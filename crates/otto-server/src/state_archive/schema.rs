@@ -384,6 +384,186 @@ fn has_credentials(value: &Value) -> bool {
         _ => false,
     }
 }
+fn non_secret_short_p_command(segment: &str) -> bool {
+    for token in segment.split_whitespace() {
+        if matches!(token, "env" | "export" | "sudo" | "command" | "nohup")
+            || (token.contains('=') && !token.starts_with('-'))
+        {
+            continue;
+        }
+        let bin = token.rsplit('/').next().unwrap_or(token);
+        return matches!(
+            bin,
+            "cargo" | "mkdir" | "rmdir" | "cp" | "install" | "type" | "jobs" | "read" | "ulimit"
+        );
+    }
+    false
+}
+
+/// Scrub inline credentials and secret CLI/env arguments from shell command
+/// strings stored in portable run configurations (`command`, `before_launch`).
+fn scrub_shell_text(input: &str) -> (String, bool) {
+    use regex::{Captures, Regex};
+    use std::sync::OnceLock;
+
+    static RE_URL_CRED: OnceLock<Regex> = OnceLock::new();
+    static RE_URL_QUERY: OnceLock<Regex> = OnceLock::new();
+    static RE_AUTH: OnceLock<Regex> = OnceLock::new();
+    static RE_LONG_EQ: OnceLock<Regex> = OnceLock::new();
+    static RE_LONG_SP: OnceLock<Regex> = OnceLock::new();
+    static RE_SHORT_P: OnceLock<Regex> = OnceLock::new();
+    static RE_ENV: OnceLock<Regex> = OnceLock::new();
+
+    if input.is_empty() {
+        return (String::new(), false);
+    }
+    let redacted = otto_core::redact::redact_text(input);
+    let mut text = redacted.value;
+
+    let re_url_cred = RE_URL_CRED.get_or_init(|| {
+        Regex::new(r#"([a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@'"]+):([^@\s'"]+)@"#).expect("regex")
+    });
+    text = re_url_cred
+        .replace_all(&text, |caps: &Captures<'_>| {
+            if &caps[2] == "[REDACTED]" {
+                caps[0].to_owned()
+            } else {
+                format!("{}:[REDACTED]@", &caps[1])
+            }
+        })
+        .into_owned();
+
+    let re_url_query = RE_URL_QUERY
+        .get_or_init(|| Regex::new(r#"([?&])([A-Za-z0-9_.-]+)=([^&\s'"]+)"#).expect("regex"));
+    text = re_url_query
+        .replace_all(&text, |caps: &Captures<'_>| {
+            if secret_key(&caps[2]) && &caps[3] != "[REDACTED]" {
+                format!("{}{}=[REDACTED]", &caps[1], &caps[2])
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    let re_auth = RE_AUTH
+        .get_or_init(|| Regex::new(r#"(?i)\b(bearer|basic)\s+([^\s'";|&)]+)"#).expect("regex"));
+    text = re_auth
+        .replace_all(&text, |caps: &Captures<'_>| {
+            if &caps[2] == "[REDACTED]" {
+                caps[0].to_owned()
+            } else {
+                format!("{} [REDACTED]", &caps[1])
+            }
+        })
+        .into_owned();
+
+    let re_long_eq = RE_LONG_EQ.get_or_init(|| {
+        Regex::new(r#"(?i)(--[a-z0-9][a-z0-9_-]*)=("[^"]*"|'[^']*'|[^\s;|&)"]+)"#).expect("regex")
+    });
+    text = re_long_eq
+        .replace_all(&text, |caps: &Captures<'_>| {
+            let flag = caps[1].trim_start_matches('-');
+            if secret_key(flag) && &caps[2] != "[REDACTED]" {
+                format!("{}=[REDACTED]", &caps[1])
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    let re_long_sp = RE_LONG_SP.get_or_init(|| {
+        Regex::new(r#"(?i)(--[a-z0-9][a-z0-9_-]*)(\s+)("[^"]*"|'[^']*'|[^\s-][^\s;|&)"]*)"#)
+            .expect("regex")
+    });
+    text = re_long_sp
+        .replace_all(&text, |caps: &Captures<'_>| {
+            let flag = caps[1].trim_start_matches('-');
+            if secret_key(flag) && &caps[3] != "[REDACTED]" {
+                format!("{}{}[REDACTED]", &caps[1], &caps[2])
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    let re_short_p = RE_SHORT_P.get_or_init(|| {
+        Regex::new(
+            r#"((?:^|[\s;|&(])-p)(?:=("[^"]*"|'[^']*'|[^\s;|&)"]+)|(\s+)("[^"]*"|'[^']*'|[^\s-][^\s;|&)"]*))"#,
+        )
+        .expect("regex")
+    });
+    let snapshot_for_p = text.clone();
+    text = re_short_p
+        .replace_all(&snapshot_for_p, |caps: &Captures<'_>| {
+            let m = caps.get(0).expect("match");
+            let prefix = &snapshot_for_p[..m.start()];
+            let seg_start = prefix
+                .rfind([';', '|', '&', '\n', '('])
+                .map_or(0, |idx| idx + 1);
+            if non_secret_short_p_command(&snapshot_for_p[seg_start..m.end()]) {
+                return caps[0].to_owned();
+            }
+            if let Some(eq_val) = caps.get(2) {
+                if eq_val.as_str() == "[REDACTED]" {
+                    caps[0].to_owned()
+                } else {
+                    format!("{}=[REDACTED]", &caps[1])
+                }
+            } else if caps.get(4).is_some_and(|v| v.as_str() == "[REDACTED]") {
+                caps[0].to_owned()
+            } else {
+                format!("{}{}[REDACTED]", &caps[1], &caps[3])
+            }
+        })
+        .into_owned();
+
+    let re_env = RE_ENV.get_or_init(|| {
+        Regex::new(
+            r#"(^|[\s;|&(])((?:export\s+|env\s+)?)([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;|&)]*)"#,
+        )
+        .expect("regex")
+    });
+    text = re_env
+        .replace_all(&text, |caps: &Captures<'_>| {
+            if secret_key(&caps[3]) && !caps[4].is_empty() && &caps[4] != "[REDACTED]" {
+                format!("{}{}{}=[REDACTED]", &caps[1], &caps[2], &caps[3])
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    let changed = text != input;
+    (text, changed)
+}
+
+fn scrub_shell_json(value: &mut Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            let mut changed = false;
+            for v in map.values_mut() {
+                changed |= scrub_shell_json(v);
+            }
+            changed
+        }
+        Value::Array(items) => {
+            let mut changed = false;
+            for v in items.iter_mut() {
+                changed |= scrub_shell_json(v);
+            }
+            changed
+        }
+        Value::String(s) => {
+            let (next, changed) = scrub_shell_text(s);
+            if changed {
+                *s = next;
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
 pub fn scrub_json(value: &mut Value) {
     match value {
         Value::Object(map) => {
@@ -708,6 +888,35 @@ pub fn sanitize(
                     }
                 }
             }
+        }
+    }
+    if table == "ide_run_configs" {
+        let mut scrubbed_any = false;
+        for col in ["command", "before_launch"] {
+            if let Some(Value::String(text)) = row.get_mut(col) {
+                if let Ok(mut doc) = serde_json::from_str::<Value>(text) {
+                    if doc.is_object() || doc.is_array() {
+                        let before = doc.clone();
+                        scrub_json(&mut doc);
+                        let shell_changed = scrub_shell_json(&mut doc);
+                        if shell_changed || doc != before {
+                            *text = doc.to_string();
+                            scrubbed_any = true;
+                        }
+                        continue;
+                    }
+                }
+                let (next, changed) = scrub_shell_text(text);
+                if changed {
+                    *text = next;
+                    scrubbed_any = true;
+                }
+            }
+        }
+        if scrubbed_any {
+            reconnect.insert(format!(
+                "{table}/{id}: review and reconnect saved credentials"
+            ));
         }
     }
     inert(table, row);

@@ -1,32 +1,8 @@
-// Typed bridge + zero-leak navigation/dive/blame/local-history/git helpers between
+// Typed bridge + navigation/dive/blame/local-history/git helpers between
 // `IdeEditorArea` and `ideStore.svelte.ts`.
 
-import { api } from '../../../lib/api/client';
-import { confirmer } from '../../../lib/confirm.svelte';
 import { idePreferences } from '../../../lib/idePreferences.svelte';
-import { toasts } from '../../../lib/toast.svelte';
-import { ide, ideBasename, type IdeOpenTab } from '../ideStore.svelte';
-
-interface NavEntry { path: string; line: number; col: number; }
-
-interface IdeStoreExtended {
-  breakpointsMuted?: boolean;
-  toggleMuteBreakpoints?: () => void;
-  togglePinTab?: (path: string) => void;
-  closeAllTabs?: () => Promise<void> | void;
-  closeUnmodifiedTabs?: () => Promise<void> | void;
-  revealInProjectTree?: (path: string) => Promise<void> | void;
-  openTerminalAt?: (path: string) => Promise<void> | void;
-  pushNavLocation?: (path: string, line: number, col: number) => void;
-  navigateBack?: () => Promise<void> | void;
-  navigateForward?: () => Promise<void> | void;
-  canNavigateBack?: boolean;
-  canNavigateForward?: boolean;
-  openFindInPath?: (opts?: { replace?: boolean; scopePath?: string | null; seedQuery?: string }) => void;
-  additionalRoots?: string[];
-}
-
-const extIde = (): IdeStoreExtended => ide as unknown as IdeStoreExtended;
+import { ide, type IdeOpenTab } from '../ideStore.svelte';
 
 export function getIdeProjectFolders(): string[] {
   const roots = ide.projectRoots.map((r) => r.path);
@@ -55,52 +31,16 @@ export function formatIdeTabDisplayName(
   return `${base.slice(0, prefixLen)}…${base.slice(base.length - suffixLen)}`;
 }
 
-// ── Auto-Snapshotting Local History (delegates to single timer in `IdeBufferPerfController`) ──
-
-async function postHistorySnapshot(filePath: string, content: string, label: string): Promise<boolean> {
-  if (!filePath || filePath.includes('://')) return false;
-  const folders = getIdeProjectFolders();
-  const root = folders.find((f) => filePath === f || filePath.startsWith(`${f}/`)) ?? ide.target.root;
-  try {
-    await api.bg.post('/ide/history/snapshot', {
-      target: { ...ide.targetPayload, root, additional_roots: folders.filter((f) => f !== root) },
-      path: filePath,
-      content,
-      label,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function scheduleAutoLocalHistorySnapshot(_filePath: string, _content: string): void {
-  // Handled by `IdeBufferPerfController.recordEdit` (`ide.updateBuffer`) so only one timer runs.
-}
-
 export function flushAutoLocalHistorySnapshot(filePath?: string): void {
   ide.flushHistorySnapshot(filePath);
 }
 
 export async function putIdeLocalHistoryLabel(filePath: string, content: string): Promise<void> {
-  const label = await confirmer.promptText(
-    `Create a named Local History label for ${ideBasename(filePath)}:`,
-    { title: 'Put Local History Label', confirmLabel: 'Put Label', placeholder: 'e.g. Before refactoring handler', danger: false },
-  );
-  if (!label) return;
-  const ok = await postHistorySnapshot(filePath, content, label);
-  if (ok) toasts.success('Local History label saved', label);
-  else toasts.info('Saved label locally', label);
+  const folders = getIdeProjectFolders();
+  const root = folders.find((f) => filePath === f || filePath.startsWith(`${f}/`)) ?? ide.target.root;
+  const { promptPutLocalHistoryLabel } = await import('../history/ideComparisonLoader');
+  await promptPutLocalHistoryLabel(root, filePath, { content });
 }
-
-// ── Bounded Fallback State & Navigation Stack ────────────────────────────────
-
-const MAX_NAV_STACK = 60;
-let fallbackPinned = $state<Record<string, boolean>>({});
-let fallbackMuted = $state(false);
-let fallbackBackStack = $state<NavEntry[]>([]);
-let fallbackFwdStack = $state<NavEntry[]>([]);
-let navJumping = false;
 
 export const ideEditorPrefs = {
   get formatOnSave(): boolean {
@@ -110,141 +50,64 @@ export const ideEditorPrefs = {
     idePreferences.update({ formatOnSave: Boolean(v) });
   },
 };
+
 export function toggleFormatOnSave(): void {
   const next = !idePreferences.current.formatOnSave;
-  idePreferences.update({ formatOnSave: next });
-  const s = extIde() as { setFormatOnSave?: (v: boolean) => void };
-  if (typeof s.setFormatOnSave === 'function') s.setFormatOnSave(next);
-}
-
-export function evictIdeEditorBridgePaths(paths: Iterable<string>): void {
-  for (const p of paths) {
-    delete fallbackPinned[p];
-  }
-}
-
-export function resetIdeEditorBridgeState(): void {
-  flushAutoLocalHistorySnapshot();
-  fallbackPinned = {};
-  fallbackBackStack = [];
-  fallbackFwdStack = [];
+  ide.setFormatOnSave(next);
 }
 
 export function isIdeTabPinned(tab: IdeOpenTab): boolean {
-  const rec = tab as IdeOpenTab & { pinned?: boolean };
-  return Boolean(rec.pinned ?? fallbackPinned[tab.path]);
+  return Boolean(tab.pinned);
 }
 
 export function toggleIdeTabPinned(path: string): void {
-  const s = extIde();
-  if (typeof s.togglePinTab === 'function') { s.togglePinTab(path); return; }
-  const next = !fallbackPinned[path];
-  if (next) fallbackPinned = { ...fallbackPinned, [path]: true };
-  else { const copy = { ...fallbackPinned }; delete copy[path]; fallbackPinned = copy; }
-  ide.pinTab(path);
+  ide.togglePinTab(path);
 }
 
 export async function closeAllIdeTabs(): Promise<void> {
   flushAutoLocalHistorySnapshot();
-  const s = extIde();
-  if (typeof s.closeAllTabs === 'function') { await s.closeAllTabs(); resetIdeEditorBridgeState(); return; }
-  for (const t of [...ide.tabs]) await ide.closeTab(t.path);
-  if (ide.tabs.length === 0) resetIdeEditorBridgeState();
+  await ide.closeAllTabs();
 }
 
 export async function closeUnmodifiedIdeTabs(): Promise<void> {
-  const s = extIde();
-  if (typeof s.closeUnmodifiedTabs === 'function') { await s.closeUnmodifiedTabs(); return; }
-  for (const t of [...ide.tabs]) {
-    const dirty = t.dirty ?? (t.content !== t.savedContent);
-    if (!dirty && !isIdeTabPinned(t)) await ide.closeTab(t.path);
-  }
+  ide.closeUnmodifiedTabs();
 }
 
 export async function revealInIdeProjectTree(path: string): Promise<void> {
-  const s = extIde() as Record<string, unknown>;
-  if (typeof s.revealInProjectTree === 'function') {
-    await (s.revealInProjectTree as (p: string) => Promise<void>)(path);
-    return;
-  }
-  if ('leftSidebarOpen' in s) s.leftSidebarOpen = true;
-  const rel = ide.relativePath(path);
-  if (!rel || rel.startsWith('..')) return;
-  const parts = rel.split('/').filter(Boolean);
-  let acc = ide.target.root.replace(/\/+$/, '');
-  const nextExpanded = { ...ide.expandedDirs };
-  for (let i = 0; i < parts.length - 1; i++) {
-    acc = `${acc}/${parts[i]}`;
-    nextExpanded[acc] = true;
-    if (!ide.childrenByDir[acc]) void ide.loadTree(acc);
-  }
-  ide.expandedDirs = nextExpanded;
+  await ide.revealInProjectTree(path);
 }
 
 export async function openIdeTerminalForPath(path: string): Promise<void> {
-  const s = extIde() as Record<string, unknown>;
-  if (typeof s.openTerminalAt === 'function') {
-    await (s.openTerminalAt as (p: string) => Promise<void>)(path);
-    return;
-  }
-  ide.openBottomTab('terminal');
-  if (typeof s.openWorkspaceTerminal === 'function') await (s.openWorkspaceTerminal as () => Promise<void>)();
+  ide.openTerminalAt(path);
 }
 
 export function areIdeBreakpointsMuted(): boolean {
-  const s = extIde();
-  return s.breakpointsMuted !== undefined ? Boolean(s.breakpointsMuted) : fallbackMuted;
+  return Boolean(ide.breakpointsMuted);
 }
 
 export function toggleIdeBreakpointsMuted(): void {
-  const s = extIde();
-  if (typeof s.toggleMuteBreakpoints === 'function') { s.toggleMuteBreakpoints(); return; }
-  fallbackMuted = !fallbackMuted;
-  void ide.syncBreakpointsToSession();
+  ide.toggleMuteBreakpoints();
 }
 
 export function pushIdeNavLocation(path: string, line: number, col: number): void {
-  if (!path || navJumping) return;
-  const s = extIde();
-  if (typeof s.pushNavLocation === 'function') { s.pushNavLocation(path, line, col); return; }
-  const top = fallbackBackStack[fallbackBackStack.length - 1];
-  if (top && top.path === path && Math.abs(top.line - line) <= 1) return;
-  fallbackBackStack = [...fallbackBackStack.slice(-(MAX_NAV_STACK - 1)), { path, line, col }];
-  fallbackFwdStack = [];
+  if (!path) return;
+  ide.pushNavLocation(path, line, col);
 }
 
 export function canIdeNavigateBack(): boolean {
-  const s = extIde();
-  return s.canNavigateBack !== undefined ? Boolean(s.canNavigateBack) : fallbackBackStack.length > 0;
+  return Boolean(ide.canNavigateBack);
 }
 
 export function canIdeNavigateForward(): boolean {
-  const s = extIde();
-  return s.canNavigateForward !== undefined ? Boolean(s.canNavigateForward) : fallbackFwdStack.length > 0;
+  return Boolean(ide.canNavigateForward);
 }
 
 export async function navigateIdeBack(): Promise<void> {
-  const s = extIde();
-  if (typeof s.navigateBack === 'function') { await s.navigateBack(); return; }
-  const target = fallbackBackStack[fallbackBackStack.length - 1];
-  if (!target) return;
-  fallbackBackStack = fallbackBackStack.slice(0, -1);
-  if (ide.activePath) fallbackFwdStack = [...fallbackFwdStack.slice(-(MAX_NAV_STACK - 1)), { path: ide.activePath, line: ide.cursorInfo.line, col: ide.cursorInfo.col }];
-  navJumping = true;
-  try { await ide.openFile(target.path, { line: target.line, col: target.col, preview: false }); }
-  finally { navJumping = false; }
+  await ide.navigateBack();
 }
 
 export async function navigateIdeForward(): Promise<void> {
-  const s = extIde();
-  if (typeof s.navigateForward === 'function') { await s.navigateForward(); return; }
-  const target = fallbackFwdStack[fallbackFwdStack.length - 1];
-  if (!target) return;
-  fallbackFwdStack = fallbackFwdStack.slice(0, -1);
-  if (ide.activePath) fallbackBackStack = [...fallbackBackStack.slice(-(MAX_NAV_STACK - 1)), { path: ide.activePath, line: ide.cursorInfo.line, col: ide.cursorInfo.col }];
-  navJumping = true;
-  try { await ide.openFile(target.path, { line: target.line, col: target.col, preview: false }); }
-  finally { navJumping = false; }
+  await ide.navigateForward();
 }
 
 // ── External / SDK Read-Only File Classification ─────────────────────────────
@@ -268,8 +131,7 @@ export function classifyIdeFile(tab: IdeOpenTab, rootPath: string, additionalRoo
   if (p.includes('/site-packages/') || p.includes('/dist-packages/')) return { external: true, sdkLabel: 'Python pkg' };
   if (p.includes('/.otto/toolchains/')) return { external: true, sdkLabel: 'SDK' };
 
-  const tabExt = (tab as IdeOpenTab & { external?: boolean }).external;
-  if (tabExt || (!inWorkspace && allRoots.length > 0)) return { external: true, sdkLabel: 'External' };
+  if (tab.external || (!inWorkspace && allRoots.length > 0)) return { external: true, sdkLabel: 'External' };
   return { external: false, sdkLabel: null };
 }
 

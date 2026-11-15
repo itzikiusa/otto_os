@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  buildIdeHoverRequest,
   extractCleanSymbolHoverFromSource,
   sanitizeAndSplitHoverDoc,
 } from '../src/lib/components/cm-ide-hover.ts';
@@ -102,4 +103,50 @@ test('extractCleanSymbolHoverFromSource extracts exact item comments across Go v
   assert.ok(rsHover);
   assert.equal(rsHover.kind, 'function');
   assert.ok(rsHover.summary.includes('Parses an incoming frame'));
+});
+
+test('buildIdeHoverRequest matches backend IdeHoverReq without duplicate column field and blocks secret/invalid paths', () => {
+  const localReq = buildIdeHoverRequest({
+    root: '/ws/app',
+    filePath: 'cmd/server/main.go',
+    content: 'package main\n',
+    line: 14,
+    character: 6,
+  });
+  assert.ok(localReq);
+  assert.deepEqual(localReq, {
+    target: {
+      kind: 'local',
+      root: '/ws/app',
+      connection_id: null,
+    },
+    path: 'cmd/server/main.go',
+    content: 'package main\n',
+    line: 14,
+    character: 6,
+  });
+  assert.equal('column' in (localReq as unknown as Record<string, unknown>), false);
+
+  const sshReq = buildIdeHoverRequest({
+    root: '/srv/mono',
+    filePath: 'svc/handler.go',
+    content: 'package svc\n',
+    line: 3,
+    character: 0,
+    connectionId: 'conn_ssh_1',
+    projectFolders: ['/srv/mono/svc', '/srv/mono/pkg'],
+  });
+  assert.ok(sshReq);
+  assert.equal(sshReq.target.kind, 'ssh');
+  assert.equal(sshReq.target.connection_id, 'conn_ssh_1');
+  assert.deepEqual(sshReq.target.additional_roots, ['/srv/mono/svc', '/srv/mono/pkg']);
+  assert.deepEqual(sshReq.project_folders, ['/srv/mono/svc', '/srv/mono/pkg']);
+  assert.equal('column' in (sshReq as unknown as Record<string, unknown>), false);
+
+  assert.equal(buildIdeHoverRequest({ root: '/ws/app', filePath: 'main.go', content: '', line: 0, character: 0 }), null);
+  assert.equal(buildIdeHoverRequest({ root: '/ws/app', filePath: 'main.go', content: '', line: 1, character: -1 }), null);
+  assert.equal(buildIdeHoverRequest({ root: '', filePath: 'main.go', content: '', line: 1, character: 0 }), null);
+  assert.equal(buildIdeHoverRequest({ root: '/ws/app', filePath: 'untitled:1', content: '', line: 1, character: 0 }), null);
+  assert.equal(buildIdeHoverRequest({ root: '/ws/app', filePath: '.env.production', content: '', line: 1, character: 0 }), null);
+  assert.equal(buildIdeHoverRequest({ root: '/ws/app', filePath: '~/.ssh/id_ed25519', content: '', line: 1, character: 0 }), null);
 });

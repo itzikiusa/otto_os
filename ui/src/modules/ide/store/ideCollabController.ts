@@ -43,6 +43,7 @@ export interface CollabHostState {
   pluginsLoading: boolean;
   pluginsError: string | null;
   onCollabJoinFailed?(errorMsg: string): void;
+  clearLiveBuffer?(path: string): void;
   openFile(path: string, opts?: { line?: number; col?: number; preview?: boolean }): Promise<void>;
   applyDebugSnapshot(snap: IdeDebugSessionSnapshot): void;
 }
@@ -80,10 +81,15 @@ export function attachCollabEventStream(
         const content = String(ev.content ?? '');
         if (editPath && ev.peer_id !== store.collabPeerId) {
           store.sharedBuffers = { ...store.sharedBuffers, [editPath]: { content, version: Number(ev.version ?? 0) } };
+          store.clearLiveBuffer?.(editPath);
           const tab = store.tabs.find((t) => t.path === editPath);
           if (tab) {
             tab.content = content;
-            if (ev.saved) tab.savedContent = content;
+            if (ev.saved) {
+              tab.savedContent = content;
+              tab.sha256 = typeof ev.sha256 === 'string' ? ev.sha256 : undefined;
+            }
+            tab.dirty = content !== tab.savedContent;
           } else if (store.collabIsGuest && store.tabs.length === 0) {
             void store.openFile(editPath);
           }

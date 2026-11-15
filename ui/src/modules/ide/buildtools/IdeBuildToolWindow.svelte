@@ -314,7 +314,7 @@
     </div>
   {/if}
 
-  <div class="bt-body" role="tree" aria-label={`${labelTitle} project tree`}>
+  <div class="bt-body">
     <LoadState
       what={`${labelTitle} modules`}
       loading={loading && modules.length === 0}

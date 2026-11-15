@@ -14,6 +14,7 @@
 
 mod changes;
 mod completion;
+pub mod ide_watch;
 mod metadata;
 mod multirun;
 pub mod process_list;

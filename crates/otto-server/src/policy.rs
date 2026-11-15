@@ -1545,7 +1545,6 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/ide/environments/python-venv"
                     | "/ide/deps/action"
                     | "/ide/runs"
-                    | "/ide/build-tools/run"
                     | "/ide/debug/sessions"
                     // MCP governance + the servers it spawns (`command`/`args`).
                     | "/mcp/otto-server"
@@ -3342,5 +3341,17 @@ mod tests {
             Some(RouteClass::Admin)
         );
         assert_eq!(route_class(&Method::GET, "/api/v1/ide/plugins"), None);
+        assert_eq!(
+            pol(Method::GET, "/api/v1/ide/lsp/status"),
+            Require(Agents, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/ide/runs/{run_id}/events"),
+            Require(Agents, Edit)
+        );
+        assert_eq!(
+            route_class(&Method::POST, "/api/v1/ide/build-tools/run"),
+            None
+        );
     }
 }

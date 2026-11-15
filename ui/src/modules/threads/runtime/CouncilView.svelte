@@ -20,6 +20,7 @@
   import { agentProviders, harnessLabel, providerReadiness } from '../../../lib/providers';
   import type { RuntimeEmbedStatus } from '../../../lib/runtimeThreadPort';
   import { now } from '../../../lib/stores/now.svelte';
+  import { getTransientComposerDraft, saveTransientComposerDraft } from '../../../lib/stores/runtimeDraftCursor';
   import { toastError } from '../../../lib/toastError';
   import { councilMembers, councilOf, councilSyntheses } from './council';
   import { askOthersText, missingSeats, roundSynthBlocker, seatRounds, synthesisRound, type SeatRound, type SeatRoundState } from './councilRounds';
@@ -131,6 +132,19 @@
     ).catch((e: unknown) => (loadError = loadErrorText(e)));
   });
   const councilId = $derived(members?.meta.id ?? null);
+  const councilDraftKey = $derived(`council:${councilId ?? sessionId}`);
+  let activeCouncilDraftKey = '';
+  $effect(() => {
+    const key = councilDraftKey;
+    if (key !== activeCouncilDraftKey) {
+      activeCouncilDraftKey = key;
+      followText = getTransientComposerDraft(key);
+    }
+  });
+  function setFollowText(next: string): void {
+    followText = next;
+    saveTransientComposerDraft(councilDraftKey, next);
+  }
   $effect(() => {
     const cid = councilId;
     const id = sessionId;
@@ -190,7 +204,7 @@
       const to = [...targets];
       const all = to.length === seatNumbers.length;
       await council.followUp(councilId, seats[0].id, { text, ...(all ? {} : { seats: to }) });
-      followText = '';
+      setFollowText('');
       followTargets = [];
       // On a phone, the seat asked (or the first one) is in view.
       picked = Math.max(0, seatNumbers.indexOf(to[0]));
@@ -214,7 +228,7 @@
   }
 
   function askOthers(n: number, answer: string): void {
-    followText = askOthersText(n, answer);
+    setFollowText(askOthersText(n, answer));
     followTargets = seatNumbers.filter((m) => m !== n);
     followError = null;
   }
@@ -323,6 +337,7 @@
     </div>
 
     <CouncilComposer
+      draftKey={councilDraftKey}
       {seatNumbers}
       {targets}
       text={followText}
@@ -333,7 +348,7 @@
       working={workingSeats.length}
       {stopping}
       ontargets={(t) => (followTargets = t.length === seatNumbers.length ? [] : t)}
-      ontext={(t) => (followText = t)}
+      ontext={setFollowText}
       onsend={() => void sendFollowUp()}
       onstop={() => void stopAll()}
     />

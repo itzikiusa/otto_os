@@ -199,6 +199,17 @@ test('Canvas is no separate destination: #/canvas is gated by Design Hall and hi
   assert.ok(!goToEntries(all()).some((e) => /canvas/i.test(e.title)), 'no "Go to Canvas" in ⌘K');
 });
 
+test('Workbench folded into IDE: #/workbench is gated by agents and highlights IDE', () => {
+  assert.equal(routeAllowed('workbench', (f) => f === 'agents'), true);
+  assert.equal(routeAllowed('workbench', (f) => f === 'git'), false);
+  assert.equal(routeAllowed('workbench/doc-1', (f) => f === 'agents'), true);
+  assert.equal(navIdForModule('workbench'), 'ide');
+  assert.ok(!SIDEBAR_MODULES.some((m) => m.id === 'workbench'));
+  const entries = goToEntries(all());
+  assert.ok(!entries.some((e) => /workbench/i.test(e.title)), 'no standalone "Go to Workbench" in ⌘K');
+  assert.match(entries.find((e) => e.id === 'core.go-ide')?.keywords ?? '', /\bworkbench\b.*\bscratches\b/);
+});
+
 // ── A module that becomes available later keeps its place (owner report) ──
 
 const only = (keep: (id: string) => boolean) => all().filter((m) => keep(m.id));

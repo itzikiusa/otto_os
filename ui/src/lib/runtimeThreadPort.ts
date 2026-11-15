@@ -199,7 +199,52 @@ export interface IdeCouncilSeatInput {
 
 export type IdeAskTarget = AskChildTarget;
 
-export interface IdeRuntimeBridge {
+export interface RuntimeComposerUiPort {
+  council: {
+    on: boolean;
+    seats: IdeCouncilSeatInput[];
+    readonly ready: boolean;
+    watchModifiers(seed: IdeCouncilSeatInput): () => void;
+    pick(seat: IdeCouncilSeatInput): void;
+    start(
+      workspaceId: string,
+      req: { prompt: string; title: string; cwd: string | null; images?: PromptImage[] },
+    ): Promise<RuntimeSession[]>;
+  };
+  councilAgentLabel(meta?: MetaResp | null): string;
+  askTargets: {
+    for(sessionId: string): IdeAskTarget[];
+    clear(sessionId: string): void;
+  };
+  CouncilStagePicker: Component<{
+    part: 'toggle' | 'seats';
+    provider: string;
+    model: string | null;
+    effort: EffortLevel | null;
+    disabled?: boolean;
+  }>;
+  RuntimeAccessChip: Component<{
+    mode: RuntimeAccessMode;
+    agent: string;
+    cwd: string;
+    disabled?: boolean;
+    onpick: (mode: RuntimeAccessMode) => void;
+  }>;
+  RuntimeComposerImages: Component<{
+    images: ComposerFile[];
+    onremove: (index: number) => void;
+  }>;
+  RuntimeMentionMenu: RuntimeMentionMenuComponent;
+  StageSlashPopup: Component<{
+    id: string;
+    items: readonly ComposerSlashCommand[];
+    active: number;
+    onaccept: (c: ComposerSlashCommand) => void;
+    onhover: (i: number) => void;
+  }>;
+}
+
+export interface RuntimeSessionPort {
   runtimeThreads: {
     readonly byId: Record<string, RuntimeSession>;
     get(id: string | null | undefined): RuntimeSession | null;
@@ -232,55 +277,17 @@ export interface IdeRuntimeBridge {
     readonly projections: Record<string, RuntimeProjectionView | undefined>;
     open(id: string): () => void;
   };
-  council: {
-    on: boolean;
-    seats: IdeCouncilSeatInput[];
-    readonly ready: boolean;
-    watchModifiers(seed: IdeCouncilSeatInput): () => void;
-    pick(seat: IdeCouncilSeatInput): void;
-    start(
-      workspaceId: string,
-      req: { prompt: string; title: string; cwd: string | null; images?: PromptImage[] },
-    ): Promise<RuntimeSession[]>;
-  };
-  councilAgentLabel(meta?: MetaResp | null): string;
-  askTargets: {
-    for(sessionId: string): IdeAskTarget[];
-    clear(sessionId: string): void;
-  };
   threads: {
     rememberProject(cwd: string): void;
     selectThread(id: string | null, opts?: { syncRoute?: boolean }): void;
     startNewThread(opts?: { workspaceId?: string | null; cwd?: string | null }): void;
   };
   readAttachments(files: Iterable<File>, takes: (file: File) => boolean): Promise<ComposerFile[]>;
-  CouncilStagePicker: Component<{
-    part: 'toggle' | 'seats';
-    provider: string;
-    model: string | null;
-    effort: EffortLevel | null;
-    disabled?: boolean;
-  }>;
-  RuntimeAccessChip: Component<{
-    mode: RuntimeAccessMode;
-    agent: string;
-    cwd: string;
-    disabled?: boolean;
-    onpick: (mode: RuntimeAccessMode) => void;
-  }>;
-  RuntimeComposerImages: Component<{
-    images: ComposerFile[];
-    onremove: (index: number) => void;
-  }>;
-  RuntimeMentionMenu: RuntimeMentionMenuComponent;
-  StageSlashPopup: Component<{
-    id: string;
-    items: readonly ComposerSlashCommand[];
-    active: number;
-    onaccept: (c: ComposerSlashCommand) => void;
-    onhover: (i: number) => void;
-  }>;
+  loadComposerUi?: () => Promise<RuntimeComposerUiPort>;
 }
+
+/** Backward-compatible alias for shell boot registration and callers migrating to `RuntimeSessionPort`. */
+export type IdeRuntimeBridge = RuntimeSessionPort;
 
 type RuntimeThreadViewModule = { default: Component<RuntimeThreadViewProps> };
 type PtyConversationViewModule = { default: Component<PtyConversationViewProps> };
@@ -289,9 +296,12 @@ type RuntimeMentionMenuModule = { default: RuntimeMentionMenuComponent };
 let loader: (() => Promise<RuntimeThreadViewModule>) | null = null;
 let ptyLoader: (() => Promise<PtyConversationViewModule>) | null = null;
 let mentionLoader: (() => Promise<RuntimeMentionMenuModule>) | null = null;
-let bridgeLoader: (() => Promise<IdeRuntimeBridge>) | null = null;
-let bridgeInstance: IdeRuntimeBridge | null = null;
-let bridgePromise: Promise<IdeRuntimeBridge> | null = null;
+let sessionPortLoader: (() => Promise<RuntimeSessionPort>) | null = null;
+let sessionPortInstance: RuntimeSessionPort | null = null;
+let sessionPortPromise: Promise<RuntimeSessionPort> | null = null;
+let composerUiLoader: (() => Promise<RuntimeComposerUiPort>) | null = null;
+let composerUiInstance: RuntimeComposerUiPort | null = null;
+let composerUiPromise: Promise<RuntimeComposerUiPort> | null = null;
 
 export function registerRuntimeThreadView(load: () => Promise<RuntimeThreadViewModule>): void {
   loader = load;
@@ -320,30 +330,72 @@ export function loadRuntimeMentionMenu(): Promise<RuntimeMentionMenuModule> {
   return mentionLoader();
 }
 
-export function registerIdeRuntimeBridge(load: () => Promise<IdeRuntimeBridge>): void {
-  bridgeLoader = load;
+export function registerIdeRuntimeSessionPort(load: () => Promise<RuntimeSessionPort>): void {
+  sessionPortLoader = load;
+  sessionPortInstance = null;
+  sessionPortPromise = null;
 }
 
-export function getIdeRuntimeBridge(): IdeRuntimeBridge | null {
-  return bridgeInstance;
+export function getIdeRuntimeSessionPort(): RuntimeSessionPort | null {
+  return sessionPortInstance;
 }
 
-export function loadIdeRuntimeBridge(): Promise<IdeRuntimeBridge> {
-  if (bridgeInstance) return Promise.resolve(bridgeInstance);
-  if (bridgePromise) return bridgePromise;
-  if (!bridgeLoader) {
+export function loadIdeRuntimeSessionPort(): Promise<RuntimeSessionPort> {
+  if (sessionPortInstance) return Promise.resolve(sessionPortInstance);
+  if (sessionPortPromise) return sessionPortPromise;
+  if (!sessionPortLoader) {
     return Promise.reject(new Error('Runtime threads aren’t available in this window'));
   }
-  bridgePromise = bridgeLoader()
+  sessionPortPromise = sessionPortLoader()
     .then((mod) => {
-      bridgeInstance = mod;
+      sessionPortInstance = mod;
+      if (!composerUiLoader && mod.loadComposerUi) {
+        composerUiLoader = mod.loadComposerUi;
+      }
       return mod;
     })
     .finally(() => {
-      bridgePromise = null;
+      sessionPortPromise = null;
     });
-  return bridgePromise;
+  return sessionPortPromise;
 }
+
+export function registerIdeRuntimeComposerUi(load: () => Promise<RuntimeComposerUiPort>): void {
+  composerUiLoader = load;
+  composerUiInstance = null;
+  composerUiPromise = null;
+}
+
+export function getIdeRuntimeComposerUi(): RuntimeComposerUiPort | null {
+  return composerUiInstance;
+}
+
+export function loadIdeRuntimeComposerUi(): Promise<RuntimeComposerUiPort> {
+  if (composerUiInstance) return Promise.resolve(composerUiInstance);
+  if (composerUiPromise) return composerUiPromise;
+  const resolveLoader = async (): Promise<RuntimeComposerUiPort> => {
+    if (composerUiLoader) return composerUiLoader();
+    const sessionPort = await loadIdeRuntimeSessionPort();
+    const viaSession = composerUiLoader ?? sessionPort.loadComposerUi;
+    if (!viaSession) {
+      throw new Error('Runtime composer UI isn’t available in this window');
+    }
+    return viaSession();
+  };
+  composerUiPromise = resolveLoader()
+    .then((mod) => {
+      composerUiInstance = mod;
+      return mod;
+    })
+    .finally(() => {
+      composerUiPromise = null;
+    });
+  return composerUiPromise;
+}
+
+export const registerIdeRuntimeBridge = registerIdeRuntimeSessionPort;
+export const getIdeRuntimeBridge = getIdeRuntimeSessionPort;
+export const loadIdeRuntimeBridge = loadIdeRuntimeSessionPort;
 
 /** The default detach: the thread in the Threads page. */
 export function openInThreads(sessionId: string): void {

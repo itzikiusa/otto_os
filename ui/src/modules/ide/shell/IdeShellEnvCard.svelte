@@ -26,8 +26,10 @@
 <script lang="ts">
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import Switch from '../../../lib/components/Switch.svelte';
   import { plural } from '../../../lib/plural';
+  import { auth } from '../../../lib/stores/auth.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { ide } from '../ideStore.svelte';
 
@@ -45,16 +47,20 @@
   let pasteRaw = $state('');
 
   $effect(() => {
-    if (!ide.hasTarget) return;
-    if (!ide.shellEnv && !ide.shellEnvLoading) {
+    if (!ide.hasTarget || !auth.isRoot) return;
+    if (!ide.shellEnv && !ide.shellEnvLoading && !ide.shellEnvAttempted) {
       void ide.loadShellEnv(false);
     }
   });
 
   const HIGHLIGHT_RE = /^(GO_DEBUGGING|GOPRIVATE|GONOSUMDB|GONOPROXY|GOROOT|GOPATH|GOFLAGS|CGO_|DELVE|DLV_|JAVA_HOME|RUST|CARGO_|NODE_|PYTHONPATH|VIRTUAL_ENV|PATH$)/i;
 
+  const effectiveShellVars = $derived(
+    (auth.isRoot ? ide.shellEnv?.vars : undefined) ?? ide.effectiveEnv ?? {},
+  );
+
   const sortedShellEntries = $derived.by((): [string, string][] => {
-    const vars = ide.shellEnv?.vars ?? ide.effectiveEnv ?? {};
+    const vars = effectiveShellVars;
     const q = filterQuery.trim().toLowerCase();
     const entries = Object.entries(vars).filter(([k, v]) => {
       if (!q) return true;
@@ -70,14 +76,14 @@
   });
 
   const visibleEntries = $derived(sortedShellEntries.slice(0, 80));
-  const totalCount = $derived(Object.keys(ide.shellEnv?.vars ?? ide.effectiveEnv ?? {}).length);
+  const totalCount = $derived(Object.keys(effectiveShellVars).length);
   const shellLabel = $derived(ide.shellEnv?.shell || '/bin/zsh');
 
   async function handleReload(): Promise<void> {
+    if (!auth.isRoot) return;
     const res = await ide.reloadShellEnv();
     if (res) {
       previewOpen = true;
-      toasts.info('Reloaded login shell environment', `${plural(Object.keys(res.vars ?? {}).length, 'variable')} from ${res.shell || 'login shell'}`);
     }
   }
 
@@ -124,16 +130,18 @@
         <Icon name={previewOpen ? 'eyeOff' : 'eye'} size={12} />
         {previewOpen ? 'Hide shell vars' : 'Inspect shell vars'}
       </button>
-      <button
-        type="button"
-        class="btn small"
-        disabled={ide.shellEnvLoading}
-        onclick={() => void handleReload()}
-        data-testid="ide-reload-shell-env"
-      >
-        <Icon name="refresh" size={12} />
-        {ide.shellEnvLoading ? 'Reloading…' : 'Reload shell env'}
-      </button>
+      {#if auth.isRoot}
+        <button
+          type="button"
+          class="btn small"
+          disabled={ide.shellEnvLoading}
+          onclick={() => void handleReload()}
+          data-testid="ide-reload-shell-env"
+        >
+          <Icon name="refresh" size={12} />
+          {ide.shellEnvLoading ? 'Reloading…' : 'Reload shell env'}
+        </button>
+      {/if}
       {#if onpasteVars}
         <button
           type="button"
@@ -185,7 +193,15 @@
         />
       </div>
 
-      {#if sortedShellEntries.length === 0}
+      {#if auth.isRoot && ide.shellEnvError && sortedShellEntries.length === 0}
+        <LoadState
+          what="shell environment"
+          error={ide.shellEnvError}
+          empty
+          onretry={() => void ide.loadShellEnv(false)}
+          variant="compact"
+        />
+      {:else if sortedShellEntries.length === 0}
         <p class="senv-empty">
           {ide.shellEnvLoading ? 'Probing login shell environment…' : 'No shell variables match this filter.'}
         </p>

@@ -56,10 +56,10 @@ export const SETTINGS_TREE: readonly SettingsTreeNode[] = [
   {
     id: 'project',
     label: 'Project Structure',
-    desc: 'Configure project name, primary SDK, language level, multi-repo modules, and installed/detected SDKs.',
+    desc: 'Configure project name, primary SDK, multi-repo modules, and installed/detected SDKs.',
     keywords: ['project', 'structure', 'module', 'sdk', 'workspace', 'folder'],
     children: [
-      { id: 'project.project', label: 'Project', desc: 'Project name, primary SDK, and compiler language level.', keywords: ['project', 'name', 'sdk', 'compiler', 'language level'] },
+      { id: 'project.project', label: 'Project', desc: 'Project name and primary SDK.', keywords: ['project', 'name', 'sdk'] },
       { id: 'project.modules', label: 'Modules', desc: 'Multi-folder repository roots attached to this project, bulk attach, and per-module SDKs.', keywords: ['modules', 'folders', 'multi-repo', 'roots', 'attach'] },
       { id: 'project.sdks', label: 'SDKs', desc: 'All 8 language ecosystems: installed toolchains, detected host SDKs, LSP servers, and DAP debuggers.', keywords: ['sdks', 'toolchains', 'download', 'detected', 'goroot', 'jdk', 'node', 'python', 'rust'] },
     ],
@@ -77,15 +77,15 @@ export const SETTINGS_TREE: readonly SettingsTreeNode[] = [
     id: 'keymap',
     label: 'Keymap',
     desc: 'Choose between JetBrains (IntelliJ / GoLand) and Standard / VS Code shortcuts, and search all bindings.',
-    keywords: ['keymap', 'shortcuts', 'hotkeys', 'jetbrains', 'goland', 'intellij', 'vscode', 'f8', 'breakpoint'],
+    keywords: ['keymap', 'shortcuts', 'hotkeys', 'jetbrains', 'goland', 'intellij', 'vscode', 'f8', 'breakpoint', 'optimize imports'],
   },
   {
     id: 'editor',
     label: 'Editor',
-    desc: 'Font metrics, syntax color schemes, rainbow brackets, inlay hints, and live code inspections.',
-    keywords: ['editor', 'font', 'colors', 'inlay', 'inspections', 'rainbow'],
+    desc: 'Font metrics, auto-save, open tab limits, syntax color schemes, rainbow brackets, inlay hints, and live code inspections.',
+    keywords: ['editor', 'font', 'colors', 'inlay', 'inspections', 'rainbow', 'autosave', 'tabs'],
     children: [
-      { id: 'editor.font', label: 'General & Font', desc: 'Font size, line height, ligatures, format on save, import folding, and breadcrumbs.', keywords: ['font', 'size', 'ligatures', 'fold', 'imports', 'breadcrumbs', 'format on save'] },
+      { id: 'editor.font', label: 'General & Font', desc: 'Font size, line height, ligatures, auto-save, maximum open tabs, format on save, import folding, and breadcrumbs.', keywords: ['font', 'size', 'ligatures', 'autosave', 'auto-save', 'max tabs', 'fold', 'imports', 'breadcrumbs', 'format on save'] },
       { id: 'editor.colors', label: 'Color Scheme', desc: 'Live Go & Java syntax preview across all 6 curated dark and light schemes.', keywords: ['color', 'scheme', 'syntax', 'islands', 'darcula', 'vscode', 'preview'] },
       { id: 'editor.hints', label: 'Inlay Hints & Quick Doc', desc: 'Parameter name hints, CodeVision symbol usages, and compact hover documentation.', keywords: ['inlay', 'hints', 'parameter', 'codevision', 'hover', 'quick doc', 'javadoc'] },
       { id: 'editor.inspections', label: 'Inspections', desc: 'Java unresolved imports, Lombok (@Slf4j / @Data / @Builder) awareness, and unused imports.', keywords: ['inspections', 'lombok', 'slf4j', 'unresolved', 'imports', 'warnings', 'java'] },
@@ -105,10 +105,10 @@ export const SETTINGS_TREE: readonly SettingsTreeNode[] = [
   {
     id: 'build',
     label: 'Build, Execution, Deployment',
-    desc: 'Configure build tools, DAP debugger behavior, login shell environment variables, and SSH targets.',
-    keywords: ['build', 'execution', 'deployment', 'debugger', 'shell', 'ssh'],
+    desc: 'Configure build flags, Testcontainers lifecycle, DAP debugger behavior, login shell environment variables, and SSH targets.',
+    keywords: ['build', 'execution', 'deployment', 'debugger', 'shell', 'ssh', 'testcontainers'],
     children: [
-      { id: 'build.tools', label: 'Build Tools', desc: 'Maven, Gradle, Cargo, Go Modules, and npm/pnpm/yarn/bun preferences.', keywords: ['build tools', 'maven', 'gradle', 'cargo', 'npm', 'pnpm', 'go modules'] },
+      { id: 'build.tools', label: 'Build Tools', desc: 'Offline build mode, test-skipping flags, Testcontainers lifecycle, and run configurations.', keywords: ['build tools', 'maven', 'gradle', 'offline', 'skip tests', 'testcontainers'] },
       { id: 'build.debugger', label: 'Debugger', desc: 'Exception breakpoints, structured JSON log pretty-printing, console wrapping, and Tabbed vs Split layout.', keywords: ['debugger', 'delve', 'jdwp', 'exceptions', 'json', 'console', 'wrap', 'tabbed', 'split'] },
       { id: 'build.env', label: 'Shell Environment', desc: 'Interactive login shell (~/.zshenv + ~/.zshrc) loader for GO_DEBUGGING_*, GOPRIVATE, PATH, and overrides.', keywords: ['shell', 'environment', 'zshrc', 'zshenv', 'goprivate', 'go_debugging', 'path', 'dotenv'] },
       { id: 'build.ssh', label: 'Remote SSH Targets', desc: 'Connect the IDE to remote Linux/macOS hosts over saved SSH connections.', keywords: ['ssh', 'remote', 'server', 'host', 'target'] },
@@ -117,16 +117,14 @@ export const SETTINGS_TREE: readonly SettingsTreeNode[] = [
   {
     id: 'lang',
     label: 'Languages & Frameworks',
-    desc: 'Per-language SDKs, GOROOT & Go Modules checklists, Detected JDKs, Python .venv, Rust, TS, Shell, JSON, and CSV.',
-    keywords: ['languages', 'frameworks', 'go', 'java', 'python', 'rust', 'node', 'typescript'],
+    desc: 'Per-language SDKs, GOROOT, Detected JDKs, Python .venv, Rust, Node/TypeScript, and CSV.',
+    keywords: ['languages', 'frameworks', 'go', 'java', 'python', 'rust', 'node', 'typescript', 'csv'],
     children: [
-      { id: 'lang.go', label: 'Go', desc: 'GOROOT, GOPATH, GOPRIVATE, Go Modules proxy, and per-module Go support checklist.', keywords: ['go', 'golang', 'goroot', 'gopath', 'goprivate', 'gomod', 'gopls', 'dlv', 'delve'] },
+      { id: 'lang.go', label: 'Go', desc: 'GOROOT, GOPATH, GOPRIVATE, gopls, and Delve debugger configuration.', keywords: ['go', 'golang', 'goroot', 'gopath', 'goprivate', 'gomod', 'gopls', 'dlv', 'delve'] },
       { id: 'lang.java', label: 'Java', desc: 'JDK & Classpath picker with auto-detected Homebrew / SDKMAN / GraalVM JDKs and broken-SDK warnings.', keywords: ['java', 'jdk', 'java_home', 'classpath', 'maven', 'gradle', 'jdtls', 'graalvm', 'openjdk', 'lombok'] },
       { id: 'lang.node', label: 'JavaScript & TypeScript', desc: 'Node.js runtime and typescript-language-server configuration.', keywords: ['javascript', 'typescript', 'node', 'tsserver', 'npm'] },
       { id: 'lang.python', label: 'Python', desc: 'Python interpreter, .venv / uv / pyenv environments, pyright, and debugpy.', keywords: ['python', 'venv', 'virtualenv', 'uv', 'pyenv', 'pyright', 'debugpy'] },
       { id: 'lang.rust', label: 'Rust', desc: 'rustup toolchain, rust-analyzer, and codelldb / lldb-dap debugger.', keywords: ['rust', 'cargo', 'rustup', 'rust-analyzer', 'codelldb', 'lldb'] },
-      { id: 'lang.shell', label: 'Shell', desc: 'Shell script dialect and bash-language-server diagnostics.', keywords: ['shell', 'bash', 'zsh', 'sh'] },
-      { id: 'lang.json', label: 'JSON & Schemas', desc: 'JSON / JSONL schema validation and formatting.', keywords: ['json', 'jsonl', 'schema'] },
       { id: 'lang.csv', label: 'CSV Formats', desc: 'CSV / TSV delimiter detection, header row, and rainbow column alignment.', keywords: ['csv', 'tsv', 'delimiter', 'table'] },
     ],
   },
@@ -150,6 +148,8 @@ const SECTION_ALIASES: Record<string, string> = {
   python: 'lang.python',
   rust: 'lang.rust',
   node: 'lang.node',
+  'lang.shell': 'plugins',
+  'lang.json': 'editor.font',
   env: 'build.env',
   environment: 'build.env',
   'build.shell': 'build.env',
@@ -266,7 +266,7 @@ class IdeSettingsController {
     this.envDirty = true;
   }
 
-  async apply(): Promise<void> {
+  async apply(): Promise<boolean> {
     const snap = writeIdePreferences(this.draft);
     this.committed = clonePrefs(snap);
     this.draft = clonePrefs(snap);
@@ -274,20 +274,22 @@ class IdeSettingsController {
     ide.setFormatOnSave(snap.formatOnSave);
     ide.breakOnExceptions = snap.breakOnExceptions;
 
+    let ok = true;
     if (this.projectNameDraft.trim() && this.projectNameDraft.trim() !== this.initialProjectName.trim() && ide.target.root) {
       const nextName = this.projectNameDraft.trim();
-      await ide.saveNamedProject({
+      const saved = await ide.saveNamedProject({
         id: ide.activeProject?.id,
         name: nextName,
         primary_root: ide.target.root,
         folders: ide.projectRoots.map((r) => r.path),
         pinned: ide.activeProject?.pinned ?? true,
       });
-      this.initialProjectName = nextName;
+      if (saved) this.initialProjectName = nextName;
+      else ok = false;
     }
 
     if ((this.envDirty || Object.keys(snap.moduleSdkMap).length > 0) && ide.hasTarget) {
-      await ide.saveEnvironment({
+      const envOk = await ide.saveEnvironment({
         java_home: this.envDraft.java_home || null,
         go_root: this.envDraft.go_root || null,
         rust_toolchain: this.envDraft.rust_toolchain || null,
@@ -298,8 +300,10 @@ class IdeSettingsController {
         module_sdks: snap.moduleSdkMap,
         env_vars: this.envDraft.env_vars.filter((v) => v.key.trim().length > 0),
       });
-      this.envDirty = false;
+      if (envOk) this.envDirty = false;
+      else ok = false;
     }
+    return ok;
   }
 
   cancel(): void {

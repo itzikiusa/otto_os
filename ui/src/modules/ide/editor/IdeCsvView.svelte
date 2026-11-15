@@ -1,12 +1,18 @@
 <script lang="ts">
   // DataGrip-grade Virtualized CSV / TSV / JSONL Table Grid:
-  // Auto-detected delimiter, ~36 rendered viewport rows even for 100k-row CSVs,
-  // sticky header, sort/filter, inline RFC-4180 cell editing with undo/redo,
-  // add/delete row & column, and live column aggregate stats.
+  // Quote-aware RFC-4180 multiline record parsing, preference-driven delimiter,
+  // first-row header & rainbow column coloring, ~36 rendered viewport rows even
+  // for 100k-row CSVs, sticky header, sort/filter, inline cell editing with
+  // undo/redo, add/delete row & column, and live column aggregate stats.
   import Badge from '../../../lib/components/Badge.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { detectCsvDelimiter, parseCsvLine, type CsvDelimiter } from '../../../lib/components/cm-ide-csv';
+  import {
+    parseCsvOrJsonlTable,
+    resolveCsvDelimiter,
+    type CsvDelimiter,
+  } from '../../../lib/components/cm-ide-csv';
+  import { idePreferences } from '../../../lib/idePreferences.svelte';
   import { copyWithToast } from '../../../lib/clipboard';
   import { rowMenu } from '../../../lib/rowMenu';
 
@@ -40,66 +46,28 @@
   let undoStack = $state<string[]>([]);
   let redoStack = $state<string[]>([]);
 
-  const delimiter = $derived<CsvDelimiter>(detectCsvDelimiter(content.slice(0, 8192), path));
+  const delimiter = $derived<CsvDelimiter>(
+    resolveCsvDelimiter(content.slice(0, 8192), path, idePreferences.current.csvDelimiter),
+  );
+  const firstRowHeader = $derived(idePreferences.current.csvFirstRowHeader);
+  const rainbowColumns = $derived(idePreferences.current.csvRainbowColumns);
   const delimiterLabel = $derived(
-    isJsonl ? 'JSONL' : delimiter === '\t' ? 'TSV (Tab)' : delimiter === ';' ? 'CSV (;)' : delimiter === '|' ? 'CSV (|)' : 'CSV (,)',
+    isJsonl
+      ? 'JSONL'
+      : delimiter === '\t'
+        ? 'TSV (Tab)'
+        : delimiter === ';'
+          ? 'CSV (;)'
+          : delimiter === '|'
+            ? 'CSV (|)'
+            : 'CSV (,)',
   );
 
-  interface ParsedTable {
-    headers: string[];
-    rows: string[][];
-  }
+  const table = $derived(
+    parseCsvOrJsonlTable(content, { isJsonl, delimiter, firstRowHeader }),
+  );
 
-  const table = $derived.by((): ParsedTable => {
-    if (!content.trim()) return { headers: ['col_1'], rows: [] };
-    const rawLines = content.split(/\r?\n/);
-    while (rawLines.length > 0 && rawLines[rawLines.length - 1] === '') rawLines.pop();
-    if (rawLines.length === 0) return { headers: ['col_1'], rows: [] };
-
-    if (isJsonl) {
-      const objs: Array<Record<string, unknown>> = [];
-      const keySet = new Set<string>();
-      for (let i = 0; i < rawLines.length; i++) {
-        const t = rawLines[i].trim();
-        if (!t) continue;
-        try {
-          const obj = JSON.parse(t) as Record<string, unknown>;
-          if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-            objs.push(obj);
-            for (const k of Object.keys(obj)) keySet.add(k);
-          } else {
-            objs.push({ value: obj });
-            keySet.add('value');
-          }
-        } catch {
-          objs.push({ _raw: t });
-          keySet.add('_raw');
-        }
-      }
-      const headers = keySet.size > 0 ? [...keySet] : ['value'];
-      const rows = objs.map((o) =>
-        headers.map((h) => {
-          const v = o[h];
-          return v === undefined || v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
-        }),
-      );
-      return { headers, rows };
-    }
-
-    const headerCells = parseCsvLine(rawLines[0], delimiter).map((c, idx) => c.value || `col_${idx + 1}`);
-    let maxCols = Math.max(1, headerCells.length);
-    const rows: string[][] = new Array(Math.max(0, rawLines.length - 1));
-    for (let i = 1; i < rawLines.length; i++) {
-      const parsed = parseCsvLine(rawLines[i], delimiter).map((c) => c.value);
-      if (parsed.length > maxCols) maxCols = parsed.length;
-      rows[i - 1] = parsed;
-    }
-    const headers = [...headerCells];
-    while (headers.length < maxCols) headers.push(`col_${headers.length + 1}`);
-    return { headers, rows };
-  });
-
-  // Filtered + sorted row index mapping into `table.rows` (zero full-string copies!).
+  // Filtered + sorted row index mapping into `table.rows` (zero full-string copies).
   const visibleRowIndices = $derived.by((): number[] => {
     const { rows } = table;
     const q = filterQuery.trim().toLowerCase();
@@ -199,14 +167,17 @@
         })
         .join('\n')}\n`;
     }
-    const lines = [headers.map((h) => formatRfc4180Cell(h, delimiter)).join(delimiter)];
+    const lines: string[] = [];
+    if (firstRowHeader) {
+      lines.push(headers.map((h) => formatRfc4180Cell(h, delimiter)).join(delimiter));
+    }
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
       const padded: string[] = [];
       for (let c = 0; c < headers.length; c++) padded.push(formatRfc4180Cell(r[c] ?? '', delimiter));
       lines.push(padded.join(delimiter));
     }
-    return `${lines.join('\n')}\n`;
+    return lines.length > 0 ? `${lines.join('\n')}\n` : '';
   }
 
   function commitTableMutation(nextHeaders: string[], nextRows: string[][]): void {
@@ -286,6 +257,10 @@
     commitTableMutation(nextHeaders, nextRows);
   }
 
+  function formatDisplayCell(val: string): string {
+    return val.includes('\n') || val.includes('\r') ? val.replace(/\r?\n/g, ' ↵ ') : val;
+  }
+
   function onGridKeydown(e: KeyboardEvent): void {
     if (!rootEl || !rootEl.contains(document.activeElement)) return;
     if ((e.metaKey || e.ctrlKey) && !editingCell) {
@@ -329,7 +304,8 @@
 
     <button
       type="button"
-      class="chip"
+      class="btn small ghost"
+      class:active={stickyHeader}
       aria-pressed={stickyHeader}
       onclick={() => (stickyHeader = !stickyHeader)}
     >
@@ -417,14 +393,15 @@
           {/if}
           {#each virtualSlice as realRowIdx (realRowIdx)}
             {@const row = table.rows[realRowIdx] ?? []}
+            {@const srcLine = table.rowStartLines[realRowIdx] ?? realRowIdx + (isJsonl || !firstRowHeader ? 1 : 2)}
             <tr class:is-selected-row={selectedRow === realRowIdx}>
               <td class="csv-rownum">
                 <button
                   type="button"
                   class="csv-line-jump"
                   aria-label="Open row {realRowIdx + 1} in text editor"
-                  title="Jump to source line {realRowIdx + (isJsonl ? 1 : 2)}"
-                  onclick={() => onswitchtext?.(realRowIdx + (isJsonl ? 1 : 2))}
+                  title="Jump to source line {srcLine}"
+                  onclick={() => onswitchtext?.(srcLine)}
                 >
                   {realRowIdx + 1}
                 </button>
@@ -437,23 +414,48 @@
                   class:is-active-col={selectedCol === colIdx}
                 >
                   {#if isEditing && editingCell}
-                    <input
-                      class="csv-cell-input mono"
-                      type="text"
-                      dir="ltr"
-                      data-autofocus
-                      aria-label="Edit row {realRowIdx + 1} column {table.headers[colIdx]}"
-                      bind:value={editingCell.draft}
-                      onblur={commitCellEdit}
-                      onkeydown={(e) => {
-                        if (e.key === 'Enter') { e.preventDefault(); commitCellEdit(); }
-                        else if (e.key === 'Escape') { e.preventDefault(); editingCell = null; }
-                      }}
-                    />
+                    {#if editingCell.draft.includes('\n') || editingCell.draft.includes('\r')}
+                      <textarea
+                        class="csv-cell-input csv-cell-textarea mono"
+                        rows="2"
+                        dir="ltr"
+                        data-autofocus
+                        aria-label="Edit row {realRowIdx + 1} column {table.headers[colIdx]}"
+                        bind:value={editingCell.draft}
+                        onblur={commitCellEdit}
+                        onkeydown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitCellEdit(); }
+                          else if (e.key === 'Escape') { e.preventDefault(); editingCell = null; }
+                        }}
+                      ></textarea>
+                    {:else}
+                      <input
+                        class="csv-cell-input mono"
+                        type="text"
+                        dir="ltr"
+                        data-autofocus
+                        aria-label="Edit row {realRowIdx + 1} column {table.headers[colIdx]}"
+                        bind:value={editingCell.draft}
+                        onblur={commitCellEdit}
+                        onkeydown={(e) => {
+                          if (e.key === 'Enter' && e.shiftKey && editingCell) {
+                            e.preventDefault();
+                            editingCell.draft = `${editingCell.draft}\n`;
+                          } else if (e.key === 'Enter') {
+                            e.preventDefault();
+                            commitCellEdit();
+                          } else if (e.key === 'Escape') {
+                            e.preventDefault();
+                            editingCell = null;
+                          }
+                        }}
+                      />
+                    {/if}
                   {:else}
                     <button
                       type="button"
                       class="csv-cell-btn mono"
+                      data-rainbow={rainbowColumns ? String(colIdx % 6) : undefined}
                       title={val || `Row ${realRowIdx + 1}, ${table.headers[colIdx]}`}
                       aria-label="{table.headers[colIdx]} row {realRowIdx + 1}: {val || 'empty'}"
                       onclick={() => {
@@ -475,7 +477,7 @@
                         void copyWithToast(val, table.headers[colIdx]);
                       }}
                       use:rowMenu
-                    >{val}</button>
+                    >{formatDisplayCell(val)}</button>
                   {/if}
                 </td>
               {/each}
@@ -632,6 +634,12 @@
     white-space: nowrap;
     line-height: 28px;
   }
+  .csv-cell-btn[data-rainbow='0'] { color: var(--code-keyword); }
+  .csv-cell-btn[data-rainbow='1'] { color: var(--code-string); }
+  .csv-cell-btn[data-rainbow='2'] { color: var(--code-number); }
+  .csv-cell-btn[data-rainbow='3'] { color: var(--code-builtin); }
+  .csv-cell-btn[data-rainbow='4'] { color: var(--info); }
+  .csv-cell-btn[data-rainbow='5'] { color: var(--warning); }
   .csv-cell-btn:focus-visible {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
@@ -645,6 +653,12 @@
     color: var(--text);
     font-size: var(--fs-xs);
     outline: none;
+  }
+  .csv-cell-textarea {
+    block-size: auto;
+    min-block-size: 28px;
+    padding-block: 2px;
+    resize: vertical;
   }
   .csv-cell-input:focus,
   .csv-cell-input:focus-visible {

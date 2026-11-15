@@ -4,12 +4,12 @@
   // Personal Agents). Strips `<ide_context>` and file-context envelopes into
   // clickable badges so user bubbles stay clean in every surface.
   import type { Snippet } from 'svelte';
-  import type { ApprovalDecision, TurnItem } from '../../../lib/api/types';
+  import type { ApprovalDecision, RuntimeRequest, TurnItem } from '../../../lib/api/types';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import { activatePathLink } from '../../../lib/pathLinks/open';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { threadCall } from './agentRows';
-  import { parseUserMessageWithBadges, type ParsedContextBadge } from './mentionMatcher';
+  import { parseUserMessageItemWithBadges, type ParsedContextBadge } from './mentionMatcher';
   import type { RuntimeProjection } from './projection';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
   import RuntimeAttachments from './RuntimeAttachments.svelte';
@@ -27,6 +27,9 @@
     pendingApprovals,
     subagentChildren,
     timelineRows,
+    workRowEntries,
+    type PendingApproval,
+    type TimelineRow,
     type WorkEntry,
   } from './timeline';
   import { formatDuration, shouldFold } from './workLog';
@@ -34,6 +37,7 @@
   interface Props {
     sessionId: string;
     projection: RuntimeProjection;
+    rows?: TimelineRow[];
     agentName: string;
     agentChatId?: string | null;
     cwd?: string | null;
@@ -47,6 +51,7 @@
   let {
     sessionId,
     projection,
+    rows: providedRows,
     agentName,
     agentChatId = null,
     cwd = null,
@@ -68,10 +73,22 @@
     run_output: 'terminal',
   };
 
-  const rows = $derived(timelineRows(projection.items, projection.turns));
-  const approvals = $derived(new Map(pendingApprovals(projection).map((a) => [a.requestId, a] as const)));
-  const pendingIds = $derived(new Set(approvals.keys()));
-  const requests = $derived(new Map(projection.requests.map((r) => [r.id, r] as const)));
+  const EMPTY_APPROVALS = new Map<string, PendingApproval>();
+  const EMPTY_PENDING_IDS = new Set<string>();
+  const EMPTY_REQUESTS = new Map<string, RuntimeRequest>();
+  const EMPTY_ACTIVITY: TurnItem[] = [];
+
+  const turns = $derived(projection.turns);
+  const outputMap = $derived(projection.output);
+  const rawRequests = $derived(projection.requests);
+  const rows = $derived(providedRows ?? timelineRows(projection.items, turns));
+  const approvals = $derived.by(() => {
+    if (rawRequests.length === 0 || !rawRequests.some((r) => r.status === 'pending')) return EMPTY_APPROVALS;
+    const pending = pendingApprovals(projection);
+    return pending.length === 0 ? EMPTY_APPROVALS : new Map(pending.map((a) => [a.requestId, a] as const));
+  });
+  const pendingIds = $derived(approvals.size === 0 ? EMPTY_PENDING_IDS : new Set(approvals.keys()));
+  const requests = $derived(rawRequests.length === 0 ? EMPTY_REQUESTS : new Map(rawRequests.map((r) => [r.id, r] as const)));
   const children = $derived(subagentChildren(projection.items));
 
   function handleBadgeClick(b: ParsedContextBadge): void {
@@ -88,7 +105,7 @@
   {@const pending = item.type === 'approval_request' ? approvals.get(item.request_id) : undefined}
   {@const call = item.type === 'dynamic_tool' && !item.error && !approval ? threadCall(item) : null}
   {#if item.type === 'subagent'}
-    <RuntimeSubagentCard {item} activity={children.get(item.id) ?? []} output={projection.output} />
+    <RuntimeSubagentCard {item} activity={children.get(item.id) ?? EMPTY_ACTIVITY} output={outputMap} />
   {:else if call}
     <RuntimeThreadCallRow {item} {call} />
   {:else if pending}
@@ -98,7 +115,7 @@
     {@const gate = approval ? approvals.get(approval.request_id) : undefined}
     <RuntimeWorkRow
       {item}
-      output={projection.output[item.id]}
+      output={outputMap[item.id]}
       pending={gate}
       note={ask && !gate ? approvalOutcome(ask, requests.get(ask.request_id), agentName) : null}
       {onrespond}
@@ -133,7 +150,7 @@
       <Markdown md={a.body} />
     </div>
   {:else if row.kind === 'message' && row.item.type === 'user_message'}
-    {@const parsed = parseUserMessageWithBadges(row.item.text)}
+    {@const parsed = parseUserMessageItemWithBadges(row.item)}
     {@const userIso = row.item.started_at ?? row.item.updated_at}
     {@const userClock = formatMessageClock(userIso)}
     <div class="rt-user">
@@ -193,9 +210,9 @@
       {/if}
     </div>
   {:else if row.kind === 'work'}
-    {@const flat = row.parts.flatMap((part) => (part.kind === 'group' ? part.entries : [part.entry]))}
+    {@const flat = workRowEntries(row)}
     <div class="rt-work">
-      <RuntimeWorkFold id={row.id} entries={flat} fold={shouldFold(flat, projection.turns, pendingIds)}>
+      <RuntimeWorkFold id={row.id} entries={flat} fold={shouldFold(flat, turns, pendingIds)}>
         {#each row.parts as part (part.kind === 'group' ? part.id : part.entry.item.id)}
           {#if part.kind === 'item'}
             {@render entryRow(part.entry)}

@@ -13,16 +13,22 @@
   import { loadErrorText } from '../../../lib/loadError';
   import { plural } from '../../../lib/plural';
   import { toasts } from '../../../lib/toast.svelte';
+  import type { IdeScanReposResp } from '../../../lib/api/types/ide-intelligence';
   import { ide, ideBasename, type IdeFsEntry, type IdeFsTreeResp } from '../ideStore.svelte';
 
   const FolderPickerLazy = lazyComponent(() => import('../../../lib/components/FolderPicker.svelte'));
 
   interface Props {
-    mode: 'create' | 'attach';
-    onclose: () => void;
+    mode?: 'create' | 'attach';
+    onclose?: () => void;
   }
 
-  let { mode, onclose }: Props = $props();
+  let { mode = 'attach', onclose = () => (ide.bulkRepoPickerMode = null) }: Props = $props();
+
+  function closeModal(): void {
+    ide.bulkRepoPickerMode = null;
+    onclose();
+  }
 
   type RepoTech = 'go' | 'java' | 'rust' | 'node' | 'python';
 
@@ -84,6 +90,14 @@
     scanAbort?.abort();
   });
 
+  function computeParentDir(fullPath: string): string | null {
+    const clean = fullPath.replace(/\/+$/, '');
+    if (!clean || clean === '/' || clean === '~') return null;
+    const slash = clean.lastIndexOf('/');
+    if (slash < 0) return null;
+    return slash === 0 ? '/' : clean.slice(0, slash);
+  }
+
   async function loadDirectory(rawDir: string): Promise<void> {
     const dir = rawDir.trim() || '~';
     scanAbort?.abort();
@@ -92,15 +106,42 @@
     loading = true;
     loadErr = null;
     try {
+      try {
+        const scan = await api.post<IdeScanReposResp>('/ide/projects/scan-repos', { parent_path: dir });
+        if (ctl.signal.aborted) return;
+        resolvedParent = scan.parent_path || dir;
+        parentInput = resolvedParent;
+        parentOfParent = computeParentDir(resolvedParent);
+        const repos = [...(scan.repos ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+        const nextTechs: Record<string, RepoTech[]> = {};
+        childDirs = repos.map((r) => {
+          const detected: RepoTech[] = [];
+          const k = (r.kind || '').toLowerCase();
+          if (r.has_go_mod || k === 'go') detected.push('go');
+          if (r.has_pom_or_gradle || k === 'java' || k === 'maven' || k === 'gradle') detected.push('java');
+          if (k === 'rust') detected.push('rust');
+          if (k === 'node' || k === 'ts' || k === 'javascript' || k === 'typescript') detected.push('node');
+          if (k === 'python') detected.push('python');
+          if (detected.length > 0) nextTechs[r.path] = detected;
+          return { name: r.name, path: r.path, kind: 'dir' as const };
+        });
+        techByPath = nextTechs;
+        return;
+      } catch (scanErr) {
+        const status = (scanErr as { status?: number } | null)?.status;
+        if (status && status !== 404 && status !== 405 && status !== 501) throw scanErr;
+      }
+
       const q = new URLSearchParams({ kind: 'local', root: dir, show_hidden: 'false' }).toString();
       const resp = await api.get<IdeFsTreeResp>(`/ide/fs/tree?${q}`);
       if (ctl.signal.aborted) return;
       resolvedParent = resp.root || dir;
       parentInput = resolvedParent;
-      parentOfParent = resp.parent ?? null;
+      parentOfParent = resp.parent ?? computeParentDir(resolvedParent);
       const dirs = (resp.entries ?? [])
         .filter((e) => e.kind === 'dir' && !e.name.startsWith('.'))
         .sort((a, b) => a.name.localeCompare(b.name));
+      techByPath = {};
       childDirs = dirs;
       void detectChildRepoTechs(dirs.slice(0, 80), ctl.signal);
     } catch (e) {
@@ -202,13 +243,13 @@
         });
         if (saved) {
           await ide.activateProject(saved.id);
-          toasts.success(`Created project "${saved.name}"`, plural(ordered.length, 'repository'));
-          onclose();
+          toasts.success(`Created project "${saved.name}"`, plural(ordered.length, 'repository', 'repositories'));
+          closeModal();
         }
       } else {
-        const added = await ide.attachProjectFolders(selectedPaths);
-        toasts.success(added > 0 ? `Attached ${plural(added, 'repository')}` : 'Repositories already attached');
-        onclose();
+        const added = await ide.attachProjectFolders(selectedPaths, { quiet: true });
+        toasts.success(added > 0 ? `Attached ${plural(added, 'repository', 'repositories')}` : 'Repositories already attached');
+        closeModal();
       }
     } finally {
       saving = false;
@@ -220,7 +261,7 @@
   title={mode === 'create' ? 'New Multi-Repo IDE Project' : 'Bulk Attach Repositories to Project'}
   width={680}
   height={580}
-  {onclose}
+  onclose={closeModal}
   dismissable={!saving}
 >
   <div class="bulk-body" data-testid="ide-bulk-repo-modal">
@@ -372,7 +413,7 @@
   {#snippet footer()}
     <span class="bulk-summary">{plural(selectedPaths.length, 'repository', 'repositories')} selected</span>
     <div class="bulk-foot-btns">
-      <button type="button" class="btn ghost" onclick={onclose} disabled={saving}>Cancel</button>
+      <button type="button" class="btn ghost" onclick={closeModal} disabled={saving}>Cancel</button>
       <button
         type="button"
         class="btn primary"

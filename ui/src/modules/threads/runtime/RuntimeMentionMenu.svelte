@@ -47,7 +47,13 @@
   let placeBelow = $state(false);
   let maxBlockPx = $state(300);
 
+  const hasAtChar = $derived(text.includes('@'));
+
   function syncCaret(): void {
+    if (!untrack(() => hasAtChar)) {
+      if (caretPos !== null) caretPos = null;
+      return;
+    }
     if (textareaEl && typeof document !== 'undefined' && document.activeElement === textareaEl) {
       caretPos = textareaEl.selectionStart ?? text.length;
     } else {
@@ -57,12 +63,16 @@
 
   $effect(() => {
     void text;
+    if (!hasAtChar) {
+      if (untrack(() => caretPos) !== null) caretPos = null;
+      return;
+    }
     untrack(() => syncCaret());
   });
 
   $effect(() => {
     const el = textareaEl;
-    if (!el) return;
+    if (!el || !hasAtChar) return;
     const handler = (): void => syncCaret();
     el.addEventListener('keyup', handler);
     el.addEventListener('click', handler);

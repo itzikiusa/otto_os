@@ -104,7 +104,9 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
     keywords: 'cron recurring job report cadence hourly daily personal agents persona soul bot channels chat schedule recap',
   },
   // ── Build ──
-  { id: 'ide', icon: 'ide', label: 'IDE', group: 'build', feature: 'agents', keywords: 'ide editor code intellij goland debug breakpoints java go rust typescript javascript python lsp ssh refactor' },
+  // IDE unifies multi-repo project editing (`#/ide`) and per-user scratch files
+  // (`#/workbench`) behind one sidebar entry and the `Project | Scratches` switcher.
+  { id: 'ide', icon: 'ide', label: 'IDE', group: 'build', feature: 'agents', keywords: 'ide editor code intellij goland debug breakpoints java go rust typescript javascript python lsp ssh refactor workbench scratch scratches scripts snippets format json markdown html mermaid d2 sql notes placeholders' },
   { id: 'git', icon: 'branch', label: 'Git', group: 'build', feature: 'git', keywords: 'repos prs pull requests diff commit' },
   {
     id: 'product',
@@ -116,9 +118,6 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   },
   // Vault v3 — the file-backed docs home (Obsidian-parity markdown vaults, OKF).
   { id: 'vault', icon: 'book', label: 'Vault', group: 'build', keywords: 'docs notes markdown obsidian okf knowledge graph' },
-  // Workbench — per-user scratch files (scripts, JSON, Markdown, diagrams) with
-  // formatting, previews, placeholders, Send to… and full edit history.
-  { id: 'workbench', icon: 'workbench', label: 'Workbench', group: 'build', feature: 'agents', keywords: 'scratch scripts editor format json markdown html mermaid d2 sql snippets notes vscode history placeholders' },
   { id: 'skills-eval', icon: 'zap', label: 'Skills Lab', group: 'build', feature: 'skill_eval', keywords: 'skill lab evaluate validate review edit improve' },
   // ── Infrastructure ──
   // The unified hub: SSH/custom terminals + databases + Kafka clusters live in
@@ -208,6 +207,7 @@ export function routeAllowed(route: string, can: (feature: Feature) => boolean):
   // `#/canvas` only forwards into Design Hall now, so the Hall's grant gates it.
   if (id === 'design' || id === 'canvas') return can('design');
   if (id === 'personal-agents') return can('scheduled_tasks');
+  if (id === 'workbench') return can('agents');
   const m = SIDEBAR_MODULES.find((x) => x.id === id);
   if (!m) return true;
   return m.featureAny ? m.featureAny.some(can) : m.feature == null || can(m.feature);
@@ -228,6 +228,7 @@ export function navIdForModule(routerModule: string): string {
   if (routerModule === 'database' || routerModule === 'brokers') return 'connections';
   if (routerModule === 'design' || routerModule === 'canvas') return 'product';
   if (routerModule === 'personal-agents') return 'scheduled-tasks';
+  if (routerModule === 'workbench') return 'ide';
   return routerModule;
 }
 
@@ -661,6 +662,7 @@ export function moduleLabel(routerModule: string): string {
     design: 'Product',
     canvas: 'Whiteboard',
     'personal-agents': 'Personal Agents',
+    workbench: 'IDE',
     settings: 'Settings',
     walkthroughs: 'Help',
     plugin: 'Plugin',

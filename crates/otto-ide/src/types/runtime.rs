@@ -174,6 +174,8 @@ pub struct IdeDebugOutputEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeDebugSessionSnapshot {
     pub id: String,
+    #[serde(default)]
+    pub revision: u64,
     pub title: String,
     pub language: String,
     pub adapter: String,

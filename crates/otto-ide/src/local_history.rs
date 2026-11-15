@@ -6,29 +6,36 @@
 //!
 //! Memory & disk bounds:
 //! - Max [`MAX_HISTORY_ENTRIES_PER_ROOT`] (`250`) entries per project root.
-//! - Max [`MAX_HISTORY_FILE_BYTES`] (`2 MiB`) per UTF-8 text file (binary files skipped).
+//! - Default [`DEFAULT_HISTORY_RETENTION_DAYS`] (`14` days, configurable `1..=365`).
+//! - Max [`MAX_HISTORY_FILE_BYTES`] (`2 MiB`) per UTF-8 text file (binary & secret files skipped).
 //! - Content-addressed SHA-256 blobs: identical saves consume `0` extra bytes,
 //!   and unreferenced blobs are garbage-collected automatically on prune.
 //! - Zero persistent in-memory content cache (`< 1 MiB` steady-state RAM).
 
-use std::collections::HashSet;
+mod storage;
+
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use otto_core::{new_id, Error, Result};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::jsonrpc_framing::sha256_hex;
 use crate::target::enforce_non_root_path;
-use crate::types::{
-    IdeHistoryEntryResp, IdeHistoryListResp, IdeHistoryRestoreResp, IdeLocalHistoryEntry,
+use crate::types::{IdeHistoryListResp, IdeLocalHistoryEntry};
+
+use self::storage::{
+    entry_path_allowed, gc_unreferenced_blobs, is_binary_or_invalid_utf8,
+    is_denied_secret_snapshot_path, normalize_snapshot_target, normalize_target_filter, now_ms,
+    prune_entries, read_index, scan_root_overlaps_filter, write_atomic_sync, write_index,
+    StoredEntry,
 };
 
 /// Maximum history timeline entries retained per project root.
 pub const MAX_HISTORY_ENTRIES_PER_ROOT: usize = 250;
+/// Default retention window for Local History entries (`14` days).
+pub const DEFAULT_HISTORY_RETENTION_DAYS: u32 = 14;
 /// Maximum file size eligible for Local History snapshots (`2 MiB`).
 pub const MAX_HISTORY_FILE_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum files snapshotted when deleting a directory tree.
@@ -36,28 +43,7 @@ pub const MAX_DELETED_DIR_FILES: usize = 200;
 /// Default entry count returned by `GET /ide/history/list`.
 const DEFAULT_LIST_LIMIT: usize = 100;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredEntry {
-    #[serde(default)]
-    seq: u64,
-    #[serde(flatten)]
-    entry: IdeLocalHistoryEntry,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct RootIndex {
-    #[serde(default)]
-    next_seq: u64,
-    #[serde(default)]
-    entries: Vec<StoredEntry>,
-}
-
 /// Thread-safe, disk-backed Local History store with zero retained blob cache.
-///
-/// Uses a fixed 16-stripe sync mutex array hashed by bucket prefix rather than
-/// a growing map of locks: Local History operations run from both sync tasks
-/// and async handlers (`KeyedLocks` is an async Tokio mutex), and 16 stripes
-/// bound memory to `< 1 KiB` with zero pruning overhead.
 #[derive(Clone)]
 pub struct LocalHistoryStore {
     base_dir: PathBuf,
@@ -91,8 +77,6 @@ impl LocalHistoryStore {
     }
 
     /// Record a UTF-8 snapshot if `bytes` is non-binary and `<= 2 MiB`.
-    /// When `skip_if_unchanged` is true, skips recording if the latest entry for
-    /// `canon_file` already has the exact same `sha256` and `event_kind != "deleted"`.
     pub fn record_bytes_sync(
         &self,
         canon_root: &Path,
@@ -102,13 +86,45 @@ impl LocalHistoryStore {
         label: &str,
         skip_if_unchanged: bool,
     ) -> Result<Option<IdeLocalHistoryEntry>> {
+        self.record_bytes_with_retention_sync(
+            canon_root,
+            canon_file,
+            bytes,
+            event_kind,
+            label,
+            skip_if_unchanged,
+            None,
+        )
+    }
+
+    /// Record a UTF-8 snapshot with an optional custom retention window (`days`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_bytes_with_retention_sync(
+        &self,
+        canon_root: &Path,
+        canon_file: &Path,
+        bytes: &[u8],
+        event_kind: &str,
+        label: &str,
+        skip_if_unchanged: bool,
+        retention_days: Option<u32>,
+    ) -> Result<Option<IdeLocalHistoryEntry>> {
         if bytes.len() > MAX_HISTORY_FILE_BYTES || is_binary_or_invalid_utf8(bytes) {
+            return Ok(None);
+        }
+        let verified_file = match normalize_snapshot_target(canon_root, canon_file) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+        if is_denied_secret_snapshot_path(canon_file)
+            || is_denied_secret_snapshot_path(&verified_file)
+        {
             return Ok(None);
         }
         let sha = sha256_hex(bytes);
         let root_str = canon_root.to_string_lossy().into_owned();
-        let file_str = canon_file.to_string_lossy().into_owned();
-        let rel_path = canon_file
+        let file_str = verified_file.to_string_lossy().into_owned();
+        let rel_path = verified_file
             .strip_prefix(canon_root)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| file_str.clone());
@@ -135,6 +151,7 @@ impl LocalHistoryStore {
             write_atomic_sync(&blob_path, bytes)?;
         }
 
+        let ts = now_ms();
         idx.next_seq = idx.next_seq.saturating_add(1);
         let entry = IdeLocalHistoryEntry {
             id: format!("lh_{}", new_id()),
@@ -143,7 +160,7 @@ impl LocalHistoryStore {
             rel_path,
             event_kind: event_kind.to_string(),
             label: label.to_string(),
-            timestamp_ms: now_ms(),
+            timestamp_ms: ts,
             size_bytes: bytes.len() as u64,
             sha256: sha,
         };
@@ -152,7 +169,7 @@ impl LocalHistoryStore {
             entry: entry.clone(),
         });
 
-        prune_entries(&mut idx);
+        prune_entries(&mut idx, ts, retention_days);
         write_index(&root_dir, &idx)?;
         if loaded.allow_gc {
             gc_unreferenced_blobs(&blobs_dir, &idx);
@@ -160,7 +177,7 @@ impl LocalHistoryStore {
         Ok(Some(entry))
     }
 
-    /// Snapshot an existing file on disk before edit/delete/restore if eligible.
+    /// Snapshot an existing regular file on disk before edit/delete/restore if eligible.
     pub fn record_existing_file_sync(
         &self,
         canon_root: &Path,
@@ -169,29 +186,72 @@ impl LocalHistoryStore {
         label: &str,
         skip_if_unchanged: bool,
     ) -> Option<IdeLocalHistoryEntry> {
-        let meta = std::fs::metadata(canon_file).ok()?;
-        if !meta.is_file() || meta.len() > MAX_HISTORY_FILE_BYTES as u64 {
-            return None;
-        }
-        let bytes = std::fs::read(canon_file).ok()?;
-        self.record_bytes_sync(
+        self.record_existing_file_with_retention_sync(
             canon_root,
             canon_file,
+            event_kind,
+            label,
+            skip_if_unchanged,
+            None,
+        )
+    }
+
+    /// Snapshot an existing regular file on disk with optional retention days.
+    pub fn record_existing_file_with_retention_sync(
+        &self,
+        canon_root: &Path,
+        canon_file: &Path,
+        event_kind: &str,
+        label: &str,
+        skip_if_unchanged: bool,
+        retention_days: Option<u32>,
+    ) -> Option<IdeLocalHistoryEntry> {
+        let sym_meta = std::fs::symlink_metadata(canon_file).ok()?;
+        if sym_meta.file_type().is_symlink() || !sym_meta.is_file() {
+            return None;
+        }
+        if sym_meta.len() > MAX_HISTORY_FILE_BYTES as u64 {
+            return None;
+        }
+        let real_file = std::fs::canonicalize(canon_file).ok()?;
+        if !real_file.starts_with(canon_root)
+            || is_denied_secret_snapshot_path(canon_file)
+            || is_denied_secret_snapshot_path(&real_file)
+        {
+            return None;
+        }
+        let bytes = std::fs::read(&real_file).ok()?;
+        self.record_bytes_with_retention_sync(
+            canon_root,
+            &real_file,
             &bytes,
             event_kind,
             label,
             skip_if_unchanged,
+            retention_days,
         )
         .ok()
         .flatten()
     }
 
-    /// Walk up to [`MAX_DELETED_DIR_FILES`] UTF-8 files inside `canon_dir`
-    /// before deletion (skipping `.git`, `node_modules`, `target`) and snapshot each.
+    /// Walk up to [`MAX_DELETED_DIR_FILES`] non-symlink UTF-8 files inside `canon_dir`
+    /// before deletion, strictly confining canonicalized targets to workspace roots.
     pub fn record_deleted_dir_sync(&self, canon_root: &Path, canon_dir: &Path) -> usize {
+        self.record_deleted_dir_with_retention_sync(canon_root, &[], canon_dir, false, None)
+    }
+
+    pub fn record_deleted_dir_with_retention_sync(
+        &self,
+        canon_root: &Path,
+        additional_roots: &[PathBuf],
+        canon_dir: &Path,
+        is_root_user: bool,
+        retention_days: Option<u32>,
+    ) -> usize {
         let walker = ignore::WalkBuilder::new(canon_dir)
             .hidden(false)
             .git_ignore(false)
+            .follow_links(false)
             .max_depth(Some(12))
             .filter_entry(|e| {
                 let name = e.file_name().to_str().unwrap_or("");
@@ -207,11 +267,37 @@ impl LocalHistoryStore {
             if recorded >= MAX_DELETED_DIR_FILES {
                 break;
             }
+            if !item.file_type().is_some_and(|ft| ft.is_file()) {
+                continue;
+            }
             let p = item.path();
-            if p.is_file()
-                && self
-                    .record_existing_file_sync(canon_root, p, "deleted", "Deleted", false)
-                    .is_some()
+            let Ok(canon_p) = std::fs::canonicalize(p) else {
+                continue;
+            };
+            let Some(matched_root) = std::iter::once(canon_root)
+                .chain(additional_roots.iter().map(PathBuf::as_path))
+                .find(|r| canon_p.starts_with(r))
+            else {
+                continue;
+            };
+            if is_denied_secret_snapshot_path(p) || is_denied_secret_snapshot_path(&canon_p) {
+                continue;
+            }
+            if !is_root_user
+                && (enforce_non_root_path(p).is_err() || enforce_non_root_path(&canon_p).is_err())
+            {
+                continue;
+            }
+            if self
+                .record_existing_file_with_retention_sync(
+                    matched_root,
+                    &canon_p,
+                    "deleted",
+                    "Deleted",
+                    false,
+                    retention_days,
+                )
+                .is_some()
             {
                 recorded += 1;
             }
@@ -219,8 +305,8 @@ impl LocalHistoryStore {
         recorded
     }
 
-    /// List Local History entries for a specific file or folder/root (including deleted files
-    /// and optional case-insensitive `search_query` across metadata and snapshot blobs).
+    /// List Local History entries for a specific file or folder/root (skipping disjoint
+    /// multi-root buckets and memoizing path validation per unique path).
     #[allow(clippy::too_many_arguments)]
     pub fn list_entries(
         &self,
@@ -247,12 +333,16 @@ impl LocalHistoryStore {
             .as_ref()
             .map(|p| format!("{}/", p.trim_end_matches('/')));
 
-        let mut seen_buckets = std::collections::HashSet::new();
+        let mut seen_buckets = HashSet::new();
+        let mut allowed_memo: HashMap<String, bool> = HashMap::new();
         let mut matched: Vec<StoredEntry> = Vec::new();
 
         for scan_root in
             std::iter::once(canon_root).chain(additional_roots.iter().map(PathBuf::as_path))
         {
+            if !scan_root_overlaps_filter(scan_root, filter_path.as_deref()) {
+                continue;
+            }
             let (bucket, root_dir) = self.bucket_dir(scan_root);
             if !seen_buckets.insert(bucket.clone()) {
                 continue;
@@ -268,16 +358,6 @@ impl LocalHistoryStore {
                 if !include_deleted && stored.entry.event_kind == "deleted" {
                     return false;
                 }
-                if entry_path_allowed(
-                    canon_root,
-                    additional_roots,
-                    is_root_user,
-                    &stored.entry.path,
-                )
-                .is_err()
-                {
-                    return false;
-                }
                 let path_ok = match (&filter_path, &folder_prefix) {
                     (None, _) => true,
                     (Some(fp), _) if fp == scan_root_str.as_ref() => true,
@@ -287,6 +367,20 @@ impl LocalHistoryStore {
                     _ => true,
                 };
                 if !path_ok {
+                    return false;
+                }
+                let allowed = *allowed_memo
+                    .entry(stored.entry.path.clone())
+                    .or_insert_with(|| {
+                        entry_path_allowed(
+                            canon_root,
+                            additional_roots,
+                            is_root_user,
+                            &stored.entry.path,
+                        )
+                        .is_ok()
+                    });
+                if !allowed {
                     return false;
                 }
                 if let Some(q) = &q_lower {
@@ -319,296 +413,5 @@ impl LocalHistoryStore {
         Ok(IdeHistoryListResp {
             entries: matched.into_iter().map(|s| s.entry).collect(),
         })
-    }
-
-    /// Read a single Local History entry's blob content alongside current disk content.
-    pub fn get_entry(
-        &self,
-        canon_root: &Path,
-        additional_roots: &[PathBuf],
-        is_root_user: bool,
-        entry_id: &str,
-    ) -> Result<IdeHistoryEntryResp> {
-        let mut seen_buckets = std::collections::HashSet::new();
-        let mut found_in_bucket = None;
-        for scan_root in
-            std::iter::once(canon_root).chain(additional_roots.iter().map(PathBuf::as_path))
-        {
-            let (bucket, root_dir) = self.bucket_dir(scan_root);
-            if !seen_buckets.insert(bucket.clone()) {
-                continue;
-            }
-            let _guard = self.lock_bucket(&bucket);
-            let idx = read_index(&root_dir).index;
-            if let Some(found) = idx
-                .entries
-                .into_iter()
-                .find(|s| s.entry.id == entry_id)
-                .map(|s| s.entry)
-            {
-                found_in_bucket = Some((found, root_dir));
-                break;
-            }
-        }
-        let (found, root_dir) = found_in_bucket.ok_or_else(|| {
-            Error::NotFound(format!("local history entry '{entry_id}' not found"))
-        })?;
-        let verified_path =
-            entry_path_allowed(canon_root, additional_roots, is_root_user, &found.path)?;
-        let blob_path = root_dir
-            .join("blobs")
-            .join(format!("{}.blob", found.sha256));
-        let bytes = std::fs::read(&blob_path).map_err(|_| {
-            Error::NotFound(format!(
-                "local history blob for entry '{entry_id}' was pruned or missing"
-            ))
-        })?;
-        let content = String::from_utf8(bytes)
-            .map_err(|_| Error::Internal("stored local history blob is not UTF-8".into()))?;
-        let entry = found;
-        let disk_path = verified_path;
-
-        let (current_exists, current_content) = match std::fs::metadata(&disk_path) {
-            Ok(m) if m.is_file() && m.len() <= MAX_HISTORY_FILE_BYTES as u64 => {
-                match std::fs::read(&disk_path) {
-                    Ok(b) if !is_binary_or_invalid_utf8(&b) => (true, String::from_utf8(b).ok()),
-                    _ => (true, None),
-                }
-            }
-            Ok(m) if m.is_file() => (true, None),
-            _ => (false, None),
-        };
-
-        Ok(IdeHistoryEntryResp {
-            entry,
-            content,
-            current_content,
-            current_exists,
-        })
-    }
-
-    /// Restore a snapshot entry back to disk (recreating deleted files & parent dirs).
-    pub fn restore_entry(
-        &self,
-        canon_root: &Path,
-        additional_roots: &[PathBuf],
-        is_root_user: bool,
-        entry_id: &str,
-    ) -> Result<IdeHistoryRestoreResp> {
-        let detail = self.get_entry(canon_root, additional_roots, is_root_user, entry_id)?;
-        let target_file = PathBuf::from(&detail.entry.path);
-        let prospective = otto_core::secret_paths::canonicalize_prospective(&target_file)
-            .ok_or_else(|| Error::Invalid("invalid restore target path".into()))?;
-
-        let matched_root = std::iter::once(canon_root)
-            .chain(additional_roots.iter().map(PathBuf::as_path))
-            .find(|r| prospective.starts_with(r))
-            .ok_or_else(|| {
-                Error::Forbidden(format!(
-                    "restore target '{}' escapes workspace root '{}'",
-                    prospective.display(),
-                    canon_root.display()
-                ))
-            })?;
-        if !is_root_user {
-            enforce_non_root_path(&prospective)?;
-        }
-
-        let existed_before = prospective.is_file();
-        if existed_before {
-            let _ = self.record_existing_file_sync(
-                matched_root,
-                &prospective,
-                "external",
-                "Before restore",
-                true,
-            );
-        }
-        if let Some(parent) = prospective.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| Error::Internal(format!("create parent directories: {e}")))?;
-        }
-        write_atomic_sync(&prospective, detail.content.as_bytes())?;
-        let _ = self.record_bytes_sync(
-            matched_root,
-            &prospective,
-            detail.content.as_bytes(),
-            "restored",
-            "Restored",
-            false,
-        )?;
-
-        Ok(IdeHistoryRestoreResp {
-            ok: true,
-            path: prospective.to_string_lossy().into_owned(),
-            content: detail.content,
-            recreated: !existed_before,
-        })
-    }
-}
-
-fn normalize_target_filter(canon_root: &Path, raw: Option<&str>) -> Result<Option<String>> {
-    let Some(trimmed) = raw.map(str::trim).filter(|s| !s.is_empty() && *s != ".") else {
-        return Ok(None);
-    };
-    let candidate = if trimmed.starts_with('~') {
-        otto_core::paths::expand_home_strict(trimmed).map_err(Error::Invalid)?
-    } else {
-        let p = Path::new(trimmed);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            canon_root.join(p)
-        }
-    };
-    let norm = candidate
-        .canonicalize()
-        .ok()
-        .or_else(|| otto_core::secret_paths::canonicalize_prospective(&candidate))
-        .unwrap_or(candidate);
-    Ok(Some(norm.to_string_lossy().into_owned()))
-}
-
-fn entry_path_allowed(
-    canon_root: &Path,
-    additional_roots: &[PathBuf],
-    is_root_user: bool,
-    raw_entry_path: &str,
-) -> Result<PathBuf> {
-    let raw = Path::new(raw_entry_path);
-    let resolved = raw
-        .canonicalize()
-        .ok()
-        .or_else(|| otto_core::secret_paths::canonicalize_prospective(raw))
-        .ok_or_else(|| Error::Invalid("invalid local history entry path".into()))?;
-    let in_roots = std::iter::once(canon_root)
-        .chain(additional_roots.iter().map(PathBuf::as_path))
-        .any(|r| resolved.starts_with(r));
-    if !in_roots {
-        return Err(Error::Forbidden(
-            "local history entry path escapes workspace root".into(),
-        ));
-    }
-    if !is_root_user {
-        enforce_non_root_path(raw)?;
-        enforce_non_root_path(&resolved)?;
-    }
-    Ok(resolved)
-}
-
-fn is_binary_or_invalid_utf8(bytes: &[u8]) -> bool {
-    let sample = &bytes[..bytes.len().min(8192)];
-    sample.contains(&0) || std::str::from_utf8(bytes).is_err()
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-struct LoadedIndex {
-    index: RootIndex,
-    allow_gc: bool,
-}
-
-fn read_index(root_dir: &Path) -> LoadedIndex {
-    let path = root_dir.join("index.json");
-    match std::fs::read(&path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => LoadedIndex {
-            index: RootIndex::default(),
-            allow_gc: true,
-        },
-        Err(e) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "local history index unreadable; preserving existing blobs"
-            );
-            LoadedIndex {
-                index: RootIndex::default(),
-                allow_gc: false,
-            }
-        }
-        Ok(bytes) => match serde_json::from_slice::<RootIndex>(&bytes) {
-            Ok(index) => LoadedIndex {
-                index,
-                allow_gc: true,
-            },
-            Err(e) => {
-                let backup = root_dir.join(format!("index.corrupt-{}.json", now_ms()));
-                let _ = std::fs::rename(&path, &backup);
-                tracing::warn!(
-                    path = %path.display(),
-                    backup = %backup.display(),
-                    error = %e,
-                    "quarantined corrupt local history index; preserving existing blobs"
-                );
-                LoadedIndex {
-                    index: RootIndex::default(),
-                    allow_gc: false,
-                }
-            }
-        },
-    }
-}
-
-fn write_index(root_dir: &Path, idx: &RootIndex) -> Result<()> {
-    let bytes = serde_json::to_vec(idx)
-        .map_err(|e| Error::Internal(format!("serialize local history index: {e}")))?;
-    write_atomic_sync(&root_dir.join("index.json"), &bytes)
-}
-
-fn write_atomic_sync(dest: &Path, bytes: &[u8]) -> Result<()> {
-    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
-    let parent = dest
-        .parent()
-        .ok_or_else(|| Error::Invalid("path has no parent directory".into()))?;
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = parent.join(format!(".otto-lh-{}-{seq}.tmp", std::process::id()));
-    let existing_perms = std::fs::metadata(dest).ok().map(|m| m.permissions());
-    std::fs::write(&tmp, bytes)
-        .map_err(|e| Error::Internal(format!("write temp file '{}': {e}", tmp.display())))?;
-    if let Some(perms) = existing_perms {
-        let _ = std::fs::set_permissions(&tmp, perms);
-    }
-    if let Err(e) = std::fs::rename(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(Error::Internal(format!(
-            "commit atomic write '{}': {e}",
-            dest.display()
-        )));
-    }
-    Ok(())
-}
-
-fn prune_entries(idx: &mut RootIndex) {
-    if idx.entries.len() > MAX_HISTORY_ENTRIES_PER_ROOT {
-        let excess = idx.entries.len() - MAX_HISTORY_ENTRIES_PER_ROOT;
-        idx.entries.drain(0..excess);
-    }
-}
-
-#[allow(clippy::disallowed_methods)] // bounded blob directory GC (<= 251 files)
-fn gc_unreferenced_blobs(blobs_dir: &Path, idx: &RootIndex) {
-    let live_hashes: HashSet<&str> = idx
-        .entries
-        .iter()
-        .map(|s| s.entry.sha256.as_str())
-        .collect();
-    let Ok(rd) = std::fs::read_dir(blobs_dir) else {
-        return;
-    };
-    for entry in rd.flatten() {
-        let p = entry.path();
-        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if let Some(sha) = name.strip_suffix(".blob") {
-            if !live_hashes.contains(sha) {
-                let _ = std::fs::remove_file(&p);
-            }
-        }
     }
 }

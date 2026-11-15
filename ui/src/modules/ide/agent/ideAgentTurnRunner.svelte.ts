@@ -9,7 +9,11 @@ import { loadErrorText } from '../../../lib/loadError';
 import { normalizeEffort, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
 import { harnessLabel, isRuntimeProvider } from '../../../lib/providers';
 import { router } from '../../../lib/router.svelte';
-import { openInThreads, type IdeRuntimeBridge } from '../../../lib/runtimeThreadPort';
+import {
+  getIdeRuntimeComposerUi,
+  openInThreads,
+  type RuntimeSessionPort,
+} from '../../../lib/runtimeThreadPort';
 import { runtimeDrafts, type ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import { transcript } from '../../../lib/stores/transcript.svelte';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
@@ -29,8 +33,8 @@ import {
 import { ideAgentState } from './ideAgentState.svelte';
 import { resolveIdeProjectCwd, resolveIdeWorkspaceId } from './ideContextBuilders';
 
-async function requireIdeRuntimeBridge(): Promise<IdeRuntimeBridge> {
-  const bridge = ideAgentState.runtimeBridge ?? (await ideAgentState.ensureBridge());
+async function requireIdeRuntimeSessionPort(): Promise<RuntimeSessionPort> {
+  const bridge = ideAgentState.runtimeSession ?? (await ideAgentState.ensureSessionPort());
   if (!bridge) throw new Error('Couldn’t load runtime threads in this window.');
   return bridge;
 }
@@ -120,7 +124,7 @@ export function isIdeSessionWorking(sending: boolean, sid: string | null): boole
 export async function loadSelectedIdeSessionMeta(
   id: string,
 ): Promise<{ provider: string; model?: string | null; accessMode?: RuntimeAccessMode } | null> {
-  const bridge = await requireIdeRuntimeBridge();
+  const bridge = await requireIdeRuntimeSessionPort();
   bridge.threads.selectThread(id, { syncRoute: false });
   const pty = ws.getSession(id);
   if (pty && !bridge.runtimeThreads.byId[id]) {
@@ -150,7 +154,7 @@ export async function ensureIdeRuntimeSession(opts: {
   onSessionBound: (id: string) => void;
   syncSubscriptions: () => void;
 }): Promise<string> {
-  const bridge = await requireIdeRuntimeBridge();
+  const bridge = await requireIdeRuntimeSessionPort();
   const { runtimeThreads, threads } = bridge;
   if (opts.existingId) {
     const row =
@@ -192,7 +196,7 @@ export async function executeIdeInlineEdit(opts: {
   isCancelled: () => boolean;
 }): Promise<IdeCodeProposal | null> {
   const { state: st, query } = opts;
-  const bridge = await requireIdeRuntimeBridge();
+  const bridge = await requireIdeRuntimeSessionPort();
   const inlineChip: IdeContextChip = {
     id: 'inline-sel',
     key: `selection:${st.path}:${st.startLine}-${st.endLine}`,
@@ -250,27 +254,33 @@ export async function executeIdePromptSend(opts: {
   selectSession: (id: string) => Promise<void>;
   syncSubscriptions: () => void;
 }): Promise<void> {
-  const bridge = await requireIdeRuntimeBridge();
-  const { askTargets, council, runtimeThreads } = bridge;
+  const bridge = await requireIdeRuntimeSessionPort();
+  const { runtimeThreads } = bridge;
+  const composerUi = ideAgentState.composerUi ?? getIdeRuntimeComposerUi();
   const pics: PromptImage[] = opts.files
     .filter((f) => f.mime.startsWith('image/'))
     .map(({ mime, data_base64 }) => ({ mime, data_base64 }));
 
-  if (opts.currentSessionId && isRuntimeProvider(opts.provider) && askTargets.for(opts.currentSessionId).length > 0) {
+  if (
+    opts.currentSessionId &&
+    isRuntimeProvider(opts.provider) &&
+    composerUi &&
+    composerUi.askTargets.for(opts.currentSessionId).length > 0
+  ) {
     const children = await runtimeThreads.askChildren(opts.currentSessionId, {
       prompt: opts.fullPrompt,
-      targets: askTargets.for(opts.currentSessionId),
+      targets: composerUi.askTargets.for(opts.currentSessionId),
       ...(opts.accessMode ? { access_mode: opts.accessMode } : {}),
       ...(pics.length > 0 ? { images: pics } : {}),
     });
-    askTargets.clear(opts.currentSessionId);
+    composerUi.askTargets.clear(opts.currentSessionId);
     void runtimeThreads.loadLinked(opts.currentSessionId).catch(() => {});
     if (children[0]) await opts.selectSession(children[0].id);
     return;
   }
 
-  if (!opts.currentSessionId && council.ready) {
-    const seats = await council.start(opts.wsId, {
+  if (!opts.currentSessionId && composerUi?.council.ready) {
+    const seats = await composerUi.council.start(opts.wsId, {
       prompt: opts.fullPrompt,
       title: summarizeIdeThreadTitle(opts.seedText, opts.provider),
       cwd: opts.localCwd,

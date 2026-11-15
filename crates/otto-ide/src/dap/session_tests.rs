@@ -1,5 +1,14 @@
+use std::sync::Mutex;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
 use super::*;
-use crate::types::{IdeBreakpoint, IdeDebugLaunchSpec, IdeScope, IdeTargetSpec};
+use crate::dap::{DapMessage, DapReader, DapWriter};
+use crate::types::{
+    IdeBreakpoint, IdeDebugEvaluateReq, IdeDebugLaunchSpec, IdeDebugState, IdeScope, IdeTargetSpec,
+    IdeVariable,
+};
 
 fn spawn_mock_dap_server(
     server_io: tokio::io::DuplexStream,
@@ -349,18 +358,19 @@ async fn full_mock_dap_lifecycle_over_duplex() {
         .unwrap();
     assert_eq!(eval.result, "x + y => 42");
 
-    mgr.command(
-        &started.id,
-        IdeDebugCommandReq {
-            action: IdeDebugAction::StepOver,
-            thread_id: Some(1),
-            frame_id: None,
-            path: None,
-            line: None,
-        },
-    )
-    .await
-    .unwrap();
+    let step_ack = mgr
+        .command(
+            &started.id,
+            IdeDebugCommandReq {
+                action: IdeDebugAction::StepOver,
+                thread_id: Some(1),
+                frame_id: None,
+                path: None,
+                line: None,
+            },
+        )
+        .await
+        .unwrap();
 
     let stepped = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -374,6 +384,8 @@ async fn full_mock_dap_lifecycle_over_duplex() {
     .await
     .expect("timed out waiting for step_over pause");
     assert_eq!(stepped.stopped_reason.as_deref(), Some("step"));
+    assert!(stepped.revision > paused.revision);
+    assert!(stepped.revision >= step_ack.revision);
 
     let stopped = mgr
         .command(

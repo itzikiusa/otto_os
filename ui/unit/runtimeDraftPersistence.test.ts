@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DraftPersistence, emptyDraft, acknowledgeDraft } from '../src/lib/stores/runtimeDraftPersistence.ts';
+import {
+  clampComposerCursor,
+  clearComposerCursorStates,
+  getComposerCursorState,
+  restoreComposerCursorOnElement,
+  saveComposerCursorState,
+} from '../src/lib/stores/runtimeDraftCursor.ts';
 
 const deferred = <T>() => { let resolve!: (value:T)=>void; const promise = new Promise<T>(r=>resolve=r); return {promise,resolve}; };
 test('late recovery keeps typing and restores untouched attachment fields', async () => {
@@ -163,4 +170,50 @@ test('syncIfClean never overwrites typing or image paste started while GET is in
   await p.syncIfClean();
   assert.equal(loadCalls, loadsBefore);
   assert.equal(draft.text, 'dirty local edit');
+});
+
+test('composer cursor and scrollTop state persists across thread switches and clamps safely to draft length', () => {
+  clearComposerCursorStates();
+  saveComposerCursorState('rt:ses_alpha', {
+    selectionStart: 12,
+    selectionEnd: 18,
+    scrollTop: 94,
+    direction: 'forward',
+  });
+  saveComposerCursorState('rt:ses_beta', {
+    selectionStart: 3,
+    selectionEnd: 3,
+    scrollTop: 0,
+  });
+
+  const alpha = getComposerCursorState('rt:ses_alpha');
+  assert.deepEqual(alpha, {
+    selectionStart: 12,
+    selectionEnd: 18,
+    scrollTop: 94,
+    direction: 'forward',
+  });
+
+  const clamped = clampComposerCursor(alpha!, 15);
+  assert.deepEqual(clamped, {
+    selectionStart: 12,
+    selectionEnd: 15,
+    scrollTop: 94,
+    direction: 'forward',
+  });
+
+  let appliedRange: [number, number, string | undefined] | null = null;
+  const fakeTextarea = {
+    value: '0123456789abcdef',
+    scrollTop: 0,
+    setSelectionRange(s: number, e: number, d?: string) {
+      appliedRange = [s, e, d];
+    },
+  };
+  assert.equal(restoreComposerCursorOnElement(fakeTextarea, 'rt:ses_alpha'), true);
+  assert.deepEqual(appliedRange, [12, 16, 'forward']);
+  assert.equal(fakeTextarea.scrollTop, 94);
+
+  clearComposerCursorStates();
+  assert.equal(getComposerCursorState('rt:ses_alpha'), null);
 });

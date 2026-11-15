@@ -3,13 +3,15 @@
   import CodeEditor, { registerIdeEditorCore } from '../../lib/components/CodeEditor.svelte';
   import type * as CmIdeDepsMod from '../../lib/components/cm-ide-deps';
   import type * as CmIdeMod from '../../lib/components/cm-ide-extensions';
-  import * as cmIdeThemeMod from '../../lib/components/cm-ide-theme';
-  import { IDE_PREFS_EVENT, readIdeEditorPreferences } from '../../lib/components/cm-ide-theme';
+  import { IDE_PREFS_EVENT, readIdePreferences } from '../../lib/components/cm-ide-prefs';
 
   let histReady = $state(false);
-  registerIdeEditorCore(cmIdeThemeMod, null);
-  void import('../../lib/components/cm-ide-history').then((m) => {
-    registerIdeEditorCore(cmIdeThemeMod, m);
+  void Promise.all([
+    import('../../lib/components/cm-ide-theme'),
+    import('../../lib/components/cm-ide-history'),
+    import('../../lib/components/cm-editor-smart'),
+  ]).then(([themeMod, histMod, smartMod]) => {
+    registerIdeEditorCore(themeMod, histMod, smartMod);
     histReady = true;
   });
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -27,7 +29,6 @@
   import {
     areIdeBreakpointsMuted,
     classifyIdeFile,
-    evictIdeEditorBridgePaths,
     fetchIdeGitBlame,
     flushAutoLocalHistorySnapshot,
     getIdeProjectFolders,
@@ -37,7 +38,6 @@
     performIdeDive,
     pushIdeNavLocation,
     putIdeLocalHistoryLabel,
-    resetIdeEditorBridgeState,
   } from './editor/ideEditorStoreBridge.svelte';
   import type { IdeOutlineNode } from './editor/ideLangAnalyzer';
   let langAnalyzerMod = $state<typeof import('./editor/ideLangAnalyzer') | null>(null);
@@ -105,7 +105,7 @@
   let blameEnabledByPath = $state<Record<string, boolean>>({});
   let blameByPath = $state<Record<string, Record<number, string> | null>>({});
   let splitRatio = $state(readSavedSplitRatio());
-  let prefs = $state(readIdeEditorPreferences());
+  let prefs = $state(readIdePreferences());
   let stagedPrimaryTab = $state<IdeOpenTab | null>(null);
   let stagedSplitTab = $state<IdeOpenTab | null>(null);
 
@@ -126,7 +126,7 @@
 
   $effect(() => {
     if (typeof window === 'undefined') return;
-    const onPrefs = () => { prefs = readIdeEditorPreferences(); };
+    const onPrefs = () => { prefs = readIdePreferences(); };
     const onPasteHist = () => { clipboardModalOpen = true; };
     const onPutLabel = (e: Event) => {
       const p = (e as CustomEvent<{ path?: string }>).detail?.path ?? ide.activePath;
@@ -171,9 +171,8 @@
     }
     if (pathList === 'all') {
       blameEnabledByPath = {}; blameByPath = {}; tableModeByPath = {}; manifestModeByPath = {}; manifestDepsByPath = {};
-      bpEditor = null; intentionState = null; resetIdeEditorBridgeState(); disposeAllPooledLsp(); return;
+      bpEditor = null; intentionState = null; disposeAllPooledLsp(); return;
     }
-    evictIdeEditorBridgePaths(pathList);
     const nextBlame = { ...blameByPath }, nextBlameOn = { ...blameEnabledByPath };
     const nextMode = { ...tableModeByPath }, nextManMode = { ...manifestModeByPath }, nextManDeps = { ...manifestDepsByPath };
     for (const p of pathList) {
@@ -231,6 +230,36 @@
   const activeDiags = $derived(ide.activeTab ? ide.problems.filter((d) => d.path === ide.activeTab?.path) : []);
   const errorCount = $derived(activeDiags.filter((d) => d.severity === 'error').length);
   const warnCount = $derived(activeDiags.filter((d) => d.severity === 'warning').length);
+
+  function canonDebugPath(raw: string): string {
+    const clean = raw.replace(/^file:\/\//, '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+    if (clean.startsWith('/private/var/')) return `/var/${clean.slice('/private/var/'.length)}`;
+    if (clean.startsWith('/private/tmp/')) return `/tmp/${clean.slice('/private/tmp/'.length)}`;
+    return clean;
+  }
+
+  function matchesPausedDebugPath(pausedFile: string | null | undefined, tabPath: string): boolean {
+    if (!pausedFile || !tabPath) return false;
+    if (pausedFile === tabPath) return true;
+    const p = canonDebugPath(pausedFile);
+    const t = canonDebugPath(tabPath);
+    if (!p || !t) return false;
+    if (p === t) return true;
+    const roots = [ide.target.root, ...ide.additionalRoots].filter(Boolean).map(canonDebugPath);
+    if (!p.startsWith('/')) {
+      for (const r of roots) {
+        if (`${r}/${p}` === t) return true;
+      }
+      return t.endsWith(`/${p}`);
+    }
+    if (!t.startsWith('/')) {
+      for (const r of roots) {
+        if (`${r}/${t}` === p) return true;
+      }
+      return p.endsWith(`/${t}`);
+    }
+    return false;
+  }
 
   function toEditorHandle(ref: ExtendedEditorRef): IdeEditorHandle {
     const h: IdeEditorHandle & { applyQuickFixEdits?: (edits: CmIdeMod.IdeConcreteTextEdit[]) => boolean } = {
@@ -414,10 +443,11 @@
             onEditBreakpoint={(ln, ev) => openBreakpointPopover(pTab.path, ln, ev)}
             gutterItems={ide.gutterByPath[pTab.path] ?? []}
             onGutterAction={(item, mode) => ide.runFromGutter(item, mode)}
-            pausedLine={ide.activeDebug?.state === 'paused' && ide.activeDebug.paused_file === pTab.path ? (ide.activeDebug.paused_line ?? null) : null}
-            inlineValues={ide.activeDebug?.state === 'paused' && ide.activeDebug.paused_file === pTab.path ? ide.activeDebug.inline_values : []}
+            pausedLine={ide.activeDebug?.state === 'paused' && matchesPausedDebugPath(ide.activeDebug.paused_file, pTab.path) ? (ide.activeDebug.paused_line ?? null) : null}
+            inlineValues={ide.activeDebug?.state === 'paused' && matchesPausedDebugPath(ide.activeDebug.paused_file, pTab.path) ? ide.activeDebug.inline_values : []}
             peerCursors={ide.peerCursors.filter((p) => p.path === pTab.path)}
             keymapPreset={ide.keymapPreset}
+            fontLigatures={prefs.fontLigatures}
             jumpToLine={ide.jumpRequest?.path === pTab.path ? { line: ide.jumpRequest.line, column: ide.jumpRequest.col, seq: ide.jumpRequest.seq } : null}
             onchange={(val) => { ide.updateBuffer(pTab.path, val); }}
             onCursorChange={(info) => ide.updateCursor(pTab.path, { line: info.line, col: info.column, cursors: info.cursorCount, selections: info.selections })}
@@ -498,9 +528,10 @@
                 onEditBreakpoint={(ln, ev) => openBreakpointPopover(sTab.path, ln, ev)}
                 gutterItems={ide.gutterByPath[sTab.path] ?? []}
                 onGutterAction={(item, mode) => ide.runFromGutter(item, mode)}
-                pausedLine={ide.activeDebug?.state === 'paused' && ide.activeDebug.paused_file === sTab.path ? (ide.activeDebug.paused_line ?? null) : null}
-                inlineValues={ide.activeDebug?.state === 'paused' && ide.activeDebug.paused_file === sTab.path ? ide.activeDebug.inline_values : []}
+                pausedLine={ide.activeDebug?.state === 'paused' && matchesPausedDebugPath(ide.activeDebug.paused_file, sTab.path) ? (ide.activeDebug.paused_line ?? null) : null}
+                inlineValues={ide.activeDebug?.state === 'paused' && matchesPausedDebugPath(ide.activeDebug.paused_file, sTab.path) ? ide.activeDebug.inline_values : []}
                 keymapPreset={ide.keymapPreset}
+                fontLigatures={prefs.fontLigatures}
                 onchange={(val) => { ide.updateBuffer(sTab.path, val); }}
                 onDefinitionJump={(t) => void performIdeDive('definition', sTab.path, t, sTab.content)}
                 onImplementationJump={(t) => void performIdeDive('implementation', sTab.path, t, sTab.content)}

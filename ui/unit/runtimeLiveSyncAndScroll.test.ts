@@ -30,7 +30,7 @@ function msgEvent(sessionId: string, sequence: number, id: string, text: string,
   };
 }
 
-function makeRuntimeHarness() {
+function makeRuntimeHarness(extraGlobals: Record<string, unknown> = {}) {
   const gets: Array<{ path: string; lane: 'fg' | 'bg'; gate: ReturnType<typeof deferred<RuntimeReplay>> }> = [];
   let liveListener: ((ev: { event: RuntimeEvent }) => void) | null = null;
   let resyncListener: (() => void) | null = null;
@@ -144,16 +144,29 @@ function makeRuntimeHarness() {
       clearInterval(id: number) {
         timers.delete(id);
       },
+      ...extraGlobals,
     },
     { relative: true },
   );
 
   return {
     views: new mod.RuntimeViews() as {
-      projections: Record<string, { lastSequence: number; items: TurnItem[] }>;
+      projections: Record<
+        string,
+        {
+          lastSequence: number;
+          turns: ProviderTurn[];
+          items: TurnItem[];
+          hasOlder: boolean;
+          oldestTurnOrdinal: number | null;
+          olderTurns: number;
+        }
+      >;
       loadError: Record<string, string>;
       staleError: Record<string, string>;
+      loadingOlder: Record<string, boolean>;
       open(id: string): () => void;
+      loadOlder(id: string, limitTurns?: number): Promise<boolean>;
       retry(id: string): void;
       noteSessionSequence(id: string, seq: number | null | undefined): void;
       setSessionActiveProbe(fn: (id: string) => boolean): void;
@@ -174,7 +187,7 @@ test('RuntimeViews dirty-replay loop catches events missed during in-flight GET 
   const close = h.views.open('s-1');
 
   assert.equal(h.gets.length, 1);
-  assert.equal(h.gets[0].path, '/runtime-sessions/s-1/events?after_sequence=0');
+  assert.equal(h.gets[0].path, '/runtime-sessions/s-1/events?after_sequence=0&tail_turns=20');
   assert.equal(h.gets[0].lane, 'fg');
 
   // While the first GET is in flight, WS reconnects (or initial onConnection fires):
@@ -195,7 +208,7 @@ test('RuntimeViews dirty-replay loop catches events missed during in-flight GET 
 
   // Immediately fires follow-up bg replay from sequence 3!
   assert.equal(h.gets.length, 2);
-  assert.equal(h.gets[1].path, '/runtime-sessions/s-1/events?after_sequence=3');
+  assert.equal(h.gets[1].path, '/runtime-sessions/s-1/events?after_sequence=3&tail_turns=20');
   assert.equal(h.gets[1].lane, 'bg');
 
   h.gets[1].gate.resolve({
@@ -246,7 +259,7 @@ test('RuntimeViews catches initial WS race, noteSessionSequence lag, and auto-re
   h.emitConnection(true);
   await flush();
   assert.equal(h.gets.length, 3);
-  assert.equal(h.gets[2].path, '/runtime-sessions/s-2/events?after_sequence=1');
+  assert.equal(h.gets[2].path, '/runtime-sessions/s-2/events?after_sequence=1&tail_turns=20');
   h.gets[2].gate.reject(new Error('transient disconnect'));
   await flush();
   assert.match(h.views.staleError['s-2'] ?? '', /transient disconnect/);
@@ -271,7 +284,7 @@ test('RuntimeViews catches initial WS race, noteSessionSequence lag, and auto-re
   liveness.fn();
   await flush();
   assert.equal(h.gets.length, 5);
-  assert.equal(h.gets[4].path, '/runtime-sessions/s-2/events?after_sequence=3');
+  assert.equal(h.gets[4].path, '/runtime-sessions/s-2/events?after_sequence=3&tail_turns=20');
   h.gets[4].gate.resolve({ kind: 'events', events: [], last_sequence: 3 });
   await flush();
 
@@ -467,4 +480,294 @@ test('providers, askAgents, and personaProviders support opencode & pi and stric
   // When `preferred` ('pi') cannot carry a persona AND `claude` is disabled, picks first enabled persona CLI (`codex`).
   assert.equal(persona.personaDefault('pi', ['codex', 'opencode', 'pi']), 'codex');
   assert.equal(persona.personaDefault('opencode', ['codex', 'opencode', 'pi']), 'opencode');
+});
+
+test('RuntimeViews tail_turns snapshot, loadOlder pagination, and reconnect snapshot preserve loaded older history', async () => {
+  const h = makeRuntimeHarness();
+  const close = h.views.open('s-paged');
+  assert.equal(h.gets[0].path, '/runtime-sessions/s-paged/events?after_sequence=0&tail_turns=20');
+
+  const mkTurn = (ord: number): ProviderTurn => ({
+    id: `t-${ord}`,
+    ordinal: ord,
+    status: 'completed',
+    started_at: '2026-11-15T00:00:00Z',
+    completed_at: '2026-11-15T00:00:01Z',
+    origin: 'user',
+  });
+  const mkMsg = (ord: number, text: string): TurnItem => ({
+    id: `a-${ord}`,
+    turn_id: `t-${ord}`,
+    ordinal: ord,
+    status: 'completed',
+    title: null,
+    started_at: '2026-11-15T00:00:00Z',
+    completed_at: '2026-11-15T00:00:01Z',
+    updated_at: '2026-11-15T00:00:01Z',
+    type: 'assistant_message',
+    message_id: `m-${ord}`,
+    text,
+    streaming: false,
+  });
+
+  // Initial open resolves with newest 2 turns (3..4) and reports 2 older turns before ordinal 3.
+  h.gets[0].gate.resolve({
+    kind: 'snapshot',
+    snapshot_sequence: 10,
+    snapshot: {
+      provider_session: null,
+      provider_thread: null,
+      turns: [mkTurn(3), mkTurn(4)],
+      turn_items: [mkMsg(3, 'reply 3'), mkMsg(4, 'reply 4')],
+      runtime_requests: [],
+      plans: [],
+      queued_prompts: [],
+      has_older: true,
+      oldest_turn_ordinal: 3,
+      older_turns: 2,
+    },
+  });
+  await flush();
+
+  assert.equal(h.views.projections['s-paged']?.hasOlder, true);
+  assert.equal(h.views.projections['s-paged']?.oldestTurnOrdinal, 3);
+  assert.equal(h.views.projections['s-paged']?.olderTurns, 2);
+
+  // User triggers loadOlder -> requests before_turn_ordinal=3&limit_turns=20 and prepends turns 1..2!
+  const pLoad = h.views.loadOlder('s-paged');
+  assert.equal(h.views.loadingOlder['s-paged'], true);
+  assert.equal(h.gets[1].path, '/runtime-sessions/s-paged/events?before_turn_ordinal=3&limit_turns=20');
+  h.gets[1].gate.resolve({
+    kind: 'snapshot',
+    snapshot_sequence: 10,
+    snapshot: {
+      provider_session: null,
+      provider_thread: null,
+      turns: [mkTurn(1), mkTurn(2)],
+      turn_items: [mkMsg(1, 'reply 1'), mkMsg(2, 'reply 2')],
+      runtime_requests: [],
+      plans: [],
+      queued_prompts: [],
+      has_older: false,
+      oldest_turn_ordinal: 1,
+      older_turns: 0,
+    },
+  });
+  assert.equal(await pLoad, true);
+  assert.equal(h.views.loadingOlder['s-paged'], undefined);
+  assert.equal(h.views.projections['s-paged']?.hasOlder, false);
+  assert.deepEqual(
+    plain(h.views.projections['s-paged']?.turns.map((t) => t.ordinal)),
+    [1, 2, 3, 4],
+  );
+
+  // Subsequent reconnect ring-miss returns tail snapshot (turns 4..5, oldest_turn_ordinal=4):
+  // applyReplay MUST keep already-loaded older turns 1..3 intact while updating turn 4..5!
+  h.emitResync();
+  await flush();
+  h.gets[2].gate.resolve({
+    kind: 'snapshot',
+    snapshot_sequence: 15,
+    snapshot: {
+      provider_session: null,
+      provider_thread: null,
+      turns: [mkTurn(4), mkTurn(5)],
+      turn_items: [mkMsg(4, 'reply 4 updated'), mkMsg(5, 'reply 5')],
+      runtime_requests: [],
+      plans: [],
+      queued_prompts: [],
+      has_older: true,
+      oldest_turn_ordinal: 4,
+      older_turns: 3,
+    },
+  });
+  await flush();
+
+  assert.equal(h.views.projections['s-paged']?.lastSequence, 15);
+  assert.equal(h.views.projections['s-paged']?.hasOlder, false);
+  assert.equal(h.views.projections['s-paged']?.oldestTurnOrdinal, 1);
+  assert.deepEqual(
+    plain(h.views.projections['s-paged']?.items.map((i) => (i.type === 'assistant_message' ? i.text : ''))),
+    ['reply 1', 'reply 2', 'reply 3', 'reply 4 updated', 'reply 5'],
+  );
+
+  close();
+});
+
+test('timelineRows preserves strict === row references for untouched rows across streaming deltas', () => {
+  const timeline = loadSource(
+    new URL('../src/modules/threads/runtime/timeline.ts', import.meta.url),
+    {},
+    {},
+    { relative: true },
+  );
+
+  const turns: ProviderTurn[] = [
+    {
+      id: 't-1',
+      ordinal: 1,
+      status: 'completed',
+      started_at: '2026-11-14T10:00:00Z',
+      completed_at: '2026-11-14T10:00:05Z',
+      origin: 'user',
+    },
+    {
+      id: 't-2',
+      ordinal: 2,
+      status: 'running',
+      started_at: '2026-11-15T10:00:00Z',
+      completed_at: null,
+      origin: 'agent',
+    },
+  ];
+  const u1: TurnItem = {
+    id: 'u-1',
+    turn_id: 't-1',
+    ordinal: 1,
+    status: 'completed',
+    title: null,
+    started_at: '2026-11-14T10:00:00Z',
+    completed_at: '2026-11-14T10:00:00Z',
+    updated_at: '2026-11-14T10:00:00Z',
+    type: 'user_message',
+    text: 'Check build',
+  };
+  const cmd1: TurnItem = {
+    id: 'c-1',
+    turn_id: 't-1',
+    ordinal: 2,
+    status: 'completed',
+    title: 'cargo check',
+    started_at: '2026-11-14T10:00:01Z',
+    completed_at: '2026-11-14T10:00:03Z',
+    updated_at: '2026-11-14T10:00:03Z',
+    type: 'command_execution',
+    input: 'cargo check',
+    output: 'Finished',
+    exit_code: 0,
+  };
+  const a1: TurnItem = {
+    id: 'a-1',
+    turn_id: 't-1',
+    ordinal: 3,
+    status: 'completed',
+    title: null,
+    started_at: '2026-11-14T10:00:04Z',
+    completed_at: '2026-11-14T10:00:05Z',
+    updated_at: '2026-11-14T10:00:05Z',
+    type: 'assistant_message',
+    message_id: 'm-1',
+    text: 'Build passed.',
+    streaming: false,
+  };
+  const streamA: TurnItem = {
+    id: 'a-2',
+    turn_id: 't-2',
+    ordinal: 4,
+    status: 'running',
+    title: null,
+    started_at: '2026-11-15T10:00:01Z',
+    completed_at: null,
+    updated_at: '2026-11-15T10:00:01Z',
+    type: 'assistant_message',
+    message_id: 'm-2',
+    text: 'Part 1',
+    streaming: true,
+  };
+  const streamB: TurnItem = { ...streamA, text: 'Part 1 + Part 2', updated_at: '2026-11-15T10:00:02Z' };
+
+  const rows1 = timeline.timelineRows([u1, cmd1, a1, streamA], turns);
+  const rows2 = timeline.timelineRows([u1, cmd1, a1, streamB], turns);
+
+  assert.equal(rows1.length, rows2.length);
+  // Day 1 separator, u1, cmd1 work row, a1, Day 2 separator, and agent_turn divider MUST all be strictly ===!
+  for (let i = 0; i < rows1.length - 1; i++) {
+    assert.equal(rows1[i], rows2[i], `expected row[${i}] (${rows1[i].kind}) to keep strict === reference`);
+  }
+  const workRow = rows1.find((r: { kind: string }) => r.kind === 'work');
+  assert.ok(workRow);
+  assert.equal(timeline.workRowEntries(workRow), timeline.workRowEntries(workRow));
+  // Only the final streaming message row gets a new wrapper with updated text.
+  assert.notEqual(rows1[rows1.length - 1], rows2[rows2.length - 1]);
+  assert.equal(rows2[rows2.length - 1].item.text, 'Part 1 + Part 2');
+});
+
+test('RuntimeViews skips keydown replays, suppresses 4s liveness GET during active WS stream, and batches burst deltas', async () => {
+  let nowMs = 100_000;
+  const FakeDate = Object.assign(function (...args: unknown[]) {
+    return new Date(...(args as [number]));
+  }, { now: () => nowMs, parse: Date.parse, UTC: Date.UTC });
+  const h = makeRuntimeHarness({
+    Date: FakeDate,
+    requestAnimationFrame: (cb: () => void) => setTimeout(cb, 16),
+  });
+  h.views.setSessionActiveProbe(() => true);
+  const close = h.views.open('s-stream');
+  h.gets[0].gate.resolve({ kind: 'events', events: [], last_sequence: 0 });
+  await flush();
+  assert.equal(h.gets.length, 1);
+
+  // 1) Typing (`keydown` on window) MUST NOT trigger HTTP GET /events mid-keystroke.
+  nowMs += 10_000;
+  h.emitWindow('keydown');
+  await flush();
+  assert.equal(h.gets.length, 1, 'keydown must never trigger mid-typing replay');
+
+  // 2) Streaming burst: first streaming event applies immediately (0ms); next 2 events within 32ms coalesce!
+  const streamEv = (seq: number, text: string, streaming = true): RuntimeEvent => ({
+    sequence: seq,
+    session_id: 's-stream',
+    ts: '2026-11-15T10:00:00Z',
+    type: 'turn_item.updated',
+    turn_item: {
+      id: 'm-live',
+      turn_id: 't-live',
+      ordinal: 1,
+      status: streaming ? 'running' : 'completed',
+      title: null,
+      started_at: '2026-11-15T10:00:00Z',
+      completed_at: streaming ? null : '2026-11-15T10:00:01Z',
+      updated_at: '2026-11-15T10:00:00Z',
+      type: 'assistant_message',
+      message_id: 'm-live',
+      text,
+      streaming,
+    },
+  });
+
+  h.emitLive(streamEv(1, 'tok1'));
+  assert.equal(h.views.projections['s-stream']?.lastSequence, 1, 'leading token applies in 0ms');
+
+  nowMs += 5;
+  h.emitLive(streamEv(2, 'tok1 tok2'));
+  nowMs += 5;
+  h.emitLive(streamEv(3, 'tok1 tok2 tok3'));
+  assert.equal(h.views.projections['s-stream']?.lastSequence, 1, 'burst tokens within 32ms wait in batch');
+
+  // 3) 4s liveness tick while WS event arrived 10ms ago MUST NOT fire redundant GET /events!
+  const liveness = [...h.timers.values()].find((t) => t.ms === 4_000);
+  assert.ok(liveness);
+  liveness.fn();
+  await flush();
+  assert.equal(h.gets.length, 1, 'active WS stream suppresses redundant 4s HTTP replay');
+
+  // 4) Non-streaming completion event flushes pending batch + completion immediately in 0ms!
+  nowMs += 5;
+  h.emitLive(streamEv(4, 'tok1 tok2 tok3 done', false));
+  assert.equal(h.views.projections['s-stream']?.lastSequence, 4);
+  assert.equal(
+    (h.views.projections['s-stream']?.items[0] as Extract<TurnItem, { type: 'assistant_message' }>).text,
+    'tok1 tok2 tok3 done',
+  );
+
+  // 5) Once WS goes quiet for >= 2.5s, 4s liveness tick resumes catching up as safety net.
+  nowMs += 3_000;
+  liveness.fn();
+  await flush();
+  assert.equal(h.gets.length, 2, 'liveness tick catches up once WS has been quiet >= 2.5s');
+  h.gets[1].gate.resolve({ kind: 'events', events: [], last_sequence: 4 });
+  await flush();
+
+  close();
+  assert.equal(h.timers.size, 0);
 });

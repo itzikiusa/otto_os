@@ -108,6 +108,12 @@
     farUp = false;
     unseen = 0;
   }
+
+  /** Unpin bottom-following before prepending older history above the viewport. */
+  export function releaseBottom(): void {
+    atBottom = false;
+    if (scroller) scroller.dataset.atBottom = '0';
+  }
 </script>
 
 {#if text}

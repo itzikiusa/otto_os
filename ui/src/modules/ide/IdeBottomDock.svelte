@@ -16,11 +16,13 @@
   } from '../../lib/paneResizer';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ideDockPrefs } from './debug/ideDockPrefs.svelte';
+  import { ideDbWatch } from './dbwatch/ideDbWatchState.svelte';
   import { ideGit } from './git/ideGitController.svelte';
   import { ide, type IdeBottomTab } from './ideStore.svelte';
 
   type DockTab = IdeBottomTab | 'git';
 
+  const IdeDbWatchPanelLazy = lazyComponent(() => import('./dbwatch/IdeDbWatchPanel.svelte'));
   const IdeDebuggerPanelLazy = lazyComponent(() => import('./IdeDebuggerPanel.svelte'));
   const IdeGitToolPanelLazy = lazyComponent(() => import('./git/IdeGitToolPanel.svelte'));
   const IdeProblemsPanelLazy = lazyComponent(() => import('./IdeProblemsPanel.svelte'));
@@ -130,6 +132,13 @@
       icon: 'search',
       count: ide.usages.length > 0 ? ide.usages.length : undefined,
       testid: 'ide-tab-usages',
+    },
+    {
+      id: 'dbwatch',
+      label: 'DB Watch',
+      icon: 'db',
+      count: ideDbWatch.changeBadgeCount,
+      testid: 'ide-tab-dbwatch',
     },
     { id: 'terminal', label: 'Terminal', icon: 'terminal', testid: 'ide-tab-terminal' },
   ]);
@@ -280,6 +289,8 @@
         <LazyMount lazy={IdeProblemsPanelLazy} what="the problems list" variant="panel" />
       {:else if activeDockTab === 'usages'}
         <LazyMount lazy={IdeUsagesPanelLazy} what="the usages panel" variant="panel" />
+      {:else if activeDockTab === 'dbwatch'}
+        <LazyMount lazy={IdeDbWatchPanelLazy} what="the database watch panel" variant="panel" />
       {:else if activeDockTab === 'terminal'}
         <LazyMount lazy={IdeTerminalPanelLazy} what="the terminal" variant="panel" />
       {/if}

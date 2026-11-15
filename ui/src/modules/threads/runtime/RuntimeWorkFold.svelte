@@ -18,6 +18,7 @@
   let { id, entries, fold, children }: Props = $props();
 
   let anchorEl = $state<HTMLDivElement | null>(null);
+  let userOpen = $state(false);
   let prevFold: boolean | null = null;
 
   // When a running work block auto-collapses (`false -> true`) while the reader
@@ -52,13 +53,15 @@
 
 <div class="rf-wrap" bind:this={anchorEl}>
   {#if fold}
-    <details class="rf" data-testid="runtime-fold-{id}">
+    <details class="rf" bind:open={userOpen} data-testid="runtime-fold-{id}">
       <summary>
         <Icon name="check" size={12} />
         <span class="ellipsis">{workedFor(entries)} · {entries.length} steps</span>
         <Icon name="chevronRight" size={12} />
       </summary>
-      <div class="rf-body">{@render children()}</div>
+      {#if userOpen}
+        <div class="rf-body">{@render children()}</div>
+      {/if}
     </details>
   {:else}
     {@render children()}

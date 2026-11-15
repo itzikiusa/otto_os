@@ -276,8 +276,8 @@ pub(super) async fn resolve_java_adapter(
             cwd_hash ^= u64::from(*b);
             cwd_hash = cwd_hash.wrapping_mul(0x100000001b3);
         }
-        let out_base = data_dir
-            .join("java-debug-classes")
+        let out_base = crate::go_build_cache::ide_build_cache_root()
+            .join("java")
             .join(format!("{cwd_hash:016x}"));
         let env_clone = env.clone();
         let plan = tokio::task::spawn_blocking(move || {

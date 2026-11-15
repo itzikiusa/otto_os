@@ -31,9 +31,9 @@ base64 = { workspace = true }
 agent-client-protocol = { version = "5.0.0", default-features = false }
 # killpg: interrupt / kill the child's whole process group.
 libc = "0.2.191"
+sqlx = { workspace = true }
 
 [dev-dependencies]
-sqlx = { workspace = true }
 tempfile = { workspace = true }
 
 # Test doubles: an ACP agent, a Codex app-server and Claude's SDK
@@ -54,5 +54,11 @@ doc = false
 [[bin]]
 name = "otto-fake-claude"
 path = "src/bin/otto-fake-claude.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "otto-runtime-holder"
+path = "src/bin/otto-runtime-holder.rs"
 test = false
 doc = false

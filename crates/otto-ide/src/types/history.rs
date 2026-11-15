@@ -69,22 +69,60 @@ pub struct IdeDiagnosticsResp {
     pub diagnostics: Vec<IdeDiagnostic>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeHoverPosition {
+    #[serde(default)]
+    pub line: u32,
+    #[serde(default)]
+    pub character: u32,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeHoverReq {
     #[serde(default)]
     pub target: Option<IdeTargetSpec>,
+    #[serde(default, alias = "uri", alias = "file_path")]
     pub path: String,
     #[serde(default)]
     pub content: Option<String>,
+    #[serde(default)]
     pub line: u32,
-    #[serde(default, alias = "column")]
+    #[serde(default)]
     pub character: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<IdeHoverPosition>,
     #[serde(
         default,
         alias = "projectFolders",
         skip_serializing_if = "Vec::is_empty"
     )]
     pub project_folders: Vec<String>,
+}
+
+impl IdeHoverReq {
+    pub fn effective_line(&self) -> u32 {
+        if self.line > 0 {
+            self.line
+        } else if let Some(pos) = self.position {
+            pos.line.saturating_add(1)
+        } else {
+            1
+        }
+    }
+
+    pub fn effective_character(&self) -> u32 {
+        if self.character > 0 {
+            self.character
+        } else if let Some(col) = self.column.filter(|&c| c > 0) {
+            col
+        } else if let Some(pos) = self.position {
+            pos.character
+        } else {
+            0
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,10 +229,14 @@ pub struct IdeHistorySnapshotReq {
     #[serde(default)]
     pub target: Option<IdeTargetSpec>,
     pub path: String,
-    #[serde(default)]
-    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default = "default_true")]
+    pub local_history_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_history_retention_days: Option<u32>,
 }
 
 impl IdeHistorySnapshotReq {

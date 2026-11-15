@@ -25,7 +25,7 @@ pub(super) fn host_key_for_target(target: &IdeTargetSpec) -> String {
     }
 }
 
-pub(super) async fn load_registered_local_sdks_by_host(
+pub(crate) async fn load_registered_local_sdks_by_host(
     pool: &DbPool,
     host_key: &str,
 ) -> HashMap<EcosystemKind, Vec<IdeInstalledSdk>> {

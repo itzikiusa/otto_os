@@ -101,6 +101,9 @@ impl otto_ide::IdeCtx for ServerCtx {
                 "shell",
             )
             .await?;
+            if let Some(ws) = &conn.workspace_id {
+                self.roles.check(user, ws, WorkspaceRole::Editor).await?;
+            }
             Ok(otto_ide::IdeSshSpec {
                 connection_id: conn.id,
                 name: conn.name,
@@ -145,6 +148,96 @@ impl otto_ide::IdeCtx for ServerCtx {
             }
             Ok(())
         })
+    }
+    fn list_saved_db_targets<'a>(
+        &'a self,
+        user: &'a User,
+    ) -> BoxFuture<'a, Result<Vec<otto_ide::db_watch::IdeSavedDbTarget>>> {
+        Box::pin(async move {
+            let items = self
+                .db_explorer
+                .list_saved_watch_targets(&self.roles, user)
+                .await?;
+            Ok(items
+                .into_iter()
+                .map(|t| otto_ide::db_watch::IdeSavedDbTarget {
+                    target_kind: "saved".into(),
+                    connection_id: t.connection_id,
+                    name: t.name,
+                    engine: map_dbviewer_engine(t.engine),
+                    host: t.host,
+                    port: t.port,
+                    database: t.database,
+                    environment: Some(t.environment),
+                })
+                .collect())
+        })
+    }
+    fn execute_db_watch_query<'a>(
+        &'a self,
+        user: &'a User,
+        exec: otto_ide::db_watch::DbWatchQueryExec,
+    ) -> BoxFuture<'a, Result<otto_ide::db_watch::DbWatchExecOutcome>> {
+        Box::pin(async move {
+            let endpoint = match exec.target {
+                otto_ide::db_watch::DbWatchQueryTarget::Saved { connection_id } => {
+                    otto_dbviewer::WatchEndpoint::Saved { connection_id }
+                }
+                otto_ide::db_watch::DbWatchQueryTarget::EphemeralLoopback {
+                    port,
+                    user,
+                    password,
+                    database,
+                } => otto_dbviewer::WatchEndpoint::EphemeralLoopback {
+                    port,
+                    user,
+                    password,
+                    database,
+                },
+            };
+            let res = self
+                .db_explorer
+                .execute_watch_query(
+                    &self.roles,
+                    user,
+                    otto_dbviewer::WatchExecReq {
+                        endpoint,
+                        engine: map_ide_db_engine(exec.engine),
+                        database: exec.database,
+                        object_name: exec.object_name,
+                        statement: exec.statement,
+                        is_custom_query: exec.is_custom_query,
+                        limit: exec.limit,
+                    },
+                )
+                .await?;
+            Ok(otto_ide::db_watch::DbWatchExecOutcome {
+                target_label: res.target_label,
+                columns: res.columns,
+                rows: res.rows,
+                duration_ms: res.duration_ms,
+            })
+        })
+    }
+}
+
+fn map_dbviewer_engine(e: otto_dbviewer::Engine) -> otto_ide::db_watch::IdeDbEngine {
+    match e {
+        otto_dbviewer::Engine::Mysql => otto_ide::db_watch::IdeDbEngine::Mysql,
+        otto_dbviewer::Engine::Postgres => otto_ide::db_watch::IdeDbEngine::Postgres,
+        otto_dbviewer::Engine::Mongodb => otto_ide::db_watch::IdeDbEngine::Mongodb,
+        otto_dbviewer::Engine::Redis => otto_ide::db_watch::IdeDbEngine::Redis,
+        otto_dbviewer::Engine::Clickhouse => otto_ide::db_watch::IdeDbEngine::Clickhouse,
+    }
+}
+
+fn map_ide_db_engine(e: otto_ide::db_watch::IdeDbEngine) -> otto_dbviewer::Engine {
+    match e {
+        otto_ide::db_watch::IdeDbEngine::Mysql => otto_dbviewer::Engine::Mysql,
+        otto_ide::db_watch::IdeDbEngine::Postgres => otto_dbviewer::Engine::Postgres,
+        otto_ide::db_watch::IdeDbEngine::Mongodb => otto_dbviewer::Engine::Mongodb,
+        otto_ide::db_watch::IdeDbEngine::Redis => otto_dbviewer::Engine::Redis,
+        otto_ide::db_watch::IdeDbEngine::Clickhouse => otto_dbviewer::Engine::Clickhouse,
     }
 }
 

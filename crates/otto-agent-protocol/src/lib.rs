@@ -18,9 +18,11 @@
 //! agent stdio`, Antigravity `agy acp`, opencode `opencode acp`).
 
 pub mod acp;
+pub(crate) mod acp_sideband;
 pub mod claude;
 pub mod codex;
 pub mod driver;
+pub mod holder;
 pub mod host;
 mod http;
 pub mod pi;
@@ -39,7 +41,8 @@ use otto_core::auth::{AuthContext, RoleChecker};
 
 pub use driver::{
     ChildSignal, DriverError, DriverEvent, DriverFactory, DriverStep, LaunchContext, LaunchSpec,
-    McpDelivery, McpServerDef, StructuredDriver,
+    McpDelivery, McpServerDef, SidebandPayload, SidebandPoll, SidebandResumeSeed, SidebandSource,
+    StructuredDriver,
 };
 pub use host::{RuntimeHost, SessionManagerHost};
 pub use runtime::{AgentRuntime, RuntimeConfig};
@@ -99,6 +102,7 @@ pub fn daemon_runtime(
         default_drivers(),
         RuntimeConfig {
             attachments_dir: data_dir.join("runtime-attachments"),
+            holders_dir: Some(data_dir.join("runtime-holders")),
             ..RuntimeConfig::default()
         },
     )

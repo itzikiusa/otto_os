@@ -1,7 +1,6 @@
 // Curated IDE Editor Color Schemes (JetBrains Islands Dark/Light, Darcula,
 // VS Code Dark/Light Modern), CodeMirror 6 theme + Lezer HighlightStyle, and
 // shared `'otto.ide.preferences.v1'` reader/writer.
-// All color hexes live in `ui/src/lib/tokens.css`; this file uses 100% CSS vars.
 
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import type { Extension } from '@codemirror/state';
@@ -43,9 +42,92 @@ export {
 export const readIdeEditorPreferences = readIdePreferences;
 export const writeIdeEditorPreferences = writeIdePreferences;
 
+export type IdeSyntaxPalette = Readonly<Record<string, string>>;
+
+/** Authentic JetBrains GoLand / IntelliJ Islands Dark, Darcula, and Light syntax token palettes. */
+export const JETBRAINS_THEME_PALETTES: Readonly<Record<
+  'jetbrains-islands-dark' | 'jetbrains-darcula' | 'jetbrains-islands-light',
+  IdeSyntaxPalette
+>> = {
+  'jetbrains-islands-dark': {
+    '--syn-bg': '#191A1C',
+    '--syn-gutter-bg': '#191A1C',
+    '--syn-fg': '#BCBEC4',
+    '--syn-keyword': '#CF8E6D',
+    '--syn-control-keyword': '#CF8E6D',
+    '--syn-func-decl': '#56A8F5',
+    '--syn-func-call': '#57AAF7',
+    '--syn-field': '#C77DBB',
+    '--syn-type': '#6FAFBD',
+    '--syn-annotation': '#BBB529',
+    '--syn-string': '#6AAB73',
+    '--syn-escape': '#CF8E6D',
+    '--syn-number': '#2AACB8',
+    '--syn-param': '#E5C07B',
+    '--syn-unused': '#7A7E85',
+    '--syn-comment': '#7A7E85',
+    '--syn-doc-comment': '#5F826B',
+  },
+  'jetbrains-darcula': {
+    '--syn-bg': '#2B2B2B',
+    '--syn-gutter-bg': '#313335',
+    '--syn-fg': '#BCBEC4',
+    '--syn-keyword': '#CF8E6D',
+    '--syn-control-keyword': '#CF8E6D',
+    '--syn-func-decl': '#56A8F5',
+    '--syn-func-call': '#57AAF7',
+    '--syn-field': '#C77DBB',
+    '--syn-type': '#6FAFBD',
+    '--syn-annotation': '#BBB529',
+    '--syn-string': '#6AAB73',
+    '--syn-escape': '#CF8E6D',
+    '--syn-number': '#2AACB8',
+    '--syn-param': '#E5C07B',
+    '--syn-unused': '#7A7E85',
+    '--syn-comment': '#7A7E85',
+    '--syn-doc-comment': '#5F826B',
+  },
+  'jetbrains-islands-light': {
+    '--syn-bg': '#FFFFFF',
+    '--syn-gutter-bg': '#F7F8FA',
+    '--syn-fg': '#080808',
+    '--syn-keyword': '#0033B3',
+    '--syn-control-keyword': '#0033B3',
+    '--syn-func-decl': '#00627A',
+    '--syn-func-call': '#00627A',
+    '--syn-field': '#871094',
+    '--syn-type': '#007E8A',
+    '--syn-annotation': '#9E880D',
+    '--syn-string': '#067D17',
+    '--syn-escape': '#0037A6',
+    '--syn-number': '#1750EB',
+    '--syn-param': '#8A5A00',
+    '--syn-unused': '#8C8C8C',
+    '--syn-comment': '#8C8C8C',
+    '--syn-doc-comment': '#497C54',
+  },
+};
+
+function resolvePaletteOverrides(
+  dark: boolean,
+  ideMode: boolean,
+  scheme?: ConcreteIdeColorSchemeId | 'jetbrains-dark' | 'jetbrains-light',
+): IdeSyntaxPalette {
+  if (!ideMode) {
+    return { '--syn-unused': dark ? '#7A7E85' : '#8C8C8C' };
+  }
+  if (scheme === 'vscode-dark-modern') return { '--syn-unused': '#7A7E85' };
+  if (scheme === 'vscode-light-modern') return { '--syn-unused': '#8C8C8C' };
+  if (scheme === 'jetbrains-darcula') return JETBRAINS_THEME_PALETTES['jetbrains-darcula'];
+  if (scheme === 'jetbrains-islands-light' || scheme === 'jetbrains-light' || !dark) {
+    return JETBRAINS_THEME_PALETTES['jetbrains-islands-light'];
+  }
+  return JETBRAINS_THEME_PALETTES['jetbrains-islands-dark'];
+}
+
 const ideHighlightStyle = HighlightStyle.define([
   {
-    tag: [tags.keyword, tags.modifier, tags.self, tags.null, tags.bool, tags.atom, tags.standard(tags.typeName)],
+    tag: [tags.keyword, tags.modifier, tags.self, tags.null, tags.bool, tags.atom],
     color: 'var(--syn-keyword)',
   },
   {
@@ -69,7 +151,7 @@ const ideHighlightStyle = HighlightStyle.define([
     color: 'var(--syn-field)',
   },
   {
-    tag: [tags.typeName, tags.className, tags.namespace, tags.macroName, tags.labelName],
+    tag: [tags.typeName, tags.standard(tags.typeName), tags.className, tags.namespace, tags.macroName, tags.labelName],
     color: 'var(--syn-type)',
   },
   {
@@ -103,10 +185,16 @@ const ideHighlightStyle = HighlightStyle.define([
   { tag: tags.link, color: 'var(--accent-text)', textDecoration: 'underline' },
 ]);
 
-function makeEditorSurfaceTheme(dark: boolean, ideMode: boolean): Extension {
+function makeEditorSurfaceTheme(
+  dark: boolean,
+  ideMode: boolean,
+  scheme?: ConcreteIdeColorSchemeId | 'jetbrains-dark' | 'jetbrains-light',
+): Extension {
+  const paletteVars = resolvePaletteOverrides(dark, ideMode, scheme);
   return EditorView.theme(
     {
       '&': {
+        ...paletteVars,
         color: 'var(--syn-fg)',
         backgroundColor: ideMode || dark ? 'var(--syn-bg)' : 'transparent',
         height: '100%',
@@ -190,6 +278,11 @@ function makeEditorSurfaceTheme(dark: boolean, ideMode: boolean): Extension {
         textDecoration: 'underline wavy var(--syn-unresolved)',
         textUnderlineOffset: '2px',
       },
+      '.cm-syn-unused, .cm-syn-unused span': {
+        color: 'var(--syn-unused) !important',
+        textDecoration: 'underline wavy var(--warning)',
+        textUnderlineOffset: '2px',
+      },
       // Rainbow Brackets (4-level IntelliJ nested bracket coloring).
       '.cm-syn-rb-1, .cm-syn-rb-1 span': { color: 'var(--syn-rb-1) !important' },
       '.cm-syn-rb-2, .cm-syn-rb-2 span': { color: 'var(--syn-rb-2) !important' },
@@ -232,6 +325,10 @@ function makeEditorSurfaceTheme(dark: boolean, ideMode: boolean): Extension {
       '.cm-ide-bp-line': {
         backgroundColor: 'color-mix(in srgb, var(--danger) 9%, transparent)',
       },
+      '&.cm-editor .cm-line.cm-ide-exec-line, &.cm-editor .cm-activeLine.cm-ide-exec-line, &.cm-editor .cm-line.cm-ide-paused-line, &.cm-editor .cm-activeLine.cm-ide-paused-line': {
+        backgroundColor: dark ? 'rgba(46, 107, 214, 0.38)' : 'rgba(53, 116, 240, 0.24)',
+        boxShadow: 'inset 3px 0 0 #4dabf7',
+      },
       '.cm-ide-reveal-pulse': {
         backgroundColor: 'color-mix(in srgb, var(--accent-solid) 18%, transparent)',
       },
@@ -247,14 +344,16 @@ export function createIdeSyntaxTheme(opts: {
   dark: boolean;
   plain?: boolean;
   ideMode?: boolean;
+  scheme?: ConcreteIdeColorSchemeId | 'jetbrains-dark' | 'jetbrains-light';
 }): Extension {
   const dark = Boolean(opts.dark);
   const ideMode = Boolean(opts.ideMode);
   const plain = Boolean(opts.plain);
-  const key = `${dark ? 1 : 0}:${ideMode ? 1 : 0}:${plain ? 1 : 0}`;
+  const scheme = opts.scheme ?? (dark ? 'jetbrains-islands-dark' : 'jetbrains-islands-light');
+  const key = `${dark ? 1 : 0}:${ideMode ? 1 : 0}:${plain ? 1 : 0}:${scheme}`;
   let cached = themeExtCache.get(key);
   if (!cached) {
-    const surface = makeEditorSurfaceTheme(dark, ideMode);
+    const surface = makeEditorSurfaceTheme(dark, ideMode, scheme);
     cached = plain ? surface : [surface, highlightExt];
     themeExtCache.set(key, cached);
   }

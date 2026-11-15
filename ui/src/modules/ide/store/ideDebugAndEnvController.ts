@@ -4,34 +4,17 @@
 import { api, ApiError } from '../../../lib/api/client';
 import { loadErrorText } from '../../../lib/loadError';
 import { pollWhileVisible, type Poller } from '../../../lib/poll';
+import { auth } from '../../../lib/stores/auth.svelte';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { canonicalizeLocalProjectPath } from '../shell/ideProjectHelpers';
 import {
-  collabGuestPost,
-  defaultRunnerForLanguage,
-  streamIdeSse,
-  type IdeBottomTab,
-  type IdeBreakpoint,
-  type IdeCollabRoom,
-  type IdeDebugSessionSnapshot,
-  type IdeDetectedSdk,
-  type IdeEnvVar,
-  type IdeGutterItem,
-  type IdeInstalledSdk,
-  type IdeInstallJob,
-  type IdeOpenTab,
-  type IdeProjectEnvironment,
-  type IdeProjectRoot,
-  type IdePythonVenv,
-  type IdeReplEntry,
-  type IdeRunConfig,
-  type IdeRunState,
-  type IdeShellEnvResp,
-  type IdeTargetSpec,
-  type IdeToolchainEcosystem,
-  type IdeVariable,
-  type IdeWatch,
+  collabGuestPost, defaultRunnerForLanguage, streamIdeSse, type IdeBottomTab,
+  type IdeBreakpoint, type IdeCollabRoom, type IdeDebugSessionSnapshot, type IdeDetectedSdk,
+  type IdeEnvVar, type IdeGutterItem, type IdeInstalledSdk, type IdeInstallJob,
+  type IdeOpenTab, type IdeProjectEnvironment, type IdeProjectRoot, type IdePythonVenv,
+  type IdeReplEntry, type IdeRunConfig, type IdeRunState, type IdeShellEnvResp,
+  type IdeTargetSpec, type IdeToolchainEcosystem, type IdeVariable, type IdeWatch,
 } from './ideTypes';
 
 export interface DebugAndEnvHost {
@@ -51,6 +34,9 @@ export interface DebugAndEnvHost {
   effectiveEnv: Record<string, string>;
   shellEnv: IdeShellEnvResp | null;
   shellEnvLoading: boolean;
+  shellEnvAttempted?: boolean;
+  shellEnvError?: string | null;
+  keepTestcontainersAlive?: boolean;
   pythonVenvs: IdePythonVenv[];
   dotenvFiles: string[];
   runConfigs: IdeRunConfig[];
@@ -68,6 +54,7 @@ export interface DebugAndEnvHost {
   watches: IdeWatch[];
   replEntries: IdeReplEntry[];
   debugLoading: boolean;
+  debugStreamActive?: boolean;
   activeMavenProfiles: string[];
   activeSpringProfiles: string[];
   buildSkipTests: boolean;
@@ -185,7 +172,10 @@ export async function registerLocalToolchain(
 }
 
 export async function fetchShellEnv(host: DebugAndEnvHost, reload = false): Promise<IdeShellEnvResp | null> {
+  host.shellEnvAttempted = true;
+  if (!auth.isRoot) return null;
   host.shellEnvLoading = true;
+  host.shellEnvError = null;
   try {
     const resp = reload
       ? await api.post<IdeShellEnvResp>('/ide/shell-env/reload', { target: host.targetPayload })
@@ -196,9 +186,11 @@ export async function fetchShellEnv(host: DebugAndEnvHost, reload = false): Prom
       vars: resp.vars ?? resp.env ?? {},
     };
     host.shellEnv = normalized;
+    host.shellEnvError = null;
     if (reload) toasts.success('Reloaded shell environment', `${Object.keys(normalized.vars).length} variables`);
     return normalized;
   } catch (e) {
+    host.shellEnvError = loadErrorText(e);
     if (reload) toastError('Couldn’t reload shell environment', e);
     return null;
   } finally {
@@ -290,6 +282,7 @@ export async function persistEnvironment(host: DebugAndEnvHost, patch: Partial<I
 export async function upsertRunConfig(host: DebugAndEnvHost, cfg: Partial<IdeRunConfig> & { name: string; runner: string }): Promise<IdeRunConfig | null> {
   try {
     const cleanId = cfg.id && !cfg.id.startsWith('auto:') ? cfg.id : undefined;
+    const existing = cleanId ? host.runConfigs.find((c) => c.id === cleanId) : undefined;
     const resp = await api.post<{ config?: IdeRunConfig } & Partial<IdeRunConfig>>('/ide/run-configs', {
       target: host.targetPayload,
       id: cleanId,
@@ -309,6 +302,10 @@ export async function upsertRunConfig(host: DebugAndEnvHost, cfg: Partial<IdeRun
       before_launch: cfg.before_launch ?? null,
       target_path: cfg.target_path ?? null,
       test_filter: cfg.test_filter ?? null,
+      maven_profiles: cfg.maven_profiles ?? existing?.maven_profiles ?? [],
+      spring_profiles: cfg.spring_profiles ?? existing?.spring_profiles ?? [],
+      skip_tests: cfg.skip_tests ?? existing?.skip_tests ?? false,
+      offline: cfg.offline ?? existing?.offline ?? false,
     });
     const saved = (resp.config ?? resp) as IdeRunConfig;
     await fetchEnvironments(host);
@@ -347,15 +344,17 @@ function resolveModuleSdkOverride(host: DebugAndEnvHost, candidatePath?: string 
 
 export async function launchIdeRun(
   host: DebugAndEnvHost,
-  opts: { configId?: string; adhoc?: Partial<IdeRunConfig> },
+  opts: { configId?: string; adhoc?: Partial<IdeRunConfig>; keepTestcontainers?: boolean },
   prevPoller: Poller | null,
-): Promise<Poller | null> {
-  if (!host.target.root) return prevPoller;
+  prevSseCtl: AbortController | null = null,
+): Promise<{ poller: Poller | null; sseCtl: AbortController | null }> {
+  if (!host.target.root) return { poller: prevPoller, sseCtl: prevSseCtl };
+  const keepTc = Boolean(opts.keepTestcontainers || host.keepTestcontainersAlive);
   const rawId = opts.configId ?? (opts.adhoc ? undefined : host.selectedConfigId ?? undefined);
   const selectedCfg = rawId ? host.runConfigs.find((c) => c.id === rawId) : undefined;
   const isClientAuto = Boolean(rawId?.startsWith('auto:') || selectedCfg?.auto_detected);
-  const cfgId = isClientAuto ? undefined : rawId;
-  const rawAdhoc = opts.adhoc ?? (isClientAuto && selectedCfg ? selectedCfg : (!cfgId && host.activeTab ? {
+  const cfgId = isClientAuto || keepTc ? undefined : rawId;
+  const rawAdhoc = opts.adhoc ?? ((isClientAuto || keepTc) && selectedCfg ? selectedCfg : (!cfgId && host.activeTab ? {
     id: 'adhoc', name: `Run ${host.activeTab.name}`, runner: defaultRunnerForLanguage(host.activeTab.language),
     args: [], env_overrides: {}, inherit_shell_env: host.projectEnv?.inherit_shell_env ?? true, target_path: host.activeTab.path,
   } : undefined));
@@ -363,11 +362,12 @@ export async function launchIdeRun(
   const springEnv: Record<string, string> = host.activeSpringProfiles.length > 0
     ? { SPRING_PROFILES_ACTIVE: host.activeSpringProfiles.join(',') }
     : {};
+  const tcEnv: Record<string, string> = keepTc ? { TESTCONTAINERS_RYUK_DISABLED: 'true' } : {};
   const adhoc = rawAdhoc
     ? {
         ...rawAdhoc,
         sdk_path: rawAdhoc.sdk_path ?? modSdk ?? null,
-        env_overrides: { ...springEnv, ...(rawAdhoc.env_overrides ?? {}) },
+        env_overrides: { ...springEnv, ...tcEnv, ...(rawAdhoc.env_overrides ?? {}) },
       }
     : undefined;
   try {
@@ -384,31 +384,62 @@ export async function launchIdeRun(
     });
     host.activeRun = resp.run;
     prevPoller?.stop();
-    const poller = pollWhileVisible(async (signal) => {
-      const r = await api.bg.get<{ run: IdeRunState }>(`/ide/runs/${encodeURIComponent(resp.run.id)}`, signal);
-      const boundedOutput = r.run.output.length > 2000 ? r.run.output.slice(-2000) : r.run.output;
-      const liveRun: IdeRunState = boundedOutput === r.run.output ? r.run : { ...r.run, output: boundedOutput };
+    prevSseCtl?.abort();
+    const sseCtl = new AbortController();
+    let sseActive = false;
+    let pollerRef: Poller | null = null;
+    const stopBoth = (): void => { sseCtl.abort(); pollerRef?.stop(); };
+    const applyRunState = (incoming: IdeRunState): void => {
+      const boundedOutput = incoming.output.length > 2000 ? incoming.output.slice(-2000) : incoming.output;
+      const liveRun: IdeRunState = boundedOutput === incoming.output ? incoming : { ...incoming, output: boundedOutput };
       host.activeRun = liveRun;
       if (liveRun.status !== 'running') {
-        const archived: IdeRunState = liveRun.output.length > 200
-          ? { ...liveRun, output: liveRun.output.slice(-200) }
-          : liveRun;
+        const archived = liveRun.output.length > 200 ? { ...liveRun, output: liveRun.output.slice(-200) } : liveRun;
         host.runsHistory = [archived, ...host.runsHistory.filter((x) => x.id !== archived.id)].slice(0, 8);
-        poller.stop();
+        stopBoth();
+      }
+    };
+    void streamIdeSse(`/ide/runs/${encodeURIComponent(resp.run.id)}/events`, {}, sseCtl.signal, (raw) => {
+      try {
+        const parsed = JSON.parse(raw) as { run?: IdeRunState } & Partial<IdeRunState>;
+        const runSnap = (parsed.run ?? parsed) as IdeRunState;
+        if (runSnap?.id) {
+          sseActive = true;
+          applyRunState(runSnap);
+        }
+      } catch { /* heartbeat */ }
+    }, () => { sseActive = true; }).catch(() => {}).finally(() => { sseActive = false; });
+    pollerRef = pollWhileVisible(async (signal) => {
+      if (sseActive && host.activeRun?.status === 'running') return;
+      try {
+        const r = await api.bg.get<{ run: IdeRunState }>(`/ide/runs/${encodeURIComponent(resp.run.id)}`, signal);
+        applyRunState(r.run);
+      } catch (e) {
+        if (signal.aborted) return;
+        if (e instanceof ApiError && e.status === 404) {
+          if (host.activeRun && host.activeRun.id === resp.run.id) {
+            const evicted: IdeRunState = { ...host.activeRun, status: 'failed' };
+            host.activeRun = evicted;
+            const archived = evicted.output.length > 200 ? { ...evicted, output: evicted.output.slice(-200) } : evicted;
+            host.runsHistory = [archived, ...host.runsHistory.filter((x) => x.id !== archived.id)].slice(0, 8);
+          }
+          toasts.error('Run ended unexpectedly', 'Run state is no longer available on the daemon.');
+          stopBoth();
+        }
       }
     }, { ms: 750, floorMs: 500, immediate: false });
-    return poller;
+    return { poller: pollerRef, sseCtl };
   } catch (e) {
     toastError('Couldn’t start run', e);
-    return prevPoller;
+    return { poller: prevPoller, sseCtl: prevSseCtl };
   }
 }
 
 export function launchGutterAction(
   host: DebugAndEnvHost,
   item: IdeGutterItem,
-  mode: 'run' | 'debug',
-  onRun: (adhoc: Partial<IdeRunConfig>) => void,
+  mode: 'run' | 'debug' | 'run_keep_tc',
+  onRun: (adhoc: Partial<IdeRunConfig>, keepTestcontainers?: boolean) => void,
   onDebug: (opts: { language: string; launch: { program: string; args: string[]; cwd: string; test_name?: string } }) => void,
 ): void {
   const spec = item.run_spec ?? {};
@@ -425,12 +456,17 @@ export function launchGutterAction(
     });
     return;
   }
-  onRun({
-    id: `gutter-${item.line}`, name: item.label, runner: spec.runner || defaultRunnerForLanguage(item.language),
-    command: spec.command ?? null, args: spec.args ?? [], cwd: spec.cwd ?? null, env_overrides: {},
-    inherit_shell_env: host.projectEnv?.inherit_shell_env ?? true,
-    target_path: filePath || null, test_filter: spec.test_filter || spec.test_name || null,
-  });
+  const keepTc = mode === 'run_keep_tc';
+  onRun(
+    {
+      id: `gutter-${item.line}`, name: item.label, runner: spec.runner || defaultRunnerForLanguage(item.language),
+      command: spec.command ?? null, args: spec.args ?? [], cwd: spec.cwd ?? null,
+      env_overrides: keepTc ? { TESTCONTAINERS_RYUK_DISABLED: 'true' } : {},
+      inherit_shell_env: host.projectEnv?.inherit_shell_env ?? true,
+      target_path: filePath || null, test_filter: spec.test_filter || spec.test_name || null,
+    },
+    keepTc,
+  );
 }
 
 export async function launchDebugSession(
@@ -453,6 +489,7 @@ export async function launchDebugSession(
     const springEnv: Record<string, string> = host.activeSpringProfiles.length > 0
       ? { SPRING_PROFILES_ACTIVE: host.activeSpringProfiles.join(',') }
       : {};
+    const tcEnv: Record<string, string> = host.keepTestcontainersAlive ? { TESTCONTAINERS_RYUK_DISABLED: 'true' } : {};
     const baseLaunch = opts.launch ?? {
       program,
       args: cfg?.args ?? [],
@@ -472,7 +509,7 @@ export async function launchDebugSession(
       launch: {
         ...baseLaunch,
         sdk_path: baseLaunch.sdk_path ?? modSdk ?? null,
-        env: { ...springEnv, ...(baseLaunch.env ?? {}) },
+        env: { ...springEnv, ...tcEnv, ...(baseLaunch.env ?? {}) },
       },
       maven_profiles: host.activeMavenProfiles,
       spring_profiles: host.activeSpringProfiles,
@@ -484,13 +521,14 @@ export async function launchDebugSession(
     onSnapshot(resp.session);
     prevCtl?.abort();
     const ctl = new AbortController();
+    host.debugStreamActive = false;
     void streamIdeSse(`/ide/debug/sessions/${encodeURIComponent(resp.session.id)}/events`, {}, ctl.signal, (raw) => {
       try {
         const parsed = JSON.parse(raw) as { session?: IdeDebugSessionSnapshot } & Partial<IdeDebugSessionSnapshot>;
         const snap = (parsed.session ?? parsed) as IdeDebugSessionSnapshot;
         if (snap?.id) onSnapshot(snap);
       } catch { /* heartbeat */ }
-    });
+    }, () => { host.debugStreamActive = true; }).catch(() => {}).finally(() => { host.debugStreamActive = false; });
     return ctl;
   } catch (e) {
     toastError('Couldn’t start debugger', e);

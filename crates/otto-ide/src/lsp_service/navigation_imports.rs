@@ -1,6 +1,6 @@
 //! Cross-module & External SDK import resolution helpers for `goto_definition`
-//! across Go, Java/Kotlin (in-project Maven/Gradle modules FIRST!), JS/TS, Python,
-//! Rust, and Shell.
+//! across Go, Java/Kotlin (in-project Maven/Gradle modules FIRST), JS/TS, Python,
+//! Rust, and Shell — enforcing `ResolvedTarget` containment on all local reads.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use crate::java_workspace::scan_java_workspace;
 use crate::types::IdeReferenceLocation;
 
-use super::navigation::find_definitions_in_content;
+use super::navigation::{
+    find_definitions_in_content, is_confined_nav_path, read_confined_nav_file,
+};
 use super::navigation_ext::{
     candidate_java_fqns_in_file, parse_go_imports, resolve_go_package_dirs,
     resolve_js_ts_module_files, resolve_python_module_files, search_external_rust_crates,
@@ -27,12 +29,13 @@ pub(super) fn resolve_local_language_imports(
     project_roots: &[PathBuf],
     readonly_roots: &[PathBuf],
     env_map: &BTreeMap<String, String>,
+    is_root_user: bool,
 ) -> Vec<IdeReferenceLocation> {
     let mut out = Vec::new();
     match lang {
         "java" | "kotlin" => {
-            // In-project Maven/Gradle modules (`project_roots`) ALWAYS resolve from local
-            // `.java`/`.kt` source files FIRST ahead of `~/.m2` JARs or JDK `src.zip`!
+            // In-project Maven/Gradle modules (`project_roots`) resolve from local
+            // `.java`/`.kt` source files ahead of `~/.m2` JARs or JDK `src.zip`.
             let ws = scan_java_workspace(project_roots);
             let target_class = qualifier.unwrap_or(symbol);
             let candidate_fqns = candidate_java_fqns_in_file(content, target_class);
@@ -40,13 +43,12 @@ pub(super) fn resolve_local_language_imports(
                 for fqn in &candidate_fqns {
                     for ext in ["java", "kt"] {
                         let cand = src_root.join(format!("{}.{ext}", fqn.replace('.', "/")));
-                        let Ok(canon) = cand.canonicalize() else {
-                            continue;
-                        };
-                        if !canon.is_file() {
-                            continue;
-                        }
-                        let Ok(text) = std::fs::read_to_string(&canon) else {
+                        let Some((canon, text)) = read_confined_nav_file(
+                            &cand,
+                            project_roots,
+                            readonly_roots,
+                            is_root_user,
+                        ) else {
                             continue;
                         };
                         let p = format_result_path(&canon, primary_root, keep_abs);
@@ -70,15 +72,26 @@ pub(super) fn resolve_local_language_imports(
                 .and_then(|q| imports.get(q))
                 .or_else(|| imports.get(symbol));
             if let Some(import_path) = matched_import {
-                let pkg_dirs = resolve_go_package_dirs(
+                let mut pkg_dirs = resolve_go_package_dirs(
                     import_path,
                     origin_abs,
                     project_roots,
                     readonly_roots,
                     env_map,
                 );
+                pkg_dirs.retain(|d| {
+                    is_confined_nav_path(d, project_roots, readonly_roots, is_root_user)
+                });
                 if qualifier.is_some() {
                     for mut loc in search_go_package_dirs(&pkg_dirs, symbol) {
+                        if !is_confined_nav_path(
+                            Path::new(&loc.path),
+                            project_roots,
+                            readonly_roots,
+                            is_root_user,
+                        ) {
+                            continue;
+                        }
                         loc.path = format_result_path(Path::new(&loc.path), primary_root, keep_abs);
                         push_unique_loc(&mut out, loc);
                     }
@@ -90,7 +103,12 @@ pub(super) fn resolve_local_language_imports(
                             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("go"))
                             .collect();
                         go_files.sort();
-                        if let Some(first_go) = go_files.first().and_then(|p| p.canonicalize().ok())
+                        if let Some(first_go) = go_files
+                            .first()
+                            .and_then(|p| p.canonicalize().ok())
+                            .filter(|c| {
+                                is_confined_nav_path(c, project_roots, readonly_roots, is_root_user)
+                            })
                         {
                             out.push(IdeReferenceLocation {
                                 path: format_result_path(&first_go, primary_root, keep_abs),
@@ -109,40 +127,48 @@ pub(super) fn resolve_local_language_imports(
             {
                 let target_sym = imported_orig.as_deref().unwrap_or(symbol);
                 for file in resolve_js_ts_module_files(&specifier, origin_abs, project_roots) {
-                    if let Ok(text) = std::fs::read_to_string(&file) {
-                        let p = format_result_path(&file, primary_root, keep_abs);
-                        let defs = find_definitions_in_content(&p, "typescript", &text, target_sym);
-                        if !defs.is_empty() {
-                            for d in defs {
-                                push_unique_loc(&mut out, d);
-                            }
-                        } else {
-                            for re_spec in extract_js_reexports(&text, target_sym) {
-                                for sub in
-                                    resolve_js_ts_module_files(&re_spec, &file, project_roots)
-                                {
-                                    if let Ok(sub_text) = std::fs::read_to_string(&sub) {
-                                        let sp = format_result_path(&sub, primary_root, keep_abs);
-                                        for d in find_definitions_in_content(
-                                            &sp,
-                                            "typescript",
-                                            &sub_text,
-                                            target_sym,
-                                        ) {
-                                            push_unique_loc(&mut out, d);
-                                        }
+                    let Some((canon_file, text)) =
+                        read_confined_nav_file(&file, project_roots, readonly_roots, is_root_user)
+                    else {
+                        continue;
+                    };
+                    let p = format_result_path(&canon_file, primary_root, keep_abs);
+                    let defs = find_definitions_in_content(&p, "typescript", &text, target_sym);
+                    if !defs.is_empty() {
+                        for d in defs {
+                            push_unique_loc(&mut out, d);
+                        }
+                    } else {
+                        for re_spec in extract_js_reexports(&text, target_sym) {
+                            for sub in
+                                resolve_js_ts_module_files(&re_spec, &canon_file, project_roots)
+                            {
+                                if let Some((canon_sub, sub_text)) = read_confined_nav_file(
+                                    &sub,
+                                    project_roots,
+                                    readonly_roots,
+                                    is_root_user,
+                                ) {
+                                    let sp = format_result_path(&canon_sub, primary_root, keep_abs);
+                                    for d in find_definitions_in_content(
+                                        &sp,
+                                        "typescript",
+                                        &sub_text,
+                                        target_sym,
+                                    ) {
+                                        push_unique_loc(&mut out, d);
                                     }
                                 }
                             }
                         }
-                        if out.is_empty() {
-                            out.push(IdeReferenceLocation {
-                                path: p,
-                                line: 1,
-                                column: 1,
-                                preview: text.lines().next().unwrap_or("").trim().to_string(),
-                            });
-                        }
+                    }
+                    if out.is_empty() {
+                        out.push(IdeReferenceLocation {
+                            path: p,
+                            line: 1,
+                            column: 1,
+                            preview: text.lines().next().unwrap_or("").trim().to_string(),
+                        });
                     }
                 }
             }
@@ -156,21 +182,24 @@ pub(super) fn resolve_local_language_imports(
                     project_roots,
                     readonly_roots,
                 ) {
-                    if let Ok(text) = std::fs::read_to_string(&file) {
-                        let p = format_result_path(&file, primary_root, keep_abs);
-                        let defs = find_definitions_in_content(&p, "python", &text, target_sym);
-                        if !defs.is_empty() {
-                            for d in defs {
-                                push_unique_loc(&mut out, d);
-                            }
-                        } else if orig_sym.is_none() {
-                            out.push(IdeReferenceLocation {
-                                path: p,
-                                line: 1,
-                                column: 1,
-                                preview: text.lines().next().unwrap_or("").trim().to_string(),
-                            });
+                    let Some((canon_file, text)) =
+                        read_confined_nav_file(&file, project_roots, readonly_roots, is_root_user)
+                    else {
+                        continue;
+                    };
+                    let p = format_result_path(&canon_file, primary_root, keep_abs);
+                    let defs = find_definitions_in_content(&p, "python", &text, target_sym);
+                    if !defs.is_empty() {
+                        for d in defs {
+                            push_unique_loc(&mut out, d);
                         }
+                    } else if orig_sym.is_none() {
+                        out.push(IdeReferenceLocation {
+                            path: p,
+                            line: 1,
+                            column: 1,
+                            preview: text.lines().next().unwrap_or("").trim().to_string(),
+                        });
                     }
                 }
             }
@@ -178,7 +207,12 @@ pub(super) fn resolve_local_language_imports(
         "rust" => {
             if let Some(q) = qualifier {
                 if matches!(q, "std" | "core" | "alloc") {
-                    out.extend(search_external_rust_crates(Some(q), symbol, readonly_roots));
+                    out.extend(search_external_rust_crates(
+                        Some(q),
+                        symbol,
+                        readonly_roots,
+                        is_root_user,
+                    ));
                 }
             }
             if out.is_empty() {
@@ -187,6 +221,7 @@ pub(super) fn resolve_local_language_imports(
                         Some(&crate_name),
                         symbol,
                         readonly_roots,
+                        is_root_user,
                     ));
                 }
             }
@@ -339,12 +374,15 @@ pub(super) fn collect_shell_sourced_files(
     content: &str,
     origin_abs: &Path,
     project_roots: &[PathBuf],
+    is_root_user: bool,
 ) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for raw in content.lines() {
         let t = raw.trim();
         if let Some(rest) = t.strip_prefix("source ").or_else(|| t.strip_prefix(". ")) {
-            if let Some(p) = resolve_shell_source_target(rest, origin_abs, project_roots) {
+            if let Some(p) =
+                resolve_shell_source_target(rest, origin_abs, project_roots, is_root_user)
+            {
                 if !out.contains(&p) {
                     out.push(p);
                 }
@@ -358,6 +396,7 @@ pub(super) fn resolve_shell_source_target(
     raw_arg: &str,
     origin_abs: &Path,
     project_roots: &[PathBuf],
+    is_root_user: bool,
 ) -> Option<PathBuf> {
     let token = raw_arg
         .split('#')
@@ -388,13 +427,13 @@ pub(super) fn resolve_shell_source_target(
         base_dir.join(&cleaned)
     };
     if let Ok(c) = cand.canonicalize() {
-        if c.is_file() {
+        if c.is_file() && is_confined_nav_path(&c, project_roots, &[], is_root_user) {
             return Some(c);
         }
     }
     for r in project_roots {
         if let Ok(c) = r.join(&cleaned).canonicalize() {
-            if c.is_file() {
+            if c.is_file() && is_confined_nav_path(&c, project_roots, &[], is_root_user) {
                 return Some(c);
             }
         }

@@ -63,11 +63,30 @@ export interface IdeRenameFileEdit {
   preview_lines: IdeRenameLinePreview[];
 }
 
+export interface IdeRenameReq {
+  target: IdeTargetSpec;
+  path: string;
+  line: number;
+  character: number;
+  new_name: string;
+  apply?: boolean;
+  record_local_history?: boolean;
+  local_history_retention_days?: number;
+}
+
 export interface IdeRenameResp {
   symbol: string;
   new_name: string;
   applied: boolean;
   edits: IdeRenameFileEdit[];
+}
+
+export interface IdeFormatReq {
+  target: IdeTargetSpec;
+  path: string;
+  content: string;
+  language?: string | null;
+  organize_imports?: boolean;
 }
 
 export interface IdeFormatResp {
@@ -442,6 +461,7 @@ export interface IdeCollabEvent {
   content?: string;
   version?: number;
   saved?: boolean;
+  sha256?: string | null;
   session?: IdeDebugSessionSnapshot | null;
   debug?: IdeDebugSessionSnapshot | null;
   room?: IdeCollabRoom;
@@ -505,8 +525,8 @@ export interface IdePluginInfo {
   author?: string | null;
   enabled: boolean;
   source: string;
-  install_path: string;
-  contributions: IdePluginContributions;
+  install_path?: string;
+  contributions?: IdePluginContributions;
   languages?: string[];
   capabilities?: string[];
 }
@@ -516,6 +536,7 @@ export interface IdePluginCatalogEntry {
   name: string;
   version: string;
   description: string;
+  author?: string | null;
   tags: string[];
   installed: boolean;
   languages?: string[];

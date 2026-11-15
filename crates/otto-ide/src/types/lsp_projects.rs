@@ -41,8 +41,10 @@ pub struct IdeReferencesReq {
     pub target: IdeTargetSpec,
     pub path: String,
     pub line: u32,
-    #[serde(default, alias = "character")]
+    #[serde(default)]
     pub column: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<u32>,
     #[serde(default)]
     pub symbol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,6 +55,23 @@ pub struct IdeReferencesReq {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub project_folders: Vec<String>,
+}
+
+impl IdeReferencesReq {
+    pub fn effective_column(&self) -> u32 {
+        if self.column > 0 {
+            self.column
+        } else {
+            self.character.unwrap_or(0)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeRenameLocation {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,11 +93,27 @@ pub struct IdeRenameReq {
     pub target: IdeTargetSpec,
     pub path: String,
     pub line: u32,
-    #[serde(default, alias = "character")]
+    #[serde(default)]
     pub column: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<u32>,
     pub new_name: String,
     #[serde(default)]
     pub apply: bool,
+    #[serde(default = "super::default_true")]
+    pub local_history_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_history_retention_days: Option<u32>,
+}
+
+impl IdeRenameReq {
+    pub fn effective_column(&self) -> u32 {
+        if self.column > 0 {
+            self.column
+        } else {
+            self.character.unwrap_or(0)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +145,8 @@ pub struct IdeFormatReq {
     pub content: String,
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default)]
+    pub organize_imports: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,12 +173,24 @@ pub struct IdeCodeActionsReq {
     pub target: IdeTargetSpec,
     pub path: String,
     pub line: u32,
-    #[serde(default, alias = "character")]
+    #[serde(default)]
     pub column: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<u32>,
     #[serde(default)]
     pub content: Option<String>,
     #[serde(default)]
     pub diagnostics: Vec<IdeDiagnosticInput>,
+}
+
+impl IdeCodeActionsReq {
+    pub fn effective_column(&self) -> u32 {
+        if self.column > 0 {
+            self.column
+        } else {
+            self.character.unwrap_or(0)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,4 +328,42 @@ pub struct IdeFsCompleteResp {
     pub items: Vec<IdeFsCompleteItem>,
     pub base_dir: String,
     pub elapsed_ms: u64,
+}
+
+// ---------------------------------------------------------------------------
+// LSP Pool & RSS Budget Status (`GET /ide/lsp/status`)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeLspAvailableServer {
+    pub language: String,
+    pub available: bool,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_command: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeLspServerStat {
+    pub language: String,
+    pub root: String,
+    pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    pub rss_bytes: u64,
+    pub active_clients: usize,
+    pub open_documents: usize,
+    pub remote_ssh: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeLspStatusResp {
+    pub active_server_count: usize,
+    pub max_servers_per_owner: usize,
+    pub max_global_servers: usize,
+    pub total_rss_bytes: u64,
+    pub rss_budget_bytes: u64,
+    pub servers: Vec<IdeLspServerStat>,
+    #[serde(default)]
+    pub available_servers: Vec<IdeLspAvailableServer>,
 }

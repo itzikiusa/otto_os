@@ -1,6 +1,6 @@
 import { test, expect, type Page, type Locator, type APIRequestContext } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
@@ -11,10 +11,10 @@ import {
   expectNoHorizontalOverflow,
 } from './helpers';
 
-// Otto IDE Round 2 — Adversarial Agent, Multi-Language Runtime & PTY E2E Suite
+// Otto IDE — Adversarial Agent, Multi-Language Runtime & PTY E2E Suite
 // Proves real ottod + otto-fake-claude + Python (unittest + bdb) + Node.js
 // (node:test + V8 Inspector) + Go + live PTY shell end-to-end:
-//   1. Side-by-side Agent (⌘L), 4 context sources (@selection, ⚠, ✗, ⏸), diff, Apply/⌘Z/⌘S
+//   1. Side-by-side Agent (⇧⌘L), 4 context sources (@selection, ⚠, ✗, ⏸), diff, Apply/⌘Z/⌘S
 //   2. Inline Selection Edit (⌘I / IdeInlinePromptBar), diff preview, Accept & ⌘Z
 //   3. Multi-language runs & live debugging (Python bdb + Node V8 Inspector)
 //   4. Live Workspace Terminal PTY (IdeTerminalPanel): spawn, I/O, axe a11y & kill
@@ -111,7 +111,7 @@ function seedPolyglotRepo(dir: string): void {
     ].join('\n'),
   );
 
-  writeFileSync(join(dir, 'package.json'), '{"name":"otto-ide-r2-polyglot","version":"1.0.0","type":"module"}\n');
+  writeFileSync(join(dir, 'package.json'), '{"name":"otto-ide-polyglot","version":"1.0.0","type":"module"}\n');
   writeFileSync(join(dir, 'web', 'calc.mjs'), 'export function combineTotals(left, right) {\n  return left + right;\n}\n');
   writeFileSync(
     join(dir, 'web', 'calc.test.mjs'),
@@ -137,10 +137,10 @@ function seedPolyglotRepo(dir: string): void {
   try {
     for (const argv of [
       ['init', '-b', 'main'],
-      ['config', 'user.email', 'ide-r2@otto.local'],
-      ['config', 'user.name', 'Otto IDE R2'],
+      ['config', 'user.email', 'ide-polyglot@otto.local'],
+      ['config', 'user.name', 'Otto IDE Polyglot'],
       ['add', '.'],
-      ['commit', '-m', 'seed polyglot r2 repo'],
+      ['commit', '-m', 'seed polyglot ide repo'],
     ]) {
       execFileSync('git', argv, { cwd: dir, stdio: 'ignore' });
     }
@@ -164,7 +164,7 @@ async function daemon<T>(ctx: APIRequestContext, method: 'GET' | 'POST' | 'PUT' 
 
 async function ensureSeeded(): Promise<void> {
   if (workspaceId && workspaceRoot && existsSync(workspaceRoot)) return;
-  workspaceRoot = realpathSync(mkdtempSync(join(tmpdir(), 'otto-e2e-ide-r2-')));
+  workspaceRoot = realpathSync(mkdtempSync(join(tmpdir(), 'otto-e2e-ide-runtimes-')));
   seedPolyglotRepo(workspaceRoot);
 
   const c = await apiCtx();
@@ -310,7 +310,7 @@ async function toggleGutterBreakpoint(page: Page, line: number): Promise<void> {
   await expect(page.locator('.cm-ide-bp-marker').first()).toBeVisible();
 }
 
-test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language Debug & Live PTY', () => {
+test.describe('Desktop IDE — Agent Dock, Inline Edit, Multi-Language Debug & Live PTY', () => {
   test.describe.configure({ mode: 'serial' });
   test.use({
     viewport: { width: 1440, height: 900 },
@@ -325,6 +325,36 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
     await ensureSeeded();
   });
 
+  test.afterAll(async () => {
+    if (workspaceId) {
+      const c = await apiCtx().catch(() => null);
+      if (c) {
+        try {
+          const rtRes = await c.ctx.get(`${c.base}/api/v1/workspaces/${workspaceId}/runtime-sessions`).catch(() => null);
+          if (rtRes?.ok()) {
+            const rtRows = (await rtRes.json()) as { id: string }[];
+            for (const row of rtRows) {
+              await c.ctx.post(`${c.base}/api/v1/runtime-sessions/${row.id}/close`).catch(() => {});
+              await c.ctx.delete(`${c.base}/api/v1/runtime-sessions/${row.id}`).catch(() => {});
+            }
+          }
+          const ptyRes = await c.ctx.get(`${c.base}/api/v1/workspaces/${workspaceId}/sessions`).catch(() => null);
+          if (ptyRes?.ok()) {
+            const ptyRows = (await ptyRes.json()) as { id: string }[];
+            for (const row of ptyRows) {
+              await c.ctx.delete(`${c.base}/api/v1/sessions/${row.id}`).catch(() => {});
+            }
+          }
+        } finally {
+          await c.ctx.dispose().catch(() => {});
+        }
+      }
+    }
+    if (workspaceRoot) {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   test.beforeEach(async ({}, info) => {
     test.skip(
       !['desktop-browser', 'android-phone'].includes(info.project.name),
@@ -332,7 +362,7 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
     );
   });
 
-  test('1. side-by-side AI Agent (⌘L), all 4 context chips (@selection, ⚠ problem, ✗ failed test, ⏸ debug frame), diff preview, Apply, ⌘Z Undo & ⌘S save', async ({
+  test('1. side-by-side AI Agent (⇧⌘L), all 4 context chips (@selection, ⚠ problem, ✗ failed test, ⏸ debug frame), diff preview, Apply, ⌘Z Undo & ⌘S save', async ({
     page,
   }) => {
     test.setTimeout(90_000);
@@ -417,7 +447,7 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
     await page.getByTestId('ide-problem-fix-agent').first().click();
     await expect(tray).toContainText('⚠ calc/calc.go:4');
 
-    // D) Select `Add` function lines (L3-L6) -> contextual selection bar -> `Add to Agent ⌘L`
+    // D) Select `Add` function lines (L3-L6) -> contextual selection bar -> `Add to Agent ⇧⌘L`
     await selectEditorLines(page, 3, 6);
     const selBar = page.getByTestId('ide-selection-agent-bar');
     await expect(selBar).toBeVisible();
@@ -617,9 +647,9 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
       await expect(dbgPanel).toContainText(/Terminated/i, { timeout: 15_000 });
     } finally {
       await page.request
-        .fetch(`${base}/api/v1/ide/debug/sessions/${pySessionId}`, {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${token}` },
+        .post(`${base}/api/v1/ide/debug/sessions/${pySessionId}/command`, {
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          data: { action: 'stop' },
         })
         .catch(() => {});
     }
@@ -668,9 +698,9 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
       await expect(dbgPanel).toContainText(/Terminated/i, { timeout: 15_000 });
     } finally {
       await page.request
-        .fetch(`${base}/api/v1/ide/debug/sessions/${nodeSessionId}`, {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${token}` },
+        .post(`${base}/api/v1/ide/debug/sessions/${nodeSessionId}/command`, {
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          data: { action: 'stop' },
         })
         .catch(() => {});
     }
@@ -775,8 +805,8 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
       await bootIdePage(page);
       await openFileFromTree(page, 'calc', 'calc.go');
 
-      // Open IDE Agent Dock (`⌘L`)
-      await page.keyboard.press('Meta+l');
+      // Open IDE Agent Dock (`⇧⌘L`)
+      await page.keyboard.press('Meta+Shift+L');
       const agentPanel = page.getByTestId('ide-agent-panel');
       await expect(agentPanel).toBeVisible({ timeout: 15_000 });
 
@@ -821,6 +851,7 @@ test.describe('Desktop IDE Round 2 — Agent Dock, Inline Edit, Multi-Language D
       // Click `Open in Threads` -> navigates cleanly to `#/threads/<id>`
       await page.getByTestId('ide-agent-open-in-threads').click();
       await expect.poll(() => page.url(), { timeout: 10_000 }).toContain(`#/threads/${ptySessionId}`);
+      await ctx.delete(`${apiBase}/api/v1/sessions/${ptySessionId}`).catch(() => {});
     } finally {
       await ctx.put(`${apiBase}/api/v1/settings`, { data: { providers: origProviders } }).catch(() => {});
       await ctx.dispose();

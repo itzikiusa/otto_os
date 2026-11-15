@@ -50,6 +50,11 @@ pub struct TestIdeCtx {
     pub data_dir: PathBuf,
     pub roles: Arc<dyn RoleChecker>,
     pub allowed_roots: Vec<PathBuf>,
+    /// When `Some`, `authorize_local_target(..., write = true)` additionally
+    /// requires every target root to fall inside `writable_roots` (modeling
+    /// `WorkspaceRole::Viewer` vs `WorkspaceRole::Editor`). `None` defaults to
+    /// treating all `allowed_roots` as writable.
+    pub writable_roots: Option<Vec<PathBuf>>,
 }
 
 impl IdeCtx for TestIdeCtx {
@@ -86,7 +91,7 @@ impl IdeCtx for TestIdeCtx {
         &'a self,
         user: &'a User,
         spec: &'a otto_ide::types::IdeTargetSpec,
-        _write: bool,
+        write: bool,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             if user.is_root || spec.kind != otto_ide::types::IdeTargetKind::Local {
@@ -108,6 +113,11 @@ impl IdeCtx for TestIdeCtx {
                 .iter()
                 .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
                 .collect();
+            let writable_canon: Option<Vec<PathBuf>> = self.writable_roots.as_ref().map(|wr| {
+                wr.iter()
+                    .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+                    .collect()
+            });
             let data_canon =
                 std::fs::canonicalize(&self.data_dir).unwrap_or_else(|_| self.data_dir.clone());
             for raw in candidates {
@@ -127,6 +137,16 @@ impl IdeCtx for TestIdeCtx {
                         "target root is not inside a workspace you have permission to access"
                             .into(),
                     ));
+                }
+                if write {
+                    if let Some(ref wr) = writable_canon {
+                        if !wr.iter().any(|w| canon.starts_with(w)) {
+                            return Err(Error::Forbidden(
+                                "workspace editor role required for IDE writes and executions"
+                                    .into(),
+                            ));
+                        }
+                    }
                 }
             }
             Ok(())
@@ -159,6 +179,21 @@ pub fn non_root_user(id: &str) -> User {
 pub fn router_as(ctx: &TestIdeCtx, user: User, allowed_roots: Vec<PathBuf>) -> Router {
     let mut scoped = ctx.clone();
     scoped.allowed_roots = allowed_roots;
+    scoped.writable_roots = None;
+    otto_ide::api_router::<TestIdeCtx>()
+        .layer(Extension(AuthUser(user)))
+        .with_state(scoped)
+}
+
+pub fn router_as_with_write_roots(
+    ctx: &TestIdeCtx,
+    user: User,
+    allowed_roots: Vec<PathBuf>,
+    writable_roots: Vec<PathBuf>,
+) -> Router {
+    let mut scoped = ctx.clone();
+    scoped.allowed_roots = allowed_roots;
+    scoped.writable_roots = Some(writable_roots);
     otto_ide::api_router::<TestIdeCtx>()
         .layer(Extension(AuthUser(user)))
         .with_state(scoped)
@@ -186,9 +221,31 @@ pub async fn build_test_app_as(
         data_dir,
         roles,
         allowed_roots: allowed_roots.clone(),
+        writable_roots: None,
     };
     let router = router_as(&ctx, user, allowed_roots);
     (ctx, router)
+}
+
+pub async fn send_raw(
+    app: &Router,
+    method: Method,
+    uri: &str,
+) -> (StatusCode, Option<String>, bytes::Bytes) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, content_type, bytes)
 }
 
 pub async fn build_test_app(data_dir: PathBuf, db_path: &Path) -> (TestIdeCtx, Router) {

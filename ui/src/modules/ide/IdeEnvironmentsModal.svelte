@@ -23,7 +23,7 @@
     initialTab?: 'env' | 'configs';
   }
 
-  let { open, onclose, initialTab = 'env' }: Props = $props();
+  let { open, onclose = () => (ide.environmentsOpen = false), initialTab = 'env' }: Props = $props();
   type EnvTab = 'env' | 'configs';
 
   interface EditableEnvRow {
@@ -72,6 +72,10 @@
       sdk_path: cfg.sdk_path ?? '',
       inherit_shell_env: cfg.inherit_shell_env !== false,
       before_launch: cfg.before_launch ?? '',
+      maven_profiles: [...(cfg.maven_profiles ?? [])],
+      spring_profiles: [...(cfg.spring_profiles ?? [])],
+      skip_tests: Boolean(cfg.skip_tests),
+      offline: Boolean(cfg.offline),
       autoDetected: Boolean(cfg.auto_detected),
       overrides: Object.entries(cfg.env_overrides ?? {}).map(([key, value], idx) => ({
         rowId: `ov-${idx}-${key}`, key, value,
@@ -81,7 +85,7 @@
 
   function close(): void {
     ide.environmentsOpen = false;
-    onclose?.();
+    onclose();
   }
 
   function openToolchainsManager(): void {
@@ -272,6 +276,10 @@
         sdk_path: cfgDraft.sdk_path.trim() || null,
         inherit_shell_env: cfgDraft.inherit_shell_env,
         before_launch: cfgDraft.before_launch.trim() || null,
+        maven_profiles: cfgDraft.maven_profiles,
+        spring_profiles: cfgDraft.spring_profiles,
+        skip_tests: cfgDraft.skip_tests,
+        offline: cfgDraft.offline,
         env_overrides: overrides,
       });
       if (saved) {

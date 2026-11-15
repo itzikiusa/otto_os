@@ -11,6 +11,8 @@ import { EditorState, type Extension, type StateEffect } from '@codemirror/state
 import { ViewPlugin, type EditorView } from '@codemirror/view';
 import type { MenuItem } from '../contextmenu.svelte.ts';
 import {
+  clearIdeSensitiveWebStorage,
+  IDE_CURSOR_POS_KEY,
   IDE_UNDO_DRAFT_INDEX_KEY,
   IDE_UNDO_DRAFT_PREFIX,
   IDE_UNDO_JOURNAL_KEY,
@@ -26,6 +28,8 @@ import {
 } from './cm-ide-drafts.ts';
 
 export {
+  clearIdeSensitiveWebStorage,
+  IDE_CURSOR_POS_KEY,
   IDE_UNDO_DRAFT_INDEX_KEY,
   IDE_UNDO_DRAFT_PREFIX,
   IDE_UNDO_JOURNAL_KEY,
@@ -119,6 +123,18 @@ export function persistIdeUndoJournal(
   } catch { /* state without historyField */ }
 }
 
+function sanitizeJournalStateJson(raw: { doc: string; [k: string]: unknown }): { doc: string; [k: string]: unknown } {
+  const maxPos = typeof raw.doc === 'string' ? raw.doc.length : 0;
+  const sel = raw.selection as { main?: number; ranges?: Array<{ anchor?: number; head?: number }> } | undefined;
+  if (!sel || !Array.isArray(sel.ranges) || sel.ranges.length === 0) return raw;
+  const clampedRanges = sel.ranges.map((r) => ({
+    anchor: Math.max(0, Math.min(maxPos, typeof r?.anchor === 'number' && Number.isFinite(r.anchor) ? r.anchor : 0)),
+    head: Math.max(0, Math.min(maxPos, typeof r?.head === 'number' && Number.isFinite(r.head) ? r.head : 0)),
+  }));
+  const mainIdx = typeof sel.main === 'number' && sel.main >= 0 && sel.main < clampedRanges.length ? sel.main : 0;
+  return { ...raw, selection: { main: mainIdx, ranges: clampedRanges } };
+}
+
 export function restoreIdeStateFromJournal(
   filePath: string,
   diskContent: string,
@@ -129,16 +145,22 @@ export function restoreIdeStateFromJournal(
   const entry = readJournalMap(storage)[filePath];
   if (!entry?.stateJson || typeof entry.stateJson.doc !== 'string') return null;
   try {
-    let st = EditorState.fromJSON(entry.stateJson, { extensions }, { history: historyField });
+    const safeJson = sanitizeJournalStateJson(entry.stateJson);
+    let st = EditorState.fromJSON(safeJson, { extensions }, { history: historyField });
     let restoredDraft: string | null = null;
-    if (entry.stateJson.doc === diskContent) {
-      // Saved before restart: `doc` matches disk AND full `historyField` undo stack is intact!
+    if (safeJson.doc === diskContent) {
+      // Saved before restart: `doc` matches disk and full `historyField` undo stack is intact.
     } else if (entry.unsaved && entry.baseSavedContent === diskContent) {
-      // Unsaved draft before restart and disk base hasn't diverged: keep unsaved draft + undo stack!
-      restoredDraft = entry.stateJson.doc;
+      // Unsaved draft before restart and disk base hasn't diverged: keep unsaved draft + undo stack.
+      restoredDraft = safeJson.doc;
     } else {
-      // File changed externally on disk while closed: append external change on top so history stays valid.
-      st = st.update({ changes: { from: 0, to: st.doc.length, insert: diskContent } }).state;
+      const prevSel = st.selection.main;
+      const anchor = Math.max(0, Math.min(diskContent.length, prevSel.anchor));
+      const head = Math.max(0, Math.min(diskContent.length, prevSel.head));
+      st = st.update({
+        changes: { from: 0, to: st.doc.length, insert: diskContent },
+        selection: { anchor, head },
+      }).state;
     }
     return { state: st, scrollTop: entry.scrollTop ?? 0, restoredDraft };
   } catch {
@@ -174,11 +196,21 @@ export function restoreDurableIdeState(
   const mem = getSingletonIdeState(filePath);
   if (mem) {
     try {
-      let st = EditorState.fromJSON(mem.stateJson, { extensions }, { history: historyField });
+      const safeJson = sanitizeJournalStateJson(mem.stateJson);
+      let st = EditorState.fromJSON(safeJson, { extensions }, { history: historyField });
       let restoredDraft: string | null = null;
       if (st.doc.toString() !== diskContent) {
-        if (savedContent != null && savedContent === diskContent) restoredDraft = st.doc.toString();
-        else st = st.update({ changes: { from: 0, to: st.doc.length, insert: diskContent } }).state;
+        if (savedContent != null && savedContent === diskContent) {
+          restoredDraft = st.doc.toString();
+        } else {
+          const prevSel = st.selection.main;
+          const anchor = Math.max(0, Math.min(diskContent.length, prevSel.anchor));
+          const head = Math.max(0, Math.min(diskContent.length, prevSel.head));
+          st = st.update({
+            changes: { from: 0, to: st.doc.length, insert: diskContent },
+            selection: { anchor, head },
+          }).state;
+        }
       }
       return { state: st, scrollTop: mem.scrollTop, restoredDraft };
     } catch { /* fall through */ }
@@ -239,26 +271,17 @@ export function clearIdeClipboardHistory(storage?: Pick<Storage, 'removeItem'> |
   try { store?.removeItem(IDE_CLIPBOARD_HISTORY_KEY); } catch { /* ignore */ }
 }
 
-/** Clear all persisted IDE undo journals, unsaved drafts, clipboard history, and singleton caches on sign-out. */
+/** Clear all persisted IDE undo journals, unsaved drafts, clipboard history, project caches, and singleton caches on identity change or sign-out. */
 export function clearIdeSensitiveStorage(
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'> | null,
 ): void {
   evictSingletonIdeState('all');
   const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
-  if (!store) return;
-  forgetIdeUndoJournal('all', store);
-  clearIdeClipboardHistory(store);
-  removeIdeUndoDraft('all', store);
-  try {
-    if (typeof store.length === 'number' && typeof store.key === 'function') {
-      const extraKeys: string[] = [];
-      for (let i = 0; i < store.length; i++) {
-        const k = store.key(i);
-        if (k && k.startsWith(IDE_UNDO_DRAFT_PREFIX)) extraKeys.push(k);
-      }
-      for (let i = 0; i < extraKeys.length; i++) store.removeItem(extraKeys[i]);
-    }
-  } catch { /* ignore */ }
+  if (store) {
+    forgetIdeUndoJournal('all', store);
+    clearIdeClipboardHistory(store);
+    clearIdeSensitiveWebStorage(store);
+  }
 }
 
 if (typeof window !== 'undefined') {
@@ -272,6 +295,9 @@ if (typeof window !== 'undefined') {
     } catch { /* ignore */ }
   };
   window.addEventListener('otto:auth-changed', checkAuthCleared);
+  window.addEventListener('otto:ide-storage-cleared', () => {
+    evictSingletonIdeState('all');
+  });
   window.addEventListener('storage', (e) => {
     if (e.key === 'otto_token' && !e.newValue) checkAuthCleared();
   });

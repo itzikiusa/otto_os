@@ -7,7 +7,7 @@
 import { fileStat } from './diff-model';
 import { SvelteMap } from 'svelte/reactivity';
 import type { PrSummary } from '../../lib/api/types';
-import { prDiffSummary } from './diff-load';
+import { prDiffSummary } from '../../lib/diff/diff-load';
 
 export interface PrStat {
   add: number;

@@ -48,7 +48,7 @@
   import { prAgentBridge, type PrAgentKind } from './pr-agent-bridge.svelte';
   import { openReviewDoneSlack } from './pr-slack';
   import { fileStat } from './diff-model';
-  import { notePrHead, onPrWhitespaceChange, prDiffFileLoader, prDiffHead, prDiffSummary, prIgnoreWhitespace, repoDiffFileLoader } from './diff-load';
+  import { notePrHead, onPrWhitespaceChange, prDiffFileLoader, prDiffHead, prDiffSummary, prIgnoreWhitespace, repoDiffFileLoader } from '../../lib/diff/diff-load';
   import PrConversation from './PrConversation.svelte';
   import PrMergeChecks from './PrMergeChecks.svelte';
   import { providePrCommentActions } from './pr-comment-ctx';

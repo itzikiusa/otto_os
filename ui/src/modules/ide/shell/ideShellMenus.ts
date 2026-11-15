@@ -7,6 +7,7 @@ import { ide } from '../ideStore.svelte';
 import { ideAgent } from '../store/ideAgentController.svelte';
 import {
   dispatchOpenLocalHistory,
+  promptIdeGoToLine,
   type IdeQuickSchemeId,
   type QuickSchemePrefs,
   writeQuickSchemePref,
@@ -72,8 +73,12 @@ export function buildIdePaletteCommands(opts: {
     { id: 'ide.debug', title: 'Debug configuration', group: 'IDE', shortcut: '⌃D', run: () => void ide.startDebug() },
     { id: 'ide.editConfigs', title: 'Edit run / debug configurations…', group: 'IDE', run: () => ide.openEnvironmentsModal('configs') },
     { id: 'ide.addFolder', title: 'Add folder to project…', group: 'IDE', run: opts.onAttachFolder },
+    { id: 'ide.goToLine', title: 'Go to line / column…', group: 'IDE', shortcut: '⌘L', keywords: 'jump line number cursor', run: () => void promptIdeGoToLine() },
+    { id: 'ide.reformat', title: 'Reformat code', group: 'IDE', shortcut: '⌘⌥L', keywords: 'format gofmt prettier rustfmt', run: () => void ide.formatActiveFile() },
+    { id: 'ide.optimizeImports', title: 'Optimize imports', group: 'IDE', shortcut: '⌃⌥O', keywords: 'organize imports unused goimports', run: () => void ide.organizeImportsActiveFile() },
+    { id: 'ide.dbWatch', title: 'IDE: Open Live DB Watch', group: 'IDE', keywords: 'database testcontainers mysql postgres mongo redis clickhouse diff', run: () => ide.openBottomTab('dbwatch') },
     { id: 'ide.revealFile', title: 'Select opened file in project tree', group: 'IDE', run: () => void ide.revealInProjectTree() },
-    { id: 'ide.toggleAgent', title: 'Toggle AI Agent', group: 'IDE', shortcut: '⌘L', keywords: 'ai assistant chat context', run: opts.onTriggerAgent },
+    { id: 'ide.toggleAgent', title: 'Toggle AI Agent', group: 'IDE', shortcut: '⇧⌘L', keywords: 'ai assistant chat context', run: opts.onTriggerAgent },
     { id: 'ide.inlineEdit', title: 'Inline AI edit…', group: 'IDE', shortcut: '⌘I', keywords: 'ai refactor rewrite selection', run: () => ideAgent.openInlineEdit() },
     { id: 'ide.toolchains', title: 'Project SDKs & Toolchains…', group: 'IDE', run: () => ide.openSettings('project.sdks') },
     { id: 'ide.environments', title: 'Shell environment & variables…', group: 'IDE', run: () => ide.openSettings('build.env') },
@@ -115,7 +120,8 @@ export function showIdeMoreMenu(
       ? [{ label: ide.buildToolOpen ? `Hide ${btName} tool window` : `Show ${btName} tool window`, icon: 'layers' as const, action: () => ide.toggleBuildTool() }]
       : []),
     { label: ide.bottomDockOpen ? 'Hide bottom tool dock' : 'Show bottom tool dock', icon: 'terminal', action: () => ide.toggleBottomDock() },
-    { label: ideAgent.panelOpen ? 'Hide AI Agent' : 'Show AI Agent', icon: 'assistant', hint: '⌘L', action: opts.onTriggerAgent },
+    { label: 'Live DB Watch', icon: 'database', disabled: !ide.hasTarget, action: () => ide.openBottomTab('dbwatch') },
+    { label: ideAgent.panelOpen ? 'Hide AI Agent' : 'Show AI Agent', icon: 'assistant', hint: '⇧⌘L', action: opts.onTriggerAgent },
     { separator: true },
     { label: 'Add folder to project…', icon: 'folder', disabled: !ide.hasTarget || ide.target.kind !== 'local', action: opts.onAttachFolder },
     { label: 'Add multiple repositories…', icon: 'layers', disabled: ide.target.kind !== 'local' && ide.hasTarget, action: () => (ide.bulkRepoPickerMode = ide.hasTarget ? 'attach' : 'create') },

@@ -6,6 +6,7 @@
 import type { Extension } from '@codemirror/state';
 import { EditorView, hoverTooltip } from '@codemirror/view';
 import { applyConcreteEditsToView, computeDeterministicQuickFixes } from './cm-ide-quickfix.ts';
+import { isSecretIdePath } from './cm-ide-drafts.ts';
 import { applyClientQuickFix, classifySemanticTokens, detectSemanticLang, getIdeQuickFixesAtLine, type SemanticLangKind } from './cm-ide-semantic.ts';
 import { readIdeEditorPreferences, type IdeEditorPreferences } from './cm-ide-theme.ts';
 
@@ -314,6 +315,53 @@ function isDepManifestPath(filePath: string): boolean {
   return b === 'go.mod' || b === 'pom.xml' || b.startsWith('build.gradle') || b === 'package.json' || b === 'cargo.toml' || b === 'requirements.txt' || b === 'pyproject.toml';
 }
 
+export interface IdeHoverRequestPayload {
+  target: {
+    kind: 'local' | 'ssh';
+    root: string;
+    connection_id: string | null;
+    additional_roots?: string[];
+  };
+  path: string;
+  content: string;
+  line: number;
+  character: number;
+  project_folders?: string[];
+}
+
+export function buildIdeHoverRequest(params: {
+  root?: string;
+  filePath?: string;
+  content: string;
+  line: number;
+  character: number;
+  connectionId?: string | null;
+  projectFolders?: string[];
+}): IdeHoverRequestPayload | null {
+  const root = (params.root ?? '').trim();
+  const filePath = (params.filePath ?? '').trim();
+  if (!root || !filePath) return null;
+  if (filePath.startsWith('untitled:') || isSecretIdePath(filePath)) return null;
+  if (!Number.isFinite(params.line) || params.line < 1) return null;
+  if (!Number.isFinite(params.character) || params.character < 0) return null;
+  const folders = Array.isArray(params.projectFolders) && params.projectFolders.length > 0
+    ? params.projectFolders
+    : undefined;
+  return {
+    target: {
+      kind: params.connectionId ? 'ssh' : 'local',
+      root,
+      connection_id: params.connectionId ?? null,
+      ...(folders ? { additional_roots: folders } : {}),
+    },
+    path: filePath,
+    content: params.content,
+    line: Math.floor(params.line),
+    character: Math.floor(params.character),
+    ...(folders ? { project_folders: folders } : {}),
+  };
+}
+
 export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension {
   const lang = detectSemanticLang(opts.filePath, opts.language);
   const tip = hoverTooltip(async (view, pos) => {
@@ -329,13 +377,21 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
     const primaryDetFix = detFixes[0] ?? null;
 
     let parsed: ParsedQuickDoc | null = null;
-    if (word && opts.root) {
+    const hoverPayload = word
+      ? buildIdeHoverRequest({
+          root: opts.root,
+          filePath: opts.filePath,
+          content: docText,
+          line: lineNo,
+          character: char0,
+          connectionId: opts.connectionId,
+          projectFolders: opts.projectFolders,
+        })
+      : null;
+    if (hoverPayload) {
       try {
         const { api } = await import('../api/client.ts');
-        const resp = await api.post<{ found?: boolean; symbol?: string; kind?: string; package_name?: string | null; signature?: string; summary?: string; full_doc?: string | null; defined_in?: { path: string; line: number } | null }>('/ide/lsp/hover', {
-          target: { kind: opts.connectionId ? 'ssh' : 'local', root: opts.root, connection_id: opts.connectionId ?? null, additional_roots: opts.projectFolders },
-          path: opts.filePath, content: docText, line: lineNo, character: char0, column: char0 + 1, symbol: word, project_folders: opts.projectFolders,
-        });
+        const resp = await api.post<{ found?: boolean; symbol?: string; kind?: string; package_name?: string | null; signature?: string; summary?: string; full_doc?: string | null; defined_in?: { path: string; line: number } | null }>('/ide/lsp/hover', hoverPayload);
         if (resp?.found && (resp.signature || resp.summary || resp.full_doc)) {
           parsed = sanitizeAndSplitHoverDoc({ symbol: resp.symbol || word, kind: resp.kind, packageName: resp.package_name, signature: resp.signature, rawDoc: resp.summary, fullDoc: resp.full_doc, definedIn: resp.defined_in, compact: isCompact });
         }

@@ -2,6 +2,7 @@
 // API delegates for `IdeStore` so `ideStore.svelte.ts` stays focused and under 800 lines.
 
 import { api } from '../../../lib/api/client';
+import { readIdePreferences } from '../../../lib/components/cm-ide-prefs';
 import { loadErrorText } from '../../../lib/loadError';
 import { plural } from '../../../lib/plural';
 import { toasts } from '../../../lib/toast.svelte';
@@ -19,6 +20,7 @@ import {
   type IdeDebugSessionSnapshot,
   type IdeFileReadResp,
   type IdePluginInfo,
+  type IdeQuickFix,
   type IdeReferenceLocation,
   type IdeRenameEdit,
   type IdeReplaceResp,
@@ -129,6 +131,7 @@ export async function runApplyRename(
   host.renameState.loading = true;
   host.renameState.error = null;
   try {
+    const prefs = readIdePreferences();
     const resp = await api.post<{ applied: boolean; edits: IdeRenameEdit[] }>('/ide/lsp/rename', {
       target: host.targetPayload,
       project_folders: host.targetPayload.project_folders,
@@ -137,6 +140,8 @@ export async function runApplyRename(
       column: host.renameState.column,
       new_name: next,
       apply: true,
+      record_local_history: prefs.localHistoryEnabled,
+      local_history_retention_days: prefs.localHistoryRetentionDays,
     });
     const touched = new Set((resp.edits ?? []).map((e) => e.path));
     await reloadTabsFromDisk(host, bufPerf, touched);
@@ -154,6 +159,7 @@ export async function runApplyRename(
 export async function runFormatActiveFile(
   host: IdeLspSearchHost,
   bufPerf: IdeBufferPerfController,
+  opts: { organizeImports?: boolean } = {},
 ): Promise<void> {
   const tab = host.activeTab;
   if (!tab || tab.readOnly) return;
@@ -164,13 +170,14 @@ export async function runFormatActiveFile(
       path: tab.path,
       content,
       language: tab.language,
+      organize_imports: Boolean(opts.organizeImports),
     });
     if (resp.changed && typeof resp.formatted === 'string') {
       await host.applyAgentEdit(tab.path, resp.formatted);
-      toasts.info(`Formatted with ${resp.formatter || 'formatter'}`);
+      toasts.info(opts.organizeImports ? 'Optimized imports' : `Formatted with ${resp.formatter || 'formatter'}`);
     }
   } catch (e) {
-    toastError('Couldn’t format file', e);
+    toastError(opts.organizeImports ? 'Couldn’t optimize imports' : 'Couldn’t format file', e);
   }
 }
 
@@ -280,6 +287,38 @@ function buildFallbackQuickFixes(path: string, content: string, line: number, di
   return actions;
 }
 
+export function toIdeCodeAction(
+  path: string,
+  item: IdeCodeAction | IdeQuickFix,
+  idx = 0,
+  content = '',
+): IdeCodeAction {
+  if ('id' in item) return item;
+  let edits = item.edits;
+  if (!edits || edits.length === 0) {
+    const lines = content ? content.split('\n') : null;
+    const endIdx = Math.max(0, item.end_line - 1);
+    if (item.delete_line) {
+      const hasNext = lines ? item.end_line < lines.length : true;
+      edits = hasNext
+        ? [{ path, start_line: item.line, start_col: 1, end_line: item.end_line + 1, end_col: 1, new_text: '' }]
+        : [{ path, start_line: item.line, start_col: 1, end_line: item.end_line, end_col: (lines?.[endIdx]?.length ?? 0) + 1, new_text: '' }];
+    } else {
+      const endCol = lines && endIdx < lines.length ? lines[endIdx].length + 1 : 1;
+      const endLine = lines && endIdx < lines.length ? item.end_line : item.end_line + 1;
+      const text = lines && endIdx < lines.length ? item.replacement : `${item.replacement}\n`;
+      edits = [{ path, start_line: item.line, start_col: 1, end_line: endLine, end_col: endCol, new_text: text }];
+    }
+  }
+  return {
+    id: `qf-${item.line}-${idx}`,
+    title: item.title,
+    kind: 'quickfix',
+    is_preferred: item.is_preferred ?? idx === 0,
+    edits,
+  };
+}
+
 export async function runFetchCodeActions(
   host: IdeLspSearchHost,
   bufPerf: IdeBufferPerfController,
@@ -296,6 +335,7 @@ export async function runFetchCodeActions(
     } catch { /* ignore */ }
   }
   const diagOnLine = host.problems.find((d) => host.resolvePath(d.path) === resolved && d.line === line);
+  const diagActions = (diagOnLine?.quick_fixes ?? []).map((qf, idx) => toIdeCodeAction(resolved, qf, idx, content));
   try {
     const resp = await api.post<{ actions: IdeCodeAction[] }>('/ide/lsp/code-actions', {
       target: host.targetPayload,
@@ -310,9 +350,9 @@ export async function runFetchCodeActions(
       return serverActions;
     }
     const fallbacks = buildFallbackQuickFixes(resolved, content, line, diagOnLine?.message);
-    return [...(diagOnLine?.quick_fixes ?? []), ...fallbacks, ...serverActions];
+    return [...diagActions, ...fallbacks, ...serverActions];
   } catch {
-    return [...(diagOnLine?.quick_fixes ?? []), ...buildFallbackQuickFixes(resolved, content, line, diagOnLine?.message)];
+    return [...diagActions, ...buildFallbackQuickFixes(resolved, content, line, diagOnLine?.message)];
   }
 }
 
@@ -347,9 +387,12 @@ export async function runApplyQuickFixEdits(
       anyApplied = true;
     } else {
       try {
+        const prefs = readIdePreferences();
         const read = await api.get<IdeFileReadResp>(`/ide/fs/file?${host.targetQuery({ path: filePath })}`);
         const prev = read.content ?? '';
-        void api.post('/ide/history/snapshot', { target: host.targetPayload, path: filePath, content: prev, label: 'Before Quick Fix' }).catch(() => {});
+        if (prefs.localHistoryEnabled) {
+          void api.post('/ide/history/snapshot', { target: host.targetPayload, path: filePath, content: prev, label: 'Before Quick Fix' }).catch(() => {});
+        }
         const nextDoc = applyTextEditsToString(prev, fileEdits);
         await api.put('/ide/fs/file', {
           target: host.targetPayload,
@@ -357,6 +400,8 @@ export async function runApplyQuickFixEdits(
           content: nextDoc,
           expected_sha256: read.sha256 || undefined,
           create_dirs: false,
+          record_local_history: prefs.localHistoryEnabled,
+          local_history_retention_days: prefs.localHistoryRetentionDays,
         });
         const editedLines = new Set(fileEdits.map((e) => e.start_line));
         host.problems = host.problems.filter((d) => !(host.resolvePath(d.path) === filePath && editedLines.has(d.line)));
@@ -374,13 +419,14 @@ export async function runApplyCodeAction(
   host: IdeLspSearchHost,
   bufPerf: IdeBufferPerfController,
   path: string,
-  action: IdeCodeAction,
+  rawAction: IdeCodeAction | IdeQuickFix,
 ): Promise<boolean> {
+  const resolved = host.resolvePath(path);
+  const action = 'id' in rawAction ? rawAction : toIdeCodeAction(resolved, rawAction, 0, bufPerf.flush(host, resolved));
   if (action.edits && action.edits.length > 0) {
     return runApplyQuickFixEdits(host, bufPerf, action.edits, action.title);
   }
   if (typeof action.replacement_content === 'string') {
-    const resolved = host.resolvePath(path);
     const ok = await host.applyAgentEdit(resolved, action.replacement_content);
     if (ok) toasts.info(action.title);
     return ok;
@@ -401,7 +447,8 @@ export async function runSearchWorkspace(
     limit?: number;
   } = {},
 ): Promise<void> {
-  if (!host.target.root || !query.trim()) {
+  const effectiveQuery = mode === 'text' ? query : query.trim();
+  if (!host.target.root || effectiveQuery.length === 0) {
     host.searchResults = [];
     host.searchTruncated = false;
     return;
@@ -411,7 +458,7 @@ export async function runSearchWorkspace(
   try {
     const resp = await api.long.post<{ items: IdeSearchItem[]; truncated: boolean }>('/ide/search', {
       target: host.targetPayload,
-      query: query.trim(),
+      query: effectiveQuery,
       mode,
       case_sensitive: opts.caseSensitive ?? false,
       whole_word: opts.wholeWord ?? false,
@@ -444,7 +491,7 @@ export async function runReplaceInWorkspace(
     paths?: string[];
   } = {},
 ): Promise<IdeReplaceResp | null> {
-  if (!host.target.root || !query) return null;
+  if (!host.target.root || query.length === 0) return null;
   host.replaceLoading = true;
   try {
     const resp = await api.long.post<IdeReplaceResp>('/ide/replace', {
@@ -576,8 +623,8 @@ export async function runSetCollabPeerRole(
   host: IdeLspSearchHost,
   peerId: string,
   role: IdeCollabRole,
-): Promise<void> {
-  if (!host.collabRoom) return;
+): Promise<boolean> {
+  if (!host.collabRoom) return false;
   try {
     host.collabRoom = (
       await api.post<{ room: IdeCollabRoom }>(
@@ -585,30 +632,35 @@ export async function runSetCollabPeerRole(
         { peer_id: peerId, role },
       )
     ).room;
+    return true;
   } catch (e) {
     toastError('Couldn’t update teammate role', e);
+    return false;
   }
 }
 
-export async function runTogglePlugin(host: IdeLspSearchHost, slug: string, enabled: boolean): Promise<void> {
+export async function runTogglePlugin(host: IdeLspSearchHost, slug: string, enabled: boolean): Promise<boolean> {
   try {
     const resp = await api.post<{ plugin: IdePluginInfo }>(
       `/ide/plugins/${encodeURIComponent(slug)}/toggle`,
       { enabled },
     );
     host.plugins = host.plugins.map((p) => (p.slug === slug ? resp.plugin : p));
+    return true;
   } catch (e) {
     toastError('Couldn’t toggle IDE plugin', e);
+    return false;
   }
 }
 
-export async function runRemovePlugin(host: IdeLspSearchHost, slug: string): Promise<void> {
+export async function runRemovePlugin(host: IdeLspSearchHost, slug: string): Promise<boolean> {
   try {
     await api.del(`/ide/plugins/${encodeURIComponent(slug)}`);
     host.plugins = host.plugins.filter((p) => p.slug !== slug);
     await host.loadPlugins();
-    toasts.info('Removed IDE plugin');
+    return true;
   } catch (e) {
     toastError('Couldn’t remove IDE plugin', e);
+    return false;
   }
 }

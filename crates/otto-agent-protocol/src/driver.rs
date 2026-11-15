@@ -44,7 +44,7 @@ pub enum McpDelivery {
 }
 
 /// One stdio MCP server handed over the protocol. `command` is absolute.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct McpServerDef {
     pub name: String,
     pub command: String,
@@ -216,6 +216,82 @@ pub fn rpc_failure(class: &str, e: &serde_json::Value) -> ProviderFailure {
     }
 }
 
+/// Sideband storage source polled asynchronously off the session lock when an
+/// ACP agent buffers between-prompt notifications in memory while persisting
+/// real-time session steps on disk (`agy`, `grok`, `gemini`, `opencode`, or an
+/// explicit `OTTO_ACP_SIDEBAND_FILE` stream).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebandSource {
+    /// Append-only `\n`-terminated JSONL (`agy` `transcript_full.jsonl`, `grok`
+    /// `updates.jsonl`, or `OTTO_ACP_SIDEBAND_FILE`).
+    AppendLines {
+        path: std::path::PathBuf,
+        fallback_path: Option<std::path::PathBuf>,
+        /// Optional `<sessions_root>/<project_dir>/<session_id>/updates.jsonl`
+        /// scan fallback when `cwd` was symlink-resolved differently by the CLI.
+        scan_sessions_dir: Option<(std::path::PathBuf, String)>,
+        offset: u64,
+        using_fallback: bool,
+    },
+    /// Rewritten JSON session snapshot (`gemini --acp` `chats/session-*.json`),
+    /// read only when `(mtime_ns, len)` changes.
+    GeminiJson {
+        gemini_home: std::path::PathBuf,
+        cwd: String,
+        session_id: String,
+        resolved_path: Option<std::path::PathBuf>,
+        last_stamp: (u64, u64),
+    },
+    /// Read-only SQLite `part` + `message` rows (`opencode acp` `opencode.db`),
+    /// queried only when `(db_mtime_ns, db_len, wal_mtime_ns, wal_len)` changes.
+    OpencodeSqlite {
+        db_path: std::path::PathBuf,
+        session_id: String,
+        min_time_ms: i64,
+        last_stamp: (u64, u64, u64, u64),
+    },
+}
+
+/// Periodic sideband poll descriptor returned by a sans-IO driver while idle
+/// between `session/prompt` RPCs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebandPoll {
+    pub source: SidebandSource,
+    pub interval: std::time::Duration,
+}
+
+/// Initial watermark seeded asynchronously before spawning a resumed session so
+/// historical on-disk steps are skipped in `O(1)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebandResumeSeed {
+    AppendOffset {
+        resolved_path: Option<std::path::PathBuf>,
+        using_fallback: bool,
+        offset: u64,
+    },
+    IdleSinceMs(u64),
+}
+
+/// Off-lock read result delivered to [`StructuredDriver::on_sideband`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebandPayload {
+    AppendLines {
+        resolved_path: Option<std::path::PathBuf>,
+        using_fallback: bool,
+        next_offset: u64,
+        bytes: Vec<u8>,
+    },
+    GeminiJson {
+        resolved_path: std::path::PathBuf,
+        stamp: (u64, u64),
+        bytes: Vec<u8>,
+    },
+    OpencodeSqlite {
+        stamp: (u64, u64, u64, u64),
+        rows_jsonl: Vec<u8>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriverError(pub String);
 
@@ -316,8 +392,41 @@ pub trait StructuredDriver: Send + 'static {
         DriverStep::default()
     }
 
+    /// Optional sideband file tail descriptor while the driver is idle between
+    /// prompts. All disk I/O runs asynchronously outside the session lock.
+    fn sideband_poll(&self) -> Option<SidebandPoll> {
+        None
+    }
+
+    /// Optional sideband source for `resume_id` so `ensure_process` can seed
+    /// the initial watermark asynchronously before spawning.
+    fn sideband_resume_poll(&self, _resume_id: &str, _cwd: &str) -> Option<SidebandSource> {
+        None
+    }
+
+    /// Seed the initial sideband watermark on resume (`session/load`) before
+    /// the child spawns so historical steps on disk are skipped in `O(1)`.
+    fn init_sideband_resume(&mut self, _seed: SidebandResumeSeed) {}
+
+    /// Translate off-lock sideband data into a sans-IO [`DriverStep`].
+    fn on_sideband(&mut self, _payload: SidebandPayload) -> DriverStep {
+        DriverStep::default()
+    }
+
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
         DriverStep::default()
+    }
+
+    /// Snapshot live protocol state so a restarted daemon adopting a detached
+    /// holder can resume mid-turn without losing request correlations or
+    /// negotiated session capabilities.
+    fn snapshot_state(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// Restore live protocol state captured by [`Self::snapshot_state`].
+    fn restore_state(&mut self, _state: &serde_json::Value) -> Result<(), DriverError> {
+        Ok(())
     }
 }
 

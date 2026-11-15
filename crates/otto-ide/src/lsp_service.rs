@@ -5,50 +5,65 @@
 //! - `document_symbols`: hierarchical File Structure outline (`line`..`end_line`).
 //! - `find_references`: word-boundary & comment/string-aware workspace usages.
 //! - `rename_symbol`: workspace refactoring with `apply: false` preview & `apply: true` write.
-//! - `format_document`: CLI formatters (`gofmt`, `rustfmt`, `prettier`, `ruff`/`black`,
+//! - `format_document`: CLI formatters (`goimports`/`gofmt`, `rustfmt`, `prettier`, `ruff`/`black`,
 //!   `google-java-format`, `buf`) with toolchain `PATH` + deterministic fallback.
 //! - `code_actions`: concrete `IdeTextEdit` Quick Fixes & Refactorings.
 //! - `diagnostics`: `< 30ms` stateless Java/Go/Python/JSON/Shell/TS/Rust diagnostics.
 //! - `hover`: clean single-symbol Quick-Doc hover without neighbor bleed.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
 
 use otto_core::domain::User;
 use otto_core::{Error, Result};
-use tokio::process::Command;
 
-use crate::target::ResolvedTarget;
+use crate::target::{HistoryWriteOpts, ResolvedTarget};
 use crate::types::{
-    detect_language, IdeFormatReq, IdeFormatResp, IdeReferenceLocation, IdeReferencesReq,
-    IdeReferencesResp, IdeRenameFileEdit, IdeRenameLinePreview, IdeRenameReq, IdeRenameResp,
-    IdeSearchItemKind, IdeSearchMode, IdeSearchReq, IdeSymbolsReq, IdeSymbolsResp,
+    detect_language, IdeFormatReq, IdeFormatResp, IdeReferencesReq, IdeReferencesResp,
+    IdeRenameReq, IdeRenameResp, IdeSearchItemKind, IdeSearchMode, IdeSearchReq, IdeSymbolsReq,
+    IdeSymbolsResp,
 };
 use crate::IdeCtx;
 
 pub mod code_actions;
+mod code_actions_lang;
 pub mod diagnostics;
+mod diagnostics_go;
 mod diagnostics_polyglot;
 mod formatting;
 pub(crate) mod go_mod_nav;
+mod go_mod_resolve;
 pub mod hover;
+mod hover_doc;
 mod java_diag;
 mod java_diag_index;
 mod navigation;
 mod navigation_ext;
 mod navigation_imports;
+mod navigation_java;
+mod navigation_matchers;
+mod navigation_refs;
 mod symbols;
 mod symbols_data;
+mod text_scan;
 
 pub use code_actions::{code_actions, generate_code_actions};
 pub use diagnostics::diagnostics;
-pub use formatting::format_builtin_fallback;
-use formatting::{formatter_candidates, run_stdin_formatter, try_native_data_format};
+pub use formatting::{format_builtin_fallback, format_builtin_fallback_opts};
+use formatting::{
+    formatter_candidates, organize_imports_if_requested, run_stdin_formatter,
+    try_native_data_format,
+};
 pub use hover::hover;
 pub use navigation::{goto_definition, goto_implementation};
 pub use symbols::parse_document_symbols;
+pub(crate) use text_scan::code_mask_for_line;
+#[cfg(test)]
+use text_scan::rg_local_candidate_files;
+use text_scan::rg_local_candidate_files_multi;
+pub use text_scan::{
+    extract_identifier_at, find_symbol_occurrences_in_text, is_ident_char, is_valid_identifier,
+    rename_identifier_in_text,
+};
 
 /// `POST /ide/lsp/symbols` — Hierarchical Document Structure outline.
 pub async fn document_symbols<S: IdeCtx>(
@@ -82,6 +97,7 @@ pub async fn find_references<S: IdeCtx>(
 ) -> Result<IdeReferencesResp> {
     req.target.absorb_project_folders(&req.project_folders);
     let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
+    let col = req.effective_column().max(1);
     let symbol = match req
         .symbol
         .as_deref()
@@ -100,10 +116,10 @@ pub async fn find_references<S: IdeCtx>(
                         .content
                 }
             };
-            extract_identifier_at(&text, req.line, req.column).ok_or_else(|| {
+            extract_identifier_at(&text, req.line, col).ok_or_else(|| {
                 Error::Invalid(format!(
                     "no identifier found at {}:{} in '{}'",
-                    req.line, req.column, req.path
+                    req.line, col, req.path
                 ))
             })?
         }
@@ -158,12 +174,20 @@ pub async fn rename_symbol<S: IdeCtx>(
             "new_name '{new_name}' is not a valid identifier"
         )));
     }
-    let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
+    let resolved = if req.apply {
+        ctx.ide()
+            .targets
+            .resolve_write(ctx, user, &req.target)
+            .await?
+    } else {
+        ctx.ide().targets.resolve(ctx, user, &req.target).await?
+    };
+    let col = req.effective_column().max(1);
     let origin = ctx.ide().targets.read_file(&resolved, &req.path).await?;
-    let symbol = extract_identifier_at(&origin.content, req.line, req.column).ok_or_else(|| {
+    let symbol = extract_identifier_at(&origin.content, req.line, col).ok_or_else(|| {
         Error::Invalid(format!(
             "no identifier found at {}:{} in '{}'",
-            req.line, req.column, req.path
+            req.line, col, req.path
         ))
     })?;
     if symbol == new_name {
@@ -198,10 +222,21 @@ pub async fn rename_symbol<S: IdeCtx>(
     }
 
     if req.apply {
+        let history_opts = HistoryWriteOpts {
+            enabled: req.local_history_enabled,
+            retention_days: req.local_history_retention_days,
+        };
         for (path, content, expected_sha) in writes {
             ctx.ide()
                 .targets
-                .write_file(&resolved, &path, &content, Some(&expected_sha), false)
+                .write_file_with_history(
+                    &resolved,
+                    &path,
+                    &content,
+                    Some(&expected_sha),
+                    false,
+                    history_opts,
+                )
                 .await?;
         }
     }
@@ -232,17 +267,26 @@ pub async fn format_document<S: IdeCtx>(
         }
     }
     let mut env_map = build_formatter_env(ctx, user, &resolved, &req.target).await;
-    if !env_map.contains_key("PATH") {
+    if !env_map.contains_key("PATH") && req.target.kind == crate::types::IdeTargetKind::Local {
         env_map.insert(
             "PATH".into(),
-            crate::lsp_host::servers::augmented_local_path(ctx.data_dir()),
+            crate::lsp_host::servers::augmented_local_path_for_user(
+                ctx.data_dir(),
+                None,
+                user.is_root,
+            ),
         );
     }
 
-    for (label, cmd, args) in formatter_candidates(&lang, &req.path) {
-        if let Some(formatted) =
+    for (label, cmd, args) in formatter_candidates(&lang, &req.path, req.organize_imports) {
+        if let Some(raw_formatted) =
             run_stdin_formatter(ctx, &resolved, &cmd, &args, &env_map, &req.content).await
         {
+            let formatted = if req.organize_imports && label != "goimports" {
+                organize_imports_if_requested(&lang, &raw_formatted)
+            } else {
+                raw_formatted
+            };
             let changed = formatted != req.content;
             return Ok(IdeFormatResp {
                 formatted,
@@ -252,7 +296,7 @@ pub async fn format_document<S: IdeCtx>(
         }
     }
 
-    let formatted = format_builtin_fallback(&lang, &req.content);
+    let formatted = format_builtin_fallback_opts(&lang, &req.content, req.organize_imports);
     let changed = formatted != req.content;
     Ok(IdeFormatResp {
         formatted,
@@ -263,28 +307,32 @@ pub async fn format_document<S: IdeCtx>(
 
 pub(super) async fn build_formatter_env<S: IdeCtx>(
     ctx: &S,
-    _user: &User,
+    user: &User,
     _resolved: &ResolvedTarget,
     target: &crate::types::IdeTargetSpec,
 ) -> BTreeMap<String, String> {
-    let mut env_map = ctx
+    let mut env_map = match ctx
         .ide()
         .environments
-        .build_effective_env(&ctx.pool(), ctx.secrets(), target)
+        .build_effective_env_for_run_as(&ctx.pool(), ctx.secrets(), target, None, user.is_root)
         .await
-        .unwrap_or_default();
-    if target.kind == crate::types::IdeTargetKind::Local {
-        let shell_env =
-            crate::environments::cached_effective_env_for_local_root(ctx.data_dir(), &target.root);
-        for (k, v) in shell_env {
-            env_map.entry(k).or_insert(v);
-        }
-        if !env_map.contains_key("PATH") {
-            env_map.insert(
-                "PATH".into(),
-                crate::lsp_host::servers::augmented_local_path(ctx.data_dir()),
-            );
-        }
+    {
+        Ok(map) => map,
+        Err(_) if target.kind == crate::types::IdeTargetKind::Local => ctx
+            .ide()
+            .environments
+            .cached_effective_env_for_local_root_as(&target.root, user.is_root),
+        Err(_) => BTreeMap::new(),
+    };
+    if target.kind == crate::types::IdeTargetKind::Local && !env_map.contains_key("PATH") {
+        env_map.insert(
+            "PATH".into(),
+            crate::lsp_host::servers::augmented_local_path_for_user(
+                ctx.data_dir(),
+                None,
+                user.is_root,
+            ),
+        );
     }
     env_map
 }
@@ -347,307 +395,6 @@ pub(super) async fn collect_candidate_files<S: IdeCtx>(
 }
 
 #[cfg(test)]
-async fn rg_local_candidate_files(
-    root: &Path,
-    is_root_user: bool,
-    symbol: &str,
-    origin_path: &str,
-) -> Option<Vec<String>> {
-    rg_local_candidate_files_multi(
-        &[root.to_path_buf()],
-        root,
-        is_root_user,
-        symbol,
-        origin_path,
-    )
-    .await
-}
-
-async fn rg_local_candidate_files_multi(
-    roots: &[PathBuf],
-    primary_root: &Path,
-    is_root_user: bool,
-    symbol: &str,
-    origin_path: &str,
-) -> Option<Vec<String>> {
-    let rg_bin =
-        crate::toolchains::find_executable_in(&crate::toolchains::system_search_dirs(), &["rg"])
-            .unwrap_or_else(|| PathBuf::from("rg"));
-    let mut cmd = Command::new(rg_bin);
-    cmd.args([
-        "--files-with-matches",
-        "--fixed-strings",
-        "--hidden",
-        "-g",
-        "!.git",
-        "-g",
-        "!node_modules",
-        "-g",
-        "!target",
-        "--",
-        symbol,
-    ]);
-    for r in roots {
-        cmd.arg(r);
-    }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-
-    let out = tokio::time::timeout(Duration::from_secs(5), cmd.output())
-        .await
-        .ok()?
-        .ok()?;
-    match out.status.code() {
-        Some(1) => return Some(vec![origin_path.to_string()]),
-        Some(0) => {}
-        _ => return None,
-    }
-
-    let mut ordered = vec![origin_path.to_string()];
-    let origin_abs = if Path::new(origin_path).is_absolute() {
-        PathBuf::from(origin_path)
-    } else {
-        primary_root.join(origin_path)
-    };
-    let mut seen_canon = BTreeSet::new();
-    if let Ok(c) = origin_abs.canonicalize() {
-        seen_canon.insert(c);
-    }
-    let keep_abs = origin_path.starts_with('/');
-
-    for raw in String::from_utf8_lossy(&out.stdout).lines() {
-        if ordered.len() >= 250 {
-            break;
-        }
-        let Ok(canon) = Path::new(raw.trim()).canonicalize() else {
-            continue;
-        };
-        if !roots.iter().any(|r| canon.starts_with(r)) {
-            continue;
-        }
-        if !is_root_user
-            && (otto_core::secret_paths::in_protected_dir(&canon)
-                || otto_core::secret_paths::is_denied_dir(&canon)
-                || otto_core::secret_paths::is_denied_file(&canon))
-        {
-            continue;
-        }
-        if seen_canon.insert(canon.clone()) {
-            let formatted = if !keep_abs && canon.starts_with(primary_root) {
-                canon
-                    .strip_prefix(primary_root)
-                    .map(|r| r.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_else(|_| canon.to_string_lossy().into_owned())
-            } else {
-                canon.to_string_lossy().into_owned()
-            };
-            ordered.push(formatted);
-        }
-    }
-    Some(ordered)
-}
-
-pub fn is_ident_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'
-}
-
-pub fn is_valid_identifier(s: &str) -> bool {
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == '_' || first == '$') && chars.all(is_ident_char)
-}
-
-pub fn extract_identifier_at(content: &str, line: u32, column: u32) -> Option<String> {
-    let line_str = content.lines().nth(line.saturating_sub(1) as usize)?;
-    let chars: Vec<char> = line_str.chars().collect();
-    if chars.is_empty() {
-        return None;
-    }
-    let mut pos = (column.saturating_sub(1) as usize).min(chars.len() - 1);
-    if !is_ident_char(chars[pos]) {
-        if pos > 0 && is_ident_char(chars[pos - 1]) {
-            pos -= 1;
-        } else if pos + 1 < chars.len() && is_ident_char(chars[pos + 1]) {
-            pos += 1;
-        } else {
-            return None;
-        }
-    }
-    let mut start = pos;
-    while start > 0 && is_ident_char(chars[start - 1]) {
-        start -= 1;
-    }
-    let mut end = pos;
-    while end + 1 < chars.len() && is_ident_char(chars[end + 1]) {
-        end += 1;
-    }
-    let ident: String = chars[start..=end].iter().collect();
-    is_valid_identifier(&ident).then_some(ident)
-}
-
-pub(super) fn code_mask_for_line(lang: &str, line: &str, in_block_comment: &mut bool) -> Vec<bool> {
-    let bytes = line.as_bytes();
-    let mut mask = vec![false; bytes.len()];
-    let hash_comment = matches!(
-        lang,
-        "python" | "shell" | "yaml" | "toml" | "makefile" | "graphql"
-    );
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if *in_block_comment {
-            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                *in_block_comment = false;
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-        if !hash_comment && i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-            break;
-        }
-        if !hash_comment && i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            *in_block_comment = true;
-            i += 2;
-            continue;
-        }
-        if hash_comment && bytes[i] == b'#' {
-            break;
-        }
-        if matches!(bytes[i], b'"' | b'\'' | b'`') {
-            let q = bytes[i];
-            if lang == "rust"
-                && q == b'\''
-                && (i + 2 >= bytes.len() || bytes[i + 2] != b'\'')
-                && (i + 3 >= bytes.len() || bytes[i + 1] != b'\\' || bytes[i + 3] != b'\'')
-            {
-                mask[i] = true;
-                i += 1;
-                continue;
-            }
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                } else if bytes[i] == q {
-                    i += 1;
-                    break;
-                } else {
-                    i += 1;
-                }
-            }
-            continue;
-        }
-        mask[i] = true;
-        i += 1;
-    }
-    mask
-}
-
-fn find_word_byte_ranges_on_line(line: &str, mask: &[bool], symbol: &str) -> Vec<(usize, usize)> {
-    let mut ranges = Vec::new();
-    if symbol.is_empty() || line.len() < symbol.len() {
-        return ranges;
-    }
-    let mut from = 0;
-    while let Some(rel) = line[from..].find(symbol) {
-        let start = from + rel;
-        let end = start + symbol.len();
-        let code_ok = mask.get(start..end).is_some_and(|s| s.iter().all(|&b| b));
-        let prev_ok = line[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !is_ident_char(c));
-        let next_ok = line[end..].chars().next().is_none_or(|c| !is_ident_char(c));
-        if code_ok && prev_ok && next_ok {
-            ranges.push((start, end));
-        }
-        from = start + line[start..].chars().next().map_or(1, char::len_utf8);
-    }
-    ranges
-}
-
-pub fn find_symbol_occurrences_in_text(
-    path: &str,
-    lang: &str,
-    content: &str,
-    symbol: &str,
-) -> Vec<IdeReferenceLocation> {
-    let mut out = Vec::new();
-    let mut in_block = false;
-    for (idx, line) in content.lines().enumerate() {
-        let mask = code_mask_for_line(lang, line, &mut in_block);
-        for (byte_start, _) in find_word_byte_ranges_on_line(line, &mask, symbol) {
-            let col = line[..byte_start].chars().count() as u32 + 1;
-            out.push(IdeReferenceLocation {
-                path: path.to_string(),
-                line: (idx + 1) as u32,
-                column: col,
-                preview: line.trim().to_string(),
-            });
-        }
-    }
-    out
-}
-
-pub fn rename_identifier_in_text(
-    path: &str,
-    lang: &str,
-    content: &str,
-    symbol: &str,
-    new_name: &str,
-) -> Option<(String, IdeRenameFileEdit)> {
-    let trailing_nl = content.ends_with('\n');
-    let (mut in_block, mut occurrences) = (false, 0usize);
-    let (mut new_lines, mut preview_lines) = (Vec::new(), Vec::new());
-    for (idx, line) in content.lines().enumerate() {
-        let mask = code_mask_for_line(lang, line, &mut in_block);
-        let ranges = find_word_byte_ranges_on_line(line, &mask, symbol);
-        if ranges.is_empty() {
-            new_lines.push(line.to_string());
-            continue;
-        }
-        occurrences += ranges.len();
-        let (mut rebuilt, mut cur) = (
-            String::with_capacity(line.len() + ranges.len() * new_name.len()),
-            0,
-        );
-        for (s, e) in ranges {
-            rebuilt.push_str(&line[cur..s]);
-            rebuilt.push_str(new_name);
-            cur = e;
-        }
-        rebuilt.push_str(&line[cur..]);
-        if preview_lines.len() < 25 {
-            preview_lines.push(IdeRenameLinePreview {
-                line: (idx + 1) as u32,
-                before: line.to_string(),
-                after: rebuilt.clone(),
-            });
-        }
-        new_lines.push(rebuilt);
-    }
-    if occurrences == 0 {
-        return None;
-    }
-    let mut updated = new_lines.join("\n");
-    if trailing_nl {
-        updated.push('\n');
-    }
-    Some((
-        updated,
-        IdeRenameFileEdit {
-            path: path.to_string(),
-            occurrences,
-            preview_lines,
-        },
-    ))
-}
-
-#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_polyglot;

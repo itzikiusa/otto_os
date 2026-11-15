@@ -36,6 +36,10 @@ mod foundation_integrity;
 mod git_spawn_guard;
 #[path = "grants_api.rs"]
 mod grants_api;
+#[path = "ide_db_watch.rs"]
+mod ide_db_watch;
+#[path = "ide_ssh_and_rbac.rs"]
+mod ide_ssh_and_rbac;
 #[path = "impersonation.rs"]
 mod impersonation;
 #[path = "k8s_backfill_budget.rs"]

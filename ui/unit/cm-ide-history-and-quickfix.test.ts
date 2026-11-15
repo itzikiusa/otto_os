@@ -29,6 +29,12 @@ import {
   readIdeEditorPreferences,
   writeIdeEditorPreferences,
 } from '../src/lib/components/cm-ide-theme.ts';
+import {
+  clearIdeSensitiveWebStorage,
+  IDE_CURSOR_POS_KEY,
+  IDE_UNDO_JOURNAL_KEY,
+  isSecretIdePath,
+} from '../src/lib/components/cm-ide-drafts.ts';
 
 function createMemoryStorage(): Storage {
   const map = new Map<string, string>();
@@ -291,4 +297,98 @@ test('Preferences round-trip stays in lockstep with IdeSettingsModal keys and ho
   } finally {
     (globalThis as Record<string, unknown>).localStorage = prevStorage;
   }
+});
+
+test('isSecretIdePath blocks credentials, keystores, private keys, shell histories, and home dot-directories while allowing source files', () => {
+  const blocked = [
+    '.env',
+    '/ws/app/.env.local',
+    '/Users/dev/.netrc',
+    '/Users/dev/.pgpass',
+    '/ws/app/.npmrc',
+    '/Users/dev/.pypirc',
+    '/Users/dev/.git-credentials',
+    '/ws/certs/server.keystore',
+    '/ws/certs/truststore.jks',
+    '/ws/certs/client.p12',
+    '/ws/certs/client.pfx',
+    '/ws/certs/tls.pem',
+    '/ws/certs/private.key',
+    '/Users/dev/.zsh_history',
+    '/Users/dev/.bash_history',
+    '~/.ssh/id_ed25519',
+    '~/.aws/credentials',
+    '~/.kube/config',
+    '~/.gnupg/secring.gpg',
+    '/Users/dev/.ssh/config',
+  ];
+  for (const p of blocked) {
+    assert.equal(isSecretIdePath(p), true, `expected secret path block for ${p}`);
+  }
+
+  const allowed = [
+    '/ws/app/cmd/key_handler.go',
+    '/ws/app/internal/auth/token_service.ts',
+    '/ws/app/src/keystore_mapper.rs',
+    '/Users/dev/.otto/vault/notes/architecture.md',
+  ];
+  for (const p of allowed) {
+    assert.equal(isSecretIdePath(p), false, `expected normal source file allowed for ${p}`);
+  }
+});
+
+test('clearIdeSensitiveWebStorage wipes IDE drafts, undo journal, clipboard, projects, roots, and session cursor map', () => {
+  const localMem = createMemoryStorage();
+  const sessionMem = createMemoryStorage();
+
+  localMem.setItem(IDE_UNDO_JOURNAL_KEY, '{"a":1}');
+  localMem.setItem('otto.ide.undoDraftIndex.v1', '{"/ws/a.go":1}');
+  localMem.setItem('otto.ide.undoDraft:/ws/a.go', '{"savedContent":"a","draftContent":"b","updatedAt":1}');
+  localMem.setItem('otto.ide.clipboardHistory.v1', '[{"id":"1","text":"secret"}]');
+  localMem.setItem('otto.ide.projects.v1', '[{"id":"p1"}]');
+  localMem.setItem('otto.ide.namedProjects.v1', '[{"id":"p1"}]');
+  localMem.setItem('otto.ide.lastRoot', '/ws/secret');
+  localMem.setItem('otto.ide.roots:local:/ws/secret', '["/ws/secret/sub"]');
+  localMem.setItem('otto_theme', 'dark');
+  sessionMem.setItem(IDE_CURSOR_POS_KEY, '[["/ws::a.go",[10,10,120]]]');
+
+  clearIdeSensitiveWebStorage(localMem, sessionMem);
+
+  assert.equal(localMem.getItem(IDE_UNDO_JOURNAL_KEY), null);
+  assert.equal(localMem.getItem('otto.ide.undoDraftIndex.v1'), null);
+  assert.equal(localMem.getItem('otto.ide.undoDraft:/ws/a.go'), null);
+  assert.equal(localMem.getItem('otto.ide.clipboardHistory.v1'), null);
+  assert.equal(localMem.getItem('otto.ide.projects.v1'), null);
+  assert.equal(localMem.getItem('otto.ide.namedProjects.v1'), null);
+  assert.equal(localMem.getItem('otto.ide.lastRoot'), null);
+  assert.equal(localMem.getItem('otto.ide.roots:local:/ws/secret'), null);
+  assert.equal(sessionMem.getItem(IDE_CURSOR_POS_KEY), null);
+  assert.equal(localMem.getItem('otto_theme'), 'dark');
+});
+
+test('restoreIdeStateFromJournal clamps out-of-bounds persisted selection offsets without RangeError', () => {
+  const mem = createMemoryStorage();
+  const shortDisk = 'package main\n\nfunc main() {}\n';
+  mem.setItem(
+    IDE_UNDO_JOURNAL_KEY,
+    JSON.stringify({
+      '/ws/main.go': {
+        stateJson: {
+          doc: shortDisk,
+          selection: { main: 0, ranges: [{ anchor: 76475, head: 76475 }] },
+        },
+        baseSavedContent: shortDisk,
+        savedContent: shortDisk,
+        unsaved: false,
+        scrollTop: 240,
+        updatedAt: Date.now(),
+      },
+    }),
+  );
+
+  const restored = restoreIdeStateFromJournal('/ws/main.go', shortDisk, [history()], mem);
+  assert.ok(restored);
+  assert.equal(restored.state.doc.toString(), shortDisk);
+  assert.equal(restored.state.selection.main.head, shortDisk.length);
+  assert.equal(restored.scrollTop, 240);
 });

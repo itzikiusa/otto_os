@@ -20,11 +20,21 @@
   }
   let { id, entries, open, cwd = null, children }: Props = $props();
 
+  let toggledOpen = $state(false);
+  const expanded = $derived(open || toggledOpen);
   const live = $derived(entries.filter((e) => e.item.status === 'running' || e.item.status === 'pending').length);
   const failed = $derived(entries.some((e) => e.item.status === 'failed'));
 </script>
 
-<details class="rg" open={open || undefined} data-testid="runtime-group-{id}">
+<details
+  class="rg"
+  open={expanded || undefined}
+  ontoggle={(e) => {
+    const nowOpen = (e.currentTarget as HTMLDetailsElement).open;
+    if (!open) toggledOpen = nowOpen;
+  }}
+  data-testid="runtime-group-{id}"
+>
   <summary>
     <Icon name="layers" size={13} />
     {#if live}
@@ -36,7 +46,9 @@
     {#if failed}<Icon name="x" size={12} />{/if}
     <Icon name="chevronRight" size={12} />
   </summary>
-  {@render children()}
+  {#if expanded}
+    {@render children()}
+  {/if}
 </details>
 
 <style>

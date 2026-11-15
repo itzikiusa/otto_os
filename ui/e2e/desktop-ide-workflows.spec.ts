@@ -9,20 +9,20 @@ import {
   expectNoHorizontalOverflow,
 } from './helpers';
 import {
-  bootR2Ide,
-  createRound2Seed,
+  bootPolyglotIde,
+  createPolyglotSeed,
   daemonCall,
   editorContent,
   GO_MAIN_SOURCE,
   JAVA_BONUS_SOURCE,
-  openR2File,
-  R2_SCREENSHOT_DIR,
-  saveR2Shot,
-  type Round2WorkspaceSeed,
-} from './ide-round2-fixtures';
+  openPolyglotFile,
+  saveWorkflowShot,
+  WORKFLOW_SCREENSHOT_DIR,
+  type PolyglotWorkspaceSeed,
+} from './ide-polyglot-fixtures';
 
-// Otto IDE Round 2 — Comprehensive End-to-End & Visual Parity Verification Suite
-// Verifies all 8 Round 2 capabilities against a real isolated `ottod` daemon:
+// Otto IDE Workflows — End-to-End & Visual Parity Verification Suite
+// Verifies polyglot IDE workflows against a real isolated `ottod` daemon:
 //   1. 1-click gutter breakpoints across Go, Java, Python, JS & Shell + live debugger pause
 //   2. Debugger Tabbed/Split view, hideable panes, JSON console, resizers & 0px editor CLS
 //   3. JetBrains syntax/semantic coloring (`decimal.MarshalJSONWithoutQuotes`), Rainbow Brackets, Dark/Light & Java Lombok/import diagnostics
@@ -30,9 +30,9 @@ import {
 //   5. IntelliJ two-pane Settings & Project Structure (`⌘,`), Maven tool window & `go.mod` Dependency Analyzer
 //   6. Integrated Git view (`M` badge in tree, Otto `DiffViewer`, stage & commit)
 //   7. Side-by-side `>>` hunk revert, deleted-file Local History recovery & `IDE -> Threads -> IDE` durability
-//   8. Unified `EmbeddedRuntimeThread` in IDE, `@` / `@~/` mentions clamping, `IDE` folder in Threads & built-in `opencode`/`pi` providers
+//   8. Go to Line (`⌘L`), Unified `EmbeddedRuntimeThread` (`⇧⌘L`), `@` / `@~/` mentions clamping, `IDE` folder in Threads & built-in `opencode`/`pi` providers
 
-let seed: Round2WorkspaceSeed;
+let seed: PolyglotWorkspaceSeed;
 
 async function clickGutterLine(page: Page, line: number, useBpLane = false): Promise<void> {
   const lineEl = page
@@ -52,7 +52,7 @@ async function clickGutterLine(page: Page, line: number, useBpLane = false): Pro
   }
 }
 
-test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', () => {
+test.describe('Desktop IDE Workflows — Polyglot Debug, Settings, Git, History & Agent Suite', () => {
   test.describe.configure({ mode: 'serial' });
   test.use({
     viewport: { width: 1440, height: 900 },
@@ -65,20 +65,20 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
 
   test.beforeAll(async () => {
     test.setTimeout(90_000);
-    seed = await createRound2Seed();
+    seed = await createPolyglotSeed();
   });
 
   test.afterAll(async () => {
     if (seed?.workspaceRoot && existsSync(seed.workspaceRoot)) {
       rmSync(seed.workspaceRoot, { recursive: true, force: true });
     }
-    void R2_SCREENSHOT_DIR;
+    void WORKFLOW_SCREENSHOT_DIR;
   });
 
   let fatalUiErrors: string[] = [];
 
   test.beforeEach(async ({ page }, info) => {
-    test.skip(info.project.name !== 'desktop-browser', 'Desktop IDE Round 2 runs on desktop-browser');
+    test.skip(info.project.name !== 'desktop-browser', 'Desktop IDE Workflows suite runs on desktop-browser');
     fatalUiErrors = [];
     page.on('pageerror', (err) => {
       if (/effect_update_depth_exceeded|Maximum update depth/i.test(err.message)) {
@@ -100,32 +100,32 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     page,
   }) => {
     test.setTimeout(120_000);
-    await bootR2Ide(page, seed, 'dark');
+    await bootPolyglotIde(page, seed, 'dark');
     await expectNoHorizontalOverflow(page);
     await expectContentHasHeight(page, 420);
 
     const bpMarkers = page.locator('.ide-editor-area [data-testid="ide-bp-marker"]');
 
     // 1a) Go: 1st click directly on line number 37 sets breakpoint immediately
-    await openR2File(page, 'app', 'main.go');
+    await openPolyglotFile(page, 'app', 'main.go');
     await expect(editorContent(page)).toContainText('decimal.MarshalJSONWithoutQuotes = true');
     await clickGutterLine(page, 37, false);
     await expect(bpMarkers).toHaveCount(1);
 
     // 1b) Java: 1st click in gutter lane sets breakpoint immediately
-    await openR2File(page, 'src', 'main', 'java', 'com', 'otto', 'BonusService.java');
+    await openPolyglotFile(page, 'src', 'main', 'java', 'com', 'otto', 'BonusService.java');
     await expect(editorContent(page)).toContainText('public class BonusService');
     await clickGutterLine(page, 21, true);
     await expect(bpMarkers).toHaveCount(1);
 
     // 1c) JS: 1st click sets breakpoint immediately
-    await openR2File(page, 'web', 'worker.mjs');
+    await openPolyglotFile(page, 'web', 'worker.mjs');
     await expect(editorContent(page)).toContainText('transformBatch');
     await clickGutterLine(page, 2, false);
     await expect(bpMarkers).toHaveCount(1);
 
     // 1d) Shell: 1st click sets breakpoint immediately
-    await openR2File(page, 'scripts', 'deploy.sh');
+    await openPolyglotFile(page, 'scripts', 'deploy.sh');
     await expect(editorContent(page)).toContainText('RELEASE_TAG=');
     await clickGutterLine(page, 5, true);
     await expect(bpMarkers).toHaveCount(1);
@@ -150,7 +150,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     expect(Math.abs(afterSelBox!.y - beforeSelBox!.y)).toBe(0);
 
     // 1e) Python: 1-click breakpoint on line 11 (`doubled = settled * 2`) + live debug pause!
-    await openR2File(page, 'pyapp', 'pipeline.py');
+    await openPolyglotFile(page, 'pyapp', 'pipeline.py');
     await expect(editorContent(page)).toContainText('doubled = settled * 2');
     await clickGutterLine(page, 11, false);
     await expect(bpMarkers).toHaveCount(1);
@@ -179,7 +179,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await dbgPanel.getByLabel('Evaluate expression').fill('settled + 8');
     await dbgPanel.getByRole('button', { name: 'Evaluate' }).click();
     await expect(dbgPanel.locator('.dbg-repl-val').first()).toContainText('50');
-    await saveR2Shot(page, '01-r2-gutter-breakpoints-live-pause.png');
+    await saveWorkflowShot(page, '01-ide-gutter-breakpoints-live-pause.png');
 
     // 2a) Switch to full-width `Console` sub-tab -> assert JSON log output rendered cleanly!
     await page.getByTestId('ide-debug-subtab-console').click();
@@ -187,7 +187,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await expect(fullConsole).toBeVisible();
     await expect(fullConsole).toContainText('settlement.start', { timeout: 10_000 });
     await expect(fullConsole).toContainText('acme');
-    await saveR2Shot(page, '02-r2-debugger-console-json.png');
+    await saveWorkflowShot(page, '02-ide-debugger-console-json.png');
 
     // 2b) Switch back to `Debugger` sub-tab -> toggle Split mode -> hide/show panes -> drag both resizers!
     await page.getByTestId('ide-debug-subtab-debugger').click();
@@ -227,7 +227,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await page.mouse.up();
     const dockHAfter = (await bottomDock.boundingBox())!.height;
     expect(dockHAfter).toBeGreaterThan(dockHBefore + 35);
-    await saveR2Shot(page, '03-r2-debugger-split-resized.png');
+    await saveWorkflowShot(page, '03-ide-debugger-split-resized.png');
 
     await dbgPanel.getByRole('button', { name: 'Resume program' }).click();
     await expect(dbgPanel).toContainText(/Terminated/i, { timeout: 15_000 });
@@ -240,8 +240,8 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     writeFileSync(join(seed.workspaceRoot, 'app', 'main.go'), GO_MAIN_SOURCE);
     writeFileSync(join(seed.workspaceRoot, 'src/main/java/com/otto', 'BonusService.java'), JAVA_BONUS_SOURCE);
 
-    await bootR2Ide(page, seed, 'dark');
-    await openR2File(page, 'app', 'main.go');
+    await bootPolyglotIde(page, seed, 'dark');
+    await openPolyglotFile(page, 'app', 'main.go');
     await expect(editorContent(page)).toContainText('decimal.MarshalJSONWithoutQuotes = true');
 
     // Wait for semantic decorations (`.cm-syn-field` & `.cm-syn-func-call` & `.cm-syn-rb-1`)
@@ -276,7 +276,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     expect(goColors.callColor).toBeTruthy();
     expect(goColors.decimalColor).not.toBe(goColors.fieldColor);
     expect(goColors.fieldColor).not.toBe(goColors.callColor);
-    await saveR2Shot(page, '04-r2-go-semantic-islands-dark.png');
+    await saveWorkflowShot(page, '04-ide-go-semantic-islands-dark.png');
 
     // Switch to JetBrains Islands Light -> verify editor-scoped scheme (no `:root` bleed) -> restore Dark
     const editorOuter = page.locator('.ide-editor-area .code-editor-outer').first();
@@ -288,7 +288,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     });
     await expect(editorOuter).toHaveAttribute('data-ide-scheme', 'jetbrains-islands-light');
     expect(await page.evaluate(() => document.documentElement.dataset.ideScheme)).toBeUndefined();
-    await saveR2Shot(page, '05-r2-go-semantic-islands-light.png');
+    await saveWorkflowShot(page, '05-ide-go-semantic-islands-light.png');
 
     await page.evaluate(async () => {
       document.documentElement.dataset.scheme = 'dark';
@@ -319,11 +319,11 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     expect(hoverText).not.toContain('NeighborAboveDoc');
     expect(hoverText).not.toContain('NeighborBelowDoc');
     expect(hoverText).not.toContain('```');
-    await saveR2Shot(page, '06-r2-compact-quick-doc-hover.png');
+    await saveWorkflowShot(page, '06-ide-compact-quick-doc-hover.png');
     await page.mouse.move(10, 10);
 
     // 3b) Java `@Service` gold annotation, `fooService` purple field, `@Slf4j` zero false error on `log.debug`, and `FakeClass` error!
-    await openR2File(page, 'src', 'main', 'java', 'com', 'otto', 'BonusService.java');
+    await openPolyglotFile(page, 'src', 'main', 'java', 'com', 'otto', 'BonusService.java');
     await expect(editorContent(page)).toContainText('import com.nonexistent.FakeClass;');
     await expect(page.locator('.ide-editor-area .cm-syn-annotation').first()).toBeVisible({ timeout: 10_000 });
     await expect(page.locator('.ide-editor-area .cm-syn-doc-tag').first()).toBeVisible({ timeout: 10_000 });
@@ -375,7 +375,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
       return ide.problems as Array<{ line: number; severity: string; message: string }>;
     });
     expect(javaDiags.some((d) => d.message.includes('log'))).toBe(false);
-    await saveR2Shot(page, '07-r2-java-semantic-lombok-diag.png');
+    await saveWorkflowShot(page, '07-ide-java-semantic-lombok-diag.png');
 
     // 4b) `<10ms` auto-apply `⌥⏎` Quick Fix on `import com.nonexistent.FakeClass;` + `⌘Z` undo!
     await editorContent(page).click();
@@ -387,7 +387,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await expect(intentionPop).toBeVisible({ timeout: 10_000 });
     await expectFullyInViewport(page, intentionPop, 'IDE intention & quick-fix popover');
     await expect(page.getByTestId('ide-intention-preview')).toBeVisible();
-    await saveR2Shot(page, '08-r2-intention-quickfix-preview.png');
+    await saveWorkflowShot(page, '08-ide-intention-quickfix-preview.png');
 
     await intentionPop
       .getByTestId('ide-intention-option')
@@ -407,8 +407,8 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     page,
   }) => {
     test.setTimeout(90_000);
-    await bootR2Ide(page, seed, 'dark');
-    await openR2File(page, 'app', 'main.go');
+    await bootPolyglotIde(page, seed, 'dark');
+    await openPolyglotFile(page, 'app', 'main.go');
 
     // 5a) Open unified two-pane Settings directly via `⌘,` (no toolbar button fallback)
     await page.keyboard.press('Meta+,');
@@ -437,23 +437,22 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await expect(page.getByTestId('ide-settings-tree')).toContainText('Go');
     await searchIn.fill('');
 
-    // Project Structure -> Project SDK dropdown (`Configured` / `Detected` + `Download SDK…` + `Add SDK from disk…`)
+    // Project Structure -> Project SDK menu (`Configured` / `Detected` + `Download SDK…` + `Add SDK from disk…`)
     await page.getByTestId('ide-settings-nav-project.project').click();
     await expect(page.getByTestId('ide-settings-project')).toBeVisible();
     await page.getByTestId('ide-project-sdk-picker').click();
-    const sdkMenu = settingsModal.locator('.sdk-menu');
-    await expect(sdkMenu).toBeVisible();
+    const sdkMenu = page.locator('.ctx-menu');
+    await expectFullyInViewport(page, sdkMenu, 'Project SDK picker menu');
     await expect(sdkMenu).toContainText('Download SDK…');
     await expect(sdkMenu).toContainText('Add SDK from disk…');
-    await saveR2Shot(page, '09-r2-settings-project-sdk.png');
-    await page.getByTestId('ide-project-sdk-picker').click();
+    await saveWorkflowShot(page, '09-ide-settings-project-sdk.png');
+    await page.keyboard.press('Escape');
+    await expect(sdkMenu).toBeHidden();
+    await expect(settingsModal).toBeVisible();
 
-    // Languages & Frameworks -> Go: GOROOT + `+` (`Local…` / `Download…`) + module checkboxes + Apply + OK
+    // Languages & Frameworks -> Go: GOROOT + `+` (`Local…` / `Download…`) + Apply + OK
     await page.getByTestId('ide-settings-nav-lang.go').click();
     await expect(page.getByTestId('ide-settings-lang-go')).toBeVisible();
-    const checklist = page.getByTestId('ide-go-modules-checklist');
-    await expect(checklist).toBeVisible();
-    await expect(checklist.locator('input[type="checkbox"]').first()).toBeVisible();
 
     await page.getByTestId('ide-goroot-add-btn').click();
     const plusMenu = page.locator('.ctx-menu');
@@ -461,16 +460,13 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await expect(plusMenu).toContainText('Local…');
     await expect(plusMenu).toContainText('Download…');
     await page.keyboard.press('Escape');
+    await expect(plusMenu).toBeHidden();
+    await expect(settingsModal).toBeVisible();
 
-    // Toggle Go module checkbox -> Apply -> OK
-    const modCheck = checklist.locator('input[type="checkbox"]').first();
-    await modCheck.click();
-    await saveR2Shot(page, '10-r2-settings-lang-go.png');
+    await saveWorkflowShot(page, '10-ide-settings-lang-go.png');
     const applyBtn = page.getByTestId('ide-settings-apply');
-    if (await applyBtn.isVisible().catch(() => false)) {
+    if (await applyBtn.isEnabled().catch(() => false)) {
       await applyBtn.click();
-    } else {
-      await settingsModal.locator('xpath=ancestor::*[@role="dialog"]').getByRole('button', { name: 'Apply' }).click();
     }
     const okBtn = page.getByTestId('ide-settings-ok');
     if (await okBtn.isVisible().catch(() => false)) {
@@ -486,21 +482,21 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await buildToggle.click();
     await expect(page.locator('body')).toContainText('otto-bonus-service');
 
-    await openR2File(page, 'go.mod');
+    await openPolyglotFile(page, 'go.mod');
     await expect(page.getByTestId('ide-dep-mode-switcher')).toBeVisible();
     await page.getByTestId('ide-dep-analyzer-tab').click();
     const depAnalyzer = page.getByTestId('ide-dependency-analyzer');
     await expect(depAnalyzer).toBeVisible({ timeout: 15_000 });
     await expect(depAnalyzer).toContainText('github.com/shopspring/decimal');
-    await saveR2Shot(page, '11-r2-dependency-analyzer-maven.png');
+    await saveWorkflowShot(page, '11-ide-dependency-analyzer-maven.png');
     await buildToggle.click();
 
     // 6) Integrated Git view: modify tracked file -> `M` badge in tree -> Git dock DiffViewer -> Stage & Commit!
-    await openR2File(page, 'notes', 'roadmap.md');
+    await openPolyglotFile(page, 'notes', 'roadmap.md');
     await expect(editorContent(page)).toContainText('Initial committed baseline.');
     await editorContent(page).click();
     await page.keyboard.press('Meta+ArrowDown');
-    await page.keyboard.insertText('\n## Round 2 Git Dock Verified\n');
+    await page.keyboard.insertText('\n## Integrated Git Dock Verified\n');
     const saveFileWait = page.waitForResponse(
       (r) => r.request().method() === 'PUT' && r.url().includes('/api/v1/ide/fs/file'),
       { timeout: 15_000 },
@@ -519,14 +515,14 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     const gitView = page.getByTestId('ide-git-changes-view');
     await expect(gitView).toBeVisible({ timeout: 15_000 });
     await expect(gitView).toContainText('roadmap.md', { timeout: 15_000 });
-    await expect(gitView.locator('.gc-diff-scroll')).toContainText('Round 2 Git Dock Verified', {
+    await expect(gitView.locator('.gc-diff-scroll')).toContainText('Integrated Git Dock Verified', {
       timeout: 15_000,
     });
-    await saveR2Shot(page, '12-r2-integrated-git-diff.png');
+    await saveWorkflowShot(page, '12-ide-integrated-git-diff.png');
 
     await page.getByTestId('ide-git-stage-all').click();
     await expect(page.getByTestId('ide-git-unstage-all')).toBeVisible({ timeout: 10_000 });
-    await page.getByTestId('ide-git-commit-input').fill('docs: verify round2 git dock');
+    await page.getByTestId('ide-git-commit-input').fill('docs: verify integrated git dock');
     await page.getByTestId('ide-git-commit-btn').click();
     await expect(gitView).toContainText('Working tree clean', { timeout: 15_000 });
 
@@ -534,10 +530,10 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
       cwd: seed.workspaceRoot,
       encoding: 'utf8',
     }).trim();
-    expect(headSubject).toBe('docs: verify round2 git dock');
+    expect(headSubject).toBe('docs: verify integrated git dock');
   });
 
-  test('7 & 8. Side-by-side `>>` hunk revert, Local History deleted-file recovery, IDE<->Threads durability, EmbeddedRuntimeThread, `@`/`@~/` clamping & built-in `opencode`/`pi` providers', async ({
+  test('7 & 8. Side-by-side `>>` hunk revert, Local History deleted-file recovery, IDE<->Threads durability, Go to Line (`⌘L`), EmbeddedRuntimeThread (`⇧⌘L`), `@`/`@~/` clamping & built-in `opencode`/`pi` providers', async ({
     page,
   }) => {
     test.setTimeout(120_000);
@@ -566,8 +562,8 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
       await c.ctx.dispose();
     }
 
-    await bootR2Ide(page, seed, 'dark');
-    await openR2File(page, 'notes', 'recoverable.txt');
+    await bootPolyglotIde(page, seed, 'dark');
+    await openPolyglotFile(page, 'notes', 'recoverable.txt');
     await expect(editorContent(page)).toContainText('Alpha v2');
 
     // 7a) Open Side-by-Side Local History comparison via Project Tree context menu & revert hunk via `>>`!
@@ -587,7 +583,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     // Select `rows.nth(1)` (`Saved` snapshot `Alpha v1` prior to `Alpha v2`)
     await rows.nth(1).click();
     await expect(page.getByTestId('ide-compare-revert-hunk').first()).toBeVisible({ timeout: 10_000 });
-    await saveR2Shot(page, '13-r2-side-by-side-compare.png');
+    await saveWorkflowShot(page, '13-ide-side-by-side-compare.png');
 
     await page.getByTestId('ide-compare-revert-hunk').first().click();
     await expect(page.getByTestId('ide-compare-identical-banner')).toBeVisible({ timeout: 10_000 });
@@ -610,7 +606,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     const delRow = cmpModal.getByTestId('ide-local-history-row').filter({ hasText: 'recoverable.txt' }).first();
     await expect(delRow).toBeVisible({ timeout: 10_000 });
     await delRow.click();
-    await saveR2Shot(page, '14-r2-local-history-deleted-restore.png');
+    await saveWorkflowShot(page, '14-ide-local-history-deleted-restore.png');
 
     await page.getByTestId('ide-local-history-restore').click();
     await expect(cmpModal).toHaveCount(0, { timeout: 10_000 });
@@ -631,8 +627,8 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     const ideFolder = page.getByTestId('threads-ide-folder');
     await expect(ideFolder).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('threads-ide-project-row').first()).toBeVisible();
-    await expect(ideFolder).toContainText(/Otto IDE Round 2 Project|otto-ide-r2-suite-/);
-    await saveR2Shot(page, '15-r2-threads-ide-folder.png');
+    await expect(ideFolder).toContainText(/Otto IDE Polyglot Project|otto-ide-workflows-suite-/);
+    await saveWorkflowShot(page, '15-ide-threads-ide-folder.png');
 
     await page.goto('/#/ide');
     await expect(editorContent(page)).toContainText('Transient unsaved edit', { timeout: 15_000 });
@@ -646,9 +642,16 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await expect(clipModal).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');
 
-    // 8a) Open AI Agent dock directly via `⌘L` -> verify `@` & `@~/` mention menus clamp in viewport + `EmbeddedRuntimeThread`!
-    const agentPanel = page.getByTestId('ide-agent-panel');
+    // 8a) Verify `⌘L` opens Go to Line:Column dialog, then `⇧⌘L` opens AI Agent dock!
+    await editorContent(page).click();
     await page.keyboard.press('Meta+l');
+    const gotoDialog = page.getByRole('dialog').filter({ hasText: /Go to Line/i }).first();
+    await expect(gotoDialog).toBeVisible({ timeout: 5_000 });
+    await page.keyboard.press('Escape');
+    await expect(gotoDialog).toHaveCount(0);
+
+    const agentPanel = page.getByTestId('ide-agent-panel');
+    await page.keyboard.press('Meta+Shift+L');
     await expect(agentPanel).toBeVisible({ timeout: 5_000 });
 
     const composer = page.getByTestId('ide-agent-composer');
@@ -664,7 +667,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
     await page.getByTestId('ide-agent-send').click();
     await expect(page.getByTestId('embedded-runtime-thread')).toBeVisible({ timeout: 25_000 });
     await expect(agentPanel).toContainText('Verify EmbeddedRuntimeThread live streaming in IDE', { timeout: 20_000 });
-    await saveR2Shot(page, '16-r2-ide-embedded-runtime-thread.png');
+    await saveWorkflowShot(page, '16-ide-embedded-runtime-thread.png');
 
     // 8b) `#/settings/providers`: verify `opencode` & `pi` under Built-in + `Enabled` toggle!
     await page.goto('/#/settings/providers');
@@ -677,7 +680,7 @@ test.describe('Desktop IDE Round 2 — Full End-to-End & Visual Parity Suite', (
 
     await opencodeToggle.uncheck();
     await expect(opencodeToggle).not.toBeChecked();
-    await saveR2Shot(page, '17-r2-settings-providers-opencode-pi.png');
+    await saveWorkflowShot(page, '17-ide-settings-providers-opencode-pi.png');
 
     // Re-enable `opencode` so daemon settings stay clean
     await opencodeToggle.check();

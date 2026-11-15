@@ -13,6 +13,7 @@
     ideBasename,
     type IdeCodeAction,
     type IdeDiagnostic,
+    type IdeQuickFix,
   } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
   import { pushIdeNavLocation } from './editor/ideEditorStoreBridge.svelte';
@@ -112,8 +113,12 @@
     query = '';
   }
 
-  function hasConcreteEdit(act: IdeCodeAction): boolean {
-    return Boolean((act.edits && act.edits.length > 0) || typeof act.replacement_content === 'string');
+  function hasConcreteEdit(act: IdeCodeAction | IdeQuickFix): boolean {
+    return Boolean(
+      (act.edits && act.edits.length > 0) ||
+        ('replacement_content' in act && typeof act.replacement_content === 'string') ||
+        ('replacement' in act && (typeof act.replacement === 'string' || act.delete_line)),
+    );
   }
 
   async function applyPreferredQuickFix(e: MouseEvent, d: IdeDiagnostic, key: string): Promise<void> {
@@ -161,7 +166,7 @@
           ? actions.map((act) => ({
               label: act.title,
               icon: 'bulb' as const,
-              hint: act.kind || '⌥⏎',
+              hint: ('kind' in act && act.kind) ? act.kind : '⌥⏎',
               action: () => {
                 void ide.applyCodeAction(d.path, act);
               },

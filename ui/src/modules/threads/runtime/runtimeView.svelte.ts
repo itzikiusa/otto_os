@@ -15,12 +15,25 @@ import { appLive, onLive } from '../../../lib/live';
 import { loadErrorText } from '../../../lib/loadError';
 import { pollWhileVisible } from '../../../lib/poll';
 import type { RuntimeEvent, RuntimeReplay } from '../../../lib/api/types';
-import { applyEvents, applyReplay, emptyProjection, type RuntimeProjection } from './projection';
+import { applyEvents, applyReplay, emptyProjection, mergeHistoryPage, type RuntimeProjection } from './projection';
 import { runtimeThreads } from './runtimeThreads.svelte';
+
+export const TAIL_TURNS = 20;
 
 const RETRY_STEPS_MS = [1_500, 3_000, 6_000, 15_000] as const;
 const ACTIVE_LIVENESS_MS = 4_000;
 const IDLE_LIVENESS_MS = 15_000;
+const LIVE_WS_FRESH_MS = 2_500;
+const STREAM_BATCH_MS = 32;
+
+function isCoalesceableStreamEvent(ev: RuntimeEvent): boolean {
+  if (ev.type === 'command_output.delta') return true;
+  if (ev.type === 'turn_item.updated') {
+    const it = ev.turn_item;
+    return Boolean(('streaming' in it && it.streaming) || it.status === 'running');
+  }
+  return false;
+}
 
 interface View {
   refs: number;
@@ -32,6 +45,13 @@ interface View {
   knownSequence: number;
   /** Epoch ms of the latest live WS event or idle liveness check. */
   lastLiveAt: number;
+  /** Epoch ms of the latest actual WS `agent_runtime_event` (`0` before first). */
+  lastWsEventAt: number;
+  /** Epoch ms when live WS events were last folded into `projections[id]`. */
+  lastLiveFlushAt: number;
+  /** Queued streaming deltas coalesced into one ~32ms frame fold. */
+  pendingLive: RuntimeEvent[];
+  liveFlushTimer: ReturnType<typeof setTimeout> | null;
   /** Consecutive failed replay count for bounded backoff. */
   failures: number;
   retryTimer: ReturnType<typeof setTimeout> | null;
@@ -45,6 +65,8 @@ export class RuntimeViews {
   /** A failed later resync (after a reconnect or a gap): the projection
    *  shown may be out of date, by session id. */
   staleError = $state<Record<string, string>>({});
+  /** In-flight older-history pagination requests, by session id. */
+  loadingOlder = $state<Record<string, boolean>>({});
 
   private views = new Map<string, View>();
   private stopLive: (() => void) | null = null;
@@ -63,6 +85,7 @@ export class RuntimeViews {
     const view = this.views.get(id);
     if (!view) return;
     if (lastSequence > view.knownSequence) view.knownSequence = lastSequence;
+    this.flushPendingLive(id, view);
     const applied = this.projections[id]?.lastSequence ?? 0;
     if (lastSequence > applied) void this.replay(id, true);
   }
@@ -79,6 +102,10 @@ export class RuntimeViews {
         dirty: false,
         knownSequence: 0,
         lastLiveAt: Date.now(),
+        lastWsEventAt: 0,
+        lastLiveFlushAt: 0,
+        pendingLive: [],
+        liveFlushTimer: null,
         failures: 0,
         retryTimer: null,
       });
@@ -88,6 +115,8 @@ export class RuntimeViews {
       const v = this.views.get(id);
       if (!v || --v.refs > 0) return;
       if (v.retryTimer) clearTimeout(v.retryTimer);
+      if (v.liveFlushTimer) clearTimeout(v.liveFlushTimer);
+      v.pendingLive.length = 0;
       this.views.delete(id);
       const { [id]: _drop, ...rest } = this.projections;
       this.projections = rest;
@@ -98,6 +127,10 @@ export class RuntimeViews {
       if (this.staleError[id]) {
         const { [id]: _gone, ...stale } = this.staleError;
         this.staleError = stale;
+      }
+      if (this.loadingOlder[id]) {
+        const { [id]: _old, ...older } = this.loadingOlder;
+        this.loadingOlder = older;
       }
       if (this.views.size === 0) {
         this.stopLive?.();
@@ -116,11 +149,23 @@ export class RuntimeViews {
     const onVisible = () => {
       if (typeof document === 'undefined' || !document.hidden) this.replayAll(true);
     };
+    let lastInputWakeAt = 0;
     const onWake = () => this.replayAll(true);
+    const onInputWake = () => {
+      const now = Date.now();
+      if (now - lastInputWakeAt < ACTIVE_LIVENESS_MS) return;
+      lastInputWakeAt = now;
+      for (const [id, view] of this.views.entries()) {
+        if (!view.held && now - view.lastLiveAt >= ACTIVE_LIVENESS_MS) {
+          void this.replay(id, true);
+        }
+      }
+    };
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible);
     if (typeof window !== 'undefined') {
       window.addEventListener('focus', onWake);
       window.addEventListener('online', onWake);
+      window.addEventListener('pointerdown', onInputWake, { passive: true });
     }
     const liveness = pollWhileVisible(() => this.livenessTick(), {
       ms: ACTIVE_LIVENESS_MS,
@@ -137,6 +182,7 @@ export class RuntimeViews {
       if (typeof window !== 'undefined') {
         window.removeEventListener('focus', onWake);
         window.removeEventListener('online', onWake);
+        window.removeEventListener('pointerdown', onInputWake);
       }
     };
   }
@@ -160,7 +206,9 @@ export class RuntimeViews {
     for (const [id, view] of this.views.entries()) {
       if (view.held) continue;
       if (this.isViewActive(id)) {
-        void this.replay(id, true);
+        if (now - view.lastWsEventAt >= LIVE_WS_FRESH_MS) {
+          void this.replay(id, true);
+        }
       } else if (now - view.lastLiveAt >= IDLE_LIVENESS_MS) {
         view.lastLiveAt = now;
         void this.replay(id, true);
@@ -168,17 +216,59 @@ export class RuntimeViews {
     }
   }
 
+  private flushPendingLive(id: string, view: View): void {
+    if (view.liveFlushTimer) {
+      clearTimeout(view.liveFlushTimer);
+      view.liveFlushTimer = null;
+    }
+    if (view.pendingLive.length === 0) return;
+    const batch = view.pendingLive.splice(0, view.pendingLive.length);
+    if (view.held) {
+      view.held.push(...batch);
+      return;
+    }
+    const prev = this.projections[id];
+    const { projection, gap } = applyEvents(prev ?? emptyProjection(), batch);
+    view.lastLiveFlushAt = Date.now();
+    if (!prev || projection !== prev) this.projections[id] = projection;
+    if (gap) void this.replay(id, true);
+  }
+
   private onEvent(ev: RuntimeEvent): void {
     const view = this.views.get(ev.session_id);
     if (!view) return;
-    view.lastLiveAt = Date.now();
+    const now = Date.now();
+    view.lastLiveAt = now;
+    view.lastWsEventAt = now;
     if (ev.sequence > view.knownSequence) view.knownSequence = ev.sequence;
     if (view.held) {
       view.held.push(ev);
       return;
     }
-    const { projection, gap } = applyEvents(this.projections[ev.session_id] ?? emptyProjection(), [ev]);
-    this.projections[ev.session_id] = projection;
+    if (typeof requestAnimationFrame === 'function' && isCoalesceableStreamEvent(ev)) {
+      if (view.pendingLive.length === 0 && now - view.lastLiveFlushAt >= STREAM_BATCH_MS) {
+        const prev = this.projections[ev.session_id];
+        const { projection, gap } = applyEvents(prev ?? emptyProjection(), [ev]);
+        view.lastLiveFlushAt = now;
+        if (!prev || projection !== prev) this.projections[ev.session_id] = projection;
+        if (gap) void this.replay(ev.session_id, true);
+        return;
+      }
+      view.pendingLive.push(ev);
+      if (!view.liveFlushTimer) {
+        const waitMs = Math.max(8, STREAM_BATCH_MS - (now - view.lastLiveFlushAt));
+        view.liveFlushTimer = setTimeout(() => {
+          view.liveFlushTimer = null;
+          if (this.views.get(ev.session_id) === view) this.flushPendingLive(ev.session_id, view);
+        }, waitMs);
+      }
+      return;
+    }
+    this.flushPendingLive(ev.session_id, view);
+    const prev = this.projections[ev.session_id];
+    const { projection, gap } = applyEvents(prev ?? emptyProjection(), [ev]);
+    view.lastLiveFlushAt = now;
+    if (!prev || projection !== prev) this.projections[ev.session_id] = projection;
     if (gap) void this.replay(ev.session_id, true);
   }
 
@@ -202,16 +292,18 @@ export class RuntimeViews {
       view.dirty = true;
       return;
     }
+    this.flushPendingLive(id, view);
     view.held = [];
     view.dirty = false;
     const after = this.projections[id]?.lastSequence ?? 0;
-    const path = `/runtime-sessions/${id}/events?after_sequence=${after}`;
+    const path = `/runtime-sessions/${id}/events?after_sequence=${after}&tail_turns=${TAIL_TURNS}`;
     try {
       const replay = await (bg ? inLane('bg', () => api.get<RuntimeReplay>(path)) : api.get<RuntimeReplay>(path));
       if (this.views.get(id) !== view) return;
-      const base = applyReplay(this.projections[id] ?? emptyProjection(), replay);
+      const prev = this.projections[id];
+      const base = applyReplay(prev ?? emptyProjection(), replay);
       const { projection, gap } = applyEvents(base, view.held);
-      this.projections[id] = projection;
+      if (!prev || projection !== prev) this.projections[id] = projection;
       if (projection.lastSequence > view.knownSequence) view.knownSequence = projection.lastSequence;
       view.lastLiveAt = Date.now();
       view.failures = 0;
@@ -240,6 +332,31 @@ export class RuntimeViews {
       if (!this.projections[id]) this.loadError = { ...this.loadError, [id]: loadErrorText(e) };
       else this.staleError = { ...this.staleError, [id]: loadErrorText(e) };
       this.scheduleRetry(id, view);
+    }
+  }
+
+  /** Fetch and prepend the next page of older turns before `oldestTurnOrdinal`. */
+  async loadOlder(id: string, limitTurns = TAIL_TURNS): Promise<boolean> {
+    const view = this.views.get(id);
+    if (view) this.flushPendingLive(id, view);
+    const cur = this.projections[id];
+    if (!cur || !cur.hasOlder || cur.oldestTurnOrdinal == null || this.loadingOlder[id]) return false;
+    this.loadingOlder = { ...this.loadingOlder, [id]: true };
+    const path = `/runtime-sessions/${id}/events?before_turn_ordinal=${cur.oldestTurnOrdinal}&limit_turns=${limitTurns}`;
+    try {
+      const replay = await api.get<RuntimeReplay>(path);
+      if (!this.views.has(id) || replay.kind !== 'snapshot') return false;
+      const latest = this.projections[id];
+      if (!latest) return false;
+      this.projections[id] = mergeHistoryPage(latest, replay.snapshot);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      if (this.loadingOlder[id]) {
+        const { [id]: _done, ...rest } = this.loadingOlder;
+        this.loadingOlder = rest;
+      }
     }
   }
 

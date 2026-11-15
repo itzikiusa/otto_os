@@ -10,10 +10,15 @@ const hook =
   '}';
 register('data:text/javascript,' + encodeURIComponent(hook));
 
-const { formatMessageClock, formatMessageTooltip } = await import(
+const { formatDuration, formatMessageClock, formatMessageTooltip } = await import(
   '../src/modules/threads/runtime/timeline.ts'
 );
-const { itemDuration } = await import('../src/modules/threads/runtime/workLog.ts');
+const { formatDuration: workLogFormatDuration, itemDuration } = await import(
+  '../src/modules/threads/runtime/workLog.ts'
+);
+const { parseUserMessageItemWithBadges } = await import(
+  '../src/modules/threads/runtime/mentionMatcher.ts'
+);
 
 test('formatMessageClock formats valid ISO timestamps and returns empty string for null or invalid values', () => {
   assert.equal(formatMessageClock(null), '');
@@ -124,4 +129,22 @@ test('itemDuration suppresses misleading 0ms on legacy persisted reasoning rows 
     updated_at: '2026-11-14T10:00:00.012Z',
   };
   assert.equal(itemDuration(fastCmd), '12ms');
+});
+
+test('formatDuration is shared between timeline and workLog and parseUserMessageItemWithBadges memoizes settled TurnItems', () => {
+  assert.equal(formatDuration, workLogFormatDuration);
+  assert.equal(formatDuration(320), '320ms');
+  assert.equal(formatDuration(14_200), '14s');
+  assert.equal(formatDuration(3_600_000), '1h 0m');
+
+  const settledUserItem = {
+    id: 'u-1',
+    text: '<ide_context>\n<file path="cmd/main.go" lines="1-20" label="@main.go">package main</file>\n</ide_context>\n\nRefactor entrypoint',
+  };
+  const first = parseUserMessageItemWithBadges(settledUserItem);
+  const second = parseUserMessageItemWithBadges(settledUserItem);
+  assert.equal(first, second, 'settled TurnItem reference should hit WeakMap cache');
+  assert.equal(first.prose, 'Refactor entrypoint');
+  assert.equal(first.badges.length, 1);
+  assert.equal(first.badges[0].label, '@main.go');
 });

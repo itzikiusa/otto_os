@@ -131,7 +131,7 @@ export function showTreeNodeContextMenu(
       {
         label: 'Put Label…',
         icon: 'tag',
-        action: () => void promptPutLocalHistoryLabel(rootForProjectPath(entry.path), entry.path),
+        action: () => void promptPutLocalHistoryLabel(rootForProjectPath(entry.path), entry.path, { isDir }),
       },
     ];
     if (isDir) {

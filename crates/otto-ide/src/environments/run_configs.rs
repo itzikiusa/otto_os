@@ -9,7 +9,7 @@ use otto_core::domain::User;
 use otto_core::{new_id, Error, Result};
 use otto_state::DbPool;
 use sqlx::Row;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 
 use super::db_store::{clean_opt, row_to_run_config};
 use super::discovery::discover_run_configs;
@@ -22,6 +22,12 @@ use crate::types::{
     IdeTargetSpec, IdeUpsertRunConfigReq,
 };
 
+const SELECT_RUN_CONFIG_SQL: &str = r#"SELECT id, name, runner, command, args_json, build_flags_json, cwd,
+       env_overrides_json, env_file, inherit_shell_env, sdk_path,
+       toolchain_id, before_launch, target_path, test_filter, compound_ids_json,
+       maven_profiles_json, spring_profiles_json, skip_tests, offline
+FROM ide_run_configs"#;
+
 impl EnvironmentManager {
     pub async fn list_run_configs(
         &self,
@@ -29,46 +35,62 @@ impl EnvironmentManager {
         target: &IdeTargetSpec,
     ) -> Result<Vec<IdeRunConfig>> {
         target.validate()?;
-        let rows = sqlx::query(
-            r#"SELECT id, name, runner, command, args_json, build_flags_json, cwd,
-                      env_overrides_json, env_file, inherit_shell_env, sdk_path,
-                      toolchain_id, before_launch, target_path, test_filter, compound_ids_json,
-                      maven_profiles_json, spring_profiles_json, skip_tests, offline
-               FROM ide_run_configs
-               WHERE project_key = ?
-               ORDER BY created_at ASC, name ASC"#,
-        )
-        .bind(target.project_key())
-        .fetch_all(pool)
-        .await
-        .map_err(|e| Error::Internal(format!("list ide_run_configs: {e}")))?;
+        let sql = format!(
+            "{SELECT_RUN_CONFIG_SQL} WHERE project_key = ? ORDER BY created_at ASC, name ASC"
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(target.project_key())
+            .fetch_all(pool)
+            .await
+            .map_err(|e| Error::Internal(format!("list ide_run_configs: {e}")))?;
 
         Ok(rows.iter().map(row_to_run_config).collect())
     }
 
-    pub async fn get_run_config(&self, pool: &DbPool, id: &str) -> Result<IdeRunConfig> {
-        let row = sqlx::query(
-            r#"SELECT id, name, runner, command, args_json, build_flags_json, cwd,
-                      env_overrides_json, env_file, inherit_shell_env, sdk_path,
-                      toolchain_id, before_launch, target_path, test_filter, compound_ids_json,
-                      maven_profiles_json, spring_profiles_json, skip_tests, offline
-               FROM ide_run_configs WHERE id = ?"#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| Error::Internal(format!("get ide_run_config: {e}")))?
-        .ok_or_else(|| Error::NotFound(format!("run config '{id}'")))?;
+    pub async fn get_run_config(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+        id: &str,
+    ) -> Result<IdeRunConfig> {
+        target.validate()?;
+        let sql = format!("{SELECT_RUN_CONFIG_SQL} WHERE id = ? AND project_key = ?");
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(id)
+            .bind(target.project_key())
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| Error::Internal(format!("get ide_run_config: {e}")))?
+            .ok_or_else(|| Error::NotFound(format!("run config '{id}'")))?;
         Ok(row_to_run_config(&row))
     }
 
-    pub async fn get_run_config_target(&self, pool: &DbPool, id: &str) -> Result<IdeTargetSpec> {
-        let row = sqlx::query(
-            "SELECT target_kind, root_path, connection_id FROM ide_run_configs WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+    pub async fn get_run_config_target(
+        &self,
+        pool: &DbPool,
+        target_opt: Option<&IdeTargetSpec>,
+        id: &str,
+    ) -> Result<IdeTargetSpec> {
+        let row = match target_opt {
+            Some(target) => {
+                target.validate()?;
+                sqlx::query(
+                    "SELECT target_kind, root_path, connection_id FROM ide_run_configs WHERE id = ? AND project_key = ?",
+                )
+                .bind(id)
+                .bind(target.project_key())
+                .fetch_optional(pool)
+                .await
+            }
+            None => {
+                sqlx::query(
+                    "SELECT target_kind, root_path, connection_id FROM ide_run_configs WHERE id = ?",
+                )
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+            }
+        }
         .map_err(|e| Error::Internal(format!("get ide_run_config target: {e}")))?
         .ok_or_else(|| Error::NotFound(format!("run config '{id}'")))?;
 
@@ -94,7 +116,7 @@ impl EnvironmentManager {
         target: &IdeTargetSpec,
         id: &str,
     ) -> Result<IdeRunConfig> {
-        if let Ok(saved) = self.get_run_config(pool, id).await {
+        if let Ok(saved) = self.get_run_config(pool, target, id).await {
             return Ok(saved);
         }
         if id.starts_with("auto:") && target.kind == IdeTargetKind::Local {
@@ -127,6 +149,8 @@ impl EnvironmentManager {
             .await
     }
 
+    /// Upsert a run configuration scoped strictly to `target.project_key()` so
+    /// reusing or guessing an existing `id` can never overwrite another workspace's row.
     pub async fn upsert_run_config_parts(
         &self,
         pool: &DbPool,
@@ -143,10 +167,6 @@ impl EnvironmentManager {
             cfg.id = format!("rc_{}", new_id());
         }
         cfg.auto_detected = false;
-        let target_kind = match target.kind {
-            IdeTargetKind::Local => "local",
-            IdeTargetKind::Ssh => "ssh",
-        };
         let runner_str = serde_json::to_value(cfg.runner)
             .ok()
             .and_then(|v| v.as_str().map(str::to_string))
@@ -164,44 +184,32 @@ impl EnvironmentManager {
             serde_json::to_string(&cfg.spring_profiles).unwrap_or_else(|_| "[]".into());
         let now = Utc::now().to_rfc3339();
 
-        sqlx::query(
+        let res = sqlx::query(
             r#"INSERT INTO ide_run_configs (
-                   id, project_key, target_kind, connection_id, root_path,
-                   name, runner, command, args_json, build_flags_json, cwd,
-                   env_overrides_json, env_file, inherit_shell_env, sdk_path,
-                   toolchain_id, before_launch, target_path, test_filter, compound_ids_json,
-                   maven_profiles_json, spring_profiles_json, skip_tests, offline,
-                   created_at, updated_at
+                   id, project_key, target_kind, connection_id, root_path, name, runner, command,
+                   args_json, build_flags_json, cwd, env_overrides_json, env_file, inherit_shell_env,
+                   sdk_path, toolchain_id, before_launch, target_path, test_filter, compound_ids_json,
+                   maven_profiles_json, spring_profiles_json, skip_tests, offline, created_at, updated_at
                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
-                   project_key = excluded.project_key,
-                   target_kind = excluded.target_kind,
-                   connection_id = excluded.connection_id,
-                   root_path = excluded.root_path,
-                   name = excluded.name,
-                   runner = excluded.runner,
-                   command = excluded.command,
-                   args_json = excluded.args_json,
-                   build_flags_json = excluded.build_flags_json,
-                   cwd = excluded.cwd,
-                   env_overrides_json = excluded.env_overrides_json,
-                   env_file = excluded.env_file,
-                   inherit_shell_env = excluded.inherit_shell_env,
-                   sdk_path = excluded.sdk_path,
-                   toolchain_id = excluded.toolchain_id,
-                   before_launch = excluded.before_launch,
-                   target_path = excluded.target_path,
-                   test_filter = excluded.test_filter,
+                   target_kind = excluded.target_kind, connection_id = excluded.connection_id,
+                   root_path = excluded.root_path, name = excluded.name, runner = excluded.runner,
+                   command = excluded.command, args_json = excluded.args_json,
+                   build_flags_json = excluded.build_flags_json, cwd = excluded.cwd,
+                   env_overrides_json = excluded.env_overrides_json, env_file = excluded.env_file,
+                   inherit_shell_env = excluded.inherit_shell_env, sdk_path = excluded.sdk_path,
+                   toolchain_id = excluded.toolchain_id, before_launch = excluded.before_launch,
+                   target_path = excluded.target_path, test_filter = excluded.test_filter,
                    compound_ids_json = excluded.compound_ids_json,
                    maven_profiles_json = excluded.maven_profiles_json,
                    spring_profiles_json = excluded.spring_profiles_json,
-                   skip_tests = excluded.skip_tests,
-                   offline = excluded.offline,
-                   updated_at = excluded.updated_at"#,
+                   skip_tests = excluded.skip_tests, offline = excluded.offline,
+                   updated_at = excluded.updated_at
+               WHERE ide_run_configs.project_key = excluded.project_key"#,
         )
         .bind(&cfg.id)
         .bind(target.project_key())
-        .bind(target_kind)
+        .bind(target.kind.as_str())
         .bind(&target.connection_id)
         .bind(&target.root)
         .bind(cfg.name.trim())
@@ -229,12 +237,26 @@ impl EnvironmentManager {
         .await
         .map_err(|e| Error::Internal(format!("upsert ide_run_config: {e}")))?;
 
+        if res.rows_affected() == 0 {
+            return Err(Error::Forbidden(format!(
+                "run configuration '{}' belongs to another workspace",
+                cfg.id
+            )));
+        }
+
         Ok(cfg)
     }
 
-    pub async fn delete_run_config(&self, pool: &DbPool, id: &str) -> Result<()> {
-        let res = sqlx::query("DELETE FROM ide_run_configs WHERE id = ?")
+    pub async fn delete_run_config(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+        id: &str,
+    ) -> Result<()> {
+        target.validate()?;
+        let res = sqlx::query("DELETE FROM ide_run_configs WHERE id = ? AND project_key = ?")
             .bind(id)
+            .bind(target.project_key())
             .execute(pool)
             .await
             .map_err(|e| Error::Internal(format!("delete ide_run_config: {e}")))?;
@@ -244,10 +266,12 @@ impl EnvironmentManager {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn get_run(&self, run_id: &str) -> Result<IdeRunState> {
         self.get_run_with_tail(run_id, None)
     }
 
+    #[cfg(test)]
     pub fn get_run_with_tail(
         &self,
         run_id: &str,
@@ -277,31 +301,25 @@ impl EnvironmentManager {
         Ok(entry.value().snapshot_with_tail(tail_lines))
     }
 
-    pub fn list_runs(&self) -> Vec<IdeRunState> {
-        let mut out: Vec<IdeRunState> = self.runs.iter().map(|e| e.value().snapshot()).collect();
-        out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-        out
-    }
-
-    pub fn list_runs_for_user(&self, user: &User) -> Vec<IdeRunState> {
-        let mut out: Vec<IdeRunState> = self
-            .runs
-            .iter()
-            .filter(|e| can_access_run(e.value(), user))
-            .map(|e| e.value().snapshot())
-            .collect();
-        out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-        out
-    }
-
-    pub async fn stop_run(&self, run_id: &str) -> Result<IdeRunState> {
-        let snap = self
+    /// Subscribe to real-time SSE output and status frames for `run_id` after
+    /// enforcing the same run-owner check as [`Self::get_run_for_user`].
+    pub fn subscribe_run_for_user(
+        &self,
+        user: &User,
+        run_id: &str,
+    ) -> Result<(IdeRunState, broadcast::Receiver<IdeRunState>)> {
+        let entry = self
             .runs
             .get(run_id)
-            .map(|e| e.value().stop())
             .ok_or_else(|| Error::NotFound(format!("IDE run '{run_id}'")))?;
-        evict_finished_runs(&self.runs);
-        Ok(snap)
+        if !can_access_run(entry.value(), user) {
+            return Err(Error::Forbidden(
+                "cannot access an IDE run owned by another user".into(),
+            ));
+        }
+        let rx = entry.value().events_tx.subscribe();
+        let snap = entry.value().snapshot_with_tail(Some(500));
+        Ok((snap, rx))
     }
 
     pub async fn stop_run_for_user(&self, user: &User, run_id: &str) -> Result<IdeRunState> {
@@ -319,18 +337,6 @@ impl EnvironmentManager {
         };
         evict_finished_runs(&self.runs);
         Ok(snap)
-    }
-
-    pub async fn start_run<S: SecretAccess + ?Sized>(
-        &self,
-        pool: &DbPool,
-        secrets: &S,
-        targets: &TargetManager,
-        req: IdeStartRunReq,
-        ssh: Option<IdeSshSpec>,
-    ) -> Result<IdeRunState> {
-        self.start_run_for_user(pool, secrets, targets, None, None, req, ssh)
-            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -440,6 +446,7 @@ impl EnvironmentManager {
         let started_at = Utc::now().to_rfc3339();
         let seq = self.run_seq.fetch_add(1, Ordering::Relaxed);
         let (stop_tx, stop_rx) = watch::channel(false);
+        let (events_tx, _) = broadcast::channel(256);
         let owner_user_id = user.map(|u| u.id.clone()).unwrap_or_default();
         let handle = Arc::new(ActiveRunHandle {
             seq,
@@ -451,6 +458,7 @@ impl EnvironmentManager {
                 started_at,
             )),
             stop_tx,
+            events_tx,
         });
         let initial = handle.snapshot();
         self.runs.insert(run_id, Arc::clone(&handle));

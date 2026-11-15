@@ -9,25 +9,33 @@
 mod detected;
 pub(crate) mod discovery;
 mod installer;
+mod installer_remote;
+mod installer_tools;
+mod jobs;
 mod local_registry;
+mod remote_probe;
 
 use self::detected::scan_detected_sdks;
 use self::discovery::{
-    collect_managed_bin_dirs, discover_local_dap, discover_local_lsp, discover_local_sdks,
-    empty_tool, mark_active_sdk, REMOTE_PROBE_SCRIPT,
+    collect_managed_bin_dirs, discover_local_dap_with_shell, discover_local_lsp_with_shell,
+    discover_local_sdks_with_shell, empty_tool, mark_active_sdk,
 };
+#[cfg(test)]
+use self::discovery::{discover_local_dap, discover_local_lsp, discover_local_sdks};
 pub(crate) use self::discovery::{
-    find_executable_in, is_executable_file, parse_ssh_probe_output, read_subdirs,
-    resolve_java_home_dir, system_search_dirs,
+    find_executable_in, is_executable_file, read_subdirs, resolve_java_home_dir,
+    system_search_dirs, system_search_dirs_with_shell,
 };
+pub(crate) use self::local_registry::load_registered_local_sdks_by_host;
 use self::local_registry::{
-    host_key_for_target, load_all_local_host_sdks, load_registered_local_sdks_by_host,
-    normalize_and_validate_local_sdk,
+    host_key_for_target, load_all_local_host_sdks, normalize_and_validate_local_sdk,
 };
+pub(crate) use self::remote_probe::parse_ssh_probe_output;
+use self::remote_probe::REMOTE_PROBE_SCRIPT;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -36,50 +44,80 @@ use dashmap::DashMap;
 use otto_core::{new_id, Error, Result};
 use otto_state::DbPool;
 use sqlx::Row;
+use tokio::sync::RwLock;
 
+use crate::environments::shell_env::ShellEnvResolver;
 use crate::target::{ResolvedTarget, TargetManager};
-use crate::toolchains_catalog::{
-    is_safe_version_token, resolve_sdk_download, CatalogClient, CatalogSdkEntry, EcosystemKind,
-    TargetPlatform,
-};
+use crate::toolchains_catalog::{CatalogClient, CatalogSdkEntry, EcosystemKind, TargetPlatform};
 use crate::types::{
-    IdeEcosystemKind, IdeInstallComponent, IdeInstallJob, IdeInstallJobStatus,
-    IdeInstallToolchainReq, IdeInstalledSdk, IdeProjectEnvironment, IdeRegisterLocalSdkReq,
-    IdeSshSpec, IdeTargetKind, IdeTargetSpec, IdeToolchainEcosystem, IdeToolchainsResp,
+    IdeEcosystemKind, IdeInstallJob, IdeInstalledSdk, IdeProjectEnvironment,
+    IdeRegisterLocalSdkReq, IdeSshSpec, IdeTargetKind, IdeTargetSpec, IdeToolchainEcosystem,
+    IdeToolchainsResp,
 };
 
-use self::installer::{
-    build_remote_install_script, install_local_dap, install_local_lsp, install_local_sdk,
-    run_ssh_streaming,
-};
-
-const MAX_JOB_LOGS: usize = 400;
-const MAX_FINISHED_JOBS: usize = 16;
-
-pub(crate) async fn load_registered_local_sdks(pool: &DbPool) -> Vec<IdeInstalledSdk> {
-    load_all_local_host_sdks(pool).await
-}
+pub(super) const MAX_JOB_LOGS: usize = 400;
+pub(super) const MAX_FINISHED_JOBS: usize = 16;
 
 /// Manages SDK/LSP/DAP discovery and background installation jobs across
 /// local and remote SSH targets.
 #[derive(Clone)]
 pub struct ToolchainManager {
     data_dir: PathBuf,
+    shell_env: Arc<ShellEnvResolver>,
     catalog: Arc<CatalogClient>,
-    jobs: Arc<DashMap<String, IdeInstallJob>>,
-    finished_order: Arc<Mutex<VecDeque<String>>>,
+    pub(super) jobs: Arc<DashMap<String, IdeInstallJob>>,
+    pub(super) finished_order: Arc<Mutex<VecDeque<String>>>,
     allow_test_loopback: Arc<AtomicBool>,
+    local_sdks_cache: Arc<RwLock<Option<Vec<IdeInstalledSdk>>>>,
+    local_sdks_gen: Arc<AtomicU64>,
 }
 
 impl ToolchainManager {
     pub fn new(data_dir: PathBuf) -> Self {
+        Self::with_shell_env(data_dir, Arc::new(ShellEnvResolver::new()))
+    }
+
+    pub fn with_shell_env(data_dir: PathBuf, shell_env: Arc<ShellEnvResolver>) -> Self {
         Self {
             data_dir,
+            shell_env,
             catalog: Arc::new(CatalogClient::new()),
             jobs: Arc::new(DashMap::new()),
             finished_order: Arc::new(Mutex::new(VecDeque::new())),
             allow_test_loopback: Arc::new(AtomicBool::new(false)),
+            local_sdks_cache: Arc::new(RwLock::new(None)),
+            local_sdks_gen: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    pub(crate) fn shell_env_snapshot(&self) -> BTreeMap<String, String> {
+        self.shell_env.vars_snapshot()
+    }
+
+    pub(crate) fn shell_path(&self) -> Option<String> {
+        self.shell_env.vars_snapshot().get("PATH").cloned()
+    }
+
+    pub(crate) fn local_sdks_generation(&self) -> u64 {
+        self.local_sdks_gen.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn cached_local_sdks(&self, pool: &DbPool) -> Vec<IdeInstalledSdk> {
+        if let Some(cached) = self.local_sdks_cache.read().await.as_ref() {
+            return cached.clone();
+        }
+        let loaded = load_all_local_host_sdks(pool).await;
+        let mut guard = self.local_sdks_cache.write().await;
+        if let Some(existing) = guard.as_ref() {
+            return existing.clone();
+        }
+        *guard = Some(loaded.clone());
+        loaded
+    }
+
+    async fn invalidate_local_sdks_cache(&self) {
+        *self.local_sdks_cache.write().await = None;
+        self.local_sdks_gen.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn allows_test_loopback(&self) -> bool {
@@ -102,20 +140,6 @@ impl ToolchainManager {
         self.data_dir.join("toolchains")
     }
 
-    pub fn list_jobs(&self) -> Vec<IdeInstallJob> {
-        let mut jobs: Vec<IdeInstallJob> = self.jobs.iter().map(|e| e.value().clone()).collect();
-        jobs.sort_by(|a, b| b.id.cmp(&a.id));
-        jobs
-    }
-
-    pub fn get_job(&self, job_id: &str) -> Result<IdeInstallJob> {
-        self.jobs
-            .get(job_id)
-            .map(|e| e.value().clone())
-            .ok_or_else(|| Error::NotFound(format!("toolchain install job '{job_id}'")))
-    }
-
-    /// Return all existing Otto-managed `bin` directories on the local host.
     pub fn extra_local_bin_dirs(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for root in self.local_toolchain_roots() {
@@ -124,21 +148,21 @@ impl ToolchainManager {
         out
     }
 
-    /// Resolve the best available local LSP executable path for `ecosystem`.
     pub fn resolve_local_lsp_path(&self, ecosystem: IdeEcosystemKind) -> Option<PathBuf> {
-        discover_local_lsp(
+        discover_local_lsp_with_shell(
             &self.local_toolchain_roots(),
             EcosystemKind::from(ecosystem),
+            self.shell_path().as_deref(),
         )
         .path
         .map(PathBuf::from)
     }
 
-    /// Resolve the best available local DAP adapter path for `ecosystem`.
     pub fn resolve_local_dap_path(&self, ecosystem: IdeEcosystemKind) -> Option<PathBuf> {
-        discover_local_dap(
+        discover_local_dap_with_shell(
             &self.local_toolchain_roots(),
             EcosystemKind::from(ecosystem),
+            self.shell_path().as_deref(),
         )
         .path
         .map(PathBuf::from)
@@ -147,9 +171,9 @@ impl ToolchainManager {
     fn local_toolchain_roots(&self) -> Vec<PathBuf> {
         let mut roots = vec![self.toolchains_dir()];
         if !otto_core::e2e::isolated() {
-            if let Some(dot_otto) = dirs::home_dir().map(|h| h.join(".otto/toolchains")) {
-                if dot_otto != roots[0] {
-                    roots.push(dot_otto);
+            if let Some(d) = dirs::home_dir().map(|h| h.join(".otto/toolchains")) {
+                if d != roots[0] {
+                    roots.push(d);
                 }
             }
         }
@@ -157,11 +181,6 @@ impl ToolchainManager {
     }
 
     /// Discover installed & downloadable SDKs, LSPs, and DAPs on `target`.
-    ///
-    /// When `include_catalog == false`, returns curated + warm-cached catalog entries
-    /// immediately (`<5ms`, zero network I/O). When `include_catalog == true`, fetches
-    /// official upstream release catalogs (`go.dev/dl/?mode=json&include=all`, Temurin,
-    /// Node.js, Python, Rust) with a bounded timeout and offline fallback.
     pub async fn list_toolchains_with_opts(
         &self,
         pool: Option<&DbPool>,
@@ -251,6 +270,8 @@ impl ToolchainManager {
         .and_then(|r| r.try_get("id").ok())
         .unwrap_or(id);
 
+        self.invalidate_local_sdks_cache().await;
+
         Ok(IdeInstalledSdk {
             id: saved_id,
             version,
@@ -319,6 +340,7 @@ impl ToolchainManager {
                 }
             }
         }
+        self.invalidate_local_sdks_cache().await;
         Ok(())
     }
 
@@ -337,6 +359,7 @@ impl ToolchainManager {
         };
         let roots = self.local_toolchain_roots();
         let env_clone = active_env.cloned();
+        let shell_path = self.shell_path();
 
         let (ecosystems, detected) = tokio::task::spawn_blocking(move || {
             let detected = scan_detected_sdks(&roots, &project_roots);
@@ -362,7 +385,7 @@ impl ToolchainManager {
                             }
                         }
                     }
-                    for disc in discover_local_sdks(&roots, eco) {
+                    for disc in discover_local_sdks_with_shell(&roots, eco, shell_path.as_deref()) {
                         if seen.insert(disc.path.clone()) {
                             installed.push(disc);
                         }
@@ -379,8 +402,16 @@ impl ToolchainManager {
                         ecosystem: eco.into(),
                         display_name: eco.display_name().to_string(),
                         installed,
-                        lsp_status: discover_local_lsp(&roots, eco),
-                        dap_status: discover_local_dap(&roots, eco),
+                        lsp_status: discover_local_lsp_with_shell(
+                            &roots,
+                            eco,
+                            shell_path.as_deref(),
+                        ),
+                        dap_status: discover_local_dap_with_shell(
+                            &roots,
+                            eco,
+                            shell_path.as_deref(),
+                        ),
                         downloadable,
                     }
                 })
@@ -459,216 +490,6 @@ impl ToolchainManager {
             detected: Vec::new(),
             jobs: self.list_jobs(),
         })
-    }
-
-    /// Spawn a background SDK / LSP / DAP installation job for `req.target`.
-    pub async fn start_install(
-        &self,
-        targets: &TargetManager,
-        req: IdeInstallToolchainReq,
-        ssh: Option<IdeSshSpec>,
-    ) -> Result<IdeInstallJob> {
-        req.target.validate()?;
-        if let Some(v) = req.version.as_deref().filter(|s| !s.trim().is_empty()) {
-            if !is_safe_version_token(v) {
-                return Err(Error::Invalid(format!(
-                    "invalid toolchain version '{}'",
-                    v.trim()
-                )));
-            }
-        }
-        let platform = match req.target.kind {
-            IdeTargetKind::Local => TargetPlatform::host(),
-            IdeTargetKind::Ssh => {
-                let spec = ssh.as_ref().ok_or_else(|| {
-                    Error::Invalid("SSH connection spec required for remote install".into())
-                })?;
-                let resolved =
-                    targets.resolve_with_ssh(&req.target, "ide-toolchains", spec.clone())?;
-                let info = targets.detect_platform(&resolved).await?;
-                TargetPlatform::from_uname(&info.os, &info.arch)
-                    .unwrap_or_else(TargetPlatform::host)
-            }
-        };
-
-        let eco = EcosystemKind::from(req.ecosystem);
-        let catalogs = self.catalog.fetch_all(platform).await;
-        let eco_cat = catalogs.get(&eco).cloned().unwrap_or_default();
-        let sdk_entry = if matches!(
-            req.component,
-            IdeInstallComponent::Sdk | IdeInstallComponent::All
-        ) {
-            Some(
-                resolve_sdk_download(eco, req.version.as_deref(), platform, &eco_cat)
-                    .map_err(Error::Invalid)?,
-            )
-        } else {
-            None
-        };
-
-        let job_id = format!("tcjob_{}", new_id());
-        let job = IdeInstallJob {
-            id: job_id.clone(),
-            ecosystem: req.ecosystem,
-            component: req.component,
-            version: sdk_entry
-                .as_ref()
-                .map(|e| e.version.clone())
-                .or_else(|| req.version.clone()),
-            target_os: platform.os.as_str().to_string(),
-            target_arch: platform.arch.as_str().to_string(),
-            status: IdeInstallJobStatus::Running,
-            progress_pct: 5,
-            log_lines: vec![format!(
-                "Starting {} ({:?}) install for {}-{}...",
-                eco.display_name(),
-                req.component,
-                platform.os.as_str(),
-                platform.arch.as_str()
-            )],
-            installed_path: None,
-            error: None,
-        };
-        self.jobs.insert(job_id.clone(), job.clone());
-
-        let mgr = self.clone();
-        tokio::spawn(async move {
-            let outcome = match req.target.kind {
-                IdeTargetKind::Local => {
-                    mgr.run_local_install(&job_id, eco, req.component, platform, sdk_entry)
-                        .await
-                }
-                IdeTargetKind::Ssh => match ssh {
-                    Some(spec) => {
-                        mgr.run_ssh_install(&job_id, &spec, eco, req.component, platform, sdk_entry)
-                            .await
-                    }
-                    None => Err("missing SSH connection specification".to_string()),
-                },
-            };
-            mgr.finish_job(&job_id, outcome);
-        });
-
-        Ok(job)
-    }
-
-    pub(super) fn log_progress(&self, job_id: &str, pct: u8, line: impl Into<String>) {
-        if let Some(mut entry) = self.jobs.get_mut(job_id) {
-            entry.progress_pct = pct.min(99);
-            let text = line.into();
-            if !text.trim().is_empty() {
-                if entry.log_lines.len() >= MAX_JOB_LOGS {
-                    entry.log_lines.remove(0);
-                }
-                entry.log_lines.push(text);
-            }
-        }
-    }
-
-    fn finish_job(&self, job_id: &str, outcome: std::result::Result<String, String>) {
-        if let Some(mut entry) = self.jobs.get_mut(job_id) {
-            match outcome {
-                Ok(path) => {
-                    entry.status = IdeInstallJobStatus::Done;
-                    entry.progress_pct = 100;
-                    entry.installed_path = Some(path.clone());
-                    entry.log_lines.push(format!("Completed cleanly: {path}"));
-                }
-                Err(err) => {
-                    tracing::warn!(job_id, error = %err, "IDE toolchain install job failed");
-                    entry.status = IdeInstallJobStatus::Error;
-                    entry.error = Some(err.clone());
-                    entry.log_lines.push(format!("ERROR: {err}"));
-                }
-            }
-            entry.log_lines.shrink_to_fit();
-        }
-        let mut evicted = Vec::new();
-        {
-            let mut order = self
-                .finished_order
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            order.push_back(job_id.to_string());
-            while order.len() > MAX_FINISHED_JOBS {
-                if let Some(old_id) = order.pop_front() {
-                    evicted.push(old_id);
-                }
-            }
-        }
-        for old_id in evicted {
-            self.jobs.remove(&old_id);
-        }
-    }
-
-    async fn run_local_install(
-        &self,
-        job_id: &str,
-        eco: EcosystemKind,
-        component: IdeInstallComponent,
-        platform: TargetPlatform,
-        sdk_entry: Option<CatalogSdkEntry>,
-    ) -> std::result::Result<String, String> {
-        let root = self.toolchains_dir();
-        tokio::fs::create_dir_all(&root)
-            .await
-            .map_err(|e| format!("create toolchains dir: {e}"))?;
-        let mut final_path = root.join(eco.as_str()).to_string_lossy().into_owned();
-        if matches!(
-            component,
-            IdeInstallComponent::Sdk | IdeInstallComponent::All
-        ) {
-            let entry = sdk_entry.ok_or_else(|| "missing SDK catalog entry".to_string())?;
-            self.log_progress(job_id, 15, format!("Downloading {}...", entry.label));
-            final_path = install_local_sdk(self, job_id, &root, eco, &entry).await?;
-        }
-        if matches!(
-            component,
-            IdeInstallComponent::Lsp | IdeInstallComponent::All
-        ) {
-            self.log_progress(
-                job_id,
-                65,
-                format!("Installing LSP ({})...", eco.lsp_name()),
-            );
-            let p = install_local_lsp(self, job_id, &root, eco, platform).await?;
-            if component == IdeInstallComponent::Lsp {
-                final_path = p;
-            }
-        }
-        if matches!(
-            component,
-            IdeInstallComponent::Dap | IdeInstallComponent::All
-        ) {
-            self.log_progress(
-                job_id,
-                85,
-                format!("Installing DAP ({})...", eco.dap_name()),
-            );
-            let p = install_local_dap(self, job_id, &root, eco, platform).await?;
-            if component == IdeInstallComponent::Dap {
-                final_path = p;
-            }
-        }
-        Ok(final_path)
-    }
-
-    async fn run_ssh_install(
-        &self,
-        job_id: &str,
-        ssh: &IdeSshSpec,
-        eco: EcosystemKind,
-        component: IdeInstallComponent,
-        platform: TargetPlatform,
-        sdk_entry: Option<CatalogSdkEntry>,
-    ) -> std::result::Result<String, String> {
-        let script = build_remote_install_script(eco, component, platform, sdk_entry.as_ref())?;
-        self.log_progress(
-            job_id,
-            20,
-            format!("Running remote installer on {}...", ssh.host),
-        );
-        run_ssh_streaming(ssh, &script, |line| self.log_progress(job_id, 60, line)).await
     }
 }
 

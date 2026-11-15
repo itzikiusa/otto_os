@@ -11,11 +11,16 @@
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
 
-  const FolderPickerLazy = lazyComponent(() => import('../../../lib/components/FolderPicker.svelte'));
   const IdeWorkspacePopoverLazy = lazyComponent(() => import('./IdeWorkspacePopover.svelte'));
 
+  interface Props {
+    mode?: 'switcher' | 'pills-bar';
+    onpickfolder?: (mode: 'open' | 'attach') => void;
+  }
+
+  let { mode = 'switcher', onpickfolder }: Props = $props();
+
   let menuOpen = $state(false);
-  let folderPickerMode = $state<'open' | 'attach' | null>(null);
   let triggerEl = $state<HTMLButtonElement | undefined>(undefined);
 
   function shortenHomePath(p: string): string {
@@ -117,49 +122,57 @@
     ctxMenu.show(e, items);
   }
 
-  function startFolderPick(mode: 'open' | 'attach'): void {
+  function startFolderPick(pickMode: 'open' | 'attach'): void {
     menuOpen = false;
-    folderPickerMode = mode;
-  }
-
-  async function handlePickedFolder(picked: string): Promise<void> {
-    const mode = folderPickerMode;
-    folderPickerMode = null;
-    if (!picked) return;
-    if (mode === 'attach' && ide.hasTarget) await ide.addProjectFolder(picked);
-    else await ide.setLocalTarget(picked);
+    onpickfolder?.(pickMode);
   }
 </script>
 
-<div class="ws-bar-cluster" role="group" aria-label="IDE project switcher">
-  <button
-    bind:this={triggerEl}
-    type="button"
-    class="ws-switcher-btn"
-    aria-haspopup="dialog"
-    aria-expanded={menuOpen}
-    title={ide.hasTarget ? `${ide.target.kind === 'ssh' ? 'SSH' : 'Project'}: ${ide.target.root}` : 'Select workspace or project folder'}
-    onclick={() => (menuOpen = !menuOpen)}
-    onpointerenter={() => IdeWorkspacePopoverLazy.prefetch()}
-    data-testid="ide-target-switcher"
-  >
-    <span class="ws-icon" aria-hidden="true">
-      <Icon name={ide.target.kind === 'ssh' ? 'server' : 'folder'} size={13} />
-    </span>
-    <span class="ws-name" dir="ltr">{primaryLabel}</span>
-    {#if ide.projectRoots.length > 1}
-      <Badge tone="accent" variant="outline" label={`${ide.projectRoots.length} repos`} />
-    {:else if extraRootCount > 0}
-      <Badge tone="accent" variant="outline" label={`+${extraRootCount}`} />
-    {/if}
-    {#if subtitlePath && pinnedProjects.length === 0}
-      <span class="ws-path" dir="ltr">{subtitlePath}</span>
-    {/if}
-    <Icon name="chevronDown" size={12} />
-  </button>
+{#if mode === 'switcher'}
+  <div class="ws-bar-cluster" role="group" aria-label="IDE project switcher">
+    <button
+      bind:this={triggerEl}
+      type="button"
+      class="ws-switcher-btn"
+      aria-haspopup="dialog"
+      aria-expanded={menuOpen}
+      title={ide.hasTarget ? `${ide.target.kind === 'ssh' ? 'SSH' : 'Project'}: ${ide.target.root}` : 'Select workspace or project folder'}
+      onclick={() => (menuOpen = !menuOpen)}
+      onpointerenter={() => IdeWorkspacePopoverLazy.prefetch()}
+      data-testid="ide-target-switcher"
+    >
+      <span class="ws-icon" aria-hidden="true">
+        <Icon name={ide.target.kind === 'ssh' ? 'server' : 'folder'} size={13} />
+      </span>
+      <span class="ws-name" dir="ltr">{primaryLabel}</span>
+      {#if ide.projectRoots.length > 1}
+        <Badge tone="accent" variant="outline" label={`${ide.projectRoots.length} repos`} />
+      {:else if extraRootCount > 0}
+        <Badge tone="accent" variant="outline" label={`+${extraRootCount}`} />
+      {:else if subtitlePath && pinnedProjects.length === 0}
+        <span class="ws-path" dir="ltr">{subtitlePath}</span>
+      {/if}
+      <Icon name="chevronDown" size={12} />
+    </button>
+  </div>
 
-  {#if !viewport.isPhone}
-    <div class="ws-pills-strip" role="group" aria-label="Pinned IDE projects">
+  {#if menuOpen}
+    <LazyMount
+      lazy={IdeWorkspacePopoverLazy}
+      what="project switcher"
+      quiet
+      props={{
+        triggerEl,
+        onclose: () => (menuOpen = false),
+        onpickfolder: startFolderPick,
+        onprojectcontextmenu: openProjectContextMenu,
+      }}
+      onerror={() => (menuOpen = false)}
+    />
+  {/if}
+{:else if !viewport.isPhone && pinnedProjects.length > 0}
+  <div class="ws-pills-bar" role="group" aria-label="Pinned IDE projects">
+    <div class="ws-pills-strip">
       {#each pinnedProjects as proj (proj.id)}
         {@const isActive = ide.activeProjectId === proj.id}
         <button
@@ -191,65 +204,39 @@
         <span class="ws-add-lbl">Project</span>
       </button>
     </div>
-  {/if}
-</div>
-
-{#if menuOpen}
-  <LazyMount
-    lazy={IdeWorkspacePopoverLazy}
-    what="project switcher"
-    quiet
-    props={{
-      triggerEl,
-      onclose: () => (menuOpen = false),
-      onpickfolder: startFolderPick,
-      onprojectcontextmenu: openProjectContextMenu,
-    }}
-    onerror={() => (menuOpen = false)}
-  />
-{/if}
-
-{#if folderPickerMode}
-  <LazyMount
-    lazy={FolderPickerLazy}
-    what="folder picker"
-    quiet
-    props={{
-      title: folderPickerMode === 'attach' ? 'Add folder to project' : 'Open project folder',
-      start: ide.target.kind === 'local' ? ide.target.root : '',
-      onpick: (p: string) => void handlePickedFolder(p),
-      onclose: () => (folderPickerMode = null),
-    }}
-    onerror={() => (folderPickerMode = null)}
-  />
+  </div>
 {/if}
 
 <style>
-  .ws-bar-cluster { display: inline-flex; align-items: center; gap: 6px; min-inline-size: 0; block-size: 28px; }
+  .ws-bar-cluster { display: inline-flex; align-items: center; gap: 6px; min-inline-size: 0; max-inline-size: 100%; block-size: 28px; }
   .ws-switcher-btn {
-    display: inline-flex; align-items: center; gap: 6px; max-inline-size: min(380px, 32vw); min-inline-size: 0;
+    display: inline-flex; align-items: center; gap: 6px; max-inline-size: min(230px, 22vw); min-inline-size: 0;
     block-size: 28px; padding-inline: 10px; background: var(--surface-2); color: var(--text);
     border: 1px solid var(--border); border-radius: var(--radius-s); font-size: var(--fs-s); cursor: pointer;
   }
   .ws-switcher-btn:hover { border-color: var(--border-strong); background: var(--hover); }
   .ws-icon { display: inline-flex; color: var(--accent-text); flex-shrink: 0; }
   .ws-name { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
-  .ws-path { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-inline-size: 160px; }
+  .ws-path { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-inline-size: 90px; }
+  .ws-pills-bar {
+    display: flex; align-items: center; padding-block: 4px; padding-inline: 16px;
+    background: var(--surface); border-block-end: 1px solid var(--border); flex-shrink: 0; min-inline-size: 0;
+  }
   .ws-pills-strip {
-    display: inline-flex; align-items: center; gap: 4px; max-inline-size: min(440px, 30vw);
+    display: flex; align-items: center; gap: 6px; inline-size: 100%;
     overflow-x: auto; scrollbar-width: none; min-inline-size: 0;
   }
   .ws-pills-strip::-webkit-scrollbar { display: none; }
   .ws-proj-pill {
     display: inline-flex; align-items: center; gap: 4px; block-size: 24px; padding-inline: 8px;
-    border-radius: var(--radius-s); border: 1px solid var(--border); background: var(--surface);
+    border-radius: var(--radius-s); border: 1px solid var(--border); background: var(--surface-2);
     color: var(--text-dim); font-size: var(--fs-xs); font-weight: 500; white-space: nowrap; cursor: pointer; flex-shrink: 0;
   }
   .ws-proj-pill:hover { background: var(--hover); color: var(--text); border-color: var(--border-strong); }
   .ws-proj-pill.is-active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); font-weight: 600; }
-  .ws-pill-name { max-inline-size: 112px; overflow: hidden; text-overflow: ellipsis; }
+  .ws-pill-name { max-inline-size: 140px; overflow: hidden; text-overflow: ellipsis; }
   .ws-pill-cnt { font-family: var(--font-mono); font-size: var(--fs-xs); opacity: 0.85; }
-  .ws-add-proj { border-style: dashed; }
-  @media (max-width: 1024px) { .ws-path, .ws-add-lbl { display: none; } .ws-pills-strip { max-inline-size: 220px; } }
+  .ws-add-proj { border-style: dashed; background: transparent; }
+  @media (max-width: 1024px) { .ws-path, .ws-add-lbl { display: none; } .ws-switcher-btn { max-inline-size: 175px; } }
   @media (max-width: 640px) { .ws-switcher-btn { max-inline-size: 145px; block-size: 26px; padding-inline: 8px; font-size: var(--fs-xs); } }
 </style>

@@ -461,7 +461,7 @@ async fn module_sdks_roundtrip_target_path_runs_and_debug_launch_overrides_work(
     )
     .unwrap();
 
-    let (_ctx, app) = build_test_app(data_dir.clone(), &db_path).await;
+    let (ctx, app) = build_test_app(data_dir.clone(), &db_path).await;
 
     // 1. `POST /ide/environments/python-venv` with optional `root` creates `<mod_py>/.venv`:
     let (st_ev, ev_body) = send_json(
@@ -559,9 +559,11 @@ async fn module_sdks_roundtrip_target_path_runs_and_debug_launch_overrides_work(
     assert_eq!(get_body["env"]["module_sdks"][&mod_py_canon], py_interp);
     assert!(get_body["effective_env"]["__otto_module_sdks__"].is_null());
 
-    // Sync snapshot (`lsp_host` `cached_effective_env_for_local_root`) sees module SDK:
-    let sync_go_env =
-        otto_ide::environments::cached_effective_env_for_local_root(&data_dir, &mod_go_canon);
+    // Sync snapshot (`EnvironmentManager::cached_effective_env_for_local_root`) sees module SDK:
+    let sync_go_env = ctx
+        .ide
+        .environments
+        .cached_effective_env_for_local_root(&mod_go_canon);
     assert_eq!(
         sync_go_env.get("GOROOT").map(String::as_str),
         Some(fake_go_str.as_str())

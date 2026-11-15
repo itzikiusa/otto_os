@@ -169,6 +169,12 @@ pub(super) fn watch(live: Arc<Live>, epoch: u64, pid: u32) {
             }
             last_seq = Some(seq);
         }
+        if live
+            .detaching_for_restart
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return; // daemon restarting: keep held CLI and its background jobs alive
+        }
         if tracker.tracked.is_empty() {
             return; // nothing was ever recorded below it
         }

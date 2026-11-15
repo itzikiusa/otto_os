@@ -5,6 +5,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
   import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
+  import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { plural } from '../../../lib/plural';
   import { toasts } from '../../../lib/toast.svelte';
@@ -22,7 +23,6 @@
   ];
 
   let activeEco = $state('go');
-  let sdkDropdownOpen = $state(false);
   let dlVersions = $state<Record<string, string>>({});
   let folderPickAction = $state<'module' | 'sdk' | null>(null);
   let sdkPickEco = $state('go');
@@ -82,12 +82,53 @@
   }
 
   async function pickDetectedSdk(det: IdeDetectedSdk): Promise<void> {
-    sdkDropdownOpen = false;
     const p = det.home_path || det.path || '';
     if (!p) return;
     const registered = await ide.addLocalToolchain(det.ecosystem, p);
     assignSdkToDraft(det.ecosystem, registered?.path || p);
     toasts.success(`Selected ${det.label || `${det.ecosystem.toUpperCase()} ${det.version}`}`);
+  }
+
+  function openProjectSdkMenu(e: MouseEvent): void {
+    const anchor = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
+    const items: MenuItem[] = [
+      {
+        label: '<No SDK>',
+        danger: true,
+        checked: !activePrimarySdkPath,
+        action: () => ideSettings.patchEnv({ go_root: '', java_home: '', python_interpreter: '', node_home: '', rust_toolchain: '' }),
+      },
+    ];
+    if (allInstalledSdks.length > 0) {
+      items.push({ separator: true }, { label: 'Configured SDKs', disabled: true });
+      for (const item of allInstalledSdks) {
+        const broken = isBroken(item.sdk);
+        items.push({
+          label: `${item.ecoName} ${item.sdk.version}${broken ? ' [Invalid / Missing]' : ''}`,
+          hint: item.sdk.path,
+          danger: broken,
+          checked: activePrimarySdkPath === item.sdk.path,
+          action: () => assignSdkToDraft(item.eco, item.sdk.path),
+        });
+      }
+    }
+    items.push(
+      { separator: true },
+      { label: 'Download SDK…', icon: 'download', action: () => onnavigate('project.sdks') },
+      { label: 'Add SDK from disk…', icon: 'folder', action: () => { sdkPickEco = 'go'; folderPickAction = 'sdk'; } },
+    );
+    if (ide.detectedSdks.length > 0) {
+      items.push({ separator: true }, { label: 'Detected SDKs', disabled: true });
+      for (const det of ide.detectedSdks) {
+        const detPath = det.home_path || det.path;
+        items.push({
+          label: det.label || `${det.ecosystem.toUpperCase()} ${det.version}`,
+          hint: detPath,
+          action: () => void pickDetectedSdk(det),
+        });
+      }
+    }
+    ctxMenu.showAt(anchor, items, { align: 'start' });
   }
 
   async function triggerInstall(eco: string, comp: 'sdk' | 'lsp' | 'dap', version?: string): Promise<void> {
@@ -128,59 +169,10 @@
     <div class="st-field">
       <span class="st-lbl" id="st-proj-sdk-lbl">SDK:</span>
       <div class="sdk-drop-wrap">
-        <button type="button" class="sdk-drop-trigger" aria-labelledby="st-proj-sdk-lbl" aria-expanded={sdkDropdownOpen} onclick={() => (sdkDropdownOpen = !sdkDropdownOpen)} data-testid="ide-project-sdk-picker">
+        <button type="button" class="sdk-drop-trigger" aria-labelledby="st-proj-sdk-lbl" aria-haspopup="menu" onclick={openProjectSdkMenu} data-testid="ide-project-sdk-picker">
           {#if activePrimarySdkLabel}<span class="sdk-val" dir="ltr">{activePrimarySdkLabel}</span>{:else}<span class="sdk-no-val">&lt;No SDK&gt;</span>{/if}
           <Icon name="chevronDown" size={12} />
         </button>
-
-        {#if sdkDropdownOpen}
-          <div class="sdk-menu" role="listbox" aria-label="Project SDK choices">
-            <button type="button" class="sdk-opt is-danger" onclick={() => { ideSettings.patchEnv({ go_root: '', java_home: '', python_interpreter: '', node_home: '', rust_toolchain: '' }); sdkDropdownOpen = false; }}>
-              <span>&lt;No SDK&gt;</span>
-            </button>
-
-            {#if allInstalledSdks.length > 0}
-              <div class="sdk-grp-hdr">Configured SDKs</div>
-              {#each allInstalledSdks as item (`${item.eco}:${item.sdk.path}`)}
-                <button type="button" class="sdk-opt" class:is-danger={isBroken(item.sdk)} onclick={() => { assignSdkToDraft(item.eco, item.sdk.path); sdkDropdownOpen = false; }}>
-                  <span class="sdk-opt-main" dir="ltr">{item.ecoName} {item.sdk.version}{isBroken(item.sdk) ? ' [Invalid / Missing]' : ''}</span>
-                  <span class="sdk-opt-sub" dir="ltr">{item.sdk.path}</span>
-                </button>
-              {/each}
-            {/if}
-
-            <div class="sdk-sep"></div>
-            <button type="button" class="sdk-opt" onclick={() => { sdkDropdownOpen = false; onnavigate('project.sdks'); }}><Icon name="download" size={12} /><span>Download SDK…</span></button>
-            <button type="button" class="sdk-opt" onclick={() => { sdkDropdownOpen = false; sdkPickEco = 'go'; folderPickAction = 'sdk'; }}><Icon name="folder" size={12} /><span>Add SDK from disk…</span></button>
-
-            {#if ide.detectedSdks.length > 0}
-              <div class="sdk-grp-hdr">Detected SDKs</div>
-              {#each ide.detectedSdks as det (`${det.ecosystem}:${det.home_path || det.path}`)}
-                <button type="button" class="sdk-opt" onclick={() => void pickDetectedSdk(det)}>
-                  <span class="sdk-opt-main" dir="ltr">{det.label || `${det.ecosystem.toUpperCase()} ${det.version}`}</span>
-                  <span class="sdk-opt-sub" dir="ltr">{det.home_path || det.path}</span>
-                </button>
-              {/each}
-            {/if}
-          </div>
-        {/if}
-      </div>
-    </div>
-
-    <div class="st-grid-2">
-      <div class="st-field">
-        <label class="st-lbl" for="st-lang-level">Language level:</label>
-        <select id="st-lang-level" class="input" bind:value={ideSettings.draft.javaLanguageLevel}>
-          <option value="23">23 — Latest preview &amp; modern syntax</option>
-          <option value="21">21 (LTS) — Virtual threads, pattern matching</option>
-          <option value="17">17 (LTS) — Sealed classes, records</option>
-          <option value="11">11 (LTS) — Standard enterprise baseline</option>
-          <option value="8">8 — Legacy bytecode target</option>
-        </select>
-      </div>
-      <div class="st-field">
-        <label class="st-lbl" for="st-comp-out">Compiler output:</label>
-        <input id="st-comp-out" class="input mono" type="text" dir="ltr" bind:value={ideSettings.draft.javaCompilerOutput} />
       </div>
     </div>
   </div>
@@ -255,7 +247,11 @@
       <div class="st-card">
         <div class="st-card-title">{ALL_ECOS.find((x) => x.id === activeEco)?.label} Ecosystem</div>
         <p class="st-help">Built-in fast syntax analysis, formatting, and table/schema inspection are active out of the box with zero external SDK download required.</p>
-        <button type="button" class="btn small" onclick={() => onnavigate(`lang.${activeEco}`)}>Configure {activeEco.toUpperCase()} preferences…</button>
+        {#if activeEco === 'csv'}
+          <button type="button" class="btn small" onclick={() => onnavigate('lang.csv')}>Configure CSV preferences…</button>
+        {:else if activeEco === 'shell'}
+          <button type="button" class="btn small" onclick={() => onnavigate('plugins')}>Manage Shell Language Server…</button>
+        {/if}
       </div>
     {:else}
       <div class="st-card">
@@ -335,8 +331,6 @@
   .st-sec { display: flex; flex-direction: column; gap: 14px; }
   .st-field { display: flex; flex-direction: column; gap: 4px; }
   .st-lbl { font-size: var(--fs-xs); font-weight: 600; color: var(--text); }
-  .st-grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
-  .mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
   .st-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
   .st-toolbar-btns, .dl-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .st-count { font-size: var(--fs-xs); color: var(--text-dim); font-weight: 500; }
@@ -344,14 +338,6 @@
   .sdk-drop-trigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; inline-size: 100%; padding-block: 6px; padding-inline: 10px; border: 1px solid var(--control-border); border-radius: var(--radius-s); background: var(--surface-2); color: var(--text); font-size: var(--fs-s); cursor: pointer; text-align: start; }
   .sdk-no-val { color: var(--danger); font-weight: 500; }
   .sdk-val { font-family: var(--font-mono); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sdk-menu { margin-block-start: 4px; max-block-size: 260px; overflow-y: auto; border: 1px solid var(--border-strong); border-radius: var(--radius-s); background: var(--surface); box-shadow: var(--shadow-card); padding: 4px; display: flex; flex-direction: column; gap: 2px; }
-  .sdk-grp-hdr { padding: 6px 8px 2px; font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); }
-  .sdk-sep { block-size: 1px; background: var(--border); margin-block: 4px; }
-  .sdk-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 6px 8px; border: 0; border-radius: var(--radius-s); background: transparent; color: var(--text); font-size: var(--fs-xs); cursor: pointer; text-align: start; }
-  .sdk-opt:hover { background: var(--hover); }
-  .sdk-opt.is-danger { color: var(--danger); }
-  .sdk-opt-main { font-weight: 500; }
-  .sdk-opt-sub { font-family: var(--font-mono); color: var(--text-dim); font-size: var(--fs-xs); }
   .mod-list, .st-card { border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface); padding: 10px; display: flex; flex-direction: column; gap: 8px; }
   .st-card-title { font-size: var(--fs-s); font-weight: 600; color: var(--text); }
   .st-help { margin: 0; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.5; }

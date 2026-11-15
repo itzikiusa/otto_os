@@ -3,7 +3,7 @@
 
 import type { DiffResp, Hunk } from '../../../lib/api/types';
 import { diffLineArrays } from '../../../lib/lineDiff.ts';
-import { wordDiff, type WordRange } from '../../git/diff-words.ts'; // ui-guards: allow — reuse Otto's shared Git word diff
+import { wordDiff, type WordRange } from '../../../lib/diff/diff-words.ts';
 
 export interface CompareHunk {
   index: number;

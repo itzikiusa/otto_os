@@ -6,8 +6,8 @@
   import { ensureHljs, escapeHtml, highlightLines, langFromPath } from '../../../lib/hl';
   import { scrollBehavior } from '../../../lib/motion';
   import { plural } from '../../../lib/plural';
-  import DiffViewer from '../../git/DiffViewer.svelte'; // ui-guards: allow — reuse Otto's shared Git DiffViewer
-  import { markWords } from '../../git/diff-words'; // ui-guards: allow — reuse Otto's shared Git word diff
+  import DiffViewer from '../../../lib/diff/DiffViewer.svelte';
+  import { markWords } from '../../../lib/diff/diff-words';
   import {
     applyLeftHunkToRight,
     computeSideBySideComparison,

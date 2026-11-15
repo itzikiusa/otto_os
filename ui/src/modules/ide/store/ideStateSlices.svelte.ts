@@ -1,4 +1,4 @@
-// Cohesive reactive sub-stores (`SOLID-4`) for `IdeStore`:
+// Cohesive reactive sub-stores for `IdeStore`:
 // - `IdeTargetEnvState`: toolchains, SDKs, environments, run configurations, active runs, and build-tool flags
 // - `IdeDebugState`: breakpoints, debugger session snapshot, variables, watches, and REPL
 // - `IdeCollabState`: live collaboration room, host/guest credentials, peer cursors, shared buffers, and plugins
@@ -36,6 +36,8 @@ export class IdeTargetEnvState {
   effectiveEnv = $state<Record<string, string>>({});
   shellEnv = $state<IdeShellEnvResp | null>(null);
   shellEnvLoading = $state(false);
+  shellEnvAttempted = $state(false);
+  shellEnvError = $state<string | null>(null);
   pythonVenvs = $state<IdePythonVenv[]>([]);
   dotenvFiles = $state<string[]>([]);
   runConfigs = $state<IdeRunConfig[]>([]);
@@ -58,6 +60,8 @@ export class IdeTargetEnvState {
     this.effectiveEnv = {};
     this.shellEnv = null;
     this.shellEnvLoading = false;
+    this.shellEnvAttempted = false;
+    this.shellEnvError = null;
     this.pythonVenvs = [];
     this.dotenvFiles = [];
     this.runConfigs = [];
@@ -87,6 +91,7 @@ export class IdeDebugState {
   watches = $state<IdeWatch[]>([]);
   replEntries = $state<IdeReplEntry[]>([]);
   debugLoading = $state(false);
+  debugStreamActive = $state(false);
 
   readonly allBreakpoints = $derived(Object.values(this.breakpointsByPath).flat());
   readonly effectiveBreakpoints = $derived(this.breakpointsMuted ? [] : this.allBreakpoints);
@@ -97,6 +102,7 @@ export class IdeDebugState {
     this.expandedVariables = {};
     this.replEntries = [];
     this.debugLoading = false;
+    this.debugStreamActive = false;
   }
 }
 
@@ -171,6 +177,8 @@ import type { IdeQuickFix } from '../../../lib/api/types/ide-intelligence';
 import { loadErrorText } from '../../../lib/loadError';
 import { toastError } from '../../../lib/toastError';
 import {
+  canonicalizeLocalProjectPath,
+  canonicalRootKey,
   detectFastRunConfigs,
   findContainingRoot,
   loadAttachedRootEntries,
@@ -239,9 +247,19 @@ export function resetTargetLifecycleState(
 ): void {
   host.collabState.reset();
   host.target = next;
-  const savedRoots = overrideAdditionalRoots
-    ? overrideAdditionalRoots.map((r) => normalizeRootPath(r)).filter((r) => r && r !== normalizeRootPath(next.root))
+  const primaryKey = canonicalRootKey(next.root);
+  const rawSaved = overrideAdditionalRoots
+    ? overrideAdditionalRoots.map((r) => normalizeRootPath(r)).filter(Boolean)
     : (next.root ? loadSavedAdditionalRoots(next) : []);
+  const seenKeys = new Set<string>(primaryKey ? [primaryKey] : []);
+  const savedRoots: string[] = [];
+  for (let i = 0; i < rawSaved.length; i++) {
+    const k = canonicalRootKey(rawSaved[i]);
+    if (k && !seenKeys.has(k)) {
+      seenKeys.add(k);
+      savedRoots.push(rawSaved[i]);
+    }
+  }
   host.additionalRoots = savedRoots;
   if (overrideAdditionalRoots && next.root) saveAdditionalRootsLocal(next, savedRoots);
   const bps = next.root ? normalizeBreakpointsMap(loadSavedBreakpoints(next), (p) => host.resolvePath(p)) : {};
@@ -280,11 +298,21 @@ export function syncAdditionalRootsFromEnvState(
   onChanged: () => void,
 ): void {
   const primary = normalizeRootPath(host.target.root);
-  const merged = [...host.additionalRoots];
-  let changed = false;
+  const seenKeys = new Set<string>(primary ? [canonicalRootKey(primary)] : []);
+  const merged: string[] = [];
+  for (let i = 0; i < host.additionalRoots.length; i++) {
+    const k = canonicalRootKey(host.additionalRoots[i]);
+    if (k && !seenKeys.has(k)) {
+      seenKeys.add(k);
+      merged.push(host.additionalRoots[i]);
+    }
+  }
+  let changed = merged.length !== host.additionalRoots.length;
   for (let i = 0; i < envRoots.length; i++) {
     const clean = normalizeRootPath(envRoots[i]);
-    if (clean && clean !== primary && !merged.includes(clean)) {
+    const k = canonicalRootKey(clean);
+    if (clean && k && !seenKeys.has(k)) {
+      seenKeys.add(k);
       merged.push(clean);
       changed = true;
     }
@@ -335,7 +363,10 @@ export async function fetchIdeWorkspaceTree(
         host.target = { ...host.target, root: resp.root };
         host.expandedDirs = { ...host.expandedDirs, [normalizeRootPath(resp.root)]: true };
       }
-      const entries = resp.entries ?? [];
+      const rawEntries = resp.entries ?? [];
+      const entries = host.target.kind === 'local'
+        ? rawEntries.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) }))
+        : rawEntries;
       host.treeRootEntries = entries;
       host.childrenByDir = { ...host.childrenByDir, [normalizeRootPath(host.target.root)]: entries };
       if (host.runConfigs.length === 0) {
@@ -352,7 +383,11 @@ export async function fetchIdeWorkspaceTree(
       onProbeBuildTool();
       void restoreWorkspaceTabsOrInitial(host);
     } else if (normDir) {
-      host.childrenByDir = { ...host.childrenByDir, [normDir]: resp.entries ?? [] };
+      const rawEntries = resp.entries ?? [];
+      const entries = host.target.kind === 'local'
+        ? rawEntries.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) }))
+        : rawEntries;
+      host.childrenByDir = { ...host.childrenByDir, [normDir]: entries };
     }
   } catch (e) {
     if (isRoot) host.treeError = loadErrorText(e);
@@ -391,10 +426,13 @@ export function performCloseTabBatch(
 export function computeIdeProjectRoots(primaryRoot: string, additionalRoots: readonly string[]): IdeProjectRoot[] {
   if (!primaryRoot) return [];
   const primary = normalizeRootPath(primaryRoot);
+  const seenKeys = new Set<string>([canonicalRootKey(primary)]);
   const out: IdeProjectRoot[] = [{ path: primary, name: ideBasename(primary) || primary, isPrimary: true }];
   for (let i = 0; i < additionalRoots.length; i++) {
     const r = normalizeRootPath(additionalRoots[i]);
-    if (r && r !== primary && !out.some((x) => x.path === r)) {
+    const k = canonicalRootKey(r);
+    if (r && k && !seenKeys.has(k)) {
+      seenKeys.add(k);
       out.push({ path: r, name: ideBasename(r) || r, isPrimary: false });
     }
   }

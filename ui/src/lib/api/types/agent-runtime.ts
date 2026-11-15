@@ -262,6 +262,12 @@ export interface RuntimeSnapshot {
   plans: PlanArtifact[];
   /** Messages queued behind the running turn, oldest first. */
   queued_prompts?: QueuedPrompt[];
+  /** Set when `tail_turns` / `before_turn_ordinal` omitted earlier turns. */
+  has_older?: boolean;
+  /** `ordinal` of the earliest turn included in this slice, when paginated. */
+  oldest_turn_ordinal?: number;
+  /** Count of earlier turns omitted before `oldest_turn_ordinal`. */
+  older_turns?: number;
 }
 
 /** A message waiting in a thread's queue (sent when the running turn ends). */

@@ -4278,3 +4278,59 @@ async fn multi_chunk_reasoning_and_message_preserve_started_at_across_completion
 
     rt.close(&s.id).await.unwrap();
 }
+
+#[tokio::test]
+async fn replay_paged_returns_tail_and_older_pages_across_restarts() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    host.wait(is_ready).await;
+
+    for n in 1..=5 {
+        rt.prompt(&s.id, &format!("turn {n}")).await.unwrap();
+        host.wait_n(is_terminal, n).await;
+    }
+
+    let tail = match rt
+        .replay_paged(&s.id, 0, Some(2), None, None)
+        .await
+        .unwrap()
+    {
+        RuntimeReplay::Snapshot { snapshot, .. } => *snapshot,
+        other => panic!("expected paged snapshot, got {other:?}"),
+    };
+    assert!(tail.has_older);
+    assert_eq!(tail.older_turns, 3);
+    assert_eq!(tail.oldest_turn_ordinal, Some(4));
+    assert_eq!(tail.turns.len(), 2);
+
+    let older = match rt
+        .replay_paged(&s.id, 0, None, tail.oldest_turn_ordinal, Some(2))
+        .await
+        .unwrap()
+    {
+        RuntimeReplay::Snapshot { snapshot, .. } => *snapshot,
+        other => panic!("expected older page snapshot, got {other:?}"),
+    };
+    assert!(older.has_older);
+    assert_eq!(older.older_turns, 1);
+    assert_eq!(older.oldest_turn_ordinal, Some(2));
+    assert_eq!(older.turns.len(), 2);
+
+    let first = match rt
+        .replay_paged(&s.id, 0, None, older.oldest_turn_ordinal, Some(2))
+        .await
+        .unwrap()
+    {
+        RuntimeReplay::Snapshot { snapshot, .. } => *snapshot,
+        other => panic!("expected first page snapshot, got {other:?}"),
+    };
+    assert!(!first.has_older);
+    assert_eq!(first.older_turns, 0);
+    assert_eq!(first.turns.len(), 1);
+
+    rt.close(&s.id).await.unwrap();
+}

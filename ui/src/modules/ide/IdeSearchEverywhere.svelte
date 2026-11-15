@@ -37,37 +37,6 @@
     | { kind: 'action'; action: IdeQuickAction }
     | { kind: 'hit'; item: IdeSearchItem; groupStart: boolean };
 
-  interface ExtendedSearchStore {
-    searchScopePath?: string | null;
-    searchReplaceMode?: boolean;
-    searchWorkspace: (
-      query: string,
-      mode: 'all' | 'files' | 'symbols' | 'text',
-      opts?: {
-        caseSensitive?: boolean;
-        regex?: boolean;
-        wholeWord?: boolean;
-        fileGlob?: string;
-        scopePath?: string | null;
-      },
-    ) => Promise<void>;
-    replaceInWorkspace: (
-      query: string,
-      replacement: string,
-      dryRun: boolean,
-      opts?: {
-        caseSensitive?: boolean;
-        regex?: boolean;
-        wholeWord?: boolean;
-        fileGlob?: string;
-        scopePath?: string | null;
-        paths?: string[];
-      },
-    ) => Promise<{ files_changed: number; replacements: number; previews: Array<{ path: string; count: number; sample_before: string; sample_after: string }> } | null>;
-  }
-
-  const extSearch = (): ExtendedSearchStore => ide as unknown as ExtendedSearchStore;
-
   const SEARCH_TABS: readonly TabItem<SearchTab>[] = [
     { id: 'all', label: 'All', testid: 'ide-se-tab-all' },
     { id: 'files', label: 'Files', testid: 'ide-se-tab-files' },
@@ -94,6 +63,12 @@
   let resultsEl = $state<HTMLDivElement | undefined>(undefined);
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let wasOpen = false;
+  let syncedInitTab: SearchTab = 'all';
+  let syncedReplaceMode = false;
+
+  function hasActiveQuery(t: SearchTab, q: string): boolean {
+    return t === 'text' ? q.length > 0 : q.trim().length > 0;
+  }
 
   const activeDirPath = $derived.by((): string => {
     const p = ide.activePath;
@@ -122,20 +97,23 @@
 
   $effect(() => {
     const open = ide.searchEverywhereOpen;
-    if (open && !wasOpen) {
-      const s = extSearch();
-      tab = ide.searchInitialTab;
-      replaceOpen = Boolean(s.searchReplaceMode);
-      if (s.searchScopePath) {
-        customScopePath = s.searchScopePath;
+    const nextInitTab = ide.searchInitialTab;
+    const nextReplace = Boolean(ide.searchReplaceMode);
+    if (open && (!wasOpen || nextInitTab !== syncedInitTab || nextReplace !== syncedReplaceMode)) {
+      tab = nextInitTab;
+      replaceOpen = nextReplace;
+      syncedInitTab = nextInitTab;
+      syncedReplaceMode = nextReplace;
+      if (ide.searchScopePath) {
+        customScopePath = ide.searchScopePath;
         scopeMode = 'custom';
-      } else {
+      } else if (!wasOpen) {
         scopeMode = 'project';
       }
       selectedIdx = 0;
       showAllRows = false;
       ide.replacePreview = null;
-      if (query.trim() && tab !== 'actions') triggerSearch(0);
+      if (hasActiveQuery(tab, query) && tab !== 'actions') triggerSearch(0);
     }
     wasOpen = open;
   });
@@ -148,7 +126,8 @@
     { id: 'run', label: 'Run active configuration', shortcut: '⌃R', icon: 'play', run: () => void ide.startRun() },
     { id: 'debug', label: 'Debug active configuration', shortcut: '⌃D', icon: 'bug', run: () => void ide.startDebug() },
     { id: 'save', label: 'Save active file', shortcut: '⌘S', icon: 'download', run: () => void ide.saveFile() },
-    { id: 'format', label: 'Reformat code', shortcut: '⌥⌘L', icon: 'format', run: () => void ide.formatActiveFile() },
+    { id: 'format', label: 'Reformat code', shortcut: '⌘⌥L', icon: 'format', run: () => void ide.formatActiveFile() },
+    { id: 'optimize-imports', label: 'Optimize imports', shortcut: '⌃⌥O', icon: 'layers', run: () => void ide.organizeImportsActiveFile() },
     { id: 'format-save', label: 'Toggle format on save', icon: 'check', run: () => toggleFormatOnSave() },
     { id: 'back', label: 'Navigate back', shortcut: '⌘[', icon: 'chevronLeft', run: () => void navigateIdeBack() },
     { id: 'forward', label: 'Navigate forward', shortcut: '⌘]', icon: 'chevronRight', run: () => void navigateIdeForward() },
@@ -241,7 +220,7 @@
   const visibleRows = $derived(!showAllRows && rows.length > ROW_CAP ? rows.slice(0, ROW_CAP) : rows);
 
   function buildSearchOpts() {
-    extSearch().searchScopePath = effectiveScopePath ?? null;
+    ide.searchScopePath = effectiveScopePath ?? null;
     return {
       caseSensitive,
       regex,
@@ -253,20 +232,20 @@
 
   function close(): void {
     if (debounceTimer) clearTimeout(debounceTimer);
-    extSearch().searchReplaceMode = false;
-    extSearch().searchScopePath = null;
+    ide.searchReplaceMode = false;
+    ide.searchScopePath = null;
     ide.searchEverywhereOpen = false;
   }
 
   function triggerSearch(delayMs = 120): void {
     if (debounceTimer) clearTimeout(debounceTimer);
-    const effectiveQ = parsedFileLineQuery.cleanQuery.trim();
-    if (tab === 'actions' || !effectiveQ) {
+    const effectiveQ = tab === 'text' ? query : parsedFileLineQuery.cleanQuery.trim();
+    if (tab === 'actions' || effectiveQ.length === 0) {
       ide.searchResults = [];
       return;
     }
     const mode = tab === 'all' ? 'all' : tab;
-    const run = () => void extSearch().searchWorkspace(effectiveQ, mode, buildSearchOpts());
+    const run = () => void ide.searchWorkspace(effectiveQ, mode, buildSearchOpts());
     if (delayMs <= 0) run();
     else debounceTimer = setTimeout(run, delayMs);
   }
@@ -317,20 +296,20 @@
   }
 
   async function previewReplace(): Promise<void> {
-    if (!query.trim()) return;
+    if (query.length === 0) return;
     replaceMode = 'preview';
     try {
-      await extSearch().replaceInWorkspace(query, replacement, true, buildSearchOpts());
+      await ide.replaceInWorkspace(query, replacement, true, buildSearchOpts());
     } finally {
       replaceMode = null;
     }
   }
 
   async function replaceSingleFile(filePath: string): Promise<void> {
-    if (!query.trim()) return;
+    if (query.length === 0) return;
     replaceMode = 'apply';
     try {
-      await extSearch().replaceInWorkspace(query, replacement, false, {
+      await ide.replaceInWorkspace(query, replacement, false, {
         caseSensitive,
         regex,
         wholeWord,
@@ -344,19 +323,19 @@
   }
 
   async function confirmAndReplaceAll(): Promise<void> {
-    if (!query.trim()) return;
+    if (query.length === 0) return;
     replaceMode = 'apply';
     try {
       const preview =
         ide.replacePreview ??
-        (await extSearch().replaceInWorkspace(query, replacement, true, buildSearchOpts()));
+        (await ide.replaceInWorkspace(query, replacement, true, buildSearchOpts()));
       if (!preview || preview.replacements === 0) return;
       const ok = await confirmer.ask(
         `Replace ${plural(preview.replacements, 'occurrence')} across ${plural(preview.files_changed, 'file')}?`,
         { title: 'Replace in path', confirmLabel: 'Replace all', danger: true },
       );
       if (!ok) return;
-      await extSearch().replaceInWorkspace(query, replacement, false, buildSearchOpts());
+      await ide.replaceInWorkspace(query, replacement, false, buildSearchOpts());
       close();
     } finally {
       replaceMode = null;
@@ -442,7 +421,10 @@
             aria-pressed={replaceOpen}
             onclick={() => {
               replaceOpen = !replaceOpen;
-              if (replaceOpen && tab !== 'text') tab = 'text';
+              if (replaceOpen && tab !== 'text') {
+                tab = 'text';
+                triggerSearch(0);
+              }
             }}
             data-testid="ide-se-replace-toggle"
           >Replace…</button>
@@ -502,7 +484,7 @@
           <button
             type="button"
             class="btn small"
-            disabled={!query.trim() || ide.replaceLoading}
+            disabled={query.length === 0 || ide.replaceLoading}
             onclick={() => void previewReplace()}
           >
             {ide.replaceLoading && replaceMode === 'preview' ? 'Previewing…' : 'Preview'}
@@ -510,7 +492,7 @@
           <button
             type="button"
             class="btn small primary"
-            disabled={!query.trim() || ide.replaceLoading}
+            disabled={query.length === 0 || ide.replaceLoading}
             onclick={() => void confirmAndReplaceAll()}
             data-testid="ide-replace-all-btn"
           >
@@ -548,7 +530,7 @@
           variant="compact"
           loading={ide.searchLoading && rows.length === 0}
           error={ide.searchError}
-          empty={rows.length === 0 && Boolean(query.trim())}
+          empty={rows.length === 0 && hasActiveQuery(tab, query)}
           onretry={() => triggerSearch(0)}
         >
           {#snippet emptyView()}

@@ -45,6 +45,7 @@ pub use nl::{
 pub use registry::Registry;
 #[doc(hidden)]
 pub use resource_cache::Lifecycle;
+pub use service::ide_watch::{SavedWatchTarget, WatchEndpoint, WatchExecOutcome, WatchExecReq};
 pub use service::DbViewerService;
 pub use split::{split_statements, SqlDialect, StatementSpan};
 pub use types::{

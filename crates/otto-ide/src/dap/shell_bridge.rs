@@ -22,9 +22,9 @@ use otto_core::new_id;
 use otto_core::{Error, Result};
 #[cfg(unix)]
 use serde_json::{json, Value};
-use tokio::io::DuplexStream;
 #[cfg(unix)]
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
+use tokio::io::DuplexStream;
 #[cfg(unix)]
 use tokio::net::unix::pipe::{self, Receiver as PipeReceiver, Sender as PipeSender};
 #[cfg(unix)]
@@ -33,6 +33,9 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 #[cfg(unix)]
+use super::shell_bridge_eval::{
+    check_shell_condition, encode_bp_list, interpolate_shell_log, spawn_trap_readers,
+};
 use super::shell_prelude::{BASH_PRELUDE, ZSH_PRELUDE};
 #[cfg(unix)]
 use super::wire::{DapMessage, DapReader, DapWriter};
@@ -59,19 +62,19 @@ pub struct ShellBridgeSpec {
 
 #[cfg(unix)]
 #[derive(Debug, Clone)]
-struct ShellBp {
-    line: u32,
-    condition: Option<String>,
-    hit_condition: Option<u32>,
-    log_message: Option<String>,
-    hits: u32,
+pub(super) struct ShellBp {
+    pub(super) line: u32,
+    pub(super) condition: Option<String>,
+    pub(super) hit_condition: Option<u32>,
+    pub(super) log_message: Option<String>,
+    pub(super) hits: u32,
 }
 
 #[cfg(unix)]
 #[derive(Debug, Clone)]
-struct PausedState {
-    frames: Vec<(String, String, u32)>,
-    vars: Vec<(String, String)>,
+pub(super) struct PausedState {
+    pub(super) frames: Vec<(String, String, u32)>,
+    pub(super) vars: Vec<(String, String)>,
 }
 
 #[cfg(not(unix))]
@@ -161,6 +164,8 @@ pub(crate) async fn spawn_shell_dap_bridge(
     cmd.arg(&prelude_file)
         .args(&spec.args)
         .current_dir(&spec.cwd)
+        .env_clear()
+        .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
         .envs(&env)
         .kill_on_drop(true)
         .stdin(Stdio::null())
@@ -212,7 +217,7 @@ async fn make_fifo(path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-enum TrapMsg {
+pub(super) enum TrapMsg {
     Stopped {
         reason: String,
         state: PausedState,
@@ -248,93 +253,13 @@ async fn run_shell_bridge_loop(
     let pause_file = ipc_dir.join("pause.flag");
 
     let (trap_tx, mut trap_rx) = mpsc::unbounded_channel::<TrapMsg>();
-
-    let stdout_handle = stdout.map(|out| {
-        let tx = trap_tx.clone();
-        let keepalive = Arc::clone(&evt_keepalive);
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(out).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
-                let _ = tx.send(TrapMsg::Output {
-                    category: "stdout",
-                    text: format!("{l}\n"),
-                });
-            }
-            if let Ok(mut g) = keepalive.lock() {
-                *g = None;
-            }
-        })
-    });
-    let stderr_handle = stderr.map(|err| {
-        let tx = trap_tx.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(err).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
-                let _ = tx.send(TrapMsg::Output {
-                    category: "stderr",
-                    text: format!("{l}\n"),
-                });
-            }
-        })
-    });
-
-    let evt_handle = {
-        let keepalive = Arc::clone(&evt_keepalive);
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(evt_pipe).lines();
-            let mut cur_reason = String::new();
-            let mut cur_frames: Vec<(String, String, u32)> = Vec::new();
-            let mut cur_vars: Vec<(String, String)> = Vec::new();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if line == "READY" {
-                    if let Ok(mut g) = keepalive.lock() {
-                        *g = None;
-                    }
-                    continue;
-                }
-                if line == "EXIT" {
-                    break;
-                }
-                if let Some(rest) = line.strip_prefix("STOP|") {
-                    let parts: Vec<&str> = rest.splitn(4, '|').collect();
-                    if parts.len() == 4 {
-                        cur_reason = parts[0].to_string();
-                        cur_frames.clear();
-                        cur_vars.clear();
-                    }
-                } else if let Some(rest) = line.strip_prefix("FRAME|") {
-                    let parts: Vec<&str> = rest.splitn(3, '|').collect();
-                    if parts.len() == 3 {
-                        let ln = parts[2].parse::<u32>().unwrap_or(1);
-                        let canon = std::fs::canonicalize(parts[1])
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_else(|_| parts[1].to_string());
-                        cur_frames.push((parts[0].to_string(), canon, ln));
-                    }
-                } else if let Some(rest) = line.strip_prefix("VAR|") {
-                    if let Some((k, v)) = rest.split_once('|') {
-                        cur_vars.push((k.to_string(), v.to_string()));
-                    }
-                } else if line == "END_STOP" {
-                    let _ = trap_tx.send(TrapMsg::Stopped {
-                        reason: std::mem::take(&mut cur_reason),
-                        state: PausedState {
-                            frames: std::mem::take(&mut cur_frames),
-                            vars: std::mem::take(&mut cur_vars),
-                        },
-                    });
-                } else if let Some(rest) = line.strip_prefix("EVAL_RES|") {
-                    if let Some((rc_s, out_s)) = rest.split_once('|') {
-                        let _ = trap_tx.send(TrapMsg::EvalResult {
-                            rc: rc_s.parse().unwrap_or(0),
-                            output: out_s.to_string(),
-                        });
-                    }
-                }
-            }
-            let _ = trap_tx.send(TrapMsg::Eof);
-        })
-    };
+    let (stdout_handle, stderr_handle, evt_handle) = spawn_trap_readers(
+        evt_pipe,
+        Arc::clone(&evt_keepalive),
+        stdout,
+        stderr,
+        trap_tx,
+    );
 
     let mut bps_by_file: HashMap<String, Vec<ShellBp>> = HashMap::new();
     let mut paused: Option<PausedState> = None;
@@ -550,47 +475,4 @@ async fn run_shell_bridge_loop(
         *g = None;
     }
     let _ = tokio::fs::remove_dir_all(&ipc_dir).await;
-}
-
-#[cfg(unix)]
-fn encode_bp_list(bps_by_file: &HashMap<String, Vec<ShellBp>>) -> String {
-    let mut out = String::from("|");
-    for (path, list) in bps_by_file {
-        for bp in list {
-            out.push_str(&format!("{path}:{}|", bp.line));
-        }
-    }
-    out
-}
-
-#[cfg(unix)]
-fn interpolate_shell_log(tpl: &str, vars: &[(String, String)]) -> String {
-    let mut out = tpl.to_string();
-    for (k, v) in vars {
-        out = out.replace(&format!("{{{k}}}"), v);
-        out = out.replace(&format!("${{{k}}}"), v);
-    }
-    out
-}
-
-#[cfg(unix)]
-async fn check_shell_condition(cond: &str, vars: &[(String, String)]) -> bool {
-    let mut cmd = Command::new("/bin/bash");
-    for (k, v) in vars {
-        cmd.env(k, v);
-    }
-    let expr = if cond.trim_start().starts_with('[') || cond.trim_start().starts_with("test ") {
-        cond.to_string()
-    } else {
-        format!("(( {cond} )) 2>/dev/null || [ {cond} ] 2>/dev/null")
-    };
-    cmd.arg("-c")
-        .arg(expr)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
 }

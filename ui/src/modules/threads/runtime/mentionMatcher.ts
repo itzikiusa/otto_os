@@ -43,17 +43,17 @@ function baseName(p: string): string {
 
 /** Detect an active `@<query>` token ending at `caret` (defaults to `text.length`). */
 export function atMentionTokenAt(text: string, caret = text.length): AtMentionToken | null {
+  if (!text || !text.includes('@')) return null;
   const clampedCaret = Math.max(0, Math.min(text.length, caret));
-  const head = text.slice(0, clampedCaret);
 
-  // Scan backward for the nearest `@` preceded by start-of-string or whitespace/delimiter.
+  // Scan backward in `text` for the nearest `@` preceded by start-of-string or whitespace/delimiter.
   let atIdx = -1;
-  for (let i = head.length - 1; i >= 0; i--) {
-    if (head[i] === '@') {
-      const prev = i === 0 ? ' ' : head[i - 1];
+  for (let i = clampedCaret - 1; i >= 0; i--) {
+    if (text.charCodeAt(i) === 64 /* '@' */) {
+      const prev = i === 0 ? ' ' : text[i - 1];
       if (/[\s([{"']/.test(prev)) {
         // Ignore `foo"@` where quote closed an earlier token; allow ` (@` or start `@`.
-        if ((prev === '"' || prev === "'") && i >= 2 && !/\s/.test(head[i - 2])) continue;
+        if ((prev === '"' || prev === "'") && i >= 2 && !/\s/.test(text[i - 2])) continue;
         atIdx = i;
         break;
       }
@@ -61,7 +61,7 @@ export function atMentionTokenAt(text: string, caret = text.length): AtMentionTo
   }
   if (atIdx < 0) return null;
 
-  const afterAt = head.slice(atIdx + 1);
+  const afterAt = text.slice(atIdx + 1, clampedCaret);
   if (afterAt.startsWith('"')) {
     const inner = afterAt.slice(1);
     // Once the closing quote is typed, the mention token is complete.
@@ -380,9 +380,21 @@ const FILE_CTX_SECTION_RE = /\n*---\s*(File|Folder)\s+context:\s*(.+?)\s*---\n(?
 const decodeXmlAttr = (s: string): string =>
   s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 
-/** Extract clean clickable badges from `<ide_context>` or `--- File context ---` blocks so user bubbles stay crisp in both Threads and IDE. */
-export function parseUserMessageWithBadges(raw: string): { badges: ParsedContextBadge[]; prose: string } {
-  if (!raw) return { badges: [], prose: '' };
+export interface ParsedUserMessageWithBadges {
+  badges: ParsedContextBadge[];
+  prose: string;
+}
+
+const EMPTY_PARSED_USER_MESSAGE: ParsedUserMessageWithBadges = { badges: [], prose: '' };
+const MAX_PARSED_USER_TEXT_CACHE = 512;
+const parsedUserByText = new Map<string, ParsedUserMessageWithBadges>();
+const parsedUserByItem = new WeakMap<object, { text: string; result: ParsedUserMessageWithBadges }>();
+
+function parseUserMessageUncached(raw: string): ParsedUserMessageWithBadges {
+  if (!raw) return EMPTY_PARSED_USER_MESSAGE;
+  if (!raw.includes('<ide_context') && !raw.includes('--- File context:') && !raw.includes('--- Folder context:') && !raw.startsWith('[PLAN MODE:') && !raw.startsWith('User request:') && !raw.startsWith('echo:')) {
+    return { badges: [], prose: raw.trim() };
+  }
   const badges: ParsedContextBadge[] = [];
 
   for (const blockMatch of raw.matchAll(IDE_CTX_BLOCK_RE)) {
@@ -423,4 +435,30 @@ export function parseUserMessageWithBadges(raw: string): { badges: ParsedContext
   });
 
   return { badges, prose: cleaned.trim() };
+}
+
+/** Extract clean clickable badges from `<ide_context>` or `--- File context ---` blocks so user bubbles stay crisp in both Threads and IDE. */
+export function parseUserMessageWithBadges(raw: string): ParsedUserMessageWithBadges {
+  if (!raw) return EMPTY_PARSED_USER_MESSAGE;
+  const cached = parsedUserByText.get(raw);
+  if (cached) return cached;
+  const result = parseUserMessageUncached(raw);
+  if (raw.length <= 64_000) {
+    if (parsedUserByText.size >= MAX_PARSED_USER_TEXT_CACHE) {
+      const oldest = parsedUserByText.keys().next().value;
+      if (oldest !== undefined) parsedUserByText.delete(oldest);
+    }
+    parsedUserByText.set(raw, result);
+  }
+  return result;
+}
+
+/** Memoize user-message envelope parsing per `TurnItem` reference so settled user
+ *  bubbles never re-run regex extraction during streamed assistant deltas. */
+export function parseUserMessageItemWithBadges(item: { text: string }): ParsedUserMessageWithBadges {
+  const hit = parsedUserByItem.get(item);
+  if (hit && hit.text === item.text) return hit.result;
+  const result = parseUserMessageWithBadges(item.text);
+  parsedUserByItem.set(item, { text: item.text, result });
+  return result;
 }

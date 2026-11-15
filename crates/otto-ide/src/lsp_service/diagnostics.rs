@@ -4,17 +4,11 @@
 //! with fast syntax & import analyzers for Go, Python, JSON/JSONL, TypeScript/JS,
 //! Rust, and Shell (`bash` / `zsh`).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::OnceLock;
-use std::time::Duration;
 
 use otto_core::domain::User;
 use otto_core::{Error, Result};
-use regex::Regex;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 
 use crate::target::ResolvedTarget;
 use crate::types::{
@@ -23,48 +17,13 @@ use crate::types::{
 };
 use crate::IdeCtx;
 
+pub(crate) use super::diagnostics_go::analyze_go_diagnostics;
 use super::diagnostics_polyglot::{
     analyze_js_ts_diagnostics, analyze_python_diagnostics, analyze_rust_diagnostics,
     analyze_shell_diagnostics,
 };
-use super::go_mod_nav::{discover_goroot_src_dirs, parse_go_imports, parse_go_mod_for_file};
-use super::java_diag::{analyze_java_diagnostics, make_delete_line_edit};
-use super::{build_formatter_env, code_mask_for_line, resolve_language};
-
-const COMMON_GO_STDLIB: &[(&str, &str)] = &[
-    ("bufio", "bufio"),
-    ("bytes", "bytes"),
-    ("context", "context"),
-    ("csv", "encoding/csv"),
-    ("errors", "errors"),
-    ("filepath", "path/filepath"),
-    ("fmt", "fmt"),
-    ("hex", "encoding/hex"),
-    ("http", "net/http"),
-    ("io", "io"),
-    ("json", "encoding/json"),
-    ("log", "log"),
-    ("math", "math"),
-    ("net", "net"),
-    ("os", "os"),
-    ("path", "path"),
-    ("rand", "math/rand"),
-    ("reflect", "reflect"),
-    ("regexp", "regexp"),
-    ("runtime", "runtime"),
-    ("slices", "slices"),
-    ("sort", "sort"),
-    ("sql", "database/sql"),
-    ("strconv", "strconv"),
-    ("strings", "strings"),
-    ("sync", "sync"),
-    ("atomic", "sync/atomic"),
-    ("testing", "testing"),
-    ("time", "time"),
-    ("unicode", "unicode"),
-    ("url", "net/url"),
-    ("utf8", "unicode/utf8"),
-];
+use super::java_diag::analyze_java_diagnostics;
+use super::{build_formatter_env, resolve_language};
 
 /// `POST /ide/lsp/diagnostics` — Stateless multi-language diagnostics + concrete `IdeQuickFix` edits.
 pub async fn diagnostics<S: IdeCtx>(
@@ -98,24 +57,9 @@ pub async fn diagnostics<S: IdeCtx>(
     };
 
     let lang = resolve_language(ctx, &req.path, req.language.as_deref());
-    let mut env_map = BTreeMap::new();
     let mut project_roots = Vec::new();
     let mut readonly_roots = Vec::new();
-    let mut preferred_java_home: Option<PathBuf> = None;
-
-    if let Some((ref resolved, ref spec)) = resolved_opt {
-        env_map = build_formatter_env(ctx, user, resolved, spec).await;
-        if let Ok(pe) = ctx
-            .ide()
-            .environments
-            .get_project_env(&ctx.pool(), spec)
-            .await
-        {
-            preferred_java_home = pe
-                .java_home
-                .filter(|s| !s.trim().is_empty())
-                .map(PathBuf::from);
-        }
+    if let Some((ref resolved, _)) = resolved_opt {
         project_roots = resolved.local_project_roots();
         if let ResolvedTarget::Local {
             readonly_roots: ro, ..
@@ -124,15 +68,22 @@ pub async fn diagnostics<S: IdeCtx>(
             readonly_roots = ro.clone();
         }
     }
-    if preferred_java_home.is_none() {
-        preferred_java_home = env_map
-            .get("JAVA_HOME")
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from);
-    }
 
+    // Lazily materialize toolchain/project environment variables ONLY for languages whose
+    // diagnostic analyzers actually read `env_map` (`java`, `go`, `python`).
     let diags = match lang.as_str() {
         "java" => {
+            let env_map = match resolved_opt {
+                Some((ref resolved, ref spec)) => {
+                    build_formatter_env(ctx, user, resolved, spec).await
+                }
+                None => BTreeMap::new(),
+            };
+            let preferred_java_home = env_map
+                .get("JAVA_HOME")
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from);
             let path_c = req.path.clone();
             let content_c = content.clone();
             tokio::task::spawn_blocking(move || {
@@ -149,6 +100,12 @@ pub async fn diagnostics<S: IdeCtx>(
         }
         "json" | "jsonl" => analyze_json_diagnostics(&req.path, &lang, &content),
         "go" => {
+            let env_map = match resolved_opt {
+                Some((ref resolved, ref spec)) => {
+                    build_formatter_env(ctx, user, resolved, spec).await
+                }
+                None => BTreeMap::new(),
+            };
             analyze_go_diagnostics(
                 &req.path,
                 &content,
@@ -158,7 +115,15 @@ pub async fn diagnostics<S: IdeCtx>(
             )
             .await
         }
-        "python" => analyze_python_diagnostics(&req.path, &content, &env_map).await,
+        "python" => {
+            let env_map = match resolved_opt {
+                Some((ref resolved, ref spec)) => {
+                    build_formatter_env(ctx, user, resolved, spec).await
+                }
+                None => BTreeMap::new(),
+            };
+            analyze_python_diagnostics(&req.path, &content, &env_map).await
+        }
         "shell" | "bash" | "sh" | "zsh" => {
             analyze_shell_diagnostics(&req.path, &lang, &content).await
         }
@@ -217,6 +182,16 @@ fn resolve_effective_target_spec(req: &IdeDiagnosticsReq) -> Option<IdeTargetSpe
     None
 }
 
+/// Convert `serde_json::Error::column()` (1-based UTF-8 byte offset on the error line)
+/// into a 1-based UTF-16 editor column so multi-byte keys/strings never shift squiggles.
+fn byte_col_to_utf16_col(raw_ln: &str, one_based_byte_col: usize) -> u32 {
+    let mut idx = one_based_byte_col.saturating_sub(1).min(raw_ln.len());
+    while idx > 0 && !raw_ln.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    (raw_ln[..idx].encode_utf16().count() + 1) as u32
+}
+
 // ---------------------------------------------------------------------------
 // JSON / JSONL Diagnostics (`serde_json` exact line/col + trailing comma fix)
 // ---------------------------------------------------------------------------
@@ -234,7 +209,7 @@ pub(crate) fn analyze_json_diagnostics(
                 continue;
             }
             if let Err(err) = serde_json::from_str::<serde_json::Value>(raw) {
-                let col = err.column().max(1) as u32;
+                let col = byte_col_to_utf16_col(raw, err.column());
                 out.push(IdeDiagnostic {
                     line: (idx + 1) as u32,
                     col,
@@ -255,7 +230,8 @@ pub(crate) fn analyze_json_diagnostics(
         return Vec::new();
     };
     let ln = (err.line().max(1) as u32).min(lines.len().max(1) as u32);
-    let col = err.column().max(1) as u32;
+    let err_raw_ln = lines.get((ln - 1) as usize).copied().unwrap_or("");
+    let col = byte_col_to_utf16_col(err_raw_ln, err.column());
     let mut fixes = Vec::new();
     let mut diag_line = ln;
     let mut diag_col = col;
@@ -269,7 +245,7 @@ pub(crate) fn analyze_json_diagnostics(
             let raw_ln = lines[(check_ln - 1) as usize];
             if let Some(comma_byte) = raw_ln.rfind(',') {
                 if raw_ln[comma_byte + 1..].trim().is_empty() {
-                    let comma_col = raw_ln[..comma_byte].chars().count() as u32 + 1;
+                    let comma_col = (raw_ln[..comma_byte].encode_utf16().count() + 1) as u32;
                     diag_line = check_ln;
                     diag_col = comma_col;
                     let mut fixed_line = raw_ln[..comma_byte].to_string();
@@ -307,285 +283,4 @@ pub(crate) fn analyze_json_diagnostics(
         message: err.to_string(),
         quick_fixes: fixes,
     }]
-}
-
-// ---------------------------------------------------------------------------
-// Go Diagnostics (`gofmt -e` syntax + unused imports + unimported package fixes)
-// ---------------------------------------------------------------------------
-
-pub(crate) async fn analyze_go_diagnostics(
-    path: &str,
-    content: &str,
-    project_roots: &[PathBuf],
-    readonly_roots: &[PathBuf],
-    env_map: &BTreeMap<String, String>,
-) -> Vec<IdeDiagnostic> {
-    let mut out = run_gofmt_syntax_check(content, env_map).await;
-    if !out.is_empty() {
-        return out;
-    }
-
-    let lines: Vec<&str> = content.lines().collect();
-    let imports = parse_go_imports(content);
-    let mut import_lines: HashMap<String, (u32, String)> = HashMap::new();
-    let mut in_import_block = false;
-    for (idx, &raw) in lines.iter().enumerate() {
-        let t = raw.split("//").next().unwrap_or("").trim();
-        if t.starts_with("import") && t.ends_with('(') {
-            in_import_block = true;
-            continue;
-        }
-        if in_import_block && t == ")" {
-            in_import_block = false;
-            continue;
-        }
-        if in_import_block || t.starts_with("import ") {
-            if let Some(q1) = t.find('"') {
-                if let Some(q2) = t[q1 + 1..].find('"') {
-                    let imp_path = &t[q1 + 1..q1 + 1 + q2];
-                    let prefix = t[..q1].trim().trim_start_matches("import").trim();
-                    if prefix != "_" && prefix != "." {
-                        let alias = if prefix.is_empty() {
-                            imp_path.rsplit('/').next().unwrap_or(imp_path).to_string()
-                        } else {
-                            prefix.to_string()
-                        };
-                        import_lines.insert(alias, ((idx + 1) as u32, imp_path.to_string()));
-                    }
-                }
-            }
-        }
-    }
-
-    // Scan body code for `ident.Member` qualifiers and declared identifiers.
-    static RE_QUAL: OnceLock<Regex> = OnceLock::new();
-    static RE_DECL: OnceLock<Regex> = OnceLock::new();
-    let qual_re = RE_QUAL
-        .get_or_init(|| Regex::new(r"\b([a-z][A-Za-z0-9_]*)\.([A-Z][A-Za-z0-9_]*)\b").unwrap());
-    let decl_re = RE_DECL.get_or_init(|| {
-        Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|=|\s+\*?[A-Za-z0-9_.\[\]]+)").unwrap()
-    });
-
-    let mut declared_locals = HashSet::new();
-    let mut used_qualifiers: HashSet<String> = HashSet::new();
-    let mut in_block = false;
-    let mut body_qual_sites: Vec<(u32, u32, String)> = Vec::new();
-
-    for (idx, &raw) in lines.iter().enumerate() {
-        let ln = (idx + 1) as u32;
-        let mask = code_mask_for_line("go", raw, &mut in_block);
-        let code_ln: String = raw
-            .char_indices()
-            .map(|(i, c)| {
-                if mask.get(i).copied().unwrap_or(false) {
-                    c
-                } else {
-                    ' '
-                }
-            })
-            .collect();
-        let t = code_ln.trim();
-        if t.starts_with("package ")
-            || t.starts_with("import ")
-            || import_lines.values().any(|(il, _)| *il == ln)
-        {
-            continue;
-        }
-        for cap in decl_re.captures_iter(&code_ln) {
-            declared_locals.insert(cap[1].to_string());
-        }
-        for cap in qual_re.captures_iter(&code_ln) {
-            let q = cap[1].to_string();
-            used_qualifiers.insert(q.clone());
-            if let Some(m) = cap.get(1) {
-                let col = code_ln[..m.start()].chars().count() as u32 + 1;
-                body_qual_sites.push((ln, col, q));
-            }
-        }
-    }
-
-    // Unused Go imports (`"imported and not used"`).
-    for (alias, (imp_ln, imp_path)) in &import_lines {
-        if !used_qualifiers.contains(alias) {
-            let del_edit = make_delete_line_edit(path, &lines, *imp_ln);
-            out.push(IdeDiagnostic {
-                line: *imp_ln,
-                col: 1,
-                end_line: *imp_ln,
-                end_col: (lines[(*imp_ln - 1) as usize].chars().count() as u32).max(1),
-                severity: "warning".into(),
-                code: "unused_import".into(),
-                source: "otto-go".into(),
-                message: format!("\"{imp_path}\" imported and not used"),
-                quick_fixes: vec![IdeQuickFix {
-                    title: format!("Remove unused import \"{imp_path}\""),
-                    line: *imp_ln,
-                    end_line: *imp_ln,
-                    replacement: String::new(),
-                    delete_line: true,
-                    is_preferred: true,
-                    edits: vec![del_edit],
-                }],
-            });
-        }
-    }
-
-    // Undeclared Go package qualifiers (`fmt.Println` when `"fmt"` is missing).
-    let stdlib_dirs = discover_goroot_src_dirs(readonly_roots, env_map);
-    let mod_info = parse_go_mod_for_file(Path::new(path), project_roots);
-    let mut flagged_quals = HashSet::new();
-
-    for (ln, col, qual) in body_qual_sites {
-        if imports.contains_key(&qual) || declared_locals.contains(&qual) {
-            continue;
-        }
-        if let Some(pkg_path) =
-            resolve_go_auto_import_candidate(&qual, &stdlib_dirs, mod_info.as_ref())
-        {
-            if !flagged_quals.insert((ln, qual.clone())) {
-                continue;
-            }
-            let edit = make_go_add_import_edit(path, &lines, &pkg_path);
-            let ins_ln = edit.start_line;
-            out.push(IdeDiagnostic {
-                line: ln,
-                col,
-                end_line: ln,
-                end_col: col + qual.chars().count() as u32,
-                severity: "error".into(),
-                code: "undeclared_name".into(),
-                source: "otto-go".into(),
-                message: format!("undefined: {qual}"),
-                quick_fixes: vec![IdeQuickFix {
-                    title: format!("Import \"{pkg_path}\""),
-                    line: ins_ln,
-                    end_line: ins_ln,
-                    replacement: format!("import \"{pkg_path}\""),
-                    delete_line: false,
-                    is_preferred: true,
-                    edits: vec![edit],
-                }],
-            });
-        }
-    }
-
-    out
-}
-
-pub(crate) fn resolve_go_auto_import_candidate(
-    qual: &str,
-    stdlib_dirs: &[PathBuf],
-    mod_info: Option<&super::go_mod_nav::GoModInfo>,
-) -> Option<String> {
-    if let Some(info) = mod_info {
-        for rep_mod in info.local_replaces.keys() {
-            if rep_mod.rsplit('/').next() == Some(qual) {
-                return Some(rep_mod.clone());
-            }
-        }
-        for req_mod in info.requires.keys() {
-            if req_mod.rsplit('/').next() == Some(qual) {
-                return Some(req_mod.clone());
-            }
-        }
-    }
-    for &(short, full) in COMMON_GO_STDLIB {
-        if short == qual {
-            return Some(full.to_string());
-        }
-    }
-    for sdir in stdlib_dirs {
-        if sdir.join(qual).is_dir() {
-            return Some(qual.to_string());
-        }
-    }
-    None
-}
-
-pub(crate) fn make_go_add_import_edit(path: &str, lines: &[&str], pkg_path: &str) -> IdeTextEdit {
-    for (idx, raw) in lines.iter().enumerate() {
-        let t = raw.trim();
-        if t.starts_with("import") && t.ends_with('(') {
-            let ins_ln = (idx + 2) as u32;
-            return IdeTextEdit {
-                path: path.to_string(),
-                start_line: ins_ln,
-                start_col: 1,
-                end_line: ins_ln,
-                end_col: 1,
-                new_text: format!("\t\"{pkg_path}\"\n"),
-            };
-        }
-    }
-    for (idx, raw) in lines.iter().enumerate() {
-        if raw.trim().starts_with("package ") {
-            let ins_ln = (idx + 2) as u32;
-            return IdeTextEdit {
-                path: path.to_string(),
-                start_line: ins_ln,
-                start_col: 1,
-                end_line: ins_ln,
-                end_col: 1,
-                new_text: format!("\nimport \"{pkg_path}\"\n"),
-            };
-        }
-    }
-    IdeTextEdit {
-        path: path.to_string(),
-        start_line: 1,
-        start_col: 1,
-        end_line: 1,
-        end_col: 1,
-        new_text: format!("import \"{pkg_path}\"\n"),
-    }
-}
-
-async fn run_gofmt_syntax_check(
-    content: &str,
-    env_map: &BTreeMap<String, String>,
-) -> Vec<IdeDiagnostic> {
-    let gofmt_bin =
-        crate::toolchains::find_executable_in(&crate::toolchains::system_search_dirs(), &["gofmt"])
-            .unwrap_or_else(|| PathBuf::from("gofmt"));
-    let mut cmd = Command::new(gofmt_bin);
-    cmd.arg("-e")
-        .envs(env_map)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let Ok(mut child) = cmd.spawn() else {
-        return Vec::new();
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(content.as_bytes()).await;
-    }
-    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(2), child.wait_with_output()).await
-    else {
-        return Vec::new();
-    };
-    if out.status.success() {
-        return Vec::new();
-    }
-    static RE_GOFMT: OnceLock<Regex> = OnceLock::new();
-    let re = RE_GOFMT.get_or_init(|| Regex::new(r":(\d+):(\d+):\s*(.+)$").unwrap());
-    let mut diags = Vec::new();
-    for line in String::from_utf8_lossy(&out.stderr).lines() {
-        if let Some(cap) = re.captures(line) {
-            let ln: u32 = cap[1].parse().unwrap_or(1);
-            let col: u32 = cap[2].parse().unwrap_or(1);
-            diags.push(IdeDiagnostic {
-                line: ln,
-                col,
-                end_line: ln,
-                end_col: col + 1,
-                severity: "error".into(),
-                code: "syntax_error".into(),
-                source: "gofmt".into(),
-                message: cap[3].trim().to_string(),
-                quick_fixes: Vec::new(),
-            });
-        }
-    }
-    diags
 }

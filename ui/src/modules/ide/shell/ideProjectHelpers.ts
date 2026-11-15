@@ -2,6 +2,7 @@
 // and instant zero-wait runner seeding for `IdeStore`.
 
 import { api } from '../../../lib/api/client';
+import { readIdePreferences } from '../../../lib/components/cm-ide-prefs';
 import { confirmer } from '../../../lib/confirm.svelte';
 import {
   loadNamedIdeProjectsLocal,
@@ -44,7 +45,7 @@ export interface ProjectHelperHost {
   targetQuery(extra?: Record<string, string | boolean | null | undefined>): string;
   resolvePath(p: string): string;
   loadTree(dirPath?: string): Promise<void>;
-  openFile(rawPath: string, opts?: { line?: number; col?: number; preview?: boolean; inSplit?: boolean }): Promise<void>;
+  openFile(rawPath: string, opts?: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; background?: boolean }): Promise<void>;
   saveEnvironment(patch: Partial<IdeProjectEnvironment>): Promise<boolean>;
 }
 
@@ -55,6 +56,11 @@ export function normalizeRootPath(raw: string): string {
 }
 
 const PRIVATE_SYMLINK_RE = /^\/private(?=\/(?:var|tmp)(?:\/|$))/;
+
+export function canonicalRootKey(raw: string): string {
+  const clean = normalizeRootPath(raw);
+  return clean.replace(PRIVATE_SYMLINK_RE, '');
+}
 
 export function canonicalizeLocalProjectPath(
   fullPath: string,
@@ -82,6 +88,7 @@ export async function performCloseAllTabs(
   },
   bufPerf: { flushAll(h: { tabs: IdeOpenTab[] }): void; isTabDirty(t: IdeOpenTab): boolean },
   evict: (paths: string[]) => void,
+  saveTab?: (path: string) => Promise<boolean>,
   opts: { force?: boolean } = {},
 ): Promise<void> {
   if (host.tabs.length === 0) {
@@ -91,7 +98,13 @@ export async function performCloseAllTabs(
     return;
   }
   bufPerf.flushAll(host);
-  const dirtyTabs = host.tabs.filter((t) => bufPerf.isTabDirty(t));
+  let dirtyTabs = host.tabs.filter((t) => bufPerf.isTabDirty(t));
+  if (!opts.force && dirtyTabs.length > 0 && readIdePreferences().autoSave && saveTab) {
+    for (let i = 0; i < dirtyTabs.length; i++) {
+      if (!dirtyTabs[i].readOnly) await saveTab(dirtyTabs[i].path);
+    }
+    dirtyTabs = host.tabs.filter((t) => bufPerf.isTabDirty(t));
+  }
   if (!opts.force && dirtyTabs.length > 0) {
     const promptMsg =
       dirtyTabs.length === 1
@@ -224,10 +237,11 @@ export function mutatePathBreakpoints(
 
 export function isPathExternal(fullPath: string, roots: IdeProjectRoot[]): boolean {
   if (!fullPath || /^(?:jdt|jar):/i.test(fullPath)) return true;
+  const cFull = canonicalRootKey(fullPath);
   for (let i = 0; i < roots.length; i++) {
-    const r = normalizeRootPath(roots[i].path);
+    const r = canonicalRootKey(roots[i].path);
     if (!r) continue;
-    if (fullPath === r || fullPath.startsWith(`${r}/`)) return false;
+    if (cFull === r || cFull.startsWith(`${r}/`)) return false;
   }
   return true;
 }
@@ -237,12 +251,13 @@ export function formatRelativeToRoots(fullPath: string, primaryRoot: string, roo
     const bang = fullPath.lastIndexOf('!/');
     return bang >= 0 ? fullPath.slice(bang + 2).split('?')[0] : ideBasename(fullPath);
   }
-  const primary = normalizeRootPath(primaryRoot);
-  if (primary && fullPath.startsWith(`${primary}/`)) return fullPath.slice(primary.length + 1);
+  const cFull = canonicalRootKey(fullPath);
+  const primary = canonicalRootKey(primaryRoot);
+  if (primary && cFull.startsWith(`${primary}/`)) return cFull.slice(primary.length + 1);
   for (let i = 0; i < roots.length; i++) {
-    const r = normalizeRootPath(roots[i].path);
-    if (r && r !== primary && fullPath.startsWith(`${r}/`)) {
-      return `${roots[i].name}/${fullPath.slice(r.length + 1)}`;
+    const r = canonicalRootKey(roots[i].path);
+    if (r && r !== primary && cFull.startsWith(`${r}/`)) {
+      return `${roots[i].name}/${cFull.slice(r.length + 1)}`;
     }
   }
   return fullPath;
@@ -250,11 +265,16 @@ export function formatRelativeToRoots(fullPath: string, primaryRoot: string, roo
 
 export function findContainingRoot(fullPath: string, roots: IdeProjectRoot[]): IdeProjectRoot | null {
   let best: IdeProjectRoot | null = null;
+  let bestLen = -1;
+  const cFull = canonicalRootKey(fullPath);
   for (let i = 0; i < roots.length; i++) {
-    const r = normalizeRootPath(roots[i].path);
+    const r = canonicalRootKey(roots[i].path);
     if (!r) continue;
-    if (fullPath === r || fullPath.startsWith(`${r}/`)) {
-      if (!best || r.length > best.path.length) best = roots[i];
+    if (cFull === r || cFull.startsWith(`${r}/`)) {
+      if (r.length > bestLen) {
+        best = roots[i];
+        bestLen = r.length;
+      }
     }
   }
   return best;
@@ -268,7 +288,11 @@ export async function loadAttachedRootEntries(host: ProjectHelperHost, rootPath:
       ? new URLSearchParams({ kind: 'local', root: clean, show_hidden: String(host.showHidden) }).toString()
       : host.targetQuery({ path: clean, show_hidden: host.showHidden });
     const resp = await api.get<IdeFsTreeResp>(`/ide/fs/tree?${query}`);
-    host.childrenByDir = { ...host.childrenByDir, [clean]: resp.entries ?? [] };
+    const rawEntries = resp.entries ?? [];
+    const entries = host.target.kind === 'local'
+      ? rawEntries.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) }))
+      : rawEntries;
+    host.childrenByDir = { ...host.childrenByDir, [clean]: entries };
   } catch (e) {
     toastError(`Couldn’t open folder ${ideBasename(clean)}`, e);
   }
@@ -276,9 +300,11 @@ export async function loadAttachedRootEntries(host: ProjectHelperHost, rootPath:
 
 export async function attachProjectFolder(host: ProjectHelperHost, rawFolder: string): Promise<boolean> {
   const clean = normalizeRootPath(rawFolder);
-  const primary = normalizeRootPath(host.target.root);
-  if (!clean || clean === primary || host.additionalRoots.includes(clean)) {
-    if (clean === primary || host.additionalRoots.includes(clean)) {
+  const cleanKey = canonicalRootKey(clean);
+  const primaryKey = canonicalRootKey(host.target.root);
+  const alreadyPresent = cleanKey === primaryKey || host.additionalRoots.some((r) => canonicalRootKey(r) === cleanKey);
+  if (!clean || alreadyPresent) {
+    if (alreadyPresent) {
       toasts.info('Folder is already in this project');
     }
     return false;
@@ -311,8 +337,9 @@ export async function attachProjectFolder(host: ProjectHelperHost, rawFolder: st
 
 export async function detachProjectFolder(host: ProjectHelperHost, rawFolder: string): Promise<boolean> {
   const clean = normalizeRootPath(rawFolder);
-  if (!host.additionalRoots.includes(clean)) return false;
-  const nextRoots = host.additionalRoots.filter((r) => r !== clean);
+  const cleanKey = canonicalRootKey(clean);
+  if (!host.additionalRoots.some((r) => canonicalRootKey(r) === cleanKey)) return false;
+  const nextRoots = host.additionalRoots.filter((r) => canonicalRootKey(r) !== cleanKey);
   try {
     const q = host.targetQuery({ folder_path: clean });
     const resp = await api.del<{ env?: IdeProjectEnvironment }>(`/ide/projects/folders?${q}`);
@@ -354,11 +381,14 @@ export async function createTemplatedFile(
     return fallbackMutate('create_file', fullPath);
   }
   try {
+    const prefs = readIdePreferences();
     await api.put('/ide/fs/file', {
       target: host.targetPayload,
       path: fullPath,
       content: template,
       create_dirs: true,
+      record_local_history: prefs.localHistoryEnabled,
+      local_history_retention_days: prefs.localHistoryRetentionDays,
     });
     const containingRoot = findContainingRoot(fullPath, host.projectRoots);
     if (containingRoot && !containingRoot.isPrimary) {

@@ -10,8 +10,10 @@
 pub mod build_tools;
 pub mod collab;
 pub mod dap;
+pub mod db_watch;
 pub mod deps_inspector;
 pub mod environments;
+pub mod go_build_cache;
 pub mod gutter;
 pub mod http;
 pub mod java_workspace;
@@ -58,6 +60,23 @@ pub trait IdeCtx: Clone + Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
+    fn list_saved_db_targets<'a>(
+        &'a self,
+        _user: &'a User,
+    ) -> BoxFuture<'a, Result<Vec<db_watch::IdeSavedDbTarget>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn execute_db_watch_query<'a>(
+        &'a self,
+        _user: &'a User,
+        _exec: db_watch::DbWatchQueryExec,
+    ) -> BoxFuture<'a, Result<db_watch::DbWatchExecOutcome>> {
+        Box::pin(async {
+            Err(otto_core::Error::Invalid(
+                "database watch query executor is not wired in this context".into(),
+            ))
+        })
+    }
 }
 
 /// Shared stateful IDE engine mounted on `ServerCtx`.
@@ -72,19 +91,23 @@ pub struct IdeEngine {
     pub history: local_history::LocalHistoryStore,
     pub projects: projects::ProjectStore,
     pub lsp_pool: Arc<lsp_host::pool::LspPool>,
-    pub debug_owners: dashmap::DashMap<String, String>,
+    pub db_watch: db_watch::DbWatchRegistry,
 }
 
 impl IdeEngine {
     pub fn new(data_dir: PathBuf) -> Self {
-        environments::ensure_shell_env_warming();
+        let shell_env = Arc::new(environments::ShellEnvResolver::new());
+        shell_env.ensure_warming_in_background();
         let history = local_history::LocalHistoryStore::new(data_dir.clone());
         let projects = projects::ProjectStore::new(data_dir.clone());
-        let environments = environments::EnvironmentManager::new(data_dir.clone());
-        let spawner =
-            lsp_host::pool::process_spawner_with_engine(data_dir.clone(), environments.clone());
-        let lsp_pool = lsp_host::pool::LspPool::new_with_environments(
-            spawner,
+        let environments = environments::EnvironmentManager::with_shell_env(
+            data_dir.clone(),
+            Arc::clone(&shell_env),
+        );
+        let toolchains =
+            toolchains::ToolchainManager::with_shell_env(data_dir.clone(), Arc::clone(&shell_env));
+        let lsp_pool = lsp_host::pool::LspPool::new_managed(
+            data_dir.clone(),
             lsp_host::pool::IDLE_TIMEOUT,
             environments.clone(),
         );
@@ -93,44 +116,34 @@ impl IdeEngine {
             Arc::clone(&lsp_pool),
             environments.clone(),
         );
+        let dap = dap::DapManager::with_environments(data_dir.clone(), environments.clone());
         Self {
             targets,
-            toolchains: toolchains::ToolchainManager::new(data_dir.clone()),
+            toolchains,
             environments,
-            dap: dap::DapManager::new(data_dir.clone()),
+            dap,
             collab: collab::CollabHub::new(),
             plugins: plugins::IdePluginRegistry::new(data_dir.clone()),
             history,
             projects,
             lsp_pool,
-            debug_owners: dashmap::DashMap::new(),
+            db_watch: db_watch::DbWatchRegistry::new(),
             data_dir,
         }
     }
 
-    pub fn record_debug_owner(&self, debug_id: &str, user_id: &str) {
-        if self.debug_owners.len() >= 2048 {
-            if let Some(first) = self.debug_owners.iter().next().map(|e| e.key().clone()) {
-                self.debug_owners.remove(&first);
-            }
-        }
-        self.debug_owners
-            .insert(debug_id.to_string(), user_id.to_string());
+    /// Live root PIDs of active local IDE runs and DAP debug sessions, used by
+    /// [`db_watch::DbWatchRegistry`] to discover in-process `miniredis` servers.
+    pub fn active_local_pids(&self) -> Vec<u32> {
+        let mut pids = self.environments.active_local_pids();
+        pids.extend(self.dap.active_local_pids());
+        pids.sort_unstable();
+        pids.dedup();
+        pids
     }
 
     pub fn authorize_debug_session(&self, user: &User, debug_id: &str) -> Result<()> {
-        if user.is_root {
-            return Ok(());
-        }
-        match self.debug_owners.get(debug_id) {
-            Some(owner) if owner.value() == &user.id => Ok(()),
-            Some(_) => Err(otto_core::Error::Forbidden(
-                "debug session belongs to another user".into(),
-            )),
-            None => Err(otto_core::Error::NotFound(format!(
-                "debug session not found: {debug_id}"
-            ))),
-        }
+        self.dap.authorize_session(user, debug_id)
     }
 
     pub fn filter_debug_sessions(
@@ -138,17 +151,7 @@ impl IdeEngine {
         user: &User,
         sessions: Vec<types::IdeDebugSessionSnapshot>,
     ) -> Vec<types::IdeDebugSessionSnapshot> {
-        if user.is_root {
-            return sessions;
-        }
-        sessions
-            .into_iter()
-            .filter(|s| {
-                self.debug_owners
-                    .get(&s.id)
-                    .is_some_and(|o| o.value() == &user.id)
-            })
-            .collect()
+        self.dap.filter_sessions_for_user(user, sessions)
     }
 }
 

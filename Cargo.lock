@@ -4950,6 +4950,7 @@ dependencies = [
  "axum",
  "axum-server",
  "dirs",
+ "otto-agent-protocol",
  "otto-core",
  "otto-keychain",
  "otto-mcp",

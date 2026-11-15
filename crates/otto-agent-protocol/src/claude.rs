@@ -112,13 +112,13 @@ fn classify(tool: &str) -> (ToolType, RequestKind) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum BlockKind {
     Text,
     Thinking,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Block {
     kind: BlockKind,
     item_id: String,
@@ -127,6 +127,7 @@ struct Block {
     started_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Tool {
     name: String,
     input: Value,
@@ -136,12 +137,40 @@ struct Tool {
     status: TurnItemStatus,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Pending {
     cli_request_id: String,
     tool_name: String,
     input: Value,
     tool_use_id: Option<String>,
     suggestions: Vec<Value>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ClaudeDriverState {
+    fresh_session_id: String,
+    session_id: Option<String>,
+    next_req: u64,
+    init_req: Option<String>,
+    turn_id: Option<String>,
+    blocks: Vec<(u64, Block)>,
+    message_id: Option<String>,
+    streamed: Vec<String>,
+    last_reply: Option<Block>,
+    last_usage: Option<(Option<String>, Value)>,
+    tools: HashMap<String, Tool>,
+    pending: HashMap<String, Pending>,
+    model: Option<String>,
+    effort: Option<String>,
+    access: RuntimeAccessMode,
+    bypass_allowed: bool,
+    switches: Vec<String>,
+    tasks: HashMap<String, tasks::Task>,
+    agents: HashMap<String, tasks::Agent>,
+    sub_tools: HashMap<String, tasks::SubTool>,
+    bg_inputs: tasks::BgInputs,
+    finished: Vec<String>,
+    reported_background: Vec<BackgroundTask>,
 }
 
 pub struct ClaudeDriver {
@@ -1243,6 +1272,70 @@ impl StructuredDriver for ClaudeDriver {
         self.turn_id = None;
         DriverStep::default()
     }
+
+    fn snapshot_state(&self) -> Value {
+        let mut blocks: Vec<(u64, Block)> =
+            self.blocks.iter().map(|(k, v)| (*k, v.clone())).collect();
+        blocks.sort_by_key(|(k, _)| *k);
+        serde_json::to_value(ClaudeDriverState {
+            fresh_session_id: self.fresh_session_id.clone(),
+            session_id: self.session_id.clone(),
+            next_req: self.next_req,
+            init_req: self.init_req.clone(),
+            turn_id: self.turn_id.clone(),
+            blocks,
+            message_id: self.message_id.clone(),
+            streamed: self.streamed.clone(),
+            last_reply: self.last_reply.clone(),
+            last_usage: self.last_usage.clone(),
+            tools: self.tools.clone(),
+            pending: self.pending.clone(),
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            access: self.access,
+            bypass_allowed: self.bypass_allowed,
+            switches: self.switches.clone(),
+            tasks: self.tasks.clone(),
+            agents: self.agents.clone(),
+            sub_tools: self.sub_tools.clone(),
+            bg_inputs: self.bg_inputs.clone(),
+            finished: self.finished.clone(),
+            reported_background: self.reported_background.clone(),
+        })
+        .unwrap_or(Value::Null)
+    }
+
+    fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
+        if state.is_null() {
+            return Ok(());
+        }
+        let s: ClaudeDriverState = serde_json::from_value(state.clone())
+            .map_err(|e| DriverError(format!("invalid claude driver state: {e}")))?;
+        self.fresh_session_id = s.fresh_session_id;
+        self.session_id = s.session_id;
+        self.next_req = s.next_req;
+        self.init_req = s.init_req;
+        self.turn_id = s.turn_id;
+        self.blocks = s.blocks.into_iter().collect();
+        self.message_id = s.message_id;
+        self.streamed = s.streamed;
+        self.last_reply = s.last_reply;
+        self.last_usage = s.last_usage;
+        self.tools = s.tools;
+        self.pending = s.pending;
+        self.model = s.model;
+        self.effort = s.effort;
+        self.access = s.access;
+        self.bypass_allowed = s.bypass_allowed;
+        self.switches = s.switches;
+        self.tasks = s.tasks;
+        self.agents = s.agents;
+        self.sub_tools = s.sub_tools;
+        self.bg_inputs = s.bg_inputs;
+        self.finished = s.finished;
+        self.reported_background = s.reported_background;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2183,5 +2276,75 @@ mod tests {
             .events
             .iter()
             .any(|e| matches!(e, DriverEvent::ContextUsage(_))));
+    }
+
+    #[test]
+    fn snapshot_and_restore_preserve_mid_turn_blocks_tools_and_pending_approvals() {
+        let mut d1 = ClaudeDriver::new();
+        ready(&mut d1);
+        feed(
+            &mut d1,
+            json!({"type":"system","subtype":"init","session_id":"claude-sid-1","model":"claude-sonnet"}),
+        );
+        d1.prompt("t1", &RuntimePromptReq::of("inspect")).unwrap();
+        feed(
+            &mut d1,
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"msg_1"}}}),
+        );
+        feed(
+            &mut d1,
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}),
+        );
+        feed(
+            &mut d1,
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}}),
+        );
+        let perm = feed(
+            &mut d1,
+            json!({"type":"control_request","request_id":"req_9","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"tu_1"}}),
+        );
+        assert!(perm
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::Request { id, .. } if id == "claude-req_9")));
+        feed(
+            &mut d1,
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}),
+        );
+        feed(
+            &mut d1,
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hel"}}}),
+        );
+
+        let snap = d1.snapshot_state();
+        let mut d2 = ClaudeDriver::new();
+        d2.restore_state(&snap).unwrap();
+
+        let resp = d2
+            .respond("claude-req_9", ApprovalDecision::Accept)
+            .unwrap();
+        let sent_resp: Value = serde_json::from_str(&resp.writes[0]).unwrap();
+        assert_eq!(sent_resp["response"]["request_id"], "req_9");
+
+        let delta = feed(
+            &mut d2,
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"lo"}}}),
+        );
+        assert!(delta.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "Hello")
+        )));
+        let done = feed(
+            &mut d2,
+            json!({"type":"result","subtype":"success","is_error":false}),
+        );
+        assert!(done.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
     }
 }

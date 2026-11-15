@@ -30,7 +30,7 @@
     onclose?: () => void;
   }
 
-  let { open, onclose }: Props = $props();
+  let { open, onclose = () => (ide.shareOpen = false) }: Props = $props();
   type ShareTab = 'host' | 'join';
 
   const isOpen = $derived(open === undefined ? ide.shareOpen : open);
@@ -48,7 +48,7 @@
 
   function close(): void {
     ide.shareOpen = false;
-    onclose?.();
+    onclose();
   }
 
   $effect(() => {
@@ -150,11 +150,13 @@
     if (peer.role === nextRole) return;
     roleBusyPeer = peer.peer_id;
     try {
-      await ide.setCollabPeerRole(peer.peer_id, nextRole);
-      toasts.success(
-        `Updated ${peer.display_name}`,
-        nextRole === 'editor' ? 'Can edit files & co-debug' : 'Read-only viewer',
-      );
+      const ok = await ide.setCollabPeerRole(peer.peer_id, nextRole);
+      if (ok) {
+        toasts.success(
+          `Updated ${peer.display_name}`,
+          nextRole === 'editor' ? 'Can edit files & co-debug' : 'Read-only viewer',
+        );
+      }
     } finally {
       roleBusyPeer = null;
     }
@@ -170,8 +172,10 @@
       { title: 'Stop sharing workspace?', confirmLabel: 'Stop sharing', danger: true },
     );
     if (!ok) return;
-    await ide.stopCollabRoom();
-    toasts.success('Stopped sharing — invite link revoked');
+    const stopped = await ide.stopCollabRoom();
+    if (stopped) {
+      toasts.success('Stopped sharing — invite link revoked');
+    }
   }
 
   function handleLeaveGuestRoom(): void {
@@ -437,8 +441,8 @@
 {/if}
 
 <style>
-  .sh-shell { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
-  .sh-pane { display: flex; flex-direction: column; gap: 6px; padding-block-start: 4px; min-width: 0; }
+  .sh-shell { display: flex; flex-direction: column; gap: 14px; min-inline-size: 0; }
+  .sh-pane { display: flex; flex-direction: column; gap: 6px; padding-block-start: 4px; min-inline-size: 0; }
 
   .sh-live-banner,
   .sh-peers-sec,
@@ -473,7 +477,7 @@
   .sh-link-box { display: flex; flex-direction: column; gap: 4px; }
   .sh-lbl { font-size: var(--fs-xs); font-weight: 500; color: var(--text-dim); }
   .sh-link-row { display: flex; align-items: center; gap: 8px; }
-  .sh-link-row input { flex: 1; min-width: 0; }
+  .sh-link-row input { flex: 1; min-inline-size: 0; }
 
   .sh-role-cards, .sh-two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 
@@ -504,7 +508,7 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     border: 1px solid var(--border);
-    min-width: 0;
+    min-inline-size: 0;
   }
   .sh-peer-dot {
     --peer-dot: var(--accent);
@@ -514,7 +518,7 @@
     background: var(--peer-dot);
     flex-shrink: 0;
   }
-  .sh-peer-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+  .sh-peer-info { display: flex; flex-direction: column; gap: 2px; min-inline-size: 0; flex: 1; }
   .sh-peer-name-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .sh-peer-name { font-size: var(--fs-s); font-weight: 600; color: var(--text); }
   .sh-peer-loc { color: var(--text-dim); }

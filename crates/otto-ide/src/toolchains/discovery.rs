@@ -1,9 +1,9 @@
-//! Local filesystem & remote SSH batched SDK/LSP/DAP discovery helpers.
+//! Local filesystem SDK/LSP/DAP discovery helpers.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::toolchains_catalog::{EcosystemKind, TargetPlatform, JAVA_DEBUG_JAR_NAME};
+use crate::toolchains_catalog::{EcosystemKind, JAVA_DEBUG_JAR_NAME};
 use crate::types::{IdeInstalledSdk, IdeProjectEnvironment, IdeToolBinaryStatus};
 
 pub(super) fn empty_tool(name: &str) -> IdeToolBinaryStatus {
@@ -54,11 +54,15 @@ pub(super) fn collect_managed_bin_dirs(tc_root: &Path, out: &mut Vec<PathBuf>) {
 }
 
 pub(crate) fn system_search_dirs() -> Vec<PathBuf> {
+    system_search_dirs_with_shell(None)
+}
+
+pub(crate) fn system_search_dirs_with_shell(shell_path: Option<&str>) -> Vec<PathBuf> {
     let mut dirs = std::env::var_os("PATH")
         .map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
         .unwrap_or_default();
-    if let Some(shell_path) = crate::environments::cached_shell_env_snapshot().get("PATH") {
-        for p in std::env::split_paths(shell_path) {
+    if let Some(sp) = shell_path {
+        for p in std::env::split_paths(sp) {
             if !dirs.contains(&p) {
                 dirs.push(p);
             }
@@ -107,13 +111,22 @@ pub(crate) fn is_executable_file(path: &Path) -> bool {
     }
 }
 
+#[cfg(test)]
 pub(super) fn discover_local_sdks(roots: &[PathBuf], eco: EcosystemKind) -> Vec<IdeInstalledSdk> {
+    discover_local_sdks_with_shell(roots, eco, None)
+}
+
+pub(super) fn discover_local_sdks_with_shell(
+    roots: &[PathBuf],
+    eco: EcosystemKind,
+    shell_path: Option<&str>,
+) -> Vec<IdeInstalledSdk> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for root in roots {
         scan_otto_sdks(root, eco, &mut seen, &mut out);
     }
-    scan_system_sdks(eco, &mut seen, &mut out);
+    scan_system_sdks(eco, shell_path, &mut seen, &mut out);
     out
 }
 
@@ -185,10 +198,11 @@ fn scan_otto_sdks(
 
 fn scan_system_sdks(
     eco: EcosystemKind,
+    shell_path: Option<&str>,
     seen: &mut BTreeSet<String>,
     out: &mut Vec<IdeInstalledSdk>,
 ) {
-    let search = system_search_dirs();
+    let search = system_search_dirs_with_shell(shell_path);
     let home = dirs::home_dir();
     match eco {
         EcosystemKind::Java => {
@@ -300,7 +314,16 @@ fn scan_system_sdks(
     }
 }
 
+#[cfg(test)]
 pub(super) fn discover_local_lsp(roots: &[PathBuf], eco: EcosystemKind) -> IdeToolBinaryStatus {
+    discover_local_lsp_with_shell(roots, eco, None)
+}
+
+pub(super) fn discover_local_lsp_with_shell(
+    roots: &[PathBuf],
+    eco: EcosystemKind,
+    shell_path: Option<&str>,
+) -> IdeToolBinaryStatus {
     let name = eco.lsp_name().to_string();
     let rels: &[&str] = match eco {
         EcosystemKind::Java => &["java/lsp/bin/jdtls"],
@@ -335,7 +358,7 @@ pub(super) fn discover_local_lsp(roots: &[PathBuf], eco: EcosystemKind) -> IdeTo
         EcosystemKind::Shell => &["bash-language-server"],
         EcosystemKind::Json => &["vscode-json-language-server", "vscode-json-languageserver"],
     };
-    if let Some(sys) = find_executable_in(&system_search_dirs(), sys_names) {
+    if let Some(sys) = find_executable_in(&system_search_dirs_with_shell(shell_path), sys_names) {
         return IdeToolBinaryStatus {
             name,
             available: true,
@@ -345,7 +368,16 @@ pub(super) fn discover_local_lsp(roots: &[PathBuf], eco: EcosystemKind) -> IdeTo
     empty_tool(&name)
 }
 
+#[cfg(test)]
 pub(super) fn discover_local_dap(roots: &[PathBuf], eco: EcosystemKind) -> IdeToolBinaryStatus {
+    discover_local_dap_with_shell(roots, eco, None)
+}
+
+pub(super) fn discover_local_dap_with_shell(
+    roots: &[PathBuf],
+    eco: EcosystemKind,
+    shell_path: Option<&str>,
+) -> IdeToolBinaryStatus {
     let name = eco.dap_name().to_string();
     let java_rel = format!("java/dap/{JAVA_DEBUG_JAR_NAME}");
     let rels: Vec<&str> = match eco {
@@ -391,7 +423,7 @@ pub(super) fn discover_local_dap(roots: &[PathBuf], eco: EcosystemKind) -> IdeTo
         EcosystemKind::Shell => &["bashdb", "bash", "zsh"],
         EcosystemKind::Json => &["jq"],
     };
-    if let Some(sys) = find_executable_in(&system_search_dirs(), sys_names) {
+    if let Some(sys) = find_executable_in(&system_search_dirs_with_shell(shell_path), sys_names) {
         return IdeToolBinaryStatus {
             name,
             available: true,
@@ -511,104 +543,4 @@ fn push_sdk(
             active: false,
         });
     }
-}
-
-pub(super) const REMOTE_PROBE_SCRIPT: &str = r#"
-echo "UNAME:$(uname -s) $(uname -m)"
-export PATH="$HOME/.otto/toolchains/java/current/bin:$HOME/.otto/toolchains/go/current/bin:$HOME/.otto/toolchains/node/current/bin:$HOME/.otto/toolchains/go/bin:$HOME/.otto/toolchains/rust/bin:$HOME/.otto/toolchains/rust/cargo/bin:$HOME/.otto/toolchains/python/bin:$HOME/.otto/toolchains/shell/bin:$HOME/.otto/toolchains/json/bin:$HOME/.cargo/bin:$HOME/go/bin:/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin:$PATH"
-for d in "$HOME"/.otto/toolchains/java/jdks/*; do
-  [ -d "$d" ] || continue
-  jh=""
-  for cand in "$d/Contents/Home" "$d" "$d"/*/Contents/Home "$d"/*; do
-    if [ -x "$cand/bin/java" ]; then jh="$cand"; break; fi
-  done
-  [ -n "$jh" ] && echo "SDK:java:otto:$jh"
-done
-for d in "$HOME"/.otto/toolchains/go/sdks/*; do
-  if [ -x "$d/go/bin/go" ]; then echo "SDK:go:otto:$d/go"; elif [ -x "$d/bin/go" ]; then echo "SDK:go:otto:$d"; fi
-done
-for d in "$HOME"/.otto/toolchains/rust/rustup/toolchains/*; do [ -d "$d" ] && echo "SDK:rust:otto:$d"; done
-for d in "$HOME"/.otto/toolchains/node/sdks/*; do [ -d "$d" ] && echo "SDK:node:otto:$d"; done
-for d in "$HOME"/.otto/toolchains/python/interpreters/*; do [ -x "$d/bin/python3" ] && echo "SDK:python:otto:$d/bin/python3"; done
-[ -x "$HOME/.otto/toolchains/shell/bin/shfmt" ] && echo "SDK:shell:otto:$HOME/.otto/toolchains/shell/bin/shfmt" || true
-[ -x "$HOME/.otto/toolchains/json/bin/jq" ] && echo "SDK:json:otto:$HOME/.otto/toolchains/json/bin/jq" || true
-for pair in "java:java" "go:go" "rust:rustc" "node:node" "python:python3" "shell:bash" "json:jq"; do
-  e="${pair%%:*}"; b="${pair#*:}"
-  command -v "$b" >/dev/null 2>&1 && echo "SDK:$e:system:$(command -v "$b")" || true
-done
-for pair in "java:jdtls:$HOME/.otto/toolchains/java/lsp/bin/jdtls" "go:gopls:$HOME/.otto/toolchains/go/bin/gopls" "rust:rust-analyzer:$HOME/.otto/toolchains/rust/bin/rust-analyzer" "node:typescript-language-server:$HOME/.otto/toolchains/node/lsp/node_modules/.bin/typescript-language-server" "python:pyright-langserver:$HOME/.otto/toolchains/python/bin/pyright-langserver" "shell:bash-language-server:$HOME/.otto/toolchains/shell/lsp/node_modules/.bin/bash-language-server" "json:vscode-json-language-server:$HOME/.otto/toolchains/json/lsp/node_modules/.bin/vscode-json-language-server"; do
-  e="${pair%%:*}"; r="${pair#*:}"; b="${r%%:*}"; m="${r#*:}"
-  if [ -x "$m" ]; then echo "LSP:$e:$m"; elif command -v "$b" >/dev/null 2>&1; then echo "LSP:$e:$(command -v "$b")"; fi
-done
-[ -f "$HOME/.otto/toolchains/java/dap/com.microsoft.java.debug.plugin-0.53.1.jar" ] && echo "DAP:java:$HOME/.otto/toolchains/java/dap/com.microsoft.java.debug.plugin-0.53.1.jar" || true
-command -v dlv >/dev/null 2>&1 && echo "DAP:go:$(command -v dlv)" || true
-if [ -x "$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb" ]; then echo "DAP:rust:$HOME/.otto/toolchains/rust/dap/extension/adapter/codelldb"; elif command -v codelldb >/dev/null 2>&1; then echo "DAP:rust:$(command -v codelldb)"; fi
-[ -f "$HOME/.otto/toolchains/node/dap/js-debug/src/dapDebugServer.js" ] && echo "DAP:node:$HOME/.otto/toolchains/node/dap/js-debug/src/dapDebugServer.js" || true
-[ -x "$HOME/.otto/toolchains/python/dap/bin/python" ] && echo "DAP:python:$HOME/.otto/toolchains/python/dap/bin/python" || true
-if [ -x "$HOME/.otto/toolchains/shell/bin/bashdb" ]; then echo "DAP:shell:$HOME/.otto/toolchains/shell/bin/bashdb"; elif command -v bashdb >/dev/null 2>&1; then echo "DAP:shell:$(command -v bashdb)"; fi
-if [ -x "$HOME/.otto/toolchains/json/bin/jq" ]; then echo "DAP:json:$HOME/.otto/toolchains/json/bin/jq"; elif command -v jq >/dev/null 2>&1; then echo "DAP:json:$(command -v jq)"; fi
-"#;
-
-#[derive(Default)]
-pub(crate) struct ProbedRemoteEcosystem {
-    pub installed: Vec<IdeInstalledSdk>,
-    pub lsp: Option<IdeToolBinaryStatus>,
-    pub dap: Option<IdeToolBinaryStatus>,
-}
-
-pub(crate) fn parse_ssh_probe_output(
-    raw: &str,
-) -> (
-    TargetPlatform,
-    HashMap<EcosystemKind, ProbedRemoteEcosystem>,
-) {
-    let mut platform = TargetPlatform::host();
-    let mut map: HashMap<EcosystemKind, ProbedRemoteEcosystem> = HashMap::new();
-    for line in raw.lines().map(str::trim) {
-        if let Some(rest) = line.strip_prefix("UNAME:") {
-            if let Some(p) = TargetPlatform::from_combined_uname(rest) {
-                platform = p;
-            }
-        } else if let Some(rest) = line.strip_prefix("SDK:") {
-            let parts: Vec<&str> = rest.splitn(3, ':').collect();
-            if parts.len() == 3 {
-                if let Some(eco) = EcosystemKind::parse(parts[0]) {
-                    let entry = map.entry(eco).or_default();
-                    entry.installed.push(IdeInstalledSdk {
-                        id: format!(
-                            "{}-{}-{}",
-                            eco.as_str(),
-                            parts[1],
-                            entry.installed.len() + 1
-                        ),
-                        version: dir_name_version(Path::new(parts[2])),
-                        path: parts[2].to_string(),
-                        source: parts[1].to_string(),
-                        active: false,
-                    });
-                }
-            }
-        } else if let Some((eco_s, path)) =
-            line.strip_prefix("LSP:").and_then(|r| r.split_once(':'))
-        {
-            if let Some(eco) = EcosystemKind::parse(eco_s) {
-                map.entry(eco).or_default().lsp = Some(IdeToolBinaryStatus {
-                    name: eco.lsp_name().to_string(),
-                    available: true,
-                    path: Some(path.to_string()),
-                });
-            }
-        } else if let Some((eco_s, path)) =
-            line.strip_prefix("DAP:").and_then(|r| r.split_once(':'))
-        {
-            if let Some(eco) = EcosystemKind::parse(eco_s) {
-                map.entry(eco).or_default().dap = Some(IdeToolBinaryStatus {
-                    name: eco.dap_name().to_string(),
-                    available: true,
-                    path: Some(path.to_string()),
-                });
-            }
-        }
-    }
-    (platform, map)
 }

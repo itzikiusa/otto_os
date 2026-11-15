@@ -28,6 +28,9 @@ pub(super) async fn analyze_python_diagnostics(
     let script = "import ast,json,sys\nsrc=sys.stdin.read()\ntry:\n ast.parse(src)\nexcept SyntaxError as e:\n print(json.dumps({'line':e.lineno or 1,'col':e.offset or 1,'msg':e.msg}))\n";
     let mut cmd = Command::new(py_bin);
     cmd.args(["-c", script])
+        .env_clear()
+        .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
+        .envs(env_map)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -79,6 +82,8 @@ pub(super) async fn analyze_shell_diagnostics(
     let bin = if is_zsh { "/bin/zsh" } else { "/bin/bash" };
     let mut cmd = Command::new(bin);
     cmd.arg("-n")
+        .env_clear()
+        .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

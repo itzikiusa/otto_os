@@ -1,11 +1,15 @@
 //! Command-line and working-directory builders for multi-language IDE Run Configurations.
 
+#[path = "runner_java.rs"]
+mod runner_java;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use otto_core::new_id;
-
-use super::runner::{append_run_line, ActiveRunHandle};
+pub(super) use self::runner_java::{
+    apply_runtime_profile_and_module_venv, compile_java_main_step, has_manual_classpath,
+};
+use crate::go_build_cache::{ensure_go_binary, GoBuildMode, GoBuildRequest};
 use crate::toolchains::{find_executable_in, is_executable_file};
 use crate::types::{IdeRunConfig, IdeRunnerKind, IdeTargetKind, IdeTargetSpec};
 
@@ -67,8 +71,96 @@ fn csv_list(items: &[String]) -> String {
         .join(",")
 }
 
+pub(super) fn is_default_go_command(cfg: &IdeRunConfig) -> bool {
+    let default_cmd = cfg
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none_or(|c| c == "go");
+    if !default_cmd {
+        return false;
+    }
+    let has_target_path = cfg
+        .target_path
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if has_target_path {
+        return true;
+    }
+    let rest = if cfg.args.first().map(String::as_str) == Some("run") {
+        &cfg.args[1..]
+    } else {
+        &cfg.args[..]
+    };
+    !rest.first().is_some_and(|a| a.starts_with('-'))
+}
+
+pub(super) async fn compile_go_run_step(
+    cfg: &IdeRunConfig,
+    target: &IdeTargetSpec,
+    cwd: &str,
+    env_map: &BTreeMap<String, String>,
+) -> std::result::Result<(String, Vec<String>), String> {
+    let mut args = cfg.args.clone();
+    if args.first().map(String::as_str) == Some("run") {
+        args.remove(0);
+    }
+    let pkg_spec = if let Some(tp) = cfg
+        .target_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if args.first().map(String::as_str) == Some(tp) {
+            args.remove(0);
+        }
+        tp.to_string()
+    } else if !args.is_empty() {
+        args.remove(0)
+    } else {
+        ".".to_string()
+    };
+
+    let mut allowed_roots = vec![PathBuf::from(&target.root)];
+    for extra in target.merged_extra_roots() {
+        let p = PathBuf::from(extra);
+        if !allowed_roots.contains(&p) {
+            allowed_roots.push(p);
+        }
+    }
+    let go_bin = env_map
+        .get("GOROOT")
+        .map(|gr| Path::new(gr).join("bin/go"))
+        .filter(|p| is_executable_file(p))
+        .unwrap_or_else(|| resolve_program_in_env("go", env_map))
+        .to_string_lossy()
+        .into_owned();
+    let build_flags: Vec<String> = cfg
+        .build_flags
+        .iter()
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect();
+    let artifact = ensure_go_binary(GoBuildRequest {
+        go_bin: &go_bin,
+        cwd: Path::new(cwd),
+        pkg_spec: &pkg_spec,
+        mode: GoBuildMode::Run,
+        extra_build_flags: &build_flags,
+        env_map,
+        allowed_roots: &allowed_roots,
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok((artifact.binary_path.to_string_lossy().into_owned(), args))
+}
+
 pub(super) fn build_runner_command(
     cfg: &IdeRunConfig,
+    target_kind: IdeTargetKind,
     cwd: &str,
     env_map: &BTreeMap<String, String>,
 ) -> (String, Vec<String>) {
@@ -177,6 +269,22 @@ pub(super) fn build_runner_command(
             if let Some(explicit) = cmd_opt {
                 return (explicit.to_string(), args);
             }
+            // Never inspect the local host filesystem for remote SSH runs; invoke
+            // `python -m pytest` on the remote host so `-k <filter>` is preserved.
+            if target_kind == IdeTargetKind::Ssh {
+                let mut p_args = vec!["-m".into(), "pytest".into()];
+                if !args.iter().any(|a| a == "-v" || a == "-q") {
+                    p_args.push("-v".into());
+                }
+                p_args.extend(build_flags);
+                if let Some(f) = filter {
+                    if !args.iter().any(|a| a == "-k") {
+                        p_args.extend(["-k".into(), f.to_string()]);
+                    }
+                }
+                p_args.extend(args);
+                return (py, p_args);
+            }
             let pytest_bin = resolve_program_in_env("pytest", env_map);
             if is_executable_file(&pytest_bin) {
                 if !args.iter().any(|a| a == "-v") {
@@ -201,24 +309,16 @@ pub(super) fn build_runner_command(
                 (py, u)
             }
         }
-        IdeRunnerKind::Python => {
-            let default_py = env_map
-                .get("VIRTUAL_ENV")
-                .map(|v| format!("{v}/bin/python"))
-                .unwrap_or_else(|| "python3".into());
-            let prog = cmd_opt.map(str::to_string).unwrap_or(default_py);
-            let mut out = build_flags;
-            if args.is_empty() {
-                if let Some(tp) = &cfg.target_path {
-                    out.push(tp.clone());
-                }
+        IdeRunnerKind::Python | IdeRunnerKind::Node => {
+            let default_prog = if cfg.runner == IdeRunnerKind::Python {
+                env_map
+                    .get("VIRTUAL_ENV")
+                    .map(|v| format!("{v}/bin/python"))
+                    .unwrap_or_else(|| "python3".into())
             } else {
-                out.extend(args);
-            }
-            (prog, out)
-        }
-        IdeRunnerKind::Node => {
-            let prog = cmd_opt.unwrap_or("node").to_string();
+                "node".into()
+            };
+            let prog = cmd_opt.map(str::to_string).unwrap_or(default_prog);
             let mut out = build_flags;
             if args.is_empty() {
                 if let Some(tp) = &cfg.target_path {
@@ -269,14 +369,6 @@ pub(super) fn build_runner_command(
             (prog, out)
         }
         IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven => {
-            let mvnw = Path::new(cwd).join("mvnw");
-            let prog = cmd_opt.map(str::to_string).unwrap_or_else(|| {
-                if is_executable_file(&mvnw) {
-                    "./mvnw".into()
-                } else {
-                    "mvn".into()
-                }
-            });
             if args.is_empty() {
                 args.push("test".into());
             }
@@ -299,17 +391,27 @@ pub(super) fn build_runner_command(
             if let Some(f) = filter {
                 args.push(format!("-Dtest={f}"));
             }
-            (prog, args)
+            if let Some(explicit) = cmd_opt {
+                return (explicit.to_string(), args);
+            }
+            if target_kind == IdeTargetKind::Ssh {
+                let mut sh_args = vec![
+                    "-c".into(),
+                    "if [ -x ./mvnw ]; then exec ./mvnw \"$@\"; else exec mvn \"$@\"; fi".into(),
+                    "otto-mvn".into(),
+                ];
+                sh_args.extend(args);
+                return ("sh".into(), sh_args);
+            }
+            let mvnw = Path::new(cwd).join("mvnw");
+            let prog = if is_executable_file(&mvnw) {
+                "./mvnw"
+            } else {
+                "mvn"
+            };
+            (prog.into(), args)
         }
         IdeRunnerKind::Gradle => {
-            let gradlew = Path::new(cwd).join("gradlew");
-            let prog = cmd_opt.map(str::to_string).unwrap_or_else(|| {
-                if is_executable_file(&gradlew) {
-                    "./gradlew".into()
-                } else {
-                    "gradle".into()
-                }
-            });
             if args.is_empty() {
                 args.push("test".into());
             }
@@ -329,7 +431,26 @@ pub(super) fn build_runner_command(
             if let Some(f) = filter {
                 args.extend(["--tests".into(), f.to_string()]);
             }
-            (prog, args)
+            if let Some(explicit) = cmd_opt {
+                return (explicit.to_string(), args);
+            }
+            if target_kind == IdeTargetKind::Ssh {
+                let mut sh_args = vec![
+                    "-c".into(),
+                    "if [ -x ./gradlew ]; then exec ./gradlew \"$@\"; else exec gradle \"$@\"; fi"
+                        .into(),
+                    "otto-gradle".into(),
+                ];
+                sh_args.extend(args);
+                return ("sh".into(), sh_args);
+            }
+            let gradlew = Path::new(cwd).join("gradlew");
+            let prog = if is_executable_file(&gradlew) {
+                "./gradlew"
+            } else {
+                "gradle"
+            };
+            (prog.into(), args)
         }
         IdeRunnerKind::Shell => {
             let is_bats = cfg
@@ -360,162 +481,4 @@ pub(super) fn build_runner_command(
             }
         }
     }
-}
-
-pub(super) fn apply_runtime_profile_and_module_venv(
-    cfg: &IdeRunConfig,
-    target: &IdeTargetSpec,
-    cwd: &str,
-    env_map: &mut BTreeMap<String, String>,
-) {
-    let spring_csv = csv_list(&cfg.spring_profiles);
-    if !spring_csv.is_empty() && !env_map.contains_key("SPRING_PROFILES_ACTIVE") {
-        env_map.insert("SPRING_PROFILES_ACTIVE".into(), spring_csv);
-    }
-    if target.kind == IdeTargetKind::Local && !env_map.contains_key("VIRTUAL_ENV") {
-        for vname in [".venv", "venv", ".env"] {
-            let cand = Path::new(cwd).join(vname);
-            if cand.join("pyvenv.cfg").is_file() && cand.join("bin/python").is_file() {
-                let bin = cand.join("bin").to_string_lossy().into_owned();
-                let cur_path = env_map.get("PATH").cloned().unwrap_or_default();
-                env_map.insert(
-                    "PATH".into(),
-                    if cur_path.is_empty() {
-                        bin
-                    } else {
-                        format!("{bin}:{cur_path}")
-                    },
-                );
-                env_map.insert("VIRTUAL_ENV".into(), cand.to_string_lossy().into_owned());
-                break;
-            }
-        }
-    }
-}
-
-pub(super) fn has_manual_classpath(cfg: &IdeRunConfig) -> bool {
-    cfg.args
-        .iter()
-        .chain(cfg.build_flags.iter())
-        .any(|a| a == "-cp" || a == "-classpath" || a == "--class-path")
-}
-
-pub(super) async fn compile_java_main_step(
-    cfg: &IdeRunConfig,
-    target: &IdeTargetSpec,
-    cwd: &str,
-    env_map: &BTreeMap<String, String>,
-    handle: &ActiveRunHandle,
-) -> std::result::Result<(String, Vec<String>, PathBuf), String> {
-    let mut roots = vec![PathBuf::from(&target.root)];
-    for extra in target.merged_extra_roots() {
-        let p = PathBuf::from(extra);
-        if !roots.contains(&p) {
-            roots.push(p);
-        }
-    }
-    let cwd_path = PathBuf::from(cwd);
-    if !roots.iter().any(|r| cwd_path.starts_with(r)) {
-        roots.insert(0, cwd_path.clone());
-    }
-
-    let target_file_or_dir = cfg
-        .target_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|tp| {
-            let p = Path::new(tp);
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                cwd_path.join(p)
-            }
-        })
-        .unwrap_or_else(|| cwd_path.clone());
-
-    let mut prog_args = cfg.args.clone();
-    let explicit_main = if let Some(tf) = cfg
-        .test_filter
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        if prog_args.first().map(String::as_str) == Some(tf) {
-            prog_args.remove(0);
-        }
-        Some(tf.to_string())
-    } else if cfg.target_path.is_none()
-        && prog_args
-            .first()
-            .is_some_and(|a| !a.starts_with('-') && !a.contains('/'))
-    {
-        Some(prog_args.remove(0))
-    } else {
-        None
-    };
-
-    let javac_bin = env_map
-        .get("JAVA_HOME")
-        .map(|jh| Path::new(jh).join("bin/javac"))
-        .filter(|p| is_executable_file(p))
-        .unwrap_or_else(|| resolve_program_in_env("javac", env_map))
-        .to_string_lossy()
-        .into_owned();
-    let out_dir = std::env::temp_dir().join(format!("otto-jrun-{}", new_id()));
-    let env_clone = env_map.clone();
-    let out_clone = out_dir.clone();
-
-    let plan = tokio::task::spawn_blocking(move || {
-        crate::java_workspace::prepare_java_execution(
-            &target_file_or_dir,
-            explicit_main.as_deref(),
-            true,
-            &roots,
-            &env_clone,
-            &javac_bin,
-            &out_clone,
-        )
-    })
-    .await
-    .map_err(|e| format!("java compile worker panicked: {e}"))?
-    .map_err(|e| e.to_string())?;
-
-    if !plan.compiler_output.trim().is_empty() {
-        for line in plan.compiler_output.lines() {
-            append_run_line(handle, line.to_string());
-        }
-    }
-
-    let java_prog = cfg
-        .command
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            env_map
-                .get("JAVA_HOME")
-                .map(|jh| format!("{}/bin/java", jh.trim_end_matches('/')))
-                .filter(|p| is_executable_file(Path::new(p)))
-        })
-        .unwrap_or_else(|| "java".into());
-
-    let mut jvm_args: Vec<String> = cfg
-        .build_flags
-        .iter()
-        .map(|f| f.trim().to_string())
-        .filter(|f| !f.is_empty())
-        .collect();
-    let spring_csv = csv_list(&cfg.spring_profiles);
-    if !spring_csv.is_empty()
-        && !jvm_args
-            .iter()
-            .any(|a| a.starts_with("-Dspring.profiles.active="))
-    {
-        jvm_args.push(format!("-Dspring.profiles.active={spring_csv}"));
-    }
-    jvm_args.extend(["-cp".into(), plan.classpath, plan.main_class]);
-    jvm_args.extend(prog_args);
-    Ok((java_prog, jvm_args, out_dir))
 }

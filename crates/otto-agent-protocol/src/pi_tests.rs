@@ -299,3 +299,57 @@ fn steer_sends_rpc_steer_mid_turn_and_surfaces_refusal_without_ending_turn() {
         }
     )));
 }
+
+#[test]
+fn snapshot_and_restore_preserve_pi_streaming_text_tools_and_settlement_mode() {
+    let mut d1 = PiDriver::with_program("pi");
+    let st = sent(&d1.start(&ctx(None, RuntimeAccessMode::FullAccess)), 0);
+    d1.on_line(&format!(
+        r#"{{"id":"{}","type":"response","command":"get_state","success":true,"data":{{"sessionId":"sess-pi-1"}}}}"#,
+        st["id"].as_str().unwrap()
+    ));
+    let p = sent(&d1.prompt("t1", &RuntimePromptReq::of("build")).unwrap(), 0);
+    d1.on_line(&format!(
+        r#"{{"id":"{}","type":"response","command":"prompt","success":true}}"#,
+        p["id"].as_str().unwrap()
+    ));
+    d1.on_line(
+        r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Half "}}"#,
+    );
+    d1.on_line(
+        r#"{"type":"tool_execution_start","toolCallId":"tc-1","toolName":"bash","args":{"command":"ls"}}"#,
+    );
+    d1.on_line(
+        r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Half "}}"#,
+    );
+
+    let snap = d1.snapshot_state();
+    let mut d2 = PiDriver::with_program("pi");
+    d2.restore_state(&snap).unwrap();
+
+    let tool_end = d2.on_line(
+        r#"{"type":"tool_execution_end","toolCallId":"tc-1","toolName":"bash","result":"ok","isError":false}"#,
+    );
+    assert!(tool_end.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i) if i.id == "t1:tool:tc-1" && i.status == TurnItemStatus::Completed
+    )));
+    let text2 = d2.on_line(
+        r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"done"}}"#,
+    );
+    assert!(text2.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "Half done")
+    )));
+    let end = d2.on_line(
+        r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}],"willRetry":false}"#,
+    );
+    assert!(end.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::Terminal {
+            status: TurnTerminalStatus::Completed,
+            ..
+        }
+    )));
+}

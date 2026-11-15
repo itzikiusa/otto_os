@@ -1,5 +1,6 @@
 use super::*;
 use crate::toolchains_catalog::JAVA_DEBUG_JAR_NAME;
+use crate::types::{IdeInstallComponent, IdeInstallJobStatus};
 use installer::make_executable;
 
 #[test]
@@ -78,16 +79,55 @@ fn discovers_otto_managed_sdks_lsps_daps_and_marks_active_selection() {
 
 #[test]
 fn parses_batched_ssh_probe_for_remote_linux_aarch64() {
-    let sample = "UNAME:Linux aarch64\nSDK:go:otto:/home/dev/.otto/toolchains/go/sdks/1.24.1\nLSP:go:/home/dev/.otto/toolchains/go/bin/gopls\nDAP:go:/usr/local/bin/dlv\nLSP:shell:/usr/local/bin/bash-language-server\n";
+    let sample = concat!(
+        "UNAME:Linux aarch64\n",
+        "SDK:go:otto:1.24.1:/home/dev/.otto/toolchains/go/sdks/1.24.1/go\n",
+        "SDK:go:system:1.23.4:/usr/local/go/bin/go\n",
+        "SDK:java:system:21.0.6:/usr/lib/jvm/java-21-openjdk\n",
+        "SDK:python:system:3.12.8:/usr/bin/python3\n",
+        "LSP:go:/home/dev/.otto/toolchains/go/bin/gopls\n",
+        "DAP:go:/usr/local/bin/dlv\n",
+        "LSP:shell:/usr/local/bin/bash-language-server\n",
+    );
     let (platform, map) = parse_ssh_probe_output(sample);
     assert_eq!(platform.os.as_str(), "linux");
     assert_eq!(platform.arch.as_str(), "aarch64");
     let go = map.get(&EcosystemKind::Go).unwrap();
     assert_eq!(go.installed[0].source, "otto");
+    assert_eq!(go.installed[0].version, "1.24.1");
+    assert_eq!(
+        go.installed[0].path,
+        "/home/dev/.otto/toolchains/go/sdks/1.24.1/go"
+    );
+    assert_eq!(go.installed[1].source, "system");
+    assert_eq!(go.installed[1].version, "1.23.4");
+    assert_eq!(go.installed[1].path, "/usr/local/go");
     assert!(go.lsp.as_ref().unwrap().available);
     assert!(go.dap.as_ref().unwrap().available);
+
+    let java = map.get(&EcosystemKind::Java).unwrap();
+    assert_eq!(java.installed[0].version, "21.0.6");
+    assert_eq!(java.installed[0].path, "/usr/lib/jvm/java-21-openjdk");
+
+    let py = map.get(&EcosystemKind::Python).unwrap();
+    assert_eq!(py.installed[0].version, "3.12.8");
+    assert_eq!(py.installed[0].path, "/usr/bin/python3");
+
     let sh = map.get(&EcosystemKind::Shell).unwrap();
     assert!(sh.lsp.as_ref().unwrap().available);
+}
+
+#[test]
+fn parses_legacy_three_field_ssh_probe_lines_and_normalizes_sdk_home() {
+    let sample = "UNAME:Linux x86_64\nSDK:go:system:/usr/local/go/bin/go\nSDK:python:system:/usr/bin/python3\n";
+    let (platform, map) = parse_ssh_probe_output(sample);
+    assert_eq!(platform.arch.as_str(), "x86_64");
+    let go = map.get(&EcosystemKind::Go).unwrap();
+    assert_eq!(go.installed[0].path, "/usr/local/go");
+    assert_eq!(go.installed[0].version, "system");
+    let py = map.get(&EcosystemKind::Python).unwrap();
+    assert_eq!(py.installed[0].path, "/usr/bin/python3");
+    assert_eq!(py.installed[0].version, "3");
 }
 
 #[tokio::test]

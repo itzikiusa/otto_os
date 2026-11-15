@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use super::adapters::{
     locate_binary, normalize_target_path, DapAdapterTransport, ResolvedDapAdapter,
 };
+use super::adapters_env::canonical_target_roots;
 use super::lldb_bridge::LLDB_PYTHON_DAP_BRIDGE;
 use super::shell_bridge::{ShellBridgeSpec, ShellFlavor};
 use super::{run_target_command, DapStartContext};
@@ -74,7 +75,7 @@ pub(super) async fn resolve_rust_adapter(
     req: &IdeStartDebugReq,
     ctx: &DapStartContext,
     cwd: &str,
-    mut env: BTreeMap<String, String>,
+    env: BTreeMap<String, String>,
 ) -> Result<ResolvedDapAdapter> {
     let mut initial_output = Vec::new();
     let raw_prog = normalize_target_path(&req.target, &req.launch.program);
@@ -88,7 +89,6 @@ pub(super) async fn resolve_rust_adapter(
     {
         raw_prog
     } else {
-        env.insert("CARGO_PROFILE_DEV_DEBUG".into(), "true".into());
         compile_rust_debug_artifact(
             req,
             ctx,
@@ -320,7 +320,12 @@ async fn compile_rust_debug_artifact(
     env: &BTreeMap<String, String>,
     initial_output: &mut Vec<IdeDebugOutputEntry>,
 ) -> Result<String> {
-    let cargo_cwd = find_cargo_dir(&req.target, raw_prog, cwd);
+    let allowed_roots = if ctx.caller_is_root {
+        Vec::new()
+    } else {
+        canonical_target_roots(&req.target)
+    };
+    let cargo_cwd = find_cargo_dir(&req.target, raw_prog, cwd, &allowed_roots);
     let mut cargo_args = if want_test {
         vec![
             "test".into(),
@@ -399,13 +404,21 @@ async fn compile_rust_debug_artifact(
     })
 }
 
-fn find_cargo_dir(target: &IdeTargetSpec, program: &str, fallback_cwd: &str) -> String {
+fn find_cargo_dir(
+    target: &IdeTargetSpec,
+    program: &str,
+    fallback_cwd: &str,
+    allowed_roots: &[std::path::PathBuf],
+) -> String {
     if target.kind == IdeTargetKind::Local && !program.is_empty() {
         let mut cur = Path::new(program);
         if cur.is_file() {
             cur = cur.parent().unwrap_or(cur);
         }
         loop {
+            if !allowed_roots.is_empty() && !allowed_roots.iter().any(|r| cur.starts_with(r)) {
+                break;
+            }
             if cur.join("Cargo.toml").is_file() {
                 return cur.to_string_lossy().into_owned();
             }
@@ -441,23 +454,29 @@ pub(super) async fn resolve_shell_adapter(
     }
 
     let (flavor, adapter_name, shell_bin) = if want_zsh {
-        let zsh_candidates = vec![
-            "/opt/homebrew/bin/zsh".to_string(),
-            "/usr/local/bin/zsh".to_string(),
-            "/bin/zsh".to_string(),
-            "zsh".to_string(),
-        ];
+        let zsh_candidates: Vec<String> = [
+            "/opt/homebrew/bin/zsh",
+            "/usr/local/bin/zsh",
+            "/bin/zsh",
+            "zsh",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let bin = locate_binary(&req.target, ctx, &env, &zsh_candidates)
             .await
             .ok_or_else(|| Error::NotFound("Zsh shell ('zsh') not found on target".into()))?;
         (ShellFlavor::Zsh, "zsh-trap-dap", bin)
     } else {
-        let bash_candidates = vec![
-            "/opt/homebrew/bin/bash".to_string(),
-            "/usr/local/bin/bash".to_string(),
-            "bash".to_string(),
-            "/bin/bash".to_string(),
-        ];
+        let bash_candidates: Vec<String> = [
+            "/opt/homebrew/bin/bash",
+            "/usr/local/bin/bash",
+            "bash",
+            "/bin/bash",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let bin = locate_binary(&req.target, ctx, &env, &bash_candidates)
             .await
             .ok_or_else(|| Error::NotFound("Bash shell ('bash') not found on target".into()))?;
@@ -476,10 +495,7 @@ pub(super) async fn resolve_shell_adapter(
             env,
         }),
         initialize_args: json!({
-            "adapterID": adapter_name,
-            "linesStartAt1": true,
-            "columnsStartAt1": true,
-            "pathFormat": "path"
+            "adapterID": adapter_name, "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path"
         }),
         launch_command: "launch".into(),
         launch_args: json!({ "program": program, "cwd": cwd, "args": req.launch.args }),

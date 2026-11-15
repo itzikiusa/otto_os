@@ -2,8 +2,15 @@
 
 import { api } from '../../../lib/api/client';
 import type { DiffResp, Repo } from '../../../lib/api/types';
+import type {
+  IdeHistoryEntryResp,
+  IdeHistoryListResp,
+  IdeHistoryRestoreResp,
+  IdeLocalHistoryEntry,
+} from '../../../lib/api/types/ide-intelligence';
+import { getLatestClipboardForCompare } from '../../../lib/components/cm-ide-history';
+import { readIdePreferences } from '../../../lib/components/cm-ide-prefs';
 import { confirmer } from '../../../lib/confirm.svelte';
-import { lsGet } from '../../../lib/storage';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { ideGit } from '../git/ideGitController.svelte';
@@ -17,35 +24,12 @@ export type IdeCompareMode =
   | 'clipboard'
   | 'file';
 
-export interface IdeLocalHistoryEntry {
-  id: string;
-  root: string;
-  path: string;
-  rel_path: string;
-  event_kind: string;
-  label: string;
-  timestamp_ms: number;
-  size_bytes: number;
-  sha256: string;
-}
-
-export interface HistoryListResp {
-  entries: IdeLocalHistoryEntry[];
-}
-
-export interface HistoryEntryResp {
-  entry: IdeLocalHistoryEntry;
-  content: string;
-  current_content?: string | null;
-  current_exists: boolean;
-}
-
-export interface HistoryRestoreResp {
-  ok: boolean;
-  path: string;
-  content: string;
-  recreated: boolean;
-}
+export type {
+  IdeLocalHistoryEntry,
+  IdeHistoryListResp as HistoryListResp,
+  IdeHistoryEntryResp as HistoryEntryResp,
+  IdeHistoryRestoreResp as HistoryRestoreResp,
+};
 
 export async function readDiskFileOnly(
   absPath: string,
@@ -106,10 +90,13 @@ export async function writeCurrentAndSyncIde(
   const clean = ide.resolvePath(absPath);
   const root = ideGit.rootContainingPath(clean)?.path || ide.target.root;
   try {
+    const prefs = readIdePreferences();
     const resp = await api.put<{ path: string; size: number; sha256: string }>('/ide/fs/file', {
       target: { ...ide.targetPayload, root },
       path: clean,
       content: nextContent,
+      record_local_history: prefs.localHistoryEnabled,
+      local_history_retention_days: prefs.localHistoryRetentionDays,
     });
     const tab = ide.tabs.find((t) => t.path === clean);
     if (tab) {
@@ -134,32 +121,7 @@ export async function writeCurrentAndSyncIde(
 
 export async function readClipboardForCompare(override?: string): Promise<string> {
   if (typeof override === 'string') return override;
-  if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
-    try {
-      const txt = await navigator.clipboard.readText();
-      if (txt) return txt;
-    } catch {
-      /* fall back to persisted IDE clipboard ring */
-    }
-  }
-  try {
-    const raw = lsGet('otto.ide.clipboardHistory.v1');
-    if (raw) {
-      const parsed: unknown = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        const first = parsed[0] as unknown;
-        if (typeof first === 'string') return first;
-        if (first && typeof first === 'object') {
-          const rec = first as Record<string, unknown>;
-          if (typeof rec.text === 'string') return rec.text;
-          if (typeof rec.content === 'string') return rec.content;
-        }
-      }
-    }
-  } catch {
-    /* ignore malformed storage */
-  }
-  return '';
+  return getLatestClipboardForCompare();
 }
 
 export async function fetchGitRefFileContent(
@@ -202,6 +164,7 @@ export async function fetchGitRefFileContent(
 export async function promptPutLocalHistoryLabel(
   root: string,
   targetPath: string,
+  opts: { content?: string; isDir?: boolean } = {},
 ): Promise<boolean> {
   const cleanTarget = ide.resolvePath(targetPath || root);
   const label = await confirmer.promptText(
@@ -214,12 +177,24 @@ export async function promptPutLocalHistoryLabel(
   );
   if (!label || !label.trim()) return false;
   try {
-    const cur = await readCurrentDiskOrTab(cleanTarget);
+    const content = opts.isDir
+      ? ''
+      : typeof opts.content === 'string'
+        ? opts.content
+        : (await readCurrentDiskOrTab(cleanTarget)).content;
+    const folders = ide.targetPayload.project_folders ?? [];
+    const effectiveRoot =
+      root || folders.find((f) => cleanTarget === f || cleanTarget.startsWith(`${f}/`)) || ide.target.root;
     await api.post('/ide/history/snapshot', {
-      root,
+      target: {
+        ...ide.targetPayload,
+        root: effectiveRoot,
+        additional_roots: folders.filter((f) => f !== effectiveRoot),
+      },
+      root: effectiveRoot,
       path: cleanTarget,
       label: label.trim(),
-      content: cur.exists ? cur.content : '',
+      content,
     });
     toasts.success('Saved Local History label', label.trim());
     return true;

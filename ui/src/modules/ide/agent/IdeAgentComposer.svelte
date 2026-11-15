@@ -31,6 +31,7 @@
     type ComposerSlashCommand,
   } from '../../../lib/slashActions';
   import { auth } from '../../../lib/stores/auth.svelte';
+  import { composerViewState } from '../../../lib/stores/runtimeDraftCursor';
   import { ide } from '../ideStore.svelte';
   import { ideAgentEngine as ideAgent } from './ideAgentEngine.svelte';
   import { ideAgentState } from './ideAgentState.svelte';
@@ -38,8 +39,9 @@
 
   let { onsent }: { onsent?: () => void } = $props();
 
-  void ideAgentState.ensureBridge();
-  const bridge = $derived(ideAgentState.runtimeBridge);
+  void ideAgentState.ensureSessionPort();
+  void ideAgentState.ensureComposerUi();
+  const bridge = $derived(ideAgentState.composerUi);
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
 
   let composerBoxEl = $state<HTMLDivElement | null>(null);
@@ -66,6 +68,7 @@
   );
 
   const activeProvider = $derived(ideAgent.provider);
+  const composerDraftKey = $derived(`ide-stage:${ideAgent.resolveProjectCwd() ?? 'default'}`);
   const agentChipLabel = $derived.by(() => {
     if (bridge?.council.on) return bridge.councilAgentLabel(auth.meta);
     const m = ideAgent.effectiveModel;
@@ -296,9 +299,14 @@
     <textarea
       bind:this={composerEl}
       bind:value={ideAgent.composerText}
+      use:composerViewState={{ key: composerDraftKey, hasText: ideAgent.composerText.length > 0 }}
       class="ia-textarea"
       rows={2}
       dir="auto"
+      spellcheck="false"
+      {...{ autocorrect: 'off' }}
+      autocapitalize="off"
+      autocomplete="off"
       disabled={ideAgent.reopening}
       aria-label="Ask Agent or describe a code change"
       aria-autocomplete="list"

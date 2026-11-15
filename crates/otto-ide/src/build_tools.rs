@@ -3,17 +3,22 @@
 
 #![allow(clippy::disallowed_methods)] // synchronous scanner invoked inside spawn_blocking
 
+#[path = "build_tools/gradle.rs"]
+mod gradle;
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use regex::Regex;
 
+use self::gradle::{scan_gradle_tree, scan_spring_profiles, shorten_home_path};
 use crate::java_workspace::{
     extract_first_tag_block, extract_tag_text, parse_pom_module, parse_pom_properties,
     remove_all_tag_blocks, resolve_pom_props, strip_xml_comments,
 };
-use crate::target::canonicalize_local_root_dir;
+use crate::target::{canonicalize_local_root_dir, enforce_non_root_path};
 use crate::types::{
     IdeBuildToolProfile, IdeBuildToolProject, IdeBuildToolsModelReq, IdeBuildToolsModelResp,
 };
@@ -21,16 +26,32 @@ use crate::types::{
 const MAVEN_LIFECYCLE: &[&str] = &[
     "clean", "validate", "compile", "test", "package", "verify", "install", "deploy",
 ];
-const GRADLE_LIFECYCLE: &[&str] = &[
-    "clean",
-    "assemble",
-    "compileJava",
-    "test",
-    "check",
-    "build",
-    "jar",
-    "bootRun",
-];
+
+struct BuildScanState<'a> {
+    canon_roots: &'a [PathBuf],
+    is_root_user: bool,
+    home: Option<&'a Path>,
+    visited: HashSet<PathBuf>,
+    profiles: &'a mut Vec<IdeBuildToolProfile>,
+    seen_profiles: &'a mut HashSet<(String, String)>,
+}
+
+/// Resolve `cand` to a canonical directory strictly inside `canon_roots` (so symlinks,
+/// `../` `<module>` declarations, and Gradle `include(...)` paths cannot escape workspace roots).
+fn confinable_project_dir(
+    cand: &Path,
+    canon_roots: &[PathBuf],
+    is_root_user: bool,
+) -> Option<PathBuf> {
+    let canon = fs::canonicalize(cand).ok()?;
+    if !canon.is_dir() || !canon_roots.iter().any(|r| canon.starts_with(r)) {
+        return None;
+    }
+    if !is_root_user && enforce_non_root_path(&canon).is_err() {
+        return None;
+    }
+    Some(canon)
+}
 
 pub fn build_tools_model(
     req: &IdeBuildToolsModelReq,
@@ -72,68 +93,75 @@ pub fn build_tools_model(
         let mut matched_root = false;
         if root.join("pom.xml").is_file() {
             matched_root = true;
-            if let Some(proj) = scan_maven_tree(
-                root,
-                0,
-                home.as_deref(),
-                &mut visited_maven,
-                &mut profiles,
-                &mut seen_profiles,
-            ) {
+            let mut st = BuildScanState {
+                canon_roots: &canon_roots,
+                is_root_user,
+                home: home.as_deref(),
+                visited: std::mem::take(&mut visited_maven),
+                profiles: &mut profiles,
+                seen_profiles: &mut seen_profiles,
+            };
+            if let Some(proj) = scan_maven_tree(root, 0, &mut st) {
                 has_maven = true;
                 projects.push(proj);
             }
+            visited_maven = st.visited;
         }
         if root.join("build.gradle").is_file() || root.join("build.gradle.kts").is_file() {
             matched_root = true;
-            if let Some(proj) = scan_gradle_tree(
-                root,
-                0,
-                home.as_deref(),
-                &mut visited_gradle,
-                &mut profiles,
-                &mut seen_profiles,
-            ) {
+            let mut st = BuildScanState {
+                canon_roots: &canon_roots,
+                is_root_user,
+                home: home.as_deref(),
+                visited: std::mem::take(&mut visited_gradle),
+                profiles: &mut profiles,
+                seen_profiles: &mut seen_profiles,
+            };
+            if let Some(proj) = scan_gradle_tree(root, 0, &mut st) {
                 has_gradle = true;
                 projects.push(proj);
             }
+            visited_gradle = st.visited;
         }
         if !matched_root {
             if let Ok(rd) = fs::read_dir(root) {
-                // 1-level child repo scan if parent folder was passed
                 let mut subdirs: Vec<PathBuf> = rd
                     .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.is_dir())
+                    .filter(|e| e.file_type().map(|ft| !ft.is_symlink()).unwrap_or(false))
+                    .filter_map(|e| confinable_project_dir(&e.path(), &canon_roots, is_root_user))
                     .collect();
                 subdirs.sort();
                 for sub in subdirs {
                     if sub.join("pom.xml").is_file() {
-                        if let Some(proj) = scan_maven_tree(
-                            &sub,
-                            0,
-                            home.as_deref(),
-                            &mut visited_maven,
-                            &mut profiles,
-                            &mut seen_profiles,
-                        ) {
+                        let mut st = BuildScanState {
+                            canon_roots: &canon_roots,
+                            is_root_user,
+                            home: home.as_deref(),
+                            visited: std::mem::take(&mut visited_maven),
+                            profiles: &mut profiles,
+                            seen_profiles: &mut seen_profiles,
+                        };
+                        if let Some(proj) = scan_maven_tree(&sub, 0, &mut st) {
                             has_maven = true;
                             projects.push(proj);
                         }
+                        visited_maven = st.visited;
                     }
                     if sub.join("build.gradle").is_file() || sub.join("build.gradle.kts").is_file()
                     {
-                        if let Some(proj) = scan_gradle_tree(
-                            &sub,
-                            0,
-                            home.as_deref(),
-                            &mut visited_gradle,
-                            &mut profiles,
-                            &mut seen_profiles,
-                        ) {
+                        let mut st = BuildScanState {
+                            canon_roots: &canon_roots,
+                            is_root_user,
+                            home: home.as_deref(),
+                            visited: std::mem::take(&mut visited_gradle),
+                            profiles: &mut profiles,
+                            seen_profiles: &mut seen_profiles,
+                        };
+                        if let Some(proj) = scan_gradle_tree(&sub, 0, &mut st) {
                             has_gradle = true;
                             projects.push(proj);
                         }
+                        visited_gradle = st.visited;
                     }
                 }
             }
@@ -151,15 +179,18 @@ pub fn build_tools_model(
 fn scan_maven_tree(
     dir: &Path,
     depth: usize,
-    home: Option<&Path>,
-    visited: &mut HashSet<PathBuf>,
-    profiles: &mut Vec<IdeBuildToolProfile>,
-    seen_profiles: &mut HashSet<(String, String)>,
+    st: &mut BuildScanState<'_>,
 ) -> Option<IdeBuildToolProject> {
-    if depth > 3 || !visited.insert(dir.to_path_buf()) {
+    if depth > 3 || !st.visited.insert(dir.to_path_buf()) {
         return None;
     }
     let pom_path = dir.join("pom.xml");
+    if fs::symlink_metadata(&pom_path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(true)
+    {
+        return None;
+    }
     let raw = fs::read_to_string(&pom_path).ok()?;
     let stripped = strip_xml_comments(&raw);
     let props = parse_pom_properties(&stripped, dir);
@@ -180,8 +211,8 @@ fn scan_maven_tree(
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| ws_mod.artifact_id.clone());
 
-    // Extract Maven `<profiles>`
-    let prof_re = Regex::new(r"(?s)<profile>(.*?)</profile>").unwrap();
+    static RE_PROF: OnceLock<Regex> = OnceLock::new();
+    let prof_re = RE_PROF.get_or_init(|| Regex::new(r"(?s)<profile>(.*?)</profile>").unwrap());
     if let Some(profs_block) = extract_first_tag_block(&stripped, "profiles") {
         for cap in prof_re.captures_iter(profs_block) {
             let pbody = &cap[1];
@@ -189,8 +220,8 @@ fn scan_maven_tree(
                 let active = extract_first_tag_block(pbody, "activation")
                     .and_then(|act| extract_tag_text(act, "activeByDefault"))
                     .is_some_and(|v| v.eq_ignore_ascii_case("true"));
-                if seen_profiles.insert(("maven".into(), pid.clone())) {
-                    profiles.push(IdeBuildToolProfile {
+                if st.seen_profiles.insert(("maven".into(), pid.clone())) {
+                    st.profiles.push(IdeBuildToolProfile {
                         id: pid,
                         kind: "maven".into(),
                         source_project: display_name.clone(),
@@ -201,12 +232,17 @@ fn scan_maven_tree(
         }
     }
 
-    // Extract Spring Boot `application-<profile>.yml/.yaml/.properties`
-    scan_spring_profiles(dir, &display_name, profiles, seen_profiles);
+    scan_spring_profiles(
+        dir,
+        &display_name,
+        st.canon_roots,
+        st.profiles,
+        st.seen_profiles,
+    );
 
-    // Extract `<plugins>`
     let mut plugins = Vec::new();
-    let plug_re = Regex::new(r"(?s)<plugin>(.*?)</plugin>").unwrap();
+    static RE_PLUG: OnceLock<Regex> = OnceLock::new();
+    let plug_re = RE_PLUG.get_or_init(|| Regex::new(r"(?s)<plugin>(.*?)</plugin>").unwrap());
     for cap in plug_re.captures_iter(&stripped) {
         if let Some(aid) = extract_tag_text(&cap[1], "artifactId").filter(|s| !s.is_empty()) {
             let clean = aid
@@ -220,9 +256,10 @@ fn scan_maven_tree(
         }
     }
 
-    // Extract `<repositories>`
     let mut repositories = vec!["central (https://repo.maven.apache.org/maven2)".to_string()];
-    let repo_re = Regex::new(r"(?s)<repository>(.*?)</repository>").unwrap();
+    static RE_REPO: OnceLock<Regex> = OnceLock::new();
+    let repo_re =
+        RE_REPO.get_or_init(|| Regex::new(r"(?s)<repository>(.*?)</repository>").unwrap());
     for cap in repo_re.captures_iter(&stripped) {
         let rid = extract_tag_text(&cap[1], "id").unwrap_or_else(|| "repo".into());
         let rurl = extract_tag_text(&cap[1], "url").unwrap_or_default();
@@ -247,15 +284,12 @@ fn scan_maven_tree(
 
     let mut child_modules = Vec::new();
     for sub in submodules {
-        let child_dir = fs::canonicalize(dir.join(&sub)).unwrap_or_else(|_| dir.join(&sub));
-        if let Some(child_proj) = scan_maven_tree(
-            &child_dir,
-            depth + 1,
-            home,
-            visited,
-            profiles,
-            seen_profiles,
-        ) {
+        let Some(child_dir) =
+            confinable_project_dir(&dir.join(&sub), st.canon_roots, st.is_root_user)
+        else {
+            continue;
+        };
+        if let Some(child_proj) = scan_maven_tree(&child_dir, depth + 1, st) {
             child_modules.push(child_proj);
         }
     }
@@ -274,7 +308,7 @@ fn scan_maven_tree(
         tool: "maven".into(),
         project_coord,
         root_dir: dir.to_string_lossy().into_owned(),
-        location_display: shorten_home_path(dir, home),
+        location_display: shorten_home_path(dir, st.home),
         manifest_path: pom_path.to_string_lossy().into_owned(),
         lifecycle: MAVEN_LIFECYCLE.iter().map(|s| (*s).to_string()).collect(),
         plugins,
@@ -284,173 +318,43 @@ fn scan_maven_tree(
     })
 }
 
-fn scan_gradle_tree(
-    dir: &Path,
-    depth: usize,
-    home: Option<&Path>,
-    visited: &mut HashSet<PathBuf>,
-    profiles: &mut Vec<IdeBuildToolProfile>,
-    seen_profiles: &mut HashSet<(String, String)>,
-) -> Option<IdeBuildToolProject> {
-    if depth > 3 || !visited.insert(dir.to_path_buf()) {
-        return None;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn build_tools_model_refuses_module_escape_outside_workspace_roots() {
+        let outer = tempfile::tempdir().unwrap();
+        let ws = outer.path().join("workspace");
+        let outside = outer.path().join("outside-secret-proj");
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        fs::write(
+            outside.join("pom.xml"),
+            "<project><groupId>sec</groupId><artifactId>escaped-mod</artifactId></project>",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("symlink-mod")).unwrap();
+        fs::write(
+            ws.join("pom.xml"),
+            "<project><groupId>app</groupId><artifactId>root-app</artifactId><modules><module>../outside-secret-proj</module><module>symlink-mod</module></modules></project>",
+        )
+        .unwrap();
+
+        let resp = build_tools_model(
+            &IdeBuildToolsModelReq {
+                target: None,
+                roots: vec![ws.to_string_lossy().into_owned()],
+            },
+            false,
+        );
+        assert_eq!(resp.projects.len(), 1);
+        assert_eq!(resp.projects[0].artifact_id, "root-app");
+        assert!(
+            resp.projects[0].modules.is_empty(),
+            "parent-traversal and symlinked modules outside authorized roots must be skipped"
+        );
     }
-    let manifest = if dir.join("build.gradle.kts").is_file() {
-        dir.join("build.gradle.kts")
-    } else {
-        dir.join("build.gradle")
-    };
-    let raw = fs::read_to_string(&manifest).ok()?;
-    let artifact_id = dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("gradle-app")
-        .to_string();
-    let group_re = Regex::new(r#"(?m)^\s*group\s*=?\s*['"]([^'"]+)['"]"#).unwrap();
-    let ver_re = Regex::new(r#"(?m)^\s*version\s*=?\s*['"]([^'"]+)['"]"#).unwrap();
-    let group_id = group_re
-        .captures(&raw)
-        .map(|c| c[1].trim().to_string())
-        .unwrap_or_default();
-    let version = ver_re
-        .captures(&raw)
-        .map(|c| c[1].trim().to_string())
-        .unwrap_or_else(|| "0.0.0".into());
-
-    scan_spring_profiles(dir, &artifact_id, profiles, seen_profiles);
-
-    // Gradle `-Pprofile` checks (`findProperty("profile")` or `profile-*.gradle`)
-    let prop_prof_re = Regex::new(r#"profile-([A-Za-z0-9_-]+)\.gradle"#).unwrap();
-    for cap in prop_prof_re.captures_iter(&raw) {
-        let pid = cap[1].to_string();
-        if seen_profiles.insert(("gradle".into(), pid.clone())) {
-            profiles.push(IdeBuildToolProfile {
-                id: pid,
-                kind: "gradle".into(),
-                source_project: artifact_id.clone(),
-                active_by_default: false,
-            });
-        }
-    }
-
-    let mut plugins = Vec::new();
-    let plug_re = Regex::new(r#"id\s*\(?\s*['"]([^'"]+)['"]"#).unwrap();
-    for cap in plug_re.captures_iter(&raw) {
-        let p = cap[1].to_string();
-        if !plugins.contains(&p) {
-            plugins.push(p);
-        }
-    }
-
-    let mut dependencies = Vec::new();
-    let dep_re = Regex::new(
-        r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*\(?\s*['"]([^'"]+)['"]"#,
-    )
-    .unwrap();
-    for cap in dep_re.captures_iter(&raw) {
-        let d = cap[1].to_string();
-        if !dependencies.contains(&d) {
-            dependencies.push(d);
-        }
-    }
-
-    let mut repositories = Vec::new();
-    for known in [
-        "mavenCentral()",
-        "google()",
-        "gradlePluginPortal()",
-        "mavenLocal()",
-    ] {
-        if raw.contains(known) {
-            repositories.push(known.trim_end_matches("()").to_string());
-        }
-    }
-
-    let mut child_modules = Vec::new();
-    let inc_re = Regex::new(r#"include\s*\(?([^)\n]+)\)?"#).unwrap();
-    let q_re = Regex::new(r#"['"]([^'"]+)['"]"#).unwrap();
-    for settings_name in ["settings.gradle", "settings.gradle.kts"] {
-        if let Ok(sraw) = fs::read_to_string(dir.join(settings_name)) {
-            for cap in inc_re.captures_iter(&sraw) {
-                for q in q_re.captures_iter(&cap[1]) {
-                    let rel = q[1].replace(':', "/").trim_start_matches('/').to_string();
-                    let cdir = fs::canonicalize(dir.join(&rel)).unwrap_or_else(|_| dir.join(&rel));
-                    if let Some(cproj) =
-                        scan_gradle_tree(&cdir, depth + 1, home, visited, profiles, seen_profiles)
-                    {
-                        child_modules.push(cproj);
-                    }
-                }
-            }
-        }
-    }
-
-    let project_coord = if group_id.is_empty() {
-        artifact_id.clone()
-    } else {
-        format!("{group_id}:{artifact_id}")
-    };
-
-    Some(IdeBuildToolProject {
-        name: artifact_id.clone(),
-        group_id,
-        artifact_id,
-        version,
-        tool: "gradle".into(),
-        project_coord,
-        root_dir: dir.to_string_lossy().into_owned(),
-        location_display: shorten_home_path(dir, home),
-        manifest_path: manifest.to_string_lossy().into_owned(),
-        lifecycle: GRADLE_LIFECYCLE.iter().map(|s| (*s).to_string()).collect(),
-        plugins,
-        dependencies,
-        repositories,
-        modules: child_modules,
-    })
-}
-
-fn scan_spring_profiles(
-    dir: &Path,
-    project_name: &str,
-    profiles: &mut Vec<IdeBuildToolProfile>,
-    seen: &mut HashSet<(String, String)>,
-) {
-    for rel in ["src/main/resources", "src/test/resources", "config"] {
-        let res_dir = dir.join(rel);
-        let Ok(rd) = fs::read_dir(&res_dir) else {
-            continue;
-        };
-        for entry in rd.flatten() {
-            let fname = entry.file_name().to_string_lossy().into_owned();
-            let Some(rest) = fname
-                .strip_prefix("application-")
-                .or_else(|| fname.strip_prefix("bootstrap-"))
-            else {
-                continue;
-            };
-            let prof_opt = rest
-                .strip_suffix(".yml")
-                .or_else(|| rest.strip_suffix(".yaml"))
-                .or_else(|| rest.strip_suffix(".properties"));
-            if let Some(prof) = prof_opt.map(str::trim).filter(|s| !s.is_empty()) {
-                if seen.insert(("spring".into(), prof.to_string())) {
-                    profiles.push(IdeBuildToolProfile {
-                        id: prof.to_string(),
-                        kind: "spring".into(),
-                        source_project: project_name.to_string(),
-                        active_by_default: false,
-                    });
-                }
-            }
-        }
-    }
-}
-
-fn shorten_home_path(path: &Path, home: Option<&Path>) -> String {
-    if let Some(h) = home {
-        if let Ok(rel) = path.strip_prefix(h) {
-            return format!("~/{}", rel.to_string_lossy().replace('\\', "/"));
-        }
-    }
-    path.to_string_lossy().into_owned()
 }

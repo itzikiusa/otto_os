@@ -12,17 +12,23 @@
 //!   inspection, IntelliJ-style inline ghost variable values, and SSE broadcasts.
 
 pub mod adapters;
+pub(crate) mod adapters_env;
 pub(crate) mod adapters_go_py;
 pub(crate) mod adapters_jvm_js;
+pub(crate) mod adapters_py;
 pub(crate) mod adapters_rust_sh;
 pub(crate) mod java_bridge;
 pub(crate) mod lldb_bridge;
 pub(crate) mod node_bridge;
 pub(crate) mod py_bridge;
 pub mod session;
+pub(crate) mod session_entry;
+pub(crate) mod session_inline;
 pub(crate) mod session_inspect;
 pub(crate) mod session_transport;
 pub(crate) mod shell_bridge;
+#[cfg(unix)]
+mod shell_bridge_eval;
 mod shell_prelude;
 pub mod wire;
 
@@ -81,6 +87,10 @@ impl BridgeGuard {
         if let Ok(mut guard) = self.temp_dirs.lock() {
             guard.push(dir);
         }
+    }
+
+    pub(crate) fn pids(&self) -> Vec<u32> {
+        self.pgids.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     pub(crate) fn kill_all(&self) {
@@ -201,6 +211,9 @@ fn build_ssh_remote_command(
 }
 
 /// Spawn a child process with piped stdio on either a Local or Remote SSH target.
+///
+/// Clears ambient daemon environment variables before applying `env` so non-root
+/// debug subprocesses never inherit daemon credentials or cloud tokens.
 pub(crate) fn spawn_target_process(
     target: &IdeTargetSpec,
     ssh: Option<&IdeSshSpec>,
@@ -215,6 +228,8 @@ pub(crate) fn spawn_target_process(
             let mut cmd = Command::new(command);
             cmd.args(args)
                 .current_dir(cwd)
+                .env_clear()
+                .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
                 .envs(env)
                 .kill_on_drop(true)
                 .stdin(Stdio::piped())
@@ -256,6 +271,8 @@ pub(crate) async fn run_target_command(
             let mut cmd = Command::new(command);
             cmd.args(args)
                 .current_dir(cwd)
+                .env_clear()
+                .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
                 .envs(env)
                 .kill_on_drop(true)
                 .stdin(Stdio::null())
@@ -289,8 +306,8 @@ pub(crate) async fn run_target_command(
     }
 }
 
-/// Read source file text safely (local disk with `secret_paths` guard, or remote SSH)
-/// for computing IntelliJ-style inline ghost variable values around `paused_line`.
+/// Read source file text safely (local disk confined to workspace roots + `secret_paths` guard,
+/// or remote SSH) for computing IntelliJ-style inline ghost variable values around `paused_line`.
 pub(crate) async fn read_target_file_for_inline(
     target: &IdeTargetSpec,
     ssh: Option<&IdeSshSpec>,
@@ -301,11 +318,20 @@ pub(crate) async fn read_target_file_for_inline(
     match target.kind {
         IdeTargetKind::Local => {
             let canon = tokio::fs::canonicalize(path).await.ok()?;
-            if !caller_is_root
-                && (otto_core::secret_paths::is_denied_dir(&canon)
-                    || otto_core::secret_paths::is_denied_file(&canon))
-            {
-                return None;
+            if !caller_is_root {
+                if crate::target::enforce_non_root_path(&canon).is_err() {
+                    return None;
+                }
+                let allowed = std::iter::once(target.root.clone())
+                    .chain(target.merged_extra_roots())
+                    .any(|r| {
+                        std::fs::canonicalize(&r)
+                            .map(|cr| canon.starts_with(&cr))
+                            .unwrap_or(false)
+                    });
+                if !allowed {
+                    return None;
+                }
             }
             let meta = tokio::fs::metadata(&canon).await.ok()?;
             if !meta.is_file() || meta.len() > MAX_INLINE_FILE_BYTES {

@@ -68,7 +68,7 @@ use crate::driver::{
     LaunchSpec, StructuredDriver,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum ReqProto {
     /// `item/*/requestApproval` — `{decision}` in v2 spelling.
     V2Decision,
@@ -77,6 +77,7 @@ enum ReqProto {
     Question,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Pending {
     rpc_id: Value,
     proto: ReqProto,
@@ -84,10 +85,36 @@ struct Pending {
 }
 
 /// Accumulated state of one Codex item.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Item {
     text: String,
     output: String,
     started_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CodexDriverState {
+    next_id: u64,
+    init_id: u64,
+    thread_req: Option<(u64, bool)>,
+    turn_req: Option<u64>,
+    steer_reqs: Vec<u64>,
+    ready: bool,
+    cwd: String,
+    model: Option<String>,
+    resume: Option<String>,
+    sandboxed: bool,
+    access: RuntimeAccessMode,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    auto_turns: u64,
+    queued: Option<RuntimePromptReq>,
+    codex_turn: Option<String>,
+    interrupt_when_started: bool,
+    items: HashMap<String, Item>,
+    pending: HashMap<String, Pending>,
+    failure: Option<ProviderFailure>,
+    mcp_failures: Vec<(String, String)>,
 }
 
 impl Default for Item {
@@ -1152,6 +1179,63 @@ impl StructuredDriver for CodexDriver {
         self.items.clear();
         DriverStep::default()
     }
+
+    fn snapshot_state(&self) -> Value {
+        serde_json::to_value(CodexDriverState {
+            next_id: self.next_id,
+            init_id: self.init_id,
+            thread_req: self.thread_req,
+            turn_req: self.turn_req,
+            steer_reqs: self.steer_reqs.clone(),
+            ready: self.ready,
+            cwd: self.cwd.clone(),
+            model: self.model.clone(),
+            resume: self.resume.clone(),
+            sandboxed: self.sandboxed,
+            access: self.access,
+            thread_id: self.thread_id.clone(),
+            turn_id: self.turn_id.clone(),
+            auto_turns: self.auto_turns,
+            queued: self.queued.clone(),
+            codex_turn: self.codex_turn.clone(),
+            interrupt_when_started: self.interrupt_when_started,
+            items: self.items.clone(),
+            pending: self.pending.clone(),
+            failure: self.failure.clone(),
+            mcp_failures: self.mcp_failures.clone(),
+        })
+        .unwrap_or(Value::Null)
+    }
+
+    fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
+        if state.is_null() {
+            return Ok(());
+        }
+        let s: CodexDriverState = serde_json::from_value(state.clone())
+            .map_err(|e| DriverError(format!("invalid codex driver state: {e}")))?;
+        self.next_id = s.next_id;
+        self.init_id = s.init_id;
+        self.thread_req = s.thread_req;
+        self.turn_req = s.turn_req;
+        self.steer_reqs = s.steer_reqs;
+        self.ready = s.ready;
+        self.cwd = s.cwd;
+        self.model = s.model;
+        self.resume = s.resume;
+        self.sandboxed = s.sandboxed;
+        self.access = s.access;
+        self.thread_id = s.thread_id;
+        self.turn_id = s.turn_id;
+        self.auto_turns = s.auto_turns;
+        self.queued = s.queued;
+        self.codex_turn = s.codex_turn;
+        self.interrupt_when_started = s.interrupt_when_started;
+        self.items = s.items;
+        self.pending = s.pending;
+        self.failure = s.failure;
+        self.mcp_failures = s.mcp_failures;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1649,6 +1733,58 @@ mod tests {
             json!({"method": "turn/completed", "params": {"turn": {"id": "ct-1", "status": "completed"}}}),
         );
         assert!(done.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn snapshot_and_restore_preserve_codex_turn_items_and_pending_rpc_state() {
+        let mut d1 = CodexDriver::with_program("codex");
+        d1.start(&ctx(None, false));
+        feed(&mut d1, json!({"id": 1, "result": {}}));
+        feed(
+            &mut d1,
+            json!({"id": 2, "result": {"thread": {"id": "th-live"}}}),
+        );
+        let p = d1.prompt("t1", &RuntimePromptReq::of("run")).unwrap();
+        let req_id = parse(&p.writes[0])["id"].clone();
+        feed(
+            &mut d1,
+            json!({"id": req_id, "result": {"turn": {"id": "ct-9"}}}),
+        );
+        feed(
+            &mut d1,
+            json!({"method": "item/agentMessage/delta", "params": {"itemId": "m1", "delta": "Part 1 "}}),
+        );
+        feed(
+            &mut d1,
+            json!({"id": 77, "method": "item/commandExecution/requestApproval", "params": {"itemId": "c1", "command": "cargo test"}}),
+        );
+
+        let snap = d1.snapshot_state();
+        let mut d2 = CodexDriver::with_program("codex");
+        d2.restore_state(&snap).unwrap();
+
+        let approval = d2.respond("codex-77", ApprovalDecision::Accept).unwrap();
+        assert_eq!(parse(&approval.writes[0])["id"], 77);
+        let delta2 = feed(
+            &mut d2,
+            json!({"method": "item/agentMessage/delta", "params": {"itemId": "m1", "delta": "Part 2"}}),
+        );
+        assert!(delta2.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "Part 1 Part 2")
+        )));
+        let fin = feed(
+            &mut d2,
+            json!({"method": "turn/completed", "params": {"turn": {"id": "ct-9", "status": "completed"}}}),
+        );
+        assert!(fin.events.iter().any(|e| matches!(
             e,
             DriverEvent::Terminal {
                 status: TurnTerminalStatus::Completed,

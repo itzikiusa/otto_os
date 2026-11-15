@@ -26,6 +26,7 @@ import {
   truncateSnippet,
   type IdeContextChip,
 } from '../src/modules/ide/store/ideDiffApplier.ts';
+import { loadSource } from './sourceHarness.ts';
 
 const SAMPLE_GO = [
   'package calc',
@@ -532,4 +533,114 @@ test('attachSymbol (buildPureSymbolDraftChip + upsertIdeContextChipList) formats
   assert.equal(parsed[0].endLine, 5);
   assert.equal(parsed[1].kind, 'symbol');
   assert.equal(parsed[1].label, '@calc/calc.go#Sub');
+});
+
+test('resolveIdeHarnesses and resolveIdeInlineProviders honor empty provider lists and canonical harness ordering', () => {
+  assert.deepEqual(resolveIdeHarnesses([]), []);
+  assert.deepEqual(resolveIdeHarnesses(['shell']), []);
+  assert.deepEqual(
+    resolveIdeHarnesses(['grok', 'gemini', 'pi', 'opencode', 'agy', 'codex', 'claude', 'shell']),
+    ['claude', 'codex', 'agy', 'opencode', 'pi', 'gemini', 'grok'],
+  );
+  assert.deepEqual(IDE_RUNTIME_PROVIDERS, [
+    'claude',
+    'codex',
+    'agy',
+    'opencode',
+    'pi',
+    'gemini',
+    'grok',
+  ]);
+
+  assert.deepEqual(resolveIdeInlineProviders(['claude', 'codex'], []), []);
+  assert.deepEqual(resolveIdeInlineProviders(['claude', 'codex'], ['shell']), []);
+  assert.deepEqual(resolveIdeInlineProviders(['claude', 'codex'], ['codex']), ['codex']);
+});
+
+test('ideContextBuilders exposes active draft builders without unused selection or inline-prompt helpers', () => {
+  const builders = loadSource(
+    new URL('../src/modules/ide/agent/ideContextBuilders.ts', import.meta.url),
+    {
+      'lib/api/client': { api: { get: async () => ({ content: '', language: '' }) } },
+      'lib/stores/auth.svelte': { auth: { meta: null } },
+      'lib/stores/workspace.svelte': { SCRATCH_WORKSPACE_ID: 'scratch', ws: { workspaces: [], currentId: 'w1' } },
+      'modules/ide/ideStore.svelte': {
+        ide: {
+          target: { kind: 'local', root: '/ws/demo', workspace_id: 'w1' },
+          tabs: [],
+          projectEnv: null,
+          resolvePath: (p: string) => p,
+          relativePath: (p: string) => p.replace(/^\/ws\/demo\//, ''),
+          targetQuery: () => '',
+        },
+        ideBasename: (p: string) => p.split('/').pop() ?? p,
+      },
+    },
+    {},
+    { relative: true },
+  ) as Record<string, unknown>;
+
+  assert.equal(typeof builders.buildSymbolDraftChip, 'function');
+  assert.equal(typeof builders.buildDiagnosticDraftChip, 'function');
+  assert.equal(typeof builders.buildTestFailureDraftChip, 'function');
+  assert.equal(typeof builders.buildFailedRunDraftChip, 'function');
+  assert.equal(typeof builders.buildDebugFrameDraftChip, 'function');
+
+  assert.equal('upsertIdeContextChip' in builders, false);
+  assert.equal('buildSelectionDraftChip' in builders, false);
+  assert.equal('buildIdeInlinePromptState' in builders, false);
+  assert.equal('resolveIdeEditorSelection' in builders, false);
+});
+
+test('runtimeThreadPort segregates headless RuntimeSessionPort from lazy RuntimeComposerUiPort', async () => {
+  const portMod = loadSource(
+    new URL('../src/lib/runtimeThreadPort.ts', import.meta.url),
+    { 'lib/stores/router.svelte': { router: { go: () => {} } } },
+    {},
+    { relative: true },
+  ) as typeof import('../src/lib/runtimeThreadPort.ts');
+
+  let uiLoadCalls = 0;
+  const fakeUiPort = {
+    council: {
+      on: false,
+      seats: [],
+      ready: false,
+      watchModifiers: () => () => {},
+      pick: () => {},
+      start: async () => [],
+    },
+    councilAgentLabel: () => 'Council',
+    askTargets: { for: () => [], clear: () => {} },
+    CouncilStagePicker: (() => null) as unknown as import('../src/lib/runtimeThreadPort.ts').RuntimeComposerUiPort['CouncilStagePicker'],
+    RuntimeAccessChip: (() => null) as unknown as import('../src/lib/runtimeThreadPort.ts').RuntimeComposerUiPort['RuntimeAccessChip'],
+    RuntimeComposerImages: (() => null) as unknown as import('../src/lib/runtimeThreadPort.ts').RuntimeComposerUiPort['RuntimeComposerImages'],
+    RuntimeMentionMenu: (() => null) as unknown as import('../src/lib/runtimeThreadPort.ts').RuntimeComposerUiPort['RuntimeMentionMenu'],
+    StageSlashPopup: (() => null) as unknown as import('../src/lib/runtimeThreadPort.ts').RuntimeComposerUiPort['StageSlashPopup'],
+  };
+
+  const fakeSessionPort = {
+    runtimeThreads: {} as import('../src/lib/runtimeThreadPort.ts').RuntimeSessionPort['runtimeThreads'],
+    runtimeViews: { projections: {}, open: () => () => {} },
+    threads: { rememberProject: () => {}, selectThread: () => {}, startNewThread: () => {} },
+    readAttachments: async () => [],
+    loadComposerUi: async () => {
+      uiLoadCalls++;
+      return fakeUiPort;
+    },
+  };
+
+  portMod.registerIdeRuntimeSessionPort(async () => fakeSessionPort);
+
+  const headless = await portMod.loadIdeRuntimeSessionPort();
+  assert.equal(headless, fakeSessionPort);
+  assert.equal(portMod.getIdeRuntimeSessionPort(), fakeSessionPort);
+  assert.equal(await portMod.loadIdeRuntimeBridge(), fakeSessionPort);
+  assert.equal(uiLoadCalls, 0, 'headless session port must not eagerly load composer UI components');
+  assert.equal(portMod.getIdeRuntimeComposerUi(), null);
+
+  const ui = await portMod.loadIdeRuntimeComposerUi();
+  assert.equal(ui, fakeUiPort);
+  assert.equal(uiLoadCalls, 1);
+  assert.equal(portMod.getIdeRuntimeComposerUi(), fakeUiPort);
 });

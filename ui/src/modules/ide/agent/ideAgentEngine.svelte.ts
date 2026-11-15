@@ -10,7 +10,7 @@ import type { ApprovalDecision, RuntimeAccessMode, RuntimeProvider, RuntimeSessi
 import { loadErrorText } from '../../../lib/loadError';
 import { normalizeEffort, supportsEffortSelection, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
 import { agentProviders, attachmentSupport, defaultAgentProvider, isRuntimeProvider, takesFile } from '../../../lib/providers';
-import type { IdeRuntimeBridge, RuntimeProjectionView } from '../../../lib/runtimeThreadPort';
+import { getIdeRuntimeComposerUi, type RuntimeProjectionView, type RuntimeSessionPort } from '../../../lib/runtimeThreadPort';
 import { runtimeDrafts, type ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import { ws } from '../../../lib/stores/workspace.svelte';
 import { ide, type IdeDebugSessionSnapshot, type IdeDiagnostic, type IdeSymbolNode, type IdeTestResult, type IdeVariable } from '../ideStore.svelte';
@@ -46,13 +46,13 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   private inflightWsLoads = new Map<string, Promise<void>>();
 
   constructor() {
-    void ideAgentState.ensureBridge().then((b) => {
+    void ideAgentState.ensureSessionPort().then((b) => {
       if (b) this.syncSubscriptions();
     });
   }
 
-  bindRuntimeBridge(bridge: IdeRuntimeBridge): void {
-    ideAgentState.runtimeBridge = bridge;
+  bindRuntimeBridge(bridge: RuntimeSessionPort): void {
+    ideAgentState.runtimeSession = bridge;
     this.syncSubscriptions();
   }
 
@@ -403,9 +403,10 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
     this.error = null;
     this.sessionId = null;
     ideAgentState.composerText = '';
-    if (ideAgentState.runtimeBridge) {
-      ideAgentState.runtimeBridge.council.on = false;
-      ideAgentState.runtimeBridge.council.seats = [];
+    const composerUi = ideAgentState.composerUi ?? getIdeRuntimeComposerUi();
+    if (composerUi) {
+      composerUi.council.on = false;
+      composerUi.council.seats = [];
     }
   }
 

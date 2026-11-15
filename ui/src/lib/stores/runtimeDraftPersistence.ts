@@ -153,15 +153,17 @@ export class DraftPersistence {
     if (this.syncing) await this.syncing;
     if (!this.loaded) await this.load();
     if (!this.loaded || !this.owns()) return;
-    while (this.owns() && JSON.stringify(this.current) !== this.saved) {
-      const snapshot = copy(this.current);
+    while (this.owns()) {
+      const currentJson = JSON.stringify(this.current);
+      if (currentJson === this.saved) break;
+      const snapshot = JSON.parse(currentJson) as RuntimeDraftContent;
       this.status('saving');
       this.inSaveCall = true;
       try {
         const record = await this.transport.save(snapshot, this.revision);
         if (!this.owns()) return;
         this.revision = record.revision;
-        this.saved = JSON.stringify(snapshot);
+        this.saved = currentJson;
       } catch (e) {
         if (!this.owns()) return;
         this.conflicted = (e as { status?: number }).status === 409;

@@ -3,12 +3,19 @@
 // Zero Svelte/DOM runtime imports so `node --test` runs directly against it.
 
 import type { Session } from '../../lib/api/types';
+import {
+  basenameOfProjectPath,
+  IDE_PROJECTS_CHANGED_EVENT,
+  LS_IDE_PROJECTS,
+  normalizeProjectPath,
+  parseNamedIdeProjectsJson,
+} from '../../lib/ideProjectsModel.ts';
 
-export const IDE_NAMED_PROJECTS_KEY = 'otto.ide.projects.v1';
+export const IDE_NAMED_PROJECTS_KEY = LS_IDE_PROJECTS;
 export const IDE_LAST_ROOT_KEY = 'otto.ide.lastRoot';
 export const IDE_ROOTS_KEY_PREFIX = 'otto.ide.roots:local:';
 export const IDE_OPEN_HANDOFF_KEY = 'otto.ide.openThreadHandoff';
-export const IDE_PROJECTS_CHANGED_EVENT = 'otto:ide-projects-changed';
+export { IDE_PROJECTS_CHANGED_EVENT };
 export const IDE_CONTEXT_CHANGED_EVENT = 'otto:ide-context-changed';
 export const IDE_OPEN_THREAD_EVENT = 'otto:ide-open-thread';
 
@@ -63,22 +70,11 @@ export function trimTrailingSlashes(path: string): string {
 
 /** Normalize macOS `/private/var` & `/private/tmp` symlinks + trailing slashes. */
 export function canonicalIdePath(raw: string | null | undefined): string {
-  const clean = trimTrailingSlashes(raw ?? '');
-  if (!clean) return '';
-  if (clean === '/private/var' || clean.startsWith('/private/var/')) {
-    return clean.slice('/private'.length);
-  }
-  if (clean === '/private/tmp' || clean.startsWith('/private/tmp/')) {
-    return clean.slice('/private'.length);
-  }
-  return clean;
+  return normalizeProjectPath(raw ?? '');
 }
 
 export function basenameOfPath(raw: string): string {
-  const clean = trimTrailingSlashes(raw);
-  if (!clean || clean === '~') return clean;
-  const idx = clean.lastIndexOf('/');
-  return idx >= 0 ? clean.slice(idx + 1) : clean;
+  return basenameOfProjectPath(raw);
 }
 
 export function isSameOrSubpath(candidate: string | null | undefined, root: string | null | undefined): boolean {
@@ -89,53 +85,13 @@ export function isSameOrSubpath(candidate: string | null | undefined, root: stri
 }
 
 export function parseNamedIdeProjects(raw: string | null | undefined): NamedIdeProjectRecord[] {
-  if (!raw) return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const out: NamedIdeProjectRecord[] = [];
-    for (let i = 0; i < parsed.length; i++) {
-      const entry = parsed[i];
-      if (!entry || typeof entry !== 'object') continue;
-      const rec = entry as Record<string, unknown>;
-      const rawPrimary =
-        typeof rec.primaryRoot === 'string'
-          ? rec.primaryRoot
-          : typeof rec.primary_root === 'string'
-            ? rec.primary_root
-            : '';
-      const primary = trimTrailingSlashes(rawPrimary);
-      const foldersRaw = Array.isArray(rec.folders) ? rec.folders : [];
-      const folders: string[] = [];
-      const pushFolder = (f: string): void => {
-        const clean = trimTrailingSlashes(f);
-        if (!clean || clean === '~') return;
-        const canon = canonicalIdePath(clean);
-        if (!folders.some((x) => canonicalIdePath(x) === canon)) folders.push(clean);
-      };
-      if (primary) pushFolder(primary);
-      for (let j = 0; j < foldersRaw.length; j++) {
-        if (typeof foldersRaw[j] === 'string') pushFolder(foldersRaw[j] as string);
-      }
-      const resolvedPrimary = primary || folders[0] || '';
-      if (!resolvedPrimary) continue;
-      const id = typeof rec.id === 'string' && rec.id.trim() ? rec.id.trim() : `ide-proj:${canonicalIdePath(resolvedPrimary)}`;
-      const name =
-        typeof rec.name === 'string' && rec.name.trim()
-          ? rec.name.trim()
-          : basenameOfPath(resolvedPrimary) || resolvedPrimary;
-      out.push({
-        id,
-        name,
-        primary_root: resolvedPrimary,
-        folders,
-        pinned: rec.pinned === true,
-      });
-    }
-    return out;
-  } catch {
-    return [];
-  }
+  return parseNamedIdeProjectsJson(raw).map((proj) => ({
+    id: proj.id,
+    name: proj.name,
+    primary_root: proj.primaryRoot,
+    folders: proj.folders,
+    pinned: proj.pinned,
+  }));
 }
 
 export function parseSavedAdditionalRoots(raw: string | null | undefined): string[] {

@@ -1,5 +1,6 @@
-//! Document formatting helpers (`gofmt`, `rustfmt`, `prettier`, `ruff`/`black`,
-//! `google-java-format`, `shfmt`, `buf`) and zero-tool deterministic fallback formatters.
+//! Document formatting helpers (`goimports`/`gofmt`, `rustfmt`, `prettier`,
+//! `ruff`/`black`, `google-java-format`, `shfmt`, `buf`) and deterministic
+//! fallback formatters (including RFC 4180 multiline CSV/TSV formatting).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -13,7 +14,9 @@ use crate::IdeCtx;
 pub(super) fn formatter_candidates(
     lang: &str,
     path: &str,
+    organize_imports: bool,
 ) -> Vec<(&'static str, String, Vec<String>)> {
+    let _ = organize_imports;
     match lang {
         "go" => vec![
             ("goimports", "goimports".into(), vec![]),
@@ -95,23 +98,31 @@ pub(super) fn try_native_data_format(lang: &str, path: &str, content: &str) -> O
     if matches!(lang, "csv" | "tsv") {
         let first = content.lines().find(|l| !l.trim().is_empty())?;
         let delim = symbols_data::detect_csv_delimiter(path, lang, first);
-        let mut rows = Vec::new();
-        for line in content.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let cells: Vec<String> = symbols_data::split_delimited_row(line, delim)
+        let parsed_rows = parse_rfc4180_records(content, delim);
+        let mut rows = Vec::with_capacity(parsed_rows.len());
+        let delim_str = delim.to_string();
+        for raw_cells in parsed_rows {
+            let cells: Vec<String> = raw_cells
                 .into_iter()
-                .map(|c| {
-                    let t = c.trim();
-                    if t.contains(delim) || t.contains('"') {
-                        format!("\"{}\"", t.replace('"', "\"\""))
+                .map(|(raw_cell, was_quoted)| {
+                    let cell = if was_quoted {
+                        raw_cell
                     } else {
-                        t.to_string()
+                        raw_cell.trim().to_string()
+                    };
+                    let needs_quotes = cell.contains(delim)
+                        || cell.contains('"')
+                        || cell.contains('\n')
+                        || cell.contains('\r')
+                        || (was_quoted && cell.trim() != cell);
+                    if needs_quotes {
+                        format!("\"{}\"", cell.replace('"', "\"\""))
+                    } else {
+                        cell
                     }
                 })
                 .collect();
-            rows.push(cells.join(&delim.to_string()));
+            rows.push(cells.join(&delim_str));
         }
         return Some(if rows.is_empty() {
             String::new()
@@ -120,6 +131,71 @@ pub(super) fn try_native_data_format(lang: &str, path: &str, content: &str) -> O
         });
     }
     None
+}
+
+/// Quote-aware RFC 4180 record scanner that preserves `\r` and `\n` inside quoted
+/// fields within a single record and distinguishes quoted vs unquoted cells.
+fn parse_rfc4180_records(content: &str, delim: char) -> Vec<Vec<(String, bool)>> {
+    let mut rows: Vec<Vec<(String, bool)>> = Vec::new();
+    let mut cur_row: Vec<(String, bool)> = Vec::new();
+    let mut cur_cell = String::new();
+    let mut cell_was_quoted = false;
+    let mut in_quotes = false;
+    let mut chars = content.chars().peekable();
+
+    let push_row_if_non_blank = |rows: &mut Vec<Vec<(String, bool)>>, row: Vec<(String, bool)>| {
+        if row.len() == 1 && !row[0].1 && row[0].0.trim().is_empty() {
+            return;
+        }
+        if !row.is_empty() {
+            rows.push(row);
+        }
+    };
+
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    let _ = chars.next();
+                    cur_cell.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                cur_cell.push(ch);
+            }
+            continue;
+        }
+
+        if ch == '"' && cur_cell.trim().is_empty() && !cell_was_quoted {
+            cur_cell.clear();
+            in_quotes = true;
+            cell_was_quoted = true;
+        } else if ch == delim {
+            cur_row.push((std::mem::take(&mut cur_cell), cell_was_quoted));
+            cell_was_quoted = false;
+        } else if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                let _ = chars.next();
+            }
+            cur_row.push((std::mem::take(&mut cur_cell), cell_was_quoted));
+            cell_was_quoted = false;
+            push_row_if_non_blank(&mut rows, std::mem::take(&mut cur_row));
+        } else if ch == '\n' {
+            cur_row.push((std::mem::take(&mut cur_cell), cell_was_quoted));
+            cell_was_quoted = false;
+            push_row_if_non_blank(&mut rows, std::mem::take(&mut cur_row));
+        } else {
+            cur_cell.push(ch);
+        }
+    }
+
+    if !cur_row.is_empty() || cell_was_quoted || !cur_cell.trim().is_empty() {
+        cur_row.push((cur_cell, cell_was_quoted));
+        push_row_if_non_blank(&mut rows, cur_row);
+    }
+
+    rows
 }
 
 pub(super) async fn run_stdin_formatter<S: IdeCtx>(
@@ -153,7 +229,31 @@ pub(super) async fn run_stdin_formatter<S: IdeCtx>(
         .flatten()
 }
 
+pub(super) fn organize_imports_if_requested(lang: &str, content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    if let Some((_, organized)) =
+        super::code_actions::build_organize_imports_action(lang, &lines, content)
+    {
+        organized
+    } else {
+        content.to_string()
+    }
+}
+
 pub fn format_builtin_fallback(lang: &str, content: &str) -> String {
+    format_builtin_fallback_opts(lang, content, false)
+}
+
+pub fn format_builtin_fallback_opts(lang: &str, content: &str, organize_imports: bool) -> String {
+    let formatted = format_builtin_fallback_inner(lang, content);
+    if organize_imports {
+        organize_imports_if_requested(lang, &formatted)
+    } else {
+        formatted
+    }
+}
+
+fn format_builtin_fallback_inner(lang: &str, content: &str) -> String {
     if matches!(lang, "json" | "jsonl" | "csv" | "tsv") {
         let fake_path = format!("doc.{lang}");
         if let Some(formatted) = try_native_data_format(lang, &fake_path, content) {

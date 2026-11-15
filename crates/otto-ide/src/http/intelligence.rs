@@ -15,14 +15,30 @@ use crate::types::{
     IdeCodeActionsReq, IdeCodeActionsResp, IdeDiagnosticsReq, IdeDiagnosticsResp, IdeFormatReq,
     IdeFormatResp, IdeFsCompleteReq, IdeFsCompleteResp, IdeHistoryEntryQuery, IdeHistoryEntryResp,
     IdeHistoryListQuery, IdeHistoryListResp, IdeHistoryRestoreReq, IdeHistoryRestoreResp,
-    IdeHistorySnapshotReq, IdeHistorySnapshotResp, IdeHoverReq, IdeHoverResp, IdeReferencesReq,
-    IdeReferencesResp, IdeRenameReq, IdeRenameResp, IdeSymbolsReq, IdeSymbolsResp, IdeTargetSpec,
+    IdeHistorySnapshotReq, IdeHistorySnapshotResp, IdeHoverReq, IdeHoverResp, IdeLspStatusResp,
+    IdeReferencesReq, IdeReferencesResp, IdeRenameReq, IdeRenameResp, IdeSymbolsReq,
+    IdeSymbolsResp, IdeTargetSpec,
 };
 use crate::IdeCtx;
 
 // ---------------------------------------------------------------------------
 // Extended LSP & Fast Code Intelligence (`/ide/lsp/*`)
 // ---------------------------------------------------------------------------
+
+pub(super) async fn lsp_status<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+) -> ApiResult<Json<IdeLspStatusResp>> {
+    let engine = ctx.ide().clone();
+    let resp = tokio::task::spawn_blocking(move || {
+        engine
+            .lsp_pool
+            .status_snapshot(Some(&user), Some(&engine.data_dir), Some(&engine.plugins))
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("lsp status worker failed: {e}")))?;
+    Ok(Json(resp))
+}
 
 pub(super) async fn lsp_symbols<S: IdeCtx>(
     State(ctx): State<S>,
@@ -140,29 +156,61 @@ pub(super) async fn lsp_hover<S: IdeCtx>(
 // `<15ms` `@` File & Path Completion (`POST /ide/fs/complete`)
 // ---------------------------------------------------------------------------
 
+fn push_canon_dir(out: &mut Vec<PathBuf>, raw: &str) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let expanded =
+        otto_core::paths::expand_home_strict(trimmed).unwrap_or_else(|_| PathBuf::from(trimmed));
+    if let Ok(canon) = std::fs::canonicalize(&expanded) {
+        if !out.contains(&canon) {
+            out.push(canon);
+        }
+    }
+}
+
 pub(super) async fn fs_complete<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeFsCompleteReq>,
 ) -> ApiResult<Json<IdeFsCompleteResp>> {
-    if !user.is_root {
+    let auth_roots = if !user.is_root {
         let mut authorized_any = false;
+        let mut allowed_dirs: Vec<PathBuf> = Vec::new();
         if let Some(ref t) = req.target {
             if !t.root.trim().is_empty() {
-                let _ = ctx.ide().targets.resolve(&ctx, &user, t).await?;
+                let resolved = ctx.ide().targets.resolve(&ctx, &user, t).await?;
                 authorized_any = true;
+                if let crate::target::ResolvedTarget::Local {
+                    root,
+                    additional_roots,
+                    ..
+                } = resolved
+                {
+                    if !allowed_dirs.contains(&root) {
+                        allowed_dirs.push(root);
+                    }
+                    for ar in additional_roots {
+                        if !allowed_dirs.contains(&ar) {
+                            allowed_dirs.push(ar);
+                        }
+                    }
+                }
             }
         }
         for r in &req.roots {
             if !r.trim().is_empty() {
                 ctx.authorize_local_target(&user, &IdeTargetSpec::local(r.clone()), false)
                     .await?;
+                push_canon_dir(&mut allowed_dirs, r);
                 authorized_any = true;
             }
         }
         if let Some(cwd) = req.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             ctx.authorize_local_target(&user, &IdeTargetSpec::local(cwd.to_string()), false)
                 .await?;
+            push_canon_dir(&mut allowed_dirs, cwd);
             authorized_any = true;
         }
         if !authorized_any {
@@ -170,10 +218,29 @@ pub(super) async fn fs_complete<S: IdeCtx>(
                 Error::Forbidden("workspace root is required for path completion".into()).into(),
             );
         }
-    }
+        for alias_val in req.aliases.values() {
+            let trimmed = alias_val.trim();
+            if !trimmed.is_empty()
+                && ctx
+                    .authorize_local_target(
+                        &user,
+                        &IdeTargetSpec::local(trimmed.to_string()),
+                        false,
+                    )
+                    .await
+                    .is_ok()
+            {
+                push_canon_dir(&mut allowed_dirs, trimmed);
+            }
+        }
+        Some(allowed_dirs)
+    } else {
+        None
+    };
+
     let is_root = user.is_root;
     let resp = tokio::task::spawn_blocking(move || {
-        crate::target::complete::complete_fs_paths(&req, is_root)
+        crate::target::complete::complete_fs_paths_for_roots(&req, is_root, auth_roots.as_deref())
     })
     .await
     .map_err(|e| Error::Internal(format!("fs complete worker failed: {e}")))?;
@@ -273,6 +340,10 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeHistorySnapshotReq>,
 ) -> ApiResult<Json<IdeHistorySnapshotResp>> {
+    if !req.local_history_enabled {
+        return Err(Error::Invalid("local history is disabled in preferences".into()).into());
+    }
+    let retention_days = req.local_history_retention_days;
     let (canon_root, extra_roots) =
         authorize_history_root(&ctx, &user, req.effective_root(), true).await?;
     let store = ctx.ide().history.clone();
@@ -318,29 +389,36 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
             let walker = ignore::WalkBuilder::new(&resolved_path)
                 .hidden(false)
                 .git_ignore(false)
+                .follow_links(false)
                 .max_depth(Some(8))
                 .build();
             for item in walker.flatten().take(200) {
+                if !item.file_type().is_some_and(|ft| ft.is_file()) {
+                    continue;
+                }
                 let p = item.path();
-                if p.is_file() {
-                    let Ok(canon_p) = std::fs::canonicalize(p) else {
-                        continue;
-                    };
-                    let Some(entry_root) = std::iter::once(&canon_root)
-                        .chain(extra_roots.iter())
-                        .find(|r| canon_p.starts_with(r))
-                    else {
-                        continue;
-                    };
-                    if !is_root && enforce_non_root_path(&canon_p).is_err() {
-                        continue;
-                    }
-                    if let Some(rec) = store
-                        .record_existing_file_sync(entry_root, &canon_p, "manual", label, false)
-                    {
-                        if first.is_none() {
-                            first = Some(rec);
-                        }
+                let Ok(canon_p) = std::fs::canonicalize(p) else {
+                    continue;
+                };
+                let Some(entry_root) = std::iter::once(&canon_root)
+                    .chain(extra_roots.iter())
+                    .find(|r| canon_p.starts_with(r))
+                else {
+                    continue;
+                };
+                if !is_root && enforce_non_root_path(&canon_p).is_err() {
+                    continue;
+                }
+                if let Some(rec) = store.record_existing_file_with_retention_sync(
+                    entry_root,
+                    &canon_p,
+                    "manual",
+                    label,
+                    false,
+                    retention_days,
+                ) {
+                    if first.is_none() {
+                        first = Some(rec);
                     }
                 }
             }
@@ -349,17 +427,33 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
             }
             let marker = resolved_path.join(".otto-folder-snapshot");
             return store
-                .record_bytes_sync(matched_root, &marker, b"", "manual", label, false)?
+                .record_bytes_with_retention_sync(
+                    matched_root,
+                    &marker,
+                    b"",
+                    "manual",
+                    label,
+                    false,
+                    retention_days,
+                )?
                 .ok_or_else(|| Error::Invalid("unable to record folder snapshot".into()));
         }
 
-        let bytes = if req.content.is_empty() && resolved_path.is_file() {
-            std::fs::read(&resolved_path).unwrap_or_default()
-        } else {
-            req.content.into_bytes()
+        let bytes = match req.content {
+            Some(buf) => buf.into_bytes(),
+            None if resolved_path.is_file() => std::fs::read(&resolved_path).unwrap_or_default(),
+            None => Vec::new(),
         };
         store
-            .record_bytes_sync(matched_root, &resolved_path, &bytes, "manual", label, false)?
+            .record_bytes_with_retention_sync(
+                matched_root,
+                &resolved_path,
+                &bytes,
+                "manual",
+                label,
+                false,
+                retention_days,
+            )?
             .ok_or_else(|| {
                 Error::Invalid("snapshot skipped (binary content or exceeds 2 MiB limit)".into())
             })

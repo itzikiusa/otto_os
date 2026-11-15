@@ -18,8 +18,18 @@ import {
 import {
   IDE_COLOR_SCHEME_OPTIONS,
   isDarkIdeScheme,
+  JETBRAINS_THEME_PALETTES,
   resolveEffectiveIdeScheme,
 } from '../src/lib/components/cm-ide-theme.ts';
+import {
+  analyzeGoImports,
+  inferGoImportPkgNames,
+} from '../src/lib/components/cm-ide-semantic-model.ts';
+import {
+  clearLiveLspDiagnostics,
+  hasLiveLspDiagnosticsForFile,
+  markLiveLspDiagnostics,
+} from '../src/lib/components/cm-ide-drafts.ts';
 
 function roleMap(doc: string, spans: ReturnType<typeof classifySemanticTokens>): Map<string, Set<string>> {
   const map = new Map<string, Set<string>>();
@@ -243,4 +253,101 @@ test('6 curated IDE color schemes resolve Auto against preferred dark & light sc
   );
   assert.equal(isDarkIdeScheme('vscode-dark-modern'), true);
   assert.equal(isDarkIdeScheme('jetbrains-islands-light'), false);
+});
+
+test('JetBrains Islands Dark & Darcula palettes match GoLand syntax colors', () => {
+  const dark = JETBRAINS_THEME_PALETTES['jetbrains-islands-dark'];
+  assert.equal(dark['--syn-keyword'], '#CF8E6D');
+  assert.equal(dark['--syn-func-decl'], '#56A8F5');
+  assert.equal(dark['--syn-func-call'], '#57AAF7');
+  assert.equal(dark['--syn-string'], '#6AAB73');
+  assert.equal(dark['--syn-escape'], '#CF8E6D');
+  assert.equal(dark['--syn-number'], '#2AACB8');
+  assert.equal(dark['--syn-field'], '#C77DBB');
+  assert.equal(dark['--syn-type'], '#6FAFBD');
+  assert.equal(dark['--syn-param'], '#E5C07B');
+  assert.equal(dark['--syn-unused'], '#7A7E85');
+  assert.equal(dark['--syn-comment'], '#7A7E85');
+  assert.equal(dark['--syn-doc-comment'], '#5F826B');
+});
+
+test('Go semantic model keeps param scopes synchronized across braces in strings/comments, multi-line params, and qualified types', () => {
+  const src = [
+    'package handler',
+    '',
+    'import (',
+    '\t"context"',
+    '\t"github.com/gofiber/fiber/v2"',
+    ')',
+    '',
+    'func Handle(',
+    '\tctx context.Context,',
+    '\tfiberCtx *fiber.Ctx,',
+    '\tcount int64,',
+    ') error {',
+    '\tpattern := "{unbalanced brace in string }}}"',
+    '\traw := `another { brace` // trailing { in comment',
+    '\t_ = pattern + raw',
+    '\tif count > 0 {',
+    '\t\treturn fiberCtx.SendStatus(200)',
+    '\t}',
+    '\t_ = ctx',
+    '\treturn nil',
+    '}',
+    '',
+    'func Other() {',
+    '\tctx := 1',
+    '\t_ = ctx',
+    '}',
+  ].join('\n');
+
+  const spans = classifySemanticTokens(src, 'go');
+  const roles = roleMap(src, spans);
+
+  assert.ok(roles.get('Context')?.has('type'));
+  assert.ok(roles.get('Ctx')?.has('type'));
+  assert.ok(roles.get('int64')?.has('type'));
+  assert.ok(roles.get('error')?.has('type'));
+  assert.ok(roles.get('fiberCtx')?.has('param'));
+  assert.ok(roles.get('count')?.has('param'));
+
+  const otherStart = src.indexOf('func Other');
+  const leakedParams = spans.filter((s) => s.from > otherStart && s.role === 'param');
+  assert.equal(leakedParams.length, 0, 'param scope must end cleanly at Handle closing brace');
+});
+
+test('inferGoImportPkgNames and analyzeGoImports handle /v2, .v3, go-foo suffixes without false unused warnings and track live LSP ownership', () => {
+  assert.deepEqual(inferGoImportPkgNames('github.com/gofiber/fiber/v2'), { names: ['fiber'], certain: true });
+  assert.deepEqual(inferGoImportPkgNames('gopkg.in/yaml.v3'), { names: ['yaml'], certain: true });
+  assert.deepEqual(inferGoImportPkgNames('github.com/redis/go-redis/v9'), {
+    names: ['redis', 'goredis'],
+    certain: true,
+  });
+
+  const goSrc = [
+    'package svc',
+    '',
+    'import (',
+    '\t"os"',
+    '\t"github.com/gofiber/fiber/v2"',
+    '\t"gopkg.in/yaml.v3"',
+    '\t"github.com/redis/go-redis/v9"',
+    ')',
+    '',
+    'func Touch(c *fiber.Ctx, r *redis.Client) error {',
+    '\tvar out map[string]any',
+    '\treturn yaml.Unmarshal(c.Body(), &out)',
+    '}',
+  ].join('\n');
+
+  const res = analyzeGoImports(goSrc);
+  assert.equal(res.diagnostics.length, 1);
+  assert.match(res.diagnostics[0].message, /"os"/);
+
+  clearLiveLspDiagnostics();
+  assert.equal(hasLiveLspDiagnosticsForFile('/ws', 'repo-1/internal/svc.go'), false);
+  markLiveLspDiagnostics('/ws/repo-1', '/ws/repo-1/internal/svc.go');
+  assert.equal(hasLiveLspDiagnosticsForFile('/ws', 'repo-1/internal/svc.go'), true);
+  clearLiveLspDiagnostics('/ws/repo-1');
+  assert.equal(hasLiveLspDiagnosticsForFile('/ws', 'repo-1/internal/svc.go'), false);
 });

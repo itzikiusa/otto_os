@@ -25,7 +25,7 @@
 </script>
 
 {#if !viewport.isPhone}
-  <div class="run-cluster" role="group" aria-label="Launch controls">
+  <div class="run-cluster" data-keep role="group" aria-label="Launch controls">
     <button
       bind:this={triggerEl}
       type="button"
@@ -141,7 +141,7 @@
 <style>
   .run-cluster { display: inline-flex; align-items: center; gap: 4px; min-inline-size: 0; }
   .run-cfg-btn {
-    display: inline-flex; align-items: center; gap: 6px; max-inline-size: min(260px, 24vw);
+    display: inline-flex; align-items: center; gap: 6px; max-inline-size: min(170px, 16vw);
     min-inline-size: 0; block-size: 26px; padding-inline: 8px; background: var(--surface-2);
     color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-s);
     font-size: var(--fs-xs); font-weight: 500; cursor: pointer;

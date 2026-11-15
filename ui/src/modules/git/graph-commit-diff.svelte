@@ -32,7 +32,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { fileFor } from './diff-load';
+  import { fileFor } from '../../lib/diff/diff-load';
   import { lsGet, lsSet } from '../../lib/storage';
   import CommitFileList from './graph/CommitFileList.svelte';
   import { loadErrorText } from '../../lib/loadError';

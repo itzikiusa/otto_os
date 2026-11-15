@@ -40,7 +40,7 @@
   import { gitBridge } from './gitBridge.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import CommentThread from './CommentThread.svelte';
-  import { prDiffCacheNearCap, prIgnoreWhitespace, setPrIgnoreWhitespace, type DiffFileLoader } from './diff-load';
+  import { prDiffCacheNearCap, prIgnoreWhitespace, setPrIgnoreWhitespace, type DiffFileLoader } from '../../lib/diff/diff-load';
   import {
     COLLAPSE_ALL_FILES,
     COLLAPSE_ALL_LINES,

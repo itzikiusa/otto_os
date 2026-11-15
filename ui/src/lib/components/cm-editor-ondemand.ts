@@ -14,8 +14,13 @@ import type * as CmIdeDepsMod from './cm-ide-deps';
 import type * as CmIdeMod from './cm-ide-extensions';
 import { isManifestPath } from './cm-ide-history';
 import { lspLanguageIdFor, normalizeIdeLspServerLang } from './cm-ide-keymap';
+import {
+  resolveIdeLspModuleRoot,
+  shouldAttachIdeLsp,
+  toAbsoluteIdeFilePath,
+} from './cm-ide-lsp-completion';
 
-export { lspLanguageIdFor, normalizeIdeLspServerLang };
+export { lspLanguageIdFor, normalizeIdeLspServerLang, toAbsoluteIdeFilePath };
 
 function lspLangFor(filePath: string, ideMode: boolean, language?: string): string | null {
   return lspLanguageIdFor(filePath, ideMode, language);
@@ -54,14 +59,18 @@ async function getLspCapabilities(force = false): Promise<LspCapabilities | null
 
 export async function attachCodeEditorLsp(opts: {
   editorView: EditorView; filePath: string; rootPath: string; connId?: string | null;
+  projectFolders?: string[];
   ideMode: boolean; language?: string; lspCompartment: Compartment;
   isCurrent: () => boolean; ensureIdeMod: () => Promise<typeof CmIdeMod>;
-  onLocationJump: (targetPath: string, line: number, column: number) => void;
+  onLocationJump: (targetPath: string, line: number, column: number, absLivePath: string) => void;
   onDiagnostics?: ((diags: IdeDiagnostic[]) => void) | null;
 }): Promise<void> {
   try {
-    const lspLang = lspLangFor(opts.filePath, opts.ideMode, opts.language);
-    if (!lspLang || !opts.rootPath) return;
+    if (!shouldAttachIdeLsp(opts.filePath, opts.language, opts.rootPath)) return;
+    const resolvedRoot = resolveIdeLspModuleRoot(opts.rootPath, opts.filePath, opts.projectFolders ?? []);
+    const absFile = toAbsoluteIdeFilePath(opts.rootPath, opts.filePath) || opts.filePath;
+    const lspLang = lspLangFor(absFile, opts.ideMode, opts.language);
+    if (!lspLang || !resolvedRoot) return;
     const serverLang = normalizeIdeLspServerLang(lspLang);
     if (!opts.connId) {
       let caps = await getLspCapabilities(false);
@@ -72,19 +81,23 @@ export async function attachCodeEditorLsp(opts: {
     }
     if (!opts.isCurrent()) return;
 
-    const wsUri = lspWsUrl(serverLang, opts.rootPath, opts.connId);
+    const wsUri = lspWsUrl(serverLang, resolvedRoot, opts.connId);
     const token = getToken();
     const protocols = token ? [WS_BEARER_SUBPROTOCOL, token] : undefined;
-    const rootUri = `file://${opts.rootPath}`;
-    const documentUri = opts.filePath.includes('://') ? opts.filePath : `file://${opts.filePath}`;
+    const rootUri = `file://${resolvedRoot}`;
+    const documentUri = absFile.includes('://') ? absFile : `file://${absFile}`;
     const mod = await opts.ensureIdeMod();
     if (!opts.isCurrent()) return;
+    if (!mod.hasWarmPooledLspClient(serverLang, resolvedRoot, opts.connId)) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 160));
+      if (!opts.isCurrent()) return;
+    }
 
-    const jump = (uri: string, line: number, column: number) => opts.onLocationJump(uriToPath(uri), line, column);
+    const jump = (uri: string, line: number, column: number) => opts.onLocationJump(uriToPath(uri), line, column, absFile);
     try {
       const lspExtensions = await mod.buildPooledLspExtensions({
-        wsUri, protocols, rootPath: opts.rootPath, connId: opts.connId,
-        filePath: opts.filePath, languageId: lspLang,
+        wsUri, protocols, rootPath: resolvedRoot, connId: opts.connId,
+        filePath: absFile, languageId: lspLang,
         onLocationJump: jump, onDiagnostics: opts.onDiagnostics,
       });
       if (!opts.isCurrent()) { mod.disposePooledLspClients(); return; }
@@ -92,7 +105,7 @@ export async function attachCodeEditorLsp(opts: {
     } catch {
       if (!opts.isCurrent()) return;
       const fallbackExt = mod.createDirectLspExtension({
-        wsUri, protocols, rootUri, documentUri, filePath: opts.filePath, languageId: lspLang,
+        wsUri, protocols, rootUri, documentUri, filePath: absFile, languageId: lspLang,
         onLocationJump: jump, onDiagnostics: opts.onDiagnostics ?? undefined,
       });
       opts.editorView.dispatch({ effects: opts.lspCompartment.reconfigure(fallbackExt) });

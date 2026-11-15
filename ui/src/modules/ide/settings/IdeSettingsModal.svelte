@@ -6,6 +6,7 @@
   import Modal from '../../../lib/components/Modal.svelte';
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import { loadPaneWidth } from '../../../lib/paneResizer';
+  import { auth } from '../../../lib/stores/auth.svelte';
   import { ide } from '../ideStore.svelte';
   import IdeBuildAndToolsSection from './IdeBuildAndToolsSection.svelte';
   import IdeEditorAppearanceSection from './IdeEditorAppearanceSection.svelte';
@@ -49,7 +50,9 @@
       if (ide.hasTarget) {
         void ide.loadToolchains({ includeCatalog: true });
         if (!ide.projectEnv && !ide.envLoading) void ide.loadEnvironments();
-        if (!ide.shellEnv && !ide.shellEnvLoading) void ide.loadShellEnv(false);
+        if (auth.isRoot && !ide.shellEnv && !ide.shellEnvLoading && !ide.shellEnvAttempted) {
+          void ide.loadShellEnv(false);
+        }
       }
       if (ide.plugins.length === 0 && !ide.pluginsLoading) void ide.loadPlugins();
     });
@@ -176,7 +179,10 @@
   async function handleOk(): Promise<void> {
     applying = true;
     try {
-      if (ideSettings.isDirty) await ideSettings.apply();
+      if (ideSettings.isDirty) {
+        const ok = await ideSettings.apply();
+        if (!ok) return;
+      }
       ide.settingsOpen = false;
     } finally {
       applying = false;
@@ -240,8 +246,8 @@
                 data-testid={`ide-settings-nav-${group.id}`}
               >
                 <span>{group.label}</span>
-                {#if group.id === 'plugins'}
-                  <Badge tone="accent" variant="outline" label={String(ide.plugins.length || 6)} />
+                {#if group.id === 'plugins' && ide.plugins.length > 0}
+                  <Badge tone="accent" variant="outline" label={String(ide.plugins.length)} />
                 {/if}
               </button>
             </div>

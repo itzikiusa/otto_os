@@ -85,6 +85,8 @@ export interface IdePreferences {
   tabSize: number;
   wordWrap: boolean;
   fontLigatures: boolean;
+  autoSave: boolean;
+  maxOpenTabs: number;
   formatOnSave: boolean;
   autoFoldImports: boolean;
   breadcrumbs: boolean;
@@ -107,17 +109,7 @@ export interface IdePreferences {
   dbgShowWatches: boolean;
   dbgShowConsole: boolean;
   hiddenDockTabs: string[];
-  defaultBuildToolJava: 'auto' | 'maven' | 'gradle';
-  goModulesEnabled: boolean;
-  goProxy: string;
-  cargoCheckOnSave: boolean;
-  npmPackageManager: 'npm' | 'pnpm' | 'yarn' | 'bun';
-  goEnabledModules: Record<string, boolean>;
   moduleSdkMap: Record<string, string>;
-  javaLanguageLevel: '8' | '11' | '17' | '21' | '23';
-  javaCompilerOutput: string;
-  shellDialect: 'zsh' | 'bash' | 'POSIX sh';
-  jsonValidateSchemas: boolean;
   csvDelimiter: 'auto' | ',' | '\t' | ';';
   csvFirstRowHeader: boolean;
   csvRainbowColumns: boolean;
@@ -140,6 +132,8 @@ export const DEFAULT_IDE_PREFERENCES: IdePreferences = {
   tabSize: 4,
   wordWrap: false,
   fontLigatures: true,
+  autoSave: true,
+  maxOpenTabs: 20,
   formatOnSave: false,
   autoFoldImports: true,
   breadcrumbs: true,
@@ -161,17 +155,7 @@ export const DEFAULT_IDE_PREFERENCES: IdePreferences = {
   dbgShowWatches: true,
   dbgShowConsole: true,
   hiddenDockTabs: [],
-  defaultBuildToolJava: 'auto',
-  goModulesEnabled: true,
-  goProxy: 'https://proxy.golang.org,direct',
-  cargoCheckOnSave: true,
-  npmPackageManager: 'npm',
-  goEnabledModules: {},
   moduleSdkMap: {},
-  javaLanguageLevel: '21',
-  javaCompilerOutput: 'target/classes',
-  shellDialect: 'zsh',
-  jsonValidateSchemas: true,
   csvDelimiter: 'auto',
   csvFirstRowHeader: true,
   csvRainbowColumns: true,
@@ -194,6 +178,16 @@ const STALE_ALIAS_KEYS = [
   'wrapConsoleLines',
   'consolePrettyJson',
   'debuggerPrettyJson',
+  'defaultBuildToolJava',
+  'goModulesEnabled',
+  'goProxy',
+  'cargoCheckOnSave',
+  'npmPackageManager',
+  'goEnabledModules',
+  'javaLanguageLevel',
+  'javaCompilerOutput',
+  'shellDialect',
+  'jsonValidateSchemas',
 ] as const;
 
 function asScheme(val: unknown, fallback: IdeColorSchemeId): IdeColorSchemeId {
@@ -240,7 +234,6 @@ export function cloneIdePreferences(p: IdePreferences): IdePreferences {
     lightColorScheme: p.preferredLightScheme,
     showBreadcrumbs: p.breadcrumbs,
     hiddenDockTabs: [...p.hiddenDockTabs],
-    goEnabledModules: { ...p.goEnabledModules },
     moduleSdkMap: { ...p.moduleSdkMap },
   };
 }
@@ -279,6 +272,8 @@ export function normalizeIdePreferencesRecord(
     tabSize: asNum(p.tabSize, 2, 8, d.tabSize),
     wordWrap: asBool(p.wordWrap ?? p.softWrap, d.wordWrap),
     fontLigatures: asBool(p.fontLigatures, d.fontLigatures),
+    autoSave: asBool(p.autoSave, d.autoSave),
+    maxOpenTabs: Math.round(asNum(p.maxOpenTabs, 15, 40, d.maxOpenTabs)),
     formatOnSave: asBool(p.formatOnSave, legacyFmt),
     autoFoldImports: asBool(p.autoFoldImports ?? p.foldImports, d.autoFoldImports),
     breadcrumbs,
@@ -319,32 +314,7 @@ export function normalizeIdePreferencesRecord(
     hiddenDockTabs: Array.isArray(p.hiddenDockTabs)
       ? p.hiddenDockTabs.filter((x): x is string => typeof x === 'string')
       : [...d.hiddenDockTabs],
-    defaultBuildToolJava: asEnum(
-      p.defaultBuildToolJava,
-      ['auto', 'maven', 'gradle'] as const,
-      d.defaultBuildToolJava,
-    ),
-    goModulesEnabled: asBool(p.goModulesEnabled, d.goModulesEnabled),
-    goProxy: typeof p.goProxy === 'string' && p.goProxy.trim() ? p.goProxy : d.goProxy,
-    cargoCheckOnSave: asBool(p.cargoCheckOnSave, d.cargoCheckOnSave),
-    npmPackageManager: asEnum(
-      p.npmPackageManager,
-      ['npm', 'pnpm', 'yarn', 'bun'] as const,
-      d.npmPackageManager,
-    ),
-    goEnabledModules: asRecord(p.goEnabledModules, (v): v is boolean => typeof v === 'boolean'),
     moduleSdkMap: asRecord(p.moduleSdkMap, (v): v is string => typeof v === 'string'),
-    javaLanguageLevel: asEnum(
-      p.javaLanguageLevel,
-      ['8', '11', '17', '21', '23'] as const,
-      d.javaLanguageLevel,
-    ),
-    javaCompilerOutput:
-      typeof p.javaCompilerOutput === 'string' && p.javaCompilerOutput.trim()
-        ? p.javaCompilerOutput
-        : d.javaCompilerOutput,
-    shellDialect: asEnum(p.shellDialect, ['zsh', 'bash', 'POSIX sh'] as const, d.shellDialect),
-    jsonValidateSchemas: asBool(p.jsonValidateSchemas, d.jsonValidateSchemas),
     csvDelimiter: asEnum(p.csvDelimiter, ['auto', ',', '\t', ';'] as const, d.csvDelimiter),
     csvFirstRowHeader: asBool(p.csvFirstRowHeader, d.csvFirstRowHeader),
     csvRainbowColumns: asBool(p.csvRainbowColumns, d.csvRainbowColumns),
@@ -356,7 +326,8 @@ export function readIdePreferences(): IdePreferences {
     if (typeof localStorage === 'undefined') return cloneIdePreferences(DEFAULT_IDE_PREFERENCES);
     const raw = localStorage.getItem(IDE_PREFS_STORAGE_KEY);
     const legacyFmt = localStorage.getItem('otto.ide.formatOnSave') === '1';
-    const legacyKeymap = localStorage.getItem('otto.ide.keymapPreset');
+    const legacyKeymap =
+      localStorage.getItem('otto.ide.keymapPreset') ?? localStorage.getItem('otto.ide.keymap');
     if (!raw) {
       return normalizeIdePreferencesRecord({}, legacyFmt, legacyKeymap);
     }
@@ -398,6 +369,7 @@ export function writeIdePreferences(patch: Partial<IdePreferences>): IdePreferen
       localStorage.setItem(IDE_PREFS_STORAGE_KEY, JSON.stringify(persisted));
       localStorage.setItem('otto.ide.formatOnSave', merged.formatOnSave ? '1' : '0');
       localStorage.setItem('otto.ide.keymapPreset', merged.keymapPreset);
+      localStorage.removeItem('otto.ide.keymap');
     }
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent(IDE_PREFS_EVENT, { detail: merged }));

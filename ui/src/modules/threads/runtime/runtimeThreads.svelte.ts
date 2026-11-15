@@ -60,12 +60,16 @@ const ROW_META_KEYS = [
   'delegated_by_name',
 ] as const;
 
+const threadSessionRowCache = new WeakMap<RuntimeSession, Session>();
+
 /** A runtime session as the Threads sidebar's row shape (never sent to the
  *  PTY session routes — `meta.runtime` marks it). */
 export function asThreadSession(r: RuntimeSession): Session {
+  const cached = threadSessionRowCache.get(r);
+  if (cached) return cached;
   const kept: Record<string, unknown> = {};
   for (const k of ROW_META_KEYS) if (r.meta && r.meta[k] !== undefined) kept[k] = r.meta[k];
-  return {
+  const mapped: Session = {
     id: r.id,
     workspace_id: r.workspace_id,
     kind: 'agent',
@@ -84,6 +88,8 @@ export function asThreadSession(r: RuntimeSession): Session {
     // the sidebar (the delegated-worker rule, `delegatedParentId`).
     meta: { ...kept, surface: 'threads', runtime: 'structured', ...(r.parent_id ? { parent_session_id: r.parent_id } : {}) },
   };
+  threadSessionRowCache.set(r, mapped);
+  return mapped;
 }
 
 /** A Threads row backed by a runtime session (see `asThreadSession`). */

@@ -1,4 +1,4 @@
-//! Go Module, `go.work`, Local `replace`, `$GOROOT`, and `$GOMODCACHE` Resolution.
+//! Go Module, `go.work`, and Go Import Package Identifier Resolution.
 //!
 //! Priority order (mandatory for Multi-Repo Go development):
 //! 1. Local `replace` target directories in `go.work` and `go.mod` (editable workspace code).
@@ -9,9 +9,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::types::IdeReferenceLocation;
-
-use super::navigation::find_definitions_in_content;
+pub(crate) use super::go_mod_resolve::{
+    discover_goroot_src_dirs, read_declared_go_package_name, resolve_go_package_dirs,
+    search_go_package_dirs,
+};
 
 /// Escape uppercase letters in a Go module path per `$GOMODCACHE` layout (`GitHub` -> `!git!hub`).
 pub(crate) fn escape_go_module_path(module_path: &str) -> String {
@@ -83,7 +84,7 @@ pub(crate) fn parse_go_mod_for_file(
 }
 
 #[allow(clippy::disallowed_methods)]
-fn parse_go_mod_file(mod_root: &Path, go_mod_file: &Path) -> Option<GoModInfo> {
+pub(super) fn parse_go_mod_file(mod_root: &Path, go_mod_file: &Path) -> Option<GoModInfo> {
     let text = std::fs::read_to_string(go_mod_file).ok()?;
     let mut info = GoModInfo {
         mod_root: mod_root
@@ -274,6 +275,82 @@ fn parse_go_replace_spec(spec: &str, base_dir: &Path, out: &mut BTreeMap<String,
     }
 }
 
+/// Derive valid Go package qualifier candidates from a module/package import path,
+/// handling `/v2`..`/v99` semantic import versioning (`github.com/gofiber/fiber/v2` -> `fiber`),
+/// `gopkg.in/yaml.v3` -> `yaml`, and `go-*` / `*-go` hyphenated repository conventions.
+pub(crate) fn candidate_go_import_identifiers(import_path: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let push_ident = |out: &mut Vec<String>, s: &str| {
+        let clean = s.trim();
+        let mut chars = clean.chars();
+        let valid = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if valid && !out.iter().any(|x| x == clean) {
+            out.push(clean.to_string());
+        }
+    };
+
+    let segs: Vec<&str> = import_path.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.is_empty() {
+        return out;
+    }
+
+    let last = segs[segs.len() - 1];
+    let is_major_ver =
+        last.len() >= 2 && last.starts_with('v') && last[1..].chars().all(|c| c.is_ascii_digit());
+    let base_seg = if is_major_ver && segs.len() >= 2 {
+        segs[segs.len() - 2]
+    } else {
+        last
+    };
+
+    // Strip `.vN` suffix (`gopkg.in/yaml.v3` -> `yaml`, `dd-trace-go.v1` -> `dd-trace-go`).
+    let without_dot_ver = match base_seg.rsplit_once('.') {
+        Some((stem, ver))
+            if !stem.is_empty()
+                && ver.len() >= 2
+                && ver.starts_with('v')
+                && ver[1..].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            stem
+        }
+        _ => base_seg,
+    };
+
+    push_ident(&mut out, without_dot_ver);
+    if let Some(stripped) = without_dot_ver.strip_prefix("go-") {
+        push_ident(&mut out, stripped);
+    }
+    if let Some(stripped) = without_dot_ver.strip_prefix("go_") {
+        push_ident(&mut out, stripped);
+    }
+    if let Some(stripped) = without_dot_ver.strip_suffix("-go") {
+        push_ident(&mut out, stripped);
+        let collapsed = stripped.replace('-', "");
+        push_ident(&mut out, &collapsed);
+    }
+    if without_dot_ver.contains('-') {
+        if let Some(tail) = without_dot_ver.rsplit('-').next() {
+            if tail != "go" {
+                push_ident(&mut out, tail);
+            }
+        }
+        if let Some(head) = without_dot_ver.split('-').next() {
+            if head != "go" {
+                push_ident(&mut out, head);
+            }
+        }
+        let collapsed = without_dot_ver.replace('-', "");
+        push_ident(&mut out, &collapsed);
+    }
+    if is_major_ver {
+        push_ident(&mut out, last);
+    }
+    out
+}
+
 /// Parse `import` specs in a Go source file: `alias_or_pkg_name -> import_path`.
 pub(crate) fn parse_go_imports(content: &str) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
@@ -320,305 +397,11 @@ fn insert_go_import_spec(spec: &str, out: &mut BTreeMap<String, String>) {
         return;
     }
     let prefix = spec[..q1].trim();
-    let alias = if prefix.is_empty() || prefix == "_" || prefix == "." {
-        let last = import_path.rsplit('/').next().unwrap_or(import_path);
-        if last.starts_with('v') && last.len() <= 3 && last[1..].chars().all(|c| c.is_ascii_digit())
-        {
-            let segs: Vec<&str> = import_path.split('/').collect();
-            if segs.len() >= 2 {
-                out.insert(segs[segs.len() - 2].to_string(), import_path.to_string());
-                out.insert(last.to_string(), import_path.to_string());
-                return;
-            }
+    if prefix.is_empty() || prefix == "_" || prefix == "." {
+        for cand in candidate_go_import_identifiers(import_path) {
+            out.entry(cand).or_insert_with(|| import_path.to_string());
         }
-        last.to_string()
     } else {
-        prefix.to_string()
-    };
-    out.insert(alias, import_path.to_string());
-}
-
-/// Discover `$GOROOT/src` directories without spawning subprocesses.
-#[allow(clippy::disallowed_methods)]
-pub(crate) fn discover_goroot_src_dirs(
-    readonly_roots: &[PathBuf],
-    env_map: &BTreeMap<String, String>,
-) -> Vec<PathBuf> {
-    let mut goroot_src_dirs = Vec::new();
-    if let Some(gr) = env_map.get("GOROOT").filter(|s| !s.is_empty()) {
-        let gp = PathBuf::from(gr);
-        goroot_src_dirs.push(gp.join("src"));
-        if gp.join("libexec/src/runtime").is_dir() {
-            goroot_src_dirs.push(gp.join("libexec/src"));
-        }
+        out.insert(prefix.to_string(), import_path.to_string());
     }
-    let path_str = env_map
-        .get("PATH")
-        .cloned()
-        .or_else(|| std::env::var("PATH").ok())
-        .unwrap_or_default();
-    for seg in path_str.split(':').filter(|s| !s.is_empty()) {
-        let go_bin = Path::new(seg).join("go");
-        if go_bin.is_file() {
-            if let Ok(canon_go) = go_bin.canonicalize() {
-                if let Some(go_home) = canon_go.parent().and_then(Path::parent) {
-                    if go_home.join("src/runtime").is_dir() {
-                        goroot_src_dirs.push(go_home.join("src"));
-                    }
-                    if go_home.join("libexec/src/runtime").is_dir() {
-                        goroot_src_dirs.push(go_home.join("libexec/src"));
-                    }
-                }
-            }
-        }
-    }
-    for rr in readonly_roots {
-        if rr.join("src/runtime").is_dir() {
-            goroot_src_dirs.push(rr.join("src"));
-        } else if rr.join("libexec/src/runtime").is_dir() {
-            goroot_src_dirs.push(rr.join("libexec/src"));
-        } else if rr.ends_with("src") && rr.join("runtime").is_dir() {
-            goroot_src_dirs.push(rr.clone());
-        } else if rr.ends_with("Cellar/go") {
-            if let Ok(rd) = std::fs::read_dir(rr) {
-                for entry in rd.flatten() {
-                    let libexec_src = entry.path().join("libexec/src");
-                    if libexec_src.join("runtime").is_dir() {
-                        goroot_src_dirs.push(libexec_src);
-                    }
-                    let direct_src = entry.path().join("src");
-                    if direct_src.join("runtime").is_dir() {
-                        goroot_src_dirs.push(direct_src);
-                    }
-                }
-            }
-        } else if rr.file_name().and_then(|n| n.to_str()) == Some("toolchains") {
-            let go_tc = rr.join("go");
-            if let Ok(rd) = std::fs::read_dir(go_tc) {
-                for entry in rd.flatten() {
-                    let src = entry.path().join("src");
-                    if src.is_dir() {
-                        goroot_src_dirs.push(src);
-                    }
-                }
-            }
-        }
-    }
-    goroot_src_dirs
-}
-
-/// Resolve a Go `import_path` across local `replace` dirs, workspace `go.mod` modules,
-/// `$GOROOT/src`, and `$GOMODCACHE` (local `replace` ALWAYS wins over `$GOMODCACHE`!).
-#[allow(clippy::disallowed_methods)]
-pub(crate) fn resolve_go_package_dirs(
-    import_path: &str,
-    origin_file: &Path,
-    project_roots: &[PathBuf],
-    readonly_roots: &[PathBuf],
-    env_map: &BTreeMap<String, String>,
-) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    let push_dir = |dirs: &mut Vec<PathBuf>, d: PathBuf| {
-        if let Ok(c) = d.canonicalize() {
-            if c.is_dir() && !dirs.contains(&c) {
-                dirs.push(c);
-            }
-        } else if d.is_dir() && !dirs.contains(&d) {
-            dirs.push(d);
-        }
-    };
-
-    let mut mod_infos = Vec::new();
-    if let Some(info) = parse_go_mod_for_file(origin_file, project_roots) {
-        mod_infos.push(info);
-    }
-    for r in project_roots {
-        if mod_infos.iter().all(|m| m.mod_root != *r) {
-            if let Some(info) = parse_go_mod_file(r, &r.join("go.mod")) {
-                mod_infos.push(info);
-            }
-        }
-    }
-
-    // 1. Local `replace` directives FIRST (highest priority: overrides both workspace & $GOMODCACHE).
-    let mut replaced_locally = false;
-    for info in &mod_infos {
-        // Match longest matching replace module prefix first.
-        let mut best_rep: Option<(&str, &PathBuf)> = None;
-        for (rep_mod, rep_dir) in &info.local_replaces {
-            if (import_path == rep_mod || import_path.starts_with(&format!("{rep_mod}/")))
-                && best_rep.is_none_or(|(prev, _)| rep_mod.len() > prev.len())
-            {
-                best_rep = Some((rep_mod.as_str(), rep_dir));
-            }
-        }
-        if let Some((rep_mod, rep_dir)) = best_rep {
-            let cand = if import_path == rep_mod {
-                rep_dir.clone()
-            } else {
-                rep_dir.join(&import_path[rep_mod.len() + 1..])
-            };
-            if cand.is_dir() {
-                push_dir(&mut dirs, cand);
-                replaced_locally = true;
-            }
-        }
-    }
-
-    // 2. Workspace `go.mod` modules across all attached project folders.
-    for info in &mod_infos {
-        if let Some(mod_name) = &info.module_path {
-            if import_path == mod_name {
-                push_dir(&mut dirs, info.mod_root.clone());
-                replaced_locally = true;
-            } else if let Some(sub) = import_path
-                .strip_prefix(mod_name.as_str())
-                .and_then(|s| s.strip_prefix('/'))
-            {
-                let cand = info.mod_root.join(sub);
-                if cand.is_dir() {
-                    push_dir(&mut dirs, cand);
-                    replaced_locally = true;
-                }
-            }
-        }
-    }
-
-    // If a local `replace` or workspace module matched, NEVER fall back to stale `$GOMODCACHE`!
-    if replaced_locally && !dirs.is_empty() {
-        return dirs;
-    }
-
-    // 3. `$GOROOT/src/<import_path>`.
-    for src_root in discover_goroot_src_dirs(readonly_roots, env_map) {
-        let cand = src_root.join(import_path);
-        if cand.is_dir() {
-            push_dir(&mut dirs, cand);
-            break;
-        }
-    }
-
-    // 4. `$GOMODCACHE` / `$GOPATH/pkg/mod` external versioned modules.
-    let mut mod_caches = Vec::new();
-    if let Some(mc) = env_map.get("GOMODCACHE").filter(|s| !s.is_empty()) {
-        mod_caches.push(PathBuf::from(mc));
-    }
-    if let Some(gp) = env_map.get("GOPATH").filter(|s| !s.is_empty()) {
-        for seg in gp.split(':').filter(|s| !s.is_empty()) {
-            mod_caches.push(PathBuf::from(seg).join("pkg/mod"));
-        }
-    }
-    for rr in readonly_roots {
-        if rr.ends_with("pkg/mod") && rr.is_dir() {
-            mod_caches.push(rr.clone());
-        }
-    }
-
-    for cache in mod_caches {
-        if !cache.is_dir() {
-            continue;
-        }
-        for info in &mod_infos {
-            for (req_mod, ver) in &info.requires {
-                if import_path == req_mod || import_path.starts_with(&format!("{req_mod}/")) {
-                    let escaped = escape_go_module_path(req_mod);
-                    let mod_dir = cache.join(format!("{escaped}@{ver}"));
-                    let target_dir = if import_path == req_mod {
-                        mod_dir
-                    } else {
-                        mod_dir.join(&import_path[req_mod.len() + 1..])
-                    };
-                    if target_dir.is_dir() {
-                        push_dir(&mut dirs, target_dir);
-                    }
-                }
-            }
-        }
-        if dirs.is_empty() {
-            if let Some(found) = find_gomodcache_prefix_dir(&cache, import_path) {
-                push_dir(&mut dirs, found);
-            }
-        }
-    }
-
-    dirs
-}
-
-#[allow(clippy::disallowed_methods)]
-fn find_gomodcache_prefix_dir(cache: &Path, import_path: &str) -> Option<PathBuf> {
-    let segs: Vec<&str> = import_path.split('/').collect();
-    for split_at in (1..=segs.len()).rev() {
-        let mod_prefix = segs[..split_at].join("/");
-        let escaped = escape_go_module_path(&mod_prefix);
-        let escaped_path = Path::new(&escaped);
-        let parent = match escaped_path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => cache.join(p),
-            _ => cache.to_path_buf(),
-        };
-        let leaf = escaped_path.file_name()?.to_str()?;
-        let want_prefix = format!("{leaf}@");
-        let Ok(rd) = std::fs::read_dir(&parent) else {
-            continue;
-        };
-        let mut matches: Vec<PathBuf> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with(&want_prefix))
-            })
-            .collect();
-        matches.sort();
-        if let Some(best_mod_dir) = matches.pop() {
-            let sub = if split_at == segs.len() {
-                best_mod_dir
-            } else {
-                best_mod_dir.join(segs[split_at..].join("/"))
-            };
-            if let Ok(canon) = sub.canonicalize() {
-                if canon.is_dir() {
-                    return Some(canon);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Search Go `.go` files inside resolved package directories for `symbol` definitions.
-#[allow(clippy::disallowed_methods)]
-pub(crate) fn search_go_package_dirs(dirs: &[PathBuf], symbol: &str) -> Vec<IdeReferenceLocation> {
-    let mut out = Vec::new();
-    for dir in dirs {
-        let Ok(rd) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        let mut files: Vec<PathBuf> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension().and_then(|e| e.to_str()) == Some("go")
-                    && !p
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.ends_with("_test.go"))
-            })
-            .collect();
-        files.sort();
-        for file in files {
-            let Ok(canon) = file.canonicalize() else {
-                continue;
-            };
-            let Ok(text) = std::fs::read_to_string(&canon) else {
-                continue;
-            };
-            let path_str = canon.to_string_lossy().into_owned();
-            out.extend(find_definitions_in_content(&path_str, "go", &text, symbol));
-            if out.len() >= 32 {
-                return out;
-            }
-        }
-    }
-    out
 }

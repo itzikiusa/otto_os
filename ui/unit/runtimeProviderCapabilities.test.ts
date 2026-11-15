@@ -6,20 +6,25 @@ import {
 } from '../src/lib/providerModels.ts';
 import { attachmentSupport, takesFile } from '../src/modules/threads/runtime/attachmentSupport.ts';
 import {
+  isRuntimeProvider,
   providerSupportsSteer,
   RUNTIME_PROVIDERS,
 } from '../src/modules/threads/runtime/capabilities.ts';
 
-test('RUNTIME_PROVIDERS enumerates all 7 structured runtime providers', () => {
+test('RUNTIME_PROVIDERS enumerates all 7 structured runtime providers from canonical registry', () => {
   assert.deepEqual(RUNTIME_PROVIDERS, [
     'claude',
     'codex',
-    'pi',
     'agy',
     'gemini',
     'grok',
     'opencode',
+    'pi',
   ]);
+  for (const p of RUNTIME_PROVIDERS) {
+    assert.equal(isRuntimeProvider(p), true);
+  }
+  assert.equal(isRuntimeProvider('shell'), false);
 });
 
 test('providerSupportsSteer enables mid-turn Steer for Claude, Codex, and pi, and not ACP v1 providers', () => {

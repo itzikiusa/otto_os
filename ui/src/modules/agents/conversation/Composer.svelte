@@ -24,7 +24,7 @@
   import { toastError } from '../../../lib/toastError';
   import { announce } from '../../../lib/announce.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { detectBlockDirection } from '../../../lib/textDirection';
+  import { composerViewState } from '../../../lib/stores/runtimeDraftCursor';
   import type { SessionStatus, SlashCommand } from '../../../lib/api/types';
   import { fetchSlashCommands, submitPrompt } from './api';
   import type { ToolCallBlock } from './format';
@@ -106,7 +106,6 @@
 
   const ownerId = untrack(() => sessionId);
   const text = $derived(transcript.draft(ownerId));
-  const draftDir = $derived(detectBlockDirection(text));
   const workspaceRoot = $derived(cwd || ws.current?.root_path || '');
   const sending = $derived(transcript.sending(ownerId));
   const uploading = $derived(pendingUploads.get(ownerId) ?? 0);
@@ -566,6 +565,7 @@
         <textarea
           bind:this={ta}
           bind:value={() => text, (value) => transcript.setDraft(ownerId, value)}
+          use:composerViewState={{ key: `pty:${ownerId}`, hasText: text.length > 0 }}
           rows="1"
           placeholder={placeholderText}
           aria-label="Message {agentName}"
@@ -573,7 +573,7 @@
           {...{ autocorrect: 'off' }}
           autocapitalize="off"
           autocomplete="off"
-          dir={draftDir}
+          dir="auto"
           oninput={syncCaret}
           onclick={syncCaret}
           onkeyup={syncCaret}

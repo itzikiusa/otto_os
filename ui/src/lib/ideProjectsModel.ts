@@ -1,6 +1,8 @@
 // Shared Named IDE Projects model, canonical path helper, localStorage persistence,
 // and backend `/ide/projects` hydration shared across IDE and Threads.
-// Pure TypeScript (zero Svelte runes or extensionless imports) so `node --test` runs directly.
+// Pure TypeScript so unit tests run directly under Node.
+
+import { lsGet, lsRemove, lsSet } from './storage.ts';
 
 export interface NamedIdeProject {
   id: string;
@@ -12,7 +14,7 @@ export interface NamedIdeProject {
 }
 
 export const LS_IDE_PROJECTS = 'otto.ide.projects.v1';
-const LS_IDE_PROJECTS_LEGACY = 'otto.ide.namedProjects.v1';
+export const LS_IDE_PROJECTS_LEGACY = 'otto.ide.namedProjects.v1';
 export const IDE_PROJECTS_CHANGED_EVENT = 'otto:ide-projects-changed';
 
 export function normalizeProjectPath(p: string): string {
@@ -28,7 +30,7 @@ export function normalizeProjectPath(p: string): string {
   return clean;
 }
 
-function basenameOfProjectPath(raw: string): string {
+export function basenameOfProjectPath(raw: string): string {
   const clean = normalizeProjectPath(raw);
   if (!clean || clean === '~') return clean;
   const idx = clean.lastIndexOf('/');
@@ -102,30 +104,6 @@ export function parseNamedIdeProject(raw: unknown): NamedIdeProject | null {
   return { id, name, primaryRoot, folders, pinned, updatedAt };
 }
 
-function safeLsGet(key: string): string | null {
-  try {
-    return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null;
-  } catch {
-    return null;
-  }
-}
-
-function safeLsSet(key: string, value: string): void {
-  try {
-    if (typeof localStorage !== 'undefined') localStorage.setItem(key, value);
-  } catch {
-    /* ignore storage quota errors */
-  }
-}
-
-function safeLsRemove(key: string): void {
-  try {
-    if (typeof localStorage !== 'undefined') localStorage.removeItem(key);
-  } catch {
-    /* ignore storage access errors */
-  }
-}
-
 export function parseNamedIdeProjectsJson(raw: string | null | undefined): NamedIdeProject[] {
   if (!raw) return [];
   try {
@@ -146,11 +124,11 @@ export function parseNamedIdeProjectsJson(raw: string | null | undefined): Named
 }
 
 export function loadNamedIdeProjectsLocal(): NamedIdeProject[] {
-  const canonicalRaw = safeLsGet(LS_IDE_PROJECTS);
+  const canonicalRaw = lsGet(LS_IDE_PROJECTS);
   if (canonicalRaw !== null) {
     return parseNamedIdeProjectsJson(canonicalRaw);
   }
-  const legacyRaw = safeLsGet(LS_IDE_PROJECTS_LEGACY);
+  const legacyRaw = lsGet(LS_IDE_PROJECTS_LEGACY);
   if (legacyRaw !== null) {
     const migrated = parseNamedIdeProjectsJson(legacyRaw);
     saveNamedIdeProjectsLocal(migrated);
@@ -168,8 +146,8 @@ export function saveNamedIdeProjectsLocal(projects: NamedIdeProject[]): void {
     seenIds.add(proj.id);
     normalized.push(proj);
   }
-  safeLsSet(LS_IDE_PROJECTS, JSON.stringify(normalized));
-  safeLsRemove(LS_IDE_PROJECTS_LEGACY);
+  lsSet(LS_IDE_PROJECTS, JSON.stringify(normalized));
+  lsRemove(LS_IDE_PROJECTS_LEGACY);
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
       new CustomEvent(IDE_PROJECTS_CHANGED_EVENT, { detail: { projects: normalized } }),
@@ -213,47 +191,11 @@ export function mergeBackendIdeProjects(
   return [...byId.values()];
 }
 
-function resolveApiBase(): string {
-  const override = safeLsGet('otto_base');
-  if (override) return override;
-  if (typeof location !== 'undefined') {
-    if (
-      location.port === '5173' ||
-      location.protocol === 'tauri:' ||
-      location.protocol === 'file:'
-    ) {
-      return 'http://127.0.0.1:7700';
-    }
-    return location.origin;
-  }
-  return 'http://127.0.0.1:7700';
-}
-
-function resolveBearerToken(): string | null {
-  try {
-    if (typeof sessionStorage !== 'undefined') {
-      const imp = sessionStorage.getItem('otto_imp_token');
-      if (imp) return imp;
-    }
-  } catch {
-    /* ignore */
-  }
-  return safeLsGet('otto_token');
-}
-
 export async function fetchNamedIdeProjectsFromServer(): Promise<NamedIdeProject[] | null> {
-  if (safeLsGet('otto_mock') === '1') return null;
-  if (typeof fetch !== 'function') return null;
+  if (lsGet('otto_mock') === '1') return null;
   try {
-    const headers: Record<string, string> = { Accept: 'application/json' };
-    const token = resolveBearerToken();
-    if (token) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(`${resolveApiBase()}/api/v1/ide/projects`, {
-      method: 'GET',
-      headers,
-    });
-    if (!res.ok) return null;
-    const body = (await res.json()) as { projects?: ReadonlyArray<Record<string, unknown>> } | null;
+    const { api } = await import('./api/client.ts');
+    const body = await api.bg.get<{ projects?: ReadonlyArray<Record<string, unknown>> }>('/ide/projects');
     const remote = Array.isArray(body?.projects) ? body.projects : [];
     const local = loadNamedIdeProjectsLocal();
     const merged = mergeBackendIdeProjects(local, remote, true);

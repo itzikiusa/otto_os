@@ -21,19 +21,29 @@ import {
 } from './ideTypes';
 
 const BUFFER_SYNC_DEBOUNCE_MS = 250;
+const AUTO_SAVE_IDLE_MS = 1000;
 const DRAFT_PERSIST_IDLE_MS = 2000;
 const BG_ANALYZE_DEBOUNCE_MS = 280;
 const HISTORY_SNAPSHOT_IDLE_MS = 4000;
 const OPEN_TABS_KEY_PREFIX = 'otto.ide.openTabs.v1:';
 interface PendingJob { timer: ReturnType<typeof setTimeout> | null; ctl: AbortController | null; seq: number; resolve: () => void }
 
+let lruAccessClock = 0;
+
+export function nextTabAccessStamp(): number {
+  const now = Date.now();
+  lruAccessClock = now > lruAccessClock ? now : lruAccessClock + 1;
+  return lruAccessClock;
+}
+
 export function saveWorkspaceOpenTabs(root: string, paths: string[], activePath: string | null, splitPath: string | null): void {
   if (!root) return;
   try {
     if (typeof localStorage === 'undefined') return;
+    const cap = Math.max(15, Math.min(40, readIdePreferences().maxOpenTabs || 20));
     localStorage.setItem(
       `${OPEN_TABS_KEY_PREFIX}${root}`,
-      JSON.stringify({ paths: paths.slice(0, 20), activePath, splitPath }),
+      JSON.stringify({ paths: paths.slice(0, cap), activePath, splitPath }),
     );
   } catch { /* ignore */ }
 }
@@ -86,14 +96,16 @@ export interface IdeBufferHost {
   cursorInfo: { line: number; col: number; cursors: number; selections: { anchor: number; head: number }[] };
   resolvePath(p: string): string; targetQuery(extra?: Record<string, string | boolean | null | undefined>): string;
   openFile(rawPath: string, opts?: { line?: number; col?: number; preview?: boolean; inSplit?: boolean }): Promise<void>;
-  closeSplit(): void; saveFile(path?: string, forceOverwrite?: boolean): Promise<boolean>;
+  closeSplit(): void; saveFile(path?: string, forceOverwrite?: boolean, opts?: { silent?: boolean }): Promise<boolean>;
   updateBuffer(path: string, content: string): void; sendCollabEdit(path: string, content: string, save?: boolean): Promise<boolean>;
   loadGutter(path: string, content?: string): Promise<void>; loadSymbols(path: string, content?: string): Promise<void>;
 }
 
 export class IdeBufferPerfController {
   readonly liveBuffers = new Map<string, string>();
+  readonly conflictedPaths = new Set<string>();
   private syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private autoSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private draftTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private historyTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private lastSnapshotted = new Map<string, string>();
@@ -102,8 +114,40 @@ export class IdeBufferPerfController {
   private activeSymbolLoads = 0;
 
   private clearSync(p: string): void { const t = this.syncTimers.get(p); if (t) { clearTimeout(t); this.syncTimers.delete(p); } }
+  private clearAutoSaveTimer(p: string): void { const t = this.autoSaveTimers.get(p); if (t) { clearTimeout(t); this.autoSaveTimers.delete(p); } }
   private clearDraftTimer(p: string): void { const t = this.draftTimers.get(p); if (t) { clearTimeout(t); this.draftTimers.delete(p); } }
   private clearHistoryTimer(p: string): void { const t = this.historyTimers.get(p); if (t) { clearTimeout(t); this.historyTimers.delete(p); } }
+  scheduleAutoSave(host: IdeBufferHost, fullPath: string): void {
+    this.clearAutoSaveTimer(fullPath);
+    if (!readIdePreferences().autoSave || this.conflictedPaths.has(fullPath) || !host.canEditCollab) return;
+    const tab = host.tabs.find((t) => t.path === fullPath);
+    if (!tab || tab.readOnly) return;
+    this.autoSaveTimers.set(fullPath, setTimeout(() => {
+      this.autoSaveTimers.delete(fullPath);
+      const cur = host.tabs.find((t) => t.path === fullPath);
+      if (!cur || cur.readOnly || !this.isTabDirty(cur) || !readIdePreferences().autoSave || this.conflictedPaths.has(fullPath)) return;
+      void host.saveFile(fullPath, false, { silent: true });
+    }, AUTO_SAVE_IDLE_MS));
+  }
+  async flushDirtyAutoSave(host: IdeBufferHost, filterPath?: string): Promise<void> {
+    if (filterPath) {
+      const target = host.resolvePath(filterPath);
+      this.clearAutoSaveTimer(target);
+      this.flush(host, target);
+    } else {
+      for (const t of this.autoSaveTimers.values()) clearTimeout(t);
+      this.autoSaveTimers.clear();
+      this.flushAll(host);
+    }
+    if (!readIdePreferences().autoSave || !host.canEditCollab) return;
+    const targetFilter = filterPath ? host.resolvePath(filterPath) : null;
+    const dirtyTabs = host.tabs.filter(
+      (t) => (!targetFilter || t.path === targetFilter) && !t.readOnly && this.isTabDirty(t) && !this.conflictedPaths.has(t.path),
+    );
+    for (let i = 0; i < dirtyTabs.length; i++) {
+      await host.saveFile(dirtyTabs[i].path, false, { silent: true });
+    }
+  }
   private scheduleDraftPersist(fullPath: string, savedContent: string, draftContent: string): void {
     this.clearDraftTimer(fullPath);
     if (savedContent === draftContent) {
@@ -162,10 +206,13 @@ export class IdeBufferPerfController {
   recordEdit(host: IdeBufferHost, fullPath: string, content: string): boolean {
     const tab = host.tabs.find((t) => t.path === fullPath);
     if (!tab || (this.liveBuffers.get(fullPath) ?? tab.content) === content) return false;
+    tab.lastAccessedAt = nextTabAccessStamp();
     this.liveBuffers.set(fullPath, content);
     const isDirty = content !== tab.savedContent;
     if ((tab.dirty ?? (tab.content !== tab.savedContent)) !== isDirty) tab.dirty = isDirty;
     if (tab.preview) tab.preview = false;
+    if (isDirty) this.scheduleAutoSave(host, fullPath);
+    else this.clearAutoSaveTimer(fullPath);
     this.clearSync(fullPath);
     this.syncTimers.set(fullPath, setTimeout(() => {
       this.syncTimers.delete(fullPath);
@@ -211,7 +258,8 @@ export class IdeBufferPerfController {
     }
   }
   markClean(tab: IdeOpenTab, content: string, sha256?: string): void {
-    this.clearSync(tab.path); this.clearDraftTimer(tab.path); this.liveBuffers.delete(tab.path);
+    this.clearSync(tab.path); this.clearAutoSaveTimer(tab.path); this.clearDraftTimer(tab.path);
+    this.liveBuffers.delete(tab.path); this.conflictedPaths.delete(tab.path);
     tab.content = content; tab.savedContent = content; tab.dirty = false;
     this.lastSnapshotted.set(tab.path, content);
     removeIdeUndoDraft(tab.path);
@@ -235,8 +283,8 @@ export class IdeBufferPerfController {
     const closed = new Set<string>(paths);
     if (closed.size === 0) return;
     for (const p of closed) {
-      this.clearSync(p); this.clearDraftTimer(p); this.clearHistoryTimer(p);
-      this.liveBuffers.delete(p); this.lastSnapshotted.delete(p);
+      this.clearSync(p); this.clearAutoSaveTimer(p); this.clearDraftTimer(p); this.clearHistoryTimer(p);
+      this.liveBuffers.delete(p); this.lastSnapshotted.delete(p); this.conflictedPaths.delete(p);
       this.cancelJob(this.gutterJobs, p); this.cancelJob(this.symbolJobs, p);
       if (clearProblems) removeIdeUndoDraft(p);
     }
@@ -248,9 +296,11 @@ export class IdeBufferPerfController {
   resetAll(host: IdeBufferHost): void {
     this.flushAndSnapshotAll(host);
     for (const t of this.syncTimers.values()) clearTimeout(t);
+    for (const t of this.autoSaveTimers.values()) clearTimeout(t);
     for (const t of this.draftTimers.values()) clearTimeout(t);
     for (const t of this.historyTimers.values()) clearTimeout(t);
-    this.syncTimers.clear(); this.draftTimers.clear(); this.historyTimers.clear(); this.liveBuffers.clear(); this.lastSnapshotted.clear();
+    this.syncTimers.clear(); this.autoSaveTimers.clear(); this.draftTimers.clear(); this.historyTimers.clear();
+    this.liveBuffers.clear(); this.lastSnapshotted.clear(); this.conflictedPaths.clear();
     for (const p of [...this.gutterJobs.keys()]) this.cancelJob(this.gutterJobs, p);
     for (const p of [...this.symbolJobs.keys()]) this.cancelJob(this.symbolJobs, p);
     this.activeSymbolLoads = 0; host.symbolsLoading = false;
@@ -293,15 +343,59 @@ export class IdeBufferPerfController {
   }
 }
 
+export async function enforceTabCap(
+  host: Pick<IdeBufferHost, 'tabs' | 'activePath' | 'splitPath' | 'canEditCollab' | 'saveFile'>,
+  perf: Pick<IdeBufferPerfController, 'isTabDirty' | 'evictPaths' | 'conflictedPaths'>,
+  maxTabs = readIdePreferences().maxOpenTabs,
+  protectedPaths: Iterable<string> = [],
+): Promise<string[]> {
+  const cap = Math.max(15, Math.min(40, Math.floor(maxTabs || 20)));
+  if (host.tabs.length <= cap) return [];
+  const keep = new Set<string>(protectedPaths);
+  if (host.activePath) keep.add(host.activePath);
+  if (host.splitPath) keep.add(host.splitPath);
+  const autoSave = readIdePreferences().autoSave;
+  const evicted: string[] = [];
+
+  while (host.tabs.length > cap) {
+    const candidates = host.tabs
+      .filter((t) => !t.pinned && !keep.has(t.path) && (autoSave || !perf.isTabDirty(t)))
+      .sort((a, b) => (a.lastAccessedAt ?? 0) - (b.lastAccessedAt ?? 0));
+    const victim = candidates[0];
+    if (!victim) break;
+    if (perf.isTabDirty(victim)) {
+      if (!autoSave || victim.readOnly || !host.canEditCollab || perf.conflictedPaths.has(victim.path)) {
+        keep.add(victim.path);
+        continue;
+      }
+      const saved = await host.saveFile(victim.path, false, { silent: true });
+      if (!saved) {
+        keep.add(victim.path);
+        continue;
+      }
+    }
+    host.tabs = host.tabs.filter((t) => t.path !== victim.path);
+    evicted.push(victim.path);
+    perf.evictPaths(host as IdeBufferHost, [victim.path], true);
+  }
+  return evicted;
+}
+
 export async function performCloseTab(host: IdeBufferHost, perf: IdeBufferPerfController, path: string): Promise<void> {
   perf.flush(host, path);
   const tab = host.tabs.find((t) => t.path === path);
   if (!tab) return;
   if (perf.isTabDirty(tab)) {
-    const res = await confirmer.choose(`“${tab.name}” has unsaved changes.`, {
-      title: 'Unsaved changes', options: [{ label: 'Save', value: 'save', kind: 'primary' }, { label: 'Discard changes', value: 'discard', kind: 'danger' }],
-    });
-    if (!res.value || (res.value === 'save' && !(await host.saveFile(path)))) return;
+    const prefs = readIdePreferences();
+    if (prefs.autoSave && !tab.readOnly && host.canEditCollab && !perf.conflictedPaths.has(path)) {
+      await host.saveFile(path, false, { silent: true });
+    }
+    if (perf.isTabDirty(tab)) {
+      const res = await confirmer.choose(`“${tab.name}” has unsaved changes.`, {
+        title: 'Unsaved changes', options: [{ label: 'Save', value: 'save', kind: 'primary' }, { label: 'Discard changes', value: 'discard', kind: 'danger' }],
+      });
+      if (!res.value || (res.value === 'save' && !(await host.saveFile(path)))) return;
+    }
   }
   const idx = host.tabs.findIndex((t) => t.path === path);
   host.tabs = host.tabs.filter((t) => t.path !== path);
@@ -324,10 +418,10 @@ export async function performOpenFile(
   perf: IdeBufferPerfController,
   isNavigatingHistory: boolean,
   rawPath: string,
-  opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean } = {},
+  opts: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean } = {},
 ): Promise<void> {
   const fullPath = host.resolvePath(rawPath);
-  if (!isNavigatingHistory && host.activePath) host.pushNavLocation(host.activePath, host.cursorInfo.line, host.cursorInfo.col);
+  if (!opts.background && !isNavigatingHistory && host.activePath) host.pushNavLocation(host.activePath, host.cursorInfo.line, host.cursorInfo.col);
   host.recentPaths = [fullPath, ...host.recentPaths.filter((p) => p !== fullPath)].slice(0, 20);
   const isGuest = host.collabIsGuest;
   const external = isPathExternal(fullPath, host.projectRoots);
@@ -342,7 +436,8 @@ export async function performOpenFile(
   const existing = host.tabs.find((t) => t.path === fullPath);
   if (existing) {
     existing.preview = false;
-    if (opts.inSplit) host.openInSplit(fullPath, host.splitDirection ?? 'right'); else host.activePath = fullPath;
+    existing.lastAccessedAt = nextTabAccessStamp();
+    if (opts.inSplit) host.openInSplit(fullPath, host.splitDirection ?? 'right'); else if (!opts.background) host.activePath = fullPath;
     if ((existing.error || opts.reload) && !isGuest) {
       existing.error = null; existing.loading = true;
       try {
@@ -352,20 +447,21 @@ export async function performOpenFile(
         existing.readOnly = Boolean(res.read_only) || sdkReadOnly; existing.truncated = res.truncated; existing.loading = false;
       } catch (e) { existing.loading = false; existing.error = loadErrorText(e); }
     }
-    if (opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1);
-    if (!isNavigatingHistory) host.pushNavLocation(fullPath, opts.line ?? 1, opts.col ?? 1);
+    if (!opts.background && opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1);
+    if (!opts.background && !isNavigatingHistory) host.pushNavLocation(fullPath, opts.line ?? 1, opts.col ?? 1);
     return;
   }
   const buf = host.sharedBuffers[fullPath]?.content ?? '';
   const placeholder: IdeOpenTab = {
     path: fullPath, name: ideBasename(fullPath), content: buf, savedContent: buf, dirty: false, sha256: '',
     language: detectIdeLanguage(fullPath), readOnly: sdkReadOnly, truncated: false, loading: !isGuest, error: null,
-    preview: false, pinned: false, external,
+    preview: false, pinned: false, external, lastAccessedAt: nextTabAccessStamp(),
   };
   host.tabs = [...host.tabs, placeholder];
-  if (opts.inSplit) host.openInSplit(fullPath, host.splitDirection ?? 'right'); else host.activePath = fullPath;
-  if (!isNavigatingHistory) host.pushNavLocation(fullPath, opts.line ?? 1, opts.col ?? 1);
-  if (isGuest) { if (opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1); return; }
+  if (opts.inSplit) host.openInSplit(fullPath, host.splitDirection ?? 'right'); else if (!opts.background) host.activePath = fullPath;
+  await enforceTabCap(host, perf, readIdePreferences().maxOpenTabs, [fullPath]);
+  if (!opts.background && !isNavigatingHistory) host.pushNavLocation(fullPath, opts.line ?? 1, opts.col ?? 1);
+  if (isGuest) { if (!opts.background && opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1); return; }
   try {
     const res = await api.get<IdeFileReadResp>(readFileUrl());
     const tab = host.tabs.find((t) => t.path === fullPath);
@@ -390,7 +486,7 @@ export async function performOpenFile(
       tab.readOnly = Boolean(res.read_only) || sdkReadOnly; tab.truncated = res.truncated; tab.loading = false;
       if (host.target.root) saveWorkspaceOpenTabs(host.target.root, host.tabs.map((t) => t.path), host.activePath, host.splitPath);
     }
-    if (opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1);
+    if (!opts.background && opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1);
     if (host.activePath === fullPath || host.splitPath === fullPath) {
       void host.loadGutter(fullPath, res.content);
       void host.loadSymbols(fullPath, res.content);
@@ -401,7 +497,13 @@ export async function performOpenFile(
   }
 }
 
-export async function performSaveFile(host: IdeBufferHost, perf: IdeBufferPerfController, path?: string, forceOverwrite = false): Promise<boolean> {
+export async function performSaveFile(
+  host: IdeBufferHost,
+  perf: IdeBufferPerfController,
+  path?: string,
+  forceOverwrite = false,
+  opts: { silent?: boolean } = {},
+): Promise<boolean> {
   const targetPath = path ? host.resolvePath(path) : host.activePath;
   const contentToSave = perf.flush(host, targetPath);
   const tab = targetPath ? host.tabs.find((t) => t.path === targetPath) : null;
@@ -410,12 +512,14 @@ export async function performSaveFile(host: IdeBufferHost, perf: IdeBufferPerfCo
     const ok = await host.sendCollabEdit(targetPath, contentToSave, true);
     if (!ok) return false;
     tab.savedContent = contentToSave; tab.dirty = perf.getBuffer(host, targetPath) !== contentToSave;
+    perf.conflictedPaths.delete(targetPath);
     removeIdeUndoDraft(targetPath);
     notifySaved(targetPath, contentToSave);
-    toasts.success('Saved to shared session', tab.name);
+    if (!opts.silent) toasts.success('Saved to shared session', tab.name);
     return true;
   }
   try {
+    const prefs = readIdePreferences();
     const folders = host.targetPayload.project_folders ?? [];
     const inProject = folders.some((r) => targetPath === r || targetPath.startsWith(`${r}/`));
     const parentDir = targetPath.lastIndexOf('/') > 0 ? targetPath.slice(0, targetPath.lastIndexOf('/')) : host.target.root;
@@ -425,8 +529,11 @@ export async function performSaveFile(host: IdeBufferHost, perf: IdeBufferPerfCo
     const resp = await api.put<{ path: string; size: number; sha256: string }>('/ide/fs/file', {
       target: saveTarget, path: targetPath, content: contentToSave,
       expected_sha256: forceOverwrite || !tab.sha256 ? undefined : tab.sha256,
+      record_local_history: prefs.localHistoryEnabled,
+      local_history_retention_days: prefs.localHistoryRetentionDays,
     });
     tab.savedContent = contentToSave; tab.sha256 = resp.sha256;
+    perf.conflictedPaths.delete(targetPath);
     const latest = perf.getBuffer(host, targetPath);
     tab.dirty = latest !== tab.savedContent;
     if (!tab.dirty) removeIdeUndoDraft(targetPath);
@@ -435,6 +542,11 @@ export async function performSaveFile(host: IdeBufferHost, perf: IdeBufferPerfCo
     return true;
   } catch (e) {
     if (e instanceof ApiError && e.status === 409) {
+      perf.conflictedPaths.add(targetPath);
+      if (opts.silent) {
+        toasts.error(`Conflict on disk for ${tab.name}`, 'Save manually to overwrite or reload from disk.');
+        return false;
+      }
       const choice = await confirmer.choose(`“${tab.name}” changed on disk since you opened it.`, {
         title: 'File conflict on disk', options: [{ label: 'Overwrite disk', value: 'overwrite', kind: 'danger' }, { label: 'Reload from disk', value: 'reload', kind: 'normal' }],
       });
@@ -442,7 +554,7 @@ export async function performSaveFile(host: IdeBufferHost, perf: IdeBufferPerfCo
       if (choice.value === 'reload') { host.tabs = host.tabs.filter((t) => t.path !== targetPath); perf.evictPaths(host, [targetPath], false); await host.openFile(targetPath); }
       return false;
     }
-    toastError(`Couldn’t save ${tab.name}`, e);
+    if (!opts.silent) toastError(`Couldn’t save ${tab.name}`, e);
     return false;
   }
 }

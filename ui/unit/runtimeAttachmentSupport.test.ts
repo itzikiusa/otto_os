@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 import { attachmentSupport, takesFile } from '../src/modules/threads/runtime/attachmentSupport.ts';
 
 test('every structured runtime agent takes images; PDFs go to Claude and the ACP agents', () => {
-  for (const p of ['claude', 'agy', 'gemini', 'grok', 'opencode']) assert.deepEqual(attachmentSupport(p), { images: true, files: true }, p);
-  for (const p of ['codex', 'pi']) assert.deepEqual(attachmentSupport(p), { images: true, files: false }, p);
+  for (const p of ['claude', 'agy', 'gemini', 'grok', 'opencode']) {
+    assert.deepEqual(attachmentSupport(p), { images: true, files: true }, p);
+  }
+  for (const p of ['codex', 'pi']) {
+    assert.deepEqual(attachmentSupport(p), { images: true, files: false }, p);
+  }
   assert.deepEqual(attachmentSupport('shell'), { images: false, files: false });
 });
 

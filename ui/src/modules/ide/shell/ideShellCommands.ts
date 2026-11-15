@@ -54,14 +54,23 @@ export function dispatchOpenLocalHistory(): void {
 
 export async function promptIdeGoToLine(): Promise<void> {
   if (!ide.activePath) return;
-  const raw = await confirmer.promptText('Go to line[:column]:', {
-    title: 'Go to Line / Column',
-    placeholder: `${ide.cursorInfo.line}:${ide.cursorInfo.col}`,
-    confirmLabel: 'Go',
-  });
-  if (!raw?.trim() || !ide.activePath) return;
-  const [lStr, cStr] = raw.trim().split(':');
-  ide.jumpTo(ide.activePath, Math.max(1, Number.parseInt(lStr ?? '1', 10) || 1), Math.max(1, Number.parseInt(cStr ?? '1', 10) || 1));
+  ide.goToLineOpen = true;
+  try {
+    const raw = await confirmer.promptText('Go to line[:column]:', {
+      title: 'Go to Line / Column',
+      placeholder: `${ide.cursorInfo.line}:${ide.cursorInfo.col}`,
+      confirmLabel: 'Go',
+    });
+    if (!raw?.trim() || !ide.activePath) return;
+    const [lStr, cStr] = raw.trim().split(':');
+    ide.jumpTo(
+      ide.activePath,
+      Math.max(1, Number.parseInt(lStr ?? '1', 10) || 1),
+      Math.max(1, Number.parseInt(cStr ?? '1', 10) || 1),
+    );
+  } finally {
+    ide.goToLineOpen = false;
+  }
 }
 
 export function openIdeRecentFilesMenu(): void {
@@ -81,61 +90,164 @@ export function openIdeRecentFilesMenu(): void {
 
 const inXterm = (t: EventTarget | null): boolean => t instanceof Element && Boolean(t.closest('.xterm'));
 
-export function handleIdeChord(e: KeyboardEvent, overlayOpen: boolean, toggleExplorer: () => void): boolean {
-  if (overlayOpen) return false;
+function matchesKey(e: KeyboardEvent, code: string, letter: string): boolean {
+  return e.code === code || e.key.toLowerCase() === letter;
+}
+
+function hasActiveDebugSession(): boolean {
+  return Boolean(ide.activeDebug && ide.activeDebug.state !== 'terminated');
+}
+
+function closeOpenIdeOverlays(): boolean {
+  let closed = false;
+  if (ide.searchEverywhereOpen) { ide.searchEverywhereOpen = false; closed = true; }
+  if (ide.bulkRepoPickerMode !== null) { ide.bulkRepoPickerMode = null; closed = true; }
+  if (ide.environmentsOpen) { ide.environmentsOpen = false; closed = true; }
+  if (ide.toolchainsOpen) { ide.toolchainsOpen = false; closed = true; }
+  if (ide.sshOpen) { ide.sshOpen = false; closed = true; }
+  if (ide.shareOpen) { ide.shareOpen = false; closed = true; }
+  if (ide.pluginsOpen) { ide.pluginsOpen = false; closed = true; }
+  if (ide.settingsOpen) { ide.settingsOpen = false; closed = true; }
+  return closed;
+}
+
+export function handleIdeChord(
+  e: KeyboardEvent,
+  overlayOpen: boolean,
+  toggleExplorer: () => void,
+  triggerAgent?: () => void,
+): boolean {
+  if (e.metaKey && e.ctrlKey && e.shiftKey && !e.altKey && matchesKey(e, 'KeyR', 'r')) {
+    e.preventDefault();
+    window.location.reload();
+    return true;
+  }
   const mod = e.metaKey || e.ctrlKey;
-  if (mod && !e.shiftKey && !e.altKey && (e.code === 'Comma' || e.key === ',')) { e.preventDefault(); ide.openSettings(); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'KeyS') { e.preventDefault(); void ide.saveFile(); return true; }
-  if (mod && !e.shiftKey && e.altKey && e.code === 'KeyS') { e.preventDefault(); void ide.saveAll(); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'KeyW' && ide.activePath) { e.preventDefault(); void ide.closeTab(ide.activePath); return true; }
-  if (mod && e.shiftKey && !e.altKey && e.code === 'KeyT') { e.preventDefault(); void ide.reopenClosedTab(); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'KeyE') { e.preventDefault(); openIdeRecentFilesMenu(); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'KeyG') { e.preventDefault(); void promptIdeGoToLine(); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'Digit1') { e.preventDefault(); toggleExplorer(); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'Digit4') { e.preventDefault(); ide.openBottomTab('run'); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'Digit5') { e.preventDefault(); ide.openBottomTab('debug'); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'Digit6') { e.preventDefault(); ide.openBottomTab('problems'); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'Digit9') { e.preventDefault(); ide.openBottomTab('git'); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'BracketLeft' && ide.canNavigateBack) { e.preventDefault(); void ide.navigateBack(); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'BracketRight' && ide.canNavigateForward) { e.preventDefault(); void ide.navigateForward(); return true; }
-  if (mod && e.shiftKey && !e.altKey && e.code === 'KeyF') { e.preventDefault(); ide.openFindInPath({ replace: false }); return true; }
-  if (mod && e.shiftKey && !e.altKey && e.code === 'KeyR') { e.preventDefault(); ide.openFindInPath({ replace: true }); return true; }
-  if (mod && e.shiftKey && !e.altKey && e.code === 'KeyO') {
-    e.preventDefault(); ide.searchScopePath = null; ide.searchReplaceMode = false; ide.searchInitialTab = 'files'; ide.searchEverywhereOpen = true; return true;
+  const pureMod = mod && !(e.metaKey && e.ctrlKey);
+  if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyR', 'r')) {
+    if (!overlayOpen || ide.searchEverywhereOpen) {
+      e.preventDefault();
+      ide.openSearchEverywhere('text', { replace: true });
+      return true;
+    }
   }
-  if (mod && !e.shiftKey && !e.altKey && (e.code === 'KeyO' || e.key === 'F12')) {
-    e.preventDefault(); ide.searchScopePath = null; ide.searchReplaceMode = false; ide.searchInitialTab = 'symbols'; ide.searchEverywhereOpen = true; return true;
+  if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyF', 'f')) {
+    if (!overlayOpen || ide.searchEverywhereOpen) {
+      e.preventDefault();
+      ide.openSearchEverywhere('text', { replace: false });
+      return true;
+    }
   }
-  if (mod && !e.shiftKey && !e.altKey && e.code === 'KeyI' && !(e.ctrlKey && !e.metaKey && inXterm(e.target))) {
+  if (overlayOpen) return false;
+  if (e.altKey && (e.ctrlKey || e.metaKey) && !e.shiftKey && matchesKey(e, 'KeyO', 'o')) {
+    e.preventDefault();
+    void ide.organizeImportsActiveFile();
+    return true;
+  }
+  if (e.metaKey && e.altKey && !e.ctrlKey && !e.shiftKey && matchesKey(e, 'KeyR', 'r') && hasActiveDebugSession()) {
+    e.preventDefault();
+    void ide.debugCommand('continue');
+    return true;
+  }
+  if ((e.metaKey || e.ctrlKey) && e.altKey && !e.shiftKey && matchesKey(e, 'KeyL', 'l')) {
+    e.preventDefault();
+    void ide.formatActiveFile();
+    return true;
+  }
+  if (pureMod && !e.shiftKey && !e.altKey && (e.code === 'Comma' || e.key === ',')) { e.preventDefault(); ide.openSettings(); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyS', 's')) { e.preventDefault(); void ide.saveFile(); return true; }
+  if (mod && !e.shiftKey && e.altKey && matchesKey(e, 'KeyS', 's')) { e.preventDefault(); void ide.saveAll(); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyW', 'w') && ide.activePath) { e.preventDefault(); void ide.closeTab(ide.activePath); return true; }
+  if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyT', 't')) { e.preventDefault(); void ide.reopenClosedTab(); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyE', 'e')) { e.preventDefault(); openIdeRecentFilesMenu(); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyG', 'g')) { e.preventDefault(); void promptIdeGoToLine(); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyL', 'l')) { e.preventDefault(); void promptIdeGoToLine(); return true; }
+  if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyL', 'l') && triggerAgent) { e.preventDefault(); triggerAgent(); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'Digit1') { e.preventDefault(); toggleExplorer(); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'Digit4') { e.preventDefault(); ide.openBottomTab('run'); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'Digit5') { e.preventDefault(); ide.openBottomTab('debug'); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'Digit6') { e.preventDefault(); ide.openBottomTab('problems'); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'Digit9') { e.preventDefault(); ide.openBottomTab('git'); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'BracketLeft' && ide.canNavigateBack) { e.preventDefault(); void ide.navigateBack(); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'BracketRight' && ide.canNavigateForward) { e.preventDefault(); void ide.navigateForward(); return true; }
+  if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyO', 'o')) {
+    e.preventDefault(); ide.openSearchEverywhere('files'); return true;
+  }
+  if (pureMod && !e.shiftKey && !e.altKey && (matchesKey(e, 'KeyO', 'o') || e.key === 'F12')) {
+    e.preventDefault(); ide.openSearchEverywhere('symbols'); return true;
+  }
+  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyI', 'i') && !(e.ctrlKey && !e.metaKey && inXterm(e.target))) {
     e.preventDefault(); ideAgent.openInlineEdit(); return true;
   }
-  if (mod && e.altKey && !e.shiftKey && e.code === 'KeyL') { e.preventDefault(); void ide.formatActiveFile(); return true; }
-  if (mod && e.altKey && !e.shiftKey && e.code === 'KeyR' && ide.activeDebug?.state === 'paused') { e.preventDefault(); void ide.resumeDebug(); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.key === 'F8' && ide.activePath) { e.preventDefault(); ide.toggleBreakpoint(ide.activePath, ide.cursorInfo.line); return true; }
-  if (mod && !e.shiftKey && !e.altKey && e.key === 'F2') { e.preventDefault(); void ide.stopActiveExecution(); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && e.key === 'F8' && ide.activePath) { e.preventDefault(); ide.toggleBreakpoint(ide.activePath, ide.cursorInfo.line); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && e.key === 'F2') { e.preventDefault(); void ide.stopActiveExecution(); return true; }
   return false;
 }
 
 export function handleIdeWindowKeyDown(e: KeyboardEvent, overlayOpen: boolean, triggerAgent: () => void): void {
-  if (overlayOpen) return;
-  if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && !(e.ctrlKey && !e.metaKey && inXterm(e.target))) {
-    if (e.code === 'KeyL') { e.preventDefault(); triggerAgent(); return; }
-    if (e.code === 'KeyI') { e.preventDefault(); ideAgent.openInlineEdit(); return; }
-    if (e.code === 'Comma' || e.key === ',') { e.preventDefault(); ide.openSettings(); return; }
+  if (!e.defaultPrevented && e.metaKey && e.ctrlKey && e.shiftKey && !e.altKey && matchesKey(e, 'KeyR', 'r')) {
+    e.preventDefault();
+    window.location.reload();
+    return;
   }
-  if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.code === 'KeyV' && e.target instanceof Element && Boolean(e.target.closest('.ide-editor-area'))) {
+  if (!e.defaultPrevented && e.key === 'Escape' && !overlayOpen) {
+    if (closeOpenIdeOverlays()) {
+      e.preventDefault();
+      return;
+    }
+  }
+  if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey) && e.shiftKey && !e.altKey && matchesKey(e, 'KeyR', 'r')) {
+    if (!overlayOpen || ide.searchEverywhereOpen) {
+      e.preventDefault();
+      ide.openSearchEverywhere('text', { replace: true });
+      return;
+    }
+  }
+  if (overlayOpen) return;
+  const term = inXterm(e.target);
+
+  if (!e.defaultPrevented && !term && e.altKey && (e.ctrlKey || e.metaKey) && !e.shiftKey && matchesKey(e, 'KeyO', 'o')) {
+    e.preventDefault();
+    void ide.organizeImportsActiveFile();
+    return;
+  }
+  if (!e.defaultPrevented && e.metaKey && e.altKey && !e.ctrlKey && !e.shiftKey && matchesKey(e, 'KeyR', 'r') && hasActiveDebugSession()) {
+    e.preventDefault();
+    void ide.debugCommand('continue');
+    return;
+  }
+  if (!e.defaultPrevented && !term && (e.metaKey || e.ctrlKey) && e.altKey && !e.shiftKey && matchesKey(e, 'KeyL', 'l')) {
+    e.preventDefault();
+    void ide.formatActiveFile();
+    return;
+  }
+  if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey) && !e.altKey && !(e.ctrlKey && !e.metaKey && term)) {
+    if (!e.shiftKey && matchesKey(e, 'KeyL', 'l')) { e.preventDefault(); void promptIdeGoToLine(); return; }
+    if (e.shiftKey && matchesKey(e, 'KeyL', 'l')) { e.preventDefault(); triggerAgent(); return; }
+    if (!e.shiftKey && matchesKey(e, 'KeyI', 'i')) { e.preventDefault(); ideAgent.openInlineEdit(); return; }
+    if (!e.shiftKey && (e.code === 'Comma' || e.key === ',')) { e.preventDefault(); ide.openSettings(); return; }
+    if (!e.shiftKey && e.key === 'F8' && ide.activePath) { e.preventDefault(); ide.toggleBreakpoint(ide.activePath, ide.cursorInfo.line); return; }
+    if (!e.shiftKey && e.key === 'F2') { e.preventDefault(); void ide.stopActiveExecution(); return; }
+  }
+  if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && matchesKey(e, 'KeyV', 'v') && e.target instanceof Element && Boolean(e.target.closest('.ide-editor-area'))) {
     e.preventDefault();
     window.dispatchEvent(new CustomEvent('otto:ide-paste-history'));
     return;
   }
+  if (!e.defaultPrevented && e.ctrlKey && e.altKey && !e.metaKey && !e.shiftKey && hasActiveDebugSession()) {
+    if (e.code === 'ArrowDown' || e.key === 'ArrowDown') { e.preventDefault(); void ide.stepOver(); return; }
+    if (e.code === 'ArrowRight' || e.key === 'ArrowRight') { e.preventDefault(); void ide.stepInto(); return; }
+    if (e.code === 'ArrowUp' || e.key === 'ArrowUp') { e.preventDefault(); void ide.stepOut(); return; }
+  }
+  if (e.defaultPrevented) return;
   if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'F12') { e.preventDefault(); ide.openBottomTab('terminal'); }
   else if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'F7' && ide.activePath) { e.preventDefault(); void ide.findReferences(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col); }
-  else if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.code === 'KeyR') { e.preventDefault(); void ide.startRun(); }
-  else if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.code === 'KeyD') { e.preventDefault(); void ide.startDebug(); }
+  else if (!term && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && matchesKey(e, 'KeyR', 'r')) { e.preventDefault(); void ide.startRun(); }
+  else if (!term && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && matchesKey(e, 'KeyD', 'd')) { e.preventDefault(); void ide.startDebug(); }
   else if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'F6' && ide.activePath) { e.preventDefault(); void ide.openRenameModal(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col); }
-  else if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === 'F8' && ide.activeDebug?.state === 'paused') { e.preventDefault(); void ide.stepOver(); }
-  else if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === 'F7' && ide.activeDebug?.state === 'paused') { e.preventDefault(); void ide.stepInto(); }
-  else if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'F8' && ide.activeDebug?.state === 'paused') { e.preventDefault(); void ide.stepOut(); }
-  else if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === 'F9' && ide.activeDebug?.state === 'paused') { e.preventDefault(); void ide.resumeDebug(); }
-  else if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'F9' && ide.activeDebug?.state === 'paused') { e.preventDefault(); void ide.runToCursor(); }
+  else if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === 'F8' && hasActiveDebugSession()) { e.preventDefault(); void ide.stepOver(); }
+  else if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === 'F7' && hasActiveDebugSession()) { e.preventDefault(); void ide.stepInto(); }
+  else if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'F8' && hasActiveDebugSession()) { e.preventDefault(); void ide.stepOut(); }
+  else if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === 'F9' && hasActiveDebugSession()) { e.preventDefault(); void ide.debugCommand('continue'); }
+  else if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'F9' && hasActiveDebugSession()) { e.preventDefault(); void ide.runToCursor(); }
 }

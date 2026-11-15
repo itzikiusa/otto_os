@@ -19,6 +19,9 @@ mod children;
 pub mod council;
 mod descendants;
 mod fresh;
+mod held_adopt;
+mod held_proc;
+mod paging;
 mod request_ids;
 use request_ids::RequestIds;
 
@@ -87,6 +90,13 @@ pub struct RuntimeConfig {
     /// The same allowance while one of the turn's tools is still running
     /// (a long build, a subagent).
     pub stall_tool_after: Duration,
+    /// Socket directory for detached `runtime-holder` processes (`<data_dir>/runtime-holders`).
+    /// When `Some` and a [`crate::holder::HolderLauncher`] is configured or auto-detected,
+    /// spawned CLIs survive `ottod` restarts.
+    pub holders_dir: Option<PathBuf>,
+    /// Explicit launcher binary for `runtime-holder` (tests pass `otto-runtime-holder`;
+    /// `None` auto-detects `ottod runtime-holder` or `OTTO_RUNTIME_HOLDER_BIN`).
+    pub holder_launcher: Option<crate::holder::HolderLauncher>,
 }
 
 impl Default for RuntimeConfig {
@@ -102,6 +112,8 @@ impl Default for RuntimeConfig {
             start_wait: Duration::from_secs(20),
             stall_after: Duration::from_secs(15 * 60),
             stall_tool_after: Duration::from_secs(45 * 60),
+            holders_dir: None,
+            holder_launcher: None,
         }
     }
 }
@@ -150,7 +162,7 @@ enum PersistOp {
 
 /// Every entity's latest state (+ the sequence that set it).
 #[derive(Default)]
-struct Projection {
+pub(crate) struct Projection {
     session: Option<ProviderSession>,
     thread: Option<ProviderThread>,
     turns: HashMap<Id, ProviderTurn>,
@@ -224,6 +236,9 @@ impl Projection {
             runtime_requests,
             plans,
             queued_prompts: self.queue.iter().map(QueuedRecord::public).collect(),
+            has_older: false,
+            oldest_turn_ordinal: None,
+            older_turns: 0,
         }
     }
 
@@ -289,35 +304,77 @@ mod erased {
     }
 }
 
-struct Proc {
-    epoch: u64,
-    request_ids: RequestIds,
-    pid: u32,
-    stdin: mpsc::UnboundedSender<String>,
-    driver: Box<dyn StructuredDriver>,
+pub(super) enum ProcTransport {
+    Direct {
+        stdin: mpsc::UnboundedSender<String>,
+    },
+    Held {
+        client: crate::holder::HolderClient,
+        acked_seq: u64,
+        claude_login: Option<Option<PathBuf>>,
+    },
 }
 
-struct ActiveTurn {
-    id: Id,
-    origin: TurnOrigin,
-    interrupting: bool,
+pub(super) struct Proc {
+    pub(super) epoch: u64,
+    pub(super) request_ids: RequestIds,
+    pub(super) pid: u32,
+    pub(super) transport: ProcTransport,
+    pub(super) driver: Box<dyn StructuredDriver>,
+}
+
+impl Proc {
+    fn send_stdin(&self, line: String) {
+        match &self.transport {
+            ProcTransport::Direct { stdin } => {
+                let _ = stdin.send(line);
+            }
+            ProcTransport::Held { client, .. } => {
+                let _ = client.send_stdin(line);
+            }
+        }
+    }
+
+    fn interrupt_process_group(&self) {
+        match &self.transport {
+            ProcTransport::Direct { .. } => signal_group(self.pid, libc::SIGINT),
+            ProcTransport::Held { client, .. } => {
+                client.signal(crate::holder::HolderSignal::Interrupt);
+            }
+        }
+    }
+
+    fn kill_process_group(&self) {
+        match &self.transport {
+            ProcTransport::Direct { .. } => signal_group(self.pid, libc::SIGKILL),
+            ProcTransport::Held { client, .. } => {
+                client.signal(crate::holder::HolderSignal::Kill);
+            }
+        }
+    }
+}
+
+pub(super) struct ActiveTurn {
+    pub(super) id: Id,
+    pub(super) origin: TurnOrigin,
+    pub(super) interrupting: bool,
     /// Stopped by the stall watchdog.
-    stalled: bool,
+    pub(super) stalled: bool,
 }
 
-struct State {
-    session: RuntimeSession,
-    next_seq: u64,
-    reserved: u64,
-    epoch: u64,
+pub(super) struct State {
+    pub(super) session: RuntimeSession,
+    pub(super) next_seq: u64,
+    pub(super) reserved: u64,
+    pub(super) epoch: u64,
     /// Native identity is committed only after the first fresh prompt is accepted.
-    fresh_starting: bool,
+    pub(super) fresh_starting: bool,
     ring: EventRing,
-    proj: Projection,
-    turn: Option<ActiveTurn>,
-    proc: Option<Proc>,
+    pub(super) proj: Projection,
+    pub(super) turn: Option<ActiveTurn>,
+    pub(super) proc: Option<Proc>,
     /// Streaming upserts waiting out their coalescing window (latest per id).
-    held: Vec<TurnItem>,
+    pub(super) held: Vec<TurnItem>,
     /// When each streaming item was last emitted.
     stream_emitted: HashMap<Id, Instant>,
     /// When the session last emitted anything (the stall watchdog's clock).
@@ -340,7 +397,7 @@ impl State {
     }
 }
 
-struct Live {
+pub(super) struct Live {
     /// Serializes prompt admission, queue delivery and fresh provider replacement.
     prompt_lock: tokio::sync::Mutex<()>,
     spawn_lock: tokio::sync::Mutex<()>,
@@ -350,6 +407,9 @@ struct Live {
     /// External turn/request changes can arm a deadline while the child is silent.
     deadline_changed: tokio::sync::Notify,
     persist: mpsc::UnboundedSender<PersistOp>,
+    /// Set during `shutdown_for_restart` so `descendants::watch` does not kill
+    /// Claude background processes when `st.proc` is detached.
+    pub(super) detaching_for_restart: std::sync::atomic::AtomicBool,
 }
 
 impl Live {
@@ -409,11 +469,22 @@ impl AgentRuntime {
     /// turn this cut off reports it to its parent (`children.rs`). Returns
     /// sessions touched.
     pub async fn recover(&self) -> Result<usize> {
+        self.recover_excluding(&std::collections::HashSet::new())
+            .await
+    }
+
+    pub(super) async fn recover_excluding(
+        &self,
+        excluded: &std::collections::HashSet<Id>,
+    ) -> Result<usize> {
         self.inner.repo.expire_drafts().await?;
         let mut touched = 0;
         let mut queued = Vec::new();
         let mut cut_children = Vec::new();
         for sid in self.inner.repo.session_ids().await? {
+            if excluded.contains(&sid) {
+                continue;
+            }
             let rec = self.inner.repo.get(&sid).await?;
             let mut seq = rec.seq_reserved.max(rec.session.last_sequence);
             let now = Utc::now();
@@ -521,12 +592,24 @@ impl AgentRuntime {
             .iter()
             .map(|e| Arc::clone(e.value()))
             .collect();
+        let mut held_shutdowns = Vec::new();
         for live in &lives {
             if let Some(p) = live.lock().proc.take() {
-                let pid = p.pid;
-                drop(p);
-                signal_group(pid, libc::SIGTERM);
+                match p.transport {
+                    ProcTransport::Direct { stdin } => {
+                        drop(stdin);
+                        signal_group(p.pid, libc::SIGTERM);
+                    }
+                    ProcTransport::Held { client, .. } => {
+                        held_shutdowns.push(tokio::spawn(async move {
+                            client.shutdown(Duration::ZERO).await;
+                        }));
+                    }
+                }
             }
+        }
+        for task in held_shutdowns {
+            let _ = task.await;
         }
         for live in lives {
             let (tx, rx) = oneshot::channel();
@@ -982,6 +1065,7 @@ impl AgentRuntime {
                 stop_requested: false,
             }),
             persist: tx,
+            detaching_for_restart: std::sync::atomic::AtomicBool::new(false),
         });
         let entry = self.inner.live.entry(id.clone()).or_insert_with(|| {
             tokio::spawn(persister(self.inner.repo.clone(), id.clone(), rx));
@@ -1031,6 +1115,8 @@ impl AgentRuntime {
         })
         .await
         .map_err(|e| Error::Internal(format!("spawn preparation failed: {e}")))?;
+        crate::acp_sideband::io::seed_resume(&mut *driver, ctx.resume.as_deref(), &session.cwd)
+            .await;
         // A host that left the tail in place (tests) still gets it last.
         let mut args = spec.args;
         args.append(&mut spec.tail_args);
@@ -1043,13 +1129,35 @@ impl AgentRuntime {
                     .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
                     .map(|(_, v)| PathBuf::from(v))
             });
-        let child = spawn_child(&ChildCommand {
+        let cmd = ChildCommand {
             program: spec.program.clone(),
             args,
             cwd: session.cwd.clone(),
             env: spec.env,
-        })
-        .map_err(|e| {
+        };
+        if let Some(holders_dir) = self.inner.config.holders_dir.as_deref() {
+            let launcher = self
+                .inner
+                .config
+                .holder_launcher
+                .clone()
+                .or_else(crate::holder::HolderLauncher::auto_detect);
+            if let Some(launcher) = launcher {
+                return held_proc::spawn_via_holder(
+                    &self.inner,
+                    live,
+                    &session,
+                    driver,
+                    &ctx,
+                    cmd,
+                    claude_login,
+                    holders_dir,
+                    &launcher,
+                )
+                .await;
+            }
+        }
+        let child = spawn_child(&cmd).map_err(|e| {
             Error::Invalid(format!(
                 "could not start {} ({}): {e}",
                 session.provider.as_str(),
@@ -1059,6 +1167,8 @@ impl AgentRuntime {
         let cli_pid = child.pid;
         let (epoch, flushed) = {
             let mut st = live.lock();
+            live.detaching_for_restart
+                .store(false, std::sync::atomic::Ordering::Release);
             st.epoch += 1;
             let epoch = st.epoch;
             let step = driver.start(&ctx);
@@ -1066,7 +1176,7 @@ impl AgentRuntime {
                 epoch,
                 request_ids: RequestIds::new(),
                 pid: child.pid,
-                stdin: child.stdin,
+                transport: ProcTransport::Direct { stdin: child.stdin },
                 driver,
             });
             st.reserved = st.next_seq + self.inner.config.seq_reserve;
@@ -1136,6 +1246,23 @@ impl AgentRuntime {
         }
         if req.fresh_context {
             return self.prompt_fresh(id, live, req).await;
+        }
+        for _ in 0..8 {
+            if !poll_driver_sideband(&self.inner, live, None).await {
+                break;
+            }
+        }
+        {
+            let mut st = live.lock();
+            let ready_to_settle = idle_settle_deadline(&st, &self.inner.config).is_some();
+            if ready_to_settle {
+                if let Some(proc) = st.proc.as_mut() {
+                    let step = proc.driver.on_idle_settle();
+                    if !step.events.is_empty() || !step.writes.is_empty() || step.signal.is_some() {
+                        apply_step(&self.inner, live, &mut st, step);
+                    }
+                }
+            }
         }
         let first = check_can_prompt(&live.lock());
         match (first, req.delivery) {
@@ -1831,6 +1958,11 @@ impl AgentRuntime {
     /// longer holds them or they exceed T3 Code's replay limits.
     pub async fn replay(&self, id: &Id, after_sequence: u64) -> Result<RuntimeReplay> {
         let live = self.live(id).await?;
+        for _ in 0..4 {
+            if !poll_driver_sideband(&self.inner, &live, None).await {
+                break;
+            }
+        }
         let mut st = live.lock();
         flush_held(&self.inner, &live, &mut st);
         let last_sequence = st.next_seq - 1;
@@ -1979,7 +2111,11 @@ fn interrupt_turn(inner: &Arc<Inner>, live: &Arc<Live>) -> bool {
             && st.proc.as_ref().is_some_and(|p| p.epoch == epoch);
         if stuck {
             tracing::warn!("runtime turn ignored interrupt; killing its process group");
-            signal_group(pid, libc::SIGKILL);
+            if let Some(p) = st.proc.as_ref() {
+                p.kill_process_group();
+            } else {
+                signal_group(pid, libc::SIGKILL);
+            }
         }
     });
     true
@@ -2240,13 +2376,24 @@ fn resume_refused_for_good(st: &State) -> bool {
 /// Close stdin (EOF), then SIGTERM and SIGKILL the group after `grace`.
 fn stop_child(p: Proc, grace: Duration) {
     let pid = p.pid;
-    drop(p);
-    tokio::spawn(async move {
-        tokio::time::sleep(grace).await;
-        signal_group(pid, libc::SIGTERM);
-        tokio::time::sleep(grace).await;
-        signal_group(pid, libc::SIGKILL);
-    });
+    match p.transport {
+        ProcTransport::Direct { stdin } => {
+            drop(stdin);
+            drop(p.driver);
+            tokio::spawn(async move {
+                tokio::time::sleep(grace).await;
+                signal_group(pid, libc::SIGTERM);
+                tokio::time::sleep(grace).await;
+                signal_group(pid, libc::SIGKILL);
+            });
+        }
+        ProcTransport::Held { client, .. } => {
+            drop(p.driver);
+            tokio::spawn(async move {
+                client.shutdown(grace).await;
+            });
+        }
+    }
 }
 
 /// Sequence, project, record and publish one event. Returns its sequence.
@@ -2384,6 +2531,7 @@ fn upsert_item(inner: &Inner, live: &Live, st: &mut State, mut item: TurnItem) {
             item.ordinal = st.proj.items[&item.id].ordinal;
             item.updated_at = now_utc;
             st.held.push(item);
+            live.deadline_changed.notify_waiters();
             return;
         }
         st.stream_emitted.insert(item.id.clone(), now);
@@ -2876,12 +3024,51 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
     }
     if let Some(p) = st.proc.as_ref() {
         for line in step.writes {
-            let _ = p.stdin.send(line);
+            p.send_stdin(line);
         }
         if step.signal == Some(ChildSignal::Interrupt) {
-            signal_group(p.pid, libc::SIGINT);
+            p.interrupt_process_group();
         }
     }
+    held_proc::sync_holder_checkpoint(st);
+}
+
+/// Poll the driver's off-lock sideband session log (`agy`, `grok`, `gemini`,
+/// `opencode`, or `OTTO_ACP_SIDEBAND_FILE`) and feed any new step payload into
+/// [`StructuredDriver::on_sideband`]. Returns `true` when unread data remains.
+async fn poll_driver_sideband(inner: &Inner, live: &Live, expected_epoch: Option<u64>) -> bool {
+    let (epoch, poll) = {
+        let st = live.lock();
+        let Some(proc) = st.proc.as_ref() else {
+            return false;
+        };
+        if expected_epoch.is_some_and(|e| proc.epoch != e) {
+            return false;
+        }
+        let Some(poll) = proc.driver.sideband_poll() else {
+            return false;
+        };
+        (proc.epoch, poll)
+    };
+
+    let (Some(payload), has_more) = crate::acp_sideband::io::fetch_sideband(&poll).await else {
+        return false;
+    };
+
+    let mut st = live.lock();
+    let Some(proc) = st.proc.as_mut() else {
+        return false;
+    };
+    if proc.epoch != epoch {
+        return false;
+    }
+    let step = proc.driver.on_sideband(payload);
+    if !step.events.is_empty() || !step.writes.is_empty() || step.signal.is_some() {
+        apply_step(inner, live, &mut st, step);
+    } else {
+        held_proc::sync_holder_checkpoint(&st);
+    }
+    has_more
 }
 
 /// Feed one child's messages to its driver until it exits.
@@ -2893,6 +3080,7 @@ async fn pump(
     claude_login: Option<Option<PathBuf>>,
 ) {
     let window = inner.config.stream_coalesce;
+    let mut next_sideband: Option<Instant> = None;
     loop {
         // Register before reading state, so a change between the snapshot and
         // select cannot leave an idle pump waiting indefinitely on child output.
@@ -2904,10 +3092,27 @@ async fn pump(
             if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
                 return; // closed or superseded
             }
+            let sideband_iv = st
+                .proc
+                .as_ref()
+                .and_then(|p| p.driver.sideband_poll())
+                .map(|s| s.interval);
+            match sideband_iv {
+                Some(iv) => {
+                    next_sideband.get_or_insert_with(|| Instant::now() + iv);
+                }
+                None => {
+                    next_sideband = None;
+                }
+            }
             let held = st.held_deadline(window);
             let settle = idle_settle_deadline(&st, &inner.config);
             let stall = stall_deadline(&st, &inner.config);
-            held.into_iter().chain(settle).chain(stall).min()
+            held.into_iter()
+                .chain(settle)
+                .chain(stall)
+                .chain(next_sideband)
+                .min()
         };
         let msg = tokio::select! {
             _ = &mut changed => continue,
@@ -2918,6 +3123,14 @@ async fn pump(
                     None => std::future::pending::<()>().await,
                 }
             } => {
+                if next_sideband.is_some_and(|at| at <= Instant::now()) {
+                    next_sideband = None;
+                    for _ in 0..8 {
+                        if !poll_driver_sideband(&inner, &live, Some(epoch)).await {
+                            break;
+                        }
+                    }
+                }
                 let mut st = live.lock();
                 if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
                     return; // closed or superseded
@@ -2978,47 +3191,8 @@ async fn pump(
                 apply_step(&inner, &live, &mut st, step);
             }
             ChildMsg::Exited { code, stderr_tail } => {
-                let mut proc = st.proc.take().expect("checked above");
-                retire(&inner, &st.session);
-                let step = proc.driver.on_exit(code);
-                apply_step(&inner, &live, &mut st, step);
-                settle_background(&inner, &live, &mut st, TurnItemStatus::Interrupted);
-                let detail = stderr_tail
-                    .lines()
-                    .rev()
-                    .find(|l| !l.trim().is_empty())
-                    .map(|l| format!(": {}", l.trim()))
-                    .unwrap_or_default();
-                let code_s = code.map_or("a signal".to_string(), |c| format!("code {c}"));
-                let message = format!("the agent process exited ({code_s}){detail}");
-                if let Some(turn) = st.turn.as_ref() {
-                    // T3 Code finalizes a turn whose process died as a
-                    // `transport_error` failure.
-                    let (status, failure) = if turn.interrupting {
-                        (TurnTerminalStatus::Interrupted, None)
-                    } else {
-                        (
-                            TurnTerminalStatus::Failed,
-                            Some(ProviderFailure {
-                                class: "transport_error".into(),
-                                message: message.clone(),
-                                code: code.map(|c| c.to_string()),
-                                retryable: Some(true),
-                            }),
-                        )
-                    };
-                    finish_turn(&inner, &live, &mut st, status, failure, None);
-                } else {
-                    cancel_pending(&inner, &live, &mut st, CancelReason::Agent);
-                }
-                let last_error = (code != Some(0)).then_some(message);
-                set_session_status(
-                    &inner,
-                    &live,
-                    &mut st,
-                    ProviderSessionStatus::Stopped,
-                    last_error,
-                );
+                let proc = st.proc.take().expect("checked above");
+                held_proc::finalize_child_exit(&inner, &live, &mut st, proc, code, stderr_tail);
                 return;
             }
         }

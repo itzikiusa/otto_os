@@ -3,31 +3,213 @@
 export const IDE_UNDO_JOURNAL_KEY = 'otto.ide.undoJournal.v1';
 export const IDE_UNDO_DRAFT_PREFIX = 'otto.ide.undoDraft:';
 export const IDE_UNDO_DRAFT_INDEX_KEY = 'otto.ide.undoDraftIndex.v1';
+export const IDE_CURSOR_POS_KEY = 'otto.ide.cursorPos.v1';
 
 export const MAX_JOURNAL_FILES = 24;
 export const MAX_DRAFT_FILES = 24;
 export const MAX_JOURNAL_ENTRY_CHARS = 160_000;
 
-/** Returns true when `filePath` names a credential, private key, or dotenv file that must never be written to Web Storage. */
+const SECRET_EXACT_NAMES = new Set([
+  'id_rsa',
+  'id_dsa',
+  'id_ecdsa',
+  'id_ed25519',
+  'credentials',
+  'credentials.toml',
+  'auth.json',
+  'oauth_creds.json',
+  '.env',
+  '.netrc',
+  '.pgpass',
+  '.npmrc',
+  '.pypirc',
+  '.dockercfg',
+  '.git-credentials',
+  '.claude.json',
+  '.bash_history',
+  '.zsh_history',
+  '.sh_history',
+  '.python_history',
+  '.node_repl_history',
+  '.psql_history',
+  '.mysql_history',
+  '.rediscli_history',
+  'fish_history',
+]);
+
+const SECRET_FILE_SUFFIXES = ['.pem', '.key', '.pfx', '.p12', '.keystore', '.jks', '.credentials'];
+
+const ANYWHERE_CREDENTIAL_DIRS = new Set([
+  '.ssh',
+  '.aws',
+  '.gnupg',
+  '.kube',
+  '.docker',
+  '.password-store',
+  '.terraform.d',
+]);
+
+const HOME_REL_DENY_PREFIXES = [
+  '.ssh/',
+  '.aws/',
+  '.gnupg/',
+  '.kube/',
+  '.docker/',
+  '.config/gcloud/',
+  '.config/gh/',
+  '.config/op/',
+  '.config/git/credentials',
+  '.config/',
+  '.azure/',
+  '.password-store/',
+  '.terraform.d/',
+  '.codex/',
+  '.gemini/',
+  '.claude/',
+  '.cursor/',
+  '.cargo/credentials',
+  'library/keychains/',
+  'library/cookies/',
+  'library/logs/otto/',
+  'library/application support/otto/',
+];
+
+const SYSTEM_DENY_PREFIXES = [
+  '/etc/',
+  '/private/etc/',
+  '/root/',
+  '/var/root/',
+  '/private/var/root/',
+  '/proc/',
+  '/sys/',
+];
+
+function extractHomeRelativeSubpath(lowerClean: string): string | null {
+  const folded = lowerClean.startsWith('/system/volumes/data/')
+    ? lowerClean.slice('/system/volumes/data'.length)
+    : lowerClean;
+  if (folded.startsWith('~/')) return folded.slice(2);
+  const m = /^(?:\/users\/[^/]+|\/home\/[^/]+|\/var\/root|\/root)\/(.+)$/.exec(folded);
+  return m ? m[1] : null;
+}
+
+/** Returns true when `filePath` names a credential, private key, shell history, or protected directory file that must never be cached in Web Storage or routed to LSP. */
 export function isSecretIdePath(filePath?: string | null): boolean {
   if (!filePath) return false;
   const clean = filePath.split('?')[0].replace(/\\/g, '/').replace(/\/+$/, '');
-  const base = (clean.slice(clean.lastIndexOf('/') + 1) || '').toLowerCase();
+  if (!clean) return false;
+  const lowerClean = clean.toLowerCase();
+  const base = lowerClean.slice(lowerClean.lastIndexOf('/') + 1);
   if (!base) return false;
-  if (base === '.env' || base.startsWith('.env.')) return true;
-  if (base.endsWith('.pem') || base.endsWith('.key') || base.endsWith('.p12') || base.endsWith('.pfx')) return true;
+
+  if (SECRET_EXACT_NAMES.has(base)) return true;
+  if (base.startsWith('.env.')) return true;
   if (
-    base === 'id_rsa' ||
     base.startsWith('id_rsa.') ||
-    base === 'id_ed25519' ||
+    base.startsWith('id_dsa.') ||
     base.startsWith('id_ed25519.') ||
-    base === 'id_ecdsa' ||
-    base.startsWith('id_ecdsa.')
+    base.startsWith('id_ecdsa.') ||
+    base.startsWith('credentials.')
   ) {
     return true;
   }
-  if (base === 'credentials' || base.startsWith('credentials.') || base.endsWith('.credentials')) return true;
+  for (let i = 0; i < SECRET_FILE_SUFFIXES.length; i++) {
+    if (base.endsWith(SECRET_FILE_SUFFIXES[i])) return true;
+  }
+
+  const folded = lowerClean.startsWith('/system/volumes/data/')
+    ? lowerClean.slice('/system/volumes/data'.length)
+    : lowerClean;
+  for (let i = 0; i < SYSTEM_DENY_PREFIXES.length; i++) {
+    const sysPrefix = SYSTEM_DENY_PREFIXES[i];
+    if (folded.startsWith(sysPrefix) || `${folded}/` === sysPrefix) return true;
+  }
+
+  const segments = folded.split('/');
+  for (let i = 0; i < segments.length - 1; i++) {
+    if (ANYWHERE_CREDENTIAL_DIRS.has(segments[i])) return true;
+  }
+  if (
+    folded.includes('/.config/gcloud/') ||
+    folded.includes('/.config/gh/') ||
+    folded.includes('/.config/op/') ||
+    folded.includes('/.cargo/credentials') ||
+    folded.includes('/library/keychains/')
+  ) {
+    return true;
+  }
+
+  const homeRel = extractHomeRelativeSubpath(lowerClean);
+  if (homeRel) {
+    if (homeRel.startsWith('.otto/') && !homeRel.startsWith('.otto/vault/')) {
+      return true;
+    }
+    for (let i = 0; i < HOME_REL_DENY_PREFIXES.length; i++) {
+      const p = HOME_REL_DENY_PREFIXES[i];
+      if (homeRel === p || homeRel.startsWith(p)) return true;
+    }
+  }
   return false;
+}
+
+const SENSITIVE_EXACT_KEYS = [
+  IDE_UNDO_JOURNAL_KEY,
+  IDE_UNDO_DRAFT_INDEX_KEY,
+  'otto.ide.clipboardHistory.v1',
+  'otto.ide.projects.v1',
+  'otto.ide.namedProjects.v1',
+  'otto.ide.lastRoot',
+  'otto.ide.activeProjectId.v1',
+  'otto.ide.openThreadHandoff',
+  IDE_CURSOR_POS_KEY,
+];
+
+const SENSITIVE_KEY_PREFIXES = [
+  IDE_UNDO_DRAFT_PREFIX,
+  'otto.ide.roots:',
+  'otto.ide.bps:',
+  'otto.ide.projectTabs:',
+  'otto.ide.openTabs.v1:',
+  'otto.ide.buildToolPrefs:',
+];
+
+export function clearIdeSensitiveWebStorage(
+  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'> | null,
+  sessionStore?: Pick<Storage, 'removeItem'> | null,
+): void {
+  const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
+  if (store) {
+    removeIdeUndoDraft('all', store);
+    for (let i = 0; i < SENSITIVE_EXACT_KEYS.length; i++) {
+      try {
+        store.removeItem?.(SENSITIVE_EXACT_KEYS[i]);
+      } catch { /* ignore */ }
+    }
+    try {
+      if (typeof store.length === 'number' && typeof store.key === 'function') {
+        const toRemove: string[] = [];
+        for (let i = 0; i < store.length; i++) {
+          const k = store.key(i);
+          if (!k) continue;
+          for (let j = 0; j < SENSITIVE_KEY_PREFIXES.length; j++) {
+            if (k.startsWith(SENSITIVE_KEY_PREFIXES[j])) {
+              toRemove.push(k);
+              break;
+            }
+          }
+        }
+        for (let i = 0; i < toRemove.length; i++) {
+          store.removeItem(toRemove[i]);
+        }
+      }
+    } catch { /* ignore */ }
+  }
+  const ss = sessionStore ?? (typeof sessionStorage !== 'undefined' ? sessionStorage : null);
+  if (ss) {
+    try {
+      ss.removeItem(IDE_CURSOR_POS_KEY);
+    } catch { /* ignore */ }
+  }
 }
 
 export interface IdeUndoJournalEntry {
@@ -174,4 +356,59 @@ export function removeIdeUndoDraft(
       store.setItem(IDE_UNDO_DRAFT_INDEX_KEY, JSON.stringify(idx));
     }
   } catch { /* ignore */ }
+}
+
+const liveLspDiagKeys = new Set<string>();
+
+function resolveDiagAbsPath(rootPath: string | null | undefined, filePath: string): string {
+  const cleanFile = filePath.split('?')[0].replace(/\\/g, '/').replace(/\/+$/, '');
+  const cleanRoot = (rootPath ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!cleanRoot || cleanFile.startsWith('/') || cleanFile.includes('://')) return cleanFile;
+  return `${cleanRoot}/${cleanFile.replace(/^\/+/, '')}`;
+}
+
+function normalizeDiagPathKey(rootPath: string | null | undefined, filePath: string): string {
+  const cleanRoot = (rootPath ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+  const absFile = resolveDiagAbsPath(rootPath, filePath);
+  return cleanRoot ? `${cleanRoot}::${absFile}` : absFile;
+}
+
+/** Record that a live pooled/direct LSP session has published authoritative diagnostics for `(rootPath, filePath)`. */
+export function markLiveLspDiagnostics(rootPath: string | null | undefined, filePath: string): void {
+  if (!filePath) return;
+  const absFile = resolveDiagAbsPath(rootPath, filePath);
+  liveLspDiagKeys.add(normalizeDiagPathKey(rootPath, filePath));
+  liveLspDiagKeys.add(absFile);
+}
+
+/** Clear live LSP diagnostic ownership for a specific file, a root, or all sessions. */
+export function clearLiveLspDiagnostics(rootPath?: string | null, filePath?: string | null): void {
+  if (!rootPath && !filePath) {
+    liveLspDiagKeys.clear();
+    return;
+  }
+  if (filePath) {
+    const absFile = resolveDiagAbsPath(rootPath, filePath);
+    liveLspDiagKeys.delete(normalizeDiagPathKey(rootPath, filePath));
+    liveLspDiagKeys.delete(absFile);
+    return;
+  }
+  const cleanRoot = (rootPath ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+  const prefix = `${cleanRoot}::`;
+  const pathPrefix = `${cleanRoot}/`;
+  for (const k of [...liveLspDiagKeys]) {
+    if (k.startsWith(prefix) || (cleanRoot && (k === cleanRoot || k.startsWith(pathPrefix)))) {
+      liveLspDiagKeys.delete(k);
+    }
+  }
+}
+
+/** True when an active LSP client already owns diagnostics for `(rootPath, filePath)`. */
+export function hasLiveLspDiagnosticsForFile(rootPath: string | null | undefined, filePath: string): boolean {
+  if (!filePath) return false;
+  const absFile = resolveDiagAbsPath(rootPath, filePath);
+  return (
+    liveLspDiagKeys.has(normalizeDiagPathKey(rootPath, filePath)) ||
+    liveLspDiagKeys.has(absFile)
+  );
 }

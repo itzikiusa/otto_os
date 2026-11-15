@@ -1,26 +1,18 @@
-//! Fast multi-file search (`files`, `text`, `symbols`, `all`) and multi-file
-//! search-and-replace (with `dry_run` preview) across primary + attached
-//! project roots on local and SSH targets.
+//! Fast multi-file search (`files`, `text`, `symbols`, `all`) across primary and
+//! attached project roots on local and SSH targets.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use otto_core::{Error, Result};
 use regex::{Regex, RegexBuilder};
 
-use crate::lsp_host::pool::LspPool;
-use crate::types::{
-    IdeReplacePreview, IdeReplaceReq, IdeReplaceResp, IdeSearchItem, IdeSearchItemKind,
-    IdeSearchMode, IdeSearchReq, IdeSearchResp,
-};
+use crate::types::{IdeSearchItem, IdeSearchItemKind, IdeSearchMode, IdeSearchReq, IdeSearchResp};
 
 use super::fs_ops::resolve_local_existing_in_roots;
-use super::{
-    enforce_non_root_path, join_remote, map_io_err, resolve_remote_in_roots, ResolvedTarget,
-    TargetManager, MAX_SEARCH_FILE_BYTES,
-};
+pub(super) use super::search_replace::{replace_local_sync, replace_remote_ssh, search_remote_ssh};
+use super::{enforce_non_root_path, MAX_SEARCH_FILE_BYTES};
 
 pub(super) fn build_matcher(
     query: &str,
@@ -53,6 +45,7 @@ pub(super) fn build_matcher(
     RegexBuilder::new(&pattern)
         .case_insensitive(!case_sensitive)
         .multi_line(true)
+        .crlf(true)
         .build()
         .map_err(|e| Error::Invalid(format!("invalid search pattern: {e}")))
 }
@@ -164,6 +157,38 @@ impl CompiledFileGlob {
     }
 }
 
+/// Distinguish generated root/module build output directories (`target/`, `build/`,
+/// `dist/`) from tracked source packages like `internal/target/` or `pkg/build/`.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn is_generated_build_dir(dir_path: &Path, dir_name: &str, owning_root: &Path) -> bool {
+    if dir_path.parent() == Some(owning_root) {
+        return matches!(dir_name, "target" | "build" | "dist");
+    }
+    let Some(parent) = dir_path.parent() else {
+        return false;
+    };
+    match dir_name {
+        "target" => {
+            dir_path.join("CACHEDIR.TAG").is_file()
+                || dir_path.join(".rustc_info.json").is_file()
+                || parent.join("Cargo.toml").is_file()
+                || parent.join("pom.xml").is_file()
+        }
+        "build" => [
+            "build.gradle",
+            "build.gradle.kts",
+            "CMakeLists.txt",
+            "package.json",
+        ]
+        .iter()
+        .any(|m| parent.join(m).is_file()),
+        "dist" => ["package.json", "tsconfig.json", "pyproject.toml"]
+            .iter()
+            .any(|m| parent.join(m).is_file()),
+        _ => false,
+    }
+}
+
 #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
 pub(super) fn collect_local_files_multi(
     root: &Path,
@@ -210,22 +235,25 @@ fn walk_one_root(
     seen: &mut HashSet<PathBuf>,
     out: &mut Vec<String>,
 ) {
+    let root_buf = owning_root.to_path_buf();
     let walker = ignore::WalkBuilder::new(scan_dir)
         .hidden(false)
         .git_ignore(true)
-        .filter_entry(|entry| {
+        .filter_entry(move |entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            if !entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                return true;
+            }
             let name = entry.file_name().to_string_lossy();
-            !matches!(
-                name.as_ref(),
-                ".git"
-                    | "node_modules"
-                    | "target"
-                    | "dist"
-                    | "build"
-                    | ".svelte-kit"
-                    | "__pycache__"
-                    | ".venv"
-            )
+            match name.as_ref() {
+                ".git" | "node_modules" | ".svelte-kit" | "__pycache__" | ".venv" => false,
+                "target" | "build" | "dist" => {
+                    !is_generated_build_dir(entry.path(), name.as_ref(), &root_buf)
+                }
+                _ => true,
+            }
         })
         .build();
 
@@ -247,21 +275,16 @@ fn walk_one_root(
             if !canon.starts_with(owning_root) || enforce_non_root_path(&canon).is_err() {
                 continue;
             }
-            if !seen.insert(canon.clone()) {
-                continue;
+            if seen.insert(canon.clone()) {
+                out.push(canon.to_string_lossy().into_owned());
             }
-            out.push(canon.to_string_lossy().into_owned());
-        } else {
-            let key = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-            if !seen.insert(key) {
-                continue;
-            }
+        } else if seen.insert(p.canonicalize().unwrap_or_else(|_| p.to_path_buf())) {
             out.push(p.to_string_lossy().into_owned());
         }
     }
 }
 
-fn display_rel_path(p: &Path, root: &Path, additional_roots: &[PathBuf]) -> String {
+pub(super) fn display_rel_path(p: &Path, root: &Path, additional_roots: &[PathBuf]) -> String {
     if let Ok(r) = p.strip_prefix(root) {
         return r.to_string_lossy().replace('\\', "/");
     }
@@ -418,7 +441,7 @@ fn scan_symbols_in_file(
         };
         if sym_name.is_empty() || !matcher.is_match(sym_name) {
             continue;
-        }
+        };
         if items.len() >= limit {
             *truncated = true;
             return;
@@ -451,366 +474,15 @@ fn scan_text_in_file(
             *truncated = true;
             return;
         }
+        let col = (line[..m.start()].encode_utf16().count() + 1) as u32;
         items.push(IdeSearchItem {
             kind: IdeSearchItemKind::Text,
             path: full_path.to_string(),
             line: Some((idx + 1) as u32),
-            column: Some((m.start() + 1) as u32),
+            column: Some(col),
             preview: line.trim().chars().take(200).collect(),
             symbol_kind: None,
             container: None,
         });
     }
-}
-
-fn display_remote_rel_path(path: &str, root: &str, additional_roots: &[String]) -> String {
-    if path == root {
-        return String::new();
-    }
-    let root_prefix = format!("{}/", root.trim_end_matches('/'));
-    if let Some(rel) = path.strip_prefix(&root_prefix) {
-        return rel.to_string();
-    }
-    for extra in additional_roots {
-        let extra_clean = extra.trim_end_matches('/');
-        let extra_prefix = format!("{extra_clean}/");
-        if let Some(rel) = path.strip_prefix(&extra_prefix) {
-            let base = extra_clean.rsplit('/').next().unwrap_or("attached");
-            return format!("{base}/{rel}");
-        }
-    }
-    path.trim_start_matches('/').to_string()
-}
-
-pub(super) async fn search_remote_ssh(
-    mgr: &TargetManager,
-    target: &ResolvedTarget,
-    root: &str,
-    additional_roots: &[String],
-    req: &IdeSearchReq,
-    limit: usize,
-) -> Result<IdeSearchResp> {
-    let mut items = Vec::new();
-    let mut truncated = false;
-    let q_lower = req.query.to_ascii_lowercase();
-    let compiled_glob = CompiledFileGlob::compile(req.file_glob.as_deref());
-    let search_roots: Vec<String> = match req
-        .scope_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(sp) => vec![resolve_remote_in_roots(root, additional_roots, sp)?.0],
-        None => std::iter::once(root.to_string())
-            .chain(additional_roots.iter().cloned())
-            .collect(),
-    };
-
-    if matches!(req.mode, IdeSearchMode::Files | IdeSearchMode::All) {
-        let files = mgr.list_files(target, 5_000).await?;
-        for f in files {
-            if !search_roots
-                .iter()
-                .any(|sr| f == *sr || f.starts_with(&format!("{}/", sr.trim_end_matches('/'))))
-            {
-                continue;
-            }
-            let rel = display_remote_rel_path(&f, root, additional_roots);
-            let matched = if req.case_sensitive {
-                rel.contains(&req.query)
-            } else {
-                rel.to_ascii_lowercase().contains(&q_lower)
-            };
-            if matched && compiled_glob.matches(&rel) {
-                if items.len() >= limit {
-                    truncated = true;
-                    break;
-                }
-                items.push(IdeSearchItem {
-                    kind: IdeSearchItemKind::File,
-                    path: f,
-                    line: None,
-                    column: None,
-                    preview: rel,
-                    symbol_kind: None,
-                    container: None,
-                });
-            }
-        }
-    }
-
-    if !truncated && !matches!(req.mode, IdeSearchMode::Files) {
-        for search_root in &search_roots {
-            if items.len() >= limit {
-                truncated = true;
-                break;
-            }
-            let cap = limit.saturating_sub(items.len()) + 1;
-            let case_flag = if req.case_sensitive { "-s" } else { "-i" };
-            let fixed_flag = if req.regex { "" } else { "-F" };
-            let word_flag = if req.whole_word { "-w" } else { "" };
-            let q_escaped = shell_words::quote(&req.query);
-            let script = format!(
-                "if command -v rg >/dev/null 2>&1; then \
-                   rg --line-number --column --no-heading --color=never {case_flag} {fixed_flag} {word_flag} -- {q_escaped} . | head -n {cap}; \
-                 else \
-                   grep -rnI {} {} -- {q_escaped} . | head -n {cap}; \
-                 fi",
-                if req.case_sensitive { "" } else { "-i" },
-                if req.whole_word { "-w" } else { "" }
-            );
-            if let Ok(out) = mgr
-                .exec_shell(
-                    target,
-                    &script,
-                    Some(search_root),
-                    &BTreeMap::new(),
-                    Duration::from_secs(15),
-                )
-                .await
-            {
-                for raw_line in out.stdout.lines() {
-                    if items.len() >= limit {
-                        truncated = true;
-                        break;
-                    }
-                    if let Some(parsed) = parse_rg_or_grep_line(search_root, raw_line) {
-                        let rel = display_remote_rel_path(&parsed.path, root, additional_roots);
-                        if compiled_glob.matches(&rel) {
-                            items.push(parsed);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(IdeSearchResp { items, truncated })
-}
-
-fn parse_rg_or_grep_line(root: &str, raw: &str) -> Option<IdeSearchItem> {
-    let mut parts = raw.splitn(4, ':');
-    let file_part = parts.next()?.trim().trim_start_matches("./");
-    let line_no: u32 = parts.next()?.trim().parse().ok()?;
-    let third = parts.next()?;
-    let (col, preview) = match (third.trim().parse::<u32>(), parts.next()) {
-        (Ok(c), Some(rest)) => (Some(c), rest.trim()),
-        _ => (Some(1), raw.splitn(3, ':').nth(2).unwrap_or("").trim()),
-    };
-    Some(IdeSearchItem {
-        kind: IdeSearchItemKind::Text,
-        path: join_remote(root, file_part),
-        line: Some(line_no),
-        column: col,
-        preview: preview.chars().take(200).collect(),
-        symbol_kind: None,
-        container: None,
-    })
-}
-
-#[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
-pub(super) fn replace_local_sync(
-    root: &Path,
-    additional_roots: &[PathBuf],
-    restricted: bool,
-    req: &IdeReplaceReq,
-    matcher: &Regex,
-    lsp_pool: Option<&LspPool>,
-) -> Result<IdeReplaceResp> {
-    let candidates = match &req.paths {
-        Some(explicit) if !explicit.is_empty() => {
-            let mut v = Vec::with_capacity(explicit.len());
-            for p in explicit {
-                let (canon, _) =
-                    resolve_local_existing_in_roots(root, additional_roots, !restricted, p)?;
-                v.push(canon.to_string_lossy().into_owned());
-            }
-            v
-        }
-        _ => collect_local_files_multi(
-            root,
-            additional_roots,
-            restricted,
-            req.scope_path.as_deref(),
-            10_000,
-        )?,
-    };
-
-    let compiled_glob = CompiledFileGlob::compile(req.file_glob.as_deref());
-    let mut files_changed = 0usize;
-    let mut total_replacements = 0usize;
-    let mut previews = Vec::new();
-
-    for full_path in candidates {
-        let p = Path::new(&full_path);
-        let rel = display_rel_path(p, root, additional_roots);
-        if !compiled_glob.matches(&rel) {
-            continue;
-        }
-        let Ok(meta) = std::fs::metadata(p) else {
-            continue;
-        };
-        if meta.len() > MAX_SEARCH_FILE_BYTES {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(p) else {
-            continue;
-        };
-        if bytes[..bytes.len().min(4096)].contains(&0) {
-            continue;
-        }
-        let Ok(text) = std::str::from_utf8(&bytes) else {
-            continue;
-        };
-
-        let Some((replaced_text, count, sample_before, sample_after)) =
-            compute_replacement(text, matcher, &req.replacement, req.regex)
-        else {
-            continue;
-        };
-
-        if !req.dry_run {
-            let existing_perms = meta.permissions();
-            let tmp = p.with_extension("otto-replace-tmp");
-            std::fs::write(&tmp, replaced_text.as_bytes())
-                .map_err(|e| map_io_err("write replace temp", &tmp, e))?;
-            let _ = std::fs::set_permissions(&tmp, existing_perms);
-            if let Err(e) = std::fs::rename(&tmp, p) {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(map_io_err("commit replace", p, e));
-            }
-            if let Some(pool) = lsp_pool {
-                pool.notify_watched_file_if_build_manifest(p, 2);
-            }
-        }
-
-        files_changed += 1;
-        total_replacements += count;
-        previews.push(IdeReplacePreview {
-            path: full_path,
-            count,
-            sample_before,
-            sample_after,
-        });
-    }
-
-    Ok(IdeReplaceResp {
-        files_changed,
-        replacements: total_replacements,
-        previews,
-    })
-}
-
-pub(super) async fn replace_remote_ssh(
-    mgr: &TargetManager,
-    target: &ResolvedTarget,
-    root: &str,
-    additional_roots: &[String],
-    req: &IdeReplaceReq,
-    matcher: &Regex,
-) -> Result<IdeReplaceResp> {
-    let candidates = match &req.paths {
-        Some(explicit) if !explicit.is_empty() => {
-            let mut out = Vec::with_capacity(explicit.len());
-            for p in explicit {
-                out.push(resolve_remote_in_roots(root, additional_roots, p)?.0);
-            }
-            out
-        }
-        _ => {
-            let search_req = IdeSearchReq {
-                target: req.target.clone(),
-                query: req.query.clone(),
-                mode: IdeSearchMode::Text,
-                case_sensitive: req.case_sensitive,
-                regex: req.regex,
-                whole_word: req.whole_word,
-                file_glob: req.file_glob.clone(),
-                scope_path: req.scope_path.clone(),
-                limit: Some(500),
-            };
-            let hits =
-                search_remote_ssh(mgr, target, root, additional_roots, &search_req, 500).await?;
-            let mut uniq: Vec<String> = hits.items.into_iter().map(|i| i.path).collect();
-            uniq.sort();
-            uniq.dedup();
-            uniq
-        }
-    };
-
-    let mut files_changed = 0usize;
-    let mut total_replacements = 0usize;
-    let mut previews = Vec::new();
-
-    for remote_path in candidates {
-        let Ok(file) = mgr.read_file(target, &remote_path).await else {
-            continue;
-        };
-        if file.truncated {
-            continue;
-        }
-        let Some((replaced_text, count, sample_before, sample_after)) =
-            compute_replacement(&file.content, matcher, &req.replacement, req.regex)
-        else {
-            continue;
-        };
-        if !req.dry_run {
-            mgr.write_file(
-                target,
-                &remote_path,
-                &replaced_text,
-                Some(&file.sha256),
-                false,
-            )
-            .await?;
-        }
-        files_changed += 1;
-        total_replacements += count;
-        previews.push(IdeReplacePreview {
-            path: remote_path,
-            count,
-            sample_before,
-            sample_after,
-        });
-    }
-
-    Ok(IdeReplaceResp {
-        files_changed,
-        replacements: total_replacements,
-        previews,
-    })
-}
-
-fn compute_replacement(
-    text: &str,
-    matcher: &Regex,
-    replacement: &str,
-    is_regex: bool,
-) -> Option<(String, usize, String, String)> {
-    let count = matcher.find_iter(text).count();
-    if count == 0 {
-        return None;
-    }
-    let mut sample_before = String::new();
-    let mut sample_after = String::new();
-    for line in text.lines() {
-        if matcher.is_match(line) {
-            sample_before = line.trim().chars().take(180).collect();
-            let replaced_line = if is_regex {
-                matcher.replace_all(line, replacement)
-            } else {
-                matcher.replace_all(line, regex::NoExpand(replacement))
-            };
-            sample_after = replaced_line.trim().chars().take(180).collect();
-            break;
-        }
-    }
-    let full = if is_regex {
-        matcher.replace_all(text, replacement).into_owned()
-    } else {
-        matcher
-            .replace_all(text, regex::NoExpand(replacement))
-            .into_owned()
-    };
-    Some((full, count, sample_before, sample_after))
 }

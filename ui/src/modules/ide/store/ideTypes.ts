@@ -2,11 +2,34 @@
 // Re-exported from `../ideStore.svelte.ts` so all IDE components import from one place.
 
 import { getToken, laneFetch } from '../../../lib/api/client';
-import type { IdeQuickFix } from '../../../lib/api/types/ide-intelligence';
+import type {
+  IdePluginCatalogEntry,
+  IdePluginContributions,
+  IdePluginDapAdapter,
+  IdePluginGutterDetector,
+  IdePluginInfo,
+  IdePluginKeymap,
+  IdePluginLanguage,
+  IdePluginLspServer,
+  IdeQuickFix,
+} from '../../../lib/api/types/ide-intelligence';
+
+export type {
+  IdePluginCatalogEntry,
+  IdePluginContributions,
+  IdePluginDapAdapter,
+  IdePluginGutterDetector,
+  IdePluginInfo,
+  IdePluginKeymap,
+  IdePluginLanguage,
+  IdePluginLspServer,
+  IdeQuickFix,
+};
+export type * from '../../../lib/api/types/ide-db-watch';
 
 export type IdeTargetKind = 'local' | 'ssh';
 export type IdeKeymapPreset = 'jetbrains' | 'standard';
-export type IdeBottomTab = 'debug' | 'run' | 'git' | 'problems' | 'usages' | 'terminal';
+export type IdeBottomTab = 'debug' | 'run' | 'git' | 'problems' | 'usages' | 'terminal' | 'dbwatch';
 export type BottomTab = IdeBottomTab;
 export type IdeSearchMode = 'files' | 'text' | 'symbols' | 'all';
 export type IdeCollabRole = 'viewer' | 'editor';
@@ -56,9 +79,10 @@ export interface IdeFileReadResp {
 
 export interface IdeOpenTab {
   path: string; name: string; content: string; savedContent: string; dirty?: boolean;
-  sha256: string; language: string; readOnly: boolean; truncated: boolean;
+  sha256?: string; language: string; readOnly: boolean; truncated: boolean;
   loading: boolean; error: string | null; preview: boolean;
   pinned?: boolean; external?: boolean;
+  lastAccessedAt?: number;
 }
 
 export interface IdeSearchItem {
@@ -106,9 +130,9 @@ export interface IdeCodeAction {
 }
 
 export interface IdeDiagnostic {
-  path: string; line: number; column?: number; end_line?: number; end_column?: number;
+  path: string; line: number; col?: number; column?: number; end_line?: number; end_col?: number; end_column?: number;
   severity: 'error' | 'warning' | 'info' | 'hint'; message: string; source?: string | null; code?: string | null;
-  quick_fixes?: IdeCodeAction[];
+  quick_fixes?: (IdeQuickFix | IdeCodeAction)[];
 }
 
 export interface IdeReferenceLocation { path: string; line: number; column: number; preview: string }
@@ -197,6 +221,7 @@ export interface IdeRunConfig {
   env_file?: string | null; inherit_shell_env?: boolean; sdk_path?: string | null;
   toolchain_id?: string | null; compound_configs?: string[]; auto_detected?: boolean;
   before_launch?: string | null; target_path?: string | null; test_filter?: string | null;
+  maven_profiles?: string[]; spring_profiles?: string[]; skip_tests?: boolean; offline?: boolean;
 }
 
 export interface IdeTestResult {
@@ -223,7 +248,7 @@ export interface IdeInlineValue { line: number; name: string; value: string }
 export interface IdeDebugOutputEntry { category: 'stdout' | 'stderr' | 'console' | string; text: string }
 
 export interface IdeDebugSessionSnapshot {
-  id: string; title: string; language: string; adapter: string;
+  id: string; revision?: number; title: string; language: string; adapter: string;
   state: 'starting' | 'running' | 'paused' | 'terminated' | 'error'; stopped_reason?: string | null;
   active_thread_id?: number | null; active_frame_id?: number | null;
   paused_file?: string | null; paused_line?: number | null;
@@ -248,16 +273,6 @@ export interface IdeCollabRoom {
 export interface IdePeerCursor {
   peer_id: string; name: string; color: string; path: string;
   active_line: number; selections: { anchor: number; head: number }[];
-}
-
-export interface IdePluginInfo {
-  slug: string; name: string; version: string; description?: string | null;
-  enabled: boolean; source: string; languages?: string[]; capabilities?: string[];
-}
-
-export interface IdePluginCatalogEntry {
-  slug: string; name: string; version: string; description: string;
-  languages: string[]; source: string; installed?: boolean;
 }
 
 export interface IdeEditorSelectionRange {
@@ -351,12 +366,13 @@ export function buildNewFileTemplate(fullPath: string, rootPath: string, sibling
   return '';
 }
 
-export async function streamIdeSse(path: string, headers: Record<string, string>, signal: AbortSignal, onData: (raw: string) => void): Promise<void> {
+export async function streamIdeSse(path: string, headers: Record<string, string>, signal: AbortSignal, onData: (raw: string) => void, onConnected?: () => void): Promise<void> {
   const token = getToken();
   const reqHeaders: Record<string, string> = { Accept: 'text/event-stream', ...headers };
   if (token && !reqHeaders['Authorization']) reqHeaders['Authorization'] = `Bearer ${token}`;
   const resp = await laneFetch('long', path, { method: 'GET', headers: reqHeaders, signal });
   if (!resp.ok || !resp.body) return;
+  onConnected?.();
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';

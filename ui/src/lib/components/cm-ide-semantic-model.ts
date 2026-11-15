@@ -1,7 +1,7 @@
-// Pure semantic classifier, symbol model, rainbow-bracket index, Java import
-// diagnostics, and per-`Text` cache (`WeakMap<Text, CachedSemanticDoc>`).
+// Pure symbol model, Go/Java import analyzers, rainbow-bracket index, and
+// per-`Text` cache (`WeakMap<Text, CachedSemanticDoc>`).
 // Keying by immutable CodeMirror `Text` guarantees zero `doc.toString()` or
-// full-document rescans on cursor movement or viewport scroll (`PERF-2`).
+// full-document rescans on cursor movement or viewport scroll.
 
 import type { Text } from '@codemirror/state';
 
@@ -10,21 +10,10 @@ export type SemanticLangKind =
 
 export type SemanticRole =
   | 'fg' | 'keyword' | 'control' | 'func-decl' | 'func-call' | 'field'
-  | 'type' | 'annotation' | 'param' | 'doc-comment' | 'doc-tag' | 'doc-param' | 'unresolved';
+  | 'type' | 'annotation' | 'param' | 'doc-comment' | 'doc-tag' | 'doc-param' | 'unresolved' | 'unused';
 
-export interface SemanticTokenSpan {
-  from: number;
-  to: number;
-  role: SemanticRole;
-  text: string;
-}
-
-export interface RainbowBracketSpan {
-  from: number;
-  to: number;
-  level: 1 | 2 | 3 | 4 | 'unmatched';
-  active: boolean;
-}
+export interface SemanticTokenSpan { from: number; to: number; role: SemanticRole; text: string }
+export interface RainbowBracketSpan { from: number; to: number; level: 1 | 2 | 3 | 4 | 'unmatched'; active: boolean }
 
 export interface ClientDiagQuickFix {
   title: string;
@@ -32,14 +21,7 @@ export interface ClientDiagQuickFix {
   endLine: number;
   deleteLine?: boolean;
   replacement?: string;
-  edits?: Array<{
-    path?: string;
-    start_line: number;
-    start_col: number;
-    end_line: number;
-    end_col: number;
-    new_text: string;
-  }>;
+  edits?: Array<{ path?: string; start_line: number; start_col: number; end_line: number; end_col: number; new_text: string }>;
 }
 
 export interface ClientIdeDiagnostic {
@@ -63,20 +45,18 @@ export interface JavaDiagPrefs {
 export interface FileSymbolModel {
   pkgVars: Set<string>;
   typeNames: Set<string>;
+  importedPkgs: Set<string>;
   funcParams: Map<string, string[]>;
   funcDecls: Array<{ name: string; line: number; nameFrom: number; nameTo: number; lineEnd: number }>;
   paramScopes: Array<{ from: number; to: number; params: Set<string> }>;
   declStarts: Set<number>;
   unresolvedIdents: Set<string>;
+  unusedRanges: Array<{ from: number; to: number }>;
 }
 
-interface BracketPair {
-  open: number;
-  close: number;
-  level: 1 | 2 | 3 | 4;
-}
+interface BracketPair { open: number; close: number; level: 1 | 2 | 3 | 4 }
 
-interface CachedBracketIndex {
+export interface CachedBracketIndex {
   pairs: BracketPair[];
   posToPair: Map<number, BracketPair>;
   stack: Array<{ ch: string; pos: number; level: 1 | 2 | 3 | 4 }>;
@@ -99,32 +79,27 @@ export function detectSemanticLang(filePath: string, language?: string): Semanti
   const ext = clean.slice(Math.max(0, clean.lastIndexOf('/'))).split('.').pop() ?? '';
   if (ext === 'go' || language === 'go') return 'go';
   if (ext === 'java' || ext === 'class' || language === 'java') return 'java';
-  if (
-    ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts'].includes(ext) ||
-    language === 'typescript' ||
-    language === 'javascript'
-  ) {
+  if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts'].includes(ext) || language === 'typescript' || language === 'javascript') {
     return 'ts';
   }
   if (ext === 'rs' || language === 'rust') return 'rust';
   if (ext === 'py' || ext === 'pyi' || language === 'python') return 'python';
-  if (['sh', 'bash', 'zsh', 'bats'].includes(ext) || language === 'shell' || language === 'shellscript') {
-    return 'shell';
-  }
-  if (['json', 'jsonc', 'jsonl', 'ndjson'].includes(ext) || language === 'json' || language === 'jsonl') {
-    return 'json';
-  }
+  if (['sh', 'bash', 'zsh', 'bats'].includes(ext) || language === 'shell' || language === 'shellscript') return 'shell';
+  if (['json', 'jsonc', 'jsonl', 'ndjson'].includes(ext) || language === 'json' || language === 'jsonl') return 'json';
   return ext === 'csv' || ext === 'tsv' || language === 'csv' || language === 'tsv' ? 'csv' : 'other';
 }
 
-const CONTROL_KW = new Set(
+export const CONTROL_KW = new Set(
   'if else for range return switch case default select defer go break continue fallthrough try catch finally throw throws while do match loop await async yield elif except raise with'.split(' '),
 );
 
-const GENERAL_KW = new Set(
+export const GO_BUILTIN_TYPES = new Set(
+  'string int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr float32 float64 complex64 complex128 bool byte rune error any comparable'.split(' '),
+);
+
+export const GENERAL_KW = new Set(
   (
-    'package import func var const type struct interface map chan string int int8 int16 int32 int64 ' +
-    'uint uint8 uint16 uint32 uint64 uintptr float32 float64 bool byte rune error any comparable ' +
+    'package import func var const type struct interface map chan ' +
     'true false nil iota public private protected static final abstract synchronized volatile ' +
     'transient native sealed non-sealed permits class enum record extends implements new instanceof ' +
     'void boolean short long double float char null this super export from let function typeof keyof ' +
@@ -138,24 +113,318 @@ const BOGUS_JAVA_PREFIXES = [
   'invalid.', 'bogus.', 'fake.', 'unknown.', 'does.not.exist.', 'nonexistent.',
 ];
 
-function splitParamNames(rawParams: string, lang: SemanticLangKind): string[] {
-  const names: string[] = [];
-  for (const part of rawParams.split(',')) {
-    const clean = part.replace(/\/\*[\s\S]*?\*\//g, '').replace(/=[^,]+$/, '').trim();
-    if (!clean || clean === 'self' || clean === '&self' || clean === '&mut self' || clean === 'this') {
+export function skipLiteralOrComment(src: string, idx: number, limit: number): number {
+  const ch = src[idx];
+  if (ch === '"' || ch === "'" || ch === '`') {
+    let p = idx + 1;
+    while (p < limit) {
+      if (src[p] === '\\' && ch !== '`') {
+        p += 2;
+        continue;
+      }
+      if (src[p] === ch) return p;
+      p++;
+    }
+    return limit;
+  }
+  if (ch === '/' && src[idx + 1] === '/') {
+    const nl = src.indexOf('\n', idx + 2);
+    return nl >= 0 && nl < limit ? nl : limit;
+  }
+  if (ch === '/' && src[idx + 1] === '*') {
+    const cl = src.indexOf('*/', idx + 2);
+    return cl >= 0 && cl + 1 < limit ? cl + 1 : limit;
+  }
+  if (ch === '#') {
+    const nl = src.indexOf('\n', idx + 1);
+    return nl >= 0 && nl < limit ? nl : limit;
+  }
+  return idx;
+}
+
+function splitTopLevelCommas(raw: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const jumped = skipLiteralOrComment(raw, i, raw.length);
+    if (jumped > i) {
+      i = jumped;
       continue;
     }
-    let m: RegExpExecArray | null = null;
-    if (lang === 'go') {
-      m = /^([A-Za-z_]\w*)(?:\s+(?:\.\.\.)?[*[\]\w.]+)?$/.exec(clean);
-    } else if (lang === 'java') {
-      m = /(?:final\s+|@\w+(?:\([^)]*\))?\s+)*[\w<>[\],.?]+\s*(?:\.\.\.)?\s+([A-Za-z_$][\w$]*)$/.exec(clean);
-    } else {
-      m = /^(?:pub\s+|private\s+|readonly\s+|mut\s+|\*\*{0,2})?([A-Za-z_$][\w$]*)\s*(?:\??\s*:|$)/.exec(clean);
+    const c = raw[i];
+    if (c === '(' || c === '[' || c === '{' || c === '<') {
+      depth++;
+    } else if (c === ')' || c === ']' || c === '}' || c === '>') {
+      depth = Math.max(0, depth - 1);
+    } else if (c === ',' && depth === 0) {
+      parts.push(raw.slice(start, i));
+      start = i + 1;
     }
-    if (m && !GENERAL_KW.has(m[1])) names.push(m[1]);
+  }
+  parts.push(raw.slice(start));
+  return parts;
+}
+
+function splitParamNames(rawParams: string, lang: SemanticLangKind): string[] {
+  const stripped = rawParams
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+    .replace(/#[^\n]*/g, ' ');
+  const parts = splitTopLevelCommas(stripped);
+  const names: string[] = [];
+  for (let idx = 0; idx < parts.length; idx++) {
+    const clean = parts[idx].replace(/=[^,]+$/, '').trim();
+    if (!clean || clean === 'self' || clean === '&self' || clean === '&mut self' || clean === 'this') continue;
+    if (lang === 'go') {
+      const mTyped = /^([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s+(?:\.\.\.)?(?:<-chan\b|chan\b|func\b|map\[|struct\b|interface\b|[*[\]\w.])/.exec(clean);
+      if (mTyped) {
+        for (const id of mTyped[1].split(',')) {
+          const t = id.trim();
+          if (t && t !== '_' && !GENERAL_KW.has(t) && !GO_BUILTIN_TYPES.has(t)) names.push(t);
+        }
+        continue;
+      }
+      if (/^[A-Za-z_]\w*$/.test(clean) && clean !== '_' && !GO_BUILTIN_TYPES.has(clean) && !GENERAL_KW.has(clean)) {
+        const hasLaterTyped = parts.slice(idx + 1).some((later) => /^[A-Za-z_]\w*\s+\S/.test(later.trim()));
+        if (hasLaterTyped) names.push(clean);
+      }
+      continue;
+    }
+    const m = lang === 'java'
+      ? /(?:final\s+|@\w+(?:\([^)]*\))?\s+)*[\w<>[\],.?]+\s*(?:\.\.\.)?\s+([A-Za-z_$][\w$]*)$/.exec(clean)
+      : /^(?:pub\s+|private\s+|readonly\s+|mut\s+|\*\*{0,2})?([A-Za-z_$][\w$]*)\s*(?:\??\s*:|$)/.exec(clean);
+    if (m && m[1] !== '_' && !GENERAL_KW.has(m[1])) names.push(m[1]);
   }
   return names;
+}
+
+function scanSignatureAndBodyScope(
+  src: string,
+  openParenPos: number,
+  lang: SemanticLangKind,
+): { paramsRaw: string; bodyEndPos: number } | null {
+  const limit = Math.min(src.length, openParenPos + 65536);
+  if (src[openParenPos] !== '(') return null;
+  let pDepth = 1;
+  let closeParenPos = -1;
+  const sigLimit = Math.min(limit, openParenPos + 4096);
+  for (let p = openParenPos + 1; p < sigLimit; p++) {
+    const jumped = skipLiteralOrComment(src, p, sigLimit);
+    if (jumped > p) {
+      p = jumped;
+      continue;
+    }
+    if (src[p] === '(') {
+      pDepth++;
+    } else if (src[p] === ')' && --pDepth === 0) {
+      closeParenPos = p;
+      break;
+    }
+  }
+  if (closeParenPos < 0) return null;
+  const paramsRaw = src.slice(openParenPos + 1, closeParenPos);
+
+  if (lang === 'python') {
+    const lineStart = src.lastIndexOf('\n', openParenPos) + 1;
+    let baseIndent = 0;
+    while (lineStart + baseIndent < src.length && (src[lineStart + baseIndent] === ' ' || src[lineStart + baseIndent] === '\t')) {
+      baseIndent++;
+    }
+    const nl = src.indexOf('\n', closeParenPos);
+    if (nl < 0) return { paramsRaw, bodyEndPos: src.length };
+    for (let pos = nl + 1; pos < limit; ) {
+      const nextNl = src.indexOf('\n', pos);
+      const lnEnd = nextNl >= 0 ? nextNl : limit;
+      const lnTxt = src.slice(pos, lnEnd);
+      const trimmed = lnTxt.trim();
+      if (trimmed && !trimmed.startsWith('#')) {
+        let ind = 0;
+        while (ind < lnTxt.length && (lnTxt[ind] === ' ' || lnTxt[ind] === '\t')) ind++;
+        if (ind <= baseIndent) return { paramsRaw, bodyEndPos: Math.max(closeParenPos, pos - 1) };
+      }
+      if (nextNl < 0) break;
+      pos = nextNl + 1;
+    }
+    return { paramsRaw, bodyEndPos: limit };
+  }
+
+  let bodyOpenPos = -1;
+  const retLimit = Math.min(limit, closeParenPos + 1024);
+  for (let p = closeParenPos + 1; p < retLimit; p++) {
+    const jumped = skipLiteralOrComment(src, p, retLimit);
+    if (jumped > p) {
+      p = jumped;
+      continue;
+    }
+    const c = src[p];
+    if (c === ';') return { paramsRaw, bodyEndPos: closeParenPos };
+    if (c === '(') {
+      let rd = 1;
+      for (p++; p < retLimit && rd > 0; p++) {
+        const rj = skipLiteralOrComment(src, p, retLimit);
+        if (rj > p) {
+          p = rj;
+          continue;
+        }
+        if (src[p] === '(') rd++;
+        else if (src[p] === ')') rd--;
+      }
+      p--;
+      continue;
+    }
+    if (c === '{') {
+      const before = src.slice(Math.max(closeParenPos, p - 16), p).trimEnd();
+      if (lang === 'go' && /(?:struct|interface)$/.test(before)) {
+        let td = 1;
+        for (p++; p < retLimit && td > 0; p++) {
+          const tj = skipLiteralOrComment(src, p, retLimit);
+          if (tj > p) {
+            p = tj;
+            continue;
+          }
+          if (src[p] === '{') td++;
+          else if (src[p] === '}') td--;
+        }
+        p--;
+        continue;
+      }
+      bodyOpenPos = p;
+      break;
+    }
+  }
+  if (bodyOpenPos < 0) return { paramsRaw, bodyEndPos: closeParenPos };
+
+  let bDepth = 1;
+  for (let p = bodyOpenPos + 1; p < limit; p++) {
+    const jumped = skipLiteralOrComment(src, p, limit);
+    if (jumped > p) {
+      p = jumped;
+      continue;
+    }
+    if (src[p] === '{') {
+      bDepth++;
+    } else if (src[p] === '}' && --bDepth === 0) {
+      return { paramsRaw, bodyEndPos: p };
+    }
+  }
+  return { paramsRaw, bodyEndPos: limit };
+}
+
+/** Infer Go package qualifier candidate(s) from an import path, handling `/v2+`, `.v3`, `go-foo`, and `foo-go`. */
+export function inferGoImportPkgNames(importPath: string, alias?: string): { names: string[]; certain: boolean } {
+  const cleanAlias = alias?.trim();
+  if (cleanAlias === '_' || cleanAlias === '.') return { names: [], certain: true };
+  if (cleanAlias && /^[A-Za-z_]\w*$/.test(cleanAlias)) return { names: [cleanAlias], certain: true };
+  const raw = importPath.trim().replace(/^["`]|["`]$/g, '').trim();
+  if (!raw || raw === 'C') return { names: [], certain: true };
+  const segs = raw.split('/').filter(Boolean);
+  if (!segs.length) return { names: [], certain: false };
+  if (segs.length >= 2 && /^v\d+$/i.test(segs[segs.length - 1])) segs.pop();
+  const last = (segs[segs.length - 1] ?? '').replace(/\.git$/i, '').replace(/\.v\d+(?:[-+.\w]*)?$/i, '');
+  if (!last) return { names: [], certain: false };
+  if (/^[A-Za-z_]\w*$/.test(last)) return { names: [last], certain: true };
+  const goPrefix = /^go[-_.]([A-Za-z_]\w*)$/i.exec(last);
+  if (goPrefix) return { names: [goPrefix[1], `go${goPrefix[1]}`], certain: true };
+  const goSuffix = /^([A-Za-z_]\w*)[-_.](?:go)$/i.exec(last);
+  if (goSuffix) return { names: [goSuffix[1], `${goSuffix[1]}go`], certain: true };
+  const collapsed = last.replace(/[^A-Za-z0-9_]/g, '');
+  const parts = last.split(/[-_.]+/).filter((s) => /^[A-Za-z_]\w*$/.test(s));
+  const candidates = new Set<string>();
+  if (collapsed && /^[A-Za-z_]\w*$/.test(collapsed)) candidates.add(collapsed);
+  if (parts.length) candidates.add(parts[parts.length - 1]);
+  return { names: [...candidates], certain: false };
+}
+
+export function analyzeGoImports(
+  docText: string,
+  prefs?: { unusedImports?: boolean },
+): {
+  diagnostics: ClientIdeDiagnostic[];
+  importedPkgs: Set<string>;
+  unusedRanges: Array<{ from: number; to: number }>;
+  entries: Array<{ line: number; path: string; names: string[]; certain: boolean; used: boolean }>;
+} {
+  const importedPkgs = new Set<string>();
+  const diagnostics: ClientIdeDiagnostic[] = [];
+  const unusedRanges: Array<{ from: number; to: number }> = [];
+  const entries: Array<{ line: number; path: string; names: string[]; certain: boolean; used: boolean }> = [];
+  const lines = docText.split('\n');
+  const rawImports: Array<{ line: number; from: number; to: number; col: number; endCol: number; alias?: string; path: string }> = [];
+  let offset = 0;
+  let inBlock = false;
+  let maxImportEnd = 0;
+
+  for (let i = 0; i < Math.min(lines.length, 300); i++) {
+    const raw = lines[i];
+    const trimmed = raw.replace(/\/\/.*$/, '').trim();
+    const ln = i + 1;
+    const lStart = offset;
+    const lEnd = offset + raw.length;
+    offset = lEnd + 1;
+    if (!inBlock) {
+      if (/^import\s*\(\s*$/.test(trimmed)) {
+        inBlock = true;
+        continue;
+      }
+      const mSingle = /^import\s+(?:([._]|[A-Za-z_]\w*)\s+)?(["`][^"`]+["`])/.exec(trimmed);
+      if (mSingle) {
+        const pIdx = raw.indexOf(mSingle[2]);
+        const firstNonWs = Math.max(0, raw.search(/\S/));
+        rawImports.push({ line: ln, from: lStart + firstNonWs, to: lEnd, col: Math.max(1, pIdx + 1), endCol: raw.length + 1, alias: mSingle[1], path: mSingle[2] });
+        maxImportEnd = lEnd;
+      }
+      continue;
+    }
+    if (trimmed.startsWith(')')) {
+      inBlock = false;
+      maxImportEnd = lEnd;
+      continue;
+    }
+    const mSpec = /^(?:([._]|[A-Za-z_]\w*)\s+)?(["`][^"`]+["`])/.exec(trimmed);
+    if (mSpec) {
+      const firstNonWs = Math.max(0, raw.search(/\S/));
+      rawImports.push({ line: ln, from: lStart + firstNonWs, to: lEnd, col: firstNonWs + 1, endCol: raw.length + 1, alias: mSpec[1], path: mSpec[2] });
+      maxImportEnd = lEnd;
+    }
+  }
+
+  const usedQualifiers = new Set<string>();
+  const bodyLimit = Math.min(docText.length, 262144);
+  for (let p = maxImportEnd; p < bodyLimit; p++) {
+    const jumped = skipLiteralOrComment(docText, p, bodyLimit);
+    if (jumped > p) {
+      p = jumped;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(docText[p])) {
+      let e = p + 1;
+      while (e < bodyLimit && /\w/.test(docText[e])) e++;
+      let nx = e;
+      while (nx < bodyLimit && (docText[nx] === ' ' || docText[nx] === '\t')) nx++;
+      if (docText[nx] === '.') usedQualifiers.add(docText.slice(p, e));
+      p = e - 1;
+    }
+  }
+
+  const checkUnused = prefs?.unusedImports !== false;
+  for (const imp of rawImports) {
+    const cleanPath = imp.path.slice(1, -1);
+    const { names, certain } = inferGoImportPkgNames(cleanPath, imp.alias);
+    for (const n of names) importedPkgs.add(n);
+    const used = names.length === 0 || names.some((n) => usedQualifiers.has(n));
+    entries.push({ line: imp.line, path: cleanPath, names, certain, used });
+    if (checkUnused && certain && names.length > 0 && !used) {
+      unusedRanges.push({ from: imp.from, to: imp.to });
+      diagnostics.push({
+        line: imp.line, column: imp.col, endLine: imp.line, endColumn: imp.endCol,
+        severity: 'warning', source: 'go-imports', code: 'unused-import',
+        message: `Unused import "${cleanPath}"`,
+        quickFixes: [{ title: `Remove unused import "${cleanPath}"`, line: imp.line, endLine: imp.line, deleteLine: true }],
+      });
+    }
+  }
+  return { diagnostics, importedPkgs, unusedRanges, entries };
 }
 
 export function buildSymbolModel(
@@ -167,31 +436,48 @@ export function buildSymbolModel(
   const sample = docText.length > 65536 ? docText.slice(0, 65536) : docText;
   const pkgVars = new Set<string>();
   const typeNames = new Set<string>();
+  const importedPkgs = new Set<string>();
   const funcParams = new Map<string, string[]>();
   const funcDecls: FileSymbolModel['funcDecls'] = [];
   const paramScopes: FileSymbolModel['paramScopes'] = [];
   const unresolvedIdents = new Set<string>(extraUnresolved);
+  const unusedRanges: Array<{ from: number; to: number }> = [];
 
   if (lang === 'java') {
-    for (const id of analyzeJavaDiagnostics(sample, jPrefs).unresolvedIdents) {
-      unresolvedIdents.add(id);
-    }
-    if ((jPrefs?.lombokSupport ?? true) && /@(?:Slf4j|Log4j2|Log|CommonsLog|JBossLog|Flogger)\b/.test(sample)) {
-      pkgVars.add('log');
-    }
+    for (const id of analyzeJavaDiagnostics(sample, jPrefs).unresolvedIdents) unresolvedIdents.add(id);
+    if ((jPrefs?.lombokSupport ?? true) && /@(?:Slf4j|Log4j2|Log|CommonsLog|JBossLog|Flogger)\b/.test(sample)) pkgVars.add('log');
+  } else if (lang === 'go') {
+    const goImp = analyzeGoImports(sample, jPrefs);
+    for (const p of goImp.importedPkgs) importedPkgs.add(p);
+    unusedRanges.push(...goImp.unusedRanges);
   }
+
+  const registerFuncDecl = (fnName: string, lineIdx: number, line: string, lineStart: number, lineEnd: number, parenSearchFrom: number, extraParams?: string[]) => {
+    const nIdx = line.indexOf(fnName, Math.max(0, parenSearchFrom - lineStart - fnName.length - 2));
+    const nFrom = lineStart + Math.max(0, nIdx >= 0 ? nIdx : line.indexOf(fnName));
+    funcDecls.push({ name: fnName, line: lineIdx + 1, nameFrom: nFrom, nameTo: nFrom + fnName.length, lineEnd });
+    if (lang === 'shell') return;
+    const openParenPos = sample.indexOf('(', parenSearchFrom);
+    if (openParenPos < 0 || openParenPos > lineEnd + 256) return;
+    const scoped = scanSignatureAndBodyScope(sample, openParenPos, lang);
+    if (!scoped) return;
+    const pList = splitParamNames(scoped.paramsRaw, lang);
+    if (pList.length) funcParams.set(fnName, pList);
+    const scopeParams = extraParams?.length ? [...extraParams, ...pList] : pList;
+    if (scopeParams.length) {
+      paramScopes.push({ from: openParenPos, to: scoped.bodyEndPos, params: new Set(scopeParams) });
+    }
+  };
 
   const lines = sample.split('\n');
   let offset = 0;
   let inGoVarBlock = false;
-
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmed = line.trim();
     const lineStart = offset;
     const lineEnd = offset + line.length;
     offset = lineEnd + 1;
-
     if (lang === 'go') {
       if (/^(?:var|const)\s*\(\s*$/.test(trimmed)) {
         inGoVarBlock = true;
@@ -212,17 +498,14 @@ export function buildSymbolModel(
       if (mTopVar && line[0] !== '\t' && line[0] !== ' ') pkgVars.add(mTopVar[1]);
       const mType = /^type\s+([A-Za-z_]\w*)\b/.exec(trimmed);
       if (mType) typeNames.add(mType[1]);
-      const mFn = /^func\s+(?:\(\s*([A-Za-z_]\w*)?\s*\*?[A-Za-z_][\w.]*\s*\)\s*)?([A-Za-z_]\w*)\s*\(([^)]*)\)/.exec(trimmed);
+      const mFn = /^func\s+(?:\(\s*(?:([A-Za-z_]\w*)\s+)?\*?[A-Za-z_][\w.[\]]*\s*\)\s*)?([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*\(/.exec(trimmed);
       if (mFn) {
+        const recvName = mFn[1] && mFn[1] !== '_' ? [mFn[1]] : undefined;
         const fnName = mFn[2];
-        const callIdx = line.indexOf(`${fnName}(`);
-        const nFrom = lineStart + Math.max(0, callIdx >= 0 ? callIdx : line.indexOf(fnName));
-        funcDecls.push({ name: fnName, line: i + 1, nameFrom: nFrom, nameTo: nFrom + fnName.length, lineEnd });
-        const pList = splitParamNames(mFn[3], 'go');
-        if (pList.length) {
-          funcParams.set(fnName, pList);
-          paramScopes.push({ from: lineStart, to: sample.length, params: new Set(pList) });
-        }
+        const recvEnd = /^func\s*\(/.test(trimmed) ? line.indexOf(')') + 1 : 0;
+        const fnIdx = line.indexOf(fnName, Math.max(0, recvEnd));
+        const fnOffset = fnIdx >= 0 ? fnIdx : Math.max(0, line.lastIndexOf(fnName));
+        registerFuncDecl(fnName, i, line, lineStart, lineEnd, lineStart + fnOffset + fnName.length, recvName);
       }
     } else if (lang === 'java') {
       const mType = /^(?:public|protected|private|abstract|final|static|sealed|\s)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)/.exec(trimmed);
@@ -235,231 +518,30 @@ export function buildSymbolModel(
         pkgVars.add(mField[1]);
         continue;
       }
-      const mMeth = /^(?:public|protected|private|static|final|synchronized|default|abstract|\s)+(?:<[^>{};]+>\s+)?(?:[\w.$?[\]]+(?:<[^>{};]+>)?(?:\[\])*)\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)/.exec(trimmed);
+      const mMeth = /^(?:public|protected|private|static|final|synchronized|default|abstract|\s)+(?:<[^>{};]+>\s+)?(?:[\w.$?[\]]+(?:<[^>{};]+>)?(?:\[\])*)\s+([A-Za-z_$][\w$]*)\s*\(/.exec(trimmed);
       if (mMeth && !CONTROL_KW.has(mMeth[1])) {
         const fnName = mMeth[1];
         const callIdx = line.indexOf(`${fnName}(`);
-        const nFrom = lineStart + Math.max(0, callIdx >= 0 ? callIdx : line.indexOf(fnName));
-        funcDecls.push({ name: fnName, line: i + 1, nameFrom: nFrom, nameTo: nFrom + fnName.length, lineEnd });
-        const pList = splitParamNames(mMeth[2], 'java');
-        if (pList.length) {
-          funcParams.set(fnName, pList);
-          paramScopes.push({ from: lineStart, to: sample.length, params: new Set(pList) });
-        }
+        const fnOffset = callIdx >= 0 ? callIdx : Math.max(0, line.indexOf(fnName));
+        registerFuncDecl(fnName, i, line, lineStart, lineEnd, lineStart + fnOffset + fnName.length);
       }
     } else if (lang === 'ts' || lang === 'rust' || lang === 'python' || lang === 'shell') {
       const re =
-        lang === 'rust'
-          ? /^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+|unsafe\s+|const\s+)*fn\s+([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)/
-          : lang === 'python'
-            ? /^(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(([^)]*)\)/
-            : lang === 'shell'
-              ? /^(?:function\s+([A-Za-z_][\w.-]*)|([A-Za-z_][\w.-]*)\s*\(\s*\))/
-              : /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)/;
+        lang === 'rust' ? /^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+|unsafe\s+|const\s+)*fn\s+([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\(/
+        : lang === 'python' ? /^(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/
+        : lang === 'shell' ? /^(?:function\s+([A-Za-z_][\w.-]*)|([A-Za-z_][\w.-]*)\s*\(\s*\))/
+        : /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/;
       const m = re.exec(trimmed);
       const fnName = m ? (m[1] || m[2]) : '';
       const nIdx = fnName ? line.indexOf(fnName) : -1;
       if (m && fnName && nIdx >= 0) {
-        funcDecls.push({
-          name: fnName,
-          line: i + 1,
-          nameFrom: lineStart + nIdx,
-          nameTo: lineStart + nIdx + fnName.length,
-          lineEnd,
-        });
-        const pList = m[2] && lang !== 'shell' ? splitParamNames(m[2], lang) : [];
-        if (pList.length) {
-          funcParams.set(fnName, pList);
-          paramScopes.push({ from: lineStart, to: sample.length, params: new Set(pList) });
-        }
+        registerFuncDecl(fnName, i, line, lineStart, lineEnd, lineStart + nIdx + fnName.length);
       }
     }
-  }
-
-  for (let i = 0; i + 1 < paramScopes.length; i++) {
-    const nextStart = funcDecls[i + 1]?.nameFrom;
-    if (nextStart && nextStart > paramScopes[i].from) paramScopes[i].to = nextStart - 1;
   }
 
   const declStarts = new Set(funcDecls.map((d) => d.nameFrom));
-  return { pkgVars, typeNames, funcParams, funcDecls, paramScopes, declStarts, unresolvedIdents };
-}
-
-function classifyDocComment(text: string, baseFrom: number, out: SemanticTokenSpan[]): void {
-  out.push({ from: baseFrom, to: baseFrom + text.length, role: 'doc-comment', text });
-  const tagRe = /(@(?:param|return|returns|throws|exception|see|since|deprecated|author))\b(?:\s+([A-Za-z_$][\w$]*))?/g;
-  for (let m: RegExpExecArray | null; (m = tagRe.exec(text)) !== null; ) {
-    const tFrom = baseFrom + m.index;
-    out.push({ from: tFrom, to: tFrom + m[1].length, role: 'doc-tag', text: m[1] });
-    if (m[2] && m[1] === '@param') {
-      const pIdx = m[0].lastIndexOf(m[2]);
-      out.push({ from: tFrom + pIdx, to: tFrom + pIdx + m[2].length, role: 'doc-param', text: m[2] });
-    }
-  }
-}
-
-export function classifySemanticTokensWithModel(
-  docText: string,
-  lang: SemanticLangKind,
-  model: FileSymbolModel,
-  visibleRanges?: readonly { from: number; to: number }[],
-): SemanticTokenSpan[] {
-  if (!docText || lang === 'csv' || lang === 'other') return [];
-  const ranges = visibleRanges ?? [{ from: 0, to: docText.length }];
-  const out: SemanticTokenSpan[] = [];
-
-  const paramsAt = (pos: number): Set<string> | null => {
-    for (let i = model.paramScopes.length - 1; i >= 0; i--) {
-      if (pos >= model.paramScopes[i].from && pos <= model.paramScopes[i].to) {
-        return model.paramScopes[i].params;
-      }
-    }
-    return null;
-  };
-
-  for (const { from: rawFrom, to: rawTo } of ranges) {
-    const from = Math.max(0, rawFrom);
-    const to = Math.min(docText.length, rawTo);
-    let i = from;
-    while (i < to) {
-      const ch = docText[i];
-      if (ch === '"' || ch === "'" || ch === '`') {
-        let end = i + 1;
-        while (end < to) {
-          if (docText[end] === '\\' && ch !== '`') { end += 2; continue; }
-          if (docText[end] === ch) { end++; break; }
-          end++;
-        }
-        if (lang === 'json' && ch === '"') {
-          let a = end;
-          while (a < to && (docText[a] === ' ' || docText[a] === '\t')) a++;
-          if (docText[a] === ':') out.push({ from: i, to: end, role: 'field', text: docText.slice(i, end) });
-        } else if (lang === 'shell' && ch === '"') {
-          const sub = docText.slice(i, end);
-          const vr = /\$(?:[A-Za-z_]\w*|\{[^}"\n]+\})/g;
-          let vm: RegExpExecArray | null;
-          while ((vm = vr.exec(sub)) !== null) {
-            out.push({ from: i + vm.index, to: i + vm.index + vm[0].length, role: 'param', text: vm[0] });
-          }
-        }
-        i = end;
-        continue;
-      }
-      if (ch === '/' && docText[i + 1] === '*') {
-        const cl = docText.indexOf('*/', i + 2);
-        const end = cl >= 0 ? Math.min(to, cl + 2) : to;
-        if (docText[i + 2] === '*' && docText[i + 3] !== '/') {
-          classifyDocComment(docText.slice(i, end), i, out);
-        }
-        i = end;
-        continue;
-      }
-      if (ch === '/' && docText[i + 1] === '/') {
-        const nl = docText.indexOf('\n', i + 2);
-        const end = nl >= 0 ? Math.min(to, nl) : to;
-        if (docText[i + 2] === '/' && lang === 'rust') {
-          classifyDocComment(docText.slice(i, end), i, out);
-        }
-        i = end;
-        continue;
-      }
-      if (ch === '#' && (lang === 'python' || lang === 'shell' || lang === 'rust')) {
-        if (lang === 'rust' && (docText[i + 1] === '[' || (docText[i + 1] === '!' && docText[i + 2] === '['))) {
-          const rb = docText.indexOf(']', i + 2);
-          const end = rb >= 0 ? Math.min(to, rb + 1) : i + 2;
-          out.push({ from: i, to: end, role: 'annotation', text: docText.slice(i, end) });
-          i = end;
-          continue;
-        }
-        const nl = docText.indexOf('\n', i + 1);
-        i = nl >= 0 ? Math.min(to, nl) : to;
-        continue;
-      }
-      if (ch === '@' && (lang === 'java' || lang === 'ts' || lang === 'python')) {
-        const m = /^@[A-Za-z_$][\w$.]*/.exec(docText.slice(i, Math.min(to, i + 64)));
-        if (m) {
-          out.push({ from: i, to: i + m[0].length, role: 'annotation', text: m[0] });
-          i += m[0].length;
-          continue;
-        }
-      }
-      if (ch === '$' && lang === 'shell') {
-        const m = /^\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)/.exec(docText.slice(i, Math.min(to, i + 64)));
-        if (m) {
-          out.push({ from: i, to: i + m[0].length, role: 'field', text: m[0] });
-          i += m[0].length;
-          continue;
-        }
-      }
-      if (/[A-Za-z_$]/.test(ch)) {
-        let end = i + 1;
-        while (end < to && /[\w$]/.test(docText[end])) end++;
-        const word = docText.slice(i, end);
-        let prev = i - 1;
-        while (prev >= 0 && (docText[prev] === ' ' || docText[prev] === '\t')) prev--;
-        const prevCh = prev >= 0 ? docText[prev] : '';
-        const isAfterDot = prevCh === '.' || (prevCh === ':' && docText[prev - 1] === ':');
-        let next = end;
-        while (next < docText.length && (docText[next] === ' ' || docText[next] === '\t')) next++;
-        let callPos = next;
-        if (docText[callPos] === '<' && (lang === 'ts' || lang === 'java' || lang === 'rust')) {
-          const gt = docText.indexOf('>', callPos + 1);
-          if (gt > callPos && gt - callPos < 64 && docText[gt + 1] === '(') callPos = gt + 1;
-        }
-        const isBeforeParen = docText[callPos] === '(';
-        const isBeforeDot = docText[next] === '.' || (docText[next] === ':' && docText[next + 1] === ':');
-        const scopeP = paramsAt(i);
-        let role: SemanticRole | null = null;
-
-        if (model.unresolvedIdents.has(word)) role = 'unresolved';
-        else if (!isAfterDot && CONTROL_KW.has(word)) role = 'control';
-        else if (!isAfterDot && GENERAL_KW.has(word)) role = 'keyword';
-        else if (model.declStarts.has(i)) role = 'func-decl';
-        else if (isAfterDot) {
-          if (isBeforeParen) role = 'func-call';
-          else if (lang === 'go' && /^[A-Z]/.test(word) && (docText[next] === '{' || (prev >= 2 && docText[prev - 2] === '*'))) {
-            role = 'type';
-          } else {
-            role = 'field';
-          }
-        } else if (isBeforeDot) {
-          role = scopeP?.has(word)
-            ? 'param'
-            : model.pkgVars.has(word)
-              ? 'field'
-              : (lang === 'java' || lang === 'rust') && /^[A-Z][a-zA-Z0-9]*$/.test(word)
-                ? 'type'
-                : 'fg';
-        } else if (isBeforeParen) {
-          role = /\bnew\s+$/.test(docText.slice(Math.max(0, i - 8), i)) && /^[A-Z]/.test(word)
-            ? 'type'
-            : 'func-call';
-        } else if (scopeP?.has(word)) role = 'param';
-        else if (model.pkgVars.has(word)) role = 'field';
-        else if (model.typeNames.has(word)) role = 'type';
-        else if (/^[A-Z][A-Z0-9_]{1,}$/.test(word)) role = 'field';
-        else if (/^[A-Z][A-Za-z0-9_]*$/.test(word) && lang !== 'shell' && lang !== 'json') role = 'type';
-
-        if (role) out.push({ from: i, to: end, role, text: word });
-        i = end;
-        continue;
-      }
-      i++;
-    }
-  }
-  return out;
-}
-
-export function classifySemanticTokens(
-  docText: string,
-  lang: SemanticLangKind,
-  visibleRanges?: readonly { from: number; to: number }[],
-  extraUnresolved?: ReadonlySet<string>,
-  jPrefs?: JavaDiagPrefs,
-): SemanticTokenSpan[] {
-  if (!docText || lang === 'csv' || lang === 'other') return [];
-  const model = buildSymbolModel(docText, lang, extraUnresolved, jPrefs);
-  return classifySemanticTokensWithModel(docText, lang, model, visibleRanges);
+  return { pkgVars, typeNames, importedPkgs, funcParams, funcDecls, paramScopes, declStarts, unresolvedIdents, unusedRanges };
 }
 
 function buildBracketIndex(docText: string): CachedBracketIndex {
@@ -470,27 +552,12 @@ function buildBracketIndex(docText: string): CachedBracketIndex {
   const unmatched: number[] = [];
 
   for (let i = 0; i < limit; i++) {
+    const jumped = skipLiteralOrComment(docText, i, limit);
+    if (jumped > i) {
+      i = jumped;
+      continue;
+    }
     const ch = docText[i];
-    if (ch === '"' || ch === "'" || ch === '`') {
-      const q = ch;
-      i++;
-      while (i < limit) {
-        if (docText[i] === '\\' && q !== '`') { i += 2; continue; }
-        if (docText[i] === q) break;
-        i++;
-      }
-      continue;
-    }
-    if (ch === '/' && docText[i + 1] === '/') {
-      const nl = docText.indexOf('\n', i + 2);
-      i = nl >= 0 ? nl : limit;
-      continue;
-    }
-    if (ch === '/' && docText[i + 1] === '*') {
-      const cl = docText.indexOf('*/', i + 2);
-      i = cl >= 0 ? cl + 1 : limit;
-      continue;
-    }
     if (ch === '(' || ch === '{' || ch === '[') {
       stack.push({ ch, pos: i, level: ((stack.length % 4) + 1) as 1 | 2 | 3 | 4 });
     } else if (ch === ')' || ch === '}' || ch === ']') {
@@ -510,16 +577,13 @@ function buildBracketIndex(docText: string): CachedBracketIndex {
   return { pairs, posToPair, stack, unmatched };
 }
 
-function visibleBracketSpansFromIndex(
+export function visibleBracketSpansFromIndex(
   idx: CachedBracketIndex,
   visibleRanges: readonly { from: number; to: number }[],
   cursorPos?: number | null,
 ): RainbowBracketSpan[] {
   const inVis = (p: number): boolean => visibleRanges.some((r) => p >= r.from && p < r.to);
-  const active =
-    cursorPos == null
-      ? null
-      : (idx.posToPair.get(cursorPos) ?? idx.posToPair.get(cursorPos - 1) ?? null);
+  const active = cursorPos == null ? null : (idx.posToPair.get(cursorPos) ?? idx.posToPair.get(cursorPos - 1) ?? null);
   const out: RainbowBracketSpan[] = [];
   for (const p of idx.pairs) {
     if (inVis(p.open)) out.push({ from: p.open, to: p.open + 1, level: p.level, active: active === p });
@@ -569,18 +633,12 @@ export function getCachedSemanticDoc(
 } {
   let entry = semanticDocCache.get(doc);
   if (!entry) {
-    entry = {
-      docText: doc.toString(),
-      modelKey: '',
-      model: null,
-      identCounts: null,
-      brackets: null,
-    };
+    entry = { docText: doc.toString(), modelKey: '', model: null, identCounts: null, brackets: null };
     semanticDocCache.set(doc, entry);
   }
   const unresKey = extraUnresolved?.size ? [...extraUnresolved].sort().join(',') : '';
   const prefsKey =
-    lang === 'java'
+    lang === 'java' || lang === 'go'
       ? `${jPrefs?.javaUnresolvedImports ?? true}:${jPrefs?.lombokSupport ?? true}:${jPrefs?.unusedImports ?? true}`
       : '';
   const wantKey = `${lang}|${prefsKey}|${unresKey}`;
@@ -588,21 +646,10 @@ export function getCachedSemanticDoc(
     entry.modelKey = wantKey;
     entry.model = buildSymbolModel(entry.docText, lang, extraUnresolved, jPrefs);
   }
-  if (needBrackets && !entry.brackets) {
-    entry.brackets = buildBracketIndex(entry.docText);
-  }
-  if (needIdentCounts && !entry.identCounts) {
-    entry.identCounts = buildIdentCountIndex(entry.docText);
-  }
-  return {
-    docText: entry.docText,
-    model: entry.model,
-    identCounts: entry.identCounts,
-    brackets: entry.brackets,
-  };
+  if (needBrackets && !entry.brackets) entry.brackets = buildBracketIndex(entry.docText);
+  if (needIdentCounts && !entry.identCounts) entry.identCounts = buildIdentCountIndex(entry.docText);
+  return { docText: entry.docText, model: entry.model, identCounts: entry.identCounts, brackets: entry.brackets };
 }
-
-export { visibleBracketSpansFromIndex };
 
 export function analyzeJavaDiagnostics(
   docText: string,
@@ -630,49 +677,33 @@ export function analyzeJavaDiagnostics(
       const endCol = raw.length + 1;
       const segs = impPath.split('.');
       const lastSeg = segs[segs.length - 1] ?? '';
-      if (
+      const isBogus =
         segs.length < 2 ||
         BOGUS_JAVA_PREFIXES.some((p) => impPath.startsWith(p)) ||
-        (!lombok && impPath.startsWith('lombok.'))
-      ) {
+        (!lombok && impPath.startsWith('lombok.'));
+      if (isBogus) {
         if (checkUnres) {
           if (lastSeg && lastSeg !== '*') unresolvedIdents.add(lastSeg);
           diagnostics.push({
-            line: ln,
-            column: col,
-            endLine: ln,
-            endColumn: endCol,
-            severity: 'error',
-            source: 'java-imports',
-            code: 'unresolved-import',
+            line: ln, column: col, endLine: ln, endColumn: endCol,
+            severity: 'error', source: 'java-imports', code: 'unresolved-import',
             message: `Unresolved import '${impPath}'`,
-            quickFixes: [
-              { title: `Remove unresolved import '${impPath}'`, line: ln, endLine: ln, deleteLine: true },
-            ],
+            quickFixes: [{ title: `Remove unresolved import '${impPath}'`, line: ln, endLine: ln, deleteLine: true }],
           });
         }
         continue;
       }
       if (seenImports.has(impPath)) {
         diagnostics.push({
-          line: ln,
-          column: col,
-          endLine: ln,
-          endColumn: endCol,
-          severity: 'warning',
-          source: 'java-imports',
-          code: 'duplicate-import',
+          line: ln, column: col, endLine: ln, endColumn: endCol,
+          severity: 'warning', source: 'java-imports', code: 'duplicate-import',
           message: `Duplicate import '${impPath}'`,
-          quickFixes: [
-            { title: `Remove duplicate import '${impPath}'`, line: ln, endLine: ln, deleteLine: true },
-          ],
+          quickFixes: [{ title: `Remove duplicate import '${impPath}'`, line: ln, endLine: ln, deleteLine: true }],
         });
         continue;
       }
       seenImports.add(impPath);
-      if (lastSeg && lastSeg !== '*') {
-        importEntries.push({ line: ln, col, endCol, path: impPath, ident: lastSeg });
-      }
+      if (lastSeg && lastSeg !== '*') importEntries.push({ line: ln, col, endCol, path: impPath, ident: lastSeg });
       continue;
     }
     bodyChunks.push(raw);
@@ -683,79 +714,13 @@ export function analyzeJavaDiagnostics(
     for (const imp of importEntries) {
       if (!bodyCounts.has(imp.ident)) {
         diagnostics.push({
-          line: imp.line,
-          column: imp.col,
-          endLine: imp.line,
-          endColumn: imp.endCol,
-          severity: 'warning',
-          source: 'java-imports',
-          code: 'unused-import',
+          line: imp.line, column: imp.col, endLine: imp.line, endColumn: imp.endCol,
+          severity: 'warning', source: 'java-imports', code: 'unused-import',
           message: `Unused import '${imp.path}'`,
-          quickFixes: [
-            { title: `Remove unused import '${imp.path}'`, line: imp.line, endLine: imp.line, deleteLine: true },
-          ],
+          quickFixes: [{ title: `Remove unused import '${imp.path}'`, line: imp.line, endLine: imp.line, deleteLine: true }],
         });
       }
     }
   }
   return { diagnostics, unresolvedIdents };
-}
-
-export function computeImportFoldRange(
-  docText: string,
-  lang: SemanticLangKind,
-  errorLines?: ReadonlySet<number>,
-): { from: number; to: number; startLine: number; endLine: number } | null {
-  const lines = docText.split('\n');
-  let offset = 0;
-  let startLine = -1;
-  let endLine = -1;
-  let foldFrom = -1;
-  let foldTo = -1;
-  let inGoParens = false;
-
-  for (let i = 0; i < Math.min(lines.length, 250); i++) {
-    const line = lines[i];
-    const trimmed = line.trim();
-    const ln = i + 1;
-    const lStart = offset;
-    const lEnd = offset + line.length;
-    offset = lEnd + 1;
-
-    if (lang === 'go') {
-      if (startLine < 0 && /^import\s*\(/.test(trimmed)) {
-        startLine = ln;
-        inGoParens = true;
-        foldFrom = lStart + line.indexOf('(') + 1;
-        continue;
-      }
-      if (inGoParens) {
-        if (trimmed.startsWith(')')) {
-          endLine = ln;
-          foldTo = lStart;
-          break;
-        }
-        continue;
-      }
-    } else if (lang === 'java' || lang === 'ts' || lang === 'python' || lang === 'rust') {
-      const isImp = lang === 'rust' ? /^use\s+/.test(trimmed) : /^(?:import|from)\s+/.test(trimmed);
-      if (isImp) {
-        if (startLine < 0) {
-          startLine = ln;
-          foldFrom = lEnd;
-        }
-        endLine = ln;
-        foldTo = lEnd;
-      } else if (startLine > 0 && trimmed !== '' && !trimmed.startsWith('//') && !trimmed.startsWith('#')) {
-        break;
-      }
-    }
-  }
-  if (startLine < 0 || endLine <= startLine || foldTo <= foldFrom) return null;
-  if (errorLines) {
-    for (let ln = startLine; ln <= endLine; ln++) {
-      if (errorLines.has(ln)) return null;
-    }
-  }
-  return { from: foldFrom, to: foldTo, startLine, endLine };
 }

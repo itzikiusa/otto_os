@@ -9,10 +9,13 @@
   import { announceShown } from '../../../lib/announce.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { composerViewState } from '../../../lib/stores/runtimeDraftCursor';
   import { followUpBlocker, targetLabel } from './councilRounds';
   import RuntimeMentionMenu, { type PickedFileMention } from './RuntimeMentionMenu.svelte';
 
   interface Props {
+    /** Stable key preserving caret and scroll state across remounts. */
+    draftKey?: string;
     /** The council's seat numbers. */
     seatNumbers: number[];
     /** Seats the next follow-up goes to (all of them = "All seats"). */
@@ -31,7 +34,7 @@
     onsend: () => void;
     onstop: () => void;
   }
-  let { seatNumbers, targets, text, cwd = null, rounds, maxRounds, sending, error, working, stopping, ontargets, ontext, onsend, onstop }: Props = $props();
+  let { draftKey = 'council:default', seatNumbers, targets, text, cwd = null, rounds, maxRounds, sending, error, working, stopping, ontargets, ontext, onsend, onstop }: Props = $props();
 
   let chooserEl = $state<HTMLButtonElement | null>(null);
   let boxEl = $state<HTMLDivElement | null>(null);
@@ -86,9 +89,14 @@
     />
     <textarea
       bind:this={textareaEl}
+      use:composerViewState={{ key: draftKey, hasText: text.length > 0 }}
       class="cc-text"
       rows={2}
       dir="auto"
+      spellcheck="false"
+      {...{ autocorrect: 'off' }}
+      autocapitalize="off"
+      autocomplete="off"
       value={text}
       placeholder={`Ask ${label === 'All seats' ? 'the council' : label.toLowerCase()} a follow-up (@ files)`}
       aria-label="Follow-up for the council"
@@ -163,6 +171,8 @@
     color: var(--text);
     font: inherit;
     font-size: var(--fs-m);
+    unicode-bidi: plaintext;
+    text-align: start;
   }
   .cc-row {
     display: flex;

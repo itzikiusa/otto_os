@@ -7,7 +7,9 @@
 // Pure (unit/runtimeWorkLog.test.ts).
 import type { ProviderTurn, TurnItem } from '../../../lib/api/types';
 import { threadCall } from './agentRows';
-import { workLabel, type WorkEntry } from './timeline';
+import { formatDuration, workLabel, type WorkEntry } from './timeline';
+
+export { formatDuration };
 
 const LIVE: ReadonlySet<string> = new Set(['running', 'pending', 'waiting']);
 export const isLive = (i: TurnItem): boolean => LIVE.has(i.status);
@@ -23,17 +25,6 @@ export function relativeToCwd(text: string, cwd: string | null | undefined): str
   const root = cwd?.replace(/\/+$/, '');
   if (!root || root === '' || root === '/') return text;
   return text.split(`${root}/`).join('');
-}
-
-/** "820ms", "14s", "2m 14s", "1h 3m". */
-export function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return '';
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
 /** A finished call's run time, or null when it has no start / end.

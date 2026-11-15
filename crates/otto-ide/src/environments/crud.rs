@@ -1,0 +1,489 @@
+//! Project environment persistence CRUD, multi-folder attachment, and effective
+//! environment resolution entry points for [`super::EnvironmentManager`].
+
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use chrono::Utc;
+use otto_core::domain::User;
+use otto_core::{Error, Result};
+use otto_state::DbPool;
+
+use super::db_store::{
+    clean_opt, discover_local_dotenv_files, discover_local_python_venvs, is_valid_env_key,
+    load_stored_project_env, persist_project_roots, secret_key_ref, validate_attached_folder_path,
+    StoredEnvVar, RESERVED_MODULE_SDKS_KEY,
+};
+use super::discovery::discover_run_configs;
+use super::module_sdks::{layer_child_and_module_sdk_for_run, sanitize_module_sdks};
+use super::{EnvironmentManager, SecretAccess};
+use crate::projects::ProjectStore;
+use crate::target::TargetManager;
+use crate::types::{
+    IdeEnvVarEntry, IdeEnvironmentsResp, IdeProjectEnvironment, IdeRunConfig, IdeSshSpec,
+    IdeTargetKind, IdeTargetSpec, IdeUpdateEnvironmentReq,
+};
+
+fn redact_stored_vars(stored: &[StoredEnvVar]) -> Vec<IdeEnvVarEntry> {
+    stored
+        .iter()
+        .map(|s| IdeEnvVarEntry {
+            key: s.key.clone(),
+            value: if s.secret { None } else { s.value.clone() },
+            secret: s.secret,
+            has_secret: s.secret && s.secret_ref.is_some(),
+        })
+        .collect()
+}
+
+impl EnvironmentManager {
+    pub async fn get_project_env(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+    ) -> Result<IdeProjectEnvironment> {
+        target.validate()?;
+        let project_key = target.project_key();
+        let (mut env, stored) = load_stored_project_env(pool, &project_key).await?;
+        self.record_snapshot(&project_key, &env, &stored);
+        env.env_vars = redact_stored_vars(&stored);
+        Ok(env)
+    }
+
+    /// Hydrate `target.additional_roots` with folders from `project_folders`,
+    /// SQLite `ide_project_environments`, and the caller's Named IDE Projects.
+    pub async fn enrich_target_roots(
+        &self,
+        pool: &DbPool,
+        projects: Option<&ProjectStore>,
+        user: Option<&User>,
+        target: &mut IdeTargetSpec,
+    ) {
+        target.absorb_project_folders(&[]);
+        let project_key = target.project_key();
+        if let Ok((proj, stored)) = load_stored_project_env(pool, &project_key).await {
+            self.record_snapshot(&project_key, &proj, &stored);
+            for r in proj.additional_roots {
+                if !r.is_empty() && r != target.root && !target.additional_roots.contains(&r) {
+                    target.additional_roots.push(r);
+                }
+            }
+        }
+        if target.kind == IdeTargetKind::Local {
+            if let Some(store) = projects {
+                let _ = store.ensure_hydrated(pool).await;
+                let extra = match user {
+                    Some(u) => store.folders_for_root_for_user(&target.root, u),
+                    None => store.folders_for_root(&target.root),
+                };
+                for r in extra {
+                    if !r.is_empty() && r != target.root && !target.additional_roots.contains(&r) {
+                        target.additional_roots.push(r);
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn add_project_folder(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+        folder_path: &str,
+    ) -> Result<IdeProjectEnvironment> {
+        target.validate()?;
+        let normalized = validate_attached_folder_path(target, folder_path)?;
+        let project_key = target.project_key();
+        let (mut proj, _) = load_stored_project_env(pool, &project_key).await?;
+        if normalized != target.root && !proj.additional_roots.contains(&normalized) {
+            proj.additional_roots.push(normalized);
+        }
+        persist_project_roots(pool, target, &proj.additional_roots).await?;
+        self.get_project_env(pool, target).await
+    }
+
+    /// Bulk-attach multiple folders in a single SQLite write (`POST /ide/projects/folders/bulk`).
+    pub async fn add_project_folders_bulk(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+        folders: &[String],
+    ) -> Result<(IdeProjectEnvironment, usize)> {
+        target.validate()?;
+        let project_key = target.project_key();
+        let (mut proj, _) = load_stored_project_env(pool, &project_key).await?;
+        let mut added = 0usize;
+        for raw in folders {
+            if raw.trim().is_empty() {
+                continue;
+            }
+            let normalized = validate_attached_folder_path(target, raw)?;
+            if normalized != target.root && !proj.additional_roots.contains(&normalized) {
+                proj.additional_roots.push(normalized);
+                added += 1;
+            }
+        }
+        persist_project_roots(pool, target, &proj.additional_roots).await?;
+        let env = self.get_project_env(pool, target).await?;
+        Ok((env, added))
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    pub async fn remove_project_folder(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
+        folder_path: &str,
+    ) -> Result<IdeProjectEnvironment> {
+        target.validate()?;
+        let raw_trimmed = folder_path.trim().trim_end_matches('/');
+        if raw_trimmed.is_empty() {
+            return Err(Error::Invalid("folder path must not be empty".into()));
+        }
+        let canon_opt = std::fs::canonicalize(raw_trimmed)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
+        let project_key = target.project_key();
+        let (mut proj, _) = load_stored_project_env(pool, &project_key).await?;
+        proj.additional_roots.retain(|entry| {
+            let trimmed = entry.trim_end_matches('/');
+            trimmed != raw_trimmed && canon_opt.as_deref() != Some(entry.as_str())
+        });
+        persist_project_roots(pool, target, &proj.additional_roots).await?;
+        self.get_project_env(pool, target).await
+    }
+
+    pub async fn get_environments<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        targets: &TargetManager,
+        target: &IdeTargetSpec,
+        ssh: Option<&IdeSshSpec>,
+    ) -> Result<IdeEnvironmentsResp> {
+        self.get_environments_for_user(pool, secrets, targets, target, ssh, true)
+            .await
+    }
+
+    pub async fn get_environments_for_user<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        _secrets: &S,
+        targets: &TargetManager,
+        target: &IdeTargetSpec,
+        ssh: Option<&IdeSshSpec>,
+        caller_is_root: bool,
+    ) -> Result<IdeEnvironmentsResp> {
+        target.validate()?;
+        let project_key = target.project_key();
+        let (mut env, stored_vars) = load_stored_project_env(pool, &project_key).await?;
+        self.record_snapshot(&project_key, &env, &stored_vars);
+        for extra in target.merged_extra_roots() {
+            if !extra.is_empty() && extra != target.root && !env.additional_roots.contains(&extra) {
+                env.additional_roots.push(extra);
+            }
+        }
+        env.env_vars = redact_stored_vars(&stored_vars);
+
+        let saved_configs = self.list_run_configs(pool, target).await?;
+
+        let (dotenv_files, python_venvs, detected_configs) = match target.kind {
+            IdeTargetKind::Local => {
+                let target_clone = target.clone();
+                let extra_roots = env.additional_roots.clone();
+                let data_dir = self.data_dir.clone();
+                tokio::task::spawn_blocking(move || {
+                    let root = PathBuf::from(&target_clone.root);
+                    let dotenvs = discover_local_dotenv_files(&root);
+                    let mut venvs = discover_local_python_venvs(&root, &data_dir);
+                    for er in &extra_roots {
+                        for mv in discover_local_python_venvs(Path::new(er), &data_dir) {
+                            if !venvs.iter().any(|v| v.path == mv.path) {
+                                venvs.push(mv);
+                            }
+                        }
+                    }
+                    let detected = discover_run_configs(&target_clone, &extra_roots);
+                    (dotenvs, venvs, detected)
+                })
+                .await
+                .map_err(|e| Error::Internal(format!("local environment discovery: {e}")))?
+            }
+            IdeTargetKind::Ssh => {
+                let dotenvs = self
+                    .discover_dotenv_files(targets, target, ssh)
+                    .await
+                    .unwrap_or_default();
+                let venvs = self
+                    .discover_python_venvs(targets, target, ssh)
+                    .await
+                    .unwrap_or_default();
+                (dotenvs, venvs, Vec::new())
+            }
+        };
+
+        let mut configs = saved_configs;
+        for det in &detected_configs {
+            let duplicate = configs.iter().any(|c| {
+                c.id == det.id
+                    || (c.runner == det.runner
+                        && c.name.eq_ignore_ascii_case(&det.name)
+                        && c.cwd == det.cwd)
+            });
+            if !duplicate {
+                configs.push(det.clone());
+            }
+        }
+
+        let effective_env = self
+            .resolve_env_layers(
+                &env,
+                &stored_vars,
+                None::<&S>,
+                target,
+                None,
+                false,
+                caller_is_root,
+            )
+            .await?;
+
+        Ok(IdeEnvironmentsResp {
+            env,
+            python_venvs,
+            dotenv_files,
+            configs,
+            detected_configs,
+            effective_env,
+        })
+    }
+
+    pub async fn update_environment<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        req: IdeUpdateEnvironmentReq,
+    ) -> Result<IdeProjectEnvironment> {
+        req.target.validate()?;
+        let project_key = req.target.project_key();
+        let (prev_proj, prev_stored) = load_stored_project_env(pool, &project_key).await?;
+        let prev_map: BTreeMap<String, StoredEnvVar> = prev_stored
+            .into_iter()
+            .map(|e| (e.key.clone(), e))
+            .collect();
+
+        let mut next_stored = Vec::with_capacity(req.env_vars.len());
+        let mut kept_refs = HashSet::new();
+
+        for item in &req.env_vars {
+            let key = item.key.trim().to_string();
+            if key.is_empty() || key == RESERVED_MODULE_SDKS_KEY || !is_valid_env_key(&key) {
+                return Err(Error::Invalid(format!(
+                    "invalid environment variable name '{key}'"
+                )));
+            }
+            if item.secret {
+                let sref = secret_key_ref(&project_key, &key);
+                if let Some(val) = item.value.as_deref().filter(|v| !v.is_empty()) {
+                    secrets.put_secret(&sref, val).await?;
+                    kept_refs.insert(sref.clone());
+                    next_stored.push(StoredEnvVar {
+                        key,
+                        value: None,
+                        secret: true,
+                        secret_ref: Some(sref),
+                    });
+                } else if let Some(prev_ref) = prev_map.get(&key).and_then(|p| p.secret_ref.clone())
+                {
+                    kept_refs.insert(prev_ref.clone());
+                    next_stored.push(StoredEnvVar {
+                        key,
+                        value: None,
+                        secret: true,
+                        secret_ref: Some(prev_ref),
+                    });
+                } else {
+                    next_stored.push(StoredEnvVar {
+                        key,
+                        value: None,
+                        secret: true,
+                        secret_ref: None,
+                    });
+                }
+            } else {
+                next_stored.push(StoredEnvVar {
+                    key,
+                    value: Some(item.value.clone().unwrap_or_default()),
+                    secret: false,
+                    secret_ref: None,
+                });
+            }
+        }
+
+        for old in prev_map.values() {
+            if let Some(r) = &old.secret_ref {
+                if !kept_refs.contains(r) {
+                    let _ = secrets.delete_secret(r).await;
+                }
+            }
+        }
+
+        let inherit_shell_env = req.inherit_shell_env.unwrap_or(prev_proj.inherit_shell_env);
+        let next_roots = match &req.additional_roots {
+            Some(explicit_roots) => {
+                let mut validated = Vec::new();
+                for r in explicit_roots {
+                    if r.trim().is_empty() || r.trim() == req.target.root {
+                        continue;
+                    }
+                    let norm = validate_attached_folder_path(&req.target, r)?;
+                    if norm != req.target.root && !validated.contains(&norm) {
+                        validated.push(norm);
+                    }
+                }
+                validated
+            }
+            None => prev_proj.additional_roots,
+        };
+
+        let next_module_sdks = match &req.module_sdks {
+            Some(explicit_map) => sanitize_module_sdks(explicit_map),
+            None => prev_proj.module_sdks,
+        };
+        if !next_module_sdks.is_empty() {
+            let encoded = serde_json::to_string(&next_module_sdks)
+                .map_err(|e| Error::Internal(format!("serialize module_sdks: {e}")))?;
+            next_stored.push(StoredEnvVar {
+                key: RESERVED_MODULE_SDKS_KEY.into(),
+                value: Some(encoded),
+                secret: false,
+                secret_ref: None,
+            });
+        }
+
+        let env_vars_json = serde_json::to_string(&next_stored)
+            .map_err(|e| Error::Internal(format!("serialize env_vars_json: {e}")))?;
+        let roots_json = serde_json::to_string(&next_roots)
+            .map_err(|e| Error::Internal(format!("serialize additional_roots_json: {e}")))?;
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            r#"INSERT INTO ide_project_environments (
+                   project_key, target_kind, root_path, connection_id,
+                   java_home, go_root, rust_toolchain, node_home,
+                   python_interpreter, dotenv_path, extra_path, env_vars_json,
+                   additional_roots_json, inherit_shell_env, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(project_key) DO UPDATE SET
+                   target_kind = excluded.target_kind,
+                   root_path = excluded.root_path,
+                   connection_id = excluded.connection_id,
+                   java_home = excluded.java_home,
+                   go_root = excluded.go_root,
+                   rust_toolchain = excluded.rust_toolchain,
+                   node_home = excluded.node_home,
+                   python_interpreter = excluded.python_interpreter,
+                   dotenv_path = excluded.dotenv_path,
+                   extra_path = excluded.extra_path,
+                   env_vars_json = excluded.env_vars_json,
+                   additional_roots_json = excluded.additional_roots_json,
+                   inherit_shell_env = excluded.inherit_shell_env,
+                   updated_at = excluded.updated_at"#,
+        )
+        .bind(&project_key)
+        .bind(req.target.kind.as_str())
+        .bind(&req.target.root)
+        .bind(&req.target.connection_id)
+        .bind(clean_opt(&req.java_home))
+        .bind(clean_opt(&req.go_root))
+        .bind(clean_opt(&req.rust_toolchain))
+        .bind(clean_opt(&req.node_home))
+        .bind(clean_opt(&req.python_interpreter))
+        .bind(clean_opt(&req.dotenv_path))
+        .bind(clean_opt(&req.extra_path))
+        .bind(&env_vars_json)
+        .bind(&roots_json)
+        .bind(i32::from(inherit_shell_env))
+        .bind(&now)
+        .execute(pool)
+        .await
+        .map_err(|e| Error::Internal(format!("upsert ide_project_environments: {e}")))?;
+
+        self.get_project_env(pool, &req.target).await
+    }
+
+    pub async fn effective_env<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        target: &IdeTargetSpec,
+    ) -> Result<BTreeMap<String, String>> {
+        self.build_effective_env_for_run(pool, secrets, target, None)
+            .await
+    }
+
+    pub async fn build_effective_env<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        target: &IdeTargetSpec,
+    ) -> Result<BTreeMap<String, String>> {
+        self.build_effective_env_for_run(pool, secrets, target, None)
+            .await
+    }
+
+    pub async fn build_effective_env_for_run<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        target: &IdeTargetSpec,
+        cfg: Option<&IdeRunConfig>,
+    ) -> Result<BTreeMap<String, String>> {
+        self.build_effective_env_for_run_as(pool, secrets, target, cfg, true)
+            .await
+    }
+
+    pub async fn build_effective_env_for_run_as<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        target: &IdeTargetSpec,
+        cfg: Option<&IdeRunConfig>,
+        caller_is_root: bool,
+    ) -> Result<BTreeMap<String, String>> {
+        Ok(self
+            .build_effective_env_with_loaded(pool, secrets, target, cfg, caller_is_root)
+            .await?
+            .1)
+    }
+
+    /// Resolve both the redacted [`IdeProjectEnvironment`] and the layered
+    /// `KEY=VALUE` process environment in a single SQLite + secret store pass.
+    pub async fn build_effective_env_with_loaded<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        target: &IdeTargetSpec,
+        cfg: Option<&IdeRunConfig>,
+        caller_is_root: bool,
+    ) -> Result<(IdeProjectEnvironment, BTreeMap<String, String>)> {
+        target.validate()?;
+        let project_key = target.project_key();
+        let (mut proj, mut stored_vars) = load_stored_project_env(pool, &project_key).await?;
+        self.record_snapshot(&project_key, &proj, &stored_vars);
+        let mut out_proj = proj.clone();
+        out_proj.env_vars = redact_stored_vars(&stored_vars);
+        layer_child_and_module_sdk_for_run(pool, target, cfg, &mut proj, &mut stored_vars).await;
+        let map = self
+            .resolve_env_layers(
+                &proj,
+                &stored_vars,
+                Some(secrets),
+                target,
+                cfg,
+                true,
+                caller_is_root,
+            )
+            .await?;
+        Ok((out_proj, map))
+    }
+}

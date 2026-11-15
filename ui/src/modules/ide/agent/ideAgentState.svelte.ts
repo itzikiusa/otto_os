@@ -7,9 +7,12 @@ import { ideWorkspacePort } from '../../../lib/ideWorkspacePort.svelte';
 import type { EffortLevel } from '../../../lib/providerModels';
 import { defaultAgentProvider, isRuntimeProvider } from '../../../lib/providers';
 import {
-  getIdeRuntimeBridge,
-  loadIdeRuntimeBridge,
-  type IdeRuntimeBridge,
+  getIdeRuntimeComposerUi,
+  getIdeRuntimeSessionPort,
+  loadIdeRuntimeComposerUi,
+  loadIdeRuntimeSessionPort,
+  type RuntimeComposerUiPort,
+  type RuntimeSessionPort,
 } from '../../../lib/runtimeThreadPort';
 import { lsGet, lsRemove, lsSet } from '../../../lib/storage';
 import type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
@@ -132,7 +135,15 @@ class IdeAgentSharedState {
   error = $state<string | null>(null);
   contexts = $state<IdeContextChip[]>([]);
   appliedUndoByProposalId = $state<Record<string, string>>({});
-  runtimeBridge = $state<IdeRuntimeBridge | null>(getIdeRuntimeBridge());
+  runtimeSession = $state<RuntimeSessionPort | null>(getIdeRuntimeSessionPort());
+  composerUi = $state<RuntimeComposerUiPort | null>(getIdeRuntimeComposerUi());
+
+  get runtimeBridge(): RuntimeSessionPort | null {
+    return this.runtimeSession;
+  }
+  set runtimeBridge(next: RuntimeSessionPort | null) {
+    this.runtimeSession = next;
+  }
 
   chipSeq = 0;
   inlineReqSeq = 0;
@@ -162,17 +173,36 @@ class IdeAgentSharedState {
     }
   }
 
-  ensureBridge(): Promise<IdeRuntimeBridge | null> {
-    if (this.runtimeBridge) return Promise.resolve(this.runtimeBridge);
-    const cached = getIdeRuntimeBridge();
+  ensureSessionPort(): Promise<RuntimeSessionPort | null> {
+    if (this.runtimeSession) return Promise.resolve(this.runtimeSession);
+    const cached = getIdeRuntimeSessionPort();
     if (cached) {
-      this.runtimeBridge = cached;
+      this.runtimeSession = cached;
       return Promise.resolve(cached);
     }
-    return loadIdeRuntimeBridge()
+    return loadIdeRuntimeSessionPort()
       .then((b) => {
-        this.runtimeBridge = b;
+        this.runtimeSession = b;
         return b;
+      })
+      .catch(() => null);
+  }
+
+  ensureBridge(): Promise<RuntimeSessionPort | null> {
+    return this.ensureSessionPort();
+  }
+
+  ensureComposerUi(): Promise<RuntimeComposerUiPort | null> {
+    if (this.composerUi) return Promise.resolve(this.composerUi);
+    const cached = getIdeRuntimeComposerUi();
+    if (cached) {
+      this.composerUi = cached;
+      return Promise.resolve(cached);
+    }
+    return loadIdeRuntimeComposerUi()
+      .then((ui) => {
+        this.composerUi = ui;
+        return ui;
       })
       .catch(() => null);
   }

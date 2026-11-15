@@ -5621,14 +5621,26 @@ impl SessionManager {
     /// returned [`RestoreSummary`] feeds the UI's "Otto restarted" notice.
     pub async fn restore_all(
         &self,
+        fallback_cwd: &(dyn Fn(&Id) -> Option<String> + Send + Sync),
+    ) -> Result<RestoreSummary> {
+        self.restore_all_with_kept(fallback_cwd, &[]).await
+    }
+
+    /// Restore sessions at daemon boot while also preserving managed per-session
+    /// MCP credentials (`OTTO_MCP_TOKEN`) for `extra_keep` (such as live
+    /// structured-runtime sessions adopted from detached `runtime-holder`s).
+    pub async fn restore_all_with_kept(
+        &self,
         _fallback_cwd: &(dyn Fn(&Id) -> Option<String> + Send + Sync),
+        extra_keep: &[Id],
     ) -> Result<RestoreSummary> {
         let adopted = self.adopt_holders().await;
-        // Deferred holders (transient lookup error) still run their agent:
-        // neither revoke its credential nor mark its row dormant (review
-        // S1-09) — a dormant row's next open would resume a SECOND CLI.
+        // Deferred holders (transient lookup error) and adopted structured
+        // runtime holders still run their agent: neither revoke their per-session
+        // credentials nor mark matching session rows dormant (review S1-09).
         let mut keep = adopted.clone();
         keep.extend(self.deferred_holders.iter().map(|e| e.key().clone()));
+        keep.extend(extra_keep.iter().cloned());
         self.expire_orphaned_session_credentials(&keep).await;
         let at = chrono::Utc::now().to_rfc3339();
         let pass = self.repo.mark_dormant_except(&keep, &at).await?;

@@ -28,7 +28,11 @@ pub(super) async fn list_projects<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<IdeProjectsResp>> {
-    let projects = ctx.ide().projects.list_for_user(&ctx.pool(), &user).await?;
+    let projects = ctx
+        .ide()
+        .projects
+        .list_for_user_with_ctx(&ctx, &user)
+        .await?;
     Ok(Json(IdeProjectsResp { projects }))
 }
 
@@ -51,7 +55,7 @@ pub(super) async fn upsert_project<S: IdeCtx>(
             .await?;
         for folder in &req.folders {
             if !folder.trim().is_empty() {
-                ctx.authorize_local_target(&user, &IdeTargetSpec::local(folder.clone()), false)
+                ctx.authorize_local_target(&user, &IdeTargetSpec::local(folder.clone()), true)
                     .await?;
             }
         }
@@ -59,23 +63,31 @@ pub(super) async fn upsert_project<S: IdeCtx>(
     let project = ctx
         .ide()
         .projects
-        .upsert_for_user(&ctx.pool(), &user, req)
+        .upsert_for_user_with_ctx(&ctx, &user, req)
         .await?;
 
     let target = IdeTargetSpec::local(project.primary_root.clone());
-    if ctx
-        .ide()
-        .targets
-        .resolve_write(&ctx, &user, &target)
-        .await
-        .is_ok()
-        && project.folders.len() > 1
+    if project.folders.len() > 1
+        && ctx
+            .ide()
+            .targets
+            .resolve_write(&ctx, &user, &target)
+            .await
+            .is_ok()
     {
-        let _ = ctx
+        if let Err(err) = ctx
             .ide()
             .environments
             .add_project_folders_bulk(&ctx.pool(), &target, &project.folders)
-            .await;
+            .await
+        {
+            tracing::warn!(
+                project_id = %project.id,
+                error = %err,
+                "failed to sync named project folders into ide_project_environments"
+            );
+            return Err(err.into());
+        }
     }
     ctx.ide().targets.invalidate_local_resolve_cache();
     Ok(Json(IdeUpsertProjectResp { project }))
@@ -88,7 +100,7 @@ pub(super) async fn delete_project<S: IdeCtx>(
 ) -> ApiResult<Json<IdeOkResp>> {
     ctx.ide()
         .projects
-        .delete_for_user(&ctx.pool(), &user, &id)
+        .delete_for_user_with_ctx(&ctx, &user, &id)
         .await?;
     ctx.ide().targets.invalidate_local_resolve_cache();
     Ok(Json(IdeOkResp { ok: true }))
@@ -125,7 +137,7 @@ pub(super) async fn add_project_folders_bulk<S: IdeCtx>(
     if req.target.kind == IdeTargetKind::Local && !user.is_root {
         for fp in &req.folder_paths {
             if !fp.trim().is_empty() {
-                ctx.authorize_local_target(&user, &IdeTargetSpec::local(fp.clone()), false)
+                ctx.authorize_local_target(&user, &IdeTargetSpec::local(fp.clone()), true)
                     .await?;
             }
         }
@@ -218,12 +230,22 @@ pub(super) async fn deps_inspect<S: IdeCtx>(
 ) -> ApiResult<Json<IdeDepsInspectResp>> {
     let (target, _, manifest_path) =
         resolve_manifest_target(&ctx, &user, req.target, &req.path, false).await?;
-    let env_map = ctx
+    let env_map = match ctx
         .ide()
         .environments
         .build_effective_env_for_run_as(&ctx.pool(), ctx.secrets(), &target, None, user.is_root)
         .await
-        .unwrap_or_default();
+    {
+        Ok(env) => env,
+        Err(err) => {
+            tracing::warn!(
+                target = %target.project_key(),
+                error = %err,
+                "failed to resolve effective environment for dependency inspection; continuing with empty overrides"
+            );
+            Default::default()
+        }
+    };
     let resp = crate::deps_inspector::inspect_dependencies(
         &manifest_path,
         req.content.as_deref(),
@@ -245,7 +267,14 @@ pub(super) async fn deps_action<S: IdeCtx>(
         .environments
         .build_effective_env_for_run_as(&ctx.pool(), ctx.secrets(), &target, None, user.is_root)
         .await
-        .unwrap_or_default();
+        .map_err(|err| {
+            tracing::warn!(
+                target = %target.project_key(),
+                error = %err,
+                "failed to resolve effective environment for dependency action"
+            );
+            err
+        })?;
     let resp = crate::deps_inspector::run_deps_action(
         &canon_root,
         &manifest_path,

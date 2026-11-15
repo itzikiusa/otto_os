@@ -170,7 +170,7 @@
 
 <style>
   .ide-tabs-row {
-    display: flex; align-items: stretch; block-size: 34px; flex-shrink: 0;
+    display: flex; align-items: stretch; block-size: var(--ide-tab-h, 34px); flex-shrink: 0;
     background: var(--surface); border-block-end: 1px solid var(--border); min-inline-size: 0; overflow: hidden;
   }
   .ide-nav-btns { display: inline-flex; align-items: center; gap: var(--sp-1); padding-inline: var(--sp-2); border-inline-end: 1px solid var(--border); flex-shrink: 0; }

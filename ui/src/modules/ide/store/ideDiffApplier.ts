@@ -4,6 +4,19 @@
 
 import { escapeHtml, unescapeHtml } from '../../../lib/html.ts';
 import { diffLineArrays } from '../../../lib/lineDiff.ts';
+import {
+  IDE_RUNTIME_PROVIDERS,
+  resolveIdeHarnesses,
+  resolveIdeInlineProviders,
+  type IdeRuntimeProvider,
+} from '../../../lib/providerRegistry.ts';
+
+export {
+  IDE_RUNTIME_PROVIDERS,
+  resolveIdeHarnesses,
+  resolveIdeInlineProviders,
+  type IdeRuntimeProvider,
+};
 
 export type IdeContextKind =
   | 'selection'
@@ -58,8 +71,6 @@ export const MAX_CHIP_SNIPPET_CHARS = 8_000;
 export const MAX_IDE_CONTEXT_PAYLOAD_CHARS = 28_000;
 export const IDE_PROPOSAL_INSTRUCTION =
   'When proposing code changes for a file, wrap the updated file or selection in a fenced block like ```<lang> path=<relative-path>\n...\n```.';
-export const IDE_RUNTIME_PROVIDERS = ['claude', 'codex', 'gemini', 'agy', 'grok', 'opencode', 'pi'] as const;
-export type IdeRuntimeProvider = (typeof IDE_RUNTIME_PROVIDERS)[number];
 
 const NON_CODE_FENCE_LANGS = new Set(['sh', 'bash', 'zsh', 'shell', 'console', 'mermaid', 'diff', 'patch']);
 const EXT_LANG_MAP: Record<string, string> = {
@@ -79,48 +90,6 @@ const normPath = (p: string | null | undefined): string => {
   const clean = (p ?? '').trim().replace(/\/+$/, '').replace(/^\/private\/(var|tmp)(?=\/|$)/, '/$1');
   return clean === '~' ? '' : clean;
 };
-
-/** Build the unified Threads harness list from enabled `/meta.providers` (`claude`, `codex`, `agy`, `gemini`, `grok`, `opencode`, `pi`, + custom CLI harnesses), never re-adding providers hidden via `disabled_providers`. */
-export function resolveIdeHarnesses(
-  registeredProviders: readonly string[],
-  extraProviders: readonly (string | null | undefined)[] = [],
-): string[] {
-  const merged: string[] = [];
-  const push = (raw: string | null | undefined): void => {
-    const clean = (raw ?? '').trim();
-    if (clean && clean !== 'shell' && !merged.includes(clean)) merged.push(clean);
-  };
-  const enabled = registeredProviders.map((p) => p.trim()).filter((p) => p && p !== 'shell');
-  if (enabled.length > 0) {
-    for (let i = 0; i < IDE_RUNTIME_PROVIDERS.length; i++) {
-      if (enabled.includes(IDE_RUNTIME_PROVIDERS[i])) push(IDE_RUNTIME_PROVIDERS[i]);
-    }
-    for (let i = 0; i < enabled.length; i++) push(enabled[i]);
-  } else {
-    for (let i = 0; i < IDE_RUNTIME_PROVIDERS.length; i++) push(IDE_RUNTIME_PROVIDERS[i]);
-  }
-  for (let i = 0; i < extraProviders.length; i++) push(extraProviders[i]);
-  return merged;
-}
-
-/** Filter available harnesses down to enabled structured `/runtime-sessions` providers for `⌘I` inline edit. */
-export function resolveIdeInlineProviders(
-  availableProviders: readonly string[],
-  registeredProviders?: readonly string[],
-): IdeRuntimeProvider[] {
-  const runtimeSet = new Set<string>(IDE_RUNTIME_PROVIDERS);
-  const enabledReg = (registeredProviders ?? []).map((p) => p.trim()).filter((p) => p && p !== 'shell');
-  const regSet = enabledReg.length > 0 ? new Set<string>(enabledReg) : null;
-  const filtered: IdeRuntimeProvider[] = [];
-  for (let i = 0; i < availableProviders.length; i++) {
-    const p = availableProviders[i]?.trim() ?? '';
-    if (runtimeSet.has(p) && (!regSet || regSet.has(p)) && !filtered.includes(p as IdeRuntimeProvider)) {
-      filtered.push(p as IdeRuntimeProvider);
-    }
-  }
-  if (filtered.length > 0) return filtered;
-  return regSet ? [] : [...IDE_RUNTIME_PROVIDERS];
-}
 
 /** Match any structured runtime or PTY thread belonging to the current IDE workspace or any attached project folder. */
 export function matchesIdeProjectThread(input: MatchIdeThreadInput): boolean {

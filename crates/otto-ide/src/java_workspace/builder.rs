@@ -5,14 +5,18 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
+use std::time::UNIX_EPOCH;
 
 use otto_core::{Error, Result};
 use regex::Regex;
+use sha2::{Digest, Sha256};
 
 use super::{
     parse_pom_module, resolve_external_dep_jar, resolve_m2_repo, scan_java_workspace,
     JavaWorkspaceGraph, WorkspaceJavaModule,
 };
+use crate::environments::shell_env::collect_safe_non_root_base_env;
 
 #[derive(Debug, Clone)]
 pub struct JavaExecutionPlan {
@@ -268,7 +272,6 @@ fn compile_dep_tree(
                 continue;
             }
         }
-        // Not in current IDE project -> resolve from `.m2` / Gradle cache!
         if let Some(jar) = resolve_external_dep_jar(dep, m2_repo, false) {
             let js = jar.to_string_lossy().into_owned();
             if !external_jars.contains(&js) {
@@ -299,6 +302,50 @@ fn compile_dep_tree(
     Ok(())
 }
 
+fn compute_javac_stamp(javac_bin: &str, cp: &str, srcs: &[PathBuf]) -> String {
+    let mut sorted: Vec<String> = srcs
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    sorted.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(javac_bin.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(cp.as_bytes());
+    hasher.update(b"\0");
+    for sp in &sorted {
+        hasher.update(sp.as_bytes());
+        if let Ok(meta) = fs::metadata(sp) {
+            hasher.update(meta.len().to_le_bytes());
+            let nanos = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            hasher.update(nanos.to_le_bytes());
+        }
+        hasher.update(b"\0");
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn has_any_class_file(dir: &Path) -> bool {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_dir() && has_any_class_file(&p) {
+            return true;
+        }
+        if p.extension().and_then(|s| s.to_str()) == Some("class") {
+            return true;
+        }
+    }
+    false
+}
+
 fn run_javac(
     javac_bin: &str,
     out_dir: &Path,
@@ -307,6 +354,16 @@ fn run_javac(
     env_map: &BTreeMap<String, String>,
     logs: &mut Vec<String>,
 ) -> Result<()> {
+    let stamp = compute_javac_stamp(javac_bin, cp, srcs);
+    let stamp_file = out_dir.join(".otto-javac.stamp");
+    if fs::read_to_string(&stamp_file)
+        .ok()
+        .is_some_and(|prev| prev.trim() == stamp)
+        && has_any_class_file(out_dir)
+    {
+        return Ok(());
+    }
+
     let mut cmd = Command::new(javac_bin);
     cmd.arg("-g")
         .arg("-encoding")
@@ -319,9 +376,12 @@ fn run_javac(
     for s in srcs {
         cmd.arg(s);
     }
-    for (k, v) in env_map {
-        cmd.env(k, v);
+    cmd.env_clear();
+    if !env_map.contains_key("PATH") {
+        cmd.envs(collect_safe_non_root_base_env());
     }
+    cmd.envs(env_map);
+
     let output = cmd
         .output()
         .map_err(|e| Error::Internal(format!("failed to execute '{javac_bin}': {e}")))?;
@@ -339,6 +399,7 @@ fn run_javac(
             combined.trim()
         )));
     }
+    let _ = fs::write(&stamp_file, &stamp);
     Ok(())
 }
 
@@ -364,6 +425,11 @@ pub fn infer_java_fqcn_from_file(java_file: &Path) -> Option<String> {
     })
 }
 
+fn main_method_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\bpublic\s+static\s+void\s+main\s*\(").unwrap())
+}
+
 fn resolve_main_class(
     explicit: Option<&str>,
     target_file_or_dir: &Path,
@@ -382,7 +448,7 @@ fn resolve_main_class(
             return Ok(fqcn);
         }
     }
-    let main_re = Regex::new(r"\bpublic\s+static\s+void\s+main\s*\(").unwrap();
+    let main_re = main_method_regex();
     for src in srcs {
         if let Ok(content) = fs::read_to_string(src) {
             if main_re.is_match(&content) {

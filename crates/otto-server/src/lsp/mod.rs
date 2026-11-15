@@ -440,7 +440,12 @@ pub(crate) fn canonical_or_ancestor(p: &std::path::Path) -> std::path::PathBuf {
     p.to_path_buf()
 }
 
-pub(crate) async fn ide_local_root_authorized(
+/// Authorize `root` against live workspace RBAC (`Editor` for writes, `Viewer`
+/// for reads). Saved IDE project attachments and cached environment metadata
+/// are user preferences rather than access grants, so every primary and
+/// additional root must sit under a currently granted workspace or registered
+/// workspace repository.
+pub async fn ide_local_root_authorized(
     ctx: &ServerCtx,
     user: &otto_core::domain::User,
     root: &std::path::Path,
@@ -464,9 +469,6 @@ pub(crate) async fn ide_local_root_authorized(
         return Ok(true);
     }
 
-    ctx.ide.environments.ensure_hydrated(&ctx.pool).await;
-    let _ = ctx.ide.projects.ensure_hydrated(&ctx.pool).await;
-
     let min_role = if write {
         WorkspaceRole::Editor
     } else {
@@ -483,25 +485,7 @@ pub(crate) async fn ide_local_root_authorized(
             Ok(repos) => member_roots.extend(repos.into_iter().map(|r| r.path)),
             Err(e) => tracing::warn!(workspace = %w.id, "ide root check: list repos: {e}"),
         }
-        member_roots.extend(
-            ctx.ide
-                .environments
-                .cached_additional_roots(&format!("local:{}", w.root_path)),
-        );
-        member_roots.extend(ctx.ide.environments.cached_additional_roots(&w.root_path));
-        if let Some(wc) = canonical_of(&w.root_path) {
-            let ws_str = wc.to_string_lossy();
-            member_roots.extend(
-                ctx.ide
-                    .environments
-                    .cached_additional_roots(&format!("local:{ws_str}")),
-            );
-            member_roots.extend(ctx.ide.environments.cached_additional_roots(&ws_str));
-        }
         member_roots.push(w.root_path);
-    }
-    for p in ctx.ide.projects.allowed_roots_for_user(user) {
-        member_roots.push(p);
     }
     let scratch_root = if write {
         None

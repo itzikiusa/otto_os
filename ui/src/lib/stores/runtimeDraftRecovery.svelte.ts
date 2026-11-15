@@ -54,18 +54,26 @@ export function installRuntimeDraftRecovery(): void {
     let initialized = false;
     const stop = $effect.root(() => {
       $effect(() => {
-        // Track fields without repeatedly serializing multi-megabyte images.
-        void [wire.text, wire.model, wire.effort, wire.access_mode, wire.fresh_context];
-        wire.images.map(image => [image.name, image.mime, image.data_base64]);
-        wire.context.map(chip => Object.values(chip));
+        // Track fields by reference/scalar without per-keystroke array/object allocations.
+        void [
+          wire.text,
+          wire.model,
+          wire.effort,
+          wire.access_mode,
+          wire.fresh_context,
+          wire.images,
+          wire.images.length,
+          wire.context,
+          wire.context.length,
+        ];
         untrack(() => {
           if (!initialized) {
             initialized = true;
             if (JSON.stringify(wire) === initialJson) return;
           }
+          if (draft.saveStatus !== 'saving') draft.saveStatus = 'saving';
           clearTimeout(timer);
-          if (draft.recovered && draft.saveStatus !== 'error') draft.saveStatus = 'saving';
-          timer = setTimeout(flush, draft.recovered ? 200 : 0);
+          timer = setTimeout(flush, draft.recovered ? 450 : 0);
         });
       });
     });

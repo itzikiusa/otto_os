@@ -1,6 +1,5 @@
-//! Allowlisted read-only external SDK / module-cache path resolution and
-//! virtual Java archive (`jar:file://...!/...`, `src.zip!/...`, `jdt://...`)
-//! readers for "Dive In" (`Cmd+Click` / `F12` / Step-Into).
+//! Allowlisted read-only external SDK / module-cache path resolution for
+//! "Dive In" (`Cmd+Click` / `F12` / Step-Into).
 //!
 //! Security invariants:
 //! - External paths are strictly read-only (`read_only: true`); every write or
@@ -8,20 +7,18 @@
 //! - Credential directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, …) and
 //!   secret filenames (`.env`, `id_rsa`, `*.pem`, `*.key`, …) are ALWAYS denied
 //!   on external paths, even when `is_root_user == true`.
-//! - Zero subprocesses are spawned during path discovery (`<0.3ms` pure `stat`),
-//!   preserving instant IDE load times.
+//! - Non-root callers never inherit unvalidated parent `go.work`/`go.mod` roots
+//!   or custom SDK directories outside standard/registered toolchains or RBAC.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
 
 use otto_core::{Error, Result};
-use tokio::process::Command;
 
-use crate::types::IdeFileReadResp;
+pub(crate) use super::sdk_archives::{discover_jdk_src_zips, read_virtual_java_archive};
 
-use super::fs_ops::{build_file_read_resp, enforce_non_root_path};
-use super::{map_io_err, MAX_FILE_READ_BYTES};
+use super::fs_ops::enforce_non_root_path;
+use super::map_io_err;
 
 /// Decode a `file://` URI into a filesystem path string, handling percent-encoded
 /// bytes such as `%20` (spaces) and `%40` (`@` in Go `$GOMODCACHE` module paths).
@@ -73,10 +70,17 @@ pub(crate) fn is_virtual_archive_uri(raw: &str) -> bool {
     t.starts_with("jdt://") || t.starts_with("jar:") || t.contains("!/")
 }
 
+pub(crate) fn collect_readonly_sdk_roots(extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    collect_readonly_sdk_roots_with_env(extra_dirs, None)
+}
+
 /// Collect canonicalized read-only external SDK & package-cache roots on the
 /// local machine without spawning any subprocesses.
-pub(crate) fn collect_readonly_sdk_roots(extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    let base = collect_base_readonly_sdk_roots();
+pub(crate) fn collect_readonly_sdk_roots_with_env(
+    extra_dirs: &[PathBuf],
+    shell_env: Option<&BTreeMap<String, String>>,
+) -> Vec<PathBuf> {
+    let base = collect_base_readonly_sdk_roots(shell_env);
     if extra_dirs.is_empty() {
         return base;
     }
@@ -115,29 +119,37 @@ pub(crate) fn collect_readonly_sdk_roots(extra_dirs: &[PathBuf]) -> Vec<PathBuf>
     out
 }
 
-fn collect_base_readonly_sdk_roots() -> Vec<PathBuf> {
+pub(crate) fn collect_base_readonly_sdk_roots(
+    shell_env: Option<&BTreeMap<String, String>>,
+) -> Vec<PathBuf> {
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
-    type BaseCache = Option<(Instant, Option<String>, Vec<PathBuf>)>;
-    static BASE_CACHE: OnceLock<Mutex<BaseCache>> = OnceLock::new();
+    type BaseCacheEntry = (Instant, Option<String>, Vec<PathBuf>);
+    static NO_SHELL_CACHE: OnceLock<Mutex<Option<BaseCacheEntry>>> = OnceLock::new();
     let extra_env = std::env::var("OTTO_EXTRA_READONLY_ROOTS").ok();
-    let cache = BASE_CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = cache.lock() {
-        if let Some((at, prev_env, paths)) = guard.as_ref() {
-            if at.elapsed() < Duration::from_secs(10) && *prev_env == extra_env {
-                return paths.clone();
+    if shell_env.is_none() {
+        let cache = NO_SHELL_CACHE.get_or_init(|| Mutex::new(None));
+        if let Ok(guard) = cache.lock() {
+            if let Some((at, prev_env, paths)) = guard.as_ref() {
+                if at.elapsed() < Duration::from_secs(10) && *prev_env == extra_env {
+                    return paths.clone();
+                }
             }
         }
     }
 
     let mut candidates: Vec<PathBuf> = Vec::with_capacity(48);
-    let shell_env = crate::environments::cached_shell_env_snapshot();
     let env_val = |key: &str| -> Option<String> {
         std::env::var(key)
             .ok()
             .filter(|v| !v.trim().is_empty())
-            .or_else(|| shell_env.get(key).cloned().filter(|v| !v.trim().is_empty()))
+            .or_else(|| {
+                shell_env
+                    .and_then(|m| m.get(key))
+                    .cloned()
+                    .filter(|v| !v.trim().is_empty())
+            })
     };
 
     for key in [
@@ -252,8 +264,12 @@ fn collect_base_readonly_sdk_roots() -> Vec<PathBuf> {
             out.push(canon);
         }
     }
-    if let Ok(mut guard) = cache.lock() {
-        *guard = Some((Instant::now(), extra_env, out.clone()));
+    if shell_env.is_none() {
+        if let Some(cache) = NO_SHELL_CACHE.get() {
+            if let Ok(mut guard) = cache.lock() {
+                *guard = Some((Instant::now(), extra_env, out.clone()));
+            }
+        }
     }
     out
 }
@@ -310,7 +326,6 @@ pub(crate) fn resolve_local_readable(
         .canonicalize()
         .map_err(|e| map_io_err("resolve path", &candidate, e))?;
 
-    // 1. Check primary root & attached project folders first.
     let in_project = std::iter::once(root)
         .chain(additional_roots.iter().map(PathBuf::as_path))
         .any(|r| canonical.starts_with(r));
@@ -322,8 +337,6 @@ pub(crate) fn resolve_local_readable(
         return Ok((canonical, vendor_ro));
     }
 
-    // 2. External path: strictly enforce secret-file & credential-dir blocks
-    //    EVEN for `is_root_user == true`, and require membership in `readonly_roots`.
     if otto_core::secret_paths::is_denied_dir(&canonical)
         || otto_core::secret_paths::is_denied_file(&canonical)
     {
@@ -341,9 +354,8 @@ pub(crate) fn resolve_local_readable(
         )));
     }
 
-    // Re-check dynamic env roots in case `GOROOT`/`JAVA_HOME` was updated after resolve.
     let in_allowlist = readonly_roots.iter().any(|r| canonical.starts_with(r))
-        || collect_readonly_sdk_roots(&[])
+        || collect_readonly_sdk_roots_with_env(&[], None)
             .iter()
             .any(|r| canonical.starts_with(r));
     if !in_allowlist {
@@ -356,372 +368,11 @@ pub(crate) fn resolve_local_readable(
     Ok((canonical, true))
 }
 
-/// Read a Java source/class entry from `jar:file:///...!/...`, `.../src.zip!/...`,
-/// or `jdt://contents/...` as a read-only `java` buffer.
-pub(crate) async fn read_virtual_java_archive(
-    root: &Path,
-    additional_roots: &[PathBuf],
-    readonly_roots: &[PathBuf],
-    is_root_user: bool,
-    raw_uri: &str,
-) -> Result<IdeFileReadResp> {
-    let trimmed = raw_uri.trim();
-    if let Some(rest) = trimmed.strip_prefix("jdt://") {
-        return read_jdt_uri(
-            root,
-            additional_roots,
-            readonly_roots,
-            is_root_user,
-            trimmed,
-            rest,
-        )
-        .await;
-    }
-
-    let without_jar = trimmed.strip_prefix("jar:").unwrap_or(trimmed);
-    let without_query = without_jar.split('?').next().unwrap_or(without_jar);
-    let (archive_raw, inner_raw) = without_query
-        .split_once("!/")
-        .ok_or_else(|| Error::Invalid(format!("malformed archive URI '{trimmed}'")))?;
-
-    let inner = validate_archive_entry(inner_raw)?;
-    let (canonical_archive, _) = resolve_local_readable(
-        root,
-        additional_roots,
-        readonly_roots,
-        is_root_user,
-        archive_raw,
-    )?;
-
-    read_archive_member_or_javap(trimmed.to_string(), &canonical_archive, &inner).await
-}
-
-fn validate_archive_entry(raw: &str) -> Result<String> {
-    let decoded = percent_decode(raw).trim_start_matches('/').to_string();
-    if decoded.is_empty() || decoded.chars().any(char::is_control) {
-        return Err(Error::Invalid("invalid archive entry path".into()));
-    }
-    if Path::new(&decoded)
-        .components()
-        .any(|c| !matches!(c, std::path::Component::Normal(_)))
-    {
-        return Err(Error::Forbidden(
-            "archive entry traversal is forbidden".into(),
-        ));
-    }
-    Ok(decoded)
-}
-
-async fn read_jdt_uri(
-    root: &Path,
-    additional_roots: &[PathBuf],
-    readonly_roots: &[PathBuf],
-    is_root_user: bool,
-    original_uri: &str,
-    rest: &str,
-) -> Result<IdeFileReadResp> {
-    // Format: `contents/<jar_or_module>/<package>/<Class>.class?...`
-    let path_part = percent_decode(rest.split('?').next().unwrap_or(rest));
-    let stripped = path_part
-        .strip_prefix("contents/")
-        .unwrap_or(path_part.as_str());
-    let mut segs = stripped.splitn(3, '/');
-    let container = segs
-        .next()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| Error::Invalid(format!("malformed jdt URI '{original_uri}'")))?;
-    let pkg = segs.next().unwrap_or("");
-    let file_part = segs.next().unwrap_or("");
-
-    let pkg_slash = pkg.replace('.', "/");
-    let stem = file_part
-        .strip_suffix(".class")
-        .or_else(|| file_part.strip_suffix(".java"))
-        .unwrap_or(file_part);
-    let outer_stem = stem.split('$').next().unwrap_or(stem);
-    let rel_java = if pkg_slash.is_empty() {
-        format!("{outer_stem}.java")
-    } else {
-        format!("{pkg_slash}/{outer_stem}.java")
-    };
-    let rel_class = if pkg_slash.is_empty() {
-        format!("{outer_stem}.class")
-    } else {
-        format!("{pkg_slash}/{outer_stem}.class")
-    };
-
-    // 1. JDK module (`java.base`, `java.sql`, `jdk.compiler`, …) -> `lib/src.zip`
-    if !container.ends_with(".jar") {
-        let mod_entry = validate_archive_entry(&format!("{container}/{rel_java}"))?;
-        let flat_entry = validate_archive_entry(&rel_java)?;
-        for src_zip in discover_jdk_src_zips(readonly_roots) {
-            if let Ok(bytes) = extract_zip_entry(&src_zip, &mod_entry).await {
-                return build_java_virtual_resp(original_uri.to_string(), &bytes);
-            }
-            if let Ok(bytes) = extract_zip_entry(&src_zip, &flat_entry).await {
-                return build_java_virtual_resp(original_uri.to_string(), &bytes);
-            }
-        }
-    }
-
-    // 2. Maven / Gradle / project `.jar` container
-    if let Some(jar_path) = find_jar_by_name(
-        container,
-        root,
-        additional_roots,
-        readonly_roots,
-        is_root_user,
-    ) {
-        return read_archive_member_or_javap(original_uri.to_string(), &jar_path, &rel_class).await;
-    }
-
-    Err(Error::NotFound(format!(
-        "Java source not found for '{original_uri}'"
-    )))
-}
-
-async fn read_archive_member_or_javap(
-    display_path: String,
-    archive: &Path,
-    entry: &str,
-) -> Result<IdeFileReadResp> {
-    // 1. Direct entry extraction (works for `src.zip`, `*-sources.jar`, or source-bearing jars).
-    if entry.ends_with(".java") {
-        if let Ok(bytes) = extract_zip_entry(archive, entry).await {
-            return build_java_virtual_resp(display_path, &bytes);
-        }
-    }
-
-    // 2. If `archive` is `foo-1.0.jar`, probe sibling/Gradle `foo-1.0-sources.jar` for `.java`.
-    let java_entry = entry
-        .strip_suffix(".class")
-        .map(|s| {
-            let outer = s.split('$').next().unwrap_or(s);
-            format!("{outer}.java")
-        })
-        .unwrap_or_else(|| entry.to_string());
-    if let Some(sources_jar) = locate_sibling_sources_jar(archive) {
-        if let Ok(bytes) = extract_zip_entry(&sources_jar, &java_entry).await {
-            return build_java_virtual_resp(display_path, &bytes);
-        }
-    }
-    if let Ok(bytes) = extract_zip_entry(archive, &java_entry).await {
-        return build_java_virtual_resp(display_path, &bytes);
-    }
-
-    // 3. Fallback: decompile class signature via `javap -p` so drill-down ALWAYS opens readable code.
-    let fqcn = java_entry
-        .strip_suffix(".java")
-        .unwrap_or(&java_entry)
-        .replace('/', ".");
-    if let Ok(sig) = run_javap_signature(archive, &fqcn).await {
-        return build_java_virtual_resp(display_path, sig.as_bytes());
-    }
-
-    Err(Error::NotFound(format!(
-        "entry '{entry}' not found in '{}'",
-        archive.display()
-    )))
-}
-
-fn build_java_virtual_resp(display_path: String, bytes: &[u8]) -> Result<IdeFileReadResp> {
-    let truncated = bytes.len() as u64 > MAX_FILE_READ_BYTES;
-    let slice = if truncated {
-        &bytes[..MAX_FILE_READ_BYTES as usize]
-    } else {
-        bytes
-    };
-    let mut resp = build_file_read_resp(display_path, slice, bytes.len() as u64, true, truncated)?;
-    resp.language = "java".into();
-    resp.read_only = true;
-    Ok(resp)
-}
-
-fn escape_unzip_wildcards(entry: &str) -> String {
-    let mut out = String::with_capacity(entry.len() + 4);
-    for ch in entry.chars() {
-        if matches!(ch, '[' | ']' | '*' | '?' | '\\') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
-}
-
-async fn extract_zip_entry(archive: &Path, entry: &str) -> Result<Vec<u8>> {
-    let escaped = escape_unzip_wildcards(entry);
-    let mut cmd = Command::new("unzip");
-    cmd.arg("-p")
-        .arg("--")
-        .arg(archive)
-        .arg(escaped)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    let out = tokio::time::timeout(Duration::from_secs(5), cmd.output())
-        .await
-        .map_err(|_| Error::Upstream("unzip timed out".into()))?
-        .map_err(|e| Error::Upstream(format!("unzip failed: {e}")))?;
-
-    if !out.status.success() || out.stdout.is_empty() {
-        return Err(Error::NotFound(format!(
-            "archive entry '{entry}' missing in '{}'",
-            archive.display()
-        )));
-    }
-    Ok(out.stdout)
-}
-
-async fn run_javap_signature(archive: &Path, fqcn: &str) -> Result<String> {
-    if fqcn.is_empty()
-        || !fqcn
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '$'))
-    {
-        return Err(Error::Invalid("invalid Java class name".into()));
-    }
-    let javap_bin = std::env::var("JAVA_HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join("bin/javap"))
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("javap"));
-
-    let mut cmd = Command::new(javap_bin);
-    cmd.args(["-p", "-cp"])
-        .arg(archive)
-        .arg(fqcn)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    let out = tokio::time::timeout(Duration::from_secs(5), cmd.output())
-        .await
-        .map_err(|_| Error::Upstream("javap timed out".into()))?
-        .map_err(|e| Error::Upstream(format!("javap failed: {e}")))?;
-    if !out.status.success() || out.stdout.is_empty() {
-        return Err(Error::NotFound(format!("class '{fqcn}' not found")));
-    }
-    let body = String::from_utf8_lossy(&out.stdout);
-    Ok(format!(
-        "// Read-only class signature from {} (sources jar not installed)\n{body}",
-        archive.display()
-    ))
-}
-
-#[allow(clippy::disallowed_methods)] // shallow 1-level Gradle hash dir scan (<16 entries)
-fn locate_sibling_sources_jar(jar: &Path) -> Option<PathBuf> {
-    let name = jar.file_name()?.to_str()?;
-    let stem = name.strip_suffix(".jar")?;
-    if stem.ends_with("-sources") {
-        return Some(jar.to_path_buf());
-    }
-    let sources_name = format!("{stem}-sources.jar");
-    let direct = jar.with_file_name(&sources_name);
-    if direct.is_file() {
-        return Some(direct);
-    }
-    // Gradle cache layout: `<version>/<hash>/<artifact>-<version>.jar` -> sibling `<other_hash>/<artifact>-<version>-sources.jar`
-    let ver_dir = jar.parent()?.parent()?;
-    let entries = std::fs::read_dir(ver_dir).ok()?;
-    for entry in entries.flatten() {
-        let cand = entry.path().join(&sources_name);
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    None
-}
-
-#[allow(clippy::disallowed_methods)] // shallow 1-level toolchain root scan (<=16 entries)
-pub(crate) fn discover_jdk_src_zips(readonly_roots: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut push_if_file = |p: PathBuf| {
-        if p.is_file() && !out.contains(&p) {
-            out.push(p);
-        }
-    };
-
-    let shell_env = crate::environments::cached_shell_env_snapshot();
-    if let Some(jh) = std::env::var("JAVA_HOME")
-        .ok()
-        .or_else(|| shell_env.get("JAVA_HOME").cloned())
-    {
-        let p = PathBuf::from(jh);
-        push_if_file(p.join("lib/src.zip"));
-        push_if_file(p.join("src.zip"));
-        push_if_file(p.join("Contents/Home/lib/src.zip"));
-    }
-
-    for r in readonly_roots {
-        push_if_file(r.join("lib/src.zip"));
-        push_if_file(r.join("Contents/Home/lib/src.zip"));
-        push_if_file(r.join("libexec/openjdk.jdk/Contents/Home/lib/src.zip"));
-        if let Ok(rd) = std::fs::read_dir(r) {
-            for e in rd.flatten().take(16) {
-                let p = e.path();
-                push_if_file(p.join("lib/src.zip"));
-                push_if_file(p.join("Contents/Home/lib/src.zip"));
-                push_if_file(p.join("libexec/openjdk.jdk/Contents/Home/lib/src.zip"));
-            }
-        }
-    }
-
-    for fixed in [
-        "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home/lib/src.zip",
-        "/usr/local/opt/openjdk/libexec/openjdk.jdk/Contents/Home/lib/src.zip",
-    ] {
-        push_if_file(PathBuf::from(fixed));
-    }
-    out
-}
-
-fn find_jar_by_name(
-    jar_name: &str,
-    root: &Path,
-    additional_roots: &[PathBuf],
-    readonly_roots: &[PathBuf],
-    is_root_user: bool,
-) -> Option<PathBuf> {
-    if !jar_name.ends_with(".jar") || jar_name.contains('/') || jar_name.contains('\\') {
-        return None;
-    }
-    let mut search_bases: Vec<PathBuf> = vec![root.to_path_buf()];
-    search_bases.extend(additional_roots.iter().cloned());
-    if let Some(home) = dirs::home_dir() {
-        search_bases.push(home.join(".m2/repository"));
-        search_bases.push(home.join(".gradle/caches/modules-2/files-2.1"));
-    }
-    for base in search_bases {
-        if !base.is_dir() {
-            continue;
-        }
-        let walker = ignore::WalkBuilder::new(&base)
-            .max_depth(Some(8))
-            .git_ignore(false)
-            .build();
-        for entry in walker.flatten().take(4_000) {
-            if entry.file_name().to_str() == Some(jar_name) && entry.path().is_file() {
-                if let Ok((canon, _)) = resolve_local_readable(
-                    root,
-                    additional_roots,
-                    readonly_roots,
-                    is_root_user,
-                    &entry.path().to_string_lossy(),
-                ) {
-                    return Some(canon);
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Discover local Go `replace` (`go.mod` / `go.work`) and `use` (`go.work`) target
-/// directories referenced by `primary_root` or `additional_roots`, returning
-/// canonicalized writable workspace directories (`<0.5ms`, zero subprocesses).
+/// directories referenced by `primary_root` or `additional_roots`.
+///
+/// Callers MUST authorize any returned directory via workspace RBAC before admitting
+/// it for non-root users, and NEVER place discovered directories into writable roots.
 #[allow(clippy::disallowed_methods)] // tiny manifest reads (`go.mod` / `go.work` <64KB)
 pub(crate) fn discover_local_go_replace_roots(
     primary_root: &Path,
@@ -732,9 +383,11 @@ pub(crate) fn discover_local_go_replace_roots(
     let mut inspect_dirs: Vec<PathBuf> = Vec::with_capacity(1 + additional_roots.len() + 1);
     inspect_dirs.push(primary_root.to_path_buf());
     inspect_dirs.extend(additional_roots.iter().cloned());
-    if let Some(parent) = primary_root.parent() {
-        if parent.join("go.work").is_file() && !inspect_dirs.iter().any(|d| d == parent) {
-            inspect_dirs.push(parent.to_path_buf());
+    if is_root_user {
+        if let Some(parent) = primary_root.parent() {
+            if parent.join("go.work").is_file() && !inspect_dirs.iter().any(|d| d == parent) {
+                inspect_dirs.push(parent.to_path_buf());
+            }
         }
     }
 
@@ -743,7 +396,6 @@ pub(crate) fn discover_local_go_replace_roots(
         if trimmed.is_empty() {
             return;
         }
-        // Only local path targets (`./...`, `../...`, `/...`, `~/...`, or existing relative dir)
         let candidate = if let Some(rest) = trimmed.strip_prefix("~/") {
             let Some(home) = dirs::home_dir() else {
                 return;

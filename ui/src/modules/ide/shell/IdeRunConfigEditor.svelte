@@ -13,6 +13,10 @@
     sdk_path: string;
     inherit_shell_env: boolean;
     before_launch: string;
+    maven_profiles: string[];
+    spring_profiles: string[];
+    skip_tests: boolean;
+    offline: boolean;
     autoDetected: boolean;
     overrides: { rowId: string; key: string; value: string }[];
   }
@@ -40,7 +44,9 @@
     return {
       id: '', name: '', runner: 'go_test', target_path: '', command: '',
       test_filter: '', buildFlagsText: '', argsText: '', cwd: '', env_file: '',
-      sdk_path: '', inherit_shell_env: true, before_launch: '', autoDetected: false, overrides: [],
+      sdk_path: '', inherit_shell_env: true, before_launch: '',
+      maven_profiles: [], spring_profiles: [], skip_tests: false, offline: false,
+      autoDetected: false, overrides: [],
     };
   }
 </script>

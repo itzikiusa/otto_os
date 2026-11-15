@@ -8,18 +8,26 @@ inline **Gutter Run/Debug**, a full **Debug Adapter Protocol (DAP) debugger**,
 Edit (`⌘I`)**, **Share with Friends** live collaborative editing, and
 zero-rebuild **runtime IDE plugins**.
 
-- Route: `#/ide`. Sidebar entry **IDE** (Build group). ⌘K: "Go to IDE",
-  "Toggle IDE AI Agent", "IDE: Inline Edit with Agent".
+- Route: `#/ide` (**Project** mode) and `#/workbench` (**Scratches** mode,
+  switched in the `IDE` header via `Project | Scratches`). Sidebar entry **IDE**
+  (Build group). ⌘K: "Go to IDE", "Toggle IDE AI Agent", "IDE: Inline Edit with Agent".
 - RBAC:
-  - Protected `/api/v1/ide/*` routes require **Agents: Edit** (`Require(Agents, Edit)`),
+  - Protected workspace `/api/v1/ide/*` routes require **Agents: Edit** (`Require(Agents, Edit)`),
     and are additionally guarded by `is_host_files_route` so an agent-session
     token cannot escape its Seatbelt sandbox through the daemon's IDE filesystem,
     runner, debugger, or history routes.
   - Toolchain installation and local SDK mutations (`/ide/toolchains/install`,
-    `/ide/toolchains/local`) and mutating plugin routes (`/ide/plugins*`) carry
-    `RouteClass::Admin` (human credentials only); minting a collab share room
-    (`POST /ide/collab/rooms`) carries `RouteClass::Secret` (human credentials
-    only).
+    `/ide/toolchains/local`) and mutating plugin routes (`/ide/plugins*`) require
+    **Settings: Admin**, carry `RouteClass::Admin` (human credentials only), and
+    enforce root authority (`GET /ide/toolchains/jobs/{job_id}` requires
+    **Agents: Edit** + root).
+  - Shell environment routes (`/ide/shell-env*`) carry `RouteClass::Secret` and
+    require human credentials + root authority; project environment routes
+    (`GET/PUT /ide/environments`) and minting a collab share room
+    (`POST /ide/collab/rooms`) carry `RouteClass::Secret` (human credentials only);
+    and subprocess-spawning workspace mutations (`python-venv`, `deps/action`,
+    `POST /ide/runs`, `POST /ide/debug/sessions`) carry `RouteClass::Admin`
+    (human credentials only).
   - Public guest routes (`/api/v1/ide/collab/guest/*`) sit outside the bearer
     chokepoint and authenticate each request with the room's capability share
     token (`viewer` vs `editor`).
@@ -81,11 +89,12 @@ active:
   `⌘⇧V` clipboard history, `⌘⌫` delete line) and **Standard** (`F12`, `⌘.`,
   `F2`, `⇧⌥F`, `F9`, `⌘D` next occurrence).
 - **6 Color Schemes, Semantic Coloring & Rainbow Brackets:** Choose between
-  **JetBrains Islands Dark**, **JetBrains Darcula**, **JetBrains Islands Light**,
-  **VS Code Dark+**, **VS Code Light+**, and **Otto Default** in `⌘,` (`Editor →
-  Color Scheme`), with distinct semantic token coloring (`package` vs exported
-  struct field vs function call in Go, `@Annotation` gold vs instance field
-  purple in Java) and 6-stop depth-cycled **Rainbow Brackets** (`()`, `[]`, `{}`).
+  **Follow Otto Dark/Light**, **JetBrains Islands Dark**, **JetBrains Darcula**,
+  **JetBrains Islands Light**, **VS Code Dark Modern**, and **VS Code Light Modern**
+  in `⌘,` (`Editor → Color Scheme`), with distinct semantic token coloring
+  (`package` vs exported struct field vs function call in Go, `@Annotation` gold
+  vs instance field purple in Java) and 4-stop depth-cycled **Rainbow Brackets**
+  (`()`, `[]`, `{}`).
 
 ### 3. SDKs & Toolchains Manager
 
@@ -289,15 +298,17 @@ composer capability parity, the shared `ModelPicker`, and the thread switcher:
   states (`8`, skipping docs `> 200 KB`) and renders modified-line gutter bars
   (`cm-ide-diff-gutter`) under `3,000` lines.
 - **Bounded daemon state (`crates/otto-ide`):** Run stdout (`2,000`-line
-  `VecDeque` ring with incremental $O(1)$-per-line test tracking and optional
-  `GET /ide/runs/{run_id}?tail_lines=`), finished runs (`MAX_FINISHED_RUNS = 16`),
-  debug output (`1,000` entries) and terminated DAP sessions (`6`), collab rooms
-  (`32` rooms, `2h` idle TTL, `32` buffers / `16 MiB` per room, zero buffer
-  clones on cursor moves), and pooled LSP servers (`MAX_SERVERS_PER_OWNER = 2`
-  LRU with child heap caps, `450ms` 0-doc detach reaping + instant workspace-root
-  eviction, `rg --files-with-matches` reference pre-filtering, and a `2s`
-  `otto_git_cmd::hardened_command()` git-status cache) are all strictly bounded
-  with zero stale FS/tree caches.
+  `VecDeque` ring with incremental $O(1)$-per-line test tracking, live
+  `GET /ide/runs/{run_id}/events` SSE streaming, and optional
+  `GET /ide/runs/{run_id}?tail_lines=`), finished runs (`MAX_FINISHED_RUNS = 8`),
+  debug output (`400` entries / `256 KiB`), terminated DAP sessions (`4`),
+  external incremental Go/Java build caches outside user repositories, collab
+  rooms (`32` rooms, `2h` idle TTL, `32` buffers / `16 MiB` per room, zero buffer
+  clones on cursor moves), and pooled module-scoped LSP servers
+  (`MAX_SERVERS_PER_OWNER = 3`, `MAX_GLOBAL_SERVERS = 3`, `1.2 GiB` combined LSP
+  RSS budget with inactive-first `active_clients == 0` LRU eviction, observable
+  via `GET /ide/lsp/status`) are all strictly bounded with zero stale FS/tree
+  caches.
 
 ## API & WebSocket summary
 
@@ -323,14 +334,15 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   `POST /ide/environments/python-venv`, `POST /ide/run-configs`,
   `DELETE /ide/run-configs/{id}`.
 - Run & DAP Debugger: `POST /ide/runs`, `GET /ide/runs/{run_id}`,
-  `POST /ide/runs/{run_id}/stop`, `POST /ide/debug/sessions`,
+  `GET /ide/runs/{run_id}/events`, `POST /ide/runs/{run_id}/stop`,
+  `POST /ide/debug/sessions`,
   `GET /ide/debug/sessions`, `GET /ide/debug/sessions/{id}`,
   `GET /ide/debug/sessions/{id}/events`,
   `PUT /ide/debug/sessions/{id}/breakpoints`,
   `POST /ide/debug/sessions/{id}/command`,
   `POST /ide/debug/sessions/{id}/variables`,
   `POST /ide/debug/sessions/{id}/evaluate`.
-- LSP Intelligence: `POST /ide/lsp/symbols`, `POST /ide/lsp/definition`,
+- LSP Intelligence: `GET /ide/lsp/status`, `POST /ide/lsp/symbols`, `POST /ide/lsp/definition`,
   `POST /ide/lsp/implementation`, `POST /ide/lsp/references`,
   `POST /ide/lsp/rename`, `POST /ide/lsp/format`, `POST /ide/lsp/code-actions`,
   `POST /ide/lsp/diagnostics`, `POST /ide/lsp/hover`,
@@ -343,6 +355,11 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   `/ide/collab/guest/{room_id}/debug-action`.
 - Runtime IDE Plugins: `GET /ide/plugins`, `POST /ide/plugins/install`,
   `POST /ide/plugins/{slug}/toggle`, `DELETE /ide/plugins/{slug}`.
+- Live Database Watch & Component-Test Watcher: `POST /ide/db-watch/detect`,
+  `POST /ide/db-watch/snapshot` (scans code for MySQL, PostgreSQL, MongoDB,
+  Redis, and ClickHouse tables/collections/key prefixes, pairs with saved DB
+  connections or live local Testcontainers / `miniredis` instances, and computes
+  read-only `Before -> After` row/field diffs across debug steps and test runs).
 
 ## Troubleshooting
 

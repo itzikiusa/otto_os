@@ -46,6 +46,60 @@ function endImpersonation(): boolean {
   return active;
 }
 
+const IDE_AUTH_CLEAR_EXACT_KEYS = [
+  'otto.ide.undoJournal.v1',
+  'otto.ide.undoDraftIndex.v1',
+  'otto.ide.clipboardHistory.v1',
+  'otto.ide.projects.v1',
+  'otto.ide.namedProjects.v1',
+  'otto.ide.lastRoot',
+  'otto.ide.activeProjectId.v1',
+  'otto.ide.openThreadHandoff',
+  'otto.ide.cursorPos.v1',
+];
+
+const IDE_AUTH_CLEAR_PREFIXES = [
+  'otto.ide.undoDraft:',
+  'otto.ide.roots:',
+  'otto.ide.bps:',
+  'otto.ide.projectTabs:',
+  'otto.ide.openTabs.v1:',
+  'otto.ide.buildToolPrefs:',
+];
+
+/** Purge user-scoped IDE drafts, undo journals, clipboard ring, project lists,
+ *  and cursor caches on sign-out, 401 expiry, sign-in, and impersonation switches,
+ *  even when `#/ide` has not been mounted in the current session. */
+export function clearIdeAuthStorage(): void {
+  for (let i = 0; i < IDE_AUTH_CLEAR_EXACT_KEYS.length; i++) {
+    lsRemove(IDE_AUTH_CLEAR_EXACT_KEYS[i]);
+  }
+  ssRemove('otto.ide.cursorPos.v1');
+  try {
+    if (typeof localStorage !== 'undefined' && typeof localStorage.length === 'number') {
+      const toRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k) continue;
+        for (let j = 0; j < IDE_AUTH_CLEAR_PREFIXES.length; j++) {
+          if (k.startsWith(IDE_AUTH_CLEAR_PREFIXES[j])) {
+            toRemove.push(k);
+            break;
+          }
+        }
+      }
+      for (let i = 0; i < toRemove.length; i++) {
+        lsRemove(toRemove[i]);
+      }
+    }
+  } catch {
+    /* Web Storage may be unavailable in restricted or headless contexts */
+  }
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('otto:ide-storage-cleared'));
+  }
+}
+
 /** Start of this tab's impersonation (ms since epoch), or null if unknown. */
 export function impersonationStartedMs(): number | null {
   const v = parseInt(ssGet(IMP_START_KEY) ?? '', 10);
@@ -356,9 +410,11 @@ class AuthStore {
         // this tab instead of signing them out of it.
         if (token !== null && token === getImpersonationToken()) {
           endImpersonation();
+          clearIdeAuthStorage();
           if (getToken()) return this.performBoot(true);
         }
         setToken(null);
+        clearIdeAuthStorage();
         this.phase = 'login';
       } else if (this.phase !== 'ready') {
         this.phase = 'offline';
@@ -369,6 +425,7 @@ class AuthStore {
   async login(username: string, password: string): Promise<void> {
     const resp = await api.post<LoginResp>('/auth/login', { username, password });
     endImpersonation();
+    clearIdeAuthStorage();
     setToken(resp.token);
     this.me = resp.user;
     this.realUser = resp.user;
@@ -381,6 +438,7 @@ class AuthStore {
   /** Used by onboarding which returns a LoginResp directly. */
   async acceptLogin(resp: LoginResp): Promise<void> {
     endImpersonation();
+    clearIdeAuthStorage();
     setToken(resp.token);
     this.me = resp.user;
     this.realUser = resp.user;
@@ -408,6 +466,7 @@ class AuthStore {
     );
 
     beginImpersonation(impToken);
+    clearIdeAuthStorage();
 
     // Re-load identity + capabilities as the impersonated user.
     await this.refreshChangedIdentity();
@@ -428,6 +487,7 @@ class AuthStore {
     }
 
     endImpersonation();
+    clearIdeAuthStorage();
 
     if (!getToken()) {
       // The admin signed out elsewhere meanwhile — go to login.
@@ -460,6 +520,7 @@ class AuthStore {
       if (!(e instanceof ApiError && e.status === 401) || token !== getToken()) return;
       // An expired impersonation token falls back to this tab's admin session.
       if (token === getImpersonationToken() && endImpersonation() && getToken()) {
+        clearIdeAuthStorage();
         try {
           await this.loadMe();
           await this.loadCapabilities();
@@ -469,6 +530,7 @@ class AuthStore {
         }
       }
       setToken(null);
+      clearIdeAuthStorage();
       this.me = null;
       this.realUser = null;
       this.capabilities = {};
@@ -496,6 +558,7 @@ class AuthStore {
       /* token may already be invalid */
     }
     setToken(null);
+    clearIdeAuthStorage();
     this.me = null;
     this.realUser = null;
     this.capabilities = {};

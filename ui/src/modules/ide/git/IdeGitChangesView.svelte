@@ -16,8 +16,8 @@
   import { viewport } from '../../../lib/stores/viewport.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { toastError } from '../../../lib/toastError';
-  import DiffViewer from '../../git/DiffViewer.svelte'; // ui-guards: allow — reuse Otto's shared Git DiffViewer
-  import { repoDiffFileLoader } from '../../git/diff-load'; // ui-guards: allow — reuse Otto's shared Git diff loader
+  import DiffViewer from '../../../lib/diff/DiffViewer.svelte';
+  import { repoDiffFileLoader } from '../../../lib/diff/diff-load';
   import { ide, ideBasename } from '../ideStore.svelte';
   import { ideGit } from './ideGitController.svelte';
 

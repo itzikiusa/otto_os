@@ -71,9 +71,27 @@ fn thinking_level(effort: &str) -> Option<&'static str> {
     })
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Tool {
     name: String,
     args: Value,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PiDriverState {
+    next_id: u64,
+    state_req: Option<String>,
+    prompt_req: Option<String>,
+    steer_reqs: Vec<String>,
+    ready: bool,
+    turn_id: Option<String>,
+    auto_turns: u64,
+    message: Option<(String, String, chrono::DateTime<chrono::Utc>)>,
+    thought: Option<(String, String, chrono::DateTime<chrono::Utc>)>,
+    messages: u32,
+    tools: HashMap<String, Tool>,
+    settles: bool,
+    ended: Option<(TurnTerminalStatus, Option<ProviderFailure>)>,
 }
 
 pub struct PiDriver {
@@ -699,6 +717,47 @@ impl StructuredDriver for PiDriver {
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
         self.steer_reqs.clear();
         DriverStep::default()
+    }
+
+    fn snapshot_state(&self) -> Value {
+        serde_json::to_value(PiDriverState {
+            next_id: self.next_id,
+            state_req: self.state_req.clone(),
+            prompt_req: self.prompt_req.clone(),
+            steer_reqs: self.steer_reqs.clone(),
+            ready: self.ready,
+            turn_id: self.turn_id.clone(),
+            auto_turns: self.auto_turns,
+            message: self.message.clone(),
+            thought: self.thought.clone(),
+            messages: self.messages,
+            tools: self.tools.clone(),
+            settles: self.settles,
+            ended: self.ended.clone(),
+        })
+        .unwrap_or(Value::Null)
+    }
+
+    fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
+        if state.is_null() {
+            return Ok(());
+        }
+        let s: PiDriverState = serde_json::from_value(state.clone())
+            .map_err(|e| DriverError(format!("invalid pi driver state: {e}")))?;
+        self.next_id = s.next_id;
+        self.state_req = s.state_req;
+        self.prompt_req = s.prompt_req;
+        self.steer_reqs = s.steer_reqs;
+        self.ready = s.ready;
+        self.turn_id = s.turn_id;
+        self.auto_turns = s.auto_turns;
+        self.message = s.message;
+        self.thought = s.thought;
+        self.messages = s.messages;
+        self.tools = s.tools;
+        self.settles = s.settles;
+        self.ended = s.ended;
+        Ok(())
     }
 }
 

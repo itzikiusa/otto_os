@@ -4,6 +4,7 @@
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import IdeModeTabs from '../../lib/components/IdeModeTabs.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -18,22 +19,24 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { idePreferences } from '../../lib/idePreferences.svelte';
   import { ideWorkspacePort } from '../../lib/ideWorkspacePort.svelte';
   import type { IdeCompareMode } from './history/ideComparisonLoader';
   import IdeEditorArea from './IdeEditorArea.svelte';
-  import IdeProjectTree from './IdeProjectTree.svelte';
   import { ide } from './ideStore.svelte';
-  import IdeRunToolbar from './shell/IdeRunToolbar.svelte';
   import IdeWorkspaceSwitcher from './shell/IdeWorkspaceSwitcher.svelte';
   import {
     handleIdeChord,
     handleIdeWindowKeyDown,
+    promptIdeGoToLine,
     readQuickSchemePrefs,
   } from './shell/ideShellCommands';
   import { ideAgent } from './store/ideAgentController.svelte';
 
   const loadShellMenus = () => import('./shell/ideShellMenus');
 
+  const IdeProjectTreeLazy = lazyComponent(() => import('./IdeProjectTree.svelte'));
+  const IdeRunToolbarLazy = lazyComponent(() => import('./shell/IdeRunToolbar.svelte'));
   const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
   const IdeBottomDockLazy = lazyComponent(() => import('./IdeBottomDock.svelte'));
   const IdeAgentPanelLazy = lazyComponent(() => import('./IdeAgentPanel.svelte'));
@@ -108,6 +111,12 @@
     const onOpenSettings = (ev: Event): void => ide.openSettings((ev as CustomEvent<{ section?: string }>).detail?.section);
     const onPrefsChanged = (): void => { quickPrefs = readQuickSchemePrefs(); };
     const onPageHide = (): void => ide.suspendOnPageLeave();
+    const onWindowBlur = (): void => {
+      if (idePreferences.current.autoSave) void ide.flushAutoSave();
+    };
+    const onVisibilityChange = (): void => {
+      if (document.hidden && idePreferences.current.autoSave) void ide.flushAutoSave();
+    };
     const onLocalHistory = (ev: Event): void => {
       const d = (ev as CustomEvent<{ path?: string; isDir?: boolean; filter?: 'all' | 'deleted'; putLabel?: boolean } | undefined>).detail;
       const p = d?.path || ide.activePath || ide.target.root;
@@ -131,6 +140,8 @@
     window.addEventListener('otto:ide-open-local-history', onLocalHistory);
     window.addEventListener('otto:ide-open-compare', onCompare);
     window.addEventListener('otto:ide-git-action', onGitAction);
+    window.addEventListener('blur', onWindowBlur);
+    document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('pagehide', onPageHide);
     window.addEventListener('beforeunload', onPageHide);
     return () => {
@@ -139,6 +150,8 @@
       window.removeEventListener('otto:ide-open-local-history', onLocalHistory);
       window.removeEventListener('otto:ide-open-compare', onCompare);
       window.removeEventListener('otto:ide-git-action', onGitAction);
+      window.removeEventListener('blur', onWindowBlur);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('beforeunload', onPageHide);
     };
@@ -190,7 +203,7 @@
     if (typeof window === 'undefined') return;
     const h = window.location.hash;
     const qIdx = h.indexOf('?');
-    if (qIdx < 0) return;
+    if (qIdx < 0) { lastHandledQuery = ''; return; }
     const rawQuery = h.slice(qIdx + 1);
     if (!rawQuery || rawQuery === lastHandledQuery) return;
     lastHandledQuery = rawQuery;
@@ -206,16 +219,24 @@
     untrack(() => {
       if (collabId && token) {
         history.replaceState(null, '', '#/ide');
+        lastHandledQuery = '';
         void ide.joinCollabRoom(collabId, token, guestName);
         return;
       }
       void (async () => {
-        if (projectParam) await ide.activateProject(projectParam);
-        else if (rootParam) await ide.setLocalTarget(rootParam);
-        else ide.attachDefaultWorkspace();
-        if (fileParam) {
-          await ide.openFile(fileParam, { line: lineParam, preview: false });
-          mobileView = 'editor';
+        try {
+          if (projectParam) await ide.activateProject(projectParam);
+          else if (rootParam) await ide.setLocalTarget(rootParam, null, { skipAutoOpen: Boolean(fileParam) });
+          else ide.attachDefaultWorkspace();
+          if (fileParam) {
+            await ide.openFile(fileParam, { line: lineParam, preview: false });
+            mobileView = 'editor';
+          }
+        } finally {
+          if (window.location.hash.endsWith(`?${rawQuery}`)) {
+            history.replaceState(null, '', '#/ide');
+            lastHandledQuery = '';
+          }
         }
       })();
     });
@@ -241,7 +262,8 @@
   });
 
   $effect(() => {
-    const claim = (e: KeyboardEvent): boolean => handleIdeChord(e, ui.overlayOpen, () => (explorerVisible = !explorerVisible));
+    const claim = (e: KeyboardEvent): boolean =>
+      handleIdeChord(e, ui.overlayOpen, () => (explorerVisible = !explorerVisible), () => triggerAgentShortcut());
     keyContext.pageChords = claim;
     return () => {
       if (keyContext.pageChords === claim) keyContext.pageChords = null;
@@ -303,10 +325,14 @@
   }
 </script>
 
-<div class="ide-page" data-testid="ide-page">
+<div class="ide-page" data-testid="ide-page" data-ide-density={idePreferences.current.uiDensity}>
   <PageHeader title="IDE">
+    {#snippet tabs()}
+      <IdeModeTabs active="project" />
+    {/snippet}
+
     {#snippet badge()}
-      <IdeWorkspaceSwitcher />
+      <IdeWorkspaceSwitcher onpickfolder={(m) => (folderPickerMode = m)} />
     {/snippet}
 
     {#snippet actions()}
@@ -327,7 +353,7 @@
           </button>
         {/if}
 
-        <IdeRunToolbar />
+        <LazyMount lazy={IdeRunToolbarLazy} what="launch controls" quiet />
 
         {#if !viewport.isPhone}
           <button
@@ -368,7 +394,7 @@
             data-icon="assistant"
             data-label="Toggle AI Agent"
             aria-pressed={ideAgent.panelOpen}
-            title="Toggle AI Agent (⌘L)"
+            title="Toggle AI Agent (⇧⌘L)"
             onclick={() => { ideAgent.togglePanel(); if (ideAgent.panelOpen) focusAgentComposer(); }}
             data-testid="ide-toggle-agent"
           >
@@ -427,7 +453,7 @@
       <button
         type="button"
         class="icon-btn"
-        data-overflow="-10"
+        data-keep
         data-icon="more"
         data-label="More actions…"
         aria-label="More actions"
@@ -450,6 +476,8 @@
       </button>
     {/snippet}
   </PageHeader>
+
+  <IdeWorkspaceSwitcher mode="pills-bar" />
 
   {#if ide.collabRoom}
     <div class="ide-collab-banner" role="region" aria-label="Live collaboration session">
@@ -506,6 +534,10 @@
           <Icon name="server" size={13} />
           Connect over SSH…
         </button>
+        <button type="button" class="btn ghost" onclick={() => router.go('workbench')} data-testid="ide-open-scratches">
+          <Icon name="workbench" size={13} />
+          Open Scratches
+        </button>
       </EmptyState>
     {:else if viewport.isPhone}
       <div class="ide-mobile-bar">
@@ -521,7 +553,7 @@
 
       <div class="ide-mobile-body">
         {#if mobileView === 'files'}
-          <IdeProjectTree onOpenCompare={openCompareModal} />
+          <LazyMount lazy={IdeProjectTreeLazy} what="project explorer" variant="panel" props={{ onOpenCompare: openCompareModal }} />
         {:else if mobileView === 'tools'}
           <LazyMount lazy={IdeBottomDockLazy} what="bottom tool dock" variant="panel" />
         {:else if mobileView === 'agent'}
@@ -534,7 +566,7 @@
       <div class="ide-workbench">
         {#if explorerVisible}
           <div class="ide-rail-wrap" style:inline-size="{treeW}px">
-            <IdeProjectTree onOpenCompare={openCompareModal} />
+            <LazyMount lazy={IdeProjectTreeLazy} what="project explorer" variant="panel" props={{ onOpenCompare: openCompareModal }} />
           </div>
           <PaneDivider bind:width={treeW} storageKey={TREE_W_KEY} min={180} max={620} defaultWidth={270} label="Resize project explorer" />
         {/if}
@@ -580,25 +612,61 @@
     <LazyMount lazy={IdeSettingsModalLazy} what="IDE settings" quiet onerror={() => (ide.settingsOpen = false)} />
   {/if}
   {#if ide.bulkRepoPickerMode}
-    <LazyMount lazy={IdeBulkRepoPickerLazy} what="multi-repo picker" quiet onerror={() => (ide.bulkRepoPickerMode = null)} />
+    <LazyMount
+      lazy={IdeBulkRepoPickerLazy}
+      props={{ mode: ide.bulkRepoPickerMode, onclose: () => (ide.bulkRepoPickerMode = null) }}
+      what="multi-repo picker"
+      quiet
+      onerror={() => (ide.bulkRepoPickerMode = null)}
+    />
   {/if}
   {#if ide.searchEverywhereOpen}
     <LazyMount lazy={IdeSearchEverywhereLazy} what="search everywhere" quiet onerror={() => (ide.searchEverywhereOpen = false)} />
   {/if}
   {#if ide.environmentsOpen}
-    <LazyMount lazy={IdeEnvironmentsModalLazy} props={{ initialTab: ide.environmentsInitialTab }} what="environments" quiet onerror={() => (ide.environmentsOpen = false)} />
+    <LazyMount
+      lazy={IdeEnvironmentsModalLazy}
+      props={{ open: true, initialTab: ide.environmentsInitialTab, onclose: () => (ide.environmentsOpen = false) }}
+      what="environments"
+      quiet
+      onerror={() => (ide.environmentsOpen = false)}
+    />
   {/if}
   {#if ide.toolchainsOpen}
-    <LazyMount lazy={IdeToolchainsModalLazy} what="toolchains manager" quiet onerror={() => (ide.toolchainsOpen = false)} />
+    <LazyMount
+      lazy={IdeToolchainsModalLazy}
+      props={{ open: true, onclose: () => (ide.toolchainsOpen = false) }}
+      what="toolchains manager"
+      quiet
+      onerror={() => (ide.toolchainsOpen = false)}
+    />
   {/if}
   {#if ide.sshOpen}
-    <LazyMount lazy={IdeSshTargetModalLazy} what="SSH target picker" quiet onerror={() => (ide.sshOpen = false)} />
+    <LazyMount
+      lazy={IdeSshTargetModalLazy}
+      props={{ open: true, onclose: () => (ide.sshOpen = false) }}
+      what="SSH target picker"
+      quiet
+      onerror={() => (ide.sshOpen = false)}
+    />
   {/if}
   {#if ide.shareOpen}
-    <LazyMount lazy={IdeShareModalLazy} what="collaboration settings" quiet onerror={() => (ide.shareOpen = false)} />
+    <LazyMount
+      lazy={IdeShareModalLazy}
+      props={{ open: true, onclose: () => (ide.shareOpen = false) }}
+      what="collaboration settings"
+      quiet
+      onerror={() => (ide.shareOpen = false)}
+    />
   {/if}
   {#if ide.pluginsOpen}
-    <LazyMount lazy={IdePluginsModalLazy} what="extensions manager" quiet onerror={() => (ide.pluginsOpen = false)} />
+    <LazyMount
+      lazy={IdePluginsModalLazy}
+      props={{ open: true, onclose: () => (ide.pluginsOpen = false) }}
+      what="extensions manager"
+      quiet
+      onerror={() => (ide.pluginsOpen = false)}
+    />
   {/if}
   {#if compareTarget}
     <LazyMount lazy={IdeComparisonModalLazy} what="comparison tool" quiet props={{ ...compareTarget, onclose: () => (compareTarget = null) }} onerror={() => (compareTarget = null)} />
@@ -606,10 +674,12 @@
 </div>
 
 <style>
-  .ide-page { display: flex; flex-direction: column; flex: 1; min-inline-size: 0; min-block-size: 0; block-size: 100%; }
+  .ide-page { display: flex; flex-direction: column; flex: 1; min-inline-size: 0; min-block-size: 0; block-size: 100%; --ide-row-py: 4px; --ide-row-px: 8px; --ide-tab-h: 32px; --ide-bar-py: 6px; }
+  .ide-page[data-ide-density='compact'] { --ide-row-py: 2px; --ide-row-px: 6px; --ide-tab-h: 28px; --ide-bar-py: 4px; }
+  .ide-page[data-ide-density='comfortable'] { --ide-row-py: 6px; --ide-row-px: 10px; --ide-tab-h: 34px; --ide-bar-py: 8px; }
   .ide-tool-toggle[aria-pressed='true'] { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
   .ide-bt-mark { display: inline-flex; align-items: center; justify-content: center; inline-size: 14px; block-size: 14px; border-radius: var(--radius-s); background: var(--accent-soft); color: var(--accent-text); font-size: var(--fs-xs); font-weight: 600; }
-  .ide-collab-banner { display: flex; align-items: center; gap: 8px; padding-block: 6px; padding-inline: 14px; background: var(--surface); border-block-end: 1px solid var(--border); font-size: var(--fs-xs); flex-wrap: wrap; }
+  .ide-collab-banner { display: flex; align-items: center; gap: 8px; padding-block: var(--ide-bar-py); padding-inline: 14px; background: var(--surface); border-block-end: 1px solid var(--border); font-size: var(--fs-xs); flex-wrap: wrap; }
   .collab-title { font-weight: 500; color: var(--text); }
   .collab-count { color: var(--text-dim); }
   .collab-peers { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
@@ -617,7 +687,7 @@
   .ide-workbench { display: flex; flex: 1; min-inline-size: 0; min-block-size: 0; }
   .ide-rail-wrap, .ide-bt-wrap, .ide-agent-wrap { flex-shrink: 0; min-inline-size: 0; min-block-size: 0; block-size: 100%; display: flex; flex-direction: column; }
   .ide-center-col { flex: 1; min-inline-size: 0; min-block-size: 0; display: flex; flex-direction: column; }
-  .ide-mobile-bar { display: flex; justify-content: center; padding-block: 6px; padding-inline: 10px; background: var(--surface); border-block-end: 1px solid var(--border); }
+  .ide-mobile-bar { display: flex; justify-content: center; padding-block: var(--ide-bar-py); padding-inline: 10px; background: var(--surface); border-block-end: 1px solid var(--border); }
   .ide-mobile-bar .segmented { max-inline-size: 100%; }
   .ide-mobile-bar .segmented > button { padding-inline: 8px; }
   .ide-mobile-body { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; flex-direction: column; }

@@ -124,7 +124,7 @@
     const walk = (entries: IdeFsEntry[], depth: number): void => {
       for (let i = 0; i < entries.length; i++) {
         const entry = entries[i];
-        if ((!ide.showHidden && entry.name.startsWith('.')) || !matchesTree(entry)) continue;
+        if (/^__debug_bin\d*$/.test(entry.name) || (!ide.showHidden && entry.name.startsWith('.')) || !matchesTree(entry)) continue;
         out.push({ entry, depth });
         if (entry.kind === 'dir' && (ide.expandedDirs[entry.path] || Boolean(q && ide.childrenByDir[entry.path]))) {
           const kids = ide.childrenByDir[entry.path];
@@ -392,7 +392,7 @@
   .tree-row:hover, .tree-row.active { background: var(--hover); }
   .tree-item {
     flex: 1; min-inline-size: 0; display: flex; align-items: center; gap: 6px;
-    padding-block: 4px; padding-inline: 2px 4px; background: transparent; border: none;
+    padding-block: var(--ide-row-py, 4px); padding-inline: 2px 4px; background: transparent; border: none;
     color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer; overflow: hidden;
   }
   .tree-list.is-virtual .tree-item { padding-block: 2px; }

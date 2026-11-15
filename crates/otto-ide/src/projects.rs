@@ -1,8 +1,18 @@
 //! Named Multi-Repo IDE Projects store (`ide_named_projects` in SQLite) and
 //! bulk child-repository scanner for multi-repo workspaces.
 
+mod scanner;
+
+pub use self::scanner::scan_parent_repos;
+use self::scanner::{
+    build_stored_project, legacy_project_authorized, load_projects_from_db,
+    migrate_legacy_projects_atomic, normalize_lookup_fast, normalize_upsert_req,
+    stored_project_matches, NormalizedUpsertProject, StoredProject,
+};
+
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::Utc;
@@ -11,14 +21,8 @@ use otto_core::{new_id, Error, Result};
 use otto_state::DbPool;
 use sqlx::Row;
 
-use crate::target::{canonicalize_local_root_dir, enforce_non_root_path};
-use crate::types::{IdeNamedProject, IdeScanReposResp, IdeScannedRepo, IdeUpsertProjectReq};
-
-#[derive(Clone, Debug)]
-struct StoredProject {
-    owner_user_id: String,
-    project: IdeNamedProject,
-}
+use crate::types::{IdeNamedProject, IdeUpsertProjectReq};
+use crate::IdeCtx;
 
 #[derive(Default)]
 struct ProjectCache {
@@ -30,6 +34,7 @@ struct ProjectCache {
 pub struct ProjectStore {
     legacy_file_path: PathBuf,
     cache: Arc<RwLock<ProjectCache>>,
+    generation: Arc<AtomicU64>,
 }
 
 impl ProjectStore {
@@ -40,10 +45,7 @@ impl ProjectStore {
             .and_then(|raw| serde_json::from_str::<Vec<IdeNamedProject>>(&raw).ok())
             .unwrap_or_default()
             .into_iter()
-            .map(|project| StoredProject {
-                owner_user_id: String::new(),
-                project,
-            })
+            .map(|proj| build_stored_project(String::new(), proj))
             .collect();
         Self {
             legacy_file_path,
@@ -51,11 +53,16 @@ impl ProjectStore {
                 hydrated: false,
                 items: initial,
             })),
+            generation: Arc::new(AtomicU64::new(1)),
         }
     }
 
+    pub(crate) fn cache_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     /// Ensure the in-memory cache is hydrated from `ide_named_projects`, migrating
-    /// any pre-SQLite `<data_dir>/ide-projects.json` entries on first boot.
+    /// any pre-SQLite `<data_dir>/ide-projects.json` entries atomically on first boot.
     pub async fn ensure_hydrated(&self, pool: &DbPool) -> Result<()> {
         if self
             .cache
@@ -69,77 +76,83 @@ impl ProjectStore {
     }
 
     pub async fn reload_from_db(&self, pool: &DbPool) -> Result<()> {
-        let mut stored = load_projects_from_db(pool).await?;
-        if stored.is_empty() && self.legacy_file_path.is_file() {
-            let legacy_path = self.legacy_file_path.clone();
-            let legacy_items: Vec<IdeNamedProject> = tokio::task::spawn_blocking(move || {
-                fs::read_to_string(&legacy_path)
-                    .ok()
-                    .and_then(|raw| serde_json::from_str::<Vec<IdeNamedProject>>(&raw).ok())
-                    .unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
-
-            for item in legacy_items {
-                let folders_json =
-                    serde_json::to_string(&item.folders).unwrap_or_else(|_| "[]".to_string());
-                let _ = sqlx::query(
-                    "INSERT OR IGNORE INTO ide_named_projects
-                        (id, owner_user_id, name, primary_root, folders_json, pinned, updated_at)
-                     VALUES (?1, '', ?2, ?3, ?4, ?5, ?6)",
-                )
-                .bind(&item.id)
-                .bind(&item.name)
-                .bind(&item.primary_root)
-                .bind(&folders_json)
-                .bind(if item.pinned { 1_i64 } else { 0_i64 })
-                .bind(&item.updated_at)
-                .execute(pool)
-                .await;
-            }
-            let legacy_rm = self.legacy_file_path.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                let _ = fs::remove_file(legacy_rm);
-            })
-            .await;
-            stored = load_projects_from_db(pool).await?;
+        let mut raw_rows = load_projects_from_db(pool).await?;
+        if raw_rows.is_empty() && self.legacy_file_path.is_file() {
+            migrate_legacy_projects_atomic(pool, &self.legacy_file_path).await?;
+            raw_rows = load_projects_from_db(pool).await?;
         }
 
+        let hydrated_items = tokio::task::spawn_blocking(move || {
+            let mut out: Vec<StoredProject> = raw_rows
+                .into_iter()
+                .map(|(owner, proj)| build_stored_project(owner, proj))
+                .collect();
+            out.sort_by(|a, b| {
+                b.project
+                    .pinned
+                    .cmp(&a.project.pinned)
+                    .then_with(|| b.project.updated_at.cmp(&a.project.updated_at))
+                    .then_with(|| a.project.name.cmp(&b.project.name))
+            });
+            out
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("hydrate projects worker failed: {e}")))?;
+
         let mut guard = self.cache.write().unwrap_or_else(|e| e.into_inner());
-        guard.items = stored;
+        guard.items = hydrated_items;
         guard.hydrated = true;
+        drop(guard);
+        self.generation.fetch_add(1, Ordering::Release);
         Ok(())
     }
 
     pub async fn list_for_user(&self, pool: &DbPool, user: &User) -> Result<Vec<IdeNamedProject>> {
-        self.reload_from_db(pool).await?;
-        let is_root = user.is_root;
-        let user_id = user.id.clone();
+        self.ensure_hydrated(pool).await?;
+        let guard = self.cache.read().unwrap_or_else(|e| e.into_inner());
+        let mut items = Vec::with_capacity(guard.items.len());
+        for entry in &guard.items {
+            if !can_access_owned_project(entry, &user.id, user.is_root) {
+                continue;
+            }
+            if let Some(proj) = project_for_caller(entry, user.is_root) {
+                items.push(proj);
+            }
+        }
+        sort_projects(&mut items);
+        Ok(items)
+    }
+
+    /// List Named Projects visible to `user`, including legacy migrated rows
+    /// (`owner_user_id == ""`) whose roots are authorized via `ctx.authorize_local_target`.
+    pub async fn list_for_user_with_ctx<S: IdeCtx>(
+        &self,
+        ctx: &S,
+        user: &User,
+    ) -> Result<Vec<IdeNamedProject>> {
+        let pool = ctx.pool();
+        self.ensure_hydrated(&pool).await?;
         let snapshot: Vec<StoredProject> = self
             .cache
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .items
-            .iter()
-            .filter(|entry| can_access_project(entry, &user_id, is_root))
-            .cloned()
-            .collect();
+            .clone();
 
-        let validated = tokio::task::spawn_blocking(move || {
-            let mut items = Vec::with_capacity(snapshot.len());
-            for entry in snapshot {
-                if let Some(proj) = revalidate_project_paths(entry.project, is_root) {
-                    items.push(proj);
-                }
+        let mut items = Vec::with_capacity(snapshot.len());
+        for entry in snapshot {
+            let Some(proj) = project_for_caller(&entry, user.is_root) else {
+                continue;
+            };
+            if can_access_owned_project(&entry, &user.id, user.is_root)
+                || (entry.owner_user_id.is_empty()
+                    && legacy_project_authorized(ctx, user, &proj, false).await)
+            {
+                items.push(proj);
             }
-            sort_projects(&mut items);
-            items
-        })
-        .await
-        .map_err(|e| Error::Internal(format!("list projects worker failed: {e}")))?;
-
-        Ok(validated)
+        }
+        sort_projects(&mut items);
+        Ok(items)
     }
 
     /// Return all folders across Named Projects owned by `user` (from the hydrated cache).
@@ -147,15 +160,16 @@ impl ProjectStore {
         let guard = self.cache.read().unwrap_or_else(|e| e.into_inner());
         let mut out = Vec::new();
         for entry in &guard.items {
-            if !can_access_project(entry, &user.id, user.is_root) {
+            if !can_access_owned_project(entry, &user.id, user.is_root) {
                 continue;
             }
-            if !entry.project.primary_root.trim().is_empty()
-                && !out.contains(&entry.project.primary_root)
-            {
-                out.push(entry.project.primary_root.clone());
+            let Some(proj) = project_for_caller(entry, user.is_root) else {
+                continue;
+            };
+            if !proj.primary_root.trim().is_empty() && !out.contains(&proj.primary_root) {
+                out.push(proj.primary_root.clone());
             }
-            for f in &entry.project.folders {
+            for f in &proj.folders {
                 if !f.trim().is_empty() && !out.contains(f) {
                     out.push(f.clone());
                 }
@@ -164,34 +178,55 @@ impl ProjectStore {
         out
     }
 
-    /// Return attached sibling folders configured for any Named Project visible to
-    /// `user` whose `primary_root` or any member entry in `folders` matches `root`.
-    #[allow(clippy::disallowed_methods)]
+    /// Return attached sibling folders configured for any Named Project owned by `user`
+    /// whose `primary_root` or any member entry in `folders` matches `root`, using pure
+    /// in-memory string comparisons (zero `realpath` syscalls on Tokio workers).
     pub fn folders_for_root_for_user(&self, root: &str, user: &User) -> Vec<String> {
-        let Some(lookup) = normalize_root_for_match(root) else {
+        let Some(lookup) = normalize_lookup_fast(root) else {
             return Vec::new();
         };
         let guard = self.cache.read().unwrap_or_else(|e| e.into_inner());
         for entry in &guard.items {
-            if !can_access_project(entry, &user.id, user.is_root) {
+            if !can_access_owned_project(entry, &user.id, user.is_root) {
                 continue;
             }
-            if project_matches_root(&entry.project, &lookup) {
-                return filter_folders_for_caller(&entry.project.folders, user.is_root);
+            if stored_project_matches(entry, &lookup) {
+                if let Some(proj) = project_for_caller(entry, user.is_root) {
+                    return proj.folders;
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// Return candidate attached folders from unowned legacy projects (`owner_user_id == ""`)
+    /// matching `root`; callers MUST authorize each returned folder via `IdeCtx`.
+    pub(crate) fn legacy_unowned_folders_for_root(&self, root: &str, is_root: bool) -> Vec<String> {
+        let Some(lookup) = normalize_lookup_fast(root) else {
+            return Vec::new();
+        };
+        let guard = self.cache.read().unwrap_or_else(|e| e.into_inner());
+        for entry in &guard.items {
+            if !entry.owner_user_id.is_empty() {
+                continue;
+            }
+            if stored_project_matches(entry, &lookup) {
+                if let Some(proj) = project_for_caller(entry, is_root) {
+                    return proj.folders;
+                }
             }
         }
         Vec::new()
     }
 
     /// Root-level lookup matching `primary_root` and every member entry in `folders`.
-    #[allow(clippy::disallowed_methods)]
     pub fn folders_for_root(&self, root: &str) -> Vec<String> {
-        let Some(lookup) = normalize_root_for_match(root) else {
+        let Some(lookup) = normalize_lookup_fast(root) else {
             return Vec::new();
         };
         let guard = self.cache.read().unwrap_or_else(|e| e.into_inner());
         for entry in &guard.items {
-            if project_matches_root(&entry.project, &lookup) {
+            if stored_project_matches(entry, &lookup) {
                 return entry.project.folders.clone();
             }
         }
@@ -203,6 +238,48 @@ impl ProjectStore {
         pool: &DbPool,
         user: &User,
         req: IdeUpsertProjectReq,
+    ) -> Result<IdeNamedProject> {
+        self.upsert_for_user_inner(pool, user, req, false).await
+    }
+
+    pub async fn upsert_for_user_claiming_legacy(
+        &self,
+        pool: &DbPool,
+        user: &User,
+        req: IdeUpsertProjectReq,
+    ) -> Result<IdeNamedProject> {
+        self.upsert_for_user_inner(pool, user, req, true).await
+    }
+
+    pub async fn upsert_for_user_with_ctx<S: IdeCtx>(
+        &self,
+        ctx: &S,
+        user: &User,
+        req: IdeUpsertProjectReq,
+    ) -> Result<IdeNamedProject> {
+        let pool = ctx.pool();
+        self.ensure_hydrated(&pool).await?;
+        let mut allow_claim = user.is_root;
+        if !allow_claim {
+            if let Some(req_id) = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some((owner, proj)) = fetch_project_owner_row(&pool, req_id).await? {
+                    allow_claim =
+                        owner.is_empty() && legacy_project_authorized(ctx, user, &proj, true).await;
+                }
+            } else {
+                allow_claim = true;
+            }
+        }
+        self.upsert_for_user_inner(&pool, user, req, allow_claim)
+            .await
+    }
+
+    async fn upsert_for_user_inner(
+        &self,
+        pool: &DbPool,
+        user: &User,
+        req: IdeUpsertProjectReq,
+        allow_claim_unowned: bool,
     ) -> Result<IdeNamedProject> {
         self.ensure_hydrated(pool).await?;
         let is_root = user.is_root;
@@ -224,7 +301,8 @@ impl ProjectStore {
                     .await
                     .map_err(|e| Error::Internal(format!("query ide_named_projects owner: {e}")))?;
             if let Some(owner) = &existing_owner {
-                if !user.is_root && owner != &user.id {
+                let unowned_claim_ok = owner.is_empty() && allow_claim_unowned;
+                if !user.is_root && owner != &user.id && !unowned_claim_ok {
                     return Err(Error::Forbidden(
                         "cannot overwrite a Named IDE Project owned by another user".into(),
                     ));
@@ -234,12 +312,18 @@ impl ProjectStore {
         } else {
             let existing_id: Option<String> = sqlx::query_scalar(
                 "SELECT id FROM ide_named_projects
-                 WHERE owner_user_id = ?1 AND primary_root = ?2 AND name = ?3
+                 WHERE (owner_user_id = ?1 OR (?4 = 1 AND owner_user_id = ''))
+                   AND primary_root = ?2 AND name = ?3
                  LIMIT 1",
             )
             .bind(&user.id)
             .bind(&primary_str)
             .bind(&name)
+            .bind(if user.is_root || allow_claim_unowned {
+                1_i64
+            } else {
+                0_i64
+            })
             .fetch_optional(pool)
             .await
             .map_err(|e| Error::Internal(format!("lookup ide_named_projects id: {e}")))?;
@@ -300,14 +384,7 @@ impl ProjectStore {
     pub async fn delete_for_user(&self, pool: &DbPool, user: &User, id: &str) -> Result<bool> {
         self.ensure_hydrated(pool).await?;
         let target_id = id.trim();
-        let existing_owner: Option<String> =
-            sqlx::query_scalar("SELECT owner_user_id FROM ide_named_projects WHERE id = ?1")
-                .bind(target_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| Error::Internal(format!("query ide_named_projects owner: {e}")))?;
-
-        let Some(owner) = existing_owner else {
+        let Some((owner, _)) = fetch_project_owner_row(pool, target_id).await? else {
             return Ok(false);
         };
         if !user.is_root && owner != user.id {
@@ -315,20 +392,87 @@ impl ProjectStore {
                 "cannot delete a Named IDE Project owned by another user".into(),
             ));
         }
+        self.execute_delete(pool, target_id).await
+    }
 
+    pub async fn delete_for_user_with_ctx<S: IdeCtx>(
+        &self,
+        ctx: &S,
+        user: &User,
+        id: &str,
+    ) -> Result<bool> {
+        let pool = ctx.pool();
+        self.ensure_hydrated(&pool).await?;
+        let target_id = id.trim();
+        let Some((owner, proj)) = fetch_project_owner_row(&pool, target_id).await? else {
+            return Ok(false);
+        };
+        if !user.is_root && owner != user.id {
+            let legacy_ok =
+                owner.is_empty() && legacy_project_authorized(ctx, user, &proj, true).await;
+            if !legacy_ok {
+                return Err(Error::Forbidden(
+                    "cannot delete a Named IDE Project owned by another user".into(),
+                ));
+            }
+        }
+        self.execute_delete(&pool, target_id).await
+    }
+
+    async fn execute_delete(&self, pool: &DbPool, target_id: &str) -> Result<bool> {
         let res = sqlx::query("DELETE FROM ide_named_projects WHERE id = ?1")
             .bind(target_id)
             .execute(pool)
             .await
             .map_err(|e| Error::Internal(format!("delete ide_named_projects: {e}")))?;
-
         self.reload_from_db(pool).await?;
         Ok(res.rows_affected() > 0)
     }
 }
 
-fn can_access_project(entry: &StoredProject, user_id: &str, is_root: bool) -> bool {
+async fn fetch_project_owner_row(
+    pool: &DbPool,
+    target_id: &str,
+) -> Result<Option<(String, IdeNamedProject)>> {
+    let row = sqlx::query(
+        "SELECT owner_user_id, primary_root, folders_json
+         FROM ide_named_projects WHERE id = ?1",
+    )
+    .bind(target_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| Error::Internal(format!("query ide_named_projects owner: {e}")))?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let owner: String = row.try_get("owner_user_id").unwrap_or_default();
+    let primary_root: String = row.try_get("primary_root").unwrap_or_default();
+    let folders_json: String = row.try_get("folders_json").unwrap_or_default();
+    let folders: Vec<String> = serde_json::from_str(&folders_json).unwrap_or_default();
+    Ok(Some((
+        owner,
+        IdeNamedProject {
+            id: target_id.to_string(),
+            name: String::new(),
+            primary_root,
+            folders,
+            pinned: false,
+            updated_at: String::new(),
+        },
+    )))
+}
+
+fn can_access_owned_project(entry: &StoredProject, user_id: &str, is_root: bool) -> bool {
     is_root || (!entry.owner_user_id.is_empty() && entry.owner_user_id == user_id)
+}
+
+fn project_for_caller(entry: &StoredProject, is_root: bool) -> Option<IdeNamedProject> {
+    if is_root {
+        Some(entry.project.clone())
+    } else {
+        entry.non_root_project.clone()
+    }
 }
 
 fn sort_projects(items: &mut [IdeNamedProject]) {
@@ -338,249 +482,4 @@ fn sort_projects(items: &mut [IdeNamedProject]) {
             .then_with(|| b.updated_at.cmp(&a.updated_at))
             .then_with(|| a.name.cmp(&b.name))
     });
-}
-
-async fn load_projects_from_db(pool: &DbPool) -> Result<Vec<StoredProject>> {
-    let rows = sqlx::query(
-        "SELECT id, owner_user_id, name, primary_root, folders_json, pinned, updated_at
-         FROM ide_named_projects",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| Error::Internal(format!("load ide_named_projects: {e}")))?;
-
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let folders_json: String = row.try_get("folders_json").unwrap_or_default();
-        let folders: Vec<String> = serde_json::from_str(&folders_json).unwrap_or_default();
-        out.push(StoredProject {
-            owner_user_id: row.try_get("owner_user_id").unwrap_or_default(),
-            project: IdeNamedProject {
-                id: row.try_get("id").unwrap_or_default(),
-                name: row.try_get("name").unwrap_or_default(),
-                primary_root: row.try_get("primary_root").unwrap_or_default(),
-                folders,
-                pinned: row.try_get::<i64, _>("pinned").unwrap_or(0) != 0,
-                updated_at: row.try_get("updated_at").unwrap_or_default(),
-            },
-        });
-    }
-    Ok(out)
-}
-
-struct NormalizedUpsertProject {
-    name: String,
-    primary_root: String,
-    folders: Vec<String>,
-    pinned: bool,
-    explicit_id: Option<String>,
-}
-
-#[allow(clippy::disallowed_methods)]
-fn normalize_upsert_req(
-    req: IdeUpsertProjectReq,
-    is_root_user: bool,
-) -> Result<NormalizedUpsertProject> {
-    let name = req.name.trim().to_string();
-    if name.is_empty() {
-        return Err(Error::Invalid("project name must not be empty".into()));
-    }
-    let raw_primary = if !req.primary_root.trim().is_empty() {
-        req.primary_root.trim()
-    } else {
-        req.folders
-            .first()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| Error::Invalid("primary_root or folders[0] is required".into()))?
-    };
-    let primary_canon = canonicalize_local_root_dir(raw_primary, is_root_user)?;
-    let primary_str = primary_canon.to_string_lossy().into_owned();
-
-    let mut folders = vec![primary_str.clone()];
-    for raw in &req.folders {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let canon = canonicalize_local_root_dir(trimmed, is_root_user)?;
-        let s = canon.to_string_lossy().into_owned();
-        if !folders.contains(&s) {
-            folders.push(s);
-        }
-    }
-
-    let explicit_id = req
-        .id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    Ok(NormalizedUpsertProject {
-        name,
-        primary_root: primary_str,
-        folders,
-        pinned: req.pinned,
-        explicit_id,
-    })
-}
-
-#[allow(clippy::disallowed_methods)]
-fn revalidate_project_paths(mut proj: IdeNamedProject, is_root: bool) -> Option<IdeNamedProject> {
-    let primary_expanded = PathBuf::from(otto_core::paths::expand_tilde(proj.primary_root.trim()));
-    let primary_canon = fs::canonicalize(&primary_expanded).unwrap_or(primary_expanded);
-    if !is_root && enforce_non_root_path(&primary_canon).is_err() {
-        return None;
-    }
-    proj.primary_root = primary_canon.to_string_lossy().into_owned();
-    proj.folders = filter_folders_for_caller(&proj.folders, is_root);
-    if !proj.folders.contains(&proj.primary_root) {
-        proj.folders.insert(0, proj.primary_root.clone());
-    }
-    Some(proj)
-}
-
-#[allow(clippy::disallowed_methods)]
-fn filter_folders_for_caller(folders: &[String], is_root: bool) -> Vec<String> {
-    let mut out = Vec::with_capacity(folders.len());
-    for raw in folders {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let expanded = PathBuf::from(otto_core::paths::expand_tilde(trimmed));
-        let canon = fs::canonicalize(&expanded).unwrap_or(expanded);
-        if !is_root && enforce_non_root_path(&canon).is_err() {
-            continue;
-        }
-        let s = canon.to_string_lossy().into_owned();
-        if !out.contains(&s) {
-            out.push(s);
-        }
-    }
-    out
-}
-
-#[derive(Debug)]
-struct NormalizedLookup {
-    raw_trimmed: String,
-    canonical: String,
-}
-
-#[allow(clippy::disallowed_methods)]
-fn normalize_root_for_match(root: &str) -> Option<NormalizedLookup> {
-    let trimmed = root.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let expanded = PathBuf::from(otto_core::paths::expand_tilde(trimmed));
-    let raw_str = trim_trailing_slash(&expanded.to_string_lossy());
-    let canonical = fs::canonicalize(&expanded)
-        .map(|p| trim_trailing_slash(&p.to_string_lossy()))
-        .unwrap_or_else(|_| raw_str.clone());
-    Some(NormalizedLookup {
-        raw_trimmed: raw_str,
-        canonical,
-    })
-}
-
-fn trim_trailing_slash(s: &str) -> String {
-    let stripped = s.trim().trim_end_matches('/');
-    if stripped.is_empty() && s.trim().starts_with('/') {
-        "/".to_string()
-    } else {
-        stripped.to_string()
-    }
-}
-
-#[allow(clippy::disallowed_methods)]
-fn path_matches_lookup(candidate: &str, lookup: &NormalizedLookup) -> bool {
-    let Some(cand) = normalize_root_for_match(candidate) else {
-        return false;
-    };
-    cand.canonical == lookup.canonical
-        || cand.raw_trimmed == lookup.raw_trimmed
-        || cand.canonical == lookup.raw_trimmed
-        || cand.raw_trimmed == lookup.canonical
-}
-
-fn project_matches_root(proj: &IdeNamedProject, lookup: &NormalizedLookup) -> bool {
-    path_matches_lookup(&proj.primary_root, lookup)
-        || proj.folders.iter().any(|f| path_matches_lookup(f, lookup))
-}
-
-/// Fast 1-level scan of `parent_path` returning child repositories and folders
-/// so users can bulk-select multi-repo workspaces into one Named IDE Project.
-#[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
-pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeScanReposResp> {
-    let parent = canonicalize_local_root_dir(parent_path, is_root_user)?;
-    let rd = fs::read_dir(&parent).map_err(|e| {
-        Error::NotFound(format!("cannot read directory '{}': {e}", parent.display()))
-    })?;
-
-    let mut repos = Vec::new();
-    for entry in rd.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') || matches!(name.as_str(), "node_modules" | "target" | "Library") {
-            continue;
-        }
-        let path = entry.path();
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        let is_dir = ft.is_dir() || (ft.is_symlink() && path.is_dir());
-        if !is_dir {
-            continue;
-        }
-        let canon = fs::canonicalize(&path).unwrap_or(path);
-        if !is_root_user && enforce_non_root_path(&canon).is_err() {
-            continue;
-        }
-        let has_go_mod = canon.join("go.mod").is_file() || canon.join("go.work").is_file();
-        let has_pom_or_gradle = canon.join("pom.xml").is_file()
-            || canon.join("build.gradle").is_file()
-            || canon.join("build.gradle.kts").is_file();
-        let has_cargo = canon.join("Cargo.toml").is_file();
-        let has_node = canon.join("package.json").is_file();
-        let has_py =
-            canon.join("pyproject.toml").is_file() || canon.join("requirements.txt").is_file();
-        let has_git = canon.join(".git").exists();
-
-        let kind = if has_go_mod {
-            "go"
-        } else if has_pom_or_gradle {
-            "java"
-        } else if has_cargo {
-            "rust"
-        } else if has_node {
-            "node"
-        } else if has_py {
-            "python"
-        } else if has_git {
-            "git"
-        } else {
-            "folder"
-        };
-
-        repos.push(IdeScannedRepo {
-            name,
-            path: canon.to_string_lossy().into_owned(),
-            kind: kind.to_string(),
-            has_go_mod,
-            has_pom_or_gradle,
-            has_git,
-        });
-    }
-    repos.sort_by(|a, b| {
-        let a_is_repo = a.kind != "folder";
-        let b_is_repo = b.kind != "folder";
-        b_is_repo
-            .cmp(&a_is_repo)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    Ok(IdeScanReposResp {
-        parent_path: parent.to_string_lossy().into_owned(),
-        repos,
-    })
 }

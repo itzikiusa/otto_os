@@ -1,17 +1,11 @@
-// Per-provider capabilities on the structured agent runtime (no imports: unit
-// tests load it directly).
+// Per-provider capabilities on the structured agent runtime, delegating the
+// canonical runtime-provider list to `lib/providers`.
 
-export const RUNTIME_PROVIDERS = [
-  'claude',
-  'codex',
-  'pi',
-  'agy',
-  'gemini',
-  'grok',
-  'opencode',
-] as const;
+import type { RuntimeProvider } from '../../../lib/api/types.ts';
+import { isRuntimeProvider, RUNTIME_PROVIDERS } from '../../../lib/providerRegistry.ts';
 
-export type RuntimeProviderId = (typeof RUNTIME_PROVIDERS)[number];
+export { isRuntimeProvider, RUNTIME_PROVIDERS };
+export type RuntimeProviderId = RuntimeProvider;
 
 /** Whether `provider`'s structured runtime protocol supports mid-turn `Steer`
  *  (injecting a user message into the running turn without cancelling it):

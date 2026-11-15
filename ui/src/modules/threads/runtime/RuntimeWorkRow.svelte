@@ -74,9 +74,44 @@
     return elapsed >= 1000 ? formatDuration(elapsed) : null;
   });
   const took = $derived(itemDuration(item) ?? liveReasoningElapsed);
+  function hasAtLeastNewlines(raw: string, minCount: number): boolean {
+    let found = 0;
+    for (let i = 0; i < raw.length; i++) {
+      if (raw.charCodeAt(i) === 10 && ++found >= minCount) return true;
+    }
+    return false;
+  }
+
+  function previewReasoningText(raw: string): string {
+    const MAX_CHARS = 520;
+    const MAX_LINES = 6;
+    let lines = 0;
+    let cut = raw.length;
+    for (let i = 0; i < raw.length; i++) {
+      if (i >= MAX_CHARS) {
+        cut = i;
+        break;
+      }
+      if (raw.charCodeAt(i) === 10 && ++lines >= MAX_LINES) {
+        cut = i;
+        break;
+      }
+    }
+    if (cut >= raw.length) return raw;
+    let slice = raw.slice(0, cut);
+    const fenceMatches = slice.match(/^(?:```|~~~)/gm);
+    if (fenceMatches && fenceMatches.length % 2 === 1) {
+      slice += `\n${fenceMatches[fenceMatches.length - 1]}`;
+    }
+    return slice;
+  }
+
   /** Thinking reads inline (T3): its text under a quiet line, clamped until opened. */
   const thinking = $derived(item.type === 'reasoning' && !!item.text);
-  const longThought = $derived(item.type === 'reasoning' && (item.text.length > 240 || item.text.split('\n').length > 3));
+  const longThought = $derived(item.type === 'reasoning' && (item.text.length > 240 || hasAtLeastNewlines(item.text, 3)));
+  const thinkingMd = $derived(
+    item.type !== 'reasoning' ? '' : open || !longThought ? item.text : previewReasoningText(item.text),
+  );
   /** The thread / session this call opened or spoke to — a one-click link. */
   const target = $derived(running ? null : openedTarget(item));
   function goTarget(e: MouseEvent): void {
@@ -90,8 +125,11 @@
   });
   const commandOut = $derived(item.type === 'command_execution' ? (item.output ?? output) : '');
   const tail = $derived(running && commandOut ? lastLine(commandOut) : '');
+  const hasFilePatch = $derived(
+    item.type === 'file_change' && Boolean(item.diff_str || item.old_str != null || item.new_str != null),
+  );
   const patch = $derived.by(() => {
-    if (item.type !== 'file_change') return null;
+    if (!open || item.type !== 'file_change') return null;
     if (item.diff_str) return item.diff_str;
     if (item.old_str == null && item.new_str == null) return null;
     const oldL = (item.old_str ?? '').split('\n');
@@ -107,7 +145,7 @@
       : item.type === 'command_execution' || item.type === 'dynamic_tool' || item.type === 'todo_list'
         ? true
         : item.type === 'file_change'
-          ? patch !== null
+          ? hasFilePatch
           : item.type === 'web_search'
             ? (item.patterns?.length ?? 0) > 0
             : item.type === 'approval_request'
@@ -150,7 +188,7 @@
   {/if}
   {#if thinking && item.type === 'reasoning'}
     <!-- Clamped to three lines until "More" (a long thought). -->
-    <div class="rw-think" class:all={open || !longThought}><Markdown md={item.text} small /></div>
+    <div class="rw-think" class:all={open || !longThought}><Markdown md={thinkingMd} small /></div>
     {#if longThought}
       <button type="button" class="rw-more" aria-expanded={open} onclick={() => (open = !open)}>{open ? 'Less' : 'More'}</button>
     {/if}

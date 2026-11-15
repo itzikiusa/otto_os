@@ -36,7 +36,9 @@
   import { auth } from '../../../lib/stores/auth.svelte';
   import { now } from '../../../lib/stores/now.svelte';
   import { acknowledgeComposer, snapshotDraft } from '../../../lib/stores/runtimeDraftPersistence';
+  import { composerViewState } from '../../../lib/stores/runtimeDraftCursor';
   import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
+  import { ui } from '../../../lib/stores/ui.svelte';
   import { uiControl } from '../../../lib/stores/uiControl.svelte';
   import { toastError } from '../../../lib/toastError';
   import StageSlashPopup from '../StageSlashPopup.svelte';
@@ -55,6 +57,7 @@
   import RuntimeContextChips from './RuntimeContextChips.svelte';
   import RuntimeDraftStatus from './RuntimeDraftStatus.svelte';
   import RuntimeFollow from './RuntimeFollow.svelte';
+  import RuntimeHistoryBar from './RuntimeHistoryBar.svelte';
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimePlan from './RuntimePlan.svelte';
   import RuntimeQueueBar from './RuntimeQueueBar.svelte';
@@ -130,7 +133,21 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
   const p = $derived(runtimeViews.projections[sessionId] ?? null);
   const loadError = $derived(runtimeViews.loadError[sessionId] ?? null);
   const staleError = $derived(runtimeViews.staleError[sessionId] ?? null);
+  const loadingOlder = $derived(!!runtimeViews.loadingOlder[sessionId]);
   const rows = $derived(p ? timelineRows(p.items, p.turns) : []);
+  let rowCap = $state(80);
+  const visibleRows = $derived(rows.length > rowCap ? rows.slice(rows.length - rowCap) : rows);
+  let prevMsgIds: string[] = [];
+  const messageIds = $derived.by(() => {
+    const next: string[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (r.kind === 'message') next.push(r.item.id);
+    }
+    if (next.length === prevMsgIds.length && next.every((id, i) => id === prevMsgIds[i])) return prevMsgIds;
+    prevMsgIds = next;
+    return next;
+  });
   const approvals = $derived(new Map((p ? pendingApprovals(p) : []).map((a) => [a.requestId, a] as const)));
   const turn = $derived(p ? latestTurn(p) : null);
   const closed = $derived(session?.status === 'closed');
@@ -165,6 +182,8 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
   ]);
 
   let scroller = $state<HTMLDivElement | null>(null);
+  let streamEl = $state<HTMLDivElement | null>(null);
+  let followRef = $state<{ releaseBottom: () => void } | null>(null);
   let composerBoxEl = $state<HTMLDivElement | null>(null);
   let composerEl = $state<HTMLTextAreaElement | null>(null);
 
@@ -296,17 +315,23 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
   const popId = $props.id();
   let cmdIdx = $state(0);
   let cmdDismissed = $state(false);
+  const hasDraftText = $derived(draft.text.trim().length > 0);
+  const canSendOrQueue = $derived(
+    hasDraftText || draft.images.length > 0 || draft.context.length > 0 || hasExternalContext,
+  );
+  const composerStateArg = $derived({ key: `rt:${ownerId}`, hasText: draft.text.length > 0 });
   const suggestions = $derived.by(() => {
+    if (cmdDismissed || !draft.text.startsWith('/')) return [];
     const prefix = /^\/([\w:-]*)$/.exec(draft.text)?.[1].toLowerCase();
-    return prefix === undefined || cmdDismissed ? [] : SLASH.filter((c) => c.name.includes(prefix));
+    return prefix === undefined ? [] : SLASH.filter((c) => c.name.includes(prefix));
   });
   $effect(() => {
     void suggestions.length;
-    cmdIdx = 0;
+    if (untrack(() => cmdIdx) !== 0) cmdIdx = 0;
   });
   $effect(() => {
     void draft.text;
-    cmdDismissed = false;
+    if (untrack(() => cmdDismissed)) cmdDismissed = false;
   });
 
   function acceptCmd(c: ComposerSlashCommand): void {
@@ -378,8 +403,8 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
 
 <section class="rt" class:compact aria-label="Conversation" data-testid="runtime-thread-{sessionId}">
   {#if onswitch}<RuntimeLinkedThreads {sessionId} {onswitch} />{/if}
-  <div class="rt-scroll" bind:this={scroller}>
-    <div class="rt-stream" data-runtime-stream>
+  <div class="rt-scroll" class:isolated={!ui.overlayOpen} bind:this={scroller}>
+    <div class="rt-stream" bind:this={streamEl} data-runtime-stream>
       <div class="rt-col">
         <LoadState what="conversation" loading={!p && !loadError} error={p ? staleError : loadError} empty={!p} onretry={() => runtimeViews.retry(sessionId)}>
           {#if rows.length === 0}
@@ -389,9 +414,21 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
               body="Replies, tool calls and approvals stream here as the agent works."
             />
           {:else if p}
+            <RuntimeHistoryBar
+              {sessionId}
+              hasOlder={p.hasOlder}
+              olderTurns={p.olderTurns}
+              {loadingOlder}
+              totalRows={rows.length}
+              {scroller}
+              {streamEl}
+              onreleasebottom={() => followRef?.releaseBottom()}
+              bind:rowCap
+            />
             <RuntimeTimelineRows
               {sessionId}
               projection={p}
+              rows={visibleRows}
               {agentName}
               {agentChatId}
               cwd={effectiveCwd}
@@ -407,7 +444,7 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
       </div>
     </div>
   </div>
-  <RuntimeFollow {scroller} seq={p?.lastSequence} messageIds={rows.flatMap((r) => (r.kind === 'message' ? [r.item.id] : []))} />
+  <RuntimeFollow bind:this={followRef} {scroller} seq={p?.lastSequence} {messageIds} />
 
   <div class="rt-dock">
     <RuntimeBannerStack blocks={banners}>
@@ -471,8 +508,13 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
       <textarea
         bind:this={composerEl}
         bind:value={draft.text}
+        use:composerViewState={composerStateArg}
         dir="auto"
         rows={2}
+        spellcheck="false"
+        {...{ autocorrect: 'off' }}
+        autocapitalize="off"
+        autocomplete="off"
         disabled={draft.reopening}
         placeholder={closed
           ? 'Send a message to reopen this thread'
@@ -552,7 +594,7 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
             />
           {/if}
         </span>
-        {#if running && !draft.text.trim() && draft.images.length === 0 && draft.context.length === 0 && !hasExternalContext}
+        {#if running && !canSendOrQueue}
           <button
             type="button"
             class="rt-send stop"
@@ -571,7 +613,7 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
             aria-label={running ? 'Queue message' : 'Send message'}
             title={running ? 'Queue (↵)' : 'Send (↵)'}
             data-testid={testIds?.send ?? 'runtime-send'}
-            disabled={!draft.recovered || draft.reopening || draft.sending || (!draft.text.trim() && draft.images.length === 0 && draft.context.length === 0 && !hasExternalContext)}
+            disabled={!draft.recovered || draft.reopening || draft.sending || !canSendOrQueue}
             onclick={submit}
           >
             <Icon name="arrowUp" size={16} />
@@ -613,6 +655,9 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
     overflow-y: auto;
     overflow-x: hidden;
     overflow-anchor: none;
+  }
+  .rt-scroll.isolated {
+    contain: layout style paint;
   }
   .rt-col,
   .rt-dock {

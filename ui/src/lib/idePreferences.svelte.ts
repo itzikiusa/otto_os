@@ -24,7 +24,15 @@ class IdePreferencesStore {
       };
       window.addEventListener(IDE_PREFS_EVENT, sync);
       window.addEventListener('storage', (ev) => {
-        if (!ev.key || ev.key === IDE_PREFS_STORAGE_KEY) sync();
+        if (
+          !ev.key ||
+          ev.key === IDE_PREFS_STORAGE_KEY ||
+          ev.key === 'otto.ide.keymapPreset' ||
+          ev.key === 'otto.ide.keymap' ||
+          ev.key === 'otto.ide.formatOnSave'
+        ) {
+          sync();
+        }
       });
     }
   }

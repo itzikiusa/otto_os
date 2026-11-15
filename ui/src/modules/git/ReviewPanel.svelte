@@ -8,7 +8,7 @@
   import { summaryFallback, summaryFallbackTitle } from './reviewFallback';
   import { toastError } from '../../lib/toastError';
   import { api, ApiError, isAbortError } from '../../lib/api/client';
-  import { prDiffFile, prDiffSummary } from './diff-load';
+  import { prDiffFile, prDiffSummary } from '../../lib/diff/diff-load';
   import { alreadyOnPr } from './reviewPost';
   import type {
     Review, ReviewComment, ReviewConfig, ReviewAgentCfg, ReviewConfigPreset, RepoReviewBinding,

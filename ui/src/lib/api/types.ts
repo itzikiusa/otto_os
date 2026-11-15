@@ -23,6 +23,7 @@ export * from './types/git';
 export * from './types/git-merge';
 export * from './types/goal-loops';
 export * from './types/ide';
+export * from './types/ide-db-watch';
 export * from './types/ide-intelligence';
 export * from './types/insights-share';
 export * from './types/integrations';

@@ -5,8 +5,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
 
-export const R2_SCREENSHOT_DIR =
-  '/Users/itziklavon/.gemini/antigravity-cli/brain/eaf6440b-3dbd-4661-9f38-63372630db72/scratch/ide-r2-shots';
+export const WORKFLOW_SCREENSHOT_DIR =
+  process.env.OTTO_IDE_SHOTS_DIR ?? join(tmpdir(), 'otto-ide-workflow-shots');
 
 export interface IdeTargetSpec {
   kind: 'local' | 'ssh';
@@ -15,7 +15,7 @@ export interface IdeTargetSpec {
   connection_id?: string | null;
 }
 
-export interface Round2WorkspaceSeed {
+export interface PolyglotWorkspaceSeed {
   base: string;
   token: string;
   workspaceId: string;
@@ -28,7 +28,7 @@ export const GO_MAIN_SOURCE = [
   '',
   'import (',
   '\t"fmt"',
-  '\t"example.com/ottoideround2/decimal"',
+  '\t"example.com/ottoidepolyglot/decimal"',
   ')',
   '',
   'var Version = "2.4.0"',
@@ -118,7 +118,7 @@ export const PY_PIPELINE_SOURCE = [
   '',
 ].join('\n');
 
-export function seedRound2Files(dir: string): void {
+export function seedPolyglotFiles(dir: string): void {
   for (const sub of ['app', 'decimal', 'pyapp', 'web', 'scripts', 'notes', 'src/main/java/com/otto']) {
     mkdirSync(join(dir, sub), { recursive: true });
   }
@@ -131,7 +131,7 @@ export function seedRound2Files(dir: string): void {
   writeFileSync(
     join(dir, 'go.mod'),
     [
-      'module example.com/ottoideround2',
+      'module example.com/ottoidepolyglot',
       '',
       'go 1.22',
       '',
@@ -189,7 +189,7 @@ export function seedRound2Files(dir: string): void {
 
   writeFileSync(
     join(dir, 'package.json'),
-    JSON.stringify({ name: 'otto-ide-r2-e2e', version: '1.0.0', type: 'module' }, null, 2) + '\n',
+    JSON.stringify({ name: 'otto-ide-workflows-e2e', version: '1.0.0', type: 'module' }, null, 2) + '\n',
   );
   writeFileSync(
     join(dir, 'web', 'worker.mjs'),
@@ -217,15 +217,15 @@ export function seedRound2Files(dir: string): void {
     ].join('\n'),
   );
 
-  writeFileSync(join(dir, 'notes', 'roadmap.md'), '# Otto IDE Round 2\n\nInitial committed baseline.\n');
+  writeFileSync(join(dir, 'notes', 'roadmap.md'), '# Otto IDE Workflows\n\nInitial committed baseline.\n');
 
   for (const argv of [
     ['init', '-b', 'main'],
-    ['config', 'user.email', 'ide-r2@otto.local'],
-    ['config', 'user.name', 'Otto IDE Round 2'],
+    ['config', 'user.email', 'ide-workflows@otto.local'],
+    ['config', 'user.name', 'Otto IDE Workflows'],
     ['config', 'commit.gpgsign', 'false'],
     ['add', '.'],
-    ['commit', '-m', 'chore: seed polyglot round2 workspace'],
+    ['commit', '-m', 'chore: seed polyglot ide workspace'],
   ]) {
     execFileSync('git', argv, { cwd: dir, stdio: 'ignore' });
   }
@@ -249,14 +249,14 @@ export async function daemonCall<T>(
   return (txt ? JSON.parse(txt) : undefined) as T;
 }
 
-export async function createRound2Seed(): Promise<Round2WorkspaceSeed> {
-  const workspaceRoot = realpathSync(mkdtempSync(join(tmpdir(), 'otto-ide-r2-suite-')));
-  seedRound2Files(workspaceRoot);
+export async function createPolyglotSeed(): Promise<PolyglotWorkspaceSeed> {
+  const workspaceRoot = realpathSync(mkdtempSync(join(tmpdir(), 'otto-ide-workflows-suite-')));
+  seedPolyglotFiles(workspaceRoot);
 
   const c = await apiCtx();
   try {
     const ws = await daemonCall<{ id: string }>(c.ctx, c.base, c.token, 'POST', '/workspaces', {
-      name: 'Otto IDE Round 2 E2E',
+      name: 'Otto IDE Workflows E2E',
       root_path: workspaceRoot,
     });
     // Also register git repo with Otto so Integrated Git dock resolves immediately.
@@ -296,16 +296,16 @@ export async function createRound2Seed(): Promise<Round2WorkspaceSeed> {
   }
 }
 
-export async function saveR2Shot(page: Page, name: string): Promise<string> {
-  mkdirSync(R2_SCREENSHOT_DIR, { recursive: true });
-  const out = join(R2_SCREENSHOT_DIR, name);
+export async function saveWorkflowShot(page: Page, name: string): Promise<string> {
+  mkdirSync(WORKFLOW_SCREENSHOT_DIR, { recursive: true });
+  const out = join(WORKFLOW_SCREENSHOT_DIR, name);
   await page.screenshot({ path: out, fullPage: false });
   return out;
 }
 
-export async function bootR2Ide(
+export async function bootPolyglotIde(
   page: Page,
-  seed: Round2WorkspaceSeed,
+  seed: PolyglotWorkspaceSeed,
   scheme: 'dark' | 'light' = 'dark',
 ): Promise<void> {
   await page.addInitScript(
@@ -319,9 +319,9 @@ export async function bootR2Ide(
         'otto.ide.namedProjects.v1',
         JSON.stringify([
           {
-            id: 'proj-r2',
-            name: 'Otto IDE Round 2 Project',
-            folders: [{ path: root, name: 'otto-r2' }],
+            id: 'proj-polyglot',
+            name: 'Otto IDE Polyglot Project',
+            folders: [{ path: root, name: 'otto-polyglot' }],
             updatedAt: Date.now(),
           },
         ]),
@@ -334,7 +334,7 @@ export async function bootR2Ide(
   await expect(page.getByTestId('ide-project-tree')).toBeVisible({ timeout: 20_000 });
 }
 
-export async function openR2File(page: Page, ...segments: string[]): Promise<void> {
+export async function openPolyglotFile(page: Page, ...segments: string[]): Promise<void> {
   const tree = page.getByTestId('ide-project-tree');
   await expect(tree).toBeVisible({ timeout: 15_000 });
   for (let i = 0; i < segments.length; i++) {

@@ -24,18 +24,21 @@
   const KEYMAP_ROWS: readonly KeymapRow[] = [
     { action: 'Settings & Project Structure', category: 'IDE', jetbrains: '⌘,', standard: '⌘,' },
     { action: 'Search Everywhere', category: 'Navigate', jetbrains: '⇧⇧', standard: '⌘P' },
+    { action: 'Replace in Path', category: 'Navigate', jetbrains: '⌘⇧R', standard: '⌘⇧H' },
     { action: 'Recent Files', category: 'Navigate', jetbrains: '⌘E', standard: '⌃R' },
     { action: 'Go to Definition / Usages', category: 'Code', jetbrains: '⌘B', standard: 'F12' },
     { action: 'Find Usages', category: 'Code', jetbrains: '⌥F7', standard: '⇧F12' },
     { action: 'Rename Symbol', category: 'Refactor', jetbrains: '⇧F6', standard: 'F2' },
     { action: 'Quick Fix / Show Intentions', category: 'Code', jetbrains: '⌥⏎', standard: '⌘.' },
-    { action: 'Reformat Code', category: 'Code', jetbrains: '⌥⌘L', standard: '⇧⌥F' },
+    { action: 'Reformat Code', category: 'Code', jetbrains: '⌘⌥L', standard: '⇧⌥F' },
+    { action: 'Optimize Imports', category: 'Code', jetbrains: '⌃⌥O / ⌘⌥O', standard: '⇧⌥O' },
     { action: 'Toggle Line Comment', category: 'Editor', jetbrains: '⌘/', standard: '⌘/' },
     { action: 'Duplicate Line / Selection', category: 'Editor', jetbrains: '⌘D', standard: '⇧⌥↓' },
     { action: 'Delete Line', category: 'Editor', jetbrains: '⌘⌫', standard: '⇧⌘K' },
     { action: 'File Structure Popup', category: 'Navigate', jetbrains: '⌘F12', standard: '⇧⌘O' },
-    { action: 'Go to Line : Column', category: 'Navigate', jetbrains: '⌘G / ⌃G', standard: '⌃G' },
+    { action: 'Go to Line : Column', category: 'Navigate', jetbrains: '⌘L / ⌘G / ⌃G', standard: '⌃G' },
     { action: 'Navigate Back / Forward', category: 'Navigate', jetbrains: '⌘[ / ⌘]', standard: '⌃- / ⌃⇧-' },
+    { action: 'Toggle AI Agent Panel', category: 'Agent', jetbrains: '⇧⌘L', standard: '⇧⌘L' },
     { action: 'Close Active Editor Tab', category: 'Tabs', jetbrains: '⌘W', standard: '⌘W' },
     { action: 'Reopen Closed Editor Tab', category: 'Tabs', jetbrains: '⌘⇧T', standard: '⌘⇧T' },
     { action: 'Toggle Project Tool Window', category: 'Windows', jetbrains: '⌘1', standard: '⌘B' },
@@ -44,9 +47,43 @@
     { action: 'Run / Debug Selected Target', category: 'Run', jetbrains: '⌃R / ⌃D', standard: 'F5' },
     { action: 'Stop Active Run or Debug', category: 'Run', jetbrains: '⌘F2', standard: '⇧F5' },
     { action: 'Toggle Line Breakpoint', category: 'Debugger', jetbrains: '⌘F8', standard: 'F9' },
-    { action: 'Step Over / Step Into / Step Out', category: 'Debugger', jetbrains: 'F8 / F7 / ⇧F8', standard: 'F10 / F11 / ⇧F11' },
-    { action: 'Resume Program / Run to Cursor', category: 'Debugger', jetbrains: 'F9 / ⌥F9', standard: 'F5 / ⌥F9' },
+    { action: 'Step Over / Step Into / Step Out', category: 'Debugger', jetbrains: 'F8 / F7 / ⇧F8 (⌃⌥↓/→/↑)', standard: 'F10 / F11 / ⇧F11' },
+    { action: 'Resume Program / Run to Cursor', category: 'Debugger', jetbrains: '⌘⌥R / F9 / ⌥F9', standard: 'F5 / ⌥F9' },
+    { action: 'Hard Reload Window', category: 'IDE', jetbrains: '⌘⌃⇧R', standard: '⌘⌃⇧R' },
   ];
+
+  interface PreviewPalette {
+    bg: string; fg: string; kw: string; fn: string; ty: string; str: string; num: string; fld: string;
+    rb1: string; rb2: string; rb3: string; rb4: string;
+  }
+
+  const PREVIEW_PALETTES: Record<string, PreviewPalette> = {
+    'jetbrains-islands-dark': {
+      bg: '#191A1C', fg: '#BCBEC4', kw: '#CF8E6D', fn: '#56A8F5', ty: '#56A8F5',
+      str: '#6AAB73', num: '#2AACB8', fld: '#C77DBB',
+      rb1: '#E8BA36', rb2: '#56A8F5', rb3: '#6AAB73', rb4: '#C77DBB',
+    },
+    'jetbrains-darcula': {
+      bg: '#2B2B2B', fg: '#A9B7C6', kw: '#CC7832', fn: '#FFC66D', ty: '#A9B7C6',
+      str: '#6A8759', num: '#6897BB', fld: '#9876AA',
+      rb1: '#FFC66D', rb2: '#6897BB', rb3: '#6A8759', rb4: '#9876AA',
+    },
+    'vscode-dark-modern': {
+      bg: '#1F1F1F', fg: '#CCCCCC', kw: '#569CD6', fn: '#DCDCAA', ty: '#4EC9B0',
+      str: '#CE9178', num: '#B5CEA8', fld: '#9CDCFE',
+      rb1: '#FFD700', rb2: '#DA70D6', rb3: '#179FFF', rb4: '#4EC9B0',
+    },
+    'jetbrains-islands-light': {
+      bg: '#FFFFFF', fg: '#080808', kw: '#0033B3', fn: '#00627A', ty: '#0033B3',
+      str: '#067D17', num: '#1750EB', fld: '#871094',
+      rb1: '#B36B00', rb2: '#0057B8', rb3: '#067D17', rb4: '#871094',
+    },
+    'vscode-light-modern': {
+      bg: '#FFFFFF', fg: '#3B3B3B', kw: '#0000FF', fn: '#795E26', ty: '#267F99',
+      str: '#A31515', num: '#098658', fld: '#001080',
+      rb1: '#0431FA', rb2: '#319331', rb3: '#7B3814', rb4: '#001080',
+    },
+  };
 
   let keymapQuery = $state('');
 
@@ -73,6 +110,7 @@
   const previewIsDark = $derived(
     previewScheme === 'jetbrains-islands-dark' || previewScheme === 'jetbrains-darcula' || previewScheme === 'vscode-dark-modern',
   );
+  const activePreviewPalette = $derived(PREVIEW_PALETTES[previewScheme] ?? PREVIEW_PALETTES['jetbrains-islands-dark']);
 
   function openProjectLocalHistory(): void {
     ide.settingsOpen = false;
@@ -217,9 +255,17 @@
         <label class="ea-lbl" for="ea-line-h">Line spacing ({ideSettings.draft.lineHeight.toFixed(2)}):</label>
         <input id="ea-line-h" type="range" min="1.3" max="1.9" step="0.05" bind:value={ideSettings.draft.lineHeight} />
       </div>
+      <div class="ea-field">
+        <label class="ea-lbl" for="ea-max-tabs">Maximum open editor tabs ({ideSettings.draft.maxOpenTabs}):</label>
+        <input id="ea-max-tabs" type="range" min="15" max="40" step="1" bind:value={ideSettings.draft.maxOpenTabs} data-testid="ide-max-open-tabs-range" />
+      </div>
     </div>
 
     <div class="ea-card">
+      <div class="ea-sw-row">
+        <Switch checked={ideSettings.draft.autoSave} label="Auto-save modified files" onchange={(v) => (ideSettings.draft.autoSave = v)} />
+        <span class="ea-title">Automatically save modified files on idle, tab switch, focus loss, and before Run / Debug</span>
+      </div>
       <div class="ea-sw-row">
         <Switch checked={ideSettings.draft.fontLigatures} label="Enable font ligatures" onchange={(v) => (ideSettings.draft.fontLigatures = v)} />
         <span class="ea-title">Enable typographic font ligatures (<code>!=</code>, <code>:=</code>, <code>-&gt;</code>)</span>
@@ -259,7 +305,25 @@
       </div>
     </div>
 
-    <div class="code-preview" class:otto-force-dark={previewIsDark} data-ide-scheme={previewScheme} dir="ltr" data-testid="ide-color-scheme-preview">
+    <div
+      class="code-preview"
+      class:otto-force-dark={previewIsDark}
+      data-ide-scheme={previewScheme}
+      dir="ltr"
+      style:--syn-bg={activePreviewPalette.bg}
+      style:--syn-fg={activePreviewPalette.fg}
+      style:--syn-keyword={activePreviewPalette.kw}
+      style:--syn-func-decl={activePreviewPalette.fn}
+      style:--syn-type={activePreviewPalette.ty}
+      style:--syn-string={activePreviewPalette.str}
+      style:--syn-number={activePreviewPalette.num}
+      style:--syn-field={activePreviewPalette.fld}
+      style:--syn-rb-1={activePreviewPalette.rb1}
+      style:--syn-rb-2={activePreviewPalette.rb2}
+      style:--syn-rb-3={activePreviewPalette.rb3}
+      style:--syn-rb-4={activePreviewPalette.rb4}
+      data-testid="ide-color-scheme-preview"
+    >
       <div class="cp-head">
         <span>Go &amp; Java Live Token Preview ({EDITOR_SCHEMES.find((s) => s.id === ideSettings.draft.colorScheme)?.label})</span>
         <Badge tone="accent" variant="outline" label={ideSettings.draft.rainbowBrackets ? 'Rainbow On' : 'Standard Brackets'} />
@@ -268,7 +332,7 @@
 
 <span class="kw">func</span> <span class="fn">LoadPromotion</span><span class:rb1={ideSettings.draft.rainbowBrackets}>(</span>ctx Context, id <span class="ty">int64</span><span class:rb1={ideSettings.draft.rainbowBrackets}>)</span> <span class:rb1={ideSettings.draft.rainbowBrackets}>&#123;</span>
     cfg := map<span class:rb2={ideSettings.draft.rainbowBrackets}>[</span><span class="ty">string</span><span class:rb2={ideSettings.draft.rainbowBrackets}>]</span><span class="ty">any</span><span class:rb2={ideSettings.draft.rainbowBrackets}>&#123;</span><span class="str">"limit"</span>: <span class="num">100</span>, <span class="str">"nested"</span>: <span class:rb3={ideSettings.draft.rainbowBrackets}>[</span><span class:rb4={ideSettings.draft.rainbowBrackets}>(</span><span class="num">42</span><span class:rb4={ideSettings.draft.rainbowBrackets}>)</span><span class:rb3={ideSettings.draft.rainbowBrackets}>]</span><span class:rb2={ideSettings.draft.rainbowBrackets}>&#125;</span>
-    logger.<span class="fn">InfoF</span><span class:rb2={ideSettings.draft.rainbowBrackets}>(</span>ctx, <span class="str">"loaded %v"</span>, cfg<span class:rb2={ideSettings.draft.rainbowBrackets}>)</span>
+    s.<span class="fld">bonusRepo</span>.<span class="fn">InfoF</span><span class:rb2={ideSettings.draft.rainbowBrackets}>(</span>ctx, <span class="str">"loaded %v"</span>, cfg<span class:rb2={ideSettings.draft.rainbowBrackets}>)</span>
 <span class:rb1={ideSettings.draft.rainbowBrackets}>&#125;</span></pre>
     </div>
   </div>
@@ -373,18 +437,15 @@
   .km-act { font-weight: 500; }
   .km-kbd { font-family: var(--font-mono); padding: 2px 6px; border-radius: var(--radius-s); background: var(--surface-2); border: 1px solid var(--border); color: var(--text-dim); }
   .km-kbd.is-selected { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); font-weight: 600; }
-  .ea-sec[data-preview-scheme] { --syn-bg: var(--term-bg); --syn-fg: var(--text); --syn-keyword: var(--code-keyword); --syn-func-decl: var(--accent-text); --syn-string: var(--code-string); --syn-type: var(--info); --syn-number: var(--warning); --syn-rb-1: var(--warning); --syn-rb-2: var(--accent-text); --syn-rb-3: var(--info); --syn-rb-4: var(--success); }
-  .ea-sec[data-preview-scheme='jetbrains-darcula'] { --syn-bg: var(--surface); --syn-keyword: var(--warning); --syn-func-decl: var(--cat-2); --syn-string: var(--cat-3); --syn-type: var(--cat-4); --syn-number: var(--cat-1); }
-  .ea-sec[data-preview-scheme='vscode-dark-modern'] { --syn-bg: var(--term-bg); --syn-keyword: var(--cat-1); --syn-func-decl: var(--cat-2); --syn-string: var(--code-number); --syn-type: var(--cat-6); --syn-number: var(--cat-3); }
-  .ea-sec[data-preview-scheme='jetbrains-islands-light'], .ea-sec[data-preview-scheme='vscode-light-modern'] { --syn-bg: var(--surface); --syn-fg: var(--text); --syn-keyword: var(--cat-4); --syn-func-decl: var(--cat-1); --syn-string: var(--cat-3); --syn-type: var(--cat-6); }
   .code-preview { border: 1px solid var(--border-strong); border-radius: var(--radius-s); background: var(--syn-bg); color: var(--syn-fg); overflow: hidden; }
-  .cp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; background: var(--surface-2); border-block-end: 1px solid var(--border); font-size: var(--fs-xs); font-weight: 600; }
+  .cp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; background: var(--surface-2); border-block-end: 1px solid var(--border); color: var(--text); font-size: var(--fs-xs); font-weight: 600; }
   .cp-code { margin: 0; padding: 12px; font-family: var(--font-mono); font-size: var(--fs-xs); line-height: 1.6; overflow-x: auto; }
   .kw { color: var(--syn-keyword); font-weight: 600; }
   .fn { color: var(--syn-func-decl); }
   .ty { color: var(--syn-type); }
   .str { color: var(--syn-string); }
   .num { color: var(--syn-number); }
+  .fld { color: var(--syn-field); }
   .rb1 { color: var(--syn-rb-1); font-weight: 600; }
   .rb2 { color: var(--syn-rb-2); font-weight: 600; }
   .rb3 { color: var(--syn-rb-3); font-weight: 600; }

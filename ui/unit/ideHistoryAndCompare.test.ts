@@ -48,7 +48,7 @@ class MemoryStorage {
 }
 
 describe('cm-ide-history: secret-path filtering, per-path drafts, undo journal & sign-out wipe', () => {
-  it('blocks secret/credential files from undo journal, draft storage, and clipboard history (SEC-10)', () => {
+  it('blocks secret/credential files from undo journal, draft storage, and clipboard history', () => {
     for (const secret of [
       '/repo/.env',
       '/repo/.env.local',
@@ -81,7 +81,7 @@ describe('cm-ide-history: secret-path filtering, per-path drafts, undo journal &
     assert.deepEqual(readIdeClipboardHistory(store), []);
   });
 
-  it('persists savedContent + draftContent across reload and wipes all IDE storage on sign-out (DATA-2, PERF-7)', () => {
+  it('persists savedContent + draftContent across reload and wipes all IDE storage on sign-out', () => {
     const store = new MemoryStorage();
     const filePath = '/repo/app/service.go';
     const diskBaseline = 'package app\n\nconst Version = 1\n';
@@ -137,7 +137,7 @@ describe('cm-ide-history: secret-path filtering, per-path drafts, undo journal &
   });
 });
 
-describe('lineDiff, ideCompareEngine & ideLocalHistoryDiff parity (DUP-7)', () => {
+describe('lineDiff, ideCompareEngine & ideLocalHistoryDiff parity', () => {
   it('computes identical edit counts across lineDiff, Side-by-Side compare, and Local History diff', () => {
     const left = ['header', 'alpha', 'shared-anchor', 'old-1', 'old-2', 'footer'].join('\n') + '\n';
     const right = ['header', 'alpha-v2', 'inserted', 'shared-anchor', 'new-1', 'footer'].join('\n') + '\n';
@@ -195,7 +195,7 @@ describe('lineDiff, ideCompareEngine & ideLocalHistoryDiff parity (DUP-7)', () =
   });
 });
 
-describe('ideProjectsModel: canonical path, RFC3339 timestamps & pinned/empty reconciliation (DATA-5)', () => {
+describe('ideProjectsModel: canonical path, RFC3339 timestamps & pinned/empty reconciliation', () => {
   it('normalizes macOS /private symlinks, RFC3339 timestamps, explicit pinned:false & empty remote list', () => {
     assert.equal(normalizeProjectPath('/private/tmp/otto-ws///'), '/tmp/otto-ws');
     assert.equal(normalizeProjectPath('/private/var/folders/ab/cd/'), '/var/folders/ab/cd');

@@ -108,8 +108,18 @@ function groupParallel(entries: WorkEntry[]): WorkPart[] {
   return parts;
 }
 
+const EMPTY_SUBAGENT_CHILDREN: ReadonlyMap<string, TurnItem[]> = new Map();
+
 /** A subagent's own activity (items with `parent_item_id`), by card id. */
 export function subagentChildren(items: readonly TurnItem[]): Map<string, TurnItem[]> {
+  let hasParent = false;
+  for (let idx = 0; idx < items.length; idx++) {
+    if (items[idx].parent_item_id) {
+      hasParent = true;
+      break;
+    }
+  }
+  if (!hasParent) return EMPTY_SUBAGENT_CHILDREN as Map<string, TurnItem[]>;
   const out = new Map<string, TurnItem[]>();
   for (const i of items) {
     if (!i.parent_item_id) continue;
@@ -194,39 +204,123 @@ export function toolWords(name: string): string {
   return `${words.charAt(0).toUpperCase()}${words.slice(1)} (${server})`;
 }
 
+type MessageTurnItem = Extract<TurnItem, { type: 'user_message' | 'assistant_message' }>;
+type MessageTimelineRow = Extract<TimelineRow, { kind: 'message' }>;
+type WorkTimelineRow = Extract<TimelineRow, { kind: 'work' }>;
+type SessionTimelineRow = Extract<TimelineRow, { kind: 'session' }>;
+type AgentTurnTimelineRow = Extract<TimelineRow, { kind: 'agent_turn' }>;
+type DayTimelineRow = Extract<TimelineRow, { kind: 'day' }>;
+
+const messageRowCache = new WeakMap<MessageTurnItem, MessageTimelineRow>();
+const workRowCache = new WeakMap<TurnItem, { entries: WorkEntry[]; row: WorkTimelineRow }>();
+const workEntriesCache = new WeakMap<WorkTimelineRow, WorkEntry[]>();
+const sessionRowCache = new WeakMap<TurnItem, SessionTimelineRow>();
+const rowAnchorItem = new WeakMap<TimelineRow, TurnItem>();
+const itemDayCache = new WeakMap<TurnItem, { time: number; day: string }>();
+const agentTurnRowCache = new Map<string, AgentTurnTimelineRow>();
+const dayRowCache = new Map<string, DayTimelineRow>();
+
+/** Flat `WorkEntry[]` for a `work` row, memoized per row object reference. */
+export function workRowEntries(row: WorkTimelineRow): WorkEntry[] {
+  let flat = workEntriesCache.get(row);
+  if (!flat) {
+    flat = row.parts.flatMap((part) => (part.kind === 'group' ? part.entries : [part.entry]));
+    workEntriesCache.set(row, flat);
+  }
+  return flat;
+}
+
+function getOrCreateWorkRow(workId: string, work: WorkEntry[]): WorkTimelineRow {
+  const lead = work[0].item;
+  const cached = workRowCache.get(lead);
+  if (
+    cached &&
+    cached.row.id === workId &&
+    cached.entries.length === work.length &&
+    cached.entries.every((e, i) => e.item === work[i].item && e.approval === work[i].approval)
+  ) {
+    return cached.row;
+  }
+  const row: WorkTimelineRow = { kind: 'work', id: workId, parts: groupParallel(work) };
+  workEntriesCache.set(row, work);
+  rowAnchorItem.set(row, lead);
+  workRowCache.set(lead, { entries: work, row });
+  return row;
+}
+
 export function timelineRows(items: readonly TurnItem[], turns: readonly ProviderTurn[] = []): TimelineRow[] {
   // A subagent's own items render inside its card, not in the timeline;
   // plumbing tool calls and a lost-conversation error not at all.
   items = items.filter((i) => !i.parent_item_id && !isLostConversation(i) && !(i.type === 'dynamic_tool' && HIDDEN_TOOLS.has(i.tool_name)));
-  const agentTurnIds = new Set(turns.filter((t) => t.origin === 'agent').map((t) => t.id));
-  const shownAgentTurns = new Set<string>();
+  let agentTurnIds: Set<string> | null = null;
+  for (let i = 0; i < turns.length; i++) {
+    if (turns[i].origin === 'agent') {
+      if (!agentTurnIds) agentTurnIds = new Set();
+      agentTurnIds.add(turns[i].id);
+    }
+  }
+  const shownAgentTurns = agentTurnIds ? new Set<string>() : null;
   // An approval naming a tool item we have folds into that tool's row.
-  const tools = new Set(items.filter(isTool).map((i) => i.id));
-  const folded = new Map<string, ApprovalItem>();
-  for (const i of items) if (i.type === 'approval_request' && i.tool_item_id && tools.has(i.tool_item_id)) folded.set(i.tool_item_id, i);
-  const foldedIds = new Set([...folded.values()].map((a) => a.id));
+  let folded: Map<string, ApprovalItem> | null = null;
+  let foldedIds: Set<string> | null = null;
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].type === 'approval_request') {
+      const tools = new Set<string>();
+      for (let j = 0; j < items.length; j++) if (isTool(items[j])) tools.add(items[j].id);
+      folded = new Map();
+      foldedIds = new Set();
+      for (let j = 0; j < items.length; j++) {
+        const cand = items[j];
+        if (cand.type === 'approval_request' && cand.tool_item_id && tools.has(cand.tool_item_id)) {
+          folded.set(cand.tool_item_id, cand);
+          foldedIds.add(cand.id);
+        }
+      }
+      break;
+    }
+  }
   const rows: TimelineRow[] = [];
   let work: WorkEntry[] = [];
   let workId = '';
   const flush = (): void => {
-    if (work.length) rows.push({ kind: 'work', id: workId, parts: groupParallel(work) });
+    if (work.length) rows.push(getOrCreateWorkRow(workId, work));
     work = [];
   };
   for (const item of items) {
-    if (item.turn_id && agentTurnIds.has(item.turn_id) && !shownAgentTurns.has(item.turn_id) && item.type !== 'session_boundary') {
-      shownAgentTurns.add(item.turn_id);
+    if (item.turn_id && agentTurnIds?.has(item.turn_id) && !shownAgentTurns!.has(item.turn_id) && item.type !== 'session_boundary') {
+      shownAgentTurns!.add(item.turn_id);
       flush();
-      rows.push({ kind: 'agent_turn', id: `agent-turn:${item.turn_id}`, label: 'Background update' });
+      const divId = `agent-turn:${item.turn_id}`;
+      let divRow = agentTurnRowCache.get(divId);
+      if (!divRow) {
+        if (agentTurnRowCache.size >= 512) agentTurnRowCache.clear();
+        divRow = { kind: 'agent_turn', id: divId, label: 'Background update' };
+        agentTurnRowCache.set(divId, divRow);
+      }
+      rows.push(divRow);
     }
     if (item.type === 'session_boundary') {
       flush();
-      rows.push({ kind: 'session', id: item.id });
+      let sRow = sessionRowCache.get(item);
+      if (!sRow) {
+        sRow = { kind: 'session', id: item.id };
+        rowAnchorItem.set(sRow, item);
+        sessionRowCache.set(item, sRow);
+      }
+      rows.push(sRow);
     } else if (item.type === 'user_message' || item.type === 'assistant_message') {
       flush();
-      rows.push({ kind: 'message', item });
-    } else if (!foldedIds.has(item.id)) {
+      let mRow = messageRowCache.get(item);
+      if (!mRow) {
+        mRow = { kind: 'message', item };
+        rowAnchorItem.set(mRow, item);
+        messageRowCache.set(item, mRow);
+      }
+      rows.push(mRow);
+    } else if (!foldedIds?.has(item.id)) {
       if (!work.length) workId = item.id;
-      work.push({ item, approval: folded.get(item.id) });
+      const approval = folded?.get(item.id);
+      work.push({ item, approval });
     }
   }
   flush();
@@ -235,6 +329,16 @@ export function timelineRows(items: readonly TurnItem[], turns: readonly Provide
 
 const itemTime = (i: TurnItem): number => Date.parse(i.started_at ?? i.updated_at);
 const dayKey = (ms: number): string => new Date(ms).toDateString();
+
+function cachedItemDay(i: TurnItem): { time: number; day: string } {
+  let hit = itemDayCache.get(i);
+  if (!hit) {
+    const time = itemTime(i);
+    hit = { time, day: Number.isFinite(time) ? dayKey(time) : '' };
+    itemDayCache.set(i, hit);
+  }
+  return hit;
+}
 
 /** "Today", "Yesterday", "Wed, Nov 4" (a past year adds it: "Mon, Dec 29, 2025"). */
 export function dayLabel(ms: number, now: Date = new Date()): string {
@@ -250,19 +354,39 @@ export function dayLabel(ms: number, now: Date = new Date()): string {
 
 /** Date separators before the first row of each day — only when the thread
  *  spans more than one calendar day (a one-day chat stays uncluttered). */
-function withDays(rows: TimelineRow[], items: readonly TurnItem[], now: Date = new Date()): TimelineRow[] {
-  const at = new Map(items.map((i) => [i.id, itemTime(i)]));
-  const rowTime = (r: TimelineRow): number =>
-    (r.kind === 'message' ? at.get(r.item.id) : r.kind === 'work' || r.kind === 'session' ? at.get(r.id) : undefined) ?? NaN;
-  const days = new Set(rows.map(rowTime).filter(Number.isFinite).map(dayKey));
-  if (days.size < 2) return rows;
+function withDays(rows: TimelineRow[], _items: readonly TurnItem[], now: Date = new Date()): TimelineRow[] {
+  let firstDay = '';
+  let multiDay = false;
+  for (let i = 0; i < rows.length; i++) {
+    const anchor = rowAnchorItem.get(rows[i]);
+    if (!anchor) continue;
+    const { day } = cachedItemDay(anchor);
+    if (!day) continue;
+    if (!firstDay) firstDay = day;
+    else if (day !== firstDay) {
+      multiDay = true;
+      break;
+    }
+  }
+  if (!multiDay) return rows;
   const out: TimelineRow[] = [];
   let last = '';
   for (const r of rows) {
-    const t = rowTime(r);
-    if (Number.isFinite(t) && dayKey(t) !== last) {
-      last = dayKey(t);
-      out.push({ kind: 'day', id: `day:${last}`, label: dayLabel(t, now) });
+    const anchor = rowAnchorItem.get(r);
+    if (anchor) {
+      const { time, day } = cachedItemDay(anchor);
+      if (day && day !== last) {
+        last = day;
+        const label = dayLabel(time, now);
+        const cacheKey = `${last}\0${label}`;
+        let dayRow = dayRowCache.get(cacheKey);
+        if (!dayRow) {
+          if (dayRowCache.size >= 256) dayRowCache.clear();
+          dayRow = { kind: 'day', id: `day:${last}`, label };
+          dayRowCache.set(cacheKey, dayRow);
+        }
+        out.push(dayRow);
+      }
     }
     out.push(r);
   }
@@ -436,6 +560,8 @@ function idOr(id: string | null, kind: OpenedTarget['kind']): OpenedTarget | nul
   return id ? { kind, id } : null;
 }
 
+const SHORT_CLOCK_FMT = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+
 function pad2(n: number): string {
   return String(n).padStart(2, '0');
 }
@@ -452,8 +578,10 @@ function fmtLocalDateTime(d: Date): string {
   return `${fmtLocalDate(d)} ${fmtLocalClockSec(d)}`;
 }
 
-function compactSpan(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 1000) return '';
+/** "820ms", "14s", "2m 14s", "1h 3m". */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
@@ -466,7 +594,7 @@ export function formatMessageClock(iso: string | null | undefined): string {
   if (!iso) return '';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  return SHORT_CLOCK_FMT.format(d);
 }
 
 /** Full local date + seconds tooltip for sent, streaming, and settled messages. */
@@ -487,7 +615,8 @@ export function formatMessageTooltip(
 
   if (completedAt !== undefined) {
     if (startOk && endOk) {
-      const span = compactSpan(end!.getTime() - start!.getTime());
+      const elapsedMs = end!.getTime() - start!.getTime();
+      const span = Number.isFinite(elapsedMs) && elapsedMs >= 1000 ? formatDuration(elapsedMs) : '';
       const suffix = span ? ` (${span})` : '';
       return `Started ${fmtLocalClockSec(start!)} · Completed ${fmtLocalClockSec(end!)}${suffix} · ${fmtLocalDate(end!)}`;
     }

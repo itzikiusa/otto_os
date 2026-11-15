@@ -604,13 +604,19 @@ async fn attachment<S: RuntimeCtx>(
     Ok((headers, bytes).into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct EventsQuery {
     #[serde(default)]
     after_sequence: u64,
+    #[serde(default)]
+    tail_turns: Option<usize>,
+    #[serde(default)]
+    before_turn_ordinal: Option<u32>,
+    #[serde(default)]
+    limit_turns: Option<usize>,
 }
 
-/// GET /runtime-sessions/{id}/events?after_sequence= — events or a snapshot.
+/// GET /runtime-sessions/{id}/events?after_sequence= — events, tail snapshot, or older turn page.
 async fn events<S: RuntimeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -619,6 +625,14 @@ async fn events<S: RuntimeCtx>(
 ) -> ApiResult<Json<RuntimeReplay>> {
     authorized(&ctx, &user, &id).await?;
     Ok(Json(
-        ctx.agent_runtime().replay(&id, q.after_sequence).await?,
+        ctx.agent_runtime()
+            .replay_paged(
+                &id,
+                q.after_sequence,
+                q.tail_turns,
+                q.before_turn_ordinal,
+                q.limit_turns,
+            )
+            .await?,
     ))
 }

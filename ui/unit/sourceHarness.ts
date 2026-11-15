@@ -86,7 +86,7 @@ export function loadSource(
       }
       // Pure, dependency-free shared helpers (load-error copy, the HTML
       // escaper, the byte formatter, the git auto-fetch policy) run for real unless a test overrides them.
-      const pure = /(?:^|\/)(loadError|html|metric-format|gitAutoFetchConfig|personalAgentBadges)(?:\.ts)?$/.exec(name);
+      const pure = /(?:^|\/)(loadError|html|metric-format|gitAutoFetchConfig|personalAgentBadges|providerRegistry)(?:\.ts)?$/.exec(name);
       if (!(name in imports) && pure) {
         return loadSource(new URL(`../src/lib/${pure[1]}.ts`, import.meta.url), {}, globals);
       }
@@ -95,6 +95,9 @@ export function loadSource(
         const key = file && srcKey(file);
         if (key && key in imports) return imports[key];
         if (file) return loadSource(file, imports, globals, options, cache);
+      }
+      if (!(name in imports) && name === 'svelte/reactivity') {
+        return { SvelteMap: Map, SvelteSet: Set, SvelteURLSearchParams: URLSearchParams };
       }
       if (!(name in imports)) throw new Error(`Missing fixture import: ${name}`);
       return imports[name];

@@ -6,33 +6,29 @@
 //! `GO_DEBUGGING_PRODAMS`, `GO_DEBUGGING_PARAMS`, `GOPRIVATE`, `GONOSUMDB`,
 //! `AWS_PROFILE`, `GOPATH`, and custom `PATH` entries).
 //!
-//! `ShellEnvResolver` spawns `$SHELL -lic` **once** lazily in the background
-//! using unique sentinel markers around `/usr/bin/env -0` so MOTD banners, ANSI
-//! escapes, and `echo` output in `.zshrc` never corrupt parsing, enforces a hard
-//! 3-second process-group timeout (`process_group(0)` + `-pgid` kill) so hanging
-//! shell RC scripts never leak orphan processes, and caches the resulting
-//! `BTreeMap<String, String>` in memory with explicit `POST /ide/shell-env/reload`.
+//! Each `IdeEngine` / `EnvironmentManager` owns its own `Arc<ShellEnvResolver>`
+//! so isolated engines and tests never share process-global state.
+
+mod shell_env_probe;
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 use tokio::sync::Notify;
 
 use crate::target::TargetManager;
 use crate::types::{IdeShellEnvResp, IdeSshSpec, IdeTargetSpec};
 
+pub(crate) use self::shell_env_probe::capture_shell_env_with_shell;
 use super::is_valid_env_key;
 
-const INTERACTIVE_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
-const LOGIN_FALLBACK_TIMEOUT: Duration = Duration::from_millis(1500);
-const MAX_SHELL_STDOUT_BYTES: usize = 512 * 1024;
+pub(super) const INTERACTIVE_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
+pub(super) const LOGIN_FALLBACK_TIMEOUT: Duration = Duration::from_millis(1500);
+pub(super) const MAX_SHELL_STDOUT_BYTES: usize = 512 * 1024;
 const MAX_SINGLE_ENV_VALUE_BYTES: usize = 32 * 1024;
 const MAX_CACHED_ENV_VARS: usize = 512;
 
@@ -50,13 +46,7 @@ const IGNORED_SHELL_KEYS: &[&str] = &[
     "XPC_FLAGS",
 ];
 
-static GLOBAL_SHELL_ENV: OnceLock<Arc<ShellEnvResolver>> = OnceLock::new();
-static PROBE_TOKEN_SEQ: AtomicU64 = AtomicU64::new(1);
-
-/// Return the process-wide shared `ShellEnvResolver`.
-pub fn global_shell_env() -> &'static Arc<ShellEnvResolver> {
-    GLOBAL_SHELL_ENV.get_or_init(|| Arc::new(ShellEnvResolver::new()))
-}
+pub(super) static PROBE_TOKEN_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 struct ShellEnvState {
@@ -68,7 +58,7 @@ struct ShellEnvState {
     error: Option<String>,
 }
 
-/// Cached login+interactive shell environment resolver.
+/// Cached login+interactive shell environment resolver owned per `IdeEngine`.
 pub struct ShellEnvResolver {
     state: RwLock<ShellEnvState>,
     warming: AtomicBool,
@@ -104,8 +94,8 @@ impl ShellEnvResolver {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_seeded_vars(vars: BTreeMap<String, String>) -> Arc<Self> {
+    /// Construct a pre-seeded resolver for deterministic tests without spawning a login shell.
+    pub fn with_seeded_vars(vars: BTreeMap<String, String>) -> Arc<Self> {
         Arc::new(Self {
             state: RwLock::new(ShellEnvState {
                 status: "ready".to_string(),
@@ -152,7 +142,6 @@ impl ShellEnvResolver {
     }
 
     /// Non-blocking snapshot of the cached user shell environment (`<1us`).
-    /// Triggers background warming if still cold.
     pub fn snapshot(self: &Arc<Self>) -> IdeShellEnvResp {
         self.ensure_warming_in_background();
         let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
@@ -170,8 +159,7 @@ impl ShellEnvResolver {
     }
 
     /// Return the resolved shell environment, awaiting an in-flight initial
-    /// warm (bounded to ~3.5s) so the very first Run/Debug launch or
-    /// `GET /ide/shell-env` request is guaranteed to include `.zshrc` exports.
+    /// warm (bounded to ~3.5s) for root-initiated Run/Debug launches.
     pub async fn get_or_load(self: &Arc<Self>) -> IdeShellEnvResp {
         if otto_core::e2e::isolated() {
             let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
@@ -210,7 +198,7 @@ impl ShellEnvResolver {
         }
     }
 
-    /// Awaited `KEY=VALUE` map for Run/Debug process launches.
+    /// Awaited `KEY=VALUE` map for root Run/Debug process launches.
     pub async fn vars_or_load(self: &Arc<Self>) -> BTreeMap<String, String> {
         self.get_or_load().await.vars
     }
@@ -227,7 +215,6 @@ impl ShellEnvResolver {
             guard.error = None;
             return state_to_resp(&guard);
         }
-        // Serialize concurrent reload calls cleanly.
         while self
             .warming
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -254,7 +241,6 @@ impl ShellEnvResolver {
             guard.duration_ms = Some(duration_ms);
             match outcome {
                 Ok(mut parsed) => {
-                    // Preserve any launchd base variables not present in shell output.
                     let mut merged = collect_process_base_env();
                     merged.append(&mut parsed);
                     guard.status = "ready".to_string();
@@ -300,11 +286,14 @@ pub(crate) fn collect_process_base_env() -> BTreeMap<String, String> {
     out
 }
 
-/// Minimal safe host environment subset for non-root callers so the daemon
-/// owner's process environment secrets never enter `effective_env`.
+/// Scrubbed minimal host environment subset for non-root callers so daemon
+/// tokens, cloud credentials, SSH agents, and login-shell secrets never leak
+/// into non-root local Run, Debug, Formatter, or LSP child processes.
 pub(crate) fn collect_safe_non_root_base_env() -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    for key in ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM"] {
+    for key in [
+        "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+    ] {
         if let Ok(val) = std::env::var(key) {
             if should_keep_env_entry(key, &val) {
                 out.insert(key.to_string(), val);
@@ -312,6 +301,27 @@ pub(crate) fn collect_safe_non_root_base_env() -> BTreeMap<String, String> {
         }
     }
     out
+}
+
+/// Returns `true` when an environment variable key may hold daemon-internal,
+/// cloud, VCS, or API credentials that non-root callers must not inherit
+/// implicitly from host/cached environments.
+pub(crate) fn is_sensitive_daemon_env_key(k: &str) -> bool {
+    let upper = k.to_ascii_uppercase();
+    upper.starts_with("OTTO_")
+        || upper.starts_with("AWS_")
+        || upper.starts_with("AZURE_")
+        || upper.starts_with("GCP_")
+        || upper.starts_with("GOOGLE_")
+        || upper == "SSH_AUTH_SOCK"
+        || upper == "SSH_AGENT_PID"
+        || upper.contains("SECRET")
+        || upper.contains("TOKEN")
+        || upper.contains("PASSWORD")
+        || upper.contains("PASSWD")
+        || upper.contains("API_KEY")
+        || upper.contains("PRIVATE_KEY")
+        || upper.contains("CREDENTIAL")
 }
 
 /// Probe the login shell environment on a remote SSH target (`GET /ide/shell-env`
@@ -389,125 +399,14 @@ fn detect_user_shell() -> String {
     "/bin/sh".to_string()
 }
 
-fn should_keep_env_entry(key: &str, value: &str) -> bool {
+pub(super) fn should_keep_env_entry(key: &str, value: &str) -> bool {
     is_valid_env_key(key)
         && !IGNORED_SHELL_KEYS.contains(&key)
         && value.len() <= MAX_SINGLE_ENV_VALUE_BYTES
 }
 
-/// Capture environment variables from `shell_bin` using `-lic` (login + interactive,
-/// loading `.zshenv` + `.zprofile` + `.zshrc` / `.bash_profile` + `.bashrc`) with
-/// fallback to `-lc` (login only) if interactive mode times out or errors.
-pub(crate) async fn capture_shell_env_with_shell(
-    shell_bin: &str,
-    interactive_timeout: Duration,
-) -> std::result::Result<BTreeMap<String, String>, String> {
-    match run_shell_env_probe(shell_bin, "-lic", interactive_timeout).await {
-        Ok(vars) if !vars.is_empty() => Ok(vars),
-        Ok(_) | Err(_) => {
-            // Fallback to login non-interactive `-lc` in case `.zshrc` exited early or timed out.
-            run_shell_env_probe(shell_bin, "-lc", LOGIN_FALLBACK_TIMEOUT).await
-        }
-    }
-}
-
-pub(crate) async fn run_shell_env_probe(
-    shell_bin: &str,
-    mode_flag: &str,
-    timeout_dur: Duration,
-) -> std::result::Result<BTreeMap<String, String>, String> {
-    let token = PROBE_TOKEN_SEQ.fetch_add(1, Ordering::Relaxed);
-    let start_marker = format!("__OTTO_SHELL_ENV_BEGIN_{}_{}__", std::process::id(), token);
-    let end_marker = format!("__OTTO_SHELL_ENV_END_{}_{}__", std::process::id(), token);
-    let env_bin = if Path::new("/usr/bin/env").is_file() {
-        "/usr/bin/env"
-    } else {
-        "env"
-    };
-    let script = format!("printf '%s' '{start_marker}'; {env_bin} -0; printf '%s' '{end_marker}'");
-
-    let mut cmd = Command::new(shell_bin);
-    cmd.args([mode_flag, &script])
-        .env("TERM", "dumb")
-        .env("OTTO_SHELL_ENV_PROBE", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    if let Some(home) = dirs::home_dir() {
-        if home.is_dir() {
-            cmd.current_dir(&home);
-        }
-    }
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn '{shell_bin} {mode_flag}': {e}"))?;
-    let child_pid = child.id();
-    let mut guard = ShellProbeGuard {
-        pid: child_pid,
-        disarmed: false,
-    };
-
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "missing stdout pipe from shell probe".to_string())?;
-
-    let read_fut = async {
-        let mut buf = Vec::with_capacity(8192);
-        let mut chunk = [0u8; 4096];
-        loop {
-            let n = stdout
-                .read(&mut chunk)
-                .await
-                .map_err(|e| format!("read shell probe stdout: {e}"))?;
-            if n == 0 {
-                break;
-            }
-            let remaining = MAX_SHELL_STDOUT_BYTES.saturating_sub(buf.len());
-            let take = n.min(remaining);
-            buf.extend_from_slice(&chunk[..take]);
-            if buf.len() >= MAX_SHELL_STDOUT_BYTES {
-                break;
-            }
-            // As soon as we see the closing sentinel we have the entire `env -0` payload!
-            if find_subslice(&buf, end_marker.as_bytes()).is_some() {
-                break;
-            }
-        }
-        Ok::<Vec<u8>, String>(buf)
-    };
-
-    let raw_bytes = match tokio::time::timeout(timeout_dur, read_fut).await {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(err)) => {
-            terminate_shell_process_group(&mut child, child_pid).await;
-            guard.disarmed = true;
-            return Err(err);
-        }
-        Err(_) => {
-            terminate_shell_process_group(&mut child, child_pid).await;
-            guard.disarmed = true;
-            return Err(format!(
-                "shell environment probe '{shell_bin} {mode_flag}' timed out after {}ms",
-                timeout_dur.as_millis()
-            ));
-        }
-    };
-
-    terminate_shell_process_group(&mut child, child_pid).await;
-    guard.disarmed = true;
-
-    parse_sentinel_env_zero(&raw_bytes, &start_marker, &end_marker)
-}
-
 /// Parse `env -0` NUL-delimited `KEY=VALUE` entries strictly between
-/// `start_marker` and `end_marker`, ignoring any noisy `.zshrc` banners,
-/// MOTD messages, ANSI color codes, or trailing shell exit hooks.
+/// `start_marker` and `end_marker`.
 pub fn parse_sentinel_env_zero(
     raw: &[u8],
     start_marker: &str,
@@ -546,152 +445,9 @@ pub fn parse_sentinel_env_zero(
     Ok(out)
 }
 
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(super) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
     haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-struct ShellProbeGuard {
-    pid: Option<u32>,
-    disarmed: bool,
-}
-
-impl Drop for ShellProbeGuard {
-    #[allow(clippy::disallowed_methods)] // synchronous Drop safeguard when task is cancelled
-    fn drop(&mut self) {
-        if !self.disarmed {
-            #[cfg(unix)]
-            if let Some(pid) = self.pid {
-                let _ = std::process::Command::new("/bin/kill")
-                    .args(["-KILL", &format!("-{pid}")])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-        }
-    }
-}
-
-async fn terminate_shell_process_group(child: &mut tokio::process::Child, pid: Option<u32>) {
-    if tokio::time::timeout(Duration::from_millis(40), child.wait())
-        .await
-        .is_ok()
-    {
-        return;
-    }
-    #[cfg(unix)]
-    if let Some(p) = pid {
-        let _ = Command::new("/bin/kill")
-            .args(["-KILL", &format!("-{p}")])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
-    }
-    let _ = child.kill().await;
-    let _ = tokio::time::timeout(Duration::from_millis(100), child.wait()).await;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sentinel_parser_ignores_zshrc_motd_banners_ansi_and_multiline_values() {
-        let start = "__OTTO_START_1__";
-        let end = "__OTTO_END_1__";
-        let mut raw = Vec::new();
-        raw.extend_from_slice(b"\x1b[32mWelcome to Oh My Zsh!\x1b[0m\nFAKE_VAR=corrupted\n");
-        raw.extend_from_slice(start.as_bytes());
-        raw.extend_from_slice(b"GO_DEBUGGING_PRODAMS=host=127.0.0.1;env=qa\0");
-        raw.extend_from_slice(b"GOPRIVATE=bitbucket.org/gamescale-rnd/*\0");
-        raw.extend_from_slice(b"MULTILINE_CERT=-----BEGIN-----\nline2\n-----END-----\0");
-        raw.extend_from_slice(b"PWD=/should/be/filtered\0");
-        raw.extend_from_slice(b"SHLVL=3\0");
-        raw.extend_from_slice(b"PATH=/Users/dev/go/bin:/opt/homebrew/bin:/usr/bin\0");
-        raw.extend_from_slice(end.as_bytes());
-        raw.extend_from_slice(b"\nGoodbye from .zlogout!\nTRAILING=ignored\0");
-
-        let parsed = parse_sentinel_env_zero(&raw, start, end).unwrap();
-        assert_eq!(
-            parsed.get("GO_DEBUGGING_PRODAMS").map(String::as_str),
-            Some("host=127.0.0.1;env=qa")
-        );
-        assert_eq!(
-            parsed.get("GOPRIVATE").map(String::as_str),
-            Some("bitbucket.org/gamescale-rnd/*")
-        );
-        assert_eq!(
-            parsed.get("MULTILINE_CERT").map(String::as_str),
-            Some("-----BEGIN-----\nline2\n-----END-----")
-        );
-        assert_eq!(
-            parsed.get("PATH").map(String::as_str),
-            Some("/Users/dev/go/bin:/opt/homebrew/bin:/usr/bin")
-        );
-        assert!(!parsed.contains_key("FAKE_VAR"));
-        assert!(!parsed.contains_key("TRAILING"));
-        assert!(!parsed.contains_key("PWD"));
-        assert!(!parsed.contains_key("SHLVL"));
-    }
-
-    #[tokio::test]
-    async fn shell_probe_captures_exported_vars_and_kills_hanging_shell_within_timeout() {
-        let tmp = tempfile::tempdir().unwrap();
-        let noisy_shell = tmp.path().join("mock_zsh.sh");
-        std::fs::write(
-            &noisy_shell,
-            "#!/bin/sh\n\
-             echo 'MOTD: loading custom zsh profile...'\n\
-             export GO_DEBUGGING_PRODAMS='enabled-from-zshrc'\n\
-             export GOPRIVATE='github.com/acme/*'\n\
-             exec /bin/sh -c \"$2\"\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&noisy_shell, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let vars = run_shell_env_probe(
-            noisy_shell.to_str().unwrap(),
-            "-lic",
-            Duration::from_secs(2),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            vars.get("GO_DEBUGGING_PRODAMS").map(String::as_str),
-            Some("enabled-from-zshrc")
-        );
-        assert_eq!(
-            vars.get("GOPRIVATE").map(String::as_str),
-            Some("github.com/acme/*")
-        );
-
-        // Verify a hanging shell that spawns a child sleep is killed cleanly on timeout.
-        let hanging_shell = tmp.path().join("hanging_zsh.sh");
-        std::fs::write(&hanging_shell, "#!/bin/sh\nsleep 30 &\nwait\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hanging_shell, std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
-
-        let started = Instant::now();
-        let res = run_shell_env_probe(
-            hanging_shell.to_str().unwrap(),
-            "-lic",
-            Duration::from_millis(200),
-        )
-        .await;
-        assert!(res.is_err());
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
 }

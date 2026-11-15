@@ -607,6 +607,10 @@ pub struct RuntimeEvent {
     pub body: RuntimeEventBody,
 }
 
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
 /// Every entity's latest state — what a client starts from when the events
 /// since its `after_sequence` are no longer (or too many to be) replayable.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -621,6 +625,15 @@ pub struct RuntimeSnapshot {
     /// Messages queued behind the running turn, oldest first.
     #[serde(default)]
     pub queued_prompts: Vec<QueuedPrompt>,
+    /// Set when `tail_turns` / `before_turn_ordinal` omitted earlier turns.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_older: bool,
+    /// `ordinal` of the earliest turn included in this slice, when paginated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_turn_ordinal: Option<u32>,
+    /// Count of earlier turns omitted before `oldest_turn_ordinal`.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub older_turns: u32,
 }
 
 /// `GET /runtime-sessions/{id}/events` (T3 Code `subscribeThread` items).

@@ -30,6 +30,7 @@
     type ComposerSlashCommand,
   } from '../../lib/slashActions';
   import { auth } from '../../lib/stores/auth.svelte';
+  import { composerViewState, getTransientComposerDraft, saveTransientComposerDraft } from '../../lib/stores/runtimeDraftCursor';
   import { git } from '../../lib/stores/git.svelte';
   import { transcript } from '../../lib/stores/transcript.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
@@ -86,6 +87,26 @@
   const files = new StageAttachments(() => provider, () => runtime && !council.on);
   const modeSupported = $derived(supportsInteractionMode(provider) && !runtime);
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
+  const stageDraftKey = $derived(`threads-stage:${cleanCwd || targetWs}`);
+  const stageViewStateArg = $derived({ key: stageDraftKey, hasText: prompt.length > 0 });
+  let hydratedStageKey = '';
+  $effect(() => {
+    const key = stageDraftKey;
+    if (key !== hydratedStageKey) {
+      hydratedStageKey = key;
+      const saved = getTransientComposerDraft(key);
+      if (saved && !prompt) {
+        prompt = saved;
+      }
+    }
+  });
+  $effect(() => {
+    const key = stageDraftKey;
+    const val = prompt;
+    if (key === hydratedStageKey) {
+      saveTransientComposerDraft(key, val);
+    }
+  });
   const onWorktree = $derived(worktree !== null && worktree.path.replace(/\/+$/, '') === cleanCwd);
   const repo = $derived(onWorktree ? worktree!.repo : threadRepos.repoFor(cleanCwd, scratchActive ? null : ws.currentId));
   const branch = $derived(onWorktree ? worktree!.branch : repo ? (git.statusById[repo.id]?.branch ?? null) : null);
@@ -137,7 +158,11 @@
     cwdError = '';
   }
 
+  const SUPPORTS_FIELD_SIZING =
+    typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('field-sizing', 'content');
+
   function autoGrow(el: HTMLTextAreaElement): void {
+    if (SUPPORTS_FIELD_SIZING) return;
     el.style.height = 'auto';
     el.style.height = `${Math.min(240, Math.max(56, el.scrollHeight))}px`;
   }
@@ -296,6 +321,7 @@
             ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
             : await ws.createSessionQuiet({ kind: 'agent', provider, title, cwd: dir || null, meta }, opts);
       if (firstMsg && !runtime && !asCouncil) transcript.recordOptimisticPrompt(created.id, firstMsg);
+      saveTransientComposerDraft(stageDraftKey, '');
       prompt = '';
       stageContext = [];
       files.picked = [];
@@ -473,8 +499,13 @@
       <textarea
         bind:this={composerEl}
         bind:value={prompt}
+        use:composerViewState={stageViewStateArg}
         dir="auto"
         rows={2}
+        spellcheck="false"
+        {...{ autocorrect: 'off' }}
+        autocapitalize="off"
+        autocomplete="off"
         placeholder={interactionMode === 'plan'
           ? 'Describe what to explore and plan. @ files, / commands, ⇧⇥ leaves Plan'
           : 'Ask anything. @ files or agents, / commands'}
@@ -689,6 +720,7 @@
     unicode-bidi: plaintext;
     text-align: start;
     outline: none;
+    field-sizing: content;
   }
   .nt-error {
     margin: 0;

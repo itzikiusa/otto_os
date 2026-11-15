@@ -7,8 +7,9 @@ import {
   removeIdeUndoDraft,
   writeIdeUndoDraftImmediate,
 } from '../../../lib/components/cm-ide-drafts';
+import { readIdePreferences } from '../../../lib/components/cm-ide-prefs';
 import { mergeBackendIdeProjects, parseNamedIdeProject } from '../../../lib/ideProjectsModel';
-import { lsGet, lsSet } from '../../../lib/storage';
+import { lsGet, lsRemove, lsSet } from '../../../lib/storage';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import {
@@ -22,6 +23,7 @@ import {
   type IdeTargetSpec,
 } from '../store/ideTypes';
 import {
+  canonicalRootKey,
   detectBuildToolFromState,
   emitIdeProjectsChanged,
   findContainingRoot,
@@ -65,6 +67,7 @@ export interface NamedProjectsHost extends ProjectHelperHost {
   activeProjectId: string | null;
   activePath: string | null;
   hasClosedAllTabs: boolean;
+  flushAutoSave?(path?: string): Promise<void>;
   setLocalTarget(
     root: string,
     workspaceId?: string | null,
@@ -81,8 +84,9 @@ interface SavedProjectTabs {
 export function snapshotProjectTabs(projectId: string | null, tabs: IdeOpenTab[], activePath: string | null): void {
   if (!projectId) return;
   try {
+    const cap = Math.max(15, Math.min(40, readIdePreferences().maxOpenTabs || 20));
     const payload: SavedProjectTabs = {
-      paths: tabs.slice(0, 24).map((t) => t.path),
+      paths: tabs.slice(0, cap).map((t) => t.path),
       activePath,
       pinnedPaths: tabs.filter((t) => t.pinned).map((t) => t.path),
     };
@@ -127,10 +131,15 @@ export async function upsertNamedProject(
 ): Promise<IdeNamedProject | null> {
   const primary = normalizeRootPath(spec.primary_root || spec.folders[0] || '');
   if (!primary) return null;
+  const seenKeys = new Set<string>([canonicalRootKey(primary)]);
   const uniqueFolders = [primary];
   for (let i = 0; i < spec.folders.length; i++) {
     const f = normalizeRootPath(spec.folders[i]);
-    if (f && !uniqueFolders.includes(f)) uniqueFolders.push(f);
+    const k = canonicalRootKey(f);
+    if (f && k && !seenKeys.has(k)) {
+      seenKeys.add(k);
+      uniqueFolders.push(f);
+    }
   }
   const id = spec.id || `proj-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const draft: IdeNamedProject = {
@@ -168,12 +177,14 @@ export async function upsertNamedProject(
 }
 
 export async function removeNamedProject(host: NamedProjectsHost, projectId: string): Promise<void> {
+  const removed = host.namedProjects.find((p) => p.id === projectId);
   try {
     await api.del(`/ide/projects/${encodeURIComponent(projectId)}`);
   } catch (e) {
     toastError('Couldn’t delete project', e);
     return;
   }
+  lsRemove(`${PROJECT_TABS_PREFIX}${projectId}`);
   const next = host.namedProjects.filter((p) => p.id !== projectId);
   host.namedProjects = next;
   if (host.activeProjectId === projectId) {
@@ -181,45 +192,86 @@ export async function removeNamedProject(host: NamedProjectsHost, projectId: str
     saveActiveProjectIdLocal(null, next, host.target.root);
   }
   saveNamedProjectsLocal(next, host.activeProjectId);
+  if (removed && removed.primary_root !== normalizeRootPath(host.target.root)) {
+    void import('../../../lib/components/cm-ide-lsp')
+      .then((m) => {
+        for (let i = 0; i < removed.folders.length; i++) {
+          m.disposePooledLspClients({ rootPath: removed.folders[i], forceAll: true });
+        }
+      })
+      .catch(() => {});
+  }
 }
 
 export async function activateNamedProject(host: NamedProjectsHost, projectId: string): Promise<void> {
   const proj = host.namedProjects.find((p) => p.id === projectId);
   if (!proj) return;
+  const primaryKey = canonicalRootKey(proj.primary_root);
+  const extraRoots = proj.folders.filter((f) => canonicalRootKey(f) !== primaryKey);
+  if (
+    host.activeProjectId === proj.id &&
+    host.target.kind === 'local' &&
+    canonicalRootKey(host.target.root) === primaryKey &&
+    host.additionalRoots.length === extraRoots.length &&
+    extraRoots.every((r, idx) => canonicalRootKey(host.additionalRoots[idx]) === canonicalRootKey(r))
+  ) {
+    return;
+  }
+  if (readIdePreferences().autoSave && host.flushAutoSave) {
+    await host.flushAutoSave();
+  }
   if (host.activeProjectId) {
     snapshotProjectTabs(host.activeProjectId, host.tabs, host.activePath);
   }
-  const extraRoots = proj.folders.filter((f) => f !== proj.primary_root);
+  void import('../../../lib/components/cm-ide-lsp')
+    .then((m) => m.disposePooledLspClients({ forceAll: true }))
+    .catch(() => {});
   const savedTabs = readProjectTabsSnapshot(proj.id);
-  const hasSavedTabs = Boolean(savedTabs && savedTabs.paths.length > 0);
+  const cap = Math.max(15, Math.min(40, readIdePreferences().maxOpenTabs || 20));
+  const boundedPaths = savedTabs?.paths.slice(0, cap) ?? [];
+  const pinnedSet = new Set(savedTabs?.pinnedPaths ?? []);
+  const hasSavedTabs = boundedPaths.length > 0;
   await host.setLocalTarget(proj.primary_root, null, {
     additionalRoots: extraRoots,
     projectId: proj.id,
     skipAutoOpen: hasSavedTabs,
   });
-  if (savedTabs && savedTabs.paths.length > 0) {
-    const activeFirst = savedTabs.activePath && savedTabs.paths.includes(savedTabs.activePath)
+  if (hasSavedTabs) {
+    const activeFirst = savedTabs?.activePath && boundedPaths.includes(savedTabs.activePath)
       ? savedTabs.activePath
-      : savedTabs.paths[0];
-    if (activeFirst) await host.openFile(activeFirst, { preview: false });
-    const rest = savedTabs.paths.filter((p) => p !== activeFirst).slice(0, 7);
-    for (let i = 0; i < rest.length; i++) {
-      void host.openFile(rest[i], { preview: false });
+      : boundedPaths[0];
+    if (activeFirst) {
+      await host.openFile(activeFirst, { preview: false });
+      const activeTab = host.tabs.find((t) => t.path === host.resolvePath(activeFirst));
+      if (activeTab && pinnedSet.has(activeTab.path)) activeTab.pinned = true;
     }
-    if (activeFirst) host.activePath = activeFirst;
+    const rest = boundedPaths.filter((p) => p !== activeFirst).slice(0, cap - 1);
+    for (let i = 0; i < rest.length; i++) {
+      void host.openFile(rest[i], { preview: false, background: true });
+      const bgTab = host.tabs.find((t) => t.path === host.resolvePath(rest[i]));
+      if (bgTab && pinnedSet.has(bgTab.path)) bgTab.pinned = true;
+    }
+    if (activeFirst) host.activePath = host.resolvePath(activeFirst);
   }
 }
 
 export async function attachProjectFoldersBatch(
   host: NamedProjectsHost,
   rawFolders: string[],
+  opts: { quiet?: boolean } = {},
 ): Promise<number> {
   const primary = normalizeRootPath(host.target.root);
+  const seenKeys = new Set<string>([
+    canonicalRootKey(primary),
+    ...host.additionalRoots.map((r) => canonicalRootKey(r)),
+  ]);
   const nextRoots = [...host.additionalRoots];
   const added: string[] = [];
   for (let i = 0; i < rawFolders.length; i++) {
     const clean = normalizeRootPath(rawFolders[i]);
-    if (!clean || clean === primary || nextRoots.includes(clean)) continue;
+    const k = canonicalRootKey(clean);
+    if (!clean || !k || seenKeys.has(k)) continue;
+    seenKeys.add(k);
     nextRoots.push(clean);
     added.push(clean);
   }
@@ -269,7 +321,9 @@ export async function attachProjectFoldersBatch(
     if (!t.external && !isReadOnlySdkOrCachePath(t.path)) t.readOnly = false;
   }
 
-  toasts.success(`Attached ${added.length} ${added.length === 1 ? 'repository' : 'repositories'} to project`);
+  if (!opts.quiet) {
+    toasts.success(`Attached ${added.length} ${added.length === 1 ? 'repository' : 'repositories'} to project`);
+  }
   return added.length;
 }
 
@@ -278,10 +332,24 @@ export function syncCurrentProjectFolders(
 ): void {
   if (!host.activeProjectId || !host.target.root) return;
   const primary = normalizeRootPath(host.target.root);
-  const folders = [primary, ...host.additionalRoots.filter((f) => f && f !== primary)];
+  const seenKeys = new Set<string>([canonicalRootKey(primary)]);
+  const folders = [primary];
+  for (let i = 0; i < host.additionalRoots.length; i++) {
+    const f = normalizeRootPath(host.additionalRoots[i]);
+    const k = canonicalRootKey(f);
+    if (f && k && !seenKeys.has(k)) {
+      seenKeys.add(k);
+      folders.push(f);
+    }
+  }
   const cur = host.namedProjects.find((p) => p.id === host.activeProjectId);
   if (!cur) return;
-  if (cur.folders.length === folders.length && cur.folders.every((f, idx) => f === folders[idx])) return;
+  if (
+    cur.folders.length === folders.length &&
+    cur.folders.every((f, idx) => canonicalRootKey(f) === canonicalRootKey(folders[idx]))
+  ) {
+    return;
+  }
   const next = host.namedProjects.map((p) =>
     p.id === host.activeProjectId ? { ...p, primary_root: primary, folders, updated_at: Date.now() } : p,
   );
@@ -310,11 +378,19 @@ export async function performMutateFs(
   destPath?: string,
 ): Promise<boolean> {
   try {
+    const prefs = readIdePreferences();
     const containing = findContainingRoot(path, host.projectRoots);
     const targetSpec = containing && !containing.isPrimary && host.target.kind === 'local'
       ? { ...host.targetPayload, root: containing.path }
       : host.targetPayload;
-    const resp = await api.post<{ ok: boolean; path: string }>('/ide/fs/mutate', { target: targetSpec, op, path, dest_path: destPath });
+    const resp = await api.post<{ ok: boolean; path: string }>('/ide/fs/mutate', {
+      target: targetSpec,
+      op,
+      path,
+      dest_path: destPath,
+      record_local_history: prefs.localHistoryEnabled,
+      local_history_retention_days: prefs.localHistoryRetentionDays,
+    });
     const parentOf = (p: string) => (p.lastIndexOf('/') > 0 ? p.slice(0, p.lastIndexOf('/')) : (containing?.path ?? host.target.root));
     await host.loadTree(containing && !containing.isPrimary ? containing.path : undefined);
     for (const dir of Object.keys(host.expandedDirs)) {

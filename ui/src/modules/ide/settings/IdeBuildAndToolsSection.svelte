@@ -72,7 +72,6 @@
   }
 
   function lspInstalled(ecoId: string): boolean {
-    if (ecoId === 'shell') return true;
     const eco = ide.toolchains.find((t) => t.ecosystem === ecoId);
     return Boolean(eco?.lsp_status?.available ?? eco?.lsp?.installed);
   }
@@ -125,38 +124,26 @@
       confirmLabel: 'Remove',
       danger: true,
     });
-    if (ok) await ide.removePlugin(slug);
+    if (ok && (await ide.removePlugin(slug))) {
+      toasts.success(`Removed ${name}`);
+    }
   }
 </script>
 
 {#if section === 'build.tools'}
   <div class="bt-sec" data-testid="ide-settings-build-tools">
     <div class="bt-card">
-      <span class="bt-title">Java Build Tool (Maven / Gradle)</span>
-      <select class="input" aria-label="Default Java build tool" bind:value={ideSettings.draft.defaultBuildToolJava}>
-        <option value="auto">Auto-detect (pom.xml → Maven, build.gradle → Gradle)</option>
-        <option value="maven">Maven (mvn)</option>
-        <option value="gradle">Gradle (./gradlew / gradle)</option>
-      </select>
-    </div>
-
-    <div class="bt-card">
       <div class="bt-sw-row">
-        <Switch checked={ideSettings.draft.goModulesEnabled} label="Enable Go Modules" onchange={(v) => (ideSettings.draft.goModulesEnabled = v)} />
-        <span class="bt-title">Go Modules (<code>go.mod</code> / multi-repo <code>replace</code> resolution)</span>
+        <Switch checked={ide.buildOffline} label="Offline build mode" onchange={(v) => ide.setBuildOffline(v)} />
+        <span class="bt-title">Work offline during Maven &amp; Gradle builds (<code>--offline</code>)</span>
       </div>
       <div class="bt-sw-row">
-        <Switch checked={ideSettings.draft.cargoCheckOnSave} label="Enable Cargo check on save" onchange={(v) => (ideSettings.draft.cargoCheckOnSave = v)} />
-        <span class="bt-title">Cargo — run <code>cargo check</code> diagnostics on save</span>
+        <Switch checked={ide.buildSkipTests} label="Skip tests during build" onchange={(v) => ide.setBuildSkipTests(v)} />
+        <span class="bt-title">Skip unit tests during project builds (<code>-DskipTests</code> / <code>-x test</code>)</span>
       </div>
-      <div class="bt-field">
-        <label class="bt-lbl" for="bt-npm-mgr">Node / TypeScript package manager:</label>
-        <select id="bt-npm-mgr" class="input" bind:value={ideSettings.draft.npmPackageManager}>
-          <option value="npm">npm</option>
-          <option value="pnpm">pnpm</option>
-          <option value="yarn">yarn</option>
-          <option value="bun">bun</option>
-        </select>
+      <div class="bt-sw-row">
+        <Switch checked={ide.keepTestcontainersAlive} label="Keep Testcontainers alive after test runs" onchange={(v) => (ide.keepTestcontainersAlive = v)} />
+        <span class="bt-title">Keep Testcontainers alive on exit (<code>TESTCONTAINERS_RYUK_DISABLED=true</code>) for DB Watch inspection</span>
       </div>
       <div>
         <button
@@ -347,7 +334,7 @@
               <span class="srv-sub">{srv.lang}</span>
             </div>
             <Badge tone={ok ? 'ok' : 'warn'} variant="outline" label={ok ? 'Ready' : 'Not installed'} />
-            {#if !ok && srv.eco !== 'shell'}
+            {#if !ok}
               <button type="button" class="btn small ghost" onclick={() => void ide.installToolchain(srv.eco, 'lsp')}>
                 Install
               </button>

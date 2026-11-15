@@ -5,7 +5,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
   import Switch from '../../../lib/components/Switch.svelte';
-  import { ctxMenu } from '../../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { ide, type IdeDetectedSdk, type IdeInstalledSdk } from '../ideStore.svelte';
@@ -16,7 +16,6 @@
   interface Props { section: string; onnavigate: (id: string) => void }
   let { section, onnavigate }: Props = $props();
 
-  let javaDropOpen = $state(false);
   let pickerEco = $state<string | null>(null);
   let creatingVenv = $state(false);
 
@@ -40,7 +39,6 @@
   }
 
   async function selectDetected(det: IdeDetectedSdk): Promise<void> {
-    javaDropOpen = false;
     const p = det.home_path || det.path || '';
     if (!p) return;
     const reg = await ide.addLocalToolchain(det.ecosystem, p);
@@ -50,13 +48,49 @@
     toasts.success(`Registered ${det.label || `${det.ecosystem.toUpperCase()} ${det.version}`}`);
   }
 
-  function isGoEnabledInModule(modPath: string): boolean {
-    const val = ideSettings.draft.goEnabledModules[modPath];
-    return val === undefined ? true : val;
-  }
-
-  function toggleGoModule(modPath: string, next: boolean): void {
-    ideSettings.draft.goEnabledModules = { ...ideSettings.draft.goEnabledModules, [modPath]: next };
+  function openJavaSdkMenu(e: MouseEvent): void {
+    const anchor = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
+    const items: MenuItem[] = [
+      {
+        label: '<No SDK>',
+        danger: true,
+        checked: !ideSettings.envDraft.java_home,
+        action: () => ideSettings.patchEnv({ java_home: '' }),
+      },
+    ];
+    if ((javaEco?.installed.length ?? 0) > 0) {
+      items.push({ separator: true }, { label: 'Configured SDKs', disabled: true });
+      for (const sdk of javaEco?.installed ?? []) {
+        const broken = isBroken(sdk);
+        items.push({
+          label: `JDK ${sdk.version}${broken ? ' [Invalid]' : ''}`,
+          hint: sdk.path,
+          danger: broken,
+          checked: ideSettings.envDraft.java_home === sdk.path,
+          action: () => ideSettings.patchEnv({ java_home: sdk.path }),
+        });
+      }
+    }
+    items.push(
+      { separator: true },
+      { label: 'Download JDK…', icon: 'download', action: () => onnavigate('project.sdks') },
+      { label: 'Add JDK from disk…', icon: 'folder', action: () => (pickerEco = 'java') },
+      { separator: true },
+      { label: 'Detected SDKs', disabled: true },
+    );
+    if (javaDetected.length === 0) {
+      items.push({ label: 'No unmanaged host JDKs detected', disabled: true });
+    } else {
+      for (const det of javaDetected) {
+        const detPath = det.home_path || det.path;
+        items.push({
+          label: det.label || `${det.source || 'OpenJDK'} ${det.version}`,
+          hint: detPath,
+          action: () => void selectDetected(det),
+        });
+      }
+    }
+    ctxMenu.showAt(anchor, items, { align: 'start' });
   }
 
   async function handlePickedSdk(picked: string): Promise<void> {
@@ -121,35 +155,6 @@
         <div class="lg-kv"><span class="lg-kv-k">GOPRIVATE</span><code class="lg-kv-v" dir="ltr">{goprivateVal || '(not set — reload in Shell Environment)'}</code></div>
       </div>
     </div>
-
-    <div class="lg-card">
-      <div class="lg-switch-row">
-        <Switch checked={ideSettings.draft.goModulesEnabled} label="Enable Go modules integration" onchange={(v) => (ideSettings.draft.goModulesEnabled = v)} />
-        <span class="lg-title">Enable Go modules integration (go.mod / replace directives)</span>
-      </div>
-      <div class="lg-field">
-        <label class="lg-lbl" for="lg-goproxy">Environment / GOPROXY:</label>
-        <input id="lg-goproxy" class="input mono" type="text" dir="ltr" bind:value={ideSettings.draft.goProxy} />
-      </div>
-    </div>
-
-    <div class="lg-card">
-      <span class="lg-title">Enable Go support in modules:</span>
-      <div class="mod-checklist" role="group" aria-label="Enable Go support in modules" data-testid="ide-go-modules-checklist">
-        {#if ide.projectFolders.length === 0}
-          <span class="lg-sub">Open a project to configure per-module Go support.</span>
-        {:else}
-          {#each ide.projectFolders as mod (mod.path)}
-            <label class="mod-check-row">
-              <input type="checkbox" checked={isGoEnabledInModule(mod.path)} onchange={(e) => toggleGoModule(mod.path, (e.currentTarget as HTMLInputElement).checked)} />
-              <Icon name="folder" size={13} />
-              <span class="mod-check-name" dir="ltr">{mod.name}</span>
-              <span class="mod-check-path" dir="ltr">{mod.path}</span>
-            </label>
-          {/each}
-        {/if}
-      </div>
-    </div>
   </div>
 
 {:else if section === 'lang.java'}
@@ -170,8 +175,8 @@
           class="jdk-trigger"
           class:is-broken={Boolean(selectedJavaSdkObj && isBroken(selectedJavaSdkObj))}
           aria-labelledby="java-sdk-lbl"
-          aria-expanded={javaDropOpen}
-          onclick={() => (javaDropOpen = !javaDropOpen)}
+          aria-haspopup="menu"
+          onclick={openJavaSdkMenu}
           data-testid="ide-java-sdk-picker"
         >
           {#if ideSettings.envDraft.java_home}
@@ -184,47 +189,8 @@
           {/if}
           <Icon name="chevronDown" size={12} />
         </button>
-
-        {#if javaDropOpen}
-          <div class="jdk-menu" role="listbox" aria-label="Java SDK options" data-testid="ide-java-sdk-menu">
-            <button type="button" class="jdk-opt is-danger" onclick={() => { ideSettings.patchEnv({ java_home: '' }); javaDropOpen = false; }}>
-              <span>&lt;No SDK&gt;</span>
-            </button>
-            {#each javaEco?.installed ?? [] as sdk (sdk.path)}
-              <button type="button" class="jdk-opt" class:is-danger={isBroken(sdk)} onclick={() => { ideSettings.patchEnv({ java_home: sdk.path }); javaDropOpen = false; }}>
-                <span class="jdk-main" dir="ltr">JDK {sdk.version}{isBroken(sdk) ? ' [Invalid]' : ''}</span>
-                <span class="jdk-sub" dir="ltr">{sdk.path}</span>
-              </button>
-            {/each}
-            <div class="jdk-sep"></div>
-            <button type="button" class="jdk-opt" onclick={() => { javaDropOpen = false; onnavigate('project.sdks'); }}><span>↓ Download JDK…</span></button>
-            <button type="button" class="jdk-opt" onclick={() => { javaDropOpen = false; pickerEco = 'java'; }}><span>Add JDK from disk…</span></button>
-
-            <div class="jdk-hdr">Detected SDKs</div>
-            {#if javaDetected.length === 0}
-              <div class="jdk-empty">No unmanaged host JDKs detected outside configured list.</div>
-            {:else}
-              {#each javaDetected as det (`${det.home_path || det.path}`)}
-                <button type="button" class="jdk-opt" onclick={() => void selectDetected(det)} data-testid="ide-detected-jdk-option">
-                  <span class="jdk-main" dir="ltr">{det.label || `${det.source || 'OpenJDK'} ${det.version}`}</span>
-                  <span class="jdk-sub" dir="ltr">{det.home_path || det.path}</span>
-                </button>
-              {/each}
-            {/if}
-          </div>
-        {/if}
       </div>
 
-      <div class="lg-field">
-        <label class="lg-lbl" for="lg-java-lvl">Project bytecode &amp; language level:</label>
-        <select id="lg-java-lvl" class="input" bind:value={ideSettings.draft.javaLanguageLevel}>
-          <option value="23">23 — Latest</option>
-          <option value="21">21 (LTS)</option>
-          <option value="17">17 (LTS)</option>
-          <option value="11">11 (LTS)</option>
-          <option value="8">8</option>
-        </select>
-      </div>
       <p class="lg-sub">
         Multi-repo Maven (<code>pom.xml</code>) &amp; Gradle (<code>build.gradle</code>) build pipes share local <code>~/.m2</code> snapshots across attached workspace modules and attach JDWP over an ephemeral loopback port.
       </p>
@@ -241,12 +207,6 @@
           {#each nodeEco?.installed ?? [] as sdk (sdk.path)}<option value={sdk.path}>Node {sdk.version} ({sdk.path})</option>{/each}
         </select>
         <button type="button" class="btn small ghost" onclick={() => (pickerEco = 'node')}>Browse…</button>
-      </div>
-      <div class="lg-field">
-        <label class="lg-lbl" for="lg-pkg-mgr">Package manager:</label>
-        <select id="lg-pkg-mgr" class="input" bind:value={ideSettings.draft.npmPackageManager}>
-          <option value="npm">npm</option><option value="pnpm">pnpm</option><option value="yarn">yarn</option><option value="bun">bun</option>
-        </select>
       </div>
     </div>
   </div>
@@ -288,30 +248,6 @@
           <option value="">Default rustup toolchain (stable)</option>
           {#each rustEco?.installed ?? [] as sdk (sdk.path)}<option value={sdk.version}>{sdk.version} ({sdk.path})</option>{/each}
         </select>
-      </div>
-      <div class="lg-switch-row">
-        <Switch checked={ideSettings.draft.cargoCheckOnSave} label="Run cargo check on save" onchange={(v) => (ideSettings.draft.cargoCheckOnSave = v)} />
-        <span class="lg-sub">Run <code>cargo check</code> diagnostics on save</span>
-      </div>
-    </div>
-  </div>
-
-{:else if section === 'lang.shell'}
-  <div class="lg-sec">
-    <div class="lg-card">
-      <label class="lg-lbl" for="lg-sh-dial">Default Shell Dialect:</label>
-      <select id="lg-sh-dial" class="input" bind:value={ideSettings.draft.shellDialect}>
-        <option value="zsh">zsh (macOS default)</option><option value="bash">bash</option><option value="POSIX sh">POSIX sh</option>
-      </select>
-    </div>
-  </div>
-
-{:else if section === 'lang.json'}
-  <div class="lg-sec">
-    <div class="lg-card">
-      <div class="lg-switch-row">
-        <Switch checked={ideSettings.draft.jsonValidateSchemas} label="Validate JSON and JSONL syntax" onchange={(v) => (ideSettings.draft.jsonValidateSchemas = v)} />
-        <span class="lg-title">Enable live JSON / JSONL syntax &amp; JSONPath breadcrumbs</span>
       </div>
     </div>
   </div>
@@ -359,25 +295,10 @@
   .goroot-bar { display: flex; align-items: center; gap: 6px; }
   .goroot-sel { flex: 1; min-inline-size: 0; font-family: var(--font-mono); font-size: var(--fs-xs); }
   .goroot-plus { border: 1px solid var(--control-border); border-radius: var(--radius-s); background: var(--surface-2); }
-  .mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
   .lg-kv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
   .lg-kv { padding: 6px 8px; border-radius: var(--radius-s); background: var(--surface-2); border: 1px solid var(--border); display: flex; flex-direction: column; gap: 2px; }
   .lg-kv-k { font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); }
   .lg-kv-v { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text); word-break: break-all; }
-  .mod-checklist { max-block-size: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface-2); padding: 4px; display: flex; flex-direction: column; gap: 2px; }
-  .mod-check-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--radius-s); cursor: pointer; font-size: var(--fs-xs); }
-  .mod-check-row:hover { background: var(--hover); }
-  .mod-check-name { font-weight: 600; color: var(--text); }
-  .mod-check-path { font-family: var(--font-mono); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-inline-start: auto; max-inline-size: 260px; }
-  .jdk-trigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; inline-size: 100%; padding: 6px 10px; border: 1px solid var(--control-border); border-radius: var(--radius-s); background: var(--surface-2); color: var(--text); font-family: var(--font-mono); font-size: var(--fs-xs); cursor: pointer; text-align: start; }
+  .jdk-trigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; inline-size: 100%; padding-block: 6px; padding-inline: 10px; border: 1px solid var(--control-border); border-radius: var(--radius-s); background: var(--surface-2); color: var(--text); font-family: var(--font-mono); font-size: var(--fs-xs); cursor: pointer; text-align: start; }
   .jdk-trigger.is-broken, .jdk-none { color: var(--danger); }
-  .jdk-menu { margin-block-start: 4px; max-block-size: 260px; overflow-y: auto; border: 1px solid var(--border-strong); border-radius: var(--radius-s); background: var(--surface); box-shadow: var(--shadow-card); padding: 4px; display: flex; flex-direction: column; gap: 2px; }
-  .jdk-hdr { padding: 6px 8px 2px; font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); }
-  .jdk-sep { block-size: 1px; background: var(--border); margin-block: 4px; }
-  .jdk-empty { padding: 6px 8px; font-size: var(--fs-xs); color: var(--text-dim); }
-  .jdk-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 6px 8px; border: 0; border-radius: var(--radius-s); background: transparent; color: var(--text); font-size: var(--fs-xs); cursor: pointer; text-align: start; }
-  .jdk-opt:hover { background: var(--hover); }
-  .jdk-opt.is-danger { color: var(--danger); }
-  .jdk-main { font-weight: 500; }
-  .jdk-sub { font-family: var(--font-mono); color: var(--text-dim); }
 </style>

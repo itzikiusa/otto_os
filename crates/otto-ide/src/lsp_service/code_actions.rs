@@ -16,10 +16,10 @@ use crate::types::{
 };
 use crate::IdeCtx;
 
-use super::symbols::{match_brace_symbol, parse_python_symbols};
-use super::{
-    extract_identifier_at, is_valid_identifier, rename_identifier_in_text, resolve_language,
+use super::code_actions_lang::{
+    add_language_specific_actions, build_doc_comment_action, build_extract_variable_action,
 };
+use super::{extract_identifier_at, rename_identifier_in_text, resolve_language};
 
 /// `POST /ide/lsp/code-actions` — Context-aware Quick Fixes & Refactorings with concrete `edits`.
 pub async fn code_actions<S: IdeCtx>(
@@ -40,9 +40,9 @@ pub async fn code_actions<S: IdeCtx>(
         }
     };
     let lang = resolve_language(ctx, &req.path, None);
+    let col = req.effective_column().max(1);
     let mut actions = Vec::new();
 
-    // 1. Synthesize concrete Quick Fixes from live language diagnostics at `req.line`!
     if let Ok(diag_resp) = super::diagnostics::diagnostics(
         ctx,
         user,
@@ -85,15 +85,8 @@ pub async fn code_actions<S: IdeCtx>(
         }
     }
 
-    // 2. Append deterministic AST/line code actions & caller-supplied diagnostic quick fixes.
-    for action in generate_code_actions(
-        &req.path,
-        &lang,
-        &content,
-        req.line,
-        req.column,
-        &req.diagnostics,
-    ) {
+    for action in generate_code_actions(&req.path, &lang, &content, req.line, col, &req.diagnostics)
+    {
         if !actions.iter().any(|a| a.title == action.title) {
             actions.push(action);
         }
@@ -196,7 +189,7 @@ fn line_col_to_char_offset(chars: &[char], target_line: u32, target_col: u32) ->
     chars.len()
 }
 
-fn make_action(
+pub(super) fn make_action(
     path: &str,
     original: &str,
     id: impl Into<String>,
@@ -281,7 +274,7 @@ pub fn generate_code_actions(
     actions
 }
 
-fn join_preserving_nl(lines: &[String], original: &str) -> String {
+pub(super) fn join_preserving_nl(lines: &[String], original: &str) -> String {
     let mut out = lines.join("\n");
     if original.ends_with('\n') && !out.is_empty() {
         out.push('\n');
@@ -386,11 +379,14 @@ fn add_manifest_version_actions(
     }
 }
 
-fn build_organize_imports_action(
+pub(super) fn build_organize_imports_action(
     lang: &str,
     lines: &[&str],
     content: &str,
 ) -> Option<(String, String)> {
+    if lang == "go" {
+        return super::code_actions_lang::organize_go_imports_block(lines, content);
+    }
     let is_import = |l: &str| {
         let t = l.trim();
         match lang {
@@ -431,307 +427,4 @@ fn build_organize_imports_action(
     rebuilt.extend(sorted.iter().map(|v| (*v).to_string()));
     rebuilt.extend(lines[end + 1..].iter().map(|v| (*v).to_string()));
     Some((sorted.join("\n"), join_preserving_nl(&rebuilt, content)))
-}
-
-fn build_doc_comment_action(
-    lang: &str,
-    lines: &[&str],
-    idx: usize,
-    content: &str,
-) -> Option<(String, String)> {
-    let line = lines[idx];
-    let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-    if idx > 0
-        && ["///", "//", "*/", "#"]
-            .iter()
-            .any(|p| lines[idx - 1].trim().starts_with(p))
-    {
-        return None;
-    }
-    let sym_name = if lang == "python" {
-        parse_python_symbols(&[line])
-            .into_iter()
-            .next()
-            .map(|s| s.name)
-    } else {
-        match_brace_symbol(lang, line.trim()).map(|(n, _, _, _)| n)
-    }?;
-    let mut updated: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
-    if lang == "python" {
-        let doc = format!("{indent}    \"\"\"TODO: Document {sym_name}.\"\"\"");
-        updated.insert(idx + 1, doc.clone());
-        return Some((doc, join_preserving_nl(&updated, content)));
-    }
-    let comment = match lang {
-        "rust" => format!("{indent}/// Documentation for `{sym_name}`."),
-        "go" => format!("{indent}// {sym_name} performs ..."),
-        _ => format!("{indent}/** Documentation for `{sym_name}`. */"),
-    };
-    updated.insert(idx, comment.clone());
-    Some((comment, join_preserving_nl(&updated, content)))
-}
-
-fn build_extract_variable_action(
-    lang: &str,
-    lines: &[&str],
-    idx: usize,
-    content: &str,
-) -> Option<(String, String)> {
-    let line = lines[idx];
-    let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-    let expr = line
-        .trim()
-        .strip_prefix("return ")?
-        .trim()
-        .trim_end_matches(';')
-        .trim();
-    if expr.is_empty() || is_valid_identifier(expr) {
-        return None;
-    }
-    let (decl, ret) = match lang {
-        "go" => (
-            format!("{indent}result := {expr}"),
-            format!("{indent}return result"),
-        ),
-        "rust" => (
-            format!("{indent}let result = {expr};"),
-            format!("{indent}result"),
-        ),
-        "python" => (
-            format!("{indent}result = {expr}"),
-            format!("{indent}return result"),
-        ),
-        "java" => (
-            format!("{indent}final var result = {expr};"),
-            format!("{indent}return result;"),
-        ),
-        _ => (
-            format!("{indent}const result = {expr};"),
-            format!("{indent}return result;"),
-        ),
-    };
-    let mut updated: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
-    updated[idx] = decl.clone();
-    updated.insert(idx + 1, ret.clone());
-    Some((
-        format!("{decl}\n{ret}"),
-        join_preserving_nl(&updated, content),
-    ))
-}
-
-fn add_language_specific_actions(
-    path: &str,
-    lang: &str,
-    lines: &[&str],
-    idx: usize,
-    current_line: &str,
-    content: &str,
-    out: &mut Vec<IdeCodeAction>,
-) {
-    let indent: String = current_line
-        .chars()
-        .take_while(|c| c.is_whitespace())
-        .collect();
-    let trimmed = current_line.trim();
-    if lang == "rust" {
-        if current_line.contains(".unwrap()") {
-            let replaced = current_line.replacen(".unwrap()", "?", 1);
-            let mut updated: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
-            updated[idx] = replaced.clone();
-            out.push(make_action(
-                path,
-                content,
-                "quickfix.rust.unwrap_to_question",
-                "Replace .unwrap() with '?' error propagation",
-                "quickfix",
-                replaced.trim().to_string(),
-                join_preserving_nl(&updated, content),
-            ));
-        }
-        if (trimmed.starts_with("pub struct ")
-            || trimmed.starts_with("struct ")
-            || trimmed.starts_with("pub enum ")
-            || trimmed.starts_with("enum "))
-            && !idx
-                .checked_sub(1)
-                .is_some_and(|p| lines[p].trim().starts_with("#[derive("))
-        {
-            let mut updated: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
-            updated.insert(idx, format!("{indent}#[derive(Debug, Clone)]"));
-            out.push(make_action(
-                path,
-                content,
-                "quickfix.rust.derive_debug_clone",
-                "Add #[derive(Debug, Clone)]",
-                "quickfix",
-                "#[derive(Debug, Clone)]".into(),
-                join_preserving_nl(&updated, content),
-            ));
-        }
-    }
-    if lang == "java"
-        && (trimmed.starts_with("public ") || trimmed.starts_with("protected "))
-        && trimmed.contains('(')
-        && !trimmed.contains("class ")
-        && !idx
-            .checked_sub(1)
-            .is_some_and(|p| lines[p].trim() == "@Override")
-    {
-        let mut updated: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
-        updated.insert(idx, format!("{indent}@Override"));
-        out.push(make_action(
-            path,
-            content,
-            "refactor.java.add_override",
-            "Add @Override annotation",
-            "refactor.rewrite",
-            "@Override".into(),
-            join_preserving_nl(&updated, content),
-        ));
-    }
-    if lang == "go" {
-        if (trimmed.contains(", err :=")
-            || trimmed.starts_with("err :=")
-            || trimmed.starts_with("err ="))
-            && !lines
-                .get(idx + 1)
-                .is_some_and(|n| n.trim().starts_with("if err != nil"))
-        {
-            let mut updated: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
-            updated.insert(
-                idx + 1,
-                format!("{indent}if err != nil {{\n{indent}\treturn err\n{indent}}}"),
-            );
-            out.push(make_action(
-                path,
-                content,
-                "refactor.go.wrap_err_check",
-                "Add 'if err != nil' error guard",
-                "refactor.rewrite",
-                "if err != nil { return err }".into(),
-                join_preserving_nl(&updated, content),
-            ));
-        }
-        // Go struct field JSON tag quick fix (`FieldName Type` -> ``FieldName Type `json:"field_name"` ``).
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        if parts.len() == 2
-            && parts[0]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_uppercase())
-            && !trimmed.contains('`')
-            && !trimmed.starts_with("type ")
-            && !trimmed.starts_with("func ")
-        {
-            let snake = to_snake_case(parts[0]);
-            let mut updated: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
-            updated[idx] = format!("{current_line} `json:\"{snake}\"`");
-            out.push(make_action(
-                path,
-                content,
-                "refactor.go.add_json_tag",
-                format!("Add `json:\"{snake}\"` struct tag"),
-                "refactor.rewrite",
-                format!("`json:\"{snake}\"`"),
-                join_preserving_nl(&updated, content),
-            ));
-        }
-    }
-    let fn_name = if lang == "python" {
-        parse_python_symbols(&[current_line])
-            .into_iter()
-            .find(|s| s.kind == "function" || s.kind == "method")
-            .map(|s| s.name)
-    } else {
-        match_brace_symbol(lang, trimmed)
-            .filter(|(_, k, _, _)| k == "function" || k == "method")
-            .map(|(n, _, _, _)| n)
-    };
-    if let Some(name) =
-        fn_name.filter(|n| !n.to_ascii_lowercase().starts_with("test") && n != "main")
-    {
-        let mut chars = name.chars();
-        let cap_name = chars
-            .next()
-            .map(|f| format!("{}{}", f.to_ascii_uppercase(), chars.as_str()))
-            .unwrap_or_else(|| name.clone());
-        let stub = match lang {
-            "go" => Some(format!(
-                "\nfunc Test{cap_name}(t *testing.T) {{\n\t// TODO: test {name}\n}}\n"
-            )),
-            "rust" => Some(format!(
-                "\n#[test]\nfn test_{name}() {{\n    // TODO: test {name}\n}}\n"
-            )),
-            "python" => Some(format!(
-                "\ndef test_{name}():\n    # TODO: test {name}\n    assert True\n"
-            )),
-            "javascript" | "typescript" => Some(format!(
-                "\ntest('{name}', () => {{\n  // TODO: test {name}\n}});\n"
-            )),
-            _ => None,
-        };
-        if let Some(snippet) = stub {
-            out.push(make_action(
-                path,
-                content,
-                format!("refactor.generate_test.{name}"),
-                format!("Generate unit test stub for '{name}'"),
-                "refactor.TestStub",
-                snippet.trim().to_string(),
-                format!("{}{}", content.trim_end(), snippet),
-            ));
-        }
-    }
-    if matches!(lang, "shell" | "bash" | "sh")
-        && !lines
-            .iter()
-            .take(8)
-            .any(|l| l.contains("set -e") || l.contains("pipefail"))
-    {
-        let mut updated: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
-        let insert_at = usize::from(lines.first().is_some_and(|l| l.starts_with("#!")));
-        updated.insert(insert_at, "set -euo pipefail".into());
-        out.push(make_action(
-            path,
-            content,
-            "quickfix.shell.strict_mode",
-            "Add 'set -euo pipefail' strict shell guard",
-            "quickfix",
-            "+ set -euo pipefail".into(),
-            join_preserving_nl(&updated, content),
-        ));
-    }
-    if lang == "json" {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
-            if let Ok(compact) = serde_json::to_string(&val) {
-                let compact_nl = format!("{compact}\n");
-                if compact_nl != content {
-                    out.push(make_action(
-                        path,
-                        content,
-                        "refactor.json.minify",
-                        "Minify JSON to single line",
-                        "refactor.rewrite",
-                        compact.chars().take(60).collect(),
-                        compact_nl,
-                    ));
-                }
-            }
-        }
-    }
-}
-
-fn to_snake_case(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 4);
-    for (i, ch) in input.chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if i > 0 {
-                out.push('_');
-            }
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            out.push(ch);
-        }
-    }
-    out
 }

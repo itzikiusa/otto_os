@@ -4,10 +4,8 @@
 import { api } from '../../../lib/api/client';
 import type { RuntimeAccessMode, RuntimeSession, Session, SessionStatus } from '../../../lib/api/types';
 import {
-  defaultAgentProvider,
   harnessLabel,
   isPlainShellSession,
-  isRuntimeProvider,
 } from '../../../lib/providers';
 import { inThreadsScope } from '../../../lib/stores/sessionBuckets';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
@@ -24,13 +22,11 @@ import {
 } from '../ideStore.svelte';
 import {
   detectProposalLanguage,
-  lineRangeFromOffsets,
   matchesIdeProjectThread,
   offsetsForLineRange,
   type IdeContextChip,
-  type IdeInlinePromptState,
 } from '../store/ideDiffApplier';
-import { buildPureSymbolDraftChip, upsertIdeContextChipList } from './ideSymbolChip';
+import { buildPureSymbolDraftChip } from './ideSymbolChip';
 
 function isIdePtyThreadSession(s: Session, pool: readonly Session[]): boolean {
   if (s.kind === 'connection') return false;
@@ -43,15 +39,6 @@ function isIdePtyThreadSession(s: Session, pool: readonly Session[]): boolean {
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07/g;
 const trimSlash = (p: string): string => p.replace(/\/+$/, '');
-
-export interface IdeSelectionInput {
-  path?: string;
-  from: number;
-  to: number;
-  startLine: number;
-  endLine: number;
-  text: string;
-}
 
 export interface IdeThreadEntry {
   id: string;
@@ -106,94 +93,6 @@ export function resolveIdeProjectCwd(): string | null {
 export function currentIdeTargetKey(): string {
   const r = (ide.target.root ?? '').trim().replace(/\/+$/, '');
   return r ? `${ide.target.kind}:${r}` : '';
-}
-
-export function upsertIdeContextChip(
-  contexts: readonly IdeContextChip[],
-  draft: Omit<IdeContextChip, 'id'> & { id?: string },
-  allocId: () => string,
-): { chip: IdeContextChip; next: IdeContextChip[] } {
-  return upsertIdeContextChipList(contexts, draft, allocId);
-}
-
-export function buildSelectionDraftChip(
-  override: IdeSelectionInput | undefined,
-  readBuf: (fullPath: string) => string,
-): Omit<IdeContextChip, 'id'> | null {
-  const resolved = resolveIdeEditorSelection(override, readBuf);
-  if (!resolved) return null;
-  const { fullPath, relPath, startLine, endLine, text } = resolved;
-  const lineCount = Math.max(1, endLine - startLine + 1);
-  return {
-    key: `selection:${fullPath}:${startLine}-${endLine}`,
-    kind: 'selection',
-    label: `@${relPath}:L${startLine}-L${endLine}`,
-    sublabel: `${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`,
-    path: fullPath,
-    startLine,
-    endLine,
-    language: detectProposalLanguage(relPath, ide.activeTab?.language),
-    snippet: text,
-  };
-}
-
-export function buildIdeInlinePromptState(
-  sel: IdeSelectionInput | undefined,
-  prev: IdeInlinePromptState | null,
-  provider: string,
-  effectiveModel: string | null,
-  effort: string | null,
-  readBuf: (fullPath: string) => string,
-): IdeInlinePromptState | null {
-  const r = resolveIdeEditorSelection(sel, readBuf);
-  if (!r) return null;
-  const defProvider = isRuntimeProvider(provider)
-    ? provider
-    : isRuntimeProvider(defaultAgentProvider())
-      ? defaultAgentProvider()
-      : 'claude';
-  return {
-    open: true,
-    path: r.fullPath,
-    relPath: r.relPath,
-    language: detectProposalLanguage(r.relPath, ide.activeTab?.language),
-    from: r.from,
-    to: r.to,
-    startLine: r.startLine,
-    endLine: r.endLine,
-    selectedText: r.text,
-    query: prev?.open && prev.path === r.fullPath ? prev.query : '',
-    provider: prev?.open ? prev.provider : defProvider,
-    model: prev?.open ? prev.model : effectiveModel,
-    effort: prev?.open ? prev.effort : effort,
-    busy: false,
-    error: null,
-    proposal: null,
-  };
-}
-
-export function resolveIdeEditorSelection(
-  override: IdeSelectionInput | undefined,
-  readBuf: (fullPath: string) => string,
-): (IdeSelectionInput & { fullPath: string; relPath: string }) | null {
-  const rawPath = override?.path ?? ide.activePath;
-  if (!rawPath) return null;
-  const fullPath = ide.resolvePath(rawPath);
-  const relPath = ide.relativePath(fullPath) || ideBasename(fullPath);
-  const buf = readBuf(fullPath);
-  if (override) return { ...override, fullPath, relPath };
-  const fromHandle = ide.getSelectionRange?.() ?? null;
-  if (fromHandle) {
-    return fromHandle.from === fromHandle.to && !fromHandle.text && buf.length > 0
-      ? { ...lineRangeFromOffsets(buf, fromHandle.from, fromHandle.to), fullPath, relPath }
-      : { ...fromHandle, fullPath, relPath };
-  }
-  const sel0 = ide.cursorInfo.selections[0];
-  if (sel0 && (sel0.anchor !== sel0.head || buf.length > 0)) {
-    return { ...lineRangeFromOffsets(buf, sel0.anchor, sel0.head), fullPath, relPath };
-  }
-  const curLine = Math.max(1, ide.cursorInfo.line || 1);
-  return { ...offsetsForLineRange(buf, curLine, curLine), fullPath, relPath };
 }
 
 export async function buildFileDraftChip(

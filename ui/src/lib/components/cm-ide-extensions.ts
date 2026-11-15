@@ -34,7 +34,7 @@ import {
 } from './cm-ide-keymap.ts';
 import {
   buildPooledLspExtensions, createCmdHoverDiveExtension, createDirectLspExtension,
-  disposePooledLspClients, lspUriToPath, notifyLspDidSave, requestIdeDiveAtPos,
+  disposePooledLspClients, hasWarmPooledLspClient, lspUriToPath, notifyLspDidSave, requestIdeDiveAtPos,
   type AttachPooledLspOptions, type DirectLspOptions,
 } from './cm-ide-lsp.ts';
 import {
@@ -60,7 +60,7 @@ export {
   addCursorAbove, addCursorBelow, applyClientQuickFix, applyConcreteEditsToView,
   applyLinePrefixSuffix, buildIdeKeymapSpecs, buildPooledLspExtensions,
   computeDeterministicQuickFixes, createDirectLspExtension, crosshairCursor,
-  disposePooledLspClients, duplicateLineOrSelection, getIdeQuickFixesAtLine,
+  disposePooledLspClients, duplicateLineOrSelection, getIdeQuickFixesAtLine, hasWarmPooledLspClient,
   isBpTargetGutterElement, lspUriToPath, moveLineDown, moveLineUp, notifyLspDidSave,
   openReplaceInFile, previewConcreteEdits, rectangularSelection, requestIdeDiveAtPos,
   selectAllOccurrences, selectNextOccurrence, selectionOrCurrentLine,
@@ -123,14 +123,29 @@ class CombinedGutterMarker extends GutterMarker {
     const wrap = document.createElement('span'); wrap.className = 'cm-ide-bp-cell';
     if (this.bpKind) {
       const el = document.createElement('span');
-      el.className = `cm-ide-bp-marker cm-ide-bp-${this.bpKind}${this.alsoPaused ? ' is-paused' : ''}${this.verified ? ' is-verified' : ''}`;
+      const isDirectPaused = this.bpKind === 'paused';
+      el.className = `cm-ide-bp-marker cm-ide-bp-${this.bpKind}${this.alsoPaused ? ' is-paused' : ''}${isDirectPaused ? ' cm-ide-exec-arrow' : ''}${this.verified ? ' is-verified' : ''}`;
       el.dataset.bpKind = this.bpKind;
-      el.dataset.testid = this.bpKind === 'preview' ? 'ide-bp-hover-preview' : 'ide-bp-marker';
+      el.dataset.testid = this.bpKind === 'preview'
+        ? 'ide-bp-hover-preview'
+        : isDirectPaused
+          ? 'ide-exec-gutter-arrow'
+          : 'ide-bp-marker';
       if (this.bpKind !== 'preview') { el.title = this.tooltip; el.setAttribute('role', 'img'); el.setAttribute('aria-label', this.tooltip); }
       else el.setAttribute('aria-hidden', 'true');
-      const shape = this.bpKind === 'paused' ? 'play' : this.bpKind === 'logpoint' ? 'diamond' : (this.bpKind === 'disabled' || this.bpKind === 'muted') ? 'hollow' : 'enabled';
+      const shape = isDirectPaused ? 'play' : this.bpKind === 'logpoint' ? 'diamond' : (this.bpKind === 'disabled' || this.bpKind === 'muted') ? 'hollow' : 'enabled';
       el.appendChild(gutterSvg(shape, this.verified, this.bpKind === 'conditional'));
       wrap.appendChild(el);
+      if (this.alsoPaused && !isDirectPaused) {
+        const execBadge = document.createElement('span');
+        execBadge.className = 'cm-ide-exec-arrow is-combo';
+        execBadge.dataset.testid = 'ide-exec-gutter-arrow';
+        execBadge.title = `Execution paused at line ${this.line}`;
+        execBadge.setAttribute('role', 'img');
+        execBadge.setAttribute('aria-label', `Execution paused at line ${this.line}`);
+        execBadge.appendChild(gutterSvg('play'));
+        wrap.appendChild(execBadge);
+      }
     }
     if (this.runItem) {
       const item = this.runItem, btn = document.createElement('button');
@@ -372,7 +387,11 @@ class InlineGhostValuesWidget extends WidgetType {
 function computeDebugDecorations(doc: EditorState['doc'], payload: IdeDebugStatePayload): DecorationSet {
   const ranges: Range<Decoration>[] = [];
   if (payload.pausedLine != null && payload.pausedLine >= 1 && payload.pausedLine <= doc.lines) {
-    ranges.push(Decoration.line({ class: 'cm-ide-paused-line' }).range(doc.line(payload.pausedLine).from));
+    ranges.push(
+      Decoration.line({ class: 'cm-ide-exec-line cm-ide-paused-line' }).range(
+        doc.line(payload.pausedLine).from,
+      ),
+    );
   }
   if (payload.inlineValues.length) {
     const byLine = new Map<number, Map<string, string>>();
@@ -459,12 +478,14 @@ const ideEditorTheme = EditorView.baseTheme({
   '.cm-ide-bp-marker.cm-ide-bp-muted': { color: 'var(--text-dim)' },
   '.cm-ide-bp-marker.cm-ide-bp-disabled': { color: 'var(--danger)' },
   '.cm-ide-bp-marker.cm-ide-bp-logpoint, .cm-ide-bp-marker.cm-ide-bp-paused': { color: 'var(--warning)' },
+  '.cm-ide-exec-arrow': { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '12px', height: '12px', lineHeight: '1', color: 'var(--warning)', filter: 'drop-shadow(0 0 1px var(--bg))' },
+  '.cm-ide-exec-arrow.is-combo': { marginInlineStart: '-3px' },
   '.cm-ide-bp-line': { backgroundColor: 'color-mix(in srgb, var(--danger) 9%, transparent)' },
   '.cm-ide-gutter-run-btn, .cm-ide-lightbulb-btn': { appearance: 'none', border: 'none', background: 'transparent', color: 'var(--success)', fontSize: 'var(--fs-xs)', lineHeight: '1', padding: '0', width: '15px', height: '15px', borderRadius: 'var(--radius-s)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
   '.cm-ide-lightbulb-btn': { color: 'var(--warning)' },
   '.cm-ide-gutter-run-btn:hover': { background: 'var(--success-soft)' },
   '.cm-ide-lightbulb-btn:hover': { background: 'var(--warning-soft)' },
-  '.cm-ide-paused-line': { backgroundColor: 'var(--warning-soft)', boxShadow: 'inset 2px 0 0 var(--warning)' },
+  '.cm-line.cm-ide-exec-line, .cm-activeLine.cm-ide-exec-line, .cm-ide-paused-line': { backgroundColor: 'color-mix(in srgb, var(--accent-solid) 32%, transparent)', boxShadow: 'inset 3px 0 0 var(--accent-text)' },
   '.cm-ide-inline-values': { color: 'var(--text-dim)', fontStyle: 'italic', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', userSelect: 'none', pointerEvents: 'none', whiteSpace: 'pre' },
   '.cm-ide-shell-var-hit': { backgroundColor: 'var(--accent-soft)', borderRadius: '2px' },
   '.cm-ide-peer-sel': { backgroundColor: 'color-mix(in srgb, var(--ide-peer-color) 22%, transparent)', borderRadius: '2px' },

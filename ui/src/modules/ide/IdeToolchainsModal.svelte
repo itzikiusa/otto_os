@@ -30,7 +30,7 @@
     onclose?: () => void;
   }
 
-  let { open, onclose }: Props = $props();
+  let { open, onclose = () => (ide.toolchainsOpen = false) }: Props = $props();
 
   const BASE_ECOS: readonly { id: string; label: string }[] = [
     { id: 'go', label: 'Go' },
@@ -51,7 +51,7 @@
 
   function close(): void {
     ide.toolchainsOpen = false;
-    onclose?.();
+    onclose();
   }
 
   function defaultEcoFromWorkspace(): string {
@@ -336,7 +336,7 @@
                             <span class="tc-sdk-ver">{sdk.version}</span>
                             <Badge
                               tone={sdk.source === 'otto' ? 'accent' : 'neutral'}
-                              label={sdk.source === 'otto' ? 'Otto managed' : sdk.source === 'custom' ? 'Local disk' : 'System'}
+                              label={sdk.source === 'otto' ? 'Otto managed' : sdk.source === 'local' || sdk.source === 'custom' ? 'Local disk' : 'System'}
                             />
                             {#if active}<Badge tone="ok" dot label="Active" />{/if}
                           </div>

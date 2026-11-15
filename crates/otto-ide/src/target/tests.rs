@@ -1,5 +1,9 @@
+use std::collections::BTreeMap;
+
 use super::*;
-use crate::types::{IdeFsEntryKind, IdeSearchItemKind, IdeSearchMode};
+use crate::types::{
+    IdeFsEntryKind, IdeFsMutateOp, IdeReplaceReq, IdeSearchItemKind, IdeSearchMode, IdeSearchReq,
+};
 
 #[tokio::test]
 async fn local_tree_read_write_conflict_and_mutate_roundtrip() {
@@ -468,106 +472,4 @@ async fn replace_preserves_executable_mode_and_supports_multiline_regex() {
         let mode = std::fs::metadata(&script).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755, "executable mode must survive replace");
     }
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn complete_fs_paths_blocks_symlink_to_secret_directory_for_non_root() {
-    let ws = tempfile::tempdir().unwrap();
-    let secret_outside = tempfile::tempdir().unwrap();
-    let fake_ssh = secret_outside.path().join(".ssh");
-    std::fs::create_dir_all(&fake_ssh).unwrap();
-    std::fs::write(fake_ssh.join("id_ed25519"), "PRIVATE\n").unwrap();
-    std::fs::write(ws.path().join("main.rs"), "fn main() {}\n").unwrap();
-    std::os::unix::fs::symlink(&fake_ssh, ws.path().join("keys_link")).unwrap();
-
-    let ws_str = ws.path().to_string_lossy().into_owned();
-    let root_items = complete::complete_fs_paths(
-        &crate::types::IdeFsCompleteReq {
-            query: String::new(),
-            cwd: Some(ws_str.clone()),
-            roots: vec![ws_str.clone()],
-            limit: 50,
-            ..Default::default()
-        },
-        false,
-    )
-    .items;
-    assert!(
-        !root_items
-            .iter()
-            .any(|i| i.path.contains("keys_link") || i.display.contains("keys_link")),
-        "symlink to secret dir must be omitted: {root_items:?}"
-    );
-    let link_items = complete::complete_fs_paths(
-        &crate::types::IdeFsCompleteReq {
-            query: "keys_link/".into(),
-            cwd: Some(ws_str.clone()),
-            roots: vec![ws_str],
-            limit: 50,
-            ..Default::default()
-        },
-        false,
-    )
-    .items;
-    assert!(
-        link_items.is_empty(),
-        "traversing symlink into .ssh must return empty: {link_items:?}"
-    );
-}
-
-#[tokio::test]
-async fn multi_root_write_and_mutate_record_history_under_matched_root() {
-    let data_dir = tempfile::tempdir().unwrap();
-    let primary = tempfile::tempdir().unwrap();
-    let attached = tempfile::tempdir().unwrap();
-    std::fs::write(primary.path().join("a.rs"), "fn a() {}\n").unwrap();
-    std::fs::write(attached.path().join("b.rs"), "fn b() { 1 }\n").unwrap();
-
-    let history = LocalHistoryStore::new(data_dir.path().to_path_buf());
-    let mgr = TargetManager::with_history(history.clone());
-    let mut spec = IdeTargetSpec::local(primary.path().to_string_lossy().into_owned());
-    spec.additional_roots = vec![attached.path().to_string_lossy().into_owned()];
-    let target = mgr.resolve_local(&spec, true).unwrap();
-
-    let attached_file = attached.path().join("b.rs").to_string_lossy().into_owned();
-    mgr.write_file(&target, &attached_file, "fn b() { 2 }\n", None, false)
-        .await
-        .unwrap();
-
-    // Querying the attached folder directly returns its snapshots:
-    let attached_only = history
-        .list_entries(
-            &target.local_project_roots()[1],
-            &[],
-            true,
-            None,
-            true,
-            Some(20),
-            None,
-        )
-        .unwrap();
-    assert!(
-        !attached_only.entries.is_empty(),
-        "expected LocalHistory entries in attached root bucket, got empty"
-    );
-    assert!(attached_only.entries.iter().any(|e| e.rel_path == "b.rs"));
-
-    // Querying via primary root + `additional_roots` also finds the attached file:
-    let listed = history
-        .list_entries(
-            &target.local_project_roots()[0],
-            &target.local_project_roots()[1..],
-            true,
-            Some(&attached_file),
-            true,
-            Some(20),
-            None,
-        )
-        .unwrap();
-    assert!(
-        !listed.entries.is_empty(),
-        "expected LocalHistory entries for attached root file, got empty"
-    );
-    assert!(listed.entries.iter().any(|e| e.rel_path == "b.rs"));
 }

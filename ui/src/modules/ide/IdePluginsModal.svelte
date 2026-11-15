@@ -24,29 +24,9 @@
     onclose?: () => void;
   }
 
-  let { open, onclose }: Props = $props();
+  let { open, onclose = () => (ide.pluginsOpen = false) }: Props = $props();
 
   type PluginTab = 'installed' | 'catalog' | 'source';
-
-  interface PluginContributionsView {
-    languages?: { id: string; display_name: string; extensions?: string[] }[];
-    lsp_servers?: { language: string; command: string }[];
-    dap_adapters?: { language: string; adapter_name: string; command: string }[];
-    gutter_detectors?: { language: string; kind?: string; runner?: string }[];
-    keymaps?: { key: string; action: string; description?: string | null }[];
-    snippets?: { language: string; prefix: string }[];
-    panels?: { id: string; title: string }[];
-  }
-
-  type RichPlugin = IdePluginInfo & {
-    author?: string | null;
-    install_path?: string;
-    contributions?: PluginContributionsView;
-  };
-
-  type RichCatalogEntry = IdePluginCatalogEntry & {
-    tags?: string[];
-  };
 
   const isOpen = $derived(open === undefined ? ide.pluginsOpen : open);
 
@@ -59,7 +39,7 @@
 
   function close(): void {
     ide.pluginsOpen = false;
-    onclose?.();
+    onclose();
   }
 
   $effect(() => {
@@ -68,8 +48,8 @@
     void ide.loadPlugins();
   });
 
-  const installedList = $derived(ide.plugins as RichPlugin[]);
-  const catalogList = $derived(ide.pluginCatalog as RichCatalogEntry[]);
+  const installedList = $derived<IdePluginInfo[]>(ide.plugins);
+  const catalogList = $derived<IdePluginCatalogEntry[]>(ide.pluginCatalog);
 
   const pluginTabs = $derived<readonly TabItem<PluginTab>[]>([
     {
@@ -89,34 +69,31 @@
     return installedList.some((p) => p.slug === slug);
   }
 
-  function languageLabels(plugin: RichPlugin): string[] {
+  function languageLabels(plugin: IdePluginInfo): string[] {
     const rich = plugin.contributions?.languages ?? [];
-    if (rich.length > 0) {
-      return rich.map((l) => {
-        const exts = (l.extensions ?? []).slice(0, 3).join(', ');
-        return exts ? `${l.display_name} (${exts})` : l.display_name;
-      });
-    }
-    return plugin.languages ?? [];
+    return rich.map((l) => {
+      const exts = (l.extensions ?? []).slice(0, 3).join(', ');
+      return exts ? `${l.display_name} (${exts})` : l.display_name;
+    });
   }
 
-  function lspLabels(plugin: RichPlugin): string[] {
+  function lspLabels(plugin: IdePluginInfo): string[] {
     return (plugin.contributions?.lsp_servers ?? []).map((s) => `${s.language}: ${s.command}`);
   }
 
-  function dapLabels(plugin: RichPlugin): string[] {
+  function dapLabels(plugin: IdePluginInfo): string[] {
     return (plugin.contributions?.dap_adapters ?? []).map(
       (d) => `${d.language}: ${d.adapter_name}`,
     );
   }
 
-  function gutterLabels(plugin: RichPlugin): string[] {
+  function gutterLabels(plugin: IdePluginInfo): string[] {
     return (plugin.contributions?.gutter_detectors ?? []).map(
       (g) => `${g.language} (${g.kind ?? 'test'})`,
     );
   }
 
-  function keymapLabels(plugin: RichPlugin): string[] {
+  function keymapLabels(plugin: IdePluginInfo): string[] {
     return (plugin.contributions?.keymaps ?? []).map((k) => `${k.key} → ${k.action}`);
   }
 
@@ -161,22 +138,24 @@
     }
   }
 
-  async function handleTogglePlugin(plugin: RichPlugin, enabled: boolean): Promise<void> {
+  async function handleTogglePlugin(plugin: IdePluginInfo, enabled: boolean): Promise<void> {
     busyToggleSlug = plugin.slug;
     try {
-      await ide.togglePlugin(plugin.slug, enabled);
-      toasts.success(
-        enabled ? `Enabled ${plugin.name}` : `Disabled ${plugin.name}`,
-        enabled
-          ? 'Language, LSP, debugger, and gutter contributions are active immediately.'
-          : 'Contributions deactivated without restarting Otto.',
-      );
+      const ok = await ide.togglePlugin(plugin.slug, enabled);
+      if (ok) {
+        toasts.success(
+          enabled ? `Enabled ${plugin.name}` : `Disabled ${plugin.name}`,
+          enabled
+            ? 'Language, LSP, debugger, and gutter contributions are active immediately.'
+            : 'Contributions deactivated without restarting Otto.',
+        );
+      }
     } finally {
       busyToggleSlug = null;
     }
   }
 
-  async function confirmRemovePlugin(plugin: RichPlugin): Promise<void> {
+  async function confirmRemovePlugin(plugin: IdePluginInfo): Promise<void> {
     const ok = await confirmer.ask(
       `Remove IDE extension "${plugin.name}" (${plugin.slug})? Its contributed languages, LSP servers, debuggers, and gutter detectors will unload immediately.`,
       {
@@ -186,8 +165,10 @@
       },
     );
     if (!ok) return;
-    await ide.removePlugin(plugin.slug);
-    toasts.success(`Removed ${plugin.name}`);
+    const removed = await ide.removePlugin(plugin.slug);
+    if (removed) {
+      toasts.success(`Removed ${plugin.name}`);
+    }
   }
 </script>
 
@@ -339,7 +320,7 @@
               <div class="pl-catalog-grid">
                 {#each catalogList as entry (entry.slug)}
                   {@const installed = Boolean(entry.installed) || isSlugInstalled(entry.slug)}
-                  {@const tags = entry.tags ?? entry.languages ?? []}
+                  {@const tags = entry.tags ?? []}
                   <article class="pl-item">
                     <div class="pl-item-head">
                       <div class="pl-item-title-row">
@@ -453,7 +434,7 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-    min-width: 0;
+    min-inline-size: 0;
   }
 
   .pl-banner {
@@ -470,8 +451,8 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 30px;
-    height: 30px;
+    inline-size: 30px;
+    block-size: 30px;
     border-radius: var(--radius-s);
     background: var(--accent-soft);
     color: var(--accent-text);
@@ -482,7 +463,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    min-width: 0;
+    min-inline-size: 0;
   }
 
   .pl-banner-title,
@@ -504,7 +485,7 @@
     flex-direction: column;
     gap: 10px;
     padding-block-start: 4px;
-    min-width: 0;
+    min-inline-size: 0;
   }
 
   .pl-list {
@@ -528,7 +509,7 @@
     border-radius: var(--radius-m);
     background: var(--surface-2);
     border: 1px solid var(--border);
-    min-width: 0;
+    min-inline-size: 0;
   }
 
   .pl-item.is-disabled {
@@ -567,7 +548,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    min-width: 0;
+    min-inline-size: 0;
   }
 
   .pl-mono,
@@ -581,7 +562,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    min-width: 0;
+    min-inline-size: 0;
   }
 
   .pl-manifest-hint {

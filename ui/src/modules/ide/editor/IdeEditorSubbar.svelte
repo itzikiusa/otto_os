@@ -82,7 +82,10 @@
       { label: `CodeVision Usages: ${cur.codeVision ? 'On' : 'Off'}`, icon: cur.codeVision ? 'check' : 'dot', action: () => { writeIdeEditorPreferences({ codeVision: !cur.codeVision }); } },
       { label: `Auto-fold Imports: ${cur.autoFoldImports ? 'On' : 'Off'}`, icon: cur.autoFoldImports ? 'check' : 'dot', action: () => { writeIdeEditorPreferences({ autoFoldImports: !cur.autoFoldImports }); } },
       { label: `Breadcrumbs Bar: ${cur.showBreadcrumbs ? 'On' : 'Off'}`, icon: cur.showBreadcrumbs ? 'check' : 'dot', action: () => { writeIdeEditorPreferences({ showBreadcrumbs: !cur.showBreadcrumbs }); } },
+      { label: `Auto-Save: ${cur.autoSave ? 'On' : 'Off'}`, icon: cur.autoSave ? 'check' : 'dot', action: () => { writeIdeEditorPreferences({ autoSave: !cur.autoSave }); } },
       { label: `Format on Save: ${cur.formatOnSave ? 'On' : 'Off'}`, icon: cur.formatOnSave ? 'check' : 'dot', action: () => { toggleFormatOnSave(); writeIdeEditorPreferences({ formatOnSave: !cur.formatOnSave }); } },
+      { separator: true },
+      { label: 'Optimize Imports', icon: 'sparkle', hint: '⌃⌥O', disabled: activeTab.readOnly, action: () => void ide.organizeImportsActiveFile() },
     );
     ctxMenu.showAt(anchor, items, { align: 'end' });
   }
@@ -136,8 +139,8 @@
 
     {#if hasNonEmptySelection && effectiveViewMode === 'text'}
       <div class="ide-sel-bar" role="group" aria-label="Selection actions" data-testid="ide-selection-agent-bar">
-        <button type="button" class="btn small ghost ide-sel-accent" title="Add selection to AI Agent context (⌘L)" onclick={() => { ideAgent.markSelectionFromEditor({ openPanel: true }); onfocusagent(); }} data-testid="ide-selection-add-agent">
-          <Icon name="assistant" size={12} />Agent ⌘L
+        <button type="button" class="btn small ghost ide-sel-accent" title="Add selection to AI Agent context (⇧⌘L)" onclick={() => { ideAgent.markSelectionFromEditor({ openPanel: true }); onfocusagent(); }} data-testid="ide-selection-add-agent">
+          <Icon name="assistant" size={12} />Agent ⇧⌘L
         </button>
         <button type="button" class="btn small ghost" disabled={activeTab.readOnly || !ide.canEditCollab} title="Inline AI edit on selection (⌘I)" onclick={() => ideAgent.openInlineEdit()} data-testid="ide-selection-inline-edit">
           <Icon name="sparkle" size={12} />Edit ⌘I
@@ -190,7 +193,7 @@
     <button type="button" class="icon-btn" aria-label="Quick fixes" title="Show quick fixes and refactorings (⌥⏎)" onclick={onopenquickfix} data-testid="ide-quickfix-btn">
       <Icon name="bulb" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="Reformat file" title="Reformat code (⌥⌘L)" disabled={activeTab.readOnly} onclick={() => void ide.formatActiveFile()}>
+    <button type="button" class="icon-btn" aria-label="Reformat file" title="Reformat code (⌘⌥L)" disabled={activeTab.readOnly} onclick={() => void ide.formatActiveFile()}>
       <Icon name="format" size={13} />
     </button>
   </div>

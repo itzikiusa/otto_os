@@ -54,6 +54,8 @@ export interface IdeFileWriteReq {
   content: string;
   expected_sha256?: string | null;
   create_dirs?: boolean;
+  record_local_history?: boolean;
+  local_history_retention_days?: number;
 }
 
 export interface IdeFileWriteResp {
@@ -69,6 +71,8 @@ export interface IdeFsMutateReq {
   op: IdeFsMutateOp;
   path: string;
   dest_path?: string | null;
+  record_local_history?: boolean;
+  local_history_retention_days?: number;
 }
 
 export interface IdeFsMutateResp {
@@ -491,6 +495,7 @@ export interface IdeDebugOutput {
 
 export interface IdeDebugSessionSnapshot {
   id: string;
+  revision?: number;
   title: string;
   language: string;
   adapter: string;

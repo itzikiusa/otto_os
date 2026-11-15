@@ -1,34 +1,24 @@
-//! HTTP handlers for Share-with-Friends Collaboration (`/ide/collab/*`),
-//! Runtime IDE Plugins (`/ide/plugins/*`), and SSE event framing helpers.
+//! HTTP handlers for Share-with-Friends Collaboration (`/ide/collab/*`) and
+//! Runtime IDE Plugins (`/ide/plugins/*`).
 
-use std::convert::Infallible;
-use std::time::Duration;
-
-use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue};
+use axum::http::{header, HeaderMap};
 use axum::response::Response;
 use axum::{Extension, Json};
-use bytes::Bytes;
-use futures_util::stream;
 use otto_core::auth::AuthUser;
 use otto_core::{Error, Result};
 use serde::Deserialize;
-use serde_json::{json, Value};
-use tokio::sync::broadcast::{self, error::RecvError};
 
+use super::sse_framing::build_collab_sse_response;
 use super::ApiResult;
 use crate::types::{
     IdeCollabCursorReq, IdeCollabDebugActionReq, IdeCollabEditReq, IdeCollabEditResp,
-    IdeCollabEvent, IdeCollabJoinReq, IdeCollabJoinResp, IdeCollabRoleReq, IdeCollabRoom,
-    IdeCollabRoomResp, IdeCollabRoomsResp, IdeCollabStateResp, IdeCreateCollabRoomReq,
-    IdeCreateCollabRoomResp, IdeDebugAction, IdeDebugCommandReq, IdeDebugSessionResp,
-    IdeDebugSessionSnapshot, IdeInstallPluginReq, IdeOkResp, IdePluginResp, IdePluginsResp,
-    IdeSetBreakpointsReq, IdeTargetKind, IdeTogglePluginReq,
+    IdeCollabJoinReq, IdeCollabJoinResp, IdeCollabRoleReq, IdeCollabRoomResp, IdeCollabRoomsResp,
+    IdeCollabStateResp, IdeCreateCollabRoomReq, IdeCreateCollabRoomResp, IdeDebugAction,
+    IdeDebugCommandReq, IdeDebugSessionResp, IdeInstallPluginReq, IdeOkResp, IdePluginResp,
+    IdePluginsResp, IdeSetBreakpointsReq, IdeTargetKind, IdeTogglePluginReq,
 };
 use crate::IdeCtx;
-
-const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 // ---------------------------------------------------------------------------
 // E. "Share with Friends" Host Routes
@@ -37,14 +27,30 @@ const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 pub(super) async fn create_collab_room<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeCreateCollabRoomReq>,
+    Json(mut req): Json<IdeCreateCollabRoomReq>,
 ) -> ApiResult<Json<IdeCreateCollabRoomResp>> {
-    let _ = ctx
+    ctx.ide()
+        .environments
+        .enrich_target_roots(
+            &ctx.pool(),
+            Some(&ctx.ide().projects),
+            Some(&user),
+            &mut req.target,
+        )
+        .await;
+    let resolved = ctx
         .ide()
         .targets
         .resolve_write(&ctx, &user, &req.target)
         .await?;
-    let resp = ctx.ide().collab.create_room(&user, req)?;
+    let initial_debug = ctx
+        .ide()
+        .dap
+        .active_session_for_target_and_owner(&req.target, &user.id);
+    let resp =
+        ctx.ide()
+            .collab
+            .create_room_with_resolved(&user, req, Some(resolved), initial_debug)?;
     Ok(Json(resp))
 }
 
@@ -186,8 +192,18 @@ pub(super) async fn collab_guest_state<S: IdeCtx>(
     let token = extract_collab_token(&headers, q.token.as_deref())?;
     let mut state = ctx.ide().collab.get_state(&room_id, &token)?;
     if let Some(debug_id) = state.room.active_debug_id.as_deref() {
-        if let Ok(fresh) = ctx.ide().dap.get_session(debug_id) {
-            state.active_debug = Some(fresh);
+        let belongs_to_host = ctx
+            .ide()
+            .dap
+            .session_owner_and_target(debug_id)
+            .is_some_and(|(owner, _)| owner == state.room.host_user_id);
+        if belongs_to_host {
+            if let Ok(fresh) = ctx.ide().dap.get_session(debug_id) {
+                state.active_debug = Some(fresh);
+            }
+        } else {
+            state.active_debug = None;
+            state.room.active_debug_id = None;
         }
     }
     Ok(Json(state))
@@ -225,8 +241,20 @@ pub(super) async fn collab_guest_edit<S: IdeCtx>(
         .validate_subpath(&target, &req.path, false)
         .await?;
     let mut saved_to_target = false;
-    if req.save && target.kind == IdeTargetKind::Local {
-        let resolved = ctx.ide().targets.resolve_local(&target, false)?;
+    if req.save {
+        let resolved = match target.kind {
+            IdeTargetKind::Local => ctx.ide().targets.resolve_local(&target, false)?,
+            IdeTargetKind::Ssh => {
+                ctx.ide()
+                    .collab
+                    .room_resolved_target(&room_id)
+                    .ok_or_else(|| {
+                        Error::Upstream(
+                            "remote SSH target is unavailable for collaborative save".into(),
+                        )
+                    })?
+            }
+        };
         ctx.ide()
             .targets
             .write_file(&resolved, &req.path, &req.content, None, false)
@@ -245,7 +273,15 @@ pub(super) async fn collab_guest_debug_action<S: IdeCtx>(
     Path(room_id): Path<String>,
     Json(req): Json<IdeCollabDebugActionReq>,
 ) -> ApiResult<Json<IdeDebugSessionResp>> {
-    let (target, _host_user_id) = ctx.ide().collab.authorize_debug_action(&room_id, &req)?;
+    let (target, host_user_id) = ctx.ide().collab.authorize_debug_action(&room_id, &req)?;
+    let owns_session = ctx
+        .ide()
+        .dap
+        .session_owner_and_target(&req.debug_id)
+        .is_some_and(|(owner, _)| owner == host_user_id);
+    if !owns_session {
+        return Err(Error::Forbidden("debug session is not owned by the room host".into()).into());
+    }
 
     if let Some(ref bps) = req.breakpoints {
         for bp in bps {
@@ -315,126 +351,6 @@ pub(super) async fn collab_guest_debug_action<S: IdeCtx>(
 
     ctx.ide()
         .collab
-        .publish_debug_snapshot(Some(&target), &session);
+        .publish_debug_snapshot(Some(&target), Some(host_user_id.as_str()), &session);
     Ok(Json(IdeDebugSessionResp { session }))
-}
-
-// ---------------------------------------------------------------------------
-// Server-Sent Events (`text/event-stream`) Framing Helpers
-// ---------------------------------------------------------------------------
-
-fn sse_headers_response(body: Body) -> Response {
-    let mut resp = Response::new(body);
-    let headers = resp.headers_mut();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/event-stream; charset=utf-8"),
-    );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    headers.insert(
-        HeaderName::from_static("x-accel-buffering"),
-        HeaderValue::from_static("no"),
-    );
-    resp
-}
-
-fn format_sse_data(value: &Value) -> Bytes {
-    let payload = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
-    Bytes::from(format!("data: {payload}\n\n"))
-}
-
-pub(super) fn build_debug_sse_response(
-    initial: IdeDebugSessionSnapshot,
-    rx: broadcast::Receiver<IdeDebugSessionSnapshot>,
-) -> Response {
-    struct State {
-        initial: Option<IdeDebugSessionSnapshot>,
-        rx: broadcast::Receiver<IdeDebugSessionSnapshot>,
-    }
-
-    let stream = stream::unfold(
-        State {
-            initial: Some(initial),
-            rx,
-        },
-        |mut st| async move {
-            if let Some(first) = st.initial.take() {
-                let val = serde_json::to_value(&first).unwrap_or_else(|_| json!({}));
-                return Some((Ok::<Bytes, Infallible>(format_sse_data(&val)), st));
-            }
-            match tokio::time::timeout(SSE_KEEPALIVE_INTERVAL, st.rx.recv()).await {
-                Ok(Ok(snap)) => {
-                    let val = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
-                    Some((Ok(format_sse_data(&val)), st))
-                }
-                Ok(Err(RecvError::Lagged(_))) => {
-                    Some((Ok(Bytes::from_static(b": lagged\n\n")), st))
-                }
-                Ok(Err(RecvError::Closed)) => None,
-                Err(_) => Some((Ok(Bytes::from_static(b": keepalive\n\n")), st)),
-            }
-        },
-    );
-
-    sse_headers_response(Body::from_stream(stream))
-}
-
-pub(super) fn format_collab_event_frame(ev: &IdeCollabEvent) -> Bytes {
-    let mut val = serde_json::to_value(ev).unwrap_or_else(|_| json!({}));
-    if let Value::Object(ref mut map) = val {
-        match ev {
-            IdeCollabEvent::CursorMoved { .. } => {
-                map.insert("kind".into(), Value::String("cursor".into()));
-            }
-            IdeCollabEvent::BufferUpdated { .. } => {
-                map.insert("kind".into(), Value::String("edit".into()));
-            }
-            _ => {}
-        }
-    }
-    format_sse_data(&val)
-}
-
-fn build_collab_sse_response(
-    room: IdeCollabRoom,
-    rx: broadcast::Receiver<IdeCollabEvent>,
-) -> Response {
-    struct State {
-        initial_room: Option<IdeCollabRoom>,
-        rx: broadcast::Receiver<IdeCollabEvent>,
-        done: bool,
-    }
-
-    let stream = stream::unfold(
-        State {
-            initial_room: Some(room),
-            rx,
-            done: false,
-        },
-        |mut st| async move {
-            if st.done {
-                return None;
-            }
-            if let Some(r) = st.initial_room.take() {
-                let val = json!({ "type": "room_state", "room": r });
-                return Some((Ok::<Bytes, Infallible>(format_sse_data(&val)), st));
-            }
-            match tokio::time::timeout(SSE_KEEPALIVE_INTERVAL, st.rx.recv()).await {
-                Ok(Ok(ev)) => {
-                    if matches!(ev, IdeCollabEvent::RoomClosed { .. }) {
-                        st.done = true;
-                    }
-                    let frame = format_collab_event_frame(&ev);
-                    Some((Ok(frame), st))
-                }
-                Ok(Err(RecvError::Lagged(_))) => {
-                    Some((Ok(Bytes::from_static(b": lagged\n\n")), st))
-                }
-                Ok(Err(RecvError::Closed)) => None,
-                Err(_) => Some((Ok(Bytes::from_static(b": keepalive\n\n")), st)),
-            }
-        },
-    );
-
-    sse_headers_response(Body::from_stream(stream))
 }

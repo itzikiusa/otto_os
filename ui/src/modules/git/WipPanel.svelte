@@ -20,7 +20,7 @@
   import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import DiffViewer from './DiffViewer.svelte';
-  import { repoDiffFileLoader } from './diff-load';
+  import { repoDiffFileLoader } from '../../lib/diff/diff-load';
   import Icon from '../../lib/components/Icon.svelte';
   import { ListWindow } from '../../lib/listWindow.svelte';
   import { lsGet, lsSet } from '../../lib/storage';

@@ -1,17 +1,12 @@
-//! Background Test & Run execution engine (`execute_run_task`, `build_runner_command`),
-//! multi-repo Java source-first classpath compilation, Maven/Gradle/Spring Boot
-//! profile injection, and Unix process-group lifecycle cleanup.
+//! Background Test & Run execution state, SSE broadcast, and task runner (`execute_run_task`).
 
 use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 
 use crate::target::TargetManager;
 use crate::types::{
@@ -20,10 +15,14 @@ use crate::types::{
 };
 
 pub(super) use super::runner_cmd::{
-    apply_runtime_profile_and_module_venv, build_runner_command, compile_java_main_step,
-    has_manual_classpath, resolve_program_in_env, resolve_run_cwd,
+    apply_runtime_profile_and_module_venv, build_runner_command, compile_go_run_step,
+    compile_java_main_step, has_manual_classpath, is_default_go_command, resolve_run_cwd,
 };
 use super::runner_parsers::IncrementalTestTracker;
+use super::runner_proc::{
+    cleanup_remaining_process_group, kill_child_process_group, run_before_launch, spawn_run_child,
+    ChildProcessGroupGuard,
+};
 
 pub(super) const MAX_FINISHED_RUNS: usize = 8;
 pub(super) const MAX_RUN_OUTPUT_LINES: usize = 2_000;
@@ -53,7 +52,7 @@ pub(super) struct RunStateInner {
     id: String,
     title: String,
     runner: IdeRunnerKind,
-    status: IdeRunStatus,
+    pub(super) status: IdeRunStatus,
     exit_code: Option<i32>,
     started_at: String,
     duration_ms: Option<u64>,
@@ -61,6 +60,7 @@ pub(super) struct RunStateInner {
     output_bytes: usize,
     output: VecDeque<String>,
     parser: IncrementalTestTracker,
+    pub(super) active_local_pid: Option<u32>,
 }
 
 impl RunStateInner {
@@ -82,6 +82,7 @@ impl RunStateInner {
             output_bytes: 0,
             output: VecDeque::new(),
             parser: IncrementalTestTracker::default(),
+            active_local_pid: None,
         }
     }
 
@@ -153,6 +154,7 @@ pub(super) struct ActiveRunHandle {
     pub(super) owner_user_id: String,
     pub(super) state: Mutex<RunStateInner>,
     pub(super) stop_tx: watch::Sender<bool>,
+    pub(super) events_tx: broadcast::Sender<IdeRunState>,
 }
 
 impl ActiveRunHandle {
@@ -178,98 +180,19 @@ impl ActiveRunHandle {
 
     pub(super) fn stop(&self) -> IdeRunState {
         let _ = self.stop_tx.send(true);
-        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.status == IdeRunStatus::Running {
-            guard.status = IdeRunStatus::Stopped;
-            guard.push_line("[Stopped by user]".into());
-        }
-        guard.to_snapshot(None)
-    }
-}
-
-struct ChildProcessGroupGuard {
-    pid: Option<u32>,
-    is_local: bool,
-    disarmed: bool,
-}
-
-impl Drop for ChildProcessGroupGuard {
-    #[allow(clippy::disallowed_methods)] // synchronous Drop safeguard against orphan child processes
-    fn drop(&mut self) {
-        if !self.disarmed && self.is_local {
-            #[cfg(unix)]
-            if let Some(pid) = self.pid {
-                let _ = std::process::Command::new("/bin/kill")
-                    .args(["-KILL", &format!("-{pid}")])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+        let snap = {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.status == IdeRunStatus::Running {
+                guard.status = IdeRunStatus::Stopped;
+                guard.push_line("[Stopped by user]".into());
             }
+            guard.to_snapshot(None)
+        };
+        if self.events_tx.receiver_count() > 0 {
+            let _ = self.events_tx.send(snap.clone());
         }
+        snap
     }
-}
-
-async fn kill_child_process_group(
-    child: &mut tokio::process::Child,
-    pid: Option<u32>,
-    is_local: bool,
-) {
-    #[cfg(unix)]
-    if is_local {
-        if let Some(p) = pid {
-            let neg = format!("-{p}");
-            let _ = Command::new("/bin/kill")
-                .args(["-TERM", &neg])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
-            if tokio::time::timeout(Duration::from_millis(150), child.wait())
-                .await
-                .is_ok()
-            {
-                let _ = Command::new("/bin/kill")
-                    .args(["-KILL", &neg])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .await;
-                return;
-            }
-            let _ = Command::new("/bin/kill")
-                .args(["-KILL", &neg])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (pid, is_local);
-
-    let _ = child.kill().await;
-    let _ = tokio::time::timeout(Duration::from_millis(120), child.wait()).await;
-}
-
-async fn cleanup_remaining_process_group(pid: Option<u32>, is_local: bool) {
-    #[cfg(unix)]
-    if is_local {
-        if let Some(p) = pid {
-            let _ = Command::new("/bin/kill")
-                .args(["-KILL", &format!("-{p}")])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (pid, is_local);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -313,32 +236,6 @@ pub(super) async fn execute_run_task(
         let cwd = resolve_run_cwd(&target, cfg.cwd.as_deref());
         apply_runtime_profile_and_module_venv(&cfg, &target, &cwd, &mut env_map);
 
-        let mut temp_java_build_dir: Option<PathBuf> = None;
-        let (program, args) = if target.kind == IdeTargetKind::Local
-            && cfg.runner == IdeRunnerKind::JavaMain
-            && !has_manual_classpath(&cfg)
-        {
-            match compile_java_main_step(&cfg, &target, &cwd, &env_map, &handle).await {
-                Ok((prog, built_args, out_dir)) => {
-                    temp_java_build_dir = Some(out_dir);
-                    (prog, built_args)
-                }
-                Err(err) => {
-                    finish_run(
-                        &handle,
-                        IdeRunStatus::Failed,
-                        Some(1),
-                        started.elapsed(),
-                        Some(err),
-                    );
-                    evict_finished_runs(&runs);
-                    return;
-                }
-            }
-        } else {
-            build_runner_command(&cfg, &cwd, &env_map)
-        };
-
         if let Some(pre) = cfg
             .before_launch
             .as_deref()
@@ -357,9 +254,6 @@ pub(super) async fn execute_run_task(
             )
             .await
             {
-                if let Some(dir) = temp_java_build_dir.take() {
-                    let _ = tokio::fs::remove_dir_all(dir).await;
-                }
                 finish_run(
                     &handle,
                     IdeRunStatus::Failed,
@@ -371,6 +265,46 @@ pub(super) async fn execute_run_task(
                 return;
             }
         }
+
+        let (program, args) = if target.kind == IdeTargetKind::Local
+            && cfg.runner == IdeRunnerKind::JavaMain
+            && !has_manual_classpath(&cfg)
+        {
+            match compile_java_main_step(&cfg, &target, &cwd, &env_map, &handle).await {
+                Ok((prog, built_args)) => (prog, built_args),
+                Err(err) => {
+                    finish_run(
+                        &handle,
+                        IdeRunStatus::Failed,
+                        Some(1),
+                        started.elapsed(),
+                        Some(err),
+                    );
+                    evict_finished_runs(&runs);
+                    return;
+                }
+            }
+        } else if target.kind == IdeTargetKind::Local
+            && cfg.runner == IdeRunnerKind::GoRun
+            && is_default_go_command(&cfg)
+        {
+            match compile_go_run_step(&cfg, &target, &cwd, &env_map).await {
+                Ok((prog, built_args)) => (prog, built_args),
+                Err(err) => {
+                    finish_run(
+                        &handle,
+                        IdeRunStatus::Failed,
+                        Some(1),
+                        started.elapsed(),
+                        Some(err),
+                    );
+                    evict_finished_runs(&runs);
+                    return;
+                }
+            }
+        } else {
+            build_runner_command(&cfg, target.kind, &cwd, &env_map)
+        };
 
         append_run_line(
             &handle,
@@ -392,9 +326,6 @@ pub(super) async fn execute_run_task(
         ) {
             Ok(c) => c,
             Err(err) => {
-                if let Some(dir) = temp_java_build_dir.take() {
-                    let _ = tokio::fs::remove_dir_all(dir).await;
-                }
                 finish_run(
                     &handle,
                     IdeRunStatus::Failed,
@@ -407,11 +338,19 @@ pub(super) async fn execute_run_task(
             }
         };
         let pid = child.id();
+        if is_local {
+            if let Ok(mut guard) = handle.state.lock() {
+                guard.active_local_pid = pid;
+            }
+        }
         let mut pg_guard = ChildProcessGroupGuard {
             pid,
             is_local,
             disarmed: false,
         };
+        // Keep remote SSH stdin alive across `child.wait()` (`Child::wait` drops
+        // `child.stdin` on first poll, which would trigger our remote EOF-kill watcher).
+        let mut ssh_stdin = if is_local { None } else { child.stdin.take() };
 
         let stdout_task = child.stdout.take().map(|out| {
             let h = Arc::clone(&handle);
@@ -434,11 +373,13 @@ pub(super) async fn execute_run_task(
 
         let wait_res = tokio::select! {
             status = child.wait() => {
+                drop(ssh_stdin.take());
                 cleanup_remaining_process_group(pid, is_local).await;
                 pg_guard.disarmed = true;
                 Some(status)
             }
             _ = stop_rx.changed() => {
+                drop(ssh_stdin.take());
                 kill_child_process_group(&mut child, pid, is_local).await;
                 pg_guard.disarmed = true;
                 None
@@ -449,9 +390,6 @@ pub(super) async fn execute_run_task(
         }
         if let Some(t) = stderr_task {
             let _ = tokio::time::timeout(Duration::from_millis(250), t).await;
-        }
-        if let Some(dir) = temp_java_build_dir.take() {
-            let _ = tokio::fs::remove_dir_all(dir).await;
         }
 
         match wait_res {
@@ -513,8 +451,14 @@ fn multi_step_label(cfg: &IdeRunConfig) -> &'static str {
 }
 
 pub(super) fn append_run_line(handle: &ActiveRunHandle, line: String) {
-    let mut guard = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-    guard.push_line(line);
+    let snap_opt = {
+        let mut guard = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.push_line(line);
+        (handle.events_tx.receiver_count() > 0).then(|| guard.to_snapshot(Some(250)))
+    };
+    if let Some(snap) = snap_opt {
+        let _ = handle.events_tx.send(snap);
+    }
 }
 
 pub(super) fn finish_run(
@@ -524,100 +468,22 @@ pub(super) fn finish_run(
     elapsed: Duration,
     err_msg: Option<String>,
 ) {
-    let mut guard = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(msg) = err_msg {
-        guard.push_line(format!("ERROR: {msg}"));
-    }
-    if guard.status != IdeRunStatus::Stopped {
-        guard.status = status;
-    }
-    guard.exit_code = exit_code;
-    guard.duration_ms = Some(elapsed.as_millis() as u64);
-    guard.compact_on_finish();
-}
-
-async fn run_before_launch(
-    targets: &TargetManager,
-    target: &IdeTargetSpec,
-    ssh: Option<&IdeSshSpec>,
-    actor_id: &str,
-    script: &str,
-    cwd: &str,
-    env_map: &BTreeMap<String, String>,
-) -> std::result::Result<(), String> {
-    match target.kind {
-        IdeTargetKind::Local => {
-            let mut cmd = Command::new("sh");
-            cmd.args(["-c", script])
-                .current_dir(cwd)
-                .envs(env_map)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-            #[cfg(unix)]
-            cmd.process_group(0);
-
-            let out = cmd.output().await.map_err(|e| e.to_string())?;
-            if !out.status.success() {
-                return Err(format!(
-                    "before_launch failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ));
-            }
-            Ok(())
+    let snap_opt = {
+        let mut guard = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(msg) = err_msg {
+            tracing::warn!(run_id = %guard.id, error = %msg, "IDE run failed");
+            guard.push_line(format!("ERROR: {msg}"));
         }
-        IdeTargetKind::Ssh => {
-            let spec = ssh.ok_or("missing SSH spec for before_launch")?;
-            let res = targets
-                .resolve_with_ssh(target, actor_id, spec.clone())
-                .map_err(|e| e.to_string())?;
-            let out = targets
-                .exec_shell(&res, script, Some(cwd), env_map, Duration::from_secs(120))
-                .await
-                .map_err(|e| e.to_string())?;
-            if !out.success() {
-                return Err(format!("before_launch failed: {}", out.stderr.trim()));
-            }
-            Ok(())
+        if guard.status != IdeRunStatus::Stopped {
+            guard.status = status;
         }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_run_child(
-    targets: &TargetManager,
-    target: &IdeTargetSpec,
-    ssh: Option<&IdeSshSpec>,
-    actor_id: &str,
-    program: &str,
-    args: &[String],
-    cwd: &str,
-    env_map: &BTreeMap<String, String>,
-) -> std::result::Result<tokio::process::Child, String> {
-    match target.kind {
-        IdeTargetKind::Local => {
-            let resolved_prog = resolve_program_in_env(program, env_map);
-            let mut cmd = Command::new(resolved_prog);
-            cmd.args(args)
-                .current_dir(cwd)
-                .envs(env_map)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-            #[cfg(unix)]
-            cmd.process_group(0);
-            cmd.spawn().map_err(|e| format!("spawn '{program}': {e}"))
-        }
-        IdeTargetKind::Ssh => {
-            let spec = ssh.ok_or("missing SSH connection spec for remote run")?;
-            let mut cmd = targets
-                .build_ssh_run_command(spec, actor_id, cwd, program, args, env_map)
-                .map_err(|e| e.to_string())?;
-            #[cfg(unix)]
-            cmd.process_group(0);
-            cmd.spawn().map_err(|e| format!("spawn ssh: {e}"))
-        }
+        guard.exit_code = exit_code;
+        guard.duration_ms = Some(elapsed.as_millis() as u64);
+        guard.active_local_pid = None;
+        guard.compact_on_finish();
+        (handle.events_tx.receiver_count() > 0).then(|| guard.to_snapshot(Some(500)))
+    };
+    if let Some(snap) = snap_opt {
+        let _ = handle.events_tx.send(snap);
     }
 }

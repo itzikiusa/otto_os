@@ -150,8 +150,12 @@ test('a thread deep link from another workspace opens the thread at phone width'
   await expectFullyInViewport(page, header, 'thread header with the keyboard up');
   // #app follows the visible viewport (lib/viewportFit.ts) on a touch device.
   expect(await page.evaluate(() => document.getElementById('app')!.getBoundingClientRect().height)).toBe(520);
+  const sendBtn = thread.getByTestId('runtime-send');
   await composer.fill('hello from the phone');
+  // On touch-first devices Enter inserts a newline; the send button sends.
   await composer.press('Enter');
+  await expect(composer).toHaveValue('hello from the phone\n');
+  await sendBtn.click();
   await expect(thread.getByText('echo: hello from the phone')).toBeVisible({ timeout: 20_000 });
   await page.setViewportSize({ width: 430, height: 932 });
   await composer.blur();
@@ -160,13 +164,13 @@ test('a thread deep link from another workspace opens the thread at phone width'
   // A long conversation: scroll every scroller to its start, then its end.
   for (let i = 0; i < 6; i++) {
     await composer.fill(`long ${i} ` + 'a long line of text '.repeat(30));
-    await composer.press('Enter');
+    await sendBtn.click();
     await expect(thread.getByText(`echo: long ${i} `).first()).toBeVisible({ timeout: 20_000 });
   }
   // A markdown table at phone width: a short column keeps its words whole
   // (it used to break letter by letter) and the table scrolls inside itself.
   await composer.fill('t\n\n| Agent | Status |\n|---|---|\n| tma-acp | ' + 'working on the Antigravity driver and the timeline '.repeat(4) + '|');
-  await composer.press('Enter');
+  await sendBtn.click();
   const cell = thread.locator('.md td', { hasText: /^tma-acp$/ }).last();
   await expect(cell).toBeVisible({ timeout: 20_000 });
   // Its narrowest line holds a whole word part ("tma-"), never one letter.
@@ -189,7 +193,7 @@ test('a thread deep link from another workspace opens the thread at phone width'
 
   // An inline approval: its buttons are real tap targets.
   await composer.fill('ask');
-  await composer.press('Enter');
+  await sendBtn.click();
   const approval = thread.locator('[data-testid^="runtime-approval-"]');
   await expect(approval).toBeVisible({ timeout: 20_000 });
   for (const name of ['Approve', 'Decline']) {
@@ -278,4 +282,164 @@ test('pairing lands on the requested thread, signed in, with no password', async
   await expect(page).toHaveURL(new RegExp(`#/threads/${threadId}$`), { timeout: 20_000 });
   await expect(page.getByTestId(`runtime-thread-${threadId}`)).toBeVisible({ timeout: 30_000 });
   await phone.close();
+});
+
+test('a 60-turn conversation opens via tail_turns=20 on phone and loads earlier turns without scroll jump', async ({ page }) => {
+  await mockPhone(page, true);
+  const TOTAL = 60;
+  const requestedUrls: string[] = [];
+
+  const buildPage = (fromOrd: number, toOrd: number, hasOlder: boolean, olderTurns: number) => {
+    const turns = [];
+    const turn_items = [];
+    let itemOrd = (fromOrd - 1) * 4 + 1;
+    for (let ord = fromOrd; ord <= toOrd; ord++) {
+      const tid = `turn-${ord}`;
+      turns.push({
+        id: tid,
+        ordinal: ord,
+        status: 'completed',
+        started_at: '2026-11-15T00:00:00Z',
+        completed_at: '2026-11-15T00:00:02Z',
+        origin: 'user',
+      });
+      turn_items.push(
+        {
+          id: `u-${ord}`,
+          turn_id: tid,
+          ordinal: itemOrd++,
+          status: 'completed',
+          title: null,
+          started_at: '2026-11-15T00:00:00Z',
+          completed_at: '2026-11-15T00:00:00Z',
+          updated_at: '2026-11-15T00:00:00Z',
+          type: 'user_message',
+          text: `Question number ${ord}`,
+        },
+        {
+          id: `c1-${ord}`,
+          turn_id: tid,
+          ordinal: itemOrd++,
+          status: 'completed',
+          title: `rg turn_${ord}`,
+          error: null,
+          started_at: '2026-11-15T00:00:00Z',
+          completed_at: '2026-11-15T00:00:01Z',
+          updated_at: '2026-11-15T00:00:01Z',
+          type: 'command_execution',
+          command: `rg turn_${ord}`,
+          cwd: '/tmp',
+          exit_code: 0,
+        },
+        {
+          id: `c2-${ord}`,
+          turn_id: tid,
+          ordinal: itemOrd++,
+          status: 'completed',
+          title: `cargo check ${ord}`,
+          error: null,
+          started_at: '2026-11-15T00:00:01Z',
+          completed_at: '2026-11-15T00:00:02Z',
+          updated_at: '2026-11-15T00:00:02Z',
+          type: 'command_execution',
+          command: `cargo check ${ord}`,
+          cwd: '/tmp',
+          exit_code: 0,
+        },
+        {
+          id: `a-${ord}`,
+          turn_id: tid,
+          ordinal: itemOrd++,
+          status: 'completed',
+          title: null,
+          started_at: '2026-11-15T00:00:01Z',
+          completed_at: '2026-11-15T00:00:02Z',
+          updated_at: '2026-11-15T00:00:02Z',
+          type: 'assistant_message',
+          message_id: `m-${ord}`,
+          text: `Answer for turn ${ord}: ` + 'detailed summary line '.repeat(8),
+          streaming: false,
+        },
+      );
+    }
+    return {
+      provider_session: null,
+      provider_thread: null,
+      turns,
+      turn_items,
+      runtime_requests: [],
+      plans: [],
+      queued_prompts: [],
+      has_older: hasOlder,
+      oldest_turn_ordinal: fromOrd,
+      older_turns: olderTurns,
+    };
+  };
+
+  await mock(page, `**/api/v1/runtime-sessions/${threadId}/events*`, (r) => {
+    const u = new URL(r.request().url());
+    requestedUrls.push(u.pathname + u.search);
+    const before = Number(u.searchParams.get('before_turn_ordinal') || '0');
+    const after = Number(u.searchParams.get('after_sequence') || '0');
+    if (before > 0) {
+      const limit = Number(u.searchParams.get('limit_turns') || '20');
+      const from = Math.max(1, before - limit);
+      const to = before - 1;
+      return {
+        kind: 'snapshot',
+        snapshot_sequence: 240,
+        snapshot: buildPage(from, to, from > 1, from - 1),
+      };
+    }
+    if (after >= 240) {
+      return { kind: 'events', events: [], last_sequence: 240 };
+    }
+    return {
+      kind: 'snapshot',
+      snapshot_sequence: 240,
+      snapshot: buildPage(41, TOTAL, true, 40),
+    };
+  });
+
+  // Warm shell first, then time switching/opening the 60-turn thread.
+  await page.goto('/#/threads');
+  await expect(page.getByTestId('threads-page')).toBeVisible({ timeout: 30_000 });
+  const t0 = Date.now();
+  await page.goto(`/#/threads/${threadId}`);
+  const thread = page.getByTestId(`runtime-thread-${threadId}`);
+  await expect(thread.getByText('Answer for turn 60:')).toBeVisible({ timeout: 5_000 });
+  const openMs = Date.now() - t0;
+  expect(openMs, `60-turn phone conversation opened in ${openMs}ms`).toBeLessThan(800);
+  expect(requestedUrls.some((u) => u.includes('tail_turns=20'))).toBe(true);
+
+  // Closed work folds must mount 0 `.rf-body` containers until tapped open!
+  await expect(thread.locator('.rf-body')).toHaveCount(0);
+  await expect(thread.getByText('Answer for turn 25:')).toHaveCount(0);
+
+  // Scroll to top of the 20-turn tail window, anchor turn 41's bubble Y, and tap "Load earlier (40 turns)".
+  await thread.locator('.rt-scroll').evaluate((el) => {
+    el.scrollTop = 0;
+  });
+  const loadOlderBtn = thread.getByTestId('runtime-load-older');
+  await expect(loadOlderBtn).toContainText('Load earlier (40 turns)');
+  await expectFullyInViewport(page, loadOlderBtn, 'Load earlier (40 turns) button');
+  const beforeTop41 = await thread.getByText('Question number 41').evaluate((el) => el.getBoundingClientRect().top);
+  await loadOlderBtn.click();
+  await expect(thread.getByText('Answer for turn 21:')).toBeVisible({ timeout: 5_000 });
+  await expect(loadOlderBtn).toContainText('Load earlier (20 turns)');
+  const afterTop41 = await thread.getByText('Question number 41').evaluate((el) => el.getBoundingClientRect().top);
+  expect(Math.abs(afterTop41 - beforeTop41), 'viewport anchor stayed stable when prepending 20 older turns').toBeLessThan(8);
+
+  // Scroll to the top of the 40-turn window and load the remaining 20 turns without scroll jump.
+  await thread.locator('.rt-scroll').evaluate((el) => {
+    el.scrollTop = 0;
+  });
+  await expectFullyInViewport(page, loadOlderBtn, 'Load earlier (20 turns) button');
+  const beforeTop21 = await thread.getByText('Question number 21').evaluate((el) => el.getBoundingClientRect().top);
+  await loadOlderBtn.click();
+  await expect(thread.getByText('Answer for turn 1:')).toBeVisible({ timeout: 5_000 });
+  await expect(loadOlderBtn).toHaveCount(0);
+  const afterTop21 = await thread.getByText('Question number 21').evaluate((el) => el.getBoundingClientRect().top);
+  expect(Math.abs(afterTop21 - beforeTop21), 'viewport anchor stayed stable when prepending final 20 turns').toBeLessThan(8);
+  await expectNoHorizontalOverflow(page);
 });

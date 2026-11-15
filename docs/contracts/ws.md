@@ -467,7 +467,8 @@ credentials are refused with 403 (`RootRoute::Lsp`).
   `~/.local/bin`, …).
 - **Multiplexing, multi-root & back-pressure:** Sockets share one language-server
   process per `(user_id, lang, root, ssh_target)` — never across users — capped
-  at `MAX_SERVERS_PER_OWNER = 2` LRU per user, reaped after `450ms` once
+  at `MAX_SERVERS_PER_OWNER = 3` (`MAX_GLOBAL_SERVERS = 3`, `1.2 GiB` combined
+  LSP RSS budget, evicting `active_clients == 0` servers first) LRU per user, reaped after `450ms` once
   detached with zero open documents (or immediately when switching workspace
   roots, and `45s` otherwise) via `shutdown` → `exit` → process-group
   `-SIGTERM`/`-SIGKILL`. JSON-RPC text frames carry bare LSP messages (the

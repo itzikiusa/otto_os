@@ -1,6 +1,5 @@
 //! Local HTTPS streaming downloader (with SHA-256 verification), archive
-//! extractor, process-group-isolated installer commands, and remote SSH
-//! installer routines for [`super::ToolchainManager`].
+//! extractor, and local SDK installer routines for [`super::ToolchainManager`].
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -8,28 +7,23 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::toolchains_catalog::{
-    codelldb_vsix_url, jq_binary_url, rust_analyzer_gz_url, shfmt_binary_url, uv_tarball_url,
-    CatalogSdkEntry, EcosystemKind, TargetPlatform, BASH_LSP_NPM_PACKAGES, DEBUGPY_PKG, DLV_PKG,
-    GOPLS_PKG, JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JSON_LSP_NPM_PACKAGES,
-    JS_DEBUG_TARBALL_URL, PYRIGHT_PKG, TS_LSP_NPM_PACKAGES,
-};
-use crate::types::{IdeInstallComponent, IdeSshSpec};
+use crate::toolchains_catalog::{CatalogSdkEntry, EcosystemKind};
 
+use super::discovery::discover_local_sdks_with_shell;
 use super::{
-    discover_local_sdks, find_executable_in, is_executable_file, read_subdirs,
-    resolve_java_home_dir, system_search_dirs, ToolchainManager,
+    find_executable_in, is_executable_file, read_subdirs, resolve_java_home_dir,
+    system_search_dirs_with_shell, ToolchainManager,
 };
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const LOCAL_CMD_TIMEOUT: Duration = Duration::from_secs(600);
 
-struct InstallerProcessGroupGuard {
-    pid: Option<u32>,
-    disarmed: bool,
+pub(super) struct InstallerProcessGroupGuard {
+    pub pid: Option<u32>,
+    pub disarmed: bool,
 }
 
 impl Drop for InstallerProcessGroupGuard {
@@ -152,7 +146,7 @@ pub(crate) fn verify_sha256_digest(
     Ok(())
 }
 
-async fn run_local_cmd(
+pub(super) async fn run_local_cmd(
     mgr: &ToolchainManager,
     job_id: &str,
     pct: u8,
@@ -162,7 +156,7 @@ async fn run_local_cmd(
 ) -> std::result::Result<(), String> {
     let mut cmd = Command::new(program);
     cmd.args(args)
-        .envs(crate::environments::cached_shell_env_snapshot())
+        .envs(mgr.shell_env_snapshot())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -221,7 +215,7 @@ pub(crate) fn make_executable(path: &Path) -> std::result::Result<(), String> {
     Ok(())
 }
 
-fn relink_current(link: &Path, target: &Path) {
+pub(super) fn relink_current(link: &Path, target: &Path) {
     #[cfg(unix)]
     {
         if let Some(p) = link.parent() {
@@ -417,7 +411,7 @@ pub(super) async fn install_local_sdk(
     }
 }
 
-async fn ensure_local_uv(
+pub(super) async fn ensure_local_uv(
     mgr: &ToolchainManager,
     job_id: &str,
     root: &Path,
@@ -427,7 +421,9 @@ async fn ensure_local_uv(
     if is_executable_file(&uv_bin) {
         return Ok(uv_bin);
     }
-    if let Some(sys_uv) = find_executable_in(&system_search_dirs(), &["uv"]) {
+    let sp = mgr.shell_path();
+    if let Some(sys_uv) = find_executable_in(&system_search_dirs_with_shell(sp.as_deref()), &["uv"])
+    {
         return Ok(sys_uv);
     }
     tokio::fs::create_dir_all(uv_bin.parent().unwrap())
@@ -468,327 +464,18 @@ async fn ensure_local_uv(
     Ok(uv_bin)
 }
 
-pub(super) async fn install_local_lsp(
+pub(super) fn resolve_best_sdk_bin(
     mgr: &ToolchainManager,
-    job_id: &str,
     root: &Path,
     eco: EcosystemKind,
-    platform: TargetPlatform,
-) -> std::result::Result<String, String> {
-    let tmp = root.join(".downloads");
-    tokio::fs::create_dir_all(&tmp)
-        .await
-        .map_err(|e| e.to_string())?;
-    match eco {
-        EcosystemKind::Java => {
-            let archive = tmp.join("jdtls.tar.gz");
-            download_https_to_file(mgr, job_id, JDTLS_TARBALL_URL, &archive, None, 65).await?;
-            let dest = root.join("java/lsp");
-            let _ = tokio::fs::remove_dir_all(&dest).await;
-            tokio::fs::create_dir_all(&dest)
-                .await
-                .map_err(|e| e.to_string())?;
-            run_local_cmd(
-                mgr,
-                job_id,
-                75,
-                Path::new("tar"),
-                &[
-                    "-xzf",
-                    &archive.to_string_lossy(),
-                    "-C",
-                    &dest.to_string_lossy(),
-                ],
-                &[],
-            )
-            .await?;
-            let _ = tokio::fs::remove_file(&archive).await;
-            let bin = dest.join("bin/jdtls");
-            make_executable(&bin)?;
-            Ok(bin.to_string_lossy().into_owned())
-        }
-        EcosystemKind::Go => {
-            let go_bin = resolve_best_sdk_bin(root, EcosystemKind::Go, "go")
-                .ok_or("Go SDK required first")?;
-            let (gobin, gopath) = (root.join("go/bin"), root.join("go/gopath"));
-            tokio::fs::create_dir_all(&gobin)
-                .await
-                .map_err(|e| e.to_string())?;
-            run_local_cmd(
-                mgr,
-                job_id,
-                75,
-                &go_bin,
-                &["install", GOPLS_PKG],
-                &[("GOBIN", &gobin), ("GOPATH", &gopath)],
-            )
-            .await?;
-            Ok(gobin.join("gopls").to_string_lossy().into_owned())
-        }
-        EcosystemKind::Rust => {
-            let gz = tmp.join("rust-analyzer.gz");
-            download_https_to_file(mgr, job_id, &rust_analyzer_gz_url(platform), &gz, None, 65)
-                .await?;
-            let bin_dir = root.join("rust/bin");
-            tokio::fs::create_dir_all(&bin_dir)
-                .await
-                .map_err(|e| e.to_string())?;
-            let dest = bin_dir.join("rust-analyzer");
-            let _ = tokio::fs::remove_file(&dest).await;
-            run_local_cmd(
-                mgr,
-                job_id,
-                75,
-                Path::new("gzip"),
-                &["-d", "-f", &gz.to_string_lossy()],
-                &[],
-            )
-            .await?;
-            tokio::fs::rename(tmp.join("rust-analyzer"), &dest)
-                .await
-                .map_err(|e| e.to_string())?;
-            make_executable(&dest)?;
-            Ok(dest.to_string_lossy().into_owned())
-        }
-        EcosystemKind::Node => {
-            let npm = resolve_best_sdk_bin(root, EcosystemKind::Node, "npm")
-                .ok_or("Node.js/npm required first")?;
-            let prefix = root.join("node/lsp");
-            tokio::fs::create_dir_all(&prefix)
-                .await
-                .map_err(|e| e.to_string())?;
-            let mut args = vec!["install", "--prefix", prefix.to_str().unwrap_or(".")];
-            args.extend_from_slice(TS_LSP_NPM_PACKAGES);
-            run_local_cmd(mgr, job_id, 75, &npm, &args, &[]).await?;
-            Ok(prefix
-                .join("node_modules/.bin/typescript-language-server")
-                .to_string_lossy()
-                .into_owned())
-        }
-        EcosystemKind::Python => {
-            let uv_bin = ensure_local_uv(mgr, job_id, root, &uv_tarball_url(platform)).await?;
-            let (tool_dir, bin_dir) = (root.join("python/tools"), root.join("python/bin"));
-            tokio::fs::create_dir_all(&bin_dir)
-                .await
-                .map_err(|e| e.to_string())?;
-            run_local_cmd(
-                mgr,
-                job_id,
-                75,
-                &uv_bin,
-                &["tool", "install", "--force", PYRIGHT_PKG],
-                &[("UV_TOOL_DIR", &tool_dir), ("UV_TOOL_BIN_DIR", &bin_dir)],
-            )
-            .await?;
-            Ok(bin_dir
-                .join("pyright-langserver")
-                .to_string_lossy()
-                .into_owned())
-        }
-        EcosystemKind::Shell => {
-            let npm = resolve_best_sdk_bin(root, EcosystemKind::Node, "npm")
-                .ok_or("Node.js/npm required to install bash-language-server")?;
-            let prefix = root.join("shell/lsp");
-            tokio::fs::create_dir_all(&prefix)
-                .await
-                .map_err(|e| e.to_string())?;
-            let mut args = vec!["install", "--prefix", prefix.to_str().unwrap_or(".")];
-            args.extend_from_slice(BASH_LSP_NPM_PACKAGES);
-            run_local_cmd(mgr, job_id, 75, &npm, &args, &[]).await?;
-            Ok(prefix
-                .join("node_modules/.bin/bash-language-server")
-                .to_string_lossy()
-                .into_owned())
-        }
-        EcosystemKind::Json => {
-            let npm = resolve_best_sdk_bin(root, EcosystemKind::Node, "npm")
-                .ok_or("Node.js/npm required to install vscode-json-language-server")?;
-            let prefix = root.join("json/lsp");
-            tokio::fs::create_dir_all(&prefix)
-                .await
-                .map_err(|e| e.to_string())?;
-            let mut args = vec!["install", "--prefix", prefix.to_str().unwrap_or(".")];
-            args.extend_from_slice(JSON_LSP_NPM_PACKAGES);
-            run_local_cmd(mgr, job_id, 75, &npm, &args, &[]).await?;
-            Ok(prefix
-                .join("node_modules/.bin/vscode-json-language-server")
-                .to_string_lossy()
-                .into_owned())
-        }
-    }
-}
-
-pub(super) async fn install_local_dap(
-    mgr: &ToolchainManager,
-    job_id: &str,
-    root: &Path,
-    eco: EcosystemKind,
-    platform: TargetPlatform,
-) -> std::result::Result<String, String> {
-    let tmp = root.join(".downloads");
-    tokio::fs::create_dir_all(&tmp)
-        .await
-        .map_err(|e| e.to_string())?;
-    match eco {
-        EcosystemKind::Java => {
-            let jar = root.join("java/dap").join(JAVA_DEBUG_JAR_NAME);
-            download_https_to_file(mgr, job_id, JAVA_DEBUG_JAR_URL, &jar, None, 85).await?;
-            Ok(jar.to_string_lossy().into_owned())
-        }
-        EcosystemKind::Go => {
-            let go_bin = resolve_best_sdk_bin(root, EcosystemKind::Go, "go")
-                .ok_or("Go SDK required first")?;
-            let (gobin, gopath) = (root.join("go/bin"), root.join("go/gopath"));
-            tokio::fs::create_dir_all(&gobin)
-                .await
-                .map_err(|e| e.to_string())?;
-            run_local_cmd(
-                mgr,
-                job_id,
-                92,
-                &go_bin,
-                &["install", DLV_PKG],
-                &[("GOBIN", &gobin), ("GOPATH", &gopath)],
-            )
-            .await?;
-            Ok(gobin.join("dlv").to_string_lossy().into_owned())
-        }
-        EcosystemKind::Rust => {
-            let vsix = tmp.join("codelldb.vsix");
-            download_https_to_file(mgr, job_id, &codelldb_vsix_url(platform), &vsix, None, 85)
-                .await?;
-            let dest = root.join("rust/dap");
-            let _ = tokio::fs::remove_dir_all(&dest).await;
-            tokio::fs::create_dir_all(&dest)
-                .await
-                .map_err(|e| e.to_string())?;
-            run_local_cmd(
-                mgr,
-                job_id,
-                94,
-                Path::new("unzip"),
-                &[
-                    "-q",
-                    "-o",
-                    &vsix.to_string_lossy(),
-                    "-d",
-                    &dest.to_string_lossy(),
-                ],
-                &[],
-            )
-            .await?;
-            let _ = tokio::fs::remove_file(&vsix).await;
-            let adapter = dest.join("extension/adapter/codelldb");
-            make_executable(&adapter)?;
-            relink_current(&root.join("rust/codelldb"), &dest.join("extension"));
-            Ok(adapter.to_string_lossy().into_owned())
-        }
-        EcosystemKind::Node => {
-            let archive = tmp.join("js-debug.tar.gz");
-            download_https_to_file(mgr, job_id, JS_DEBUG_TARBALL_URL, &archive, None, 85).await?;
-            let dest = root.join("node/dap");
-            let _ = tokio::fs::remove_dir_all(&dest).await;
-            tokio::fs::create_dir_all(&dest)
-                .await
-                .map_err(|e| e.to_string())?;
-            run_local_cmd(
-                mgr,
-                job_id,
-                94,
-                Path::new("tar"),
-                &[
-                    "-xzf",
-                    &archive.to_string_lossy(),
-                    "-C",
-                    &dest.to_string_lossy(),
-                ],
-                &[],
-            )
-            .await?;
-            let _ = tokio::fs::remove_file(&archive).await;
-            relink_current(&root.join("node/js-debug"), &dest.join("js-debug"));
-            Ok(dest
-                .join("js-debug/src/dapDebugServer.js")
-                .to_string_lossy()
-                .into_owned())
-        }
-        EcosystemKind::Python => {
-            let uv_bin = ensure_local_uv(mgr, job_id, root, &uv_tarball_url(platform)).await?;
-            let dap_venv = root.join("python/dap");
-            run_local_cmd(
-                mgr,
-                job_id,
-                90,
-                &uv_bin,
-                &["venv", "--clear", &dap_venv.to_string_lossy()],
-                &[],
-            )
-            .await?;
-            let venv_py = dap_venv.join("bin/python");
-            run_local_cmd(
-                mgr,
-                job_id,
-                95,
-                &uv_bin,
-                &[
-                    "pip",
-                    "install",
-                    "--python",
-                    &venv_py.to_string_lossy(),
-                    DEBUGPY_PKG,
-                ],
-                &[],
-            )
-            .await?;
-            Ok(venv_py.to_string_lossy().into_owned())
-        }
-        EcosystemKind::Shell => {
-            if let Some(sys_bashdb) = find_executable_in(&system_search_dirs(), &["bashdb"]) {
-                return Ok(sys_bashdb.to_string_lossy().into_owned());
-            }
-            let bin_dir = root.join("shell/bin");
-            tokio::fs::create_dir_all(&bin_dir)
-                .await
-                .map_err(|e| e.to_string())?;
-            let wrapper = bin_dir.join("bashdb");
-            tokio::fs::write(
-                &wrapper,
-                "#!/usr/bin/env bash\nexport PS4='+ ${BASH_SOURCE}:${LINENO}: '\nexec bash -x \"$@\"\n",
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-            make_executable(&wrapper)?;
-            Ok(wrapper.to_string_lossy().into_owned())
-        }
-        EcosystemKind::Json => {
-            let bin_dir = root.join("json/bin");
-            tokio::fs::create_dir_all(&bin_dir)
-                .await
-                .map_err(|e| e.to_string())?;
-            let jq = bin_dir.join("jq");
-            if !is_executable_file(&jq) {
-                download_https_to_file(
-                    mgr,
-                    job_id,
-                    &jq_binary_url("1.7.1", platform),
-                    &jq,
-                    None,
-                    85,
-                )
-                .await?;
-                make_executable(&jq)?;
-            }
-            Ok(jq.to_string_lossy().into_owned())
-        }
-    }
-}
-
-fn resolve_best_sdk_bin(root: &Path, eco: EcosystemKind, bin_name: &str) -> Option<PathBuf> {
-    discover_local_sdks(&[root.to_path_buf()], eco)
+    bin_name: &str,
+) -> Option<PathBuf> {
+    let sp = mgr.shell_path();
+    discover_local_sdks_with_shell(&[root.to_path_buf()], eco, sp.as_deref())
         .into_iter()
         .map(|sdk| PathBuf::from(sdk.path).join("bin").join(bin_name))
         .find(|cand| is_executable_file(cand))
-        .or_else(|| find_executable_in(&system_search_dirs(), &[bin_name]))
+        .or_else(|| find_executable_in(&system_search_dirs_with_shell(sp.as_deref()), &[bin_name]))
 }
 
 #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking on newly extracted archive dir
@@ -805,205 +492,4 @@ fn find_file_recursive(dir: &Path, target_name: &str) -> Option<PathBuf> {
         }
     }
     None
-}
-
-pub(super) async fn run_ssh_streaming<F: FnMut(String)>(
-    ssh: &IdeSshSpec,
-    script: &str,
-    mut on_line: F,
-) -> std::result::Result<String, String> {
-    let (ssh_args, dest) =
-        crate::target::ssh_exec::build_ssh_cli_args(ssh, None).map_err(|e| e.to_string())?;
-    let mut cmd = Command::new("ssh");
-    cmd.args(&ssh_args)
-        .arg("--")
-        .arg(dest)
-        .args(["sh", "-s"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    let mut child = cmd.spawn().map_err(|e| format!("spawn ssh: {e}"))?;
-    let mut pg_guard = InstallerProcessGroupGuard {
-        pid: child.id(),
-        disarmed: false,
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(script.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    let stdout = child.stdout.take().ok_or("missing ssh stdout")?;
-    let mut lines = BufReader::new(stdout).lines();
-    let mut installed = String::from("~/.otto/toolchains");
-    while let Ok(Some(line)) = lines.next_line().await {
-        if let Some(p) = line.strip_prefix("INSTALLED_PATH:") {
-            installed = p.trim().to_string();
-        } else {
-            on_line(line);
-        }
-    }
-    let status = child.wait().await.map_err(|e| e.to_string())?;
-    pg_guard.disarmed = true;
-    if !status.success() {
-        return Err(format!("remote installer exited with {status}"));
-    }
-    Ok(installed)
-}
-
-pub(super) fn build_remote_install_script(
-    eco: EcosystemKind,
-    component: IdeInstallComponent,
-    platform: TargetPlatform,
-    sdk: Option<&CatalogSdkEntry>,
-) -> std::result::Result<String, String> {
-    let mut s = String::from(
-        "set -eu\nTC=\"$HOME/.otto/toolchains\"\nmkdir -p \"$TC/.downloads\"\nfor d in \"$TC\"/go/sdks/*/go/bin \"$TC\"/node/sdks/*/bin; do [ -d \"$d\" ] && PATH=\"$d:$PATH\"; done\nexport PATH=\"$TC/java/current/bin:$TC/go/current/bin:$TC/node/current/bin:$TC/rust/cargo/bin:$TC/python/bin:$PATH\"\n",
-    );
-    if matches!(
-        component,
-        IdeInstallComponent::Sdk | IdeInstallComponent::All
-    ) {
-        let entry = sdk.ok_or("missing SDK entry")?;
-        let (u, v) = (
-            shell_words::quote(&entry.url),
-            shell_words::quote(&entry.version),
-        );
-        match eco {
-            EcosystemKind::Java => s.push_str(&format!(
-                "DEST=\"$TC/java/jdks/jdk-{0}\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ncurl -fsSL {u} | tar -xz -C \"$DEST\"\nJH=\"\"\nfor cand in \"$DEST/Contents/Home\" \"$DEST\" \"$DEST\"/*/Contents/Home \"$DEST\"/*; do\n  if [ -x \"$cand/bin/java\" ]; then JH=\"$cand\"; break; fi\ndone\n[ -n \"$JH\" ] || {{ echo \"JDK archive missing bin/java\" >&2; exit 1; }}\nchmod +x \"$JH/bin/java\"\n\"$JH/bin/java\" -version\nln -sfn \"$JH\" \"$TC/java/current\"\nexport PATH=\"$TC/java/current/bin:$PATH\"\necho \"INSTALLED_PATH:$JH\"\n",
-                entry.version
-            )),
-            EcosystemKind::Go => s.push_str(&format!("DEST=\"$TC/go/sdks/{0}\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ncurl -fsSL {u} | tar -xz -C \"$DEST\"\n\"$DEST/go/bin/go\" version\nln -sfn \"$DEST/go\" \"$TC/go/current\"\nexport PATH=\"$TC/go/current/bin:$PATH\"\necho \"INSTALLED_PATH:$DEST/go\"\n", entry.version)),
-            EcosystemKind::Rust => s.push_str(&format!("INIT=\"$TC/.downloads/rustup-init\"\ncurl -fsSL {u} -o \"$INIT\" && chmod +x \"$INIT\"\nRUSTUP_HOME=\"$TC/rust/rustup\" CARGO_HOME=\"$TC/rust/cargo\" \"$INIT\" -y --no-modify-path --default-toolchain {v}\necho \"INSTALLED_PATH:$TC/rust/cargo\"\n")),
-            EcosystemKind::Node => s.push_str(&format!("DEST=\"$TC/node/sdks/{0}\"\nrm -rf \"$DEST\" && mkdir -p \"$DEST\"\ncurl -fsSL {u} | tar -xz --strip-components=1 -C \"$DEST\"\n\"$DEST/bin/node\" --version\nln -sfn \"$DEST\" \"$TC/node/current\"\nexport PATH=\"$TC/node/current/bin:$PATH\"\necho \"INSTALLED_PATH:$DEST\"\n", entry.version)),
-            EcosystemKind::Python => s.push_str(&format!("mkdir -p \"$TC/python/bin\" \"$TC/python/interpreters\"\ncurl -fsSL {u} | tar -xz -C \"$TC/.downloads\"\nUV_BIN=$(find \"$TC/.downloads\" -name uv -type f | head -n 1)\ncp \"$UV_BIN\" \"$TC/python/bin/uv\" && chmod +x \"$TC/python/bin/uv\"\nUV_PYTHON_INSTALL_DIR=\"$TC/python/interpreters\" \"$TC/python/bin/uv\" python install {v}\necho \"INSTALLED_PATH:$TC/python/interpreters\"\n")),
-            EcosystemKind::Shell => s.push_str(&format!("mkdir -p \"$TC/shell/bin\"\ncurl -fsSL '{}' -o \"$TC/shell/bin/shfmt\" && chmod +x \"$TC/shell/bin/shfmt\"\necho \"INSTALLED_PATH:$TC/shell/bin/shfmt\"\n", shfmt_binary_url(&entry.version, platform))),
-            EcosystemKind::Json => s.push_str(&format!("mkdir -p \"$TC/json/bin\"\ncurl -fsSL '{}' -o \"$TC/json/bin/jq\" && chmod +x \"$TC/json/bin/jq\"\necho \"INSTALLED_PATH:$TC/json/bin/jq\"\n", jq_binary_url(&entry.version, platform))),
-        }
-    }
-    if matches!(
-        component,
-        IdeInstallComponent::Lsp | IdeInstallComponent::All
-    ) {
-        match eco {
-            EcosystemKind::Java => s.push_str(&format!("mkdir -p \"$TC/java/lsp\"\ncurl -fsSL '{JDTLS_TARBALL_URL}' | tar -xz -C \"$TC/java/lsp\" && chmod +x \"$TC/java/lsp/bin/jdtls\"\necho \"INSTALLED_PATH:$TC/java/lsp/bin/jdtls\"\n")),
-            EcosystemKind::Go => s.push_str(&format!("export PATH=\"$TC/go/current/bin:$PATH\"\nmkdir -p \"$TC/go/bin\"\nGOBIN=\"$TC/go/bin\" GOPATH=\"$TC/go/gopath\" go install '{GOPLS_PKG}'\necho \"INSTALLED_PATH:$TC/go/bin/gopls\"\n")),
-            EcosystemKind::Rust => s.push_str(&format!("mkdir -p \"$TC/rust/bin\"\ncurl -fsSL '{}' | gzip -d > \"$TC/rust/bin/rust-analyzer\" && chmod +x \"$TC/rust/bin/rust-analyzer\"\necho \"INSTALLED_PATH:$TC/rust/bin/rust-analyzer\"\n", rust_analyzer_gz_url(platform))),
-            EcosystemKind::Node => s.push_str("export PATH=\"$TC/node/current/bin:$PATH\"\nmkdir -p \"$TC/node/lsp\"\nnpm install --prefix \"$TC/node/lsp\" typescript typescript-language-server\necho \"INSTALLED_PATH:$TC/node/lsp/node_modules/.bin/typescript-language-server\"\n"),
-            EcosystemKind::Python => s.push_str(&format!("UV_TOOL_DIR=\"$TC/python/tools\" UV_TOOL_BIN_DIR=\"$TC/python/bin\" \"$TC/python/bin/uv\" tool install --force '{PYRIGHT_PKG}'\necho \"INSTALLED_PATH:$TC/python/bin/pyright-langserver\"\n")),
-            EcosystemKind::Shell => s.push_str("export PATH=\"$TC/node/current/bin:$PATH\"\nmkdir -p \"$TC/shell/lsp\"\nnpm install --prefix \"$TC/shell/lsp\" bash-language-server\necho \"INSTALLED_PATH:$TC/shell/lsp/node_modules/.bin/bash-language-server\"\n"),
-            EcosystemKind::Json => s.push_str("export PATH=\"$TC/node/current/bin:$PATH\"\nmkdir -p \"$TC/json/lsp\"\nnpm install --prefix \"$TC/json/lsp\" vscode-langservers-extracted\necho \"INSTALLED_PATH:$TC/json/lsp/node_modules/.bin/vscode-json-language-server\"\n"),
-        }
-    }
-    if matches!(
-        component,
-        IdeInstallComponent::Dap | IdeInstallComponent::All
-    ) {
-        match eco {
-            EcosystemKind::Java => s.push_str(&format!("mkdir -p \"$TC/java/dap\"\ncurl -fsSL '{JAVA_DEBUG_JAR_URL}' -o \"$TC/java/dap/{JAVA_DEBUG_JAR_NAME}\"\necho \"INSTALLED_PATH:$TC/java/dap/{JAVA_DEBUG_JAR_NAME}\"\n")),
-            EcosystemKind::Go => s.push_str(&format!("export PATH=\"$TC/go/current/bin:$PATH\"\nmkdir -p \"$TC/go/bin\"\nGOBIN=\"$TC/go/bin\" GOPATH=\"$TC/go/gopath\" go install '{DLV_PKG}'\necho \"INSTALLED_PATH:$TC/go/bin/dlv\"\n")),
-            EcosystemKind::Rust => s.push_str(&format!("rm -rf \"$TC/rust/dap\" && mkdir -p \"$TC/rust/dap\"\ncurl -fsSL '{}' -o \"$TC/.downloads/codelldb.vsix\" && unzip -q -o \"$TC/.downloads/codelldb.vsix\" -d \"$TC/rust/dap\" && chmod +x \"$TC/rust/dap/extension/adapter/codelldb\"\nln -sfn \"$TC/rust/dap/extension\" \"$TC/rust/codelldb\"\necho \"INSTALLED_PATH:$TC/rust/dap/extension/adapter/codelldb\"\n", codelldb_vsix_url(platform))),
-            EcosystemKind::Node => s.push_str(&format!("rm -rf \"$TC/node/dap\" && mkdir -p \"$TC/node/dap\"\ncurl -fsSL '{JS_DEBUG_TARBALL_URL}' | tar -xz -C \"$TC/node/dap\"\nln -sfn \"$TC/node/dap/js-debug\" \"$TC/node/js-debug\"\necho \"INSTALLED_PATH:$TC/node/dap/js-debug/src/dapDebugServer.js\"\n")),
-            EcosystemKind::Python => s.push_str(&format!("\"$TC/python/bin/uv\" venv --clear \"$TC/python/dap\" && \"$TC/python/bin/uv\" pip install --python \"$TC/python/dap/bin/python\" '{DEBUGPY_PKG}'\necho \"INSTALLED_PATH:$TC/python/dap/bin/python\"\n")),
-            EcosystemKind::Shell => s.push_str("mkdir -p \"$TC/shell/bin\"\nprintf '#!/usr/bin/env bash\\nexec bash -x \"$@\"\\n' > \"$TC/shell/bin/bashdb\" && chmod +x \"$TC/shell/bin/bashdb\"\necho \"INSTALLED_PATH:$TC/shell/bin/bashdb\"\n"),
-            EcosystemKind::Json => s.push_str(&format!("mkdir -p \"$TC/json/bin\"\ncurl -fsSL '{}' -o \"$TC/json/bin/jq\" && chmod +x \"$TC/json/bin/jq\"\necho \"INSTALLED_PATH:$TC/json/bin/jq\"\n", jq_binary_url("1.7.1", platform))),
-        }
-    }
-    Ok(s)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sha256_verifier_accepts_case_insensitive_match_and_rejects_corruption() {
-        let actual = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        assert!(verify_sha256_digest(actual, None, "https://go.dev/dl/go.tar.gz").is_ok());
-        assert!(verify_sha256_digest(
-            actual,
-            Some("E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"),
-            "https://go.dev/dl/go.tar.gz"
-        )
-        .is_ok());
-        let err = verify_sha256_digest(
-            actual,
-            Some("0000000000000000000000000000000000000000000000000000000000000000"),
-            "https://go.dev/dl/go.tar.gz",
-        )
-        .unwrap_err();
-        assert!(err.contains("SHA-256 checksum mismatch"));
-    }
-
-    #[test]
-    fn remote_install_script_resolves_nested_jdk_home_and_avoids_hardcoded_sdk_versions() {
-        let platform = TargetPlatform::host();
-        let java_sdk = CatalogSdkEntry {
-            version: "21".into(),
-            label: "Temurin 21".into(),
-            lts: true,
-            os: platform.os.as_str().into(),
-            arch: platform.arch.as_str().into(),
-            url: "https://api.adoptium.net/jdk21.tar.gz".into(),
-            size_hint: None,
-            sha256: None,
-        };
-        let java_script = build_remote_install_script(
-            EcosystemKind::Java,
-            IdeInstallComponent::Sdk,
-            platform,
-            Some(&java_sdk),
-        )
-        .unwrap();
-        assert!(java_script.contains("Contents/Home"));
-        assert!(java_script.contains("ln -sfn \"$JH\" \"$TC/java/current\""));
-        assert!(java_script.contains("INSTALLED_PATH:$JH"));
-
-        let go_lsp = build_remote_install_script(
-            EcosystemKind::Go,
-            IdeInstallComponent::Lsp,
-            platform,
-            None,
-        )
-        .unwrap();
-        assert!(go_lsp.contains("$TC/go/current/bin"));
-        assert!(!go_lsp.contains(EcosystemKind::Go.default_sdk_version()));
-
-        let shell_lsp = build_remote_install_script(
-            EcosystemKind::Shell,
-            IdeInstallComponent::Lsp,
-            platform,
-            None,
-        )
-        .unwrap();
-        assert!(shell_lsp.contains("$TC/node/current/bin"));
-    }
-
-    #[tokio::test]
-    async fn download_https_to_file_blocks_loopback_and_private_urls_via_netguard() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mgr = ToolchainManager::new(tmp.path().join("data"));
-        let dest = tmp.path().join("out.tar.gz");
-        let err_loopback = download_https_to_file(
-            &mgr,
-            "job_1",
-            "https://127.0.0.1:8443/go.tar.gz",
-            &dest,
-            None,
-            10,
-        )
-        .await
-        .unwrap_err();
-        assert!(err_loopback.contains("blocked toolchain URL"));
-        let err_private =
-            download_https_to_file(&mgr, "job_2", "https://10.0.0.5/go.tar.gz", &dest, None, 10)
-                .await
-                .unwrap_err();
-        assert!(err_private.contains("blocked toolchain URL"));
-    }
 }

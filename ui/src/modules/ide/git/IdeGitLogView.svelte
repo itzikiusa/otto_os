@@ -13,9 +13,9 @@
   import { loadErrorText } from '../../../lib/loadError';
   import { loadPaneWidth } from '../../../lib/paneResizer';
   import { rel } from '../../../lib/stores/now.svelte';
-  import BlamePanel from '../../git/BlamePanel.svelte'; // ui-guards: allow — reuse Otto's shared Git BlamePanel
-  import { repoDiffFileLoader } from '../../git/diff-load'; // ui-guards: allow — reuse Otto's shared Git diff loader
-  import DiffViewer from '../../git/DiffViewer.svelte'; // ui-guards: allow — reuse Otto's shared Git DiffViewer
+  import BlamePanel from '../../../lib/diff/BlamePanel.svelte';
+  import { repoDiffFileLoader } from '../../../lib/diff/diff-load';
+  import DiffViewer from '../../../lib/diff/DiffViewer.svelte';
   import { ide, ideBasename } from '../ideStore.svelte';
   import { ideGit } from './ideGitController.svelte';
 
@@ -272,7 +272,15 @@
 
   {#if mode === 'file' && relFilePath && fileMode === 'blame'}
     <div class="gl-blame-wrap">
-      <BlamePanel repoId={repo.id} path={relFilePath} onclose={() => (fileMode = 'history')} />
+      <BlamePanel
+        repoId={repo.id}
+        path={relFilePath}
+        onclose={() => (fileMode = 'history')}
+        onfocuscommit={(sha) => {
+          selectedSha = sha;
+          fileMode = 'history';
+        }}
+      />
     </div>
   {:else if mode === 'log' || (mode === 'file' && relFilePath)}
     <div class="gl-split">

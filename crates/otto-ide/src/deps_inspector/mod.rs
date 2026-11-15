@@ -5,10 +5,12 @@
 
 pub mod actions;
 mod enrich;
+mod parsers;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use regex::Regex;
@@ -22,6 +24,7 @@ use self::enrich::{
     enrich_crates_updates, enrich_maven_updates, enrich_npm_updates, enrich_osv_vulnerabilities,
     enrich_pypi_updates, same_major_minor,
 };
+pub use self::parsers::{parse_cargo_toml, parse_package_json, parse_python_deps};
 
 /// Inspect a manifest file (`go.mod`, `pom.xml`, `build.gradle*`, `package.json`,
 /// `Cargo.toml`, `requirements.txt`, `pyproject.toml`) for versions, upgrades,
@@ -202,10 +205,10 @@ async fn enrich_go_mod_updates(
     let mut cmd = tokio::process::Command::new("go");
     cmd.args(["list", "-m", "-u", "-json", "all"])
         .current_dir(dir)
+        .env_clear()
+        .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
+        .envs(env_map)
         .kill_on_drop(true);
-    for (k, v) in env_map {
-        cmd.env(k, v);
-    }
     let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(6), cmd.output()).await else {
         return;
     };
@@ -449,10 +452,13 @@ fn extract_line_tag_span(line: &str, tag: &str) -> Option<(String, u32, u32)> {
 }
 
 pub fn parse_gradle_dependencies(content: &str) -> Vec<IdeDepItem> {
-    let re = Regex::new(
-        r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*\(?\s*['"]([^:'"]+):([^:'"]+):([^'"]+)['"]"#,
-    )
-    .unwrap();
+    static RE_GRADLE_DEP: OnceLock<Regex> = OnceLock::new();
+    let re = RE_GRADLE_DEP.get_or_init(|| {
+        Regex::new(
+            r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*\(?\s*['"]([^:'"]+):([^:'"]+):([^'"]+)['"]"#,
+        )
+        .unwrap()
+    });
     let mut items = Vec::new();
     for (idx, line) in content.lines().enumerate() {
         if let Some(cap) = re.captures(line) {
@@ -477,146 +483,6 @@ pub fn parse_gradle_dependencies(content: &str) -> Vec<IdeDepItem> {
                 version_line: line_no,
                 version_col: ver_col,
                 version_end_col: ver_end_col,
-                block_start_line: line_no,
-                block_end_line: line_no,
-                property_name: None,
-                managed_in: None,
-                vulnerabilities: Vec::new(),
-            });
-        }
-    }
-    items
-}
-
-// ── 3. Node (`package.json`), Rust (`Cargo.toml`), Python (`requirements.txt` / `pyproject.toml`) ──
-
-pub fn parse_package_json(content: &str) -> Vec<IdeDepItem> {
-    let kv_re = Regex::new(r#"^\s*"([^"]+)"\s*:\s*"([^"]+)""#).unwrap();
-    let mut section = "";
-    let mut items = Vec::new();
-    for (idx, line) in content.lines().enumerate() {
-        let t = line.trim();
-        if t.starts_with("\"dependencies\"") {
-            section = if t.contains('}') { "" } else { "deps" };
-            continue;
-        } else if t.starts_with("\"devDependencies\"") {
-            section = if t.contains('}') { "" } else { "dev" };
-            continue;
-        } else if !section.is_empty() && t.starts_with('}') {
-            section = "";
-            continue;
-        }
-        if !section.is_empty() {
-            if let Some(cap) = kv_re.captures(line) {
-                let n = cap.get(1).unwrap();
-                let v = cap.get(2).unwrap();
-                let raw_v = v.as_str();
-                if raw_v.starts_with("workspace:") || raw_v.starts_with("file:") {
-                    continue;
-                }
-                let clean_v = raw_v
-                    .trim_start_matches(['^', '~', '>', '=', '<', ' '])
-                    .to_string();
-                let line_no = (idx + 1) as u32;
-                items.push(IdeDepItem {
-                    name: n.as_str().to_string(),
-                    current_version: clean_v,
-                    latest_version: None,
-                    latest_patch: None,
-                    indirect: section == "dev",
-                    deprecated: None,
-                    line: line_no,
-                    name_col: (line[..n.start()].chars().count() + 1) as u32,
-                    name_end_col: (line[..n.end()].chars().count() + 1) as u32,
-                    version_line: line_no,
-                    version_col: (line[..v.start()].chars().count() + 1) as u32,
-                    version_end_col: (line[..v.end()].chars().count() + 1) as u32,
-                    block_start_line: line_no,
-                    block_end_line: line_no,
-                    property_name: None,
-                    managed_in: None,
-                    vulnerabilities: Vec::new(),
-                });
-            }
-        }
-    }
-    items
-}
-
-pub fn parse_cargo_toml(content: &str) -> Vec<IdeDepItem> {
-    let simple_re = Regex::new(r#"^\s*([A-Za-z0-9_-]+)\s*=\s*"([^"]+)""#).unwrap();
-    let table_re =
-        Regex::new(r#"^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}]*?\bversion\s*=\s*"([^"]+)""#).unwrap();
-    let mut section = "";
-    let mut items = Vec::new();
-    for (idx, line) in content.lines().enumerate() {
-        let t = line.trim();
-        if t.starts_with('[') && t.ends_with(']') {
-            section = match t {
-                "[dependencies]" | "[workspace.dependencies]" => "deps",
-                "[dev-dependencies]" | "[build-dependencies]" => "dev",
-                _ => "",
-            };
-            continue;
-        }
-        if section.is_empty() || t.starts_with('#') {
-            continue;
-        }
-        let cap_opt = simple_re.captures(line).or_else(|| table_re.captures(line));
-        if let Some(cap) = cap_opt {
-            let n = cap.get(1).unwrap();
-            let v = cap.get(2).unwrap();
-            let line_no = (idx + 1) as u32;
-            items.push(IdeDepItem {
-                name: n.as_str().to_string(),
-                current_version: v.as_str().trim_start_matches(['^', '~', '=']).to_string(),
-                latest_version: None,
-                latest_patch: None,
-                indirect: section == "dev",
-                deprecated: None,
-                line: line_no,
-                name_col: (line[..n.start()].chars().count() + 1) as u32,
-                name_end_col: (line[..n.end()].chars().count() + 1) as u32,
-                version_line: line_no,
-                version_col: (line[..v.start()].chars().count() + 1) as u32,
-                version_end_col: (line[..v.end()].chars().count() + 1) as u32,
-                block_start_line: line_no,
-                block_end_line: line_no,
-                property_name: None,
-                managed_in: None,
-                vulnerabilities: Vec::new(),
-            });
-        }
-    }
-    items
-}
-
-pub fn parse_python_deps(fname: &str, content: &str) -> Vec<IdeDepItem> {
-    let req_re =
-        Regex::new(r#"^\s*"?([A-Za-z0-9_.-]+)\s*(?:==|>=|~=)\s*([0-9][A-Za-z0-9_.-]*)"#).unwrap();
-    let mut items = Vec::new();
-    for (idx, line) in content.lines().enumerate() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') || (fname == "pyproject.toml" && t.starts_with('[')) {
-            continue;
-        }
-        if let Some(cap) = req_re.captures(line) {
-            let n = cap.get(1).unwrap();
-            let v = cap.get(2).unwrap();
-            let line_no = (idx + 1) as u32;
-            items.push(IdeDepItem {
-                name: n.as_str().to_string(),
-                current_version: v.as_str().to_string(),
-                latest_version: None,
-                latest_patch: None,
-                indirect: false,
-                deprecated: None,
-                line: line_no,
-                name_col: (line[..n.start()].chars().count() + 1) as u32,
-                name_end_col: (line[..n.end()].chars().count() + 1) as u32,
-                version_line: line_no,
-                version_col: (line[..v.start()].chars().count() + 1) as u32,
-                version_end_col: (line[..v.end()].chars().count() + 1) as u32,
                 block_start_line: line_no,
                 block_end_line: line_no,
                 property_name: None,
