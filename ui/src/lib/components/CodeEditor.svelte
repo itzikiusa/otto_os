@@ -39,7 +39,7 @@
   import {
     applyLinePrefixSuffixSync, buildEditorFindProviderSpec,
     buildReadOnlyExtension, clampSelectionToDoc, computeCursorChangeInfo, computeMinimalTextUpdate,
-    createCompletionExtension, createCopyRecorder, createEditorStateCache, createPlainLineWatch,
+    createCompletionExtension, createCopyRecorder, createEditorStateCache, createIdeColdGutterPlaceholders, createPlainLineWatch,
     foldMarkerGutter, hasLongLine, langExtOf,
     lightEditorTheme, parkEditorHistory, placeholderEditorTheme,
     restoreOrCreateEditorState, revealEditorLine,
@@ -64,7 +64,7 @@
     savedContent?: string | null; gitBaseContent?: string | null;
     breakpoints?: IdeBreakpoint[]; breakpointsMuted?: boolean; blameByLine?: Record<number, string> | null;
     onToggleBreakpoint?: ((line: number) => void) | null; onEditBreakpoint?: ((line: number, event?: MouseEvent) => void) | null;
-    gutterItems?: IdeGutterItem[]; onGutterAction?: ((item: IdeGutterItem, mode: 'run' | 'debug') => void) | null;
+    gutterItems?: IdeGutterItem[]; onGutterAction?: ((item: IdeGutterItem, mode: 'run' | 'debug' | 'run_keep_tc') => void) | null;
     pausedLine?: number | null; executionLine?: number | null; inlineValues?: IdeInlineValue[];
     peerCursors?: (IdePeerCursor | IdeCollabPeer)[]; keymapPreset?: 'jetbrains' | 'standard'; fontLigatures?: boolean;
     jumpToLine?: { line: number; column?: number | null; seq?: number } | number | null;
@@ -173,11 +173,13 @@
     diskSavedContent: savedContent, savedContent: effectiveDiffBaseline(), blameByLine, keymapPreset, getCallbacks: getIdeCallbacks,
   });
 
+  const coldGutters = createIdeColdGutterPlaceholders();
   const buildIdeBpExtIfLoaded = (forPath?: string): Extension =>
-    ideMod && isIdeActive() ? ideMod.createIdeGutterExtensions(buildIdeOpts(forPath)) : [];
+    !isIdeActive() ? [] : ideMod ? ideMod.createIdeGutterExtensions(buildIdeOpts(forPath)) : coldGutters.bp;
 
   function buildIdeExtIfLoaded(forPath?: string): Extension {
-    if (!ideMod || !isIdeActive()) { ideMounted = false; return []; }
+    if (!isIdeActive()) { ideMounted = false; return []; }
+    if (!ideMod) { ideMounted = false; return coldGutters.diff; }
     const p = forPath ?? (livePath || path);
     ideMounted = true; appliedIdePath = p; appliedKeymapPreset = keymapPreset;
     return ideMod.createIdeExtensions(buildIdeOpts(p));
@@ -662,7 +664,7 @@
     } else if (!view || curPath !== prevPath || curRoot !== prevRoot || curConn !== prevConnId) {
       prevPath = curPath; prevRoot = curRoot; prevConnId = curConn; prevContent = curContent;
       buildEditor(el, curPath, curContent, curRoot, curConn);
-    } else if (curContent !== prevContent && !contentEchoed && !changes.pending) {
+    } else if (curContent !== prevContent && !changes.pending && (!contentEchoed || view.state.doc.toString() !== curContent)) {
       prevContent = curContent;
       const upd = computeMinimalTextUpdate(view.state.doc.toString(), curContent, view.state.selection.main.anchor, view.state.selection.main.head);
       if (upd) view.dispatch({ changes: { from: upd.from, to: upd.to, insert: upd.insert }, selection: EditorSelection.range(upd.anchor, upd.head) });

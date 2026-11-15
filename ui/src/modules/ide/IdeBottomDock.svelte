@@ -304,8 +304,8 @@
     min-inline-size: 0; border-block-start: 1px solid var(--border); background: var(--surface);
   }
   .dock-shell.is-open { max-block-size: 85%; min-block-size: 120px; }
-  .dock-resizer { position: absolute; inset-block-start: -4px; inset-inline: 0; block-size: 8px; cursor: row-resize; z-index: var(--z-sticky); }
-  .dock-resizer::after { content: ''; position: absolute; inset-block-start: 4px; inset-inline: 0; block-size: 2px; background: transparent; transition: background var(--dur-fast) ease-out; }
+  .dock-resizer { position: absolute; inset-block-start: -3px; inset-inline-start: 0; inset-inline-end: 72px; block-size: 5px; cursor: row-resize; z-index: var(--z-sticky); }
+  .dock-resizer::after { content: ''; position: absolute; inset-block-start: 3px; inset-inline: 0; block-size: 2px; background: transparent; transition: background var(--dur-fast) ease-out; }
   .dock-resizer:hover::after, .dock-resizer:focus-visible::after { background: var(--accent-text); }
   .dock-header { flex-shrink: 0; min-inline-size: 0; block-size: 32px; min-block-size: 32px; max-block-size: 32px; overflow: hidden; }
   .dock-header :global(.otabs) { block-size: 32px; min-block-size: 32px; }

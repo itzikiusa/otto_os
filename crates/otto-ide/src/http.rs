@@ -46,8 +46,9 @@ use self::projects_deps::{
 };
 use self::runtime_debug::{
     create_python_venv, debug_command, debug_evaluate, debug_variables, delete_run_config,
-    get_debug_session, get_run, list_debug_sessions, set_debug_breakpoints, start_debug_session,
-    start_run, stop_run, stream_debug_events, stream_run_events, upsert_run_config,
+    get_debug_session, get_run, list_debug_sessions, list_run_configs, set_debug_breakpoints,
+    start_debug_session, start_run, stop_run, stream_debug_events, stream_run_events,
+    upsert_run_config,
 };
 use self::toolchains_env::{
     add_project_folder, delete_local_sdk, get_environments, get_shell_env, get_toolchain_job,
@@ -56,8 +57,9 @@ use self::toolchains_env::{
 };
 use crate::types::{
     IdeFileQuery, IdeFileReadResp, IdeFileWriteReq, IdeFileWriteResp, IdeFsEntryKind,
-    IdeFsMutateReq, IdeFsMutateResp, IdeFsTreeQuery, IdeFsTreeResp, IdeGutterReq, IdeGutterResp,
-    IdeReplaceReq, IdeReplaceResp, IdeSearchReq, IdeSearchResp,
+    IdeFsMutateReq, IdeFsMutateResp, IdeFsTreeQuery, IdeFsTreeResp, IdeGitBaseQuery,
+    IdeGitBaseResp, IdeGutterReq, IdeGutterResp, IdeReplaceReq, IdeReplaceResp, IdeSearchReq,
+    IdeSearchResp,
 };
 use crate::IdeCtx;
 
@@ -113,6 +115,7 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             "/ide/fs/file",
             get(fs_read_file::<S>).put(fs_write_file::<S>),
         )
+        .route("/ide/fs/git-base", get(fs_git_base::<S>))
         .route("/ide/fs/mutate", post(fs_mutate::<S>))
         .route("/ide/fs/complete", post(fs_complete::<S>))
         .route("/ide/search", post(search_workspace::<S>))
@@ -177,7 +180,10 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             "/ide/environments/bridge-test",
             post(test_network_bridge::<S>),
         )
-        .route("/ide/run-configs", post(upsert_run_config::<S>))
+        .route(
+            "/ide/run-configs",
+            get(list_run_configs::<S>).post(upsert_run_config::<S>),
+        )
         .route("/ide/run-configs/{id}", delete(delete_run_config::<S>))
         .route("/ide/runs", post(start_run::<S>))
         .route("/ide/runs/{run_id}", get(get_run::<S>))
@@ -299,6 +305,17 @@ async fn fs_read_file<S: IdeCtx>(
     Ok(Json(resp))
 }
 
+async fn fs_git_base<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Query(q): Query<IdeGitBaseQuery>,
+) -> ApiResult<Json<IdeGitBaseResp>> {
+    let spec = q.target_spec()?;
+    let resolved = ctx.ide().targets.resolve(&ctx, &user, &spec).await?;
+    let resp = ctx.ide().targets.read_git_base(&resolved, &q.path).await?;
+    Ok(Json(resp))
+}
+
 async fn fs_write_file<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -312,12 +329,13 @@ async fn fs_write_file<S: IdeCtx>(
     let resp = ctx
         .ide()
         .targets
-        .write_file_with_history(
+        .write_file_with_options(
             &resolved,
             &req.path,
             &req.content,
             req.expected_sha256.as_deref(),
             req.create_dirs,
+            req.allow_overwrite_large,
             crate::target::HistoryWriteOpts {
                 enabled: req.local_history_enabled,
                 retention_days: req.local_history_retention_days,

@@ -1,6 +1,7 @@
 // Per-repository Go build tag mutation, per-repository test execution, and
 // production target launch confirmation helpers extracted from `IdeStore`.
 
+import { api } from '../../../lib/api/client';
 import { normalizeRootPath } from '../shell/ideProjectHelpers';
 import {
   normalizeGoBuildTags,
@@ -48,7 +49,7 @@ export interface RepoActionsHost {
   readonly projectEnv: IdeProjectEnvironment | null;
   readonly activePath: string | null;
   readonly treeRootEntries: IdeFsEntry[];
-  readonly childrenByDir: Record<string, IdeFsEntry[]>;
+  childrenByDir: Record<string, IdeFsEntry[]>;
   readonly runConfigs: IdeRunConfig[];
   readonly detectedConfigs: IdeRunConfig[];
   readonly tabs: IdeOpenTab[];
@@ -126,7 +127,17 @@ export async function performRunRepoTests(
     pathOrRoot ?? host.activePath,
   );
   const isPrimary = normalizeRootPath(repo.path) === normalizeRootPath(host.target.root);
-  const dirEntries = isPrimary ? host.treeRootEntries : (host.childrenByDir[repo.path] ?? []);
+  let dirEntries = isPrimary ? host.treeRootEntries : (host.childrenByDir[repo.path] ?? []);
+  if (!isPrimary && dirEntries.length === 0 && host.target.kind === 'local' && repo.path) {
+    try {
+      const q = new URLSearchParams({ kind: 'local', root: repo.path, path: '', show_hidden: 'false' }).toString();
+      const resp = await api.get<{ entries?: IdeFsEntry[] }>(`/ide/fs/tree?${q}`);
+      if (resp.entries?.length) {
+        dirEntries = resp.entries;
+        host.childrenByDir = { ...host.childrenByDir, [repo.path]: resp.entries };
+      }
+    } catch { /* fallback to openTabs / runConfigs */ }
+  }
   const plan = resolveRepoTestPlan({
     repoRoot: repo.path,
     repoName: repo.name,

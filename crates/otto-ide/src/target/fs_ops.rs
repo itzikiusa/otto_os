@@ -281,6 +281,27 @@ pub(super) async fn read_bounded_bytes(path: &Path, max_bytes: u64) -> Result<(V
     }
 }
 
+/// Trim an incomplete UTF-8 multi-byte sequence split at a truncation boundary
+/// so `truncated == true` never injects `U+FFFD` replacement characters.
+pub(crate) fn trim_incomplete_utf8_tail(bytes: &[u8]) -> &[u8] {
+    if bytes.is_empty() {
+        return bytes;
+    }
+    let mut i = bytes.len() - 1;
+    let min_i = bytes.len().saturating_sub(4);
+    while i > min_i && (bytes[i] & 0xC0) == 0x80 {
+        i -= 1;
+    }
+    if (bytes[i] & 0xC0) == 0x80 {
+        return bytes;
+    }
+    match std::str::from_utf8(&bytes[i..]) {
+        Ok(_) => bytes,
+        Err(e) if e.error_len().is_none() => &bytes[..i + e.valid_up_to()],
+        Err(_) => bytes,
+    }
+}
+
 pub(crate) fn build_file_read_resp(
     path: String,
     bytes: &[u8],
@@ -290,9 +311,9 @@ pub(crate) fn build_file_read_resp(
 ) -> Result<IdeFileReadResp> {
     let sample_len = bytes.len().min(8192);
     let is_binary = bytes[..sample_len].contains(&0);
-    let sha256 = sha256_hex(bytes);
     let language = detect_entry_language(&path).unwrap_or_else(|| "plaintext".to_string());
     if is_binary {
+        let sha256 = sha256_hex(bytes);
         return Ok(IdeFileReadResp {
             path,
             content: String::new(),
@@ -304,7 +325,16 @@ pub(crate) fn build_file_read_resp(
             line_count: 0,
         });
     }
-    let content = String::from_utf8_lossy(bytes).into_owned();
+    let effective_bytes = if truncated {
+        trim_incomplete_utf8_tail(bytes)
+    } else {
+        bytes
+    };
+    let sha256 = sha256_hex(effective_bytes);
+    let content = match std::str::from_utf8(effective_bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => String::from_utf8_lossy(effective_bytes).into_owned(),
+    };
     let line_count = if content.is_empty() {
         0
     } else {
@@ -316,7 +346,7 @@ pub(crate) fn build_file_read_resp(
         language,
         size,
         sha256,
-        read_only,
+        read_only: read_only || truncated,
         truncated,
         line_count,
     })

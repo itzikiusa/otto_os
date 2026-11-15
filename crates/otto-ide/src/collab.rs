@@ -53,6 +53,15 @@ pub(super) struct PeerRecord {
     pub(super) secret_hash: [u8; 32],
 }
 
+impl std::fmt::Debug for PeerRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerRecord")
+            .field("peer", &self.peer)
+            .field("secret_hash", &"[REDACTED]")
+            .finish()
+    }
+}
+
 pub(super) struct SharedBufferRecord {
     pub(super) buf: IdeSharedBuffer,
     pub(super) clean: bool,
@@ -65,6 +74,7 @@ pub(super) struct RoomState {
     pub(super) title: String,
     pub(super) target: IdeTargetSpec,
     pub(super) resolved_target: Option<ResolvedTarget>,
+    pub(super) host_user: User,
     pub(super) host_user_id: String,
     pub(super) default_role: IdeCollabRole,
     pub(super) invite_token_hash: [u8; 32],
@@ -75,6 +85,20 @@ pub(super) struct RoomState {
     pub(super) created_at: String,
     pub(super) last_activity_at: Instant,
     pub(super) events_tx: broadcast::Sender<IdeCollabEvent>,
+}
+
+impl std::fmt::Debug for RoomState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoomState")
+            .field("id", &self.id)
+            .field("title", &self.title)
+            .field("host_user_id", &self.host_user_id)
+            .field("default_role", &self.default_role)
+            .field("invite_token_hash", &"[REDACTED]")
+            .field("peer_count", &self.peers.len())
+            .field("buffer_count", &self.shared_buffers.len())
+            .finish()
+    }
 }
 
 impl RoomState {
@@ -265,6 +289,7 @@ impl CollabHub {
             title,
             target: req.target,
             resolved_target,
+            host_user: host.clone(),
             host_user_id: host.id.clone(),
             default_role: req.default_role,
             invite_token_hash,

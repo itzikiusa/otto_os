@@ -46,6 +46,7 @@
   let busyAction = $state(false);
 
   const changes = $derived(status?.changes ?? []);
+  const statusError = $derived(git.statusErrorById[repo.id] ?? null);
   const stagedList = $derived(changes.filter((c) => c.staged));
   const unstagedList = $derived(changes.filter((c) => c.unstaged || c.kind === 'untracked' || c.kind === 'conflicted'));
 
@@ -254,9 +255,18 @@
     aria-label="Local working tree changes"
   >
     <div class="gc-lists">
-      {#if !status}
+      {#if statusError && !status}
+        <div class="gc-pad">
+          <LoadState what="working tree status" error={statusError} empty={true} onretry={() => void ideGit.refreshActive()} variant="compact" />
+        </div>
+      {:else if !status}
         <div class="gc-pad"><LoadState what="working tree status" loading={true} variant="compact" rows={3} /></div>
       {:else if changes.length === 0}
+        {#if statusError}
+          <div class="gc-pad">
+            <LoadState what="working tree status" error={statusError} empty={true} onretry={() => void ideGit.refreshActive()} variant="compact" />
+          </div>
+        {/if}
         <div class="gc-empty">
           <EmptyState
             icon="check"
@@ -266,6 +276,11 @@
           />
         </div>
       {:else}
+        {#if statusError}
+          <div class="gc-pad">
+            <LoadState what="working tree status" error={statusError} empty={true} onretry={() => void ideGit.refreshActive()} variant="compact" />
+          </div>
+        {/if}
         {#if stagedList.length > 0}
           <div class="gc-sec-head">
             <span class="gc-sec-title">Staged ({stagedList.length})</span>

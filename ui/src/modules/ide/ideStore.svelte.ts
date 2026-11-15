@@ -23,7 +23,7 @@ import {
 import {
   computeIdeProjectRoots, fetchIdeWorkspaceTree, IdeCollabState, IdeDebugState, IdeTargetEnvState,
   normalizePathDiagnostics, performCloseTabBatch, resetTargetLifecycleState, syncAdditionalRootsFromEnvState,
-  type IncomingIdeDiagnostic,
+  type IdeRunLaunchMemo, type IncomingIdeDiagnostic,
 } from './store/ideStateSlices.svelte';
 import {
   resolveRepoGoBuildTags,
@@ -168,6 +168,8 @@ class IdeStore {
   get replEntries() { return this.debugState.replEntries; } set replEntries(v) { this.debugState.replEntries = v; }
   get debugLoading() { return this.debugState.debugLoading; } set debugLoading(v) { this.debugState.debugLoading = v; }
   get debugStreamActive() { return this.debugState.debugStreamActive; } set debugStreamActive(v) { this.debugState.debugStreamActive = v; }
+  get lastDebugLaunch() { return this.debugState.lastDebugLaunch; } set lastDebugLaunch(v) { this.debugState.lastDebugLaunch = v; }
+  get canRestartDebug() { return this.debugState.canRestart; }
   get allBreakpoints() { return this.debugState.allBreakpoints; } get breakpoints() { return this.debugState.allBreakpoints; }
   get effectiveBreakpoints() { return this.debugState.effectiveBreakpoints; }
 
@@ -543,7 +545,7 @@ class IdeStore {
     this.problems = [...this.problems.filter((d) => d.path !== path), ...normalizePathDiagnostics(path, items)];
   }
 
-  findReferences(path: string, line: number, column: number, symbol?: string): Promise<void> { return loadLspMod().then((m) => m.runFindReferences(this, path, line, column, symbol)); }
+  findReferences(path: string, line: number, column: number, symbol?: string): Promise<void> { return loadLspMod().then((m) => m.runFindReferences(this, path, line, column, symbol, this.bufPerf)); }
   async openRenameModal(path: string, line: number, column: number, symbol = '', initialNewName?: string): Promise<void> {
     const startName = initialNewName ?? symbol;
     this.renameState = { open: true, path, line, column, symbol, newName: startName, edits: [], loading: Boolean(startName), error: null };
@@ -579,6 +581,14 @@ class IdeStore {
   setRepoGoBuildTags(pathOrRoot: string, tags: readonly string[] | string): Promise<boolean> { return loadRepoActionsMod().then((m) => m.performSetRepoGoBuildTags(this, pathOrRoot, tags)); }
   runRepoTests(pathOrRoot?: string | null, mode: RepoTestExecutionMode = 'run'): Promise<void> { return loadRepoActionsMod().then((m) => m.performRunRepoTests(this, pathOrRoot, mode)); }
   saveRunConfig(cfg: Partial<IdeRunConfig> & { name: string; runner: string }): Promise<IdeRunConfig | null> { return loadDebugEnvMod().then((m) => m.upsertRunConfig(this, cfg)); }
+  recordRunLaunch(runId: string, memo: IdeRunLaunchMemo): void {
+    this.envState.lastRunLaunch = memo;
+    this.envState.runLaunchById[runId] = memo;
+  }
+  rerunRun(runId?: string): Promise<void> {
+    const memo = (runId ? this.envState.runLaunchById[runId] : null) ?? this.envState.lastRunLaunch ?? {};
+    return this.startRun(memo);
+  }
   async startRun(opts: { configId?: string; adhoc?: Partial<IdeRunConfig>; keepTestcontainers?: boolean; coverage?: boolean; skipProdConfirm?: boolean } = {}): Promise<void> {
     const gate = await (await loadRepoActionsMod()).confirmIdeTargetProdLaunch(this.target, this.projectEnv, opts.skipProdConfirm);
     if (!gate.allowed) return;
@@ -698,7 +708,12 @@ class IdeStore {
   stepOut = () => this.debugCommand('step_out');
   resumeDebug = () => this.debugCommand('continue');
   pauseDebug = () => this.debugCommand('pause');
-  restartDebug = () => this.debugCommand('restart');
+  restartDebug = async (): Promise<void> => {
+    if (this.activeDebug && this.activeDebug.state !== 'terminated' && this.activeDebug.state !== 'error') {
+      await this.stopDebug();
+    }
+    await this.startDebug(this.debugState.lastDebugLaunch ?? {});
+  };
   stopDebug = () => this.debugCommand('stop');
   runToCursor = (path?: string, line?: number) => this.debugCommand('run_to_cursor', { path: path ?? this._activePath ?? undefined, line: line ?? this.cursorInfo.line });
   selectFrame = (frameId: number, threadId?: number) => this.debugCommand('select_frame', { frame_id: frameId, thread_id: threadId });

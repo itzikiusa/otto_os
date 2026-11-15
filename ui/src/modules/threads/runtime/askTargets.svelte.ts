@@ -46,7 +46,9 @@ export async function askFromComposer(parentId: string, draft: RuntimeComposerDr
       targets,
       // Omitted = this thread's own mode; a wider pick is refused (400) in words.
       ...(access ? { access_mode: access } : {}),
-      ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
+      ...(pics.length
+        ? { images: pics.map(({ name, mime, data_base64 }) => ({ ...(name ? { name } : {}), mime, data_base64 })) }
+        : {}),
     });
     draft.text = '';
     draft.images = [];

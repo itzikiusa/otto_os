@@ -17,6 +17,16 @@ pub(crate) enum TokenFormat {
 }
 
 impl TokenFormat {
+    pub(crate) fn with_canonical_base(self, canon_dir: &Path) -> Self {
+        match self {
+            Self::Relative { prefix, base } => Self::Relative {
+                prefix,
+                base: std::fs::canonicalize(&base).unwrap_or_else(|_| canon_dir.to_path_buf()),
+            },
+            other => other,
+        }
+    }
+
     pub(crate) fn render(
         &self,
         abs_path: &Path,
@@ -80,6 +90,14 @@ fn shorten_home(path: &Path, home: Option<&Path>) -> String {
         }
         if let Ok(rel) = path.strip_prefix(h) {
             return format!("~/{}", rel.to_string_lossy().replace('\\', "/"));
+        }
+        if let Ok(canon_h) = std::fs::canonicalize(h) {
+            if path == canon_h {
+                return "~".to_string();
+            }
+            if let Ok(rel) = path.strip_prefix(&canon_h) {
+                return format!("~/{}", rel.to_string_lossy().replace('\\', "/"));
+            }
         }
     }
     path.to_string_lossy().into_owned()

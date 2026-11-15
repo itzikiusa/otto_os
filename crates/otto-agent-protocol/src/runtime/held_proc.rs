@@ -229,7 +229,8 @@ pub(super) async fn spawn_via_holder(
             request_ids_prefix: request_ids.prefix().to_string(),
             claude_login: claude_login.clone(),
             fresh_starting,
-        },
+        }
+        .to_wire_value(),
         exit_linger_ms: None,
     };
 
@@ -404,9 +405,15 @@ async fn pump_held_inner(
                 continue;
             }
         };
-        let Some(ev) = ev else { return };
+        let Some(ev) = ev else {
+            handle_unexpected_holder_disconnect(inner, live, epoch);
+            return;
+        };
         match ev {
-            HolderEvent::Disconnected => return,
+            HolderEvent::Disconnected => {
+                handle_unexpected_holder_disconnect(inner, live, epoch);
+                return;
+            }
             HolderEvent::Line(entry) => {
                 if entry.stream == LineStream::Out && entry.overlong_bytes.is_none() {
                     record_claude_stdout_line(&claude_login, &entry.line);
@@ -444,4 +451,50 @@ async fn pump_held_inner(
             }
         }
     }
+}
+
+fn handle_unexpected_holder_disconnect(inner: &Arc<Inner>, live: &Arc<Live>, epoch: u64) {
+    if live.detaching_for_restart.load(Ordering::Acquire) {
+        return;
+    }
+    let mut st = live.lock();
+    if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
+        return;
+    }
+    let mut proc = st.proc.take().expect("checked above");
+    if let ProcTransport::Held { client, .. } = &proc.transport {
+        client.shutdown_fire_and_forget(Duration::from_millis(250));
+    }
+    live.proc_ended.notify_waiters();
+    retire(inner, &st.session);
+    let step = proc.driver.on_exit(None);
+    apply_step_opts(inner, live, &mut st, step, true, true);
+    flush_held(inner, live, &mut st);
+    settle_background(inner, live, &mut st, TurnItemStatus::Interrupted);
+    cancel_pending(inner, live, &mut st, CancelReason::Agent);
+    let msg = "the runtime holder disconnected unexpectedly".to_string();
+    tracing::warn!(session = %st.session.id, "{msg}");
+    if let Some(turn) = st.turn.as_ref() {
+        let (status, failure) = if turn.interrupting {
+            (TurnTerminalStatus::Interrupted, None)
+        } else {
+            (
+                TurnTerminalStatus::Failed,
+                Some(ProviderFailure {
+                    class: "transport_error".into(),
+                    message: msg.clone(),
+                    code: None,
+                    retryable: Some(true),
+                }),
+            )
+        };
+        finish_turn(inner, live, &mut st, status, failure, None);
+    }
+    set_session_status(
+        inner,
+        live,
+        &mut st,
+        ProviderSessionStatus::Error,
+        Some(msg),
+    );
 }

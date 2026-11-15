@@ -1,61 +1,17 @@
-//! Claude Code driver — the Claude Agent SDK's transport, ported to Rust.
+//! Claude Code driver — the Claude Agent SDK's stream-json control protocol
+//! over stdio, ported from T3 Code (`ClaudeAdapterV2.ts`, MIT, Copyright (c)
+//! 2026 T3 Tools Inc.) to pure Rust without Node/npm:
 //!
-//! T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.) drives Claude through the
-//! TypeScript Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`,
-//! `apps/server/package.json:37`; `query()` at
-//! `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts:1090`). The
-//! SDK itself only spawns the `claude` CLI and speaks its stream-json control
-//! protocol over stdio; Otto speaks that protocol directly (no Node, no npm
-//! package):
-//!
-//! * argv — the SDK's (`sdk.mjs` `ProcessTransport.initialize`):
-//!   `--output-format stream-json --verbose --input-format stream-json`,
-//!   `--permission-prompt-tool stdio` (the SDK's `canUseTool` callback),
-//!   `--permission-mode` per access mode (`permissionModeForClaudeRuntimePolicy`,
-//!   `ClaudeAdapterV2.ts:2573-2620`: approval-required → `default`,
-//!   auto-accept-edits → `acceptEdits`, full-access → `bypassPermissions`
-//!   plus the SDK's `allowDangerouslySkipPermissions` →
-//!   `--allow-dangerously-skip-permissions`, `:2681`), `--include-partial-messages`
-//!   (`:1617`), `--model`, and `--session-id <uuid>` on a fresh thread /
-//!   `--resume <id>` after (`threadIdentity`, `:1578-1580`). Env
-//!   `CLAUDE_CODE_ENTRYPOINT=sdk-ts`, as the SDK sets it.
-//! * control protocol — `{type:"control_request", request_id, request:
-//!   {subtype:"initialize"}}` first; `can_use_tool` requests from the CLI
-//!   answered with `{type:"control_response", response:{subtype:"success",
-//!   request_id, response: PermissionResult}}`; `{subtype:"interrupt"}` to
-//!   stop; `control_cancel_request` withdraws a pending question;
-//!   `{subtype:"set_permission_mode", mode}` switches the access mode live
-//!   (the SDK's `setPermissionMode`) — into `bypassPermissions` only when
-//!   the process was launched with the allow flag, else the runtime
-//!   respawns with `--resume`. Like the SDK, the prompt is written right
-//!   away; the CLI reads stdin in order. Images go as `image` blocks, PDFs as
-//!   base64 `document` blocks.
-//! * decisions — `permissionResultFromDecision` (`ClaudeAdapterV2.ts:
-//!   3502-3545`): accept → `allow` + the original input; accept-for-session →
-//!   `allow` + `updatedPermissions` (the CLI's suggestions re-targeted at
-//!   `session`, else an `addRules` allow rule for the tool); decline → `deny`;
-//!   cancel → `deny` + `interrupt: true`. Otto drops `setMode` suggestions
-//!   (a whole-session mode switch is a wider grant than the one tool the
-//!   person approved — T3 Code drops them too under a managed ceiling).
-//! * tools — `CLAUDE_KNOWN_TOOL_CLASSIFICATIONS` (`:2819-2860`): Bash →
-//!   `command_execution`; Edit / MultiEdit / Write / NotebookEdit →
-//!   `file_change`; WebFetch / WebSearch → `web_search`; the rest →
-//!   `dynamic_tool`; a root `TodoWrite` is the plan (`:9313`).
-//! * turn end — the `result` message (`terminalStatusFromResult`,
-//!   `:3708-3738`): `terminal_reason` aborted_* → interrupted; `success`
-//!   without `is_error` → completed; errors mentioning interrupt / cancel →
-//!   interrupted / cancelled; anything else failed.
-//!
-//! Subagents and background work (`claude_tasks.rs`): an `Agent` / `Task`
-//! call is a `subagent` card whose frames (`parent_tool_use_id` set) are
-//! projected under it; `run_in_background` work is tracked from the CLI's
-//! `task_*` frames into the session's background-task list. Subagent
-//! permission requests reach a person like the root's.
-//!
-//! Auto turns: after `result` the CLI may run a turn on its own (a
-//! background task finished and its notification was fed to the model).
-//! Root frames arriving with no prompt of ours running open one
-//! ([`DriverEvent::TurnStarted`]); its `result` ends it.
+//! * argv: `--output-format stream-json --verbose --input-format stream-json`,
+//!   `--permission-prompt-tool stdio`, `--permission-mode` per access mode,
+//!   `--include-partial-messages`, `--model`, and `--session-id` / `--resume`.
+//! * control protocol: `initialize`, `can_use_tool` → `PermissionResult`
+//!   (dropping `setMode` suggestions), `interrupt`, `control_cancel_request`,
+//!   and `set_permission_mode`.
+//! * tools & subagents (`claude_tasks.rs`): Bash → `command_execution`,
+//!   Edit/MultiEdit/Write/NotebookEdit → `file_change`, WebFetch/WebSearch →
+//!   `web_search`, `Agent`/`Task` → `subagent` with `parent_tool_use_id` child
+//!   routing, and `task_*` background tracking + auto-turn support.
 
 use std::collections::HashMap;
 
@@ -1415,6 +1371,7 @@ mod tests {
             images: vec![otto_core::agent_runtime::PromptImage {
                 mime: "image/png".into(),
                 data_base64: "AAAA".into(),
+                name: None,
             }],
             ..RuntimePromptReq::of("what is this?")
         };
@@ -1791,9 +1748,14 @@ mod tests {
             json!({"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"tu1","status":"completed","summary":"exit 0","output_file":"/tmp/b1"}),
         );
         let notice = &items(&s)[0];
-        assert!(
-            matches!(&notice.kind, TurnItemKind::SystemNotice { message } if message == "Background command finished: Wait five minutes")
-        );
+        assert!(matches!(
+            &notice.kind,
+            TurnItemKind::SystemNotice {
+                message,
+                task_settlement: Some(ts),
+            } if message == "Background command finished: Wait five minutes"
+                && ts.status == "completed"
+        ));
         assert_eq!(notice.turn_id, None, "no turn running");
         assert_eq!(bg_lists(&s), vec![Vec::<BackgroundTask>::new()]);
         // A duplicate notification changes nothing.
@@ -1896,8 +1858,13 @@ mod tests {
             json!({"type":"system","subtype":"task_updated","task_id":"f1","patch":{"status":"killed"}}),
         );
         assert_eq!(bg_lists(&s)[0].len(), 1);
-        assert!(items(&s).iter().any(|i| matches!(&i.kind,
-            TurnItemKind::SystemNotice { message } if message.starts_with("Background command stopped"))));
+        assert!(items(&s).iter().any(|i| matches!(
+            &i.kind,
+            TurnItemKind::SystemNotice {
+                message,
+                task_settlement: Some(ts),
+            } if message.starts_with("Background command stopped") && ts.status == "stopped"
+        )));
     }
 
     #[test]

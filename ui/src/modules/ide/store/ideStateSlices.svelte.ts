@@ -26,6 +26,27 @@ import type {
   IdeWatch,
 } from './ideTypes';
 
+export interface IdeRunLaunchMemo {
+  configId?: string;
+  adhoc?: Partial<IdeRunConfig>;
+  keepTestcontainers?: boolean;
+  coverage?: boolean;
+}
+
+export interface IdeDebugLaunchMemo {
+  configId?: string;
+  language?: string;
+  launch?: {
+    program: string;
+    args?: string[];
+    build_flags?: string[];
+    cwd?: string;
+    test_name?: string;
+    attach_port?: number;
+    env?: Record<string, string>;
+  };
+}
+
 export class IdeTargetEnvState {
   toolchains = $state<IdeToolchainEcosystem[]>([]);
   detectedSdks = $state<IdeDetectedSdk[]>([]);
@@ -47,6 +68,8 @@ export class IdeTargetEnvState {
   envError = $state<string | null>(null);
   activeRun = $state<IdeRunState | null>(null);
   runsHistory = $state<IdeRunState[]>([]);
+  lastRunLaunch: IdeRunLaunchMemo | null = null;
+  runLaunchById: Record<string, IdeRunLaunchMemo> = {};
 
   buildToolOpen = $state(false);
   detectedBuildToolOverride = $state<'maven' | 'gradle' | null>(null);
@@ -71,6 +94,8 @@ export class IdeTargetEnvState {
     this.envError = null;
     this.activeRun = null;
     this.runsHistory = [];
+    this.lastRunLaunch = null;
+    this.runLaunchById = {};
 
     const bt = loadBuildToolPrefsLocal(root);
     this.buildToolOpen = bt.open;
@@ -92,9 +117,11 @@ export class IdeDebugState {
   replEntries = $state<IdeReplEntry[]>([]);
   debugLoading = $state(false);
   debugStreamActive = $state(false);
+  lastDebugLaunch = $state<IdeDebugLaunchMemo | null>(null);
 
   readonly allBreakpoints = $derived(Object.values(this.breakpointsByPath).flat());
   readonly effectiveBreakpoints = $derived(this.breakpointsMuted ? [] : this.allBreakpoints);
+  readonly canRestart = $derived(Boolean(this.activeDebug || this.lastDebugLaunch));
 
   reset(breakpoints: Record<string, IdeBreakpoint[]> = {}): void {
     this.breakpointsByPath = breakpoints;
@@ -103,6 +130,7 @@ export class IdeDebugState {
     this.replEntries = [];
     this.debugLoading = false;
     this.debugStreamActive = false;
+    this.lastDebugLaunch = null;
   }
 }
 

@@ -266,6 +266,24 @@ impl NetBridgeInstance {
         port: u16,
     ) -> Result<PathBuf> {
         ensure_not_metadata_target(host)?;
+        let bare_host = host.trim().trim_start_matches('[').trim_end_matches(']');
+        let explicit_mapped_ip = bare_host.parse::<IpAddr>().ok().filter(|ip| {
+            !otto_netguard::is_metadata_ip(*ip)
+                && self.cfg.host_mappings.iter().any(|m| {
+                    m.from_host
+                        .trim()
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .parse::<IpAddr>()
+                        .ok()
+                        == Some(*ip)
+                })
+        });
+        if explicit_mapped_ip.is_none() {
+            let _ = otto_netguard::resolve_host_checked(host, port)
+                .await
+                .map_err(Error::Forbidden)?;
+        }
         let key = (host.to_string(), port);
         let slot = self
             .direct_relays
@@ -308,7 +326,15 @@ impl NetBridgeInstance {
                     if ensure_not_metadata_target(&th).is_err() {
                         return;
                     }
-                    if let Ok(mut up) = TcpStream::connect((th.as_str(), port)).await {
+                    let vetted_addrs = if let Some(ip) = explicit_mapped_ip {
+                        vec![std::net::SocketAddr::new(ip, port)]
+                    } else {
+                        let Ok(addrs) = otto_netguard::resolve_host_checked(&th, port).await else {
+                            return;
+                        };
+                        addrs
+                    };
+                    if let Ok(mut up) = TcpStream::connect(vetted_addrs.as_slice()).await {
                         let _ = up.set_nodelay(true);
                         let _ = tokio::io::copy_bidirectional(&mut inbound, &mut up).await;
                     }

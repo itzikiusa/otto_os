@@ -50,7 +50,7 @@ pub enum ShellFlavor {
     Zsh,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ShellBridgeSpec {
     pub shell_bin: String,
     pub flavor: ShellFlavor,

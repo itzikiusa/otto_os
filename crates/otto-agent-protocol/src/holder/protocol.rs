@@ -44,7 +44,9 @@ pub struct HolderChildCommand {
 pub struct HolderTurnSnapshot {
     pub id: String,
     pub origin: TurnOrigin,
+    #[serde(default)]
     pub interrupting: bool,
+    #[serde(default)]
     pub stalled: bool,
 }
 
@@ -52,20 +54,117 @@ pub struct HolderTurnSnapshot {
 pub struct HolderCheckpoint {
     pub session_id: String,
     pub provider: RuntimeProvider,
+    #[serde(default)]
     pub acked_seq: u64,
+    #[serde(default)]
     pub driver_state: serde_json::Value,
+    #[serde(default)]
     pub active_turn_id: Option<String>,
+    #[serde(default)]
     pub active_turn: Option<HolderTurnSnapshot>,
+    #[serde(default)]
     pub streaming_items: Vec<TurnItem>,
+    #[serde(default)]
     pub request_ids_prefix: String,
+    #[serde(default)]
     pub claude_login: Option<Option<PathBuf>>,
+    #[serde(default)]
     pub fresh_starting: bool,
+}
+
+impl HolderCheckpoint {
+    /// Serialize checkpoint as an opaque JSON value so the `runtime-holder`
+    /// process never fails frame deserialization across `TurnItem` schema skew.
+    pub fn to_wire_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// Hydrate a [`HolderCheckpoint`] from wire JSON, falling back to per-field
+    /// and per-item recovery if a binary upgrade/rollback skewed nested types.
+    pub fn from_wire_value(v: serde_json::Value) -> io::Result<Self> {
+        if let Ok(cp) = serde_json::from_value::<Self>(v.clone()) {
+            return Ok(cp);
+        }
+        let session_id = v
+            .get("session_id")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "missing session_id in runtime holder checkpoint",
+                )
+            })?
+            .to_string();
+        let provider = v
+            .get("provider")
+            .cloned()
+            .and_then(|x| serde_json::from_value::<RuntimeProvider>(x).ok())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "missing or unsupported provider in runtime holder checkpoint",
+                )
+            })?;
+        let acked_seq = checkpoint_acked_seq(&v);
+        let driver_state = v
+            .get("driver_state")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let active_turn_id = v
+            .get("active_turn_id")
+            .and_then(|x| x.as_str())
+            .map(str::to_string);
+        let active_turn = v
+            .get("active_turn")
+            .cloned()
+            .and_then(|x| serde_json::from_value::<HolderTurnSnapshot>(x).ok());
+        let streaming_items = v
+            .get("streaming_items")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| serde_json::from_value::<TurnItem>(item.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let request_ids_prefix = v
+            .get("request_ids_prefix")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let claude_login = v
+            .get("claude_login")
+            .cloned()
+            .and_then(|x| serde_json::from_value::<Option<Option<PathBuf>>>(x).ok())
+            .unwrap_or(None);
+        let fresh_starting = v
+            .get("fresh_starting")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        Ok(Self {
+            session_id,
+            provider,
+            acked_seq,
+            driver_state,
+            active_turn_id,
+            active_turn,
+            streaming_items,
+            request_ids_prefix,
+            claude_login,
+            fresh_starting,
+        })
+    }
+}
+
+pub fn checkpoint_acked_seq(v: &serde_json::Value) -> u64 {
+    v.get("acked_seq").and_then(|x| x.as_u64()).unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HolderSpawnSpec {
     pub command: HolderChildCommand,
-    pub initial_checkpoint: HolderCheckpoint,
+    pub initial_checkpoint: serde_json::Value,
     #[serde(default)]
     pub exit_linger_ms: Option<u64>,
 }
@@ -113,7 +212,7 @@ pub enum DaemonFrame {
     Stdin { line: String },
     CloseStdin,
     Signal { signal: HolderSignal },
-    Checkpoint { checkpoint: Box<HolderCheckpoint> },
+    Checkpoint { checkpoint: serde_json::Value },
     Detach,
     Shutdown { grace_ms: u64 },
 }
@@ -125,7 +224,7 @@ pub enum HolderFrame {
         proto_version: u32,
         holder_pid: u32,
         child_pid: u32,
-        checkpoint: Box<HolderCheckpoint>,
+        checkpoint: serde_json::Value,
         exited: Option<HolderExitStatus>,
     },
     ReplayLine {

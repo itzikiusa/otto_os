@@ -10,9 +10,11 @@ use otto_core::agent_runtime::{BackgroundTask, TurnItemStatus};
 use serde_json::Value;
 
 use super::subagent::{
-    file_uri_to_path, parse_embedded_json, parse_grok_bg_launch, take_id_token, BgTaskMeta,
+    parse::{file_uri_to_path, parse_embedded_json, parse_grok_bg_launch, take_id_token},
+    BgTaskMeta,
 };
 use super::{command_text, AcpDriver, Tool};
+use crate::acp_sideband::confinement::validate_task_log_candidate;
 use crate::driver::DriverStep;
 
 impl AcpDriver {
@@ -72,7 +74,7 @@ impl AcpDriver {
                 if !self.state.finished_bg_ids.iter().any(|f| f == &tid) {
                     let cmd = command_text(t.raw_input.as_ref());
                     let label = cmd.clone().unwrap_or_else(|| t.title.clone());
-                    let log_path = extract_task_log_path(&t.output);
+                    let log_path = self.extract_confined_task_log_path(&t.output);
                     self.register_bg_task(
                         step,
                         BgTaskMeta {
@@ -86,6 +88,7 @@ impl AcpDriver {
                             command_input: cmd,
                             accumulated_output: String::new(),
                             due_at: None,
+                            timer_condition: None,
                             log_path,
                             fallback_log_path: None,
                             tail_offset: 0,
@@ -98,6 +101,7 @@ impl AcpDriver {
             if !self.state.finished_bg_ids.iter().any(|f| f == &grok_id) {
                 let cmd = command_text(t.raw_input.as_ref());
                 let label = cmd.clone().unwrap_or_else(|| t.title.clone());
+                let log_path = self.extract_confined_task_log_path(&t.output);
                 self.register_bg_task(
                     step,
                     BgTaskMeta {
@@ -111,7 +115,8 @@ impl AcpDriver {
                         command_input: cmd,
                         accumulated_output: String::new(),
                         due_at: None,
-                        log_path: extract_task_log_path(&t.output),
+                        timer_condition: None,
+                        log_path,
                         fallback_log_path: None,
                         tail_offset: 0,
                         tail_using_fallback: false,
@@ -123,6 +128,7 @@ impl AcpDriver {
             if !self.state.finished_bg_ids.iter().any(|f| f == &tid) {
                 let cmd = command_text(t.raw_input.as_ref());
                 let label = cmd.clone().unwrap_or_else(|| t.title.clone());
+                let log_path = self.extract_confined_task_log_path(&t.output);
                 self.register_bg_task(
                     step,
                     BgTaskMeta {
@@ -136,7 +142,8 @@ impl AcpDriver {
                         command_input: cmd,
                         accumulated_output: String::new(),
                         due_at: None,
-                        log_path: extract_task_log_path(&t.output),
+                        timer_condition: None,
+                        log_path,
                         fallback_log_path: None,
                         tail_offset: 0,
                         tail_using_fallback: false,
@@ -151,6 +158,13 @@ impl AcpDriver {
         {
             let now = Utc::now();
             let due_at = one_shot_due_at(t.raw_input.as_ref(), now);
+            let timer_condition = t
+                .raw_input
+                .as_ref()
+                .and_then(|v| v.get("TimerCondition").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
             let label = schedule_label(t.raw_input.as_ref(), &t.title);
             self.register_bg_task(
                 step,
@@ -165,6 +179,7 @@ impl AcpDriver {
                     command_input: None,
                     accumulated_output: String::new(),
                     due_at,
+                    timer_condition,
                     log_path: None,
                     fallback_log_path: None,
                     tail_offset: 0,
@@ -185,6 +200,7 @@ impl AcpDriver {
                     command_input: None,
                     accumulated_output: String::new(),
                     due_at: None,
+                    timer_condition: None,
                     log_path: None,
                     fallback_log_path: None,
                     tail_offset: 0,
@@ -213,6 +229,7 @@ impl AcpDriver {
                     command_input: None,
                     accumulated_output: String::new(),
                     due_at: None,
+                    timer_condition: None,
                     log_path: None,
                     fallback_log_path: None,
                     tail_offset: 0,
@@ -220,6 +237,16 @@ impl AcpDriver {
                 },
             );
         }
+    }
+
+    fn extract_confined_task_log_path(&self, output: &str) -> Option<PathBuf> {
+        let raw = extract_task_log_path(output)?;
+        validate_task_log_candidate(
+            &raw,
+            &self.state.cwd,
+            self.state.sideband.root_dir(),
+            self.provider,
+        )
     }
 
     fn note_manage_subagents(&mut self, step: &mut DriverStep, raw_input: Option<&Value>) {
@@ -439,6 +466,7 @@ pub(super) fn upsert_bg_task(list: &mut Vec<BackgroundTask>, task: BackgroundTas
         if existing.label == task.label
             && existing.kind == task.kind
             && existing.item_id == task.item_id
+            && existing.due_at == task.due_at
         {
             return false;
         }

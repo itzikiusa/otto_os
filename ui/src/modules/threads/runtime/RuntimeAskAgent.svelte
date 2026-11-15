@@ -19,7 +19,7 @@
   } from '../../../lib/providerModels';
   import { agentProviders, harnessLabel } from '../../../lib/providers';
   import { auth } from '../../../lib/stores/auth.svelte';
-  import { ASK_MAX_TARGETS, askableProviders, type ASK_PROVIDERS } from './askAgents';
+  import { ASK_MAX_TARGETS, askableProviders } from './askAgents';
   import { askTargets } from './askTargets.svelte';
   import { fileMentionContext, type ComposerContext } from './composerContext';
   import RuntimeMentionMenu, { type PickedAgentMention, type PickedFileMention } from './RuntimeMentionMenu.svelte';
@@ -65,7 +65,7 @@
   let pickEffort = $state<EffortLevel | null>(null);
   const targets = $derived(askTargets.for(sessionId));
   const full = $derived(targets.length >= ASK_MAX_TARGETS);
-  const allowedProviders = $derived(askableProviders(agentProviders()));
+  const allowedProviders = $derived(askableProviders(agentProviders(), auth.meta));
 
   const label = (t: { provider: string; model?: string | null; effort?: string | null }): string =>
     [t.model ? formatModelLabel(t.provider, t.model, auth.meta) : harnessLabel(t.provider), t.effort ? formatEffortShort(t.effort) : null]
@@ -164,10 +164,10 @@
     mode="full"
     onprovider={(p: string) => (pickProvider = p)}
     onmodel={(m: string | null) => {
-      askTargets.add(sessionId, { provider: pickProvider as (typeof ASK_PROVIDERS)[number], ...(m ? { model: m } : {}), ...(pickEffort ? { effort: pickEffort } : {}) });
+      askTargets.add(sessionId, { provider: pickProvider, ...(m ? { model: m } : {}), ...(pickEffort ? { effort: pickEffort } : {}) });
       open = false;
     }}
-    oneffort={supportsEffortSelection(pickProvider) ? (e: EffortLevel | null) => (pickEffort = e) : undefined}
+    oneffort={supportsEffortSelection(pickProvider, auth.meta) ? (e: EffortLevel | null) => (pickEffort = e) : undefined}
     onclose={() => (open = false)}
   />
 {/if}

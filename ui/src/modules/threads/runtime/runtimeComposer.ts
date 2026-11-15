@@ -22,6 +22,8 @@ import { errorText, type TimelineRow } from './timeline';
 
 /** Per file (images and PDFs). */
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+/** Maximum images/PDFs attached to a single composer draft (mirrors server draft cap). */
+export const MAX_DRAFT_IMAGES = 20;
 let optimisticSeq = 0;
 
 import { runtimeDrafts, type ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
@@ -57,9 +59,14 @@ export async function appendDraftAttachments<TDraft extends { images: ComposerFi
   takes: (f: File) => boolean,
 ): Promise<void> {
   const read = await readAttachments(files, takes);
-  if (read.length && runtimeDrafts.owns(ownerId, draft as never)) {
-    draft.images = [...draft.images, ...read];
+  if (!read.length || !runtimeDrafts.owns(ownerId, draft as never)) return;
+  const combined = [...draft.images, ...read];
+  if (combined.length > MAX_DRAFT_IMAGES) {
+    toastError('Too many attachments', new Error(`At most ${MAX_DRAFT_IMAGES} images or PDFs per message.`));
+    draft.images = combined.slice(0, MAX_DRAFT_IMAGES);
+    return;
   }
+  draft.images = combined;
 }
 
 export function pasteDraftAttachments<TDraft extends { images: ComposerFile[] }>(
@@ -212,21 +219,30 @@ export function mergeQueuedEdit(current: string, queued: string): string {
 }
 
 /** Merge attachments popped from an edited queued message back into `draft.images`
- *  without duplicating screenshots/files already sitting in the composer. */
+ *  without duplicating screenshots/files already sitting in the composer, capped at `MAX_DRAFT_IMAGES`. */
 export function mergeQueuedAttachments(
   current: readonly ComposerFile[],
   restored: readonly ComposerFile[],
 ): ComposerFile[] {
-  if (restored.length === 0) return [...current];
-  const seen = new Set(current.map((f) => `${f.mime}:${f.data_base64}`));
+  if (restored.length === 0) return current.slice(0, MAX_DRAFT_IMAGES);
+  const kept = current.slice(0, MAX_DRAFT_IMAGES);
+  const seen = new Set(kept.map((f) => `${f.mime}:${f.data_base64}`));
   const extra: ComposerFile[] = [];
+  let capped = current.length > MAX_DRAFT_IMAGES;
   for (const item of restored) {
     const key = `${item.mime}:${item.data_base64}`;
     if (seen.has(key)) continue;
+    if (kept.length + extra.length >= MAX_DRAFT_IMAGES) {
+      capped = true;
+      break;
+    }
     seen.add(key);
     extra.push({ ...item });
   }
-  return extra.length > 0 ? [...current, ...extra] : [...current];
+  if (capped) {
+    toastError('Too many attachments', new Error(`Kept the first ${MAX_DRAFT_IMAGES} attachments in the composer.`));
+  }
+  return extra.length > 0 ? [...kept, ...extra] : kept;
 }
 
 export function collectMessageIds(rows: readonly TimelineRow[], prev: string[]): string[] {
@@ -280,10 +296,11 @@ export function mapChildThreadSummaries(
   const out: LinkedChildThreadSummary[] = [];
   for (const s of Object.values(byId)) {
     if (s.parent_id !== parentSessionId) continue;
+    const rawSlug = s.meta?.provider_slug;
     out.push({
       id: s.id,
       title: s.title,
-      provider: s.provider,
+      provider: typeof rawSlug === 'string' && rawSlug.trim() ? rawSlug.trim() : s.provider,
       model: s.model ?? null,
       status: s.status,
       createdAt: s.created_at,

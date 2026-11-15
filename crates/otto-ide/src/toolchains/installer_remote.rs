@@ -1,9 +1,13 @@
 //! Remote SSH installer script generation and streaming runner.
 
+use std::collections::VecDeque;
 use std::process::Stdio;
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+
+const REMOTE_INSTALL_TIMEOUT: Duration = Duration::from_secs(900);
 
 use crate::toolchains_catalog::{
     codelldb_vsix_url, jq_binary_url, rust_analyzer_gz_url, shfmt_binary_url, CatalogSdkEntry,
@@ -45,19 +49,96 @@ pub(super) async fn run_ssh_streaming<F: FnMut(String)>(
             .map_err(|e| e.to_string())?;
     }
     let stdout = child.stdout.take().ok_or("missing ssh stdout")?;
-    let mut lines = BufReader::new(stdout).lines();
+    let stderr = child.stderr.take().ok_or("missing ssh stderr")?;
+
+    let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<(bool, String)>(256);
+    let tx_out = line_tx.clone();
+    let mut out_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout).lines();
+        loop {
+            match reader.next_line().await {
+                Ok(Some(line)) => {
+                    if tx_out.send((false, line)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => return Ok::<(), String>(()),
+                Err(e) => return Err(format!("read ssh stdout: {e}")),
+            }
+        }
+        Ok(())
+    });
+    let mut err_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr).lines();
+        loop {
+            match reader.next_line().await {
+                Ok(Some(line)) => {
+                    if line_tx.send((true, line)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => return Ok::<(), String>(()),
+                Err(e) => return Err(format!("read ssh stderr: {e}")),
+            }
+        }
+        Ok(())
+    });
+
     let mut installed = String::from("~/.otto/toolchains");
-    while let Ok(Some(line)) = lines.next_line().await {
-        if let Some(p) = line.strip_prefix("INSTALLED_PATH:") {
-            installed = p.trim().to_string();
-        } else {
+    let mut stderr_tail: VecDeque<String> = VecDeque::with_capacity(12);
+
+    let wait_res = tokio::time::timeout(REMOTE_INSTALL_TIMEOUT, async {
+        while let Some((is_err, line)) = line_rx.recv().await {
+            if !is_err {
+                if let Some(p) = line.strip_prefix("INSTALLED_PATH:") {
+                    installed = p.trim().to_string();
+                    continue;
+                }
+            } else {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    if stderr_tail.len() >= 10 {
+                        stderr_tail.pop_front();
+                    }
+                    stderr_tail.push_back(trimmed.to_string());
+                }
+            }
             on_line(line);
         }
-    }
-    let status = child.wait().await.map_err(|e| e.to_string())?;
+        let status = child.wait().await.map_err(|e| e.to_string())?;
+        if let Ok(Err(e)) = (&mut out_task).await {
+            return Err(e);
+        }
+        if let Ok(Err(e)) = (&mut err_task).await {
+            return Err(e);
+        }
+        Ok(status)
+    })
+    .await;
+
+    let status = match wait_res {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            out_task.abort();
+            err_task.abort();
+            let _ = child.start_kill();
+            return Err(format!(
+                "remote installer timed out after {}s",
+                REMOTE_INSTALL_TIMEOUT.as_secs()
+            ));
+        }
+    };
     pg_guard.disarmed = true;
     if !status.success() {
-        return Err(format!("remote installer exited with {status}"));
+        let detail: Vec<String> = stderr_tail.into_iter().collect();
+        if detail.is_empty() {
+            return Err(format!("remote installer exited with {status}"));
+        }
+        return Err(format!(
+            "remote installer exited with {status}: {}",
+            detail.join(" | ")
+        ));
     }
     Ok(installed)
 }

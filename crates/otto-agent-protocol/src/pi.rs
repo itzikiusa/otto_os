@@ -47,6 +47,9 @@ use crate::driver::{
     StructuredDriver,
 };
 
+#[path = "pi_subagent.rs"]
+mod pi_subagent;
+
 /// pi's built-in tools per access mode (`--tools` allowlist; `None` = all).
 fn tools_for(mode: RuntimeAccessMode) -> Option<&'static str> {
     match mode {
@@ -75,6 +78,14 @@ fn thinking_level(effort: &str) -> Option<&'static str> {
 struct Tool {
     name: String,
     args: Value,
+    #[serde(default)]
+    item_id: String,
+    #[serde(default)]
+    is_subagent: bool,
+    #[serde(default)]
+    parent_item_id: Option<String>,
+    #[serde(default)]
+    parent_key: Option<String>,
     #[serde(default)]
     turn_id: Option<String>,
     #[serde(default = "chrono::Utc::now")]
@@ -105,27 +116,6 @@ struct PiBgEntry {
     last_tool: Option<String>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct PiDriverState {
-    next_id: u64,
-    state_req: Option<String>,
-    prompt_req: Option<String>,
-    steer_reqs: Vec<String>,
-    ready: bool,
-    turn_id: Option<String>,
-    auto_turns: u64,
-    message: Option<(String, String, chrono::DateTime<chrono::Utc>)>,
-    thought: Option<(String, String, chrono::DateTime<chrono::Utc>)>,
-    messages: u32,
-    tools: HashMap<String, Tool>,
-    settles: bool,
-    ended: Option<(TurnTerminalStatus, Option<ProviderFailure>)>,
-    #[serde(default)]
-    bg_tasks: Vec<BackgroundTask>,
-    #[serde(default)]
-    bg_entries: HashMap<String, PiBgEntry>,
-}
-
 pub struct PiDriver {
     program: String,
     next_id: u64,
@@ -137,10 +127,13 @@ pub struct PiDriver {
     auto_turns: u64,
     /// The streaming assistant message: its item id, text so far, and start time.
     message: Option<(String, String, chrono::DateTime<chrono::Utc>)>,
+    message_parent: Option<String>,
     /// The streaming thinking/reasoning block: its item id, text so far, and start time.
     thought: Option<(String, String, chrono::DateTime<chrono::Utc>)>,
+    thought_parent: Option<String>,
     messages: u32,
     tools: HashMap<String, Tool>,
+    subagent_order: Vec<String>,
     /// This pi sends `agent_settled` (1.x): a turn ends there, and a
     /// non-retrying `agent_end` only stashes its outcome in `ended`.
     settles: bool,
@@ -161,9 +154,12 @@ impl PiDriver {
             turn_id: None,
             auto_turns: 0,
             message: None,
+            message_parent: None,
             thought: None,
+            thought_parent: None,
             messages: 0,
             tools: HashMap::new(),
+            subagent_order: Vec::new(),
             settles: false,
             ended: None,
             bg_tasks: Vec::new(),
@@ -192,7 +188,8 @@ impl PiDriver {
         self.turn_id = Some(id.clone());
         self.messages = 0;
         self.ended = None;
-        self.tools.clear();
+        self.tools.retain(|_, t| t.bg_id.is_some());
+        self.subagent_order.retain(|c| self.tools.contains_key(c));
         step.push(DriverEvent::TurnStarted { turn_id: id });
     }
 
@@ -207,11 +204,11 @@ impl PiDriver {
         }
         self.close_thought(step);
         self.close_message(step);
+        self.settle_foreground_tools_on_finish(step, status);
         self.turn_id = None;
         self.prompt_req = None;
         self.steer_reqs.clear();
         self.ended = None;
-        self.tools.clear();
         step.push(DriverEvent::Terminal {
             status,
             failure,
@@ -220,6 +217,7 @@ impl PiDriver {
     }
 
     fn close_thought(&mut self, step: &mut DriverStep) {
+        let parent_item_id = self.thought_parent.take();
         if let Some((id, text, started_at)) = self.thought.take() {
             if !text.is_empty() {
                 let mut it = item(
@@ -232,12 +230,15 @@ impl PiDriver {
                     },
                 );
                 it.started_at = Some(started_at);
+                it.completed_at = Some(chrono::Utc::now());
+                it.parent_item_id = parent_item_id;
                 step.push(DriverEvent::TurnItem(it));
             }
         }
     }
 
     fn close_message(&mut self, step: &mut DriverStep) {
+        let parent_item_id = self.message_parent.take();
         if let Some((id, text, started_at)) = self.message.take() {
             if !text.is_empty() {
                 let mut it = item(
@@ -251,18 +252,24 @@ impl PiDriver {
                     },
                 );
                 it.started_at = Some(started_at);
+                it.completed_at = Some(chrono::Utc::now());
+                it.parent_item_id = parent_item_id;
                 step.push(DriverEvent::TurnItem(it));
             }
         }
     }
 
-    fn on_thought(&mut self, step: &mut DriverStep, delta: &str) {
+    fn on_thought(&mut self, step: &mut DriverStep, delta: &str, parent_item_id: Option<String>) {
         if delta.is_empty() {
             return;
         }
         self.close_message(step);
+        if self.thought.is_some() && self.thought_parent != parent_item_id {
+            self.close_thought(step);
+        }
         if self.thought.is_none() {
             self.messages += 1;
+            self.thought_parent = parent_item_id.clone();
             self.thought = Some((
                 format!("{}:thought:{}", self.turn(), self.messages),
                 String::new(),
@@ -281,16 +288,21 @@ impl PiDriver {
             },
         );
         it.started_at = Some(*started_at);
+        it.parent_item_id = self.thought_parent.clone();
         step.push(DriverEvent::TurnItem(it));
     }
 
-    fn on_text(&mut self, step: &mut DriverStep, delta: &str) {
+    fn on_text(&mut self, step: &mut DriverStep, delta: &str, parent_item_id: Option<String>) {
         if delta.is_empty() {
             return;
         }
         self.close_thought(step);
+        if self.message.is_some() && self.message_parent != parent_item_id {
+            self.close_message(step);
+        }
         if self.message.is_none() {
             self.messages += 1;
+            self.message_parent = parent_item_id.clone();
             self.message = Some((
                 format!("{}:msg:{}", self.turn(), self.messages),
                 String::new(),
@@ -310,79 +322,8 @@ impl PiDriver {
             },
         );
         it.started_at = Some(*started_at);
+        it.parent_item_id = self.message_parent.clone();
         step.push(DriverEvent::TurnItem(it));
-    }
-
-    fn is_subagent_tool(name: &str, args: &Value) -> bool {
-        let lower = name.trim().to_ascii_lowercase();
-        let bare = lower
-            .rsplit_once("__")
-            .map(|(_, tail)| tail)
-            .unwrap_or(lower.as_str());
-        matches!(
-            bare,
-            "subagent"
-                | "task"
-                | "spawn_agent"
-                | "spawn_subagent"
-                | "delegate_to_agent"
-                | "invoke_subagent"
-        ) || args.get("subagent_type").is_some()
-            || args.get("subagentType").is_some()
-            || args.get("agent_type").is_some()
-            || args.get("agentType").is_some()
-            || args.get("TypeName").is_some()
-    }
-
-    fn is_background_call(args: &Value) -> bool {
-        args.get("run_in_background").and_then(Value::as_bool) == Some(true)
-            || args.get("background").and_then(Value::as_bool) == Some(true)
-    }
-
-    fn arg_str(args: &Value, keys: &[&str]) -> Option<String> {
-        for k in keys {
-            if let Some(s) = args
-                .get(*k)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                return Some(s.to_string());
-            }
-        }
-        None
-    }
-
-    fn first_line_truncated(s: &str) -> Option<String> {
-        let line = s.lines().map(str::trim).find(|l| !l.is_empty())?;
-        let mut out: String = line.chars().take(80).collect();
-        if line.chars().count() > 80 {
-            out.push('…');
-        }
-        Some(out)
-    }
-
-    fn subagent_fields(args: &Value) -> (Option<String>, Option<String>, Option<String>, bool) {
-        let prompt = Self::arg_str(args, &["prompt", "Prompt", "task", "message"]);
-        let subagent_type = Self::arg_str(
-            args,
-            &[
-                "subagent_type",
-                "subagentType",
-                "agent_type",
-                "agentType",
-                "TypeName",
-                "agent",
-                "role",
-            ],
-        );
-        let description = Self::arg_str(
-            args,
-            &["description", "Description", "Role", "name", "title"],
-        )
-        .or_else(|| prompt.as_deref().and_then(Self::first_line_truncated));
-        let background = Self::is_background_call(args);
-        (description, subagent_type, prompt, background)
     }
 
     fn tool_kind(
@@ -446,30 +387,6 @@ impl PiDriver {
                 .or_else(|| Some(name.to_string()));
         }
         Some(name.to_string())
-    }
-
-    fn bg_kind_and_label(name: &str, args: &Value) -> (&'static str, String) {
-        if Self::is_subagent_tool(name, args) {
-            let (description, subagent_type, _, _) = Self::subagent_fields(args);
-            let label = description
-                .or(subagent_type)
-                .unwrap_or_else(|| name.to_string());
-            ("agent", label)
-        } else if name == "bash" {
-            let label = args
-                .get("description")
-                .and_then(Value::as_str)
-                .and_then(Self::first_line_truncated)
-                .or_else(|| {
-                    args.get("command")
-                        .and_then(Value::as_str)
-                        .and_then(Self::first_line_truncated)
-                })
-                .unwrap_or_else(|| "bash".into());
-            ("command", label)
-        } else {
-            ("command", name.to_string())
-        }
     }
 
     fn extract_launched_bg_id(result: &Value, output: Option<&str>) -> Option<(String, bool)> {
@@ -543,44 +460,18 @@ impl PiDriver {
         let before = self.bg_tasks.len();
         self.bg_tasks
             .retain(|t| t.id != bg_id && t.id != entry.call_id);
-        if emit_card {
-            let mut it = item(
-                entry.item_id.clone(),
-                status,
-                Self::tool_title(&entry.name, &entry.args),
-                Self::tool_kind(
-                    &entry.name,
-                    &entry.args,
-                    output.clone(),
-                    entry.tool_uses,
-                    entry.last_tool.clone(),
-                ),
-            );
-            it.turn_id = entry.turn_id.clone();
-            it.started_at = Some(entry.started_at);
-            if status == TurnItemStatus::Failed {
-                it.error = output.as_deref().and_then(tool_error);
-            }
-            step.push(DriverEvent::TurnItem(it));
-        }
         if self.bg_tasks.len() != before {
             step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
         }
-        let verb = match status {
-            TurnItemStatus::Failed => "failed",
-            TurnItemStatus::Cancelled => "stopped",
-            _ => "finished",
-        };
-        let mut notice = item(
-            format!("bg:{bg_id}"),
+        Self::settle_bg_entry_inner(
+            entry,
+            bg_id,
             status,
-            None,
-            TurnItemKind::SystemNotice {
-                message: format!("Background {} {verb}: {}", entry.kind, entry.label),
-            },
+            output,
+            emit_card,
+            self.turn_id.clone(),
+            step,
         );
-        notice.turn_id = entry.turn_id.or_else(|| self.turn_id.clone());
-        step.push(DriverEvent::TurnItem(notice));
     }
 
     fn maybe_handle_bg_control_tool(
@@ -698,13 +589,20 @@ impl PiDriver {
             }
             Some("message_update") => {
                 let ev = &v["assistantMessageEvent"];
+                let seg_parent = self
+                    .resolve_parent_subagent(v, None, None, false)
+                    .map(|(_, pid)| pid);
                 match ev.get("type").and_then(Value::as_str) {
                     Some("text_start") => {
                         self.ensure_autonomous_turn(step);
                         if self.turn_id.is_some() {
                             self.close_thought(step);
+                            if self.message.is_some() && self.message_parent != seg_parent {
+                                self.close_message(step);
+                            }
                             if self.message.is_none() {
                                 self.messages += 1;
+                                self.message_parent = seg_parent;
                                 self.message = Some((
                                     format!("{}:msg:{}", self.turn(), self.messages),
                                     String::new(),
@@ -717,8 +615,12 @@ impl PiDriver {
                         self.ensure_autonomous_turn(step);
                         if self.turn_id.is_some() {
                             self.close_message(step);
+                            if self.thought.is_some() && self.thought_parent != seg_parent {
+                                self.close_thought(step);
+                            }
                             if self.thought.is_none() {
                                 self.messages += 1;
+                                self.thought_parent = seg_parent;
                                 self.thought = Some((
                                     format!("{}:thought:{}", self.turn(), self.messages),
                                     String::new(),
@@ -732,7 +634,7 @@ impl PiDriver {
                         if !delta.is_empty() {
                             self.ensure_autonomous_turn(step);
                             if self.turn_id.is_some() {
-                                self.on_text(step, delta);
+                                self.on_text(step, delta, seg_parent);
                             }
                         }
                     }
@@ -741,7 +643,7 @@ impl PiDriver {
                         if !delta.is_empty() {
                             self.ensure_autonomous_turn(step);
                             if self.turn_id.is_some() {
-                                self.on_thought(step, delta);
+                                self.on_thought(step, delta, seg_parent);
                             }
                         }
                     }
@@ -810,6 +712,10 @@ impl PiDriver {
             .unwrap_or("tool")
             .to_string();
         let args = v.get("args").cloned().unwrap_or(Value::Null);
+        let is_subagent = Self::is_subagent_tool(&name, &args);
+        let parent = self.resolve_parent_subagent(v, Some(&args), Some(call), is_subagent);
+        let parent_key = parent.as_ref().map(|(k, _)| k.clone());
+        let parent_item_id = parent.as_ref().map(|(_, pid)| pid.clone());
         let started_at = chrono::Utc::now();
         let turn_id = self.turn_id.clone();
         let id = format!("{}:tool:{call}", self.turn());
@@ -821,23 +727,30 @@ impl PiDriver {
         );
         ti.turn_id = turn_id.clone();
         ti.started_at = Some(started_at);
+        ti.parent_item_id = parent_item_id.clone();
         step.push(DriverEvent::TurnItem(ti));
 
-        let bg_id = if Self::is_background_call(&args) {
+        if let Some(ref pkey) = parent_key {
+            self.record_child_tool_on_parent(step, pkey, &name);
+        }
+
+        let bg_id = if Self::is_background_call(&name, &args) {
             let (kind, label) = Self::bg_kind_and_label(&name, &args);
+            let due_at = Self::extract_due_at(&name, &args, started_at);
             let bg_id = call.to_string();
             self.bg_tasks.push(BackgroundTask {
                 id: bg_id.clone(),
                 kind: kind.to_string(),
                 label: label.clone(),
                 started_at,
+                due_at,
                 item_id: Some(id.clone()),
             });
             self.bg_entries.insert(
                 bg_id.clone(),
                 PiBgEntry {
                     call_id: call.to_string(),
-                    item_id: id,
+                    item_id: id.clone(),
                     turn_id: turn_id.clone(),
                     name: name.clone(),
                     args: args.clone(),
@@ -854,11 +767,20 @@ impl PiDriver {
             None
         };
 
+        if is_subagent && bg_id.is_none() {
+            self.subagent_order.retain(|c| c != call);
+            self.subagent_order.push(call.to_string());
+        }
+
         self.tools.insert(
             call.to_string(),
             Tool {
                 name,
                 args,
+                item_id: id,
+                is_subagent,
+                parent_item_id,
+                parent_key,
                 turn_id,
                 started_at,
                 streamed_output: String::new(),
@@ -883,7 +805,11 @@ impl PiDriver {
             .as_deref()
             .or(self.turn_id.as_deref())
             .unwrap_or_default();
-        let item_id = format!("{turn_str}:tool:{call}");
+        let item_id = if tool.item_id.is_empty() {
+            format!("{turn_str}:tool:{call}")
+        } else {
+            tool.item_id.clone()
+        };
         if tool.name == "bash" {
             if let Some(full) = partial_text {
                 if let Some(delta) = full.strip_prefix(tool.streamed_output.as_str()) {
@@ -929,6 +855,7 @@ impl PiDriver {
                 );
                 ti.turn_id = tool.turn_id.clone();
                 ti.started_at = Some(tool.started_at);
+                ti.parent_item_id = tool.parent_item_id.clone();
                 step.push(DriverEvent::TurnItem(ti));
             }
         }
@@ -939,19 +866,30 @@ impl PiDriver {
             .get("toolCallId")
             .and_then(Value::as_str)
             .unwrap_or("tool");
-        let tool = self.tools.remove(call).unwrap_or_else(|| Tool {
-            name: v
+        self.subagent_order.retain(|c| c != call);
+        let tool = self.tools.remove(call).unwrap_or_else(|| {
+            let name: String = v
                 .get("toolName")
                 .and_then(Value::as_str)
                 .unwrap_or("tool")
-                .into(),
-            args: v.get("args").cloned().unwrap_or(Value::Null),
-            turn_id: self.turn_id.clone(),
-            started_at: chrono::Utc::now(),
-            streamed_output: String::new(),
-            tool_uses: 0,
-            last_tool: None,
-            bg_id: None,
+                .into();
+            let args = v.get("args").cloned().unwrap_or(Value::Null);
+            let is_subagent = Self::is_subagent_tool(&name, &args);
+            let parent = self.resolve_parent_subagent(v, Some(&args), Some(call), is_subagent);
+            Tool {
+                name,
+                args,
+                item_id: String::new(),
+                is_subagent,
+                parent_item_id: parent.as_ref().map(|(_, pid)| pid.clone()),
+                parent_key: parent.map(|(k, _)| k),
+                turn_id: self.turn_id.clone(),
+                started_at: chrono::Utc::now(),
+                streamed_output: String::new(),
+                tool_uses: 0,
+                last_tool: None,
+                bg_id: None,
+            }
         });
         let result = &v["result"];
         let output = Self::result_text(result)
@@ -962,7 +900,18 @@ impl PiDriver {
             .clone()
             .or_else(|| self.turn_id.clone())
             .unwrap_or_default();
-        let item_id = format!("{turn_str}:tool:{call}");
+        let item_id = if tool.item_id.is_empty() {
+            format!("{turn_str}:tool:{call}")
+        } else {
+            tool.item_id.clone()
+        };
+        if self.thought_parent.as_deref() == Some(item_id.as_str()) {
+            self.close_thought(step);
+        }
+        if self.message_parent.as_deref() == Some(item_id.as_str()) {
+            self.close_message(step);
+        }
+        let now = chrono::Utc::now();
 
         if let Some(orig_bg_id) = tool.bg_id.clone() {
             if !failed {
@@ -1002,6 +951,7 @@ impl PiDriver {
                     );
                     it.turn_id = tool.turn_id;
                     it.started_at = Some(tool.started_at);
+                    it.parent_item_id = tool.parent_item_id;
                     step.push(DriverEvent::TurnItem(it));
                     return;
                 }
@@ -1026,6 +976,8 @@ impl PiDriver {
             );
             it.turn_id = tool.turn_id;
             it.started_at = Some(tool.started_at);
+            it.completed_at = Some(now);
+            it.parent_item_id = tool.parent_item_id;
             if failed {
                 it.error = output.as_deref().and_then(tool_error);
             }
@@ -1052,6 +1004,8 @@ impl PiDriver {
         );
         it.turn_id = tool.turn_id;
         it.started_at = Some(tool.started_at);
+        it.completed_at = Some(now);
+        it.parent_item_id = tool.parent_item_id;
         if failed {
             it.error = output.as_deref().and_then(tool_error);
         }
@@ -1173,8 +1127,23 @@ impl StructuredDriver for PiDriver {
     }
 
     /// `get_state` reports the session id (the resume key) and the model.
-    fn start(&mut self, _ctx: &LaunchContext) -> DriverStep {
+    fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
         let mut step = DriverStep::default();
+        if ctx.resume.is_none() {
+            self.tools.clear();
+            self.subagent_order.clear();
+            self.message = None;
+            self.message_parent = None;
+            self.thought = None;
+            self.thought_parent = None;
+            self.turn_id = None;
+            self.ended = None;
+            self.bg_entries.clear();
+            if !self.bg_tasks.is_empty() {
+                self.bg_tasks.clear();
+                step.push(DriverEvent::BackgroundTasks(Vec::new()));
+            }
+        }
         let id = self.command(&mut step, json!({"type": "get_state"}));
         self.state_req = Some(id);
         step
@@ -1279,55 +1248,19 @@ impl StructuredDriver for PiDriver {
     }
 
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
+        let mut step = DriverStep::default();
         self.steer_reqs.clear();
-        self.bg_tasks.clear();
-        self.bg_entries.clear();
-        DriverStep::default()
+        self.subagent_order.clear();
+        self.clear_all_bg_on_session_close(&mut step);
+        step
     }
 
     fn snapshot_state(&self) -> Value {
-        serde_json::to_value(PiDriverState {
-            next_id: self.next_id,
-            state_req: self.state_req.clone(),
-            prompt_req: self.prompt_req.clone(),
-            steer_reqs: self.steer_reqs.clone(),
-            ready: self.ready,
-            turn_id: self.turn_id.clone(),
-            auto_turns: self.auto_turns,
-            message: self.message.clone(),
-            thought: self.thought.clone(),
-            messages: self.messages,
-            tools: self.tools.clone(),
-            settles: self.settles,
-            ended: self.ended.clone(),
-            bg_tasks: self.bg_tasks.clone(),
-            bg_entries: self.bg_entries.clone(),
-        })
-        .unwrap_or(Value::Null)
+        self.snapshot_driver_state()
     }
 
     fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
-        if state.is_null() {
-            return Ok(());
-        }
-        let s: PiDriverState = serde_json::from_value(state.clone())
-            .map_err(|e| DriverError(format!("invalid pi driver state: {e}")))?;
-        self.next_id = s.next_id;
-        self.state_req = s.state_req;
-        self.prompt_req = s.prompt_req;
-        self.steer_reqs = s.steer_reqs;
-        self.ready = s.ready;
-        self.turn_id = s.turn_id;
-        self.auto_turns = s.auto_turns;
-        self.message = s.message;
-        self.thought = s.thought;
-        self.messages = s.messages;
-        self.tools = s.tools;
-        self.settles = s.settles;
-        self.ended = s.ended;
-        self.bg_tasks = s.bg_tasks;
-        self.bg_entries = s.bg_entries;
-        Ok(())
+        self.restore_driver_state(state)
     }
 }
 

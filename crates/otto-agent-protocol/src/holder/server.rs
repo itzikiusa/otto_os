@@ -22,7 +22,7 @@ use crate::holder::pipes::{
     redirect_stdio_to_devnull, spawn_child_pipes, terminate_child_group, ChildPipeEvent, StdinCmd,
 };
 use crate::holder::protocol::{
-    read_frame, write_frame, DaemonFrame, HolderCheckpoint, HolderExitStatus, HolderFrame,
+    checkpoint_acked_seq, read_frame, write_frame, DaemonFrame, HolderExitStatus, HolderFrame,
     HolderReady, HolderSignal, HolderSpawnSpec, LineRing, DEFAULT_EXIT_LINGER, ERROR_PREFIX,
     HOLDER_ENV, MAX_RING_BYTES, PROTO_VERSION, READY_PREFIX,
 };
@@ -200,7 +200,7 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
         .map(Duration::from_millis)
         .unwrap_or(DEFAULT_EXIT_LINGER);
     let mut ring = LineRing::new(MAX_RING_BYTES);
-    let mut checkpoint: HolderCheckpoint = spec.initial_checkpoint;
+    let mut checkpoint: serde_json::Value = spec.initial_checkpoint;
     let mut exited: Option<HolderExitStatus> = None;
     let mut active_client: Option<ActiveClient> = None;
     let mut next_conn_id: u64 = 1;
@@ -278,10 +278,10 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
                             proto_version: PROTO_VERSION,
                             holder_pid: std::process::id(),
                             child_pid,
-                            checkpoint: Box::new(checkpoint.clone()),
+                            checkpoint: checkpoint.clone(),
                             exited: exited.clone(),
                         });
-                        for entry in ring.replay_after(checkpoint.acked_seq) {
+                        for entry in ring.replay_after(checkpoint_acked_seq(&checkpoint)) {
                             let _ = out_tx.send(HolderFrame::ReplayLine { entry });
                         }
                         let _ = out_tx.send(HolderFrame::ReplayDone);
@@ -337,8 +337,8 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
                                 signal_group(child_pid, sig);
                             }
                             DaemonFrame::Checkpoint { checkpoint: cp } => {
-                                ring.prune_acked(cp.acked_seq);
-                                checkpoint = *cp;
+                                ring.prune_acked(checkpoint_acked_seq(&cp));
+                                checkpoint = cp;
                             }
                             DaemonFrame::Detach => {
                                 if let Some(prev) = active_client.take() {

@@ -9,6 +9,7 @@
   import type { IconName } from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { scrollBehavior } from '../../../lib/motion';
+  import { sessionProviderSlug } from '../../../lib/providers';
   import { now } from '../../../lib/stores/now.svelte';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { threads } from '../threadsStore.svelte';
@@ -45,7 +46,7 @@
       out.push({
         id: s.id,
         title: s.title,
-        provider: s.provider,
+        provider: sessionProviderSlug(s),
         model: s.model ?? null,
         status: s.status,
         createdAt: s.created_at,
@@ -68,6 +69,15 @@
   const nowMs = $derived(tasks.running.length ? now() : Date.now());
 
   let expandedIds = $state<Record<string, boolean>>({});
+  let attemptedHydration = new Set<string>();
+  let lastSessionId = untrack(() => sessionId);
+  $effect(() => {
+    if (sessionId !== lastSessionId) {
+      lastSessionId = sessionId;
+      expandedIds = {};
+      attemptedHydration = new Set<string>();
+    }
+  });
   function toggleExpand(id: string): void {
     expandedIds = { ...expandedIds, [id]: !expandedIds[id] };
   }
@@ -79,8 +89,14 @@
     for (let i = 0; i < allRows.length; i++) {
       const r = allRows[i];
       if (!expandedIds[r.id]) continue;
-      if (r.detailOmitted && r.itemId) {
-        void runtimeViews.ensureItemDetail(sessionId, r.itemId);
+      if (r.itemId) {
+        const hKey = `${sessionId}:${r.itemId}`;
+        if (r.detailOmitted) {
+          void runtimeViews.ensureItemDetail(sessionId, r.itemId);
+        } else if (!r.prompt && !r.output && !r.error && r.status !== 'running' && !attemptedHydration.has(hKey)) {
+          attemptedHydration.add(hKey);
+          void runtimeViews.ensureItemDetail(sessionId, r.itemId, { force: true });
+        }
       }
       if (r.childSessionId) {
         releases.push(runtimeViews.open(r.childSessionId));
@@ -135,7 +151,7 @@
       : []}
   {@const liveOut = (t.itemId ? p?.output?.[t.itemId] : null) || t.output}
   {@const detailKey = t.itemId ? `${sessionId}:${t.itemId}` : ''}
-  {@const detailLoading = Boolean(t.detailOmitted && detailKey && runtimeViews.loadingItem[detailKey])}
+  {@const detailLoading = Boolean(detailKey && runtimeViews.loadingItem[detailKey])}
   {@const detailError = detailKey ? (runtimeViews.itemError[detailKey] ?? null) : null}
   <li
     class="tat-item"
@@ -208,7 +224,7 @@
           </div>
         {/if}
 
-        {#if t.detailOmitted && (detailLoading || detailError)}
+        {#if detailLoading || detailError}
           <LoadState
             variant="compact"
             what="task details"
@@ -216,7 +232,7 @@
             error={detailError}
             empty
             rows={1}
-            onretry={t.itemId ? () => void runtimeViews.ensureItemDetail(sessionId, t.itemId!) : undefined}
+            onretry={t.itemId ? () => void runtimeViews.ensureItemDetail(sessionId, t.itemId!, { force: true }) : undefined}
           />
         {/if}
 

@@ -34,10 +34,10 @@ pub(crate) fn sanitize_module_go_build_tags(
         if clean_k.is_empty() {
             continue;
         }
-        let validated = crate::lsp_service::validate_go_build_tags(raw_tags)?;
-        if !validated.is_empty() {
-            out.insert(clean_k.to_string(), validated);
-        }
+        let validated = crate::go_build_tags::validate_go_build_tags(raw_tags)?;
+        // Preserve empty `[]` module overrides: `Some(vec![])` explicitly clears
+        // inherited workspace Go build tags for that child/sibling module.
+        out.insert(clean_k.to_string(), validated);
     }
     Ok(out)
 }
@@ -69,7 +69,7 @@ pub(crate) fn match_longest_module_go_build_tags(
 
         for (mod_root, tags) in module_tags {
             let mr = mod_root.trim().trim_end_matches('/');
-            if mr.is_empty() || tags.is_empty() {
+            if mr.is_empty() {
                 continue;
             }
             let mut matched = cand == mr || cand.starts_with(&format!("{mr}/"));
@@ -90,7 +90,43 @@ pub(crate) fn match_longest_module_go_build_tags(
     best.map(|(_, mr, tags)| (mr, tags))
 }
 
-pub(crate) fn effective_go_build_tags_for_paths(
+#[allow(clippy::disallowed_methods)]
+fn any_candidate_under_root(root: &str, candidate_paths: &[String], local: bool) -> bool {
+    let r = root.trim().trim_end_matches('/');
+    if r.is_empty() {
+        return true;
+    }
+    let r_canon = if local {
+        std::fs::canonicalize(r).ok()
+    } else {
+        None
+    };
+    for raw_cand in candidate_paths {
+        let cand = raw_cand.trim().trim_end_matches('/');
+        if cand.is_empty() {
+            continue;
+        }
+        if cand == r || cand.starts_with(&format!("{r}/")) {
+            return true;
+        }
+        if local {
+            let cand_canon = std::fs::canonicalize(cand).ok().or_else(|| {
+                Path::new(cand)
+                    .parent()
+                    .and_then(|p| std::fs::canonicalize(p).ok())
+            });
+            if let (Some(cc), Some(cr)) = (&cand_canon, &r_canon) {
+                if cc == cr || cc.starts_with(cr) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+pub(crate) fn effective_go_build_tags_for_paths_in_project(
+    primary_root: Option<&str>,
     proj: &IdeProjectEnvironment,
     candidate_paths: &[String],
     local: bool,
@@ -102,11 +138,25 @@ pub(crate) fn effective_go_build_tags_for_paths(
         for t in mod_tags {
             push_unique(&mut out, t);
         }
+        return out;
+    }
+    if let Some(pr) = primary_root {
+        if !any_candidate_under_root(pr, candidate_paths, local) {
+            return out;
+        }
     }
     for t in &proj.go_build_tags {
         push_unique(&mut out, t.clone());
     }
     out
+}
+
+pub(crate) fn effective_go_build_tags_for_paths(
+    proj: &IdeProjectEnvironment,
+    candidate_paths: &[String],
+    local: bool,
+) -> Vec<String> {
+    effective_go_build_tags_for_paths_in_project(None, proj, candidate_paths, local)
 }
 
 /// Find the longest-prefix match in `module_sdks` for any of `candidate_paths`,
@@ -391,6 +441,7 @@ pub(super) async fn layer_child_and_module_sdk_for_run(
             }
         });
 
+    let mut child_own_go_tags: Vec<String> = Vec::new();
     if target.kind == IdeTargetKind::Local {
         let child_dir = resolved_cwd.clone().or_else(|| {
             resolved_tp.as_deref().and_then(|tp| {
@@ -423,9 +474,7 @@ pub(super) async fn layer_child_and_module_sdk_for_run(
                 if mod_proj.dotenv_path.is_some() {
                     proj.dotenv_path = mod_proj.dotenv_path;
                 }
-                for tag in mod_proj.go_build_tags {
-                    push_unique(&mut proj.go_build_tags, tag);
-                }
+                child_own_go_tags = mod_proj.go_build_tags;
                 for (mk, mtags) in mod_proj.module_go_build_tags {
                     proj.module_go_build_tags.entry(mk).or_insert(mtags);
                 }
@@ -444,8 +493,23 @@ pub(super) async fn layer_child_and_module_sdk_for_run(
     if candidates.is_empty() {
         candidates.push(target.root.clone());
     }
-    let eff_tags =
-        effective_go_build_tags_for_paths(proj, &candidates, target.kind == IdeTargetKind::Local);
+    let has_mod_override = match_longest_module_go_build_tags(
+        &proj.module_go_build_tags,
+        &candidates,
+        target.kind == IdeTargetKind::Local,
+    )
+    .is_some();
+    let mut eff_tags = effective_go_build_tags_for_paths_in_project(
+        Some(&target.root),
+        proj,
+        &candidates,
+        target.kind == IdeTargetKind::Local,
+    );
+    if !has_mod_override {
+        for tag in child_own_go_tags {
+            push_unique(&mut eff_tags, tag);
+        }
+    }
     proj.go_build_tags = eff_tags;
     if let Some((mod_root, sdk_val)) = match_longest_module_sdk(
         &proj.module_sdks,

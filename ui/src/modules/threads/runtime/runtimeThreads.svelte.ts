@@ -22,13 +22,13 @@ import type {
   RuntimeEvent,
   RuntimePromptReq,
   RuntimePromptResp,
-  RuntimeProvider,
+  RuntimeProviderOrSlug,
   RuntimeSession,
   RuntimeSessionStatus,
   Session,
   UnqueuePromptResp,
 } from '../../../lib/api/types';
-import { isRuntimeProvider, RUNTIME_PROVIDERS } from '../../../lib/providers';
+import { isRuntimeProvider, RUNTIME_PROVIDERS, sessionProviderSlug } from '../../../lib/providers';
 import { threads } from '../threadsStore.svelte';
 
 export { isRuntimeProvider, RUNTIME_PROVIDERS };
@@ -46,11 +46,13 @@ const SESSION_STATUS: Record<ProviderSessionStatus, RuntimeSessionStatus> = {
 };
 
 /** The server-owned meta keys a Threads row keeps: who a personal agent's
- *  thread belongs to and what started it (lib/personalAgentBadges.ts). The
- *  rest stays on the runtime row — a row never inherits keys that would
- *  change how other session code treats it. */
+ *  thread belongs to, what started it (lib/personalAgentBadges.ts), and any
+ *  configured custom provider slug (`provider_slug`). The rest stays on the
+ *  runtime row — a row never inherits keys that would change how other session
+ *  code treats it. */
 const ROW_META_KEYS = [
   'source',
+  'provider_slug',
   'personal_agent',
   'personal_agent_name',
   'personal_agent_chat',
@@ -76,7 +78,7 @@ export function asThreadSession(r: RuntimeSession): Session {
     id: r.id,
     workspace_id: r.workspace_id,
     kind: 'agent',
-    provider: r.provider,
+    provider: sessionProviderSlug(r),
     title: r.title,
     // Background work the agent started keeps the row working between turns.
     status: r.status === 'working' || r.status === 'starting' || (r.status !== 'closed' && (r.background_tasks?.length ?? 0) > 0) ? 'working' : 'idle',
@@ -289,7 +291,7 @@ class RuntimeThreads {
   async start(
     workspaceId: string,
     req: {
-      provider: RuntimeProvider;
+      provider: RuntimeProviderOrSlug;
       cwd: string | null;
       title: string;
       model: string | null;
@@ -313,12 +315,18 @@ class RuntimeThreads {
     const pics = (req.attachments ?? []).filter((f) => f.mime.startsWith('image/'));
     const docs = (req.attachments ?? []).filter((f) => !f.mime.startsWith('image/'));
     if (req.prompt || pics.length || docs.length) {
-      await this.prompt(created.id, {
-        text: req.prompt,
-        ...(req.effort ? { effort: req.effort } : {}),
-        ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
-        ...(docs.length ? { files: docs.map((d) => ({ ...d })) } : {}),
-      });
+      await this.prompt(
+        created.id,
+        {
+          text: req.prompt,
+          ...(req.effort ? { effort: req.effort } : {}),
+          ...(pics.length
+            ? { images: pics.map(({ name, mime, data_base64 }) => ({ ...(name ? { name } : {}), mime, data_base64 })) }
+            : {}),
+          ...(docs.length ? { files: docs.map((d) => ({ ...d })) } : {}),
+        },
+        req.attachments,
+      );
     }
     return created;
   }
@@ -341,7 +349,7 @@ class RuntimeThreads {
         ? localAttachments.map((a) => ({ ...a }))
         : [
             ...(req.images ?? []).map((img, i) => ({
-              name: (req.images?.length ?? 0) > 1 ? `Screenshot ${i + 1}` : 'Screenshot',
+              name: img.name?.trim() || ((req.images?.length ?? 0) > 1 ? `Screenshot ${i + 1}` : 'Screenshot'),
               mime: img.mime,
               data_base64: img.data_base64,
             })),
@@ -433,7 +441,7 @@ class RuntimeThreads {
       const docs = resp.files ?? [];
       const reconstructed = [
         ...imgs.map((img, idx) => ({
-          name: imgs.length > 1 ? `Screenshot ${idx + 1}` : 'Screenshot',
+          name: img.name?.trim() || (imgs.length > 1 ? `Screenshot ${idx + 1}` : 'Screenshot'),
           mime: img.mime,
           data_base64: img.data_base64,
         })),
@@ -462,7 +470,9 @@ export const runtimeThreads = new RuntimeThreads();
 uiControl.addSource({
   get: (id) => {
     const r = runtimeThreads.get(id);
-    return r ? { id: r.id, provider: r.provider, title: r.title, meta: r.ui_control ? { ui_control: r.ui_control } : {} } : null;
+    return r
+      ? { id: r.id, provider: sessionProviderSlug(r), title: r.title, meta: r.ui_control ? { ui_control: r.ui_control } : {} }
+      : null;
   },
   patch: (id, grant) => {
     const r = runtimeThreads.byId[id];

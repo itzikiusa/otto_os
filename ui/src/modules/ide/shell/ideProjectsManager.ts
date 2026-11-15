@@ -317,7 +317,7 @@ export async function attachProjectFoldersBatch(
   for (let i = 0; i < host.tabs.length; i++) {
     const t = host.tabs[i];
     t.external = isPathExternal(t.path, allRoots);
-    if (!t.external && !isReadOnlySdkOrCachePath(t.path)) t.readOnly = false;
+    if (!t.external && !t.truncated && !isReadOnlySdkOrCachePath(t.path)) t.readOnly = false;
   }
 
   if (!opts.quiet) {

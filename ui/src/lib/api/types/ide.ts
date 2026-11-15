@@ -54,8 +54,19 @@ export interface IdeFileWriteReq {
   content: string;
   expected_sha256?: string | null;
   create_dirs?: boolean;
+  allow_overwrite_large?: boolean;
   local_history_enabled?: boolean;
   local_history_retention_days?: number;
+}
+
+export interface IdeGitBaseResp {
+  in_repo: boolean;
+  repo_root?: string | null;
+  rel_path?: string | null;
+  head_exists: boolean;
+  content?: string | null;
+  binary: boolean;
+  truncated: boolean;
 }
 
 export interface IdeFileWriteResp {

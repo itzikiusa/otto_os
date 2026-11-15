@@ -274,6 +274,8 @@ pub struct ActiveTailSource {
     pub fallback_path: Option<std::path::PathBuf>,
     pub offset: u64,
     pub using_fallback: bool,
+    pub allowed_cwd: Option<std::path::PathBuf>,
+    pub agy_brain_dir: Option<std::path::PathBuf>,
 }
 
 /// Off-lock read chunk from an [`ActiveTailSource`].

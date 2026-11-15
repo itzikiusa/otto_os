@@ -148,6 +148,8 @@ impl EnvironmentManager {
                 Some(validate_python_spec(
                     v,
                     req.target.kind == IdeTargetKind::Local,
+                    &self.data_dir,
+                    Path::new(&effective_root),
                     &registered_py_sdks,
                 )?)
             }
@@ -300,7 +302,13 @@ impl EnvironmentManager {
 }
 
 #[allow(clippy::disallowed_methods)]
-fn validate_python_spec(raw: &str, is_local: bool, registered_sdks: &[PathBuf]) -> Result<String> {
+fn validate_python_spec(
+    raw: &str,
+    is_local: bool,
+    data_dir: &Path,
+    workspace_root: &Path,
+    registered_sdks: &[PathBuf],
+) -> Result<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty()
         || trimmed.starts_with('-')
@@ -353,11 +361,59 @@ fn validate_python_spec(raw: &str, is_local: bool, registered_sdks: &[PathBuf]) 
             let sdk_canon = std::fs::canonicalize(sdk).unwrap_or_else(|_| sdk.clone());
             canon == sdk_canon || canon.starts_with(&sdk_canon)
         });
+        let toolchains_dir = data_dir.join("toolchains");
+        let toolchains_canon =
+            std::fs::canonicalize(&toolchains_dir).unwrap_or_else(|_| toolchains_dir.clone());
+        let in_managed_toolchains =
+            canon.starts_with(&toolchains_canon) || canon.starts_with(&toolchains_dir);
+        let ws_canon =
+            std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+        if canon.starts_with(&ws_canon) && !in_registered_sdk && !in_managed_toolchains {
+            return Err(Error::Forbidden(format!(
+                "Python interpreter '{}' cannot be an unregistered binary inside the workspace",
+                expanded.display()
+            )));
+        }
+        let search_dirs = system_search_dirs();
+        let req_parent = expanded.parent();
+        let in_trusted_host_dir = in_registered_sdk
+            || in_managed_toolchains
+            || search_dirs.iter().any(|dir| {
+                let dc = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+                req_parent.is_some_and(|p| p == dir || p == dc)
+                    || canon.starts_with(&dc)
+                    || canon.starts_with(dir)
+            })
+            || [
+                "/usr/",
+                "/opt/homebrew/",
+                "/usr/local/",
+                "/Library/Frameworks/",
+                "/Library/Developer/",
+                "/System/Library/",
+                "/Applications/Xcode.app/",
+                "/nix/store/",
+            ]
+            .iter()
+            .any(|prefix| canon.to_string_lossy().starts_with(prefix))
+            || dirs::home_dir().is_some_and(|home| {
+                [
+                    ".pyenv",
+                    ".local/share/uv",
+                    ".asdf",
+                    ".mise",
+                    ".conda",
+                    "miniconda3",
+                ]
+                .iter()
+                .any(|rel| canon.starts_with(home.join(rel)))
+            });
         let req_name = expanded.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let canon_name = canon.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let canon_str = canon.to_string_lossy();
         let is_valid_python = in_registered_sdk
-            || (is_known_python_bin_name(req_name)
+            || (in_trusted_host_dir
+                && is_known_python_bin_name(req_name)
                 && (is_known_python_bin_name(canon_name)
                     || (canon_name == "Python" && canon_str.contains(".framework/"))));
         if !is_valid_python {

@@ -99,10 +99,24 @@ export interface IdeFileReadResp {
 
 export interface IdeOpenTab {
   path: string; name: string; content: string; savedContent: string; dirty?: boolean;
+  eol?: '\r\n' | '\n';
   sha256?: string; language: string; readOnly: boolean; truncated: boolean;
   loading: boolean; error: string | null; preview: boolean;
   pinned?: boolean; external?: boolean;
   lastAccessedAt?: number;
+}
+
+export function detectTextEol(text: string): '\r\n' | '\n' {
+  return text.includes('\r\n') ? '\r\n' : '\n';
+}
+
+export function normalizeEditorLf(text: string): string {
+  return text.indexOf('\r') >= 0 ? text.replace(/\r\n?/g, '\n') : text;
+}
+
+export function serializeTabDiskContent(tab: Pick<IdeOpenTab, 'eol'>, editorLfContent: string): string {
+  const lf = normalizeEditorLf(editorLfContent);
+  return tab.eol === '\r\n' ? lf.replace(/\n/g, '\r\n') : lf;
 }
 
 export interface IdeSearchItem {

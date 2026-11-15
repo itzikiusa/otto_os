@@ -12,6 +12,9 @@ use sqlx::Row;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use super::burst::now_ms;
+use super::confinement::{
+    is_forbidden_tail_target, validate_confined_tail_path, validate_existing_or_pending_tail_path,
+};
 use crate::driver::{
     ActiveTailChunk, ActiveTailKind, ActiveTailSource, SidebandPayload, SidebandPoll,
     SidebandResumeSeed, SidebandSource, StructuredDriver,
@@ -164,9 +167,25 @@ async fn fetch_primary_sideband(source: &SidebandSource) -> (Option<SidebandPayl
 async fn fetch_active_tail(tail: &ActiveTailSource) -> (Option<ActiveTailChunk>, bool) {
     match tail.kind {
         ActiveTailKind::AgySubagentTranscript => {
-            let (payload, more) = fetch_append_lines(
+            let Some(valid_primary) = validate_existing_or_pending_tail_path(
                 &tail.path,
-                tail.fallback_path.as_deref(),
+                tail.kind,
+                tail.allowed_cwd.as_deref(),
+                tail.agy_brain_dir.as_deref(),
+            ) else {
+                return (None, false);
+            };
+            let valid_fallback = tail.fallback_path.as_deref().and_then(|fb| {
+                validate_existing_or_pending_tail_path(
+                    fb,
+                    tail.kind,
+                    tail.allowed_cwd.as_deref(),
+                    tail.agy_brain_dir.as_deref(),
+                )
+            });
+            let (payload, more) = fetch_append_lines(
+                &valid_primary,
+                valid_fallback.as_deref(),
                 None,
                 tail.offset,
                 tail.using_fallback,
@@ -197,7 +216,15 @@ async fn fetch_active_tail(tail: &ActiveTailSource) -> (Option<ActiveTailChunk>,
 }
 
 async fn fetch_raw_log_chunk(tail: &ActiveTailSource) -> (Option<ActiveTailChunk>, bool) {
-    let Ok(mut file) = tokio::fs::File::open(&tail.path).await else {
+    let Some(canon_path) = validate_confined_tail_path(
+        &tail.path,
+        ActiveTailKind::CommandLog,
+        tail.allowed_cwd.as_deref(),
+        tail.agy_brain_dir.as_deref(),
+    ) else {
+        return (None, false);
+    };
+    let Ok(mut file) = tokio::fs::File::open(&canon_path).await else {
         return (None, false);
     };
     let Ok(meta) = file.metadata().await else {
@@ -279,16 +306,31 @@ async fn fetch_append_lines(
     read_cap: usize,
 ) -> (Option<SidebandPayload>, bool) {
     let mut resolved_override: Option<PathBuf> = None;
-    let (using_fallback, file_res) = match tokio::fs::File::open(path).await {
+    let open_nonsymlink = |p: &Path| {
+        let ok = std::fs::symlink_metadata(p)
+            .is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
+            && !is_forbidden_tail_target(p);
+        let p = p.to_path_buf();
+        async move {
+            if !ok {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "denied tail target",
+                ));
+            }
+            tokio::fs::File::open(&p).await
+        }
+    };
+    let (using_fallback, file_res) = match open_nonsymlink(path).await {
         Ok(f) => (false, Ok(f)),
         Err(_) => match fallback_path {
-            Some(fb) => (true, tokio::fs::File::open(fb).await),
+            Some(fb) => (true, open_nonsymlink(fb).await),
             None => match scan_sessions_dir {
                 Some((sessions_dir, sid)) => {
                     let Some(found) = scan_grok_session_file(sessions_dir, sid).await else {
                         return (Some(SidebandPayload::Unresolved), false);
                     };
-                    let open_res = tokio::fs::File::open(&found).await;
+                    let open_res = open_nonsymlink(&found).await;
                     resolved_override = Some(found);
                     (false, open_res)
                 }
@@ -512,10 +554,12 @@ async fn fetch_opencode_sqlite(
     let rows_res = sqlx::query(
         "SELECT p.id, p.message_id, p.time_created, p.time_updated, p.data, \
          COALESCE(json_extract(m.data, '$.role'), 'assistant') AS role, \
-         COALESCE(m.time_created, CAST(json_extract(m.data, '$.time.created') AS INTEGER), p.time_created, 0) AS msg_time_created \
+         COALESCE(m.time_created, CAST(json_extract(m.data, '$.time.created') AS INTEGER), p.time_created, 0) AS msg_time_created, \
+         p.session_id \
          FROM part p \
          JOIN message m ON p.message_id = m.id \
-         WHERE p.session_id = ?1 AND p.time_updated >= ?2 \
+         WHERE (p.session_id = ?1 OR p.session_id IN (SELECT id FROM session WHERE parent_id = ?1)) \
+           AND p.time_updated >= ?2 \
          ORDER BY p.time_created ASC, p.id ASC \
          LIMIT 256",
     )
@@ -530,7 +574,8 @@ async fn fetch_opencode_sqlite(
             let fallback_res = sqlx::query(
                 "SELECT p.id, p.message_id, p.time_created, p.time_updated, p.data, \
                  COALESCE(json_extract(m.data, '$.role'), 'assistant') AS role, \
-                 COALESCE(CAST(json_extract(m.data, '$.time.created') AS INTEGER), p.time_created, 0) AS msg_time_created \
+                 COALESCE(CAST(json_extract(m.data, '$.time.created') AS INTEGER), p.time_created, 0) AS msg_time_created, \
+                 p.session_id \
                  FROM part p \
                  JOIN message m ON p.message_id = m.id \
                  WHERE p.session_id = ?1 AND p.time_updated >= ?2 \
@@ -561,6 +606,7 @@ async fn fetch_opencode_sqlite(
             "data": r.try_get::<String, _>(4).unwrap_or_default(),
             "role": r.try_get::<String, _>(5).unwrap_or_else(|_| "assistant".into()),
             "msg_time_created": r.try_get::<i64, _>(6).unwrap_or(0),
+            "session_id": r.try_get::<String, _>(7).unwrap_or_else(|_| session_id.to_string()),
         });
         rows_jsonl.extend_from_slice(rec.to_string().as_bytes());
         rows_jsonl.push(b'\n');

@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use chrono::Utc;
+use otto_core::domain::User;
 use otto_core::{Error, Result};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
@@ -85,7 +86,7 @@ impl CollabHub {
         &self,
         room_id: &str,
         req: &IdeCollabEditReq,
-    ) -> Result<(IdeTargetSpec, String)> {
+    ) -> Result<(IdeTargetSpec, User)> {
         if req.content.len() > MAX_SHARED_BUFFER_BYTES {
             return Err(Error::PayloadTooLarge(
                 "shared buffer exceeds 8 MiB limit".into(),
@@ -103,7 +104,7 @@ impl CollabHub {
             .get_mut(room_id)
             .ok_or_else(|| Error::NotFound(format!("collab room '{room_id}' not found")))?;
         let target = room.target.clone();
-        let host_user_id = room.host_user_id.clone();
+        let host_user = room.host_user.clone();
         {
             let rec = room.find_authenticated_peer_mut(&req.peer_id, &req.peer_secret)?;
             if rec.peer.role != IdeCollabRole::Editor {
@@ -114,7 +115,20 @@ impl CollabHub {
         }
         Self::check_base_version(room.shared_buffers.get(&req.path), req.base_version)?;
         room.last_activity_at = Instant::now();
-        Ok((target, host_user_id))
+        Ok((target, host_user))
+    }
+
+    /// Mark an already-applied shared buffer version as dirty if a subsequent disk save failed.
+    pub fn mark_buffer_dirty(&self, room_id: &str, path: &str, version: u64) {
+        if let Ok(mut guard) = self.rooms.write() {
+            if let Some(room) = guard.get_mut(room_id) {
+                if let Some(rec) = room.shared_buffers.get_mut(path) {
+                    if rec.buf.version == version {
+                        rec.clean = false;
+                    }
+                }
+            }
+        }
     }
 
     fn check_base_version(

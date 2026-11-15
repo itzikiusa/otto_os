@@ -6,6 +6,39 @@ use super::*;
 
 use crate::http::MCP_PROFILES_META;
 
+pub(super) fn codex_creds_path(session_id: &Id) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("otto-mcp")
+        .join(format!("{session_id}.json"))
+}
+
+pub(super) fn codex_server_env_path(session_id: &Id, server: &str) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("otto-mcp")
+        .join(format!("{session_id}.{server}.env"))
+}
+
+pub(super) fn pi_mcp_extension_path(session_id: &Id) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("otto-mcp")
+        .join(format!("{session_id}.pi-mcp.js"))
+}
+
+pub(super) async fn remove_codex_server_env_files(session_id: &Id) {
+    let dir = std::env::temp_dir().join("otto-mcp");
+    let prefix = format!("{session_id}.");
+    let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && name.ends_with(".env") {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
+}
+
 /// The session's MCP profile ids as the bridge receives them
 /// (`OTTO_MCP_PROFILES` / the creds file's `profiles`): comma-separated, or
 /// `default` when none is stored (existing sessions use the default).

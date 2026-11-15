@@ -80,6 +80,20 @@ impl Drop for AbortOnDrop {
     }
 }
 
+struct IdeShutdownOnDrop(Arc<otto_ide::IdeEngine>);
+
+impl Drop for IdeShutdownOnDrop {
+    fn drop(&mut self) {
+        self.0.lsp_pool.shutdown();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let ide = Arc::clone(&self.0);
+            handle.spawn(async move {
+                ide.shutdown().await;
+            });
+        }
+    }
+}
+
 /// Start every background task, in boot order. `root_user_id` gates the
 /// channel supervisor (none until onboarding).
 pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> Background {
@@ -139,7 +153,17 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     start_model_catalog(ctx);
     start_usage_tracking(ctx);
     spawn_mcp_health_sweep(ctx);
+    spawn_ide_shutdown_watcher(ctx, &mut bg);
     bg
+}
+
+fn spawn_ide_shutdown_watcher(ctx: &ServerCtx, bg: &mut Background) {
+    bg.keep(IdeShutdownOnDrop(Arc::clone(&ctx.ide)));
+    let ide = Arc::clone(&ctx.ide);
+    tokio::spawn(async move {
+        crate::shutdown::cancelled().await;
+        ide.shutdown().await;
+    });
 }
 
 /// Reconcile the memory FTS index off the request path: it used to run
@@ -186,8 +210,15 @@ fn spawn_boot_warmups(ctx: &ServerCtx) {
         );
         let families = manager.providers().model_families();
         let probe = otto_sessions::provider_models::ModelProbe::from_tool_specs(families, &specs);
-        let agy = manager.provider_program("agy");
-        let grok = manager.provider_program("grok");
+        let enabled_program = |p: &str| {
+            manager
+                .providers()
+                .is_enabled(p)
+                .then(|| manager.provider_program(p))
+                .flatten()
+        };
+        let agy = enabled_program("agy");
+        let grok = enabled_program("grok");
         let _ = tokio::join!(
             otto_sessions::tool_probe::probe_tools_cached(specs),
             otto_sessions::provider_models::probe_provider_models_cached(&probe),
@@ -842,58 +873,5 @@ fn spawn_mcp_health_sweep(ctx: &ServerCtx) {
 }
 
 #[cfg(test)]
-mod background_shutdown_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn dropping_background_cancels_supervisors_and_aborts_owned_tasks() {
-        let signal = crate::cancel_signal::CancelSignal::new();
-        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel::<()>();
-        let task = tokio::spawn(async move {
-            let _finished_tx = finished_tx;
-            std::future::pending::<()>().await;
-        });
-        let mut background = Background::default();
-        background.keep(CancelOnDrop(signal.clone()));
-        background.keep(StopFlagOnDrop(flag.clone()));
-        background.keep(AbortOnDrop(task));
-        assert!(!signal.is_cancelled());
-        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
-        drop(background);
-        assert!(signal.is_cancelled());
-        assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(tokio::time::timeout(Duration::from_secs(1), finished_rx)
-            .await
-            .expect("owned task was aborted")
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn stop_watcher_drops_handles_before_teardown_even_without_signal() {
-        let signal = crate::cancel_signal::CancelSignal::new();
-        let mut background = Background::default();
-        background.keep(CancelOnDrop(signal.clone()));
-        // Mirrors the daemon's ownership: an early server exit must stop
-        // admission even if the shutdown watcher never received a signal.
-        let watcher = background.stop_on(std::future::pending());
-        watcher.abort();
-        let _ = watcher.await;
-        assert!(signal.is_cancelled(), "teardown sees cancelled admission");
-    }
-
-    #[tokio::test]
-    async fn stop_watcher_cancels_on_signal_before_it_returns() {
-        let signal = crate::cancel_signal::CancelSignal::new();
-        let mut background = Background::default();
-        background.keep(CancelOnDrop(signal.clone()));
-        let (stop, stopped) = tokio::sync::oneshot::channel();
-        let watcher = background.stop_on(async move {
-            let _ = stopped.await;
-        });
-        assert!(!signal.is_cancelled());
-        stop.send(()).unwrap();
-        watcher.await.unwrap();
-        assert!(signal.is_cancelled());
-    }
-}
+#[path = "tasks_tests.rs"]
+mod background_shutdown_tests;

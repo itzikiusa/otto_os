@@ -16,6 +16,11 @@ export function composerContent(d: ComposerContent): RuntimeDraftContent {
     get text() { return d.text; }, set text(v) { d.text = v; },
     get images() { return d.images; }, set images(v) { d.images = v; },
     get model() { return d.model; }, set model(v) { d.model = v; },
+    get model_default() { return d.model === null; },
+    set model_default(v) {
+      if (v === true) d.model = null;
+      else if (v === false && d.model === null) d.model = undefined;
+    },
     get effort() { return d.effort; }, set effort(v) { d.effort = v; },
     get access_mode() { return d.pickedMode; }, set access_mode(v) { d.pickedMode = v; },
     get fresh_context() { return d.freshContext; }, set fresh_context(v) { d.freshContext = v; },
@@ -23,17 +28,43 @@ export function composerContent(d: ComposerContent): RuntimeDraftContent {
   };
 }
 export function snapshotDraft(d: ComposerContent): RuntimeDraftContent {
-  return JSON.parse(JSON.stringify(composerContent(d))) as RuntimeDraftContent;
+  const cloned = JSON.parse(JSON.stringify(composerContent(d))) as RuntimeDraftContent;
+  if (d.model === undefined) cloned.model = undefined;
+  return cloned;
 }
 export function acknowledgeComposer(d: ComposerContent, sent: RuntimeDraftContent): void {
   acknowledgeDraft(composerContent(d), sent);
 }
 
 export function emptyDraft(): RuntimeDraftContent {
-  return { text: '', images: [], model: undefined, effort: null, access_mode: null, fresh_context: false, context: [] };
+  return {
+    text: '',
+    images: [],
+    model: undefined,
+    model_default: false,
+    effort: null,
+    access_mode: null,
+    fresh_context: false,
+    context: [],
+  };
+}
+function normalizeRemoteDraftModel(draft: RuntimeDraftContent): string | null | undefined {
+  if (typeof draft.model === 'string' && draft.model !== '') return draft.model;
+  if (draft.model_default === true) return null;
+  return undefined;
 }
 function isEmptyDraftContent(d: RuntimeDraftContent | null | undefined): boolean {
-  return !d || (!d.text && d.images.length === 0 && d.context.length === 0 && !d.fresh_context);
+  return (
+    !d ||
+    (!d.text &&
+      d.images.length === 0 &&
+      d.context.length === 0 &&
+      !d.fresh_context &&
+      !d.model &&
+      !d.model_default &&
+      !d.effort &&
+      !d.access_mode)
+  );
 }
 const DRAFT_KEYS: readonly (keyof RuntimeDraftContent)[] = [
   'text',
@@ -104,9 +135,15 @@ export class DraftPersistence {
       if (record.draft) {
         const addedContext = this.current.context;
         const addedImages = this.current.images;
+        const remoteModel = normalizeRemoteDraftModel(record.draft);
         for (const key of DRAFT_KEYS) {
           if (!equal(this.current[key], before[key])) continue;
-          if (key === 'model' && before.model === undefined && record.draft.model === null && !isEmptyDraftContent(record.draft)) {
+          if (key === 'model') {
+            if (!equal(this.current.model_default ?? (this.current.model === null), before.model_default ?? (before.model === null))) {
+              continue;
+            }
+            this.current.model = remoteModel;
+            this.current.model_default = remoteModel === null;
             continue;
           }
           Object.assign(this.current, { [key]: record.draft[key] });
@@ -146,8 +183,11 @@ export class DraftPersistence {
         const remoteJson = JSON.stringify(remoteDraft);
         if (JSON.stringify(this.current) === this.saved) {
           this.revision = record.revision;
+          const remoteModel = normalizeRemoteDraftModel(remoteDraft);
           for (const key of DRAFT_KEYS) {
-            if (key === 'model' && this.current.model === undefined && remoteDraft.model === null && !isEmptyDraftContent(record.draft)) {
+            if (key === 'model') {
+              this.current.model = remoteModel;
+              this.current.model_default = remoteModel === null;
               continue;
             }
             Object.assign(this.current, { [key]: copy(remoteDraft[key]) });

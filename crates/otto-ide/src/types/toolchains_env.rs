@@ -348,11 +348,11 @@ pub struct IdeProjectEnvironment {
     pub inherit_shell_env: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_roots: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, alias = "moduleSdks")]
     pub module_sdks: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, alias = "goBuildTags")]
     pub go_build_tags: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "moduleGoBuildTags")]
     pub module_go_build_tags: BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_bridge: Option<IdeNetworkBridgeConfig>,
@@ -402,17 +402,17 @@ pub struct IdeUpdateEnvironmentReq {
     pub inherit_shell_env: Option<bool>,
     #[serde(default)]
     pub additional_roots: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, alias = "moduleSdks")]
     pub module_sdks: Option<BTreeMap<String, String>>,
-    #[serde(default)]
+    #[serde(default, alias = "goBuildTags")]
     pub go_build_tags: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, alias = "moduleGoBuildTags")]
     pub module_go_build_tags: Option<BTreeMap<String, Vec<String>>>,
     #[serde(default)]
     pub network_bridge: Option<IdeNetworkBridgeConfig>,
     #[serde(default, alias = "vars")]
     pub env_vars: Vec<IdeEnvVarEntry>,
-    #[serde(default)]
+    #[serde(default, alias = "confirmProdTargets")]
     pub confirm_prod_targets: bool,
 }
 
@@ -511,7 +511,7 @@ pub struct IdeRunConfig {
     pub inherit_shell_env: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sdk_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "toolchainId")]
     pub toolchain_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_launch: Option<String>,
@@ -519,7 +519,7 @@ pub struct IdeRunConfig {
     pub target_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_filter: Option<String>,
-    #[serde(default, alias = "compound_ids", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, alias = "compound_ids", alias = "compoundConfigs")]
     pub compound_configs: Vec<String>,
     #[serde(default)]
     pub auto_detected: bool,
@@ -574,6 +574,13 @@ pub struct IdeUpsertRunConfigReq {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeRunConfigResp {
     pub config: IdeRunConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeRunConfigsResp {
+    pub configs: Vec<IdeRunConfig>,
+    #[serde(default)]
+    pub detected_configs: Vec<IdeRunConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,7 +678,7 @@ pub struct IdeStartRunReq {
     pub offline: bool,
     #[serde(default)]
     pub coverage: bool,
-    #[serde(default)]
+    #[serde(default, alias = "confirmProdTargets")]
     pub confirm_prod_targets: bool,
 }
 

@@ -28,9 +28,13 @@ mod probes;
 mod scan;
 
 pub use claude::{claude_config_dir, record_claude_line, record_claude_rate_limit};
-pub use logins::{run_claude_check, set_claude_check, ClaudeCheckReq, ClaudeRunReq};
+pub use logins::{
+    run_claude_check, run_claude_check_filtered, set_claude_check, set_claude_check_filtered,
+    ClaudeCheckReq, ClaudeRunReq,
+};
 pub use probes::refresh as refresh_cli_limits;
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -131,6 +135,102 @@ pub struct WindowLimit {
     pub severity: Option<String>,
 }
 
+/// Active provider snapshot from `ProviderRegistry` so `GET /usage/limits`
+/// hides disabled providers (e.g. `grok` marked Hidden) and leftover
+/// `~/.claude-*` directories whose custom provider was removed or hidden.
+#[derive(Debug, Clone, Default)]
+pub struct ActiveLimitProviders {
+    enabled_slugs: HashSet<String>,
+    enabled_families: HashSet<String>,
+    claude_tokens: HashSet<String>,
+    claude_dir_hints: HashSet<String>,
+}
+
+fn norm_alnum(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+impl ActiveLimitProviders {
+    /// Build from `(slug, cmd, args, model_family)` tuples of enabled providers.
+    pub fn from_specs<'a>(
+        specs: impl IntoIterator<Item = (&'a str, &'a str, &'a [String], Option<&'a str>)>,
+    ) -> Self {
+        let mut out = Self::default();
+        for (slug, cmd, args, family) in specs {
+            let slug_lc = slug.trim().to_ascii_lowercase();
+            if slug_lc.is_empty() {
+                continue;
+            }
+            out.enabled_slugs.insert(slug_lc.clone());
+            if let Some(fam) = family.map(str::trim).filter(|f| !f.is_empty()) {
+                out.enabled_families.insert(fam.to_ascii_lowercase());
+            }
+            let cmd_base = cmd
+                .split_whitespace()
+                .find(|tok| !tok.contains('='))
+                .unwrap_or("")
+                .rsplit('/')
+                .next()
+                .unwrap_or("");
+            for tok in cmd
+                .split_whitespace()
+                .chain(args.iter().map(String::as_str))
+            {
+                for seg in tok.split(['/', '=', '"', '\'']) {
+                    if seg.starts_with(".claude-") {
+                        out.claude_dir_hints.insert(seg.to_string());
+                        let norm = norm_alnum(seg.trim_start_matches('.'));
+                        if !norm.is_empty() && norm != "claude" {
+                            out.claude_tokens.insert(norm);
+                        }
+                    }
+                }
+            }
+            let is_claude = family.is_some_and(|f| f.eq_ignore_ascii_case("claude"))
+                || slug_lc.starts_with("claude")
+                || cmd_base.to_ascii_lowercase().starts_with("claude");
+            if is_claude {
+                for candidate in [slug_lc.as_str(), cmd_base] {
+                    let norm = norm_alnum(candidate);
+                    if !norm.is_empty() && norm != "claude" {
+                        out.claude_tokens.insert(norm);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether `provider` (`claude`, `codex`, `agy`, `grok`, …) is enabled.
+    pub fn is_enabled(&self, provider: &str) -> bool {
+        let lc = provider.trim().to_ascii_lowercase();
+        if lc == "claude" {
+            self.enabled_slugs.contains("claude")
+        } else {
+            self.enabled_slugs.contains(&lc) || self.enabled_families.contains(&lc)
+        }
+    }
+
+    /// Whether a non-default Claude config dir (`~/.claude-*` or
+    /// `~/.config/claude`) corresponds to an enabled provider.
+    pub fn matches_claude_config_dir(&self, dir: &Path) -> bool {
+        let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        if !name.starts_with(".claude-") {
+            return self.is_enabled("claude");
+        }
+        if self.claude_dir_hints.contains(name) {
+            return true;
+        }
+        let norm = norm_alnum(name.trim_start_matches('.'));
+        !norm.is_empty() && norm != "claude" && self.claude_tokens.contains(&norm)
+    }
+}
+
 /// Every login `user_id` may see, with its newest limits. Root also sees the
 /// machine's default CLI homes. Filesystem work runs on the blocking pool.
 pub async fn remaining_limits(
@@ -139,15 +239,27 @@ pub async fn remaining_limits(
     is_root: bool,
     data_dir: &Path,
 ) -> otto_core::Result<LimitsResp> {
+    remaining_limits_filtered(pool, user_id, is_root, data_dir, None).await
+}
+
+/// [`remaining_limits`] scoped to the providers currently enabled in Settings.
+pub async fn remaining_limits_filtered(
+    pool: &DbPool,
+    user_id: &Id,
+    is_root: bool,
+    data_dir: &Path,
+    active: Option<&ActiveLimitProviders>,
+) -> otto_core::Result<LimitsResp> {
     let accounts = ProviderAccountsRepo::new(pool.clone())
         .list(user_id)
         .await?;
     let checks = logins::load_checks(pool).await;
     let data_dir = data_dir.to_path_buf();
+    let active = active.cloned();
     let readings = probes::readings();
     let now = Utc::now();
     let rows = tokio::task::spawn_blocking(move || {
-        build(
+        build_filtered(
             &accounts,
             is_root,
             &data_dir,
@@ -156,6 +268,7 @@ pub async fn remaining_limits(
             &checks,
             &readings,
             now,
+            active.as_ref(),
         )
     })
     .await
@@ -169,6 +282,7 @@ pub async fn remaining_limits(
 
 /// The rows, in display order: Codex, Claude, Antigravity, Grok; within each
 /// the default login, `~/.claude-*` dirs, then profiles by label.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn build(
     accounts: &[ProviderAccount],
@@ -180,35 +294,55 @@ fn build(
     readings: &probes::Readings,
     now: DateTime<Utc>,
 ) -> Vec<AccountLimits> {
+    build_filtered(
+        accounts, is_root, data_dir, home, env, checks, readings, now, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_filtered(
+    accounts: &[ProviderAccount],
+    is_root: bool,
+    data_dir: &Path,
+    home: &Path,
+    env: &RootsEnv,
+    checks: &logins::Checks,
+    readings: &probes::Readings,
+    now: DateTime<Utc>,
+    active: Option<&ActiveLimitProviders>,
+) -> Vec<AccountLimits> {
     let mut rows: Vec<AccountLimits> =
-        logins::claude_logins(accounts, is_root, data_dir, home, env)
+        logins::claude_logins_filtered(accounts, is_root, data_dir, home, env, active)
             .iter()
             .map(|login| logins::claude_row(login, checks.contains(&login.key), now))
             .collect();
     if is_root {
         let roots = env.discover(home, data_dir);
-        let codex: Vec<_> = roots
-            .codex
-            .iter()
-            .filter(|r| r.kind != RootKind::Account && r.dir.is_dir())
-            .collect();
-        for (i, root) in codex.iter().enumerate() {
-            let key = if i == 0 {
-                "codex:default".to_string()
-            } else {
-                format!("codex:{}", tilde(&root.dir, home))
-            };
-            let label = if i == 0 {
-                "Default Codex login".to_string()
-            } else {
-                tilde(root.dir.parent().unwrap_or(&root.dir), home)
-            };
-            rows.push(codex_row(key, None, label, "default", &root.dir, now));
+        if active.is_none_or(|a| a.is_enabled("codex")) {
+            let codex: Vec<_> = roots
+                .codex
+                .iter()
+                .filter(|r| r.kind != RootKind::Account && r.dir.is_dir())
+                .collect();
+            for (i, root) in codex.iter().enumerate() {
+                let key = if i == 0 {
+                    "codex:default".to_string()
+                } else {
+                    format!("codex:{}", tilde(&root.dir, home))
+                };
+                let label = if i == 0 {
+                    "Default Codex login".to_string()
+                } else {
+                    tilde(root.dir.parent().unwrap_or(&root.dir), home)
+                };
+                rows.push(codex_row(key, None, label, "default", &root.dir, now));
+            }
         }
-        if roots
-            .agy
-            .iter()
-            .any(|r| r.kind != RootKind::Account && r.dir.is_dir())
+        if active.is_none_or(|a| a.is_enabled("agy"))
+            && roots
+                .agy
+                .iter()
+                .any(|r| r.kind != RootKind::Account && r.dir.is_dir())
         {
             rows.push(match readings.get("agy") {
                 Some(r) => probes::agy_row(r, now),
@@ -222,27 +356,31 @@ fn build(
                 ),
             });
         }
-        // A reading exists only when a `grok` provider is set up (the route
-        // passes its program to `refresh_cli_limits`).
-        if let Some(r) = readings.get("grok") {
-            rows.push(probes::grok_row(r, now));
+        // A reading is shown only when `grok` is enabled in Settings (hiding
+        // `grok` immediately drops any cached reading from earlier in the run).
+        if active.is_none_or(|a| a.is_enabled("grok")) {
+            if let Some(r) = readings.get("grok") {
+                rows.push(probes::grok_row(r, now));
+            }
         }
     }
-    let homes = data_dir.join("provider-accounts");
-    for account in accounts {
-        let Some(id) = otto_core::paths::safe_component(&account.id) else {
-            continue;
-        };
-        let key = format!("{}:account:{id}", account.provider);
-        if account.provider == "codex" {
-            rows.push(codex_row(
-                key,
-                Some(account.id.clone()),
-                account.label.clone(),
-                "account",
-                &homes.join(id).join("sessions"),
-                now,
-            ));
+    if active.is_none_or(|a| a.is_enabled("codex")) {
+        let homes = data_dir.join("provider-accounts");
+        for account in accounts {
+            let Some(id) = otto_core::paths::safe_component(&account.id) else {
+                continue;
+            };
+            let key = format!("{}:account:{id}", account.provider);
+            if account.provider == "codex" {
+                rows.push(codex_row(
+                    key,
+                    Some(account.id.clone()),
+                    account.label.clone(),
+                    "account",
+                    &homes.join(id).join("sessions"),
+                    now,
+                ));
+            }
         }
     }
     rows.sort_by_key(|r| (provider_rank(&r.provider), source_rank(&r.source)));
@@ -674,5 +812,57 @@ mod tests {
         ] {
             assert!(v.get(key).is_some(), "{key}");
         }
+    }
+
+    #[test]
+    fn inactive_claude_sub_and_hidden_grok_are_excluded_from_remaining_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".claude/projects")).unwrap();
+        std::fs::create_dir_all(home.join(".claude-work/projects")).unwrap();
+        std::fs::create_dir_all(home.join(".claude-sub/projects")).unwrap();
+        std::fs::create_dir_all(home.join(".codex/sessions")).unwrap();
+        std::fs::create_dir_all(home.join(".gemini/antigravity-cli/brain")).unwrap();
+        let env = RootsEnv {
+            explicit: None,
+            isolated: false,
+            codex_home: None,
+        };
+        let now = at("2026-11-15T20:00:00Z");
+        let readings = probes::Readings::from([(
+            "grok",
+            probes::Reading {
+                taken_at: now,
+                answer: Err("cached before hiding".into()),
+            },
+        )]);
+        let args = vec!["--dangerously-skip-permissions".to_string()];
+        let active = ActiveLimitProviders::from_specs([
+            ("codex", "codex", &[][..], Some("codex")),
+            ("claude", "claude", args.as_slice(), Some("claude")),
+            ("claudework", "claude-work", args.as_slice(), Some("claude")),
+            ("agy", "agy", &[][..], Some("agy")),
+        ]);
+        let rows = build_filtered(
+            &[],
+            true,
+            dir.path(),
+            &home,
+            &env,
+            &Default::default(),
+            &readings,
+            now,
+            Some(&active),
+        );
+        let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "codex:default",
+                "claude:~/.claude",
+                "claude:~/.claude-work",
+                "agy:default",
+            ]
+        );
     }
 }

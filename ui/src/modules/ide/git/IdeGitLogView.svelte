@@ -12,6 +12,7 @@
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import { loadErrorText } from '../../../lib/loadError';
   import { loadPaneWidth } from '../../../lib/paneResizer';
+  import { git } from '../../../lib/stores/git.svelte';
   import { rel } from '../../../lib/stores/now.svelte';
   import BlamePanel from '../../../lib/diff/BlamePanel.svelte';
   import { repoDiffFileLoader } from '../../../lib/diff/diff-load';
@@ -77,6 +78,7 @@
   $effect(() => {
     void refreshTick;
     const repoId = repo.id;
+    void git.refsRev[repoId];
     if (mode !== 'log') return;
     let canceled = false;
     void gitApi.readRefs(repoId).then((res) => {
@@ -92,6 +94,7 @@
   $effect(() => {
     void refreshTick;
     const repoId = repo.id;
+    void git.refsRev[repoId];
     const curMode = mode;
     const fPath = relFilePath;
     const bFilter = branchFilter;

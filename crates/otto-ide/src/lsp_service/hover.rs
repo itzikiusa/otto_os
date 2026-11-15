@@ -26,8 +26,21 @@ pub async fn hover<S: IdeCtx>(ctx: &S, user: &User, req: IdeHoverReq) -> Result<
     }
 
     let target_spec_opt = resolve_hover_target(&req);
+    if !user.is_root && target_spec_opt.is_none() {
+        return Err(Error::Forbidden("workspace target is required".into()));
+    }
     let resolved_opt = match &target_spec_opt {
-        Some(spec) => Some(ctx.ide().targets.resolve(ctx, user, spec).await?),
+        Some(spec) => {
+            let resolved = ctx.ide().targets.resolve(ctx, user, spec).await?;
+            if !req.path.trim().is_empty() {
+                let _ = ctx
+                    .ide()
+                    .targets
+                    .resolve_readable_or_prospective_path(&resolved, &req.path)
+                    .await?;
+            }
+            Some(resolved)
+        }
         None => None,
     };
 

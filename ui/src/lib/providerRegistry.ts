@@ -1,11 +1,22 @@
-// Pure, zero-Svelte provider constants, runtime capability helpers, harness
-// ordering, and display labels shared by `lib/providers.ts`, IDE/Threads
-// modules, and Node `unit/*.test.ts` suites.
+// Pure, zero-Svelte provider constants, family resolution, runtime capability
+// helpers, harness ordering, and display labels shared by `lib/providers.ts`,
+// `lib/providerModels.ts`, IDE/Threads modules, and Node `unit/*.test.ts` suites.
 
-import type { RuntimeProvider, Session } from './api/types.ts';
+import type { MetaResp, RuntimeProvider, RuntimeProviderOrSlug, Session } from './api/types.ts';
 
 /** The pseudo-provider that opens a raw shell — can't plan/review/analyze. */
 export const SHELL_PROVIDER = 'shell';
+
+/** Canonical CLI model families supported across Otto. */
+export const KNOWN_AGENT_FAMILIES = [
+  'claude',
+  'codex',
+  'agy',
+  'gemini',
+  'grok',
+  'opencode',
+  'pi',
+] as const;
 
 /** Harnesses with a structured runtime driver (Threads / IDE Agent dock). */
 export const RUNTIME_PROVIDERS: readonly RuntimeProvider[] = [
@@ -18,27 +29,132 @@ export const RUNTIME_PROVIDERS: readonly RuntimeProvider[] = [
   'pi',
 ];
 
-export function isRuntimeProvider(provider: string): provider is RuntimeProvider {
-  return (RUNTIME_PROVIDERS as readonly string[]).includes(provider);
+/** Infer the canonical agent CLI family (`'claude'`, `'codex'`, `'agy'`, `'gemini'`,
+ *  `'grok'`, `'opencode'`, `'pi'`, `'shell'`) for any built-in or custom provider slug
+ *  (e.g. `'claudework'` -> `'claude'`), using token-boundary matching for short names
+ *  like `'pi'` (so `'pipeline'` or `'api-agent'` never false-matches `'pi'`) plus
+ *  `/meta.provider_models` catalog signatures when a custom slug uses an arbitrary alias. */
+export function inferProviderFamily(
+  provider: string,
+  meta?: Pick<MetaResp, 'provider_models'> | null,
+): string {
+  const p = provider.trim().toLowerCase();
+  if (!p) return '';
+  if (
+    p === 'claude' ||
+    p === 'codex' ||
+    p === 'agy' ||
+    p === 'gemini' ||
+    p === 'grok' ||
+    p === 'opencode' ||
+    p === 'pi' ||
+    p === 'shell'
+  ) {
+    return p;
+  }
+  if (p === 'antigravity' || p.startsWith('agy') || p.startsWith('antigravity') || p.endsWith('-agy')) {
+    return 'agy';
+  }
+  if (p.startsWith('claude') || p.endsWith('-claude') || p.endsWith('_claude')) return 'claude';
+  if (p.startsWith('codex') || p.endsWith('-codex') || p.endsWith('_codex')) return 'codex';
+  if (p.startsWith('gemini') || p.endsWith('-gemini') || p.endsWith('_gemini')) return 'gemini';
+  if (p.startsWith('grok') || p.endsWith('-grok') || p.endsWith('_grok')) return 'grok';
+  if (p.startsWith('opencode') || p.endsWith('-opencode') || p.endsWith('_opencode')) return 'opencode';
+  if (
+    p === 'pi' ||
+    p.startsWith('pi-') ||
+    p.startsWith('pi_') ||
+    p.endsWith('-pi') ||
+    p.endsWith('_pi')
+  ) {
+    return 'pi';
+  }
+
+  const live = meta?.provider_models?.[provider];
+  if (live && live.length > 0) {
+    if (live.some((m) => m.id.startsWith('gemini-4-') || m.id.startsWith('gemini-pro-orchestrator'))) {
+      return 'agy';
+    }
+    if (live.some((m) => m.id === 'opus' || m.id === 'sonnet' || m.id === 'haiku' || m.id.startsWith('claude-'))) {
+      return 'claude';
+    }
+    if (live.some((m) => m.id.startsWith('gpt-5') || m.id.includes('codex'))) {
+      return 'codex';
+    }
+    if (live.some((m) => m.id.startsWith('grok-'))) {
+      return 'grok';
+    }
+    if (live.some((m) => m.id.startsWith('gemini-'))) {
+      return 'gemini';
+    }
+  }
+  return p;
 }
 
-/** What a runtime thread's agent takes besides text. Claude: images + PDFs
- *  (content/document blocks); Codex and pi: images; the ACP agents
- *  (Antigravity, Gemini, Grok, OpenCode): images + PDFs, and the driver
- *  refuses with a clear message if that agent did not advertise them. */
-export function attachmentSupport(provider: string): { images: boolean; files: boolean } {
+/** Whether `provider` can run on Structured Runtime (`AgentRuntime`): true for all 7
+ *  built-in runtime providers AND any custom provider whose CLI family maps to one of
+ *  the 7 structured runtime drivers (e.g. `'claudework'` -> `'claude'`). */
+export function isRuntimeProvider(
+  provider: string,
+  meta?: Pick<MetaResp, 'provider_models' | 'providers'> | null,
+): provider is RuntimeProvider {
+  const clean = provider.trim();
+  if (!clean || clean !== clean.toLowerCase() || clean === SHELL_PROVIDER) return false;
+  if ((RUNTIME_PROVIDERS as readonly string[]).includes(clean)) return true;
+  if (meta?.providers && !meta.providers.includes(clean)) return false;
+  const fam = inferProviderFamily(clean, meta);
+  return (RUNTIME_PROVIDERS as readonly string[]).includes(fam);
+}
+
+/** Return the effective provider slug for a runtime or PTY session:
+ *  prefers `s.meta.provider_slug` (e.g. `'claudework'`) when present so custom
+ *  providers keep their configured identity, icon, and model catalog even when
+ *  `s.provider` stores the underlying protocol driver (`'claude'`). */
+export function sessionProviderSlug(
+  s: { provider: string; meta?: Record<string, unknown> | null } | null | undefined,
+): string {
+  if (!s) return 'claude';
+  const rawSlug = s.meta?.provider_slug;
+  if (typeof rawSlug === 'string' && rawSlug.trim()) return rawSlug.trim();
+  return s.provider;
+}
+
+/** Whether a runtime provider supports steering mid-turn (`PromptDelivery = 'steer'`).
+ *  Supported by Claude (`stream-json`), Codex (`turn/steer`), and pi (`steer` RPC),
+ *  including custom providers mapped to those families (e.g. `claudework`). */
+export function providerSupportsSteer(
+  provider: string,
+  meta?: Pick<MetaResp, 'provider_models' | 'providers'> | null,
+): boolean {
+  if (!isRuntimeProvider(provider, meta)) return false;
+  const fam = inferProviderFamily(provider, meta);
+  return fam === 'claude' || fam === 'codex' || fam === 'pi';
+}
+
+/** What a runtime thread's agent takes besides text. Claude (and Claude-family
+ *  custom providers like `claudework`): images + PDFs; Codex and pi: images; the
+ *  ACP agents (Antigravity, Gemini, Grok, OpenCode): images + PDFs. */
+export function attachmentSupport(
+  provider: string,
+  meta?: Pick<MetaResp, 'provider_models'> | null,
+): { images: boolean; files: boolean } {
+  const fam = inferProviderFamily(provider, meta);
   const files =
-    provider === 'claude' ||
-    provider === 'agy' ||
-    provider === 'gemini' ||
-    provider === 'grok' ||
-    provider === 'opencode';
-  return { images: files || provider === 'codex' || provider === 'pi', files };
+    fam === 'claude' ||
+    fam === 'agy' ||
+    fam === 'gemini' ||
+    fam === 'grok' ||
+    fam === 'opencode';
+  return { images: files || fam === 'codex' || fam === 'pi', files };
 }
 
 /** Whether `f` is an attachment `provider` takes. */
-export function takesFile(provider: string, f: Pick<File, 'type'>): boolean {
-  const can = attachmentSupport(provider);
+export function takesFile(
+  provider: string,
+  f: Pick<File, 'type'>,
+  meta?: Pick<MetaResp, 'provider_models'> | null,
+): boolean {
+  const can = attachmentSupport(provider, meta);
   return (can.images && f.type.startsWith('image/')) || (can.files && f.type === 'application/pdf');
 }
 
@@ -78,7 +194,7 @@ export function orderThreadHarnesses(registered: readonly string[]): string[] {
 export const IDE_RUNTIME_PROVIDERS: readonly RuntimeProvider[] = orderThreadHarnesses(
   RUNTIME_PROVIDERS,
 ) as RuntimeProvider[];
-export type IdeRuntimeProvider = RuntimeProvider;
+export type IdeRuntimeProvider = RuntimeProviderOrSlug;
 
 /** Build the ordered IDE harness list from enabled `/meta.providers`, preserving
  *  an explicit empty registry (`[]`) when every built-in provider is disabled
@@ -98,11 +214,11 @@ export function resolveIdeHarnesses(
 }
 
 /** Filter available harnesses down to enabled structured `/runtime-sessions`
- *  providers for inline edits. Whenever `registeredProviders` is supplied as an
- *  array (even empty `[]`), disabled providers stay excluded. */
+ *  providers for inline edits (including custom providers like `claudework`). */
 export function resolveIdeInlineProviders(
   availableProviders: readonly string[],
   registeredProviders?: readonly string[],
+  meta?: Pick<MetaResp, 'provider_models' | 'providers'> | null,
 ): IdeRuntimeProvider[] {
   const hasRegistry = Array.isArray(registeredProviders);
   const regSet = hasRegistry
@@ -115,7 +231,7 @@ export function resolveIdeInlineProviders(
   const filtered: IdeRuntimeProvider[] = [];
   for (let i = 0; i < availableProviders.length; i++) {
     const p = availableProviders[i]?.trim() ?? '';
-    if (isRuntimeProvider(p) && (!regSet || regSet.has(p)) && !filtered.includes(p)) {
+    if (isRuntimeProvider(p, meta) && (!regSet || regSet.has(p)) && !filtered.includes(p)) {
       filtered.push(p);
     }
   }

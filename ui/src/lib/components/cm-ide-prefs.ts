@@ -321,6 +321,10 @@ export function normalizeIdePreferencesRecord(
   };
 }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+}
+
 export function readIdePreferences(): IdePreferences {
   try {
     if (typeof localStorage === 'undefined') return cloneIdePreferences(DEFAULT_IDE_PREFERENCES);
@@ -331,8 +335,8 @@ export function readIdePreferences(): IdePreferences {
     if (!raw) {
       return normalizeIdePreferencesRecord({}, legacyFmt, legacyKeymap);
     }
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return normalizeIdePreferencesRecord(parsed, legacyFmt, legacyKeymap);
+    const parsed = JSON.parse(raw) as unknown;
+    return normalizeIdePreferencesRecord(isPlainObject(parsed) ? parsed : {}, legacyFmt, legacyKeymap);
   } catch {
     return cloneIdePreferences(DEFAULT_IDE_PREFERENCES);
   }
@@ -361,7 +365,8 @@ export function writeIdePreferences(patch: Partial<IdePreferences>): IdePreferen
   try {
     if (typeof localStorage !== 'undefined') {
       const existingRaw = localStorage.getItem(IDE_PREFS_STORAGE_KEY);
-      const existing = existingRaw ? (JSON.parse(existingRaw) as Record<string, unknown>) : {};
+      const parsedExisting = existingRaw ? (JSON.parse(existingRaw) as unknown) : null;
+      const existing = isPlainObject(parsedExisting) ? parsedExisting : {};
       const persisted: Record<string, unknown> = { ...existing, ...merged };
       for (const staleKey of STALE_ALIAS_KEYS) {
         delete persisted[staleKey];

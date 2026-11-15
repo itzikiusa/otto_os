@@ -9,7 +9,7 @@ use std::time::Duration;
 use otto_core::{Error, Result};
 use serde_json::{json, Value};
 
-use super::adapters::{normalize_target_path, resolve_dap_adapter_with_manager};
+use super::adapters::{display_target_path, resolve_dap_adapter_with_manager};
 use super::read_target_file_for_inline;
 use super::session::{DapManager, DapWireClient, SessionEntry};
 use super::session_transport::boot_session_connection;
@@ -198,8 +198,14 @@ impl DapManager {
     ) -> Result<IdeDebugSessionSnapshot> {
         use futures_util::FutureExt;
 
+        let my_gen = entry.boot_generation.fetch_add(1, Ordering::SeqCst) + 1;
         entry.restarting.store(true, Ordering::SeqCst);
         teardown_connection(entry).await;
+        let lifecycle_guard = entry.lifecycle_lock.lock().await;
+        if entry.boot_generation.load(Ordering::SeqCst) != my_gen {
+            entry.restarting.store(false, Ordering::SeqCst);
+            return Ok(entry.read_snapshot());
+        }
         tokio::task::yield_now().await;
 
         if let Ok(mut files) = entry.configured_bp_files.lock() {
@@ -214,7 +220,7 @@ impl DapManager {
         let _ = entry.initialized_notify.notified().now_or_never();
         let _ = entry.halted_notify.notified().now_or_never();
 
-        let (mut orig_req, orig_ctx) = {
+        let (mut orig_req, mut orig_ctx) = {
             let mut r = entry
                 .orig_req
                 .read()
@@ -228,8 +234,20 @@ impl DapManager {
                 .clone();
             (r, c)
         };
+        if orig_ctx.netbridge.is_none() {
+            if let Some(ref dormant) = orig_ctx.dormant_netbridge {
+                if let Some(reacquired) = dormant.reacquire().await {
+                    orig_ctx.netbridge = Some(Arc::clone(&reacquired));
+                    entry
+                        .orig_ctx
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .netbridge = Some(reacquired);
+                }
+            }
+        }
         for bp in &mut orig_req.breakpoints {
-            bp.path = normalize_target_path(&orig_req.target, &bp.path);
+            bp.path = display_target_path(&orig_req.target, &bp.path);
         }
         entry.mutate_and_broadcast(|snap| {
             snap.state = IdeDebugState::Starting;
@@ -243,6 +261,7 @@ impl DapManager {
             snap.error = None;
         });
         entry.restarting.store(false, Ordering::SeqCst);
+        drop(lifecycle_guard);
 
         let resolved = match resolve_dap_adapter_with_manager(
             &self.data_dir,
@@ -254,14 +273,23 @@ impl DapManager {
         {
             Ok(res) => res,
             Err(err) => {
-                entry.fail_and_evict(&self.sessions, err.to_string());
+                let _guard = entry.lifecycle_lock.lock().await;
+                if entry.boot_generation.load(Ordering::SeqCst) == my_gen && !entry.is_terminal() {
+                    entry.fail_and_evict(&self.sessions, err.to_string());
+                }
                 return Err(err);
             }
         };
+        let _guard = entry.lifecycle_lock.lock().await;
+        if entry.boot_generation.load(Ordering::SeqCst) != my_gen || entry.is_terminal() {
+            return Ok(entry.read_snapshot());
+        }
         if let Err(err) =
             boot_session_connection(&self.sessions, entry, resolved, &orig_req, &orig_ctx).await
         {
-            entry.fail_and_evict(&self.sessions, err.to_string());
+            if entry.boot_generation.load(Ordering::SeqCst) == my_gen && !entry.is_terminal() {
+                entry.fail_and_evict(&self.sessions, err.to_string());
+            }
             return Err(err);
         }
         Ok(entry.read_snapshot())
@@ -329,7 +357,13 @@ pub(super) fn build_session_title(req: &IdeStartDebugReq, adapter: &str) -> Stri
 }
 
 pub(super) fn mark_resumed(entry: &SessionEntry) {
+    if entry.is_terminal() {
+        return;
+    }
     entry.mutate_and_broadcast(|snap| {
+        if matches!(snap.state, IdeDebugState::Terminated | IdeDebugState::Error) {
+            return;
+        }
         snap.state = IdeDebugState::Running;
         snap.stopped_reason = None;
         snap.paused_file = None;
@@ -361,6 +395,9 @@ async fn teardown_connection(entry: &SessionEntry) {
 }
 
 pub(super) async fn stop_entry(entry: &SessionEntry) {
+    entry.boot_generation.fetch_add(1, Ordering::SeqCst);
+    teardown_connection(entry).await;
+    let _guard = entry.lifecycle_lock.lock().await;
     teardown_connection(entry).await;
     entry.mark_terminated();
 }

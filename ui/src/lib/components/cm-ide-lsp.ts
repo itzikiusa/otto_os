@@ -5,6 +5,7 @@
 import { EditorView, ViewPlugin } from '@codemirror/view';
 import type { Extension } from '@codemirror/state';
 import type { IdeDiagnostic } from '../api/types';
+import { pathToFileUri } from '../fileUri.ts';
 import {
   clearLiveLspDiagnostics,
   hasLiveLspDiagnosticsForFile,
@@ -318,7 +319,7 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
     disposePooledEntry(victim);
   }
 
-  const rootUri = `file://${resolvedRoot}`;
+  const rootUri = pathToFileUri(resolvedRoot);
   const langProbeKey = `${serverLang}::${connKey}`;
   const openViews = new Map<string, EditorView>();
   const transport = new mod.WebSocketTransport(opts.wsUri, opts.protocols);
@@ -521,7 +522,7 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
 
   const mod = await loadMarimo();
   const pooled = acquirePooledClient(mod, opts, resolvedRoot);
-  const documentUri = opts.filePath.includes('://') ? opts.filePath : `file://${absFile}`;
+  const documentUri = opts.filePath.includes('://') ? opts.filePath : pathToFileUri(absFile);
 
   const lifecycleCleanup = ViewPlugin.fromClass(class {
     private unsubDiag: (() => void) | null = null;

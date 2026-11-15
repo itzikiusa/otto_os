@@ -13,12 +13,15 @@ class BridgeEnvironmentCache {
   clusters = $state<K8sCluster[]>([]);
   sshConns = $state<Connection[]>([]);
   private clustersLoaded = false;
+  private clustersLoadFailed = false;
+  private sshLoadFailed = false;
   private loadedSshWorkspaces = new Set<string>();
   private inflight: Promise<void> | null = null;
 
   seedClusters(list: readonly K8sCluster[]): void {
     this.clusters = [...list];
     this.clustersLoaded = true;
+    this.clustersLoadFailed = false;
   }
 
   seedSshConns(list: readonly Connection[], workspaceId?: string | null): void {
@@ -30,6 +33,7 @@ class BridgeEnvironmentCache {
       if (list[i].kind === 'ssh') byId.set(list[i].id, list[i]);
     }
     this.sshConns = Array.from(byId.values());
+    this.sshLoadFailed = false;
     if (workspaceId) this.loadedSshWorkspaces.add(workspaceId);
   }
 
@@ -61,8 +65,11 @@ class BridgeEnvironmentCache {
             .then((res) => {
               this.clusters = res ?? [];
               this.clustersLoaded = true;
+              this.clustersLoadFailed = false;
             })
-            .catch(() => {}),
+            .catch(() => {
+              this.clustersLoadFailed = true;
+            }),
         );
       }
       if (missingScopes.length > 0) {
@@ -78,9 +85,13 @@ class BridgeEnvironmentCache {
                 seen.set(this.sshConns[i].id, this.sshConns[i]);
               }
               let anyFulfilled = false;
+              let anyRejected = false;
               for (let i = 0; i < results.length; i++) {
                 const r = results[i];
-                if (r.status !== 'fulfilled') continue;
+                if (r.status !== 'fulfilled') {
+                  anyRejected = true;
+                  continue;
+                }
                 anyFulfilled = true;
                 this.loadedSshWorkspaces.add(r.value.id);
                 for (let j = 0; j < r.value.rows.length; j++) {
@@ -88,11 +99,14 @@ class BridgeEnvironmentCache {
                   if (c.kind === 'ssh') seen.set(c.id, c);
                 }
               }
+              this.sshLoadFailed = anyRejected;
               if (anyFulfilled) {
                 this.sshConns = Array.from(seen.values());
               }
             })
-            .catch(() => {}),
+            .catch(() => {
+              this.sshLoadFailed = true;
+            }),
         );
       }
       await Promise.all(tasks);
@@ -103,8 +117,33 @@ class BridgeEnvironmentCache {
     return p;
   }
 
+  hasUnverifiedTarget(cfg?: Pick<IdeNetworkBridgeConfig, 'k8s_cluster_id' | 'ssh_tunnel_connection_id'> | null): boolean {
+    if (!cfg) return false;
+    const unknownCluster = Boolean(
+      cfg.k8s_cluster_id &&
+        this.clustersLoadFailed &&
+        !this.clusters.some((c) => c.id === cfg.k8s_cluster_id || c.name === cfg.k8s_cluster_id),
+    );
+    const unknownSsh = Boolean(
+      cfg.ssh_tunnel_connection_id &&
+        this.sshLoadFailed &&
+        !this.sshConns.some((c) => c.id === cfg.ssh_tunnel_connection_id || c.name === cfg.ssh_tunnel_connection_id),
+    );
+    return unknownCluster || unknownSsh;
+  }
+
   inspect(cfg?: Pick<IdeNetworkBridgeConfig, 'k8s_cluster_id' | 'k8s_namespace' | 'ssh_tunnel_connection_id'> | null): ProdBridgeTargetInfo {
-    return describeProdBridgeTarget(cfg, this.clusters, this.sshConns);
+    const info = describeProdBridgeTarget(cfg, this.clusters, this.sshConns);
+    if (!info.isProd && this.hasUnverifiedTarget(cfg)) {
+      const targetName = cfg?.k8s_cluster_id || cfg?.ssh_tunnel_connection_id || 'remote target';
+      return {
+        isProd: true,
+        clusterProd: null,
+        sshProd: null,
+        summary: `unverified target "${targetName}"`,
+      };
+    }
+    return info;
   }
 
   isProdBridge(cfg?: IdeNetworkBridgeConfig | null): boolean {

@@ -28,7 +28,7 @@ use super::BridgeGuard;
 use crate::types::{IdeSshSpec, IdeTargetSpec};
 
 /// Launch/attach parameters for the built-in Node/V8 Inspector-to-DAP bridge.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NodeInspectorBridgeSpec {
     pub node_bin: String,
     pub node_flags: Vec<String>,
@@ -110,32 +110,11 @@ impl NodeBridgeState {
 }
 
 pub(super) fn file_url_to_path(url: &str) -> Option<String> {
-    let raw = url.strip_prefix("file://")?;
-    let decoded = percent_decode(raw);
-    if let Ok(canon) = std::fs::canonicalize(&decoded) {
+    let path = otto_core::paths::file_uri_to_path(url)?;
+    if let Ok(canon) = std::fs::canonicalize(&path) {
         return Some(canon.to_string_lossy().into_owned());
     }
-    Some(decoded)
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
-                if let Ok(b) = u8::from_str_radix(hex, 16) {
-                    out.push(b);
-                    i += 3;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    Some(path.to_string_lossy().into_owned())
 }
 
 fn path_to_url_regex(path: &str) -> String {

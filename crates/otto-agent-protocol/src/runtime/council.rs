@@ -16,8 +16,9 @@
 //! person, so it is not a background source and takes no admission slot.
 
 use otto_core::agent_runtime::{
-    CouncilMeta, CouncilRole, CouncilSeatReq, CreateCouncilReq, RuntimeAccessMode,
+    CouncilMeta, CouncilRole, CouncilSeatReq, CreateCouncilReq, OpenPeerReq, RuntimeAccessMode,
     SynthesizeCouncilReq, COUNCIL_MAX_SEATS, COUNCIL_META_KEY, COUNCIL_MIN_SEATS,
+    PROVIDER_SLUG_META_KEY,
 };
 
 use super::*;
@@ -38,6 +39,7 @@ fn council_meta(
     seat: u32,
     role: CouncilRole,
     effort: Option<String>,
+    custom_slug: Option<&str>,
 ) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     let council = CouncilMeta {
@@ -52,6 +54,12 @@ fn council_meta(
     );
     // Version 1: every seat only reads, so parallel agents never clash on files.
     m.insert("read_only".into(), serde_json::Value::Bool(true));
+    if let Some(slug) = custom_slug.map(str::trim).filter(|s| !s.is_empty()) {
+        m.insert(
+            PROVIDER_SLUG_META_KEY.into(),
+            serde_json::Value::String(slug.to_string()),
+        );
+    }
     serde_json::Value::Object(m)
 }
 
@@ -80,14 +88,20 @@ fn council_title(title: Option<&str>, prompt: &str) -> String {
 
 /// "codex gpt-6.1-sol" / "claude" — how errors and titles name a seat.
 fn seat_label(seat: &CouncilSeatReq) -> String {
+    let p = seat
+        .provider_slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| seat.provider.as_str());
     match seat
         .model
         .as_deref()
         .map(str::trim)
         .filter(|m| !m.is_empty())
     {
-        Some(m) => format!("{} {m}", seat.provider.as_str()),
-        None => seat.provider.as_str().to_string(),
+        Some(m) => format!("{p} {m}"),
+        None => p.to_string(),
     }
 }
 
@@ -110,7 +124,7 @@ fn seat_error(n: usize, label: &str, e: Error) -> Error {
 /// One seat's answer as the judge reads it.
 struct SeatAnswer {
     seat: u32,
-    provider: &'static str,
+    provider: String,
     model: Option<String>,
     text: String,
     turn_status: Option<String>,
@@ -222,23 +236,29 @@ impl AgentRuntime {
             )));
         }
         // An unknown provider is refused before anything is spawned.
+        let mut resolved = Vec::with_capacity(n);
         for (i, seat) in req.seats.iter().enumerate() {
-            if self.inner.drivers.create(seat.provider).is_none() {
+            let label = seat_label(seat);
+            let (provider, custom_slug) = self
+                .resolve_target_provider(seat.provider, seat.provider_slug.as_deref())
+                .map_err(|e| seat_error(i + 1, &label, e))?;
+            if self.inner.drivers.create(provider).is_none() {
                 return Err(seat_error(
                     i + 1,
-                    &seat_label(seat),
+                    &label,
                     Error::Invalid("no structured driver for this provider yet".into()),
                 ));
             }
+            resolved.push((provider, custom_slug));
         }
         let council = new_id();
         let base = council_title(req.title.as_deref(), prompt);
         let mut seats: Vec<RuntimeSession> = Vec::with_capacity(n);
-        for (i, seat) in req.seats.iter().enumerate() {
+        for (i, (seat, (provider, custom_slug))) in req.seats.iter().zip(&resolved).enumerate() {
             let label = seat_label(seat);
             let effort = seat.effort.clone().filter(|e| !e.trim().is_empty());
             let create = CreateRuntimeSessionReq {
-                provider: Some(seat.provider),
+                provider: Some(*provider),
                 cwd: req.cwd.clone(),
                 title: Some(format!("{base} · {label}")),
                 model: seat.model.clone(),
@@ -248,6 +268,7 @@ impl AgentRuntime {
                     (i + 1) as u32,
                     CouncilRole::Seat,
                     effort,
+                    custom_slug.as_deref(),
                 )),
             };
             let root = seats.first().map(|s| s.id.clone());
@@ -402,11 +423,21 @@ impl AgentRuntime {
         // A full group refuses before the answers are read: closing a thread
         // is what the person must do either way.
         self.ensure_group_room(&c.root).await?;
+        let (judge_provider, judge_slug) =
+            self.resolve_target_provider(req.provider, req.provider_slug.as_deref())?;
+        if self.inner.drivers.create(judge_provider).is_none() {
+            return Err(Error::Invalid(format!(
+                "no structured driver for provider '{}' yet",
+                judge_slug
+                    .as_deref()
+                    .unwrap_or_else(|| judge_provider.as_str())
+            )));
+        }
         let mut answers = Vec::with_capacity(round.seats.len());
         for (n, s) in c.seats.iter().filter(|(n, _)| round.seats.contains(n)) {
             let mut a = SeatAnswer {
                 seat: *n,
-                provider: s.provider.as_str(),
+                provider: s.provider_slug().to_string(),
                 model: s.model.clone(),
                 text: String::new(),
                 turn_status: None,
@@ -457,13 +488,19 @@ impl AgentRuntime {
             .open_linked(
                 &c.root.id,
                 OpenPeerReq {
-                    provider: req.provider,
+                    provider: judge_provider,
                     prompt: Some(prompt),
                     title: Some(title),
                     model: req.model,
                     effort: effort.clone(),
                     cwd: None,
-                    meta: Some(council_meta(&c.meta.id, 0, CouncilRole::Synthesis, effort)),
+                    meta: Some(council_meta(
+                        &c.meta.id,
+                        0,
+                        CouncilRole::Synthesis,
+                        effort,
+                        judge_slug.as_deref(),
+                    )),
                 },
                 false,
             )
@@ -488,10 +525,18 @@ mod tests {
         assert_eq!(council_title(None, &"a".repeat(80)).chars().count(), 61);
         let seat = CouncilSeatReq {
             provider: otto_core::agent_runtime::RuntimeProvider::Codex,
+            provider_slug: None,
             model: Some("gpt-6.1-sol".into()),
             effort: None,
         };
         assert_eq!(seat_label(&seat), "codex gpt-6.1-sol");
+        let custom_seat = CouncilSeatReq {
+            provider: otto_core::agent_runtime::RuntimeProvider::Claude,
+            provider_slug: Some("claudework".into()),
+            model: Some("opus".into()),
+            effort: None,
+        };
+        assert_eq!(seat_label(&custom_seat), "claudework opus");
         let e = seat_error(2, "codex", Error::Conflict("busy".into()));
         assert!(matches!(e, Error::Conflict(m) if m == "seat 2 (codex): busy"));
     }
@@ -508,7 +553,7 @@ mod tests {
             &[
                 SeatAnswer {
                     seat: 1,
-                    provider: "claude",
+                    provider: "claude".into(),
                     model: Some("opus".into()),
                     text: "Redis".into(),
                     turn_status: Some("completed".into()),
@@ -516,7 +561,7 @@ mod tests {
                 },
                 SeatAnswer {
                     seat: 2,
-                    provider: "codex",
+                    provider: "codex".into(),
                     model: None,
                     text: String::new(),
                     turn_status: Some("failed".into()),
@@ -540,7 +585,7 @@ mod tests {
             &one,
             &[SeatAnswer {
                 seat: 1,
-                provider: "claude",
+                provider: "claude".into(),
                 model: None,
                 text: "Redis, beca".into(),
                 turn_status: Some("interrupted".into()),
@@ -551,10 +596,17 @@ mod tests {
             "Redis, beca\n(its last turn ended interrupted: this answer may be incomplete)"
         ));
         assert!(p.contains("agree") && p.contains("disagree") && p.contains("open questions"));
-        let meta = council_meta(&"c1".into(), 0, CouncilRole::Synthesis, Some("high".into()));
+        let meta = council_meta(
+            &"c1".into(),
+            0,
+            CouncilRole::Synthesis,
+            Some("high".into()),
+            Some("claudework"),
+        );
         assert_eq!(meta["council"]["effort"], "high");
         assert_eq!(meta["council"]["role"], "synthesis");
         assert_eq!(meta["read_only"], true);
+        assert_eq!(meta["provider_slug"], "claudework");
     }
 
     /// A follow-up round's judge reads that round's question with the
@@ -570,7 +622,7 @@ mod tests {
             &[
                 SeatAnswer {
                     seat: 1,
-                    provider: "claude",
+                    provider: "claude".into(),
                     model: None,
                     text: "On TTLs".into(),
                     turn_status: Some("completed".into()),
@@ -578,7 +630,7 @@ mod tests {
                 },
                 SeatAnswer {
                     seat: 3,
-                    provider: "codex",
+                    provider: "codex".into(),
                     model: None,
                     text: String::new(),
                     turn_status: None,

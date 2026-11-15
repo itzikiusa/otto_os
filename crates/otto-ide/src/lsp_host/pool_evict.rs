@@ -44,16 +44,16 @@ fn is_build_manifest_name(name: &str) -> bool {
     )
 }
 
-fn path_to_file_uri(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    if s.starts_with('/') {
-        format!("file://{s}")
-    } else {
-        format!("file:///{s}")
-    }
-}
-
 impl LspPool {
+    /// Terminate and evict all pooled language server processes immediately.
+    pub fn shutdown(&self) {
+        let evicted: Vec<Entry> = {
+            let mut entries = self.lock();
+            entries.drain().map(|(_, e)| e).collect()
+        };
+        Self::finish_evicted_entries(evicted);
+    }
+
     pub(super) fn finish_evicted_entries(evicted: Vec<Entry>) {
         for entry in evicted {
             #[cfg(unix)]
@@ -74,21 +74,23 @@ impl LspPool {
         if local_go_keys.is_empty() {
             return;
         }
-        let desired: HashMap<PoolKey, Vec<String>> = local_go_keys
+        let desired: HashMap<PoolKey, (Vec<String>, Vec<String>)> = local_go_keys
             .into_iter()
             .map(|k| {
                 let tags = self.go_build_tags(&k.root);
-                (k, tags)
+                let canon_tags = crate::go_build_tags::canonicalize_go_build_tags(&tags);
+                (k, (tags, canon_tags))
             })
             .collect();
 
         let mut evicted = Vec::new();
         {
             let mut entries = self.lock();
-            for (k, want_tags) in desired {
-                let changed = entries
-                    .get(&k)
-                    .is_some_and(|e| e.go_build_tags != want_tags);
+            for (k, (want_tags, want_canon)) in desired {
+                let changed = k.go_build_tags != want_canon
+                    || entries
+                        .get(&k)
+                        .is_some_and(|e| e.go_build_tags != want_tags);
                 if changed {
                     if let Some(removed) = entries.remove(&k) {
                         evicted.push(removed);
@@ -203,7 +205,7 @@ impl LspPool {
         if !is_build_manifest_name(name) {
             return;
         }
-        let uri = path_to_file_uri(path);
+        let uri = otto_core::paths::path_to_file_uri(path);
         let candidates: Vec<(PoolKey, mpsc::UnboundedSender<Ctl>)> = self
             .lock()
             .iter()

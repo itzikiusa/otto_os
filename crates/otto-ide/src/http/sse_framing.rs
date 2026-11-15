@@ -14,7 +14,8 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast::{self, error::RecvError};
 
 use crate::types::{
-    IdeCollabEvent, IdeCollabRoom, IdeDebugSessionSnapshot, IdeRunState, IdeRunStatus,
+    IdeCollabEvent, IdeCollabRoom, IdeDebugSessionSnapshot, IdeDebugState, IdeRunState,
+    IdeRunStatus,
 };
 
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -39,17 +40,20 @@ fn format_sse_data(value: &Value) -> Bytes {
     Bytes::from(format!("data: {payload}\n\n"))
 }
 
-fn build_json_sse_response<T>(
+fn build_json_sse_response<T, F>(
     initial: T,
     rx: broadcast::Receiver<T>,
+    latest_snapshot: F,
     stop_after: fn(&T) -> bool,
 ) -> Response
 where
     T: Serialize + Clone + Send + 'static,
+    F: Fn() -> Option<T> + Send + 'static,
 {
-    struct StreamState<T> {
+    struct StreamState<T, F> {
         initial: Option<T>,
         rx: broadcast::Receiver<T>,
+        latest_snapshot: F,
         stop_after: fn(&T) -> bool,
         done: bool,
     }
@@ -58,6 +62,7 @@ where
         StreamState {
             initial: Some(initial),
             rx,
+            latest_snapshot,
             stop_after,
             done: false,
         },
@@ -80,8 +85,24 @@ where
                     let val = serde_json::to_value(&item).unwrap_or_else(|_| json!({}));
                     Some((Ok(format_sse_data(&val)), st))
                 }
-                Ok(Err(RecvError::Lagged(_))) => {
-                    Some((Ok(Bytes::from_static(b": lagged\n\n")), st))
+                Ok(Err(RecvError::Lagged(skipped))) => {
+                    let lag_frame = format!(
+                        "event: lagged\ndata: {{\"lagged\":true,\"skipped\":{skipped}}}\n\n"
+                    );
+                    if let Some(latest) = (st.latest_snapshot)() {
+                        if (st.stop_after)(&latest) {
+                            st.done = true;
+                        }
+                        let val = serde_json::to_value(&latest).unwrap_or_else(|_| json!({}));
+                        let snap_frame = format_sse_data(&val);
+                        let mut combined = Vec::with_capacity(lag_frame.len() + snap_frame.len());
+                        combined.extend_from_slice(lag_frame.as_bytes());
+                        combined.extend_from_slice(&snap_frame);
+                        Some((Ok(Bytes::from(combined)), st))
+                    } else {
+                        st.done = true;
+                        Some((Ok(Bytes::from(lag_frame)), st))
+                    }
                 }
                 Ok(Err(RecvError::Closed)) => None,
                 Err(_) => Some((Ok(Bytes::from_static(b": keepalive\n\n")), st)),
@@ -92,18 +113,30 @@ where
     sse_headers_response(Body::from_stream(stream))
 }
 
-pub(super) fn build_debug_sse_response(
+pub(super) fn build_debug_sse_response<F>(
     initial: IdeDebugSessionSnapshot,
     rx: broadcast::Receiver<IdeDebugSessionSnapshot>,
-) -> Response {
-    build_json_sse_response(initial, rx, |_| false)
+    latest_snapshot: F,
+) -> Response
+where
+    F: Fn() -> Option<IdeDebugSessionSnapshot> + Send + 'static,
+{
+    build_json_sse_response(initial, rx, latest_snapshot, |s| {
+        matches!(s.state, IdeDebugState::Terminated | IdeDebugState::Error)
+    })
 }
 
-pub(super) fn build_run_sse_response(
+pub(super) fn build_run_sse_response<F>(
     initial: IdeRunState,
     rx: broadcast::Receiver<IdeRunState>,
-) -> Response {
-    build_json_sse_response(initial, rx, |s| s.status != IdeRunStatus::Running)
+    latest_snapshot: F,
+) -> Response
+where
+    F: Fn() -> Option<IdeRunState> + Send + 'static,
+{
+    build_json_sse_response(initial, rx, latest_snapshot, |s| {
+        s.status != IdeRunStatus::Running
+    })
 }
 
 pub(super) fn format_collab_event_frame(ev: &IdeCollabEvent) -> Bytes {
@@ -154,9 +187,12 @@ pub(super) fn build_collab_sse_response(
                     let frame = format_collab_event_frame(&ev);
                     Some((Ok(frame), st))
                 }
-                Ok(Err(RecvError::Lagged(_))) => {
-                    Some((Ok(Bytes::from_static(b": lagged\n\n")), st))
-                }
+                Ok(Err(RecvError::Lagged(skipped))) => Some((
+                    Ok(Bytes::from(format!(
+                        "event: lagged\ndata: {{\"lagged\":true,\"skipped\":{skipped}}}\n\n"
+                    ))),
+                    st,
+                )),
                 Ok(Err(RecvError::Closed)) => None,
                 Err(_) => Some((Ok(Bytes::from_static(b": keepalive\n\n")), st)),
             }

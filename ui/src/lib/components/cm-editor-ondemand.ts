@@ -7,6 +7,7 @@ import type { Compartment } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import { api, baseUrl, getToken, WS_BEARER_SUBPROTOCOL } from '../api/client';
 import type { IdeDiagnostic, LspCapabilities } from '../api/types';
+import { fileUriToPath, pathToFileUri } from '../fileUri';
 import { ws } from '../stores/workspace.svelte';
 import { toasts } from '../toast.svelte';
 import { extOf, langExtOf } from './cm-editor-helpers';
@@ -27,9 +28,7 @@ function lspLangFor(filePath: string, ideMode: boolean, language?: string): stri
 }
 
 export function uriToPath(uri: string): string {
-  if (!uri.startsWith('file://')) return uri;
-  try { return decodeURIComponent(uri.slice('file://'.length)); }
-  catch { return uri.slice('file://'.length); }
+  return fileUriToPath(uri);
 }
 
 export function lspWsUrl(
@@ -91,8 +90,8 @@ export async function attachCodeEditorLsp(opts: {
     const wsUri = lspWsUrl(serverLang, resolvedRoot, absFile, opts.connId);
     const token = getToken();
     const protocols = token ? [WS_BEARER_SUBPROTOCOL, token] : undefined;
-    const rootUri = `file://${resolvedRoot}`;
-    const documentUri = absFile.includes('://') ? absFile : `file://${absFile}`;
+    const rootUri = pathToFileUri(resolvedRoot);
+    const documentUri = absFile.includes('://') ? absFile : pathToFileUri(absFile);
     const mod = await opts.ensureIdeMod();
     if (!opts.isCurrent()) return;
     if (!mod.hasWarmPooledLspClient(serverLang, resolvedRoot, opts.connId, absFile)) {

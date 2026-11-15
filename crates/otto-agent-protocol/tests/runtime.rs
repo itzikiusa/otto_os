@@ -687,6 +687,7 @@ async fn codex_takes_model_effort_and_images_per_turn_without_a_respawn() {
         images: vec![PromptImage {
             mime: "image/png".into(),
             data_base64: "iVBORw0KGgo=".into(),
+            name: None,
         }],
         ..RuntimePromptReq::default()
     };
@@ -700,6 +701,7 @@ async fn codex_takes_model_effort_and_images_per_turn_without_a_respawn() {
         images: vec![PromptImage {
             mime: "text/plain".into(),
             data_base64: "eA==".into(),
+            name: None,
         }],
         ..RuntimePromptReq::of("x")
     };
@@ -720,7 +722,6 @@ async fn acp_model_switch_respawns_and_resumes_and_unsupported_input_is_refused(
     rt.prompt(&s.id, "hi").await.unwrap();
     host.wait(is_terminal).await;
     let native = rt.get(&s.id).await.unwrap().native_thread_id;
-
     let switch = RuntimePromptReq {
         model: Some("m2".into()),
         ..RuntimePromptReq::of("again")
@@ -737,16 +738,15 @@ async fn acp_model_switch_respawns_and_resumes_and_unsupported_input_is_refused(
         now.native_thread_id, native,
         "the session was loaded, not replaced"
     );
-
     // the same model again: no respawn
     rt.prompt_with(&s.id, &switch).await.unwrap();
     host.wait_n(is_terminal, 3).await;
     assert_eq!(host.prepared.lock().unwrap().len(), 2);
-
     let image = RuntimePromptReq {
         images: vec![PromptImage {
             mime: "image/png".into(),
             data_base64: "iVBORw0KGgo=".into(),
+            name: None,
         }],
         ..RuntimePromptReq::of("look")
     };
@@ -1259,6 +1259,7 @@ async fn attachments_are_stored_served_and_refused_where_unsupported() {
     let png = PromptImage {
         mime: "image/png".into(),
         data_base64: "iVBORw0KGgo=".into(),
+        name: None,
     };
     let pdf = PromptFile {
         mime: "application/pdf".into(),
@@ -1275,7 +1276,6 @@ async fn attachments_are_stored_served_and_refused_where_unsupported() {
             })
             .unwrap()
     };
-
     // Gemini (the fake) takes embedded PDFs but no images.
     let g = create(&rt, dir.path().to_str().unwrap()).await;
     let with_pdf = RuntimePromptReq {
@@ -1508,8 +1508,14 @@ async fn linked_threads_open_message_and_read_within_their_group() {
     let marker = format!("[otto-thread:{}:finished]", worker.id);
     host.wait(|e| {
         e.session_id == lead.id
-            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
-                if matches!(&turn_item.kind, TurnItemKind::SystemNotice { message } if message.ends_with(&marker)))
+            && matches!(
+                &e.body,
+                RuntimeEventBody::TurnItemUpdated { turn_item }
+                    if matches!(
+                        &turn_item.kind,
+                        TurnItemKind::SystemNotice { message, .. } if message.ends_with(&marker)
+                    )
+            )
     })
     .await;
     assert_eq!(
@@ -1564,10 +1570,10 @@ async fn a_person_asks_other_agents_from_a_thread() {
     let lead = create(&rt, cwd).await;
     let target = |p| AskChildTarget {
         provider: p,
+        provider_slug: None,
         model: None,
         effort: None,
     };
-
     // Never more access than the parent's.
     let wider = rt
         .ask_children(
@@ -1615,8 +1621,14 @@ async fn a_person_asks_other_agents_from_a_thread() {
         let done = format!("[otto-thread:{}:finished]", k.id);
         host.wait(|e| {
             e.session_id == lead.id
-                && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
-                    if matches!(&turn_item.kind, TurnItemKind::SystemNotice { message } if message.ends_with(&done)))
+                && matches!(
+                    &e.body,
+                    RuntimeEventBody::TurnItemUpdated { turn_item }
+                        if matches!(
+                            &turn_item.kind,
+                            TurnItemKind::SystemNotice { message, .. } if message.ends_with(&done)
+                        )
+                )
         })
         .await;
     }
@@ -1691,7 +1703,7 @@ fn notices(host: &TestHost) -> Vec<String> {
     host.items()
         .into_iter()
         .filter_map(|i| match i.kind {
-            TurnItemKind::SystemNotice { message } => Some(message),
+            TurnItemKind::SystemNotice { message, .. } => Some(message),
             _ => None,
         })
         .collect()
@@ -2191,7 +2203,7 @@ async fn a_child_interrupted_by_restart_reports_to_its_parent() {
             .filter(|e| e.session_id == lead.id)
             .filter_map(|e| match e.body {
                 RuntimeEventBody::TurnItemUpdated { turn_item } => match turn_item.kind {
-                    TurnItemKind::SystemNotice { message } => Some(message),
+                    TurnItemKind::SystemNotice { message, .. } => Some(message),
                     _ => None,
                 },
                 _ => None,
@@ -2268,9 +2280,18 @@ async fn closing_a_parent_leaves_its_children_running_and_tells_it_nothing() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let finished = format!("[otto-thread:{}:finished]", worker.id);
     assert!(
-        !host.all().iter().any(|e| e.session_id == lead.id
-            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
-                if matches!(&turn_item.kind, TurnItemKind::SystemNotice { message } if message.ends_with(&finished)))),
+        !host.all().iter().any(|e| {
+            e.session_id == lead.id
+                && matches!(
+                    &e.body,
+                    RuntimeEventBody::TurnItemUpdated { turn_item }
+                        if matches!(
+                            &turn_item.kind,
+                            TurnItemKind::SystemNotice { message, .. }
+                                if message.ends_with(&finished)
+                        )
+                )
+        }),
         "nothing lands in a closed parent"
     );
     assert!(queue_texts(&host, &lead.id).unwrap_or_default().is_empty());
@@ -3251,6 +3272,7 @@ fn seat(
 ) -> otto_core::agent_runtime::CouncilSeatReq {
     otto_core::agent_runtime::CouncilSeatReq {
         provider,
+        provider_slug: None,
         model: None,
         effort: effort.map(str::to_string),
     }
@@ -3269,13 +3291,9 @@ fn council_req(
     }
 }
 
-/// A council is one linked group (seat 1 the root), every seat read-only and
-/// approval-required, each sent the prompt (the same provider may sit
-/// twice); the judge is linked to seat 1, reads every answer and gets the
-/// daemon's own prompt without the "Opened by" header.
 #[tokio::test]
 async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer() {
-    use otto_core::agent_runtime::{CouncilRole, SynthesizeCouncilReq};
+    use otto_core::agent_runtime::CouncilRole;
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap();
     let pool = pool().await;
@@ -3326,14 +3344,7 @@ async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer
     );
 
     let judge = rt
-        .synthesize_council(
-            &seats[2].id,
-            SynthesizeCouncilReq {
-                provider: RuntimeProvider::Gemini,
-                model: None,
-                effort: None,
-            },
-        )
+        .synthesize_council(&seats[2].id, gemini_judge())
         .await
         .unwrap();
     assert_eq!(judge.parent_id.as_ref(), Some(&root.id));
@@ -3359,19 +3370,10 @@ async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer
     ] {
         assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
     }
-
     // A thread outside any council has nothing to synthesize.
     let plain = create(&rt, cwd).await;
     assert!(matches!(
-        rt.synthesize_council(
-            &plain.id,
-            SynthesizeCouncilReq {
-                provider: RuntimeProvider::Gemini,
-                model: None,
-                effort: None,
-            },
-        )
-        .await,
+        rt.synthesize_council(&plain.id, gemini_judge()).await,
         Err(Error::Invalid(_))
     ));
 }
@@ -3421,11 +3423,9 @@ async fn council_is_created_all_or_none() {
     );
 }
 
-/// The judge waits for every seat (409 while one works) and counts against
-/// the group's open-thread cap like any linked thread.
 #[tokio::test]
 async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
-    use otto_core::agent_runtime::{OpenPeerReq, SynthesizeCouncilReq};
+    use otto_core::agent_runtime::OpenPeerReq;
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap();
     let pool = pool().await;
@@ -3440,21 +3440,14 @@ async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
         )
         .await
         .unwrap();
-    let judge = || SynthesizeCouncilReq {
-        provider: RuntimeProvider::Gemini,
-        model: None,
-        effort: None,
-    };
     let busy = rt
-        .synthesize_council(&seats[0].id, judge())
+        .synthesize_council(&seats[0].id, gemini_judge())
         .await
         .expect_err("seats are still in their turn");
     assert!(
         matches!(&busy, Error::Conflict(m) if m.contains("is still working")),
         "{busy:?}"
     );
-    // Both seats have started answering ("working") before they are stopped,
-    // so each keeps a partial answer for the judge.
     for s in &seats {
         host.wait(|e| {
             e.session_id == s.id
@@ -3467,12 +3460,10 @@ async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
         assert!(rt.interrupt(&s.id).await.unwrap());
         assert!(!rt.latest_reply(&s.id, WAIT).await.unwrap().busy);
     }
-
-    // Fill the group to its cap (seat 1 + 8 linked threads).
     let mut extra = Vec::new();
     for i in 0..7 {
-        let p = rt
-            .open_peer(
+        extra.push(
+            rt.open_peer(
                 &seats[0].id,
                 OpenPeerReq {
                     provider: RuntimeProvider::Gemini,
@@ -3485,12 +3476,11 @@ async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
                 },
             )
             .await
-            .unwrap();
-        extra.push(p);
+            .unwrap(),
+        );
     }
-    // The cap is checked before the answers are read.
     let full = rt
-        .synthesize_council(&seats[1].id, judge())
+        .synthesize_council(&seats[1].id, gemini_judge())
         .await
         .expect_err("the group is full");
     assert!(
@@ -3498,13 +3488,12 @@ async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
         "{full:?}"
     );
     rt.close(&extra[0].id).await.unwrap();
-    let j = rt.synthesize_council(&seats[1].id, judge()).await.unwrap();
+    let j = rt
+        .synthesize_council(&seats[1].id, gemini_judge())
+        .await
+        .unwrap();
     let verdict = rt.latest_reply(&j.id, WAIT).await.unwrap();
-    assert!(
-        verdict.text.contains("working"),
-        "the interrupted seats' partial answers: {}",
-        verdict.text
-    );
+    assert!(verdict.text.contains("working"), "{}", verdict.text);
 }
 
 // ---- council rounds: follow-ups, per-round synthesis, restart ----
@@ -3522,6 +3511,7 @@ fn follow_up(
 fn gemini_judge() -> otto_core::agent_runtime::SynthesizeCouncilReq {
     otto_core::agent_runtime::SynthesizeCouncilReq {
         provider: RuntimeProvider::Gemini,
+        provider_slug: None,
         model: None,
         effort: None,
     }
@@ -4010,13 +4000,13 @@ async fn codex_steer_lands_in_the_running_turn_without_cancelling_it() {
         images: vec![PromptImage {
             mime: "image/png".into(),
             data_base64: "iVBORw0KGgo=".into(),
+            name: None,
         }],
         ..Default::default()
     };
     let r = rt.prompt_with(&s.id, &steer_req).await.unwrap();
     assert!(r.steered);
     assert_eq!(r.turn_id, first.turn_id);
-
     host.wait(|e| {
         matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
             if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "steered: more [1]"))
@@ -4154,13 +4144,13 @@ for raw in sys.stdin:
         images: vec![PromptImage {
             mime: "image/png".into(),
             data_base64: "iVBORw0KGgo=".into(),
+            name: None,
         }],
         ..Default::default()
     };
     let r = rt.prompt_with(&s.id, &steer_req).await.unwrap();
     assert!(r.steered);
     assert_eq!(r.turn_id, first.turn_id);
-
     let done = host.wait(is_terminal).await;
     assert_eq!(terminal(&done), Some(TurnTerminalStatus::Completed));
     assert_eq!(

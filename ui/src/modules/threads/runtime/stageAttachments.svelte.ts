@@ -1,29 +1,43 @@
 // Images / PDFs on the new-thread stage: they ride a structured runtime
 // thread's first message. A harness switch hides what the new one can't take.
+import type { MetaResp } from '../../../lib/api/types';
+import { toasts } from '../../../lib/toast.svelte';
 import { attachmentSupport, takesFile } from './attachmentSupport';
-import { readAttachments, type ComposerFile } from './runtimeComposer';
+import { MAX_DRAFT_IMAGES, readAttachments, type ComposerFile } from './runtimeComposer';
 
 export class StageAttachments {
   picked = $state<ComposerFile[]>([]);
   constructor(
     private readonly provider: () => string,
     private readonly enabled: () => boolean,
+    private readonly meta: () => Pick<MetaResp, 'provider_models'> | null | undefined = () => null,
   ) {}
 
   /** What the current harness takes: images, and PDFs too. */
   get can(): { images: boolean; files: boolean } {
-    return this.enabled() ? attachmentSupport(this.provider()) : { images: false, files: false };
+    return this.enabled() ? attachmentSupport(this.provider(), this.meta()) : { images: false, files: false };
   }
   /** The attachments the first message sends. */
   get list(): ComposerFile[] {
-    return this.can.images ? this.picked.filter((a) => takesFile(this.provider(), { type: a.mime })) : [];
+    return this.can.images
+      ? this.picked.filter((a) => takesFile(this.provider(), { type: a.mime }, this.meta()))
+      : [];
   }
   async add(files: File[]): Promise<void> {
-    const read = await readAttachments(files, (f) => takesFile(this.provider(), f));
-    this.picked = [...this.picked, ...read];
+    const read = await readAttachments(files, (f) => takesFile(this.provider(), f, this.meta()));
+    if (read.length === 0) return;
+    const combined = [...this.picked, ...read];
+    if (combined.length > MAX_DRAFT_IMAGES) {
+      toasts.error('Too many attachments', `At most ${MAX_DRAFT_IMAGES} images or PDFs per message.`);
+      this.picked = combined.slice(0, MAX_DRAFT_IMAGES);
+      return;
+    }
+    this.picked = combined;
   }
   paste(e: ClipboardEvent): void {
-    const files = this.can.images ? [...(e.clipboardData?.files ?? [])].filter((f) => takesFile(this.provider(), f)) : [];
+    const files = this.can.images
+      ? [...(e.clipboardData?.files ?? [])].filter((f) => takesFile(this.provider(), f, this.meta()))
+      : [];
     if (files.length === 0) return;
     e.preventDefault();
     void this.add(files);

@@ -4,6 +4,7 @@
 //! and Multi-Language Test/Run Execution Engine (`EnvironmentManager`).
 
 mod crud;
+mod crud_folders;
 mod db_store;
 pub mod discovery;
 mod discovery_jvm_py;
@@ -37,10 +38,12 @@ use crate::types::{IdeEnvVarEntry, IdeProjectEnvironment, IdeShellEnvResp};
 
 pub use self::db_store::parse_dotenv;
 use self::db_store::{
-    is_valid_env_key, load_all_stored_project_envs, load_stored_project_env, push_unique,
-    safe_join_allowed_roots, StoredEnvVar,
+    is_dangerous_loader_env_key, is_reserved_internal_env_key, is_valid_env_key,
+    load_all_stored_project_envs, load_stored_project_env, push_unique, safe_join_allowed_roots,
+    StoredEnvVar,
 };
 pub use self::discovery::discover_run_configs;
+pub(crate) use self::module_sdks::effective_go_build_tags_for_paths_in_project;
 use self::module_sdks::{
     apply_module_sdk_to_project_env, effective_go_build_tags_for_paths,
     match_longest_module_go_build_tags, match_longest_module_sdk,
@@ -54,18 +57,28 @@ const MAX_SYNC_PROJECT_SNAPSHOTS: usize = 128;
 #[derive(Clone, Default)]
 struct SyncProjectSnapshot {
     key: String,
+    owner_key: Option<String>,
     env: IdeProjectEnvironment,
 }
 
 fn upsert_snapshot_entry(
     guard: &mut Vec<SyncProjectSnapshot>,
     key: String,
+    owner_key: Option<String>,
     env: IdeProjectEnvironment,
 ) {
     if let Some(pos) = guard.iter().position(|s| s.key == key) {
+        if owner_key.is_some() && guard[pos].owner_key.is_none() {
+            // Do not overwrite an explicit primary project snapshot with a synthetic module entry.
+            return;
+        }
         guard.remove(pos);
     }
-    guard.push(SyncProjectSnapshot { key, env });
+    guard.push(SyncProjectSnapshot {
+        key,
+        owner_key,
+        env,
+    });
     if guard.len() > MAX_SYNC_PROJECT_SNAPSHOTS {
         let excess = guard.len() - MAX_SYNC_PROJECT_SNAPSHOTS;
         guard.drain(0..excess);
@@ -93,25 +106,40 @@ fn record_snapshot_into(
         ..env.clone()
     };
     let mut guard = snapshots.write().unwrap_or_else(|e| e.into_inner());
-    upsert_snapshot_entry(&mut guard, project_key.to_string(), base_env.clone());
-    if project_key.starts_with("local:") {
+    guard.retain(|s| s.owner_key.as_deref() != Some(project_key));
+    upsert_snapshot_entry(&mut guard, project_key.to_string(), None, base_env.clone());
+    if let Some(primary_root) = project_key.strip_prefix("local:") {
         for (mod_root, sdk_val) in &base_env.module_sdks {
+            let mod_key = format!("local:{}", mod_root.trim_end_matches('/'));
+            if mod_key == project_key {
+                continue;
+            }
             let mut mod_env = base_env.clone();
             apply_module_sdk_to_project_env(&mut mod_env, mod_root, sdk_val, None, None);
-            mod_env.go_build_tags =
-                effective_go_build_tags_for_paths(&base_env, std::slice::from_ref(mod_root), true);
-            let mod_key = format!("local:{}", mod_root.trim_end_matches('/'));
-            upsert_snapshot_entry(&mut guard, mod_key, mod_env);
+            mod_env.go_build_tags = effective_go_build_tags_for_paths_in_project(
+                Some(primary_root),
+                &base_env,
+                std::slice::from_ref(mod_root),
+                true,
+            );
+            upsert_snapshot_entry(&mut guard, mod_key, Some(project_key.to_string()), mod_env);
         }
         for mod_root in base_env.module_go_build_tags.keys() {
             if base_env.module_sdks.contains_key(mod_root) {
                 continue;
             }
-            let mut mod_env = base_env.clone();
-            mod_env.go_build_tags =
-                effective_go_build_tags_for_paths(&base_env, std::slice::from_ref(mod_root), true);
             let mod_key = format!("local:{}", mod_root.trim_end_matches('/'));
-            upsert_snapshot_entry(&mut guard, mod_key, mod_env);
+            if mod_key == project_key {
+                continue;
+            }
+            let mut mod_env = base_env.clone();
+            mod_env.go_build_tags = effective_go_build_tags_for_paths_in_project(
+                Some(primary_root),
+                &base_env,
+                std::slice::from_ref(mod_root),
+                true,
+            );
+            upsert_snapshot_entry(&mut guard, mod_key, Some(project_key.to_string()), mod_env);
         }
     }
 }
@@ -166,52 +194,54 @@ fn build_cached_local_env(
 
     let mut path_dirs: Vec<String> = Vec::new();
     let mut has_explicit_py = false;
-    if let Some(proj) = proj_opt {
-        if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
-            map.insert("JAVA_HOME".into(), jh.to_string());
-            push_unique(&mut path_dirs, format!("{}/bin", jh.trim_end_matches('/')));
-        }
-        if let Some(gr) = proj.go_root.as_deref().filter(|s| !s.is_empty()) {
-            map.insert("GOROOT".into(), gr.to_string());
-            push_unique(&mut path_dirs, format!("{}/bin", gr.trim_end_matches('/')));
-        }
-        if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
-            push_unique(&mut path_dirs, format!("{}/bin", nh.trim_end_matches('/')));
-        }
-        if let Some(rt) = proj.rust_toolchain.as_deref().filter(|s| !s.is_empty()) {
-            if rt.starts_with('/') {
-                push_unique(&mut path_dirs, format!("{}/bin", rt.trim_end_matches('/')));
-            } else {
-                map.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
+    if caller_is_root {
+        if let Some(proj) = proj_opt {
+            if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
+                map.insert("JAVA_HOME".into(), jh.to_string());
+                push_unique(&mut path_dirs, format!("{}/bin", jh.trim_end_matches('/')));
             }
-        }
-        if let Some(py) = proj.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
-            has_explicit_py = true;
-            if let Some(bin_dir) = Path::new(py).parent() {
-                push_unique(&mut path_dirs, bin_dir.to_string_lossy().into_owned());
-                if let Some(venv) = bin_dir.parent() {
-                    if venv.join("pyvenv.cfg").is_file() {
-                        map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
+            if let Some(gr) = proj.go_root.as_deref().filter(|s| !s.is_empty()) {
+                map.insert("GOROOT".into(), gr.to_string());
+                push_unique(&mut path_dirs, format!("{}/bin", gr.trim_end_matches('/')));
+            }
+            if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
+                push_unique(&mut path_dirs, format!("{}/bin", nh.trim_end_matches('/')));
+            }
+            if let Some(rt) = proj.rust_toolchain.as_deref().filter(|s| !s.is_empty()) {
+                if rt.starts_with('/') {
+                    push_unique(&mut path_dirs, format!("{}/bin", rt.trim_end_matches('/')));
+                } else {
+                    map.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
+                }
+            }
+            if let Some(py) = proj.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
+                has_explicit_py = true;
+                if let Some(bin_dir) = Path::new(py).parent() {
+                    push_unique(&mut path_dirs, bin_dir.to_string_lossy().into_owned());
+                    if let Some(venv) = bin_dir.parent() {
+                        if venv.join("pyvenv.cfg").is_file() {
+                            map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
+                        }
                     }
                 }
             }
-        }
-        if let Some(extra) = proj.extra_path.as_deref().filter(|s| !s.is_empty()) {
-            for seg in extra.split(':').filter(|s| !s.trim().is_empty()) {
-                push_unique(&mut path_dirs, seg.trim().to_string());
+            if let Some(extra) = proj.extra_path.as_deref().filter(|s| !s.is_empty()) {
+                for seg in extra.split(':').filter(|s| !s.trim().is_empty()) {
+                    push_unique(&mut path_dirs, seg.trim().to_string());
+                }
             }
         }
-    }
-    if !has_explicit_py {
-        for vname in [".venv", "venv", ".env"] {
-            let cand = Path::new(root).join(vname);
-            if cand.join("pyvenv.cfg").is_file() && cand.join("bin/python").is_file() {
-                push_unique(
-                    &mut path_dirs,
-                    cand.join("bin").to_string_lossy().into_owned(),
-                );
-                map.insert("VIRTUAL_ENV".into(), cand.to_string_lossy().into_owned());
-                break;
+        if !has_explicit_py {
+            for vname in [".venv", "venv", ".env"] {
+                let cand = Path::new(root).join(vname);
+                if cand.join("pyvenv.cfg").is_file() && cand.join("bin/python").is_file() {
+                    push_unique(
+                        &mut path_dirs,
+                        cand.join("bin").to_string_lossy().into_owned(),
+                    );
+                    map.insert("VIRTUAL_ENV".into(), cand.to_string_lossy().into_owned());
+                    break;
+                }
             }
         }
     }
@@ -269,13 +299,25 @@ fn build_cached_local_env(
     if let Some(dotenv_file) = safe_join_allowed_roots(&allowed_roots, dotenv_rel) {
         if caller_is_root || !otto_core::secret_paths::is_denied_file(&dotenv_file) {
             if let Ok(raw) = std::fs::read_to_string(&dotenv_file) {
-                map.extend(parse_dotenv(&raw));
+                for (k, v) in parse_dotenv(&raw) {
+                    if is_reserved_internal_env_key(&k)
+                        || (!caller_is_root && is_dangerous_loader_env_key(&k))
+                    {
+                        continue;
+                    }
+                    map.insert(k, v);
+                }
             }
         }
     }
 
     if let Some(proj) = proj_opt {
         for item in &proj.env_vars {
+            if is_reserved_internal_env_key(&item.key)
+                || (!caller_is_root && is_dangerous_loader_env_key(&item.key))
+            {
+                continue;
+            }
             if !item.secret {
                 if let Some(val) = &item.value {
                     if is_valid_env_key(&item.key) {
@@ -433,7 +475,7 @@ impl EnvironmentManager {
     }
 
     /// Resolve effective Go build tags for `root` across exact module snapshots,
-    /// ancestor/umbrella project snapshots, `additional_roots`, and `module_go_build_tags`.
+    /// ancestor/umbrella project snapshots, and `module_go_build_tags`.
     pub fn effective_go_build_tags_for_local_root(&self, root: &str) -> Vec<String> {
         let trimmed = root.trim().trim_end_matches('/');
         if trimmed.is_empty() {
@@ -442,30 +484,29 @@ impl EnvironmentManager {
         let cands = vec![trimmed.to_string()];
         let local_key = format!("local:{trimmed}");
         let guard = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
-        let mut out = Vec::new();
         if let Some(exact) = guard.iter().rev().find(|s| {
             let sk = s.key.trim_end_matches('/');
             sk == trimmed || sk == local_key
         }) {
-            for t in effective_go_build_tags_for_paths(&exact.env, &cands, true) {
-                push_unique(&mut out, t);
-            }
+            return effective_go_build_tags_for_paths(&exact.env, &cands, true);
         }
+        let mut out = Vec::new();
         for snap in guard.iter().rev() {
             let Some(snap_root) = snap.key.strip_prefix("local:") else {
                 continue;
             };
+            if let Some((_, mod_tags)) =
+                match_longest_module_go_build_tags(&snap.env.module_go_build_tags, &cands, true)
+            {
+                for t in mod_tags {
+                    push_unique(&mut out, t);
+                }
+                return out;
+            }
             let sr = snap_root.trim_end_matches('/');
             let under_primary =
                 !sr.is_empty() && (trimmed == sr || trimmed.starts_with(&format!("{sr}/")));
-            let under_extra = snap.env.additional_roots.iter().any(|ar| {
-                let art = ar.trim().trim_end_matches('/');
-                !art.is_empty() && (trimmed == art || trimmed.starts_with(&format!("{art}/")))
-            });
-            let matches_mod =
-                match_longest_module_go_build_tags(&snap.env.module_go_build_tags, &cands, true)
-                    .is_some();
-            if under_primary || under_extra || matches_mod {
+            if under_primary {
                 for t in effective_go_build_tags_for_paths(&snap.env, &cands, true) {
                     push_unique(&mut out, t);
                 }
@@ -519,5 +560,18 @@ impl EnvironmentManager {
                     .flatten()
             })
             .collect()
+    }
+
+    /// Stop all active test/program runs and reap local child process groups on shutdown.
+    pub async fn shutdown(&self) {
+        let pids = self.active_local_pids();
+        let handles: Vec<Arc<runner::ActiveRunHandle>> =
+            self.runs.iter().map(|e| Arc::clone(e.value())).collect();
+        for h in handles {
+            let _ = h.stop();
+        }
+        for pid in pids {
+            runner_proc::cleanup_remaining_process_group(Some(pid), true).await;
+        }
     }
 }

@@ -50,59 +50,65 @@ impl EnvironmentManager {
             }
         }
 
+        let allow_sdk_and_path_overrides = caller_is_root || target.kind == IdeTargetKind::Ssh;
         let mut path_dirs: Vec<String> = Vec::new();
-        if let Some(extra) = proj.extra_path.as_deref().filter(|s| !s.is_empty()) {
-            path_dirs.extend(
-                extra
-                    .split(':')
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string),
-            );
+        if allow_sdk_and_path_overrides {
+            if let Some(extra) = proj.extra_path.as_deref().filter(|s| !s.is_empty()) {
+                path_dirs.extend(
+                    extra
+                        .split(':')
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                );
+            }
         }
 
         let mut proj_path_dirs: Vec<String> = Vec::new();
-        if let Some(py) = proj.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
-            if let Some(bin_dir) = Path::new(py).parent() {
-                push_unique(&mut proj_path_dirs, bin_dir.to_string_lossy().into_owned());
-                if let Some(venv) = bin_dir.parent() {
-                    if venv.join("pyvenv.cfg").is_file() || target.kind == IdeTargetKind::Ssh {
-                        map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
+        if allow_sdk_and_path_overrides {
+            if let Some(py) = proj.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
+                if let Some(bin_dir) = Path::new(py).parent() {
+                    push_unique(&mut proj_path_dirs, bin_dir.to_string_lossy().into_owned());
+                    if let Some(venv) = bin_dir.parent() {
+                        if venv.join("pyvenv.cfg").is_file() || target.kind == IdeTargetKind::Ssh {
+                            map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
+                        }
                     }
                 }
             }
-        }
-        if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
-            map.insert("JAVA_HOME".into(), jh.to_string());
-            push_unique(
-                &mut proj_path_dirs,
-                format!("{}/bin", jh.trim_end_matches('/')),
-            );
-        }
-        if let Some(gr) = proj.go_root.as_deref().filter(|s| !s.is_empty()) {
-            map.insert("GOROOT".into(), gr.to_string());
-            push_unique(
-                &mut proj_path_dirs,
-                format!("{}/bin", gr.trim_end_matches('/')),
-            );
-        }
-        if let Some(rt) = proj.rust_toolchain.as_deref().filter(|s| !s.is_empty()) {
-            if rt.starts_with('/') {
+            if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
+                map.insert("JAVA_HOME".into(), jh.to_string());
                 push_unique(
                     &mut proj_path_dirs,
-                    format!("{}/bin", rt.trim_end_matches('/')),
+                    format!("{}/bin", jh.trim_end_matches('/')),
                 );
-            } else {
-                map.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
             }
-        }
-        if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
-            push_unique(
-                &mut proj_path_dirs,
-                format!("{}/bin", nh.trim_end_matches('/')),
-            );
+            if let Some(gr) = proj.go_root.as_deref().filter(|s| !s.is_empty()) {
+                map.insert("GOROOT".into(), gr.to_string());
+                push_unique(
+                    &mut proj_path_dirs,
+                    format!("{}/bin", gr.trim_end_matches('/')),
+                );
+            }
+            if let Some(rt) = proj.rust_toolchain.as_deref().filter(|s| !s.is_empty()) {
+                if rt.starts_with('/') {
+                    push_unique(
+                        &mut proj_path_dirs,
+                        format!("{}/bin", rt.trim_end_matches('/')),
+                    );
+                } else {
+                    map.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
+                }
+            }
+            if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
+                push_unique(
+                    &mut proj_path_dirs,
+                    format!("{}/bin", nh.trim_end_matches('/')),
+                );
+            }
         }
 
         let cfg_sdk = cfg
+            .filter(|_| allow_sdk_and_path_overrides)
             .and_then(|c| c.sdk_path.as_deref())
             .map(str::trim)
             .filter(|s| !s.is_empty());
@@ -158,22 +164,38 @@ impl EnvironmentManager {
 
         if target.kind == IdeTargetKind::Local {
             let mut all_roots = vec![target.root.clone()];
-            for r in proj
-                .additional_roots
-                .iter()
-                .cloned()
-                .chain(target.merged_extra_roots())
-            {
+            let extra_iter: Box<dyn Iterator<Item = String>> = if caller_is_root {
+                Box::new(
+                    proj.additional_roots
+                        .iter()
+                        .cloned()
+                        .chain(target.merged_extra_roots()),
+                )
+            } else {
+                Box::new(target.merged_extra_roots().into_iter())
+            };
+            for r in extra_iter {
                 if !r.is_empty() && !all_roots.contains(&r) {
                     all_roots.push(r);
                 }
             }
 
+            let extend_dotenv = |map: &mut BTreeMap<String, String>, raw: &str| {
+                for (k, v) in parse_dotenv(raw) {
+                    if is_reserved_internal_env_key(&k)
+                        || (!caller_is_root && is_dangerous_loader_env_key(&k))
+                    {
+                        continue;
+                    }
+                    map.insert(k, v);
+                }
+            };
+
             if let Some(dotenv_rel) = proj.dotenv_path.as_deref().filter(|s| !s.is_empty()) {
                 if let Some(dotenv_file) = safe_join_allowed_roots(&all_roots, dotenv_rel) {
                     if caller_is_root || !otto_core::secret_paths::is_denied_file(&dotenv_file) {
                         if let Ok(raw) = tokio::fs::read_to_string(&dotenv_file).await {
-                            map.extend(parse_dotenv(&raw));
+                            extend_dotenv(&mut map, &raw);
                         }
                     }
                 }
@@ -183,7 +205,7 @@ impl EnvironmentManager {
                     && (caller_is_root || !otto_core::secret_paths::is_denied_file(&default_dotenv))
                 {
                     if let Ok(raw) = tokio::fs::read_to_string(&default_dotenv).await {
-                        map.extend(parse_dotenv(&raw));
+                        extend_dotenv(&mut map, &raw);
                     }
                 }
             }
@@ -196,7 +218,7 @@ impl EnvironmentManager {
                 if let Some(resolved_ef) = safe_join_allowed_roots(&all_roots, cfg_env_file) {
                     if caller_is_root || !otto_core::secret_paths::is_denied_file(&resolved_ef) {
                         if let Ok(raw) = tokio::fs::read_to_string(&resolved_ef).await {
-                            map.extend(parse_dotenv(&raw));
+                            extend_dotenv(&mut map, &raw);
                         }
                     }
                 }

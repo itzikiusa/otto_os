@@ -268,10 +268,13 @@ pub(super) async fn handshake_and_run(
     let (ev_tx, ev_rx) = mpsc::unbounded_channel();
     let wire = DapWireClient::spawn(read_io, write_io, ev_tx);
 
-    spawn_event_driver(Arc::clone(sessions), entry.clone(), ev_rx);
+    spawn_event_driver(Arc::clone(sessions), entry.clone(), wire.clone(), ev_rx);
 
     let init_resp = wire.request("initialize", Some(initialize_args)).await?;
     let caps = init_resp.body.as_ref();
+    let supports_config_done = caps
+        .and_then(|c| c.get("supportsConfigurationDoneRequest"))
+        .and_then(Value::as_bool);
     let supports_terminate = caps
         .and_then(|c| c.get("supportsTerminateRequest"))
         .and_then(Value::as_bool)
@@ -325,7 +328,18 @@ pub(super) async fn handshake_and_run(
     }
 
     sync_all_breakpoints(entry, &active_conn).await?;
-    let _ = wire.request("configurationDone", Some(json!({}))).await;
+    if let Err(err) = wire.request("configurationDone", Some(json!({}))).await {
+        let msg = err.to_string();
+        let msg_lc = msg.to_ascii_lowercase();
+        let benign_unsupported = supports_config_done == Some(false)
+            && (msg_lc.contains("unsupported")
+                || msg_lc.contains("unrecognized")
+                || msg_lc.contains("not implemented")
+                || msg_lc.contains("unknown command"));
+        if !benign_unsupported {
+            return Err(Error::Invalid(format!("configurationDone failed: {msg}")));
+        }
+    }
 
     if !launch_done {
         if let Ok(launch_res) =
@@ -370,10 +384,14 @@ pub(super) async fn handshake_and_run(
 fn spawn_event_driver(
     sessions: Arc<DashMap<String, Arc<SessionEntry>>>,
     entry: Arc<SessionEntry>,
+    wire: Arc<DapWireClient>,
     mut ev_rx: mpsc::UnboundedReceiver<DapEvent>,
 ) {
     tokio::spawn(async move {
         while let Some(ev) = ev_rx.recv().await {
+            if wire.is_retired() {
+                break;
+            }
             match ev.event.as_str() {
                 "initialized" => {
                     entry.initialized_notify.notify_one();
@@ -423,10 +441,36 @@ fn spawn_event_driver(
                         .and_then(|b| b.get("threadId"))
                         .and_then(Value::as_i64);
                     if let Ok(conn) = entry.active_conn() {
-                        handle_stopped_event(&entry, &conn, reason, stopped_tid).await;
+                        if Arc::ptr_eq(&conn.wire, &wire) {
+                            handle_stopped_event(&entry, &conn, reason, stopped_tid).await;
+                        }
                     }
                 }
-                "terminated" | "exited" | "__eof__" => {
+                "exited" => {
+                    let exit_code = ev
+                        .body
+                        .as_ref()
+                        .and_then(|b| b.get("exitCode"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
+                    let cat = if exit_code == 0 { "console" } else { "stderr" };
+                    entry.append_output(cat, format!("Process exited with code {exit_code}\n"));
+                    let sessions_fallback = Arc::clone(&sessions);
+                    let entry_fallback = entry.clone();
+                    let wire_fallback = wire.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        if wire_fallback.is_retired() {
+                            return;
+                        }
+                        entry_fallback.disconnect_and_kill();
+                        if !entry_fallback.is_terminal() {
+                            entry_fallback.mark_terminated();
+                        }
+                        evict_terminated_sessions(&sessions_fallback);
+                    });
+                }
+                "terminated" | "__eof__" => {
                     entry.disconnect_and_kill();
                     if !entry.is_terminal() {
                         entry.mark_terminated();

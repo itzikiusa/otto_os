@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{IdeGutterKind, IdeRunnerKind, IdeTargetSpec};
 
+#[path = "runtime_debug_fmt.rs"]
+mod runtime_debug_fmt;
+
 fn default_true() -> bool {
     true
 }
@@ -56,7 +59,7 @@ impl Default for IdeBreakpoint {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeDebugLaunchSpec {
     pub program: String,
     #[serde(default)]
@@ -110,7 +113,9 @@ pub struct IdeStartDebugReq {
     pub skip_tests: bool,
     #[serde(default)]
     pub offline: bool,
-    #[serde(default)]
+    #[serde(default, alias = "breakOnExceptions")]
+    pub break_on_exceptions: bool,
+    #[serde(default, alias = "confirmProdTargets")]
     pub confirm_prod_targets: bool,
 }
 
@@ -324,7 +329,7 @@ pub struct IdeCreateCollabRoomReq {
     pub default_role: IdeCollabRole,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeCreateCollabRoomResp {
     pub room: IdeCollabRoom,
     pub invite_token: String,
@@ -349,13 +354,13 @@ pub struct IdeCollabRoomResp {
     pub room: IdeCollabRoom,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeCollabJoinReq {
     pub display_name: String,
     pub token: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeCollabJoinResp {
     pub peer_id: String,
     pub peer_secret: String,
@@ -377,7 +382,7 @@ pub struct IdeCollabStateResp {
     pub active_debug: Option<IdeDebugSessionSnapshot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeCollabCursorReq {
     pub peer_id: String,
     pub peer_secret: String,
@@ -387,7 +392,7 @@ pub struct IdeCollabCursorReq {
     pub active_line: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeCollabEditReq {
     pub peer_id: String,
     pub peer_secret: String,
@@ -404,7 +409,7 @@ pub struct IdeCollabEditResp {
     pub version: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeCollabDebugActionReq {
     pub peer_id: String,
     pub peer_secret: String,

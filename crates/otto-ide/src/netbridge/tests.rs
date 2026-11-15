@@ -679,6 +679,16 @@ async fn corr_p1_6_routing_cloud_managed_unmapped_vip_port_cgnat_and_idle_listen
         _ => panic!("expected UnixSocket relay for unmapped VIP port"),
     }
 
+    // Non-configured hostname resolving to loopback/private IP is blocked by DNS-rebinding netguard:
+    let rebind_vip = inst.allocate_vip("localhost");
+    let rebind_res = inst
+        .resolve_connect_target(&rebind_vip.to_string(), direct_port)
+        .await;
+    assert!(
+        matches!(rebind_res, Err(otto_core::Error::Forbidden(_))),
+        "hostname resolving to loopback must be blocked by resolve_host_checked"
+    );
+
     inst.stop_idle_listeners();
     assert_eq!(inst.active_host_mapping_listener_count(), 0);
     direct_task.abort();

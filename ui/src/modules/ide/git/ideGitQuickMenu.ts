@@ -9,6 +9,7 @@ import { gitApi, pullReport } from '../../../lib/api/git';
 import type { Repo, RepoStatusResp, StashInfo } from '../../../lib/api/types';
 import { confirmer } from '../../../lib/confirm.svelte';
 import { ctxMenu, type MenuItem, type MenuOptions } from '../../../lib/contextmenu.svelte';
+import { git } from '../../../lib/stores/git.svelte';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { ide, ideBasename, type IdeBottomTab } from '../ideStore.svelte';
@@ -51,6 +52,7 @@ export async function gitFetchRepo(absPath: string): Promise<void> {
   try {
     const st = await api.post<RepoStatusResp>(`/repos/${encodeURIComponent(repo.id)}/fetch`, {});
     ideGit.applyStatus(repo.id, st);
+    git.bumpRefs(repo.id);
     toasts.success('Fetched from remote', repo.name);
   } catch (e) {
     toastError('Couldn’t fetch from remote', e);
@@ -63,13 +65,9 @@ export async function gitPullRepo(absPath: string): Promise<void> {
   try {
     const res = await gitApi.pull(repo.id);
     ideGit.applyStatus(repo.id, res.status);
+    git.bumpRefs(repo.id);
     await ide.loadTree();
-    for (let i = 0; i < ide.tabs.length; i++) {
-      const p = ide.tabs[i].path;
-      if (p.startsWith(`${repo.path.replace(/\/+$/, '')}/`)) {
-        await ideGit.reloadIdeTabIfOpen(p);
-      }
-    }
+    await ideGit.reloadCleanOpenTabsForRepo(repo.path);
     const report = pullReport(res);
     if (report.tone === 'warn') toasts.warn(report.title, report.body);
     else toasts.success(report.title, report.body ?? repo.name);
@@ -116,6 +114,8 @@ export async function gitCreateNewBranch(absPath: string): Promise<void> {
   try {
     const st = await gitApi.checkout(repo.id, { branch: name.trim(), create: true });
     ideGit.applyStatus(repo.id, st);
+    git.bumpRefs(repo.id);
+    await ideGit.reloadCleanOpenTabsForRepo(repo.path);
     toasts.success(`Switched to new branch ${name.trim()}`, repo.name);
   } catch (e) {
     toastError('Couldn’t create branch', e);
@@ -150,7 +150,9 @@ export async function gitOpenBranchesMenu(absPath: string, anchor: IdeMenuAnchor
             .checkout(repo.id, { branch: br.name })
             .then(async (st) => {
               ideGit.applyStatus(repo.id, st);
+              git.bumpRefs(repo.id);
               await ide.loadTree();
+              await ideGit.reloadCleanOpenTabsForRepo(repo.path);
               toasts.success(`Checked out ${br.name}`, repo.name);
             })
             .catch((err) => toastError(`Couldn’t checkout ${br.name}`, err));
@@ -170,7 +172,9 @@ export async function gitOpenBranchesMenu(absPath: string, anchor: IdeMenuAnchor
             .checkout(repo.id, { branch: localName, create: !local.some((l) => l.name === localName) })
             .then(async (st) => {
               ideGit.applyStatus(repo.id, st);
+              git.bumpRefs(repo.id);
               await ide.loadTree();
+              await ideGit.reloadCleanOpenTabsForRepo(repo.path);
               toasts.success(`Checked out ${localName}`, repo.name);
             })
             .catch((err) => toastError(`Couldn’t checkout ${br.name}`, err));
@@ -196,7 +200,9 @@ export async function gitStashSave(absPath: string): Promise<void> {
       op: 'save',
     });
     ideGit.applyStatus(repo.id, st);
+    git.bumpRefs(repo.id);
     await ide.loadTree();
+    await ideGit.reloadCleanOpenTabsForRepo(repo.path);
     toasts.success('Stashed local changes', repo.name);
   } catch (e) {
     toastError('Couldn’t stash local changes', e);
@@ -225,7 +231,9 @@ export async function gitUnstashMenu(absPath: string, anchor: IdeMenuAnchor): Pr
           })
           .then(async (st) => {
             ideGit.applyStatus(repo.id, st);
+            git.bumpRefs(repo.id);
             await ide.loadTree();
+            await ideGit.reloadCleanOpenTabsForRepo(repo.path);
             toasts.success(`Popped stash@{${s.index}}`, repo.name);
           })
           .catch((err) => toastError('Couldn’t apply stash', err));

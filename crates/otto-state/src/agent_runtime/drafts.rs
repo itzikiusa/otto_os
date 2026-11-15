@@ -71,8 +71,10 @@ impl AgentRuntimeRepo {
             || !draft.images.is_empty()
             || !draft.context.is_empty()
             || draft.fresh_context;
-        let has_preferences =
-            draft.model.is_some() || draft.effort.is_some() || draft.access_mode.is_some();
+        let has_preferences = draft.model.is_some()
+            || draft.model_default
+            || draft.effort.is_some()
+            || draft.access_mode.is_some();
         let payload = (has_content || has_preferences).then_some(json.as_str());
         let mut tx = self
             .pool
@@ -297,5 +299,57 @@ mod tests {
         assert_eq!(raw.0, 1, "GET must not mutate stored revision");
         assert!(raw.1.is_some(), "GET must not prune payload_json on read");
         assert_eq!(raw.2, 0);
+    }
+
+    #[tokio::test]
+    async fn composer_draft_three_state_model_round_trips() {
+        let (repo, _pool) = seeded().await;
+        let (u, w, r) = ("u1".into(), "w1".into(), "r1".into());
+
+        // 1) Explicit model override (`Some("opus")`, `model_default: false`).
+        let explicit = RuntimeDraftContent {
+            model: Some("opus".into()),
+            model_default: false,
+            ..Default::default()
+        };
+        let saved = repo
+            .save_composer_draft(&u, &w, &r, 0, &explicit)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 1);
+        let got = repo.composer_draft(&u, &w, &r).await.unwrap();
+        let d = got.draft.expect("explicit model draft");
+        assert_eq!(d.model.as_deref(), Some("opus"));
+        assert!(!d.model_default);
+
+        // 2) Explicit "Default" selection (`model: None`, `model_default: true`)
+        //    must persist even with empty text so a user resetting a pinned
+        //    session's model to Default survives reload!
+        let explicit_default = RuntimeDraftContent {
+            model: None,
+            model_default: true,
+            ..Default::default()
+        };
+        let saved = repo
+            .save_composer_draft(&u, &w, &r, 1, &explicit_default)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 2);
+        let got = repo.composer_draft(&u, &w, &r).await.unwrap();
+        let d = got.draft.expect("explicit default draft");
+        assert_eq!(d.model, None);
+        assert!(d.model_default);
+
+        // 3) Inherit / untouched (`model: None`, `model_default: false`) with
+        //    no other content clears `payload_json` back to `None`.
+        let inherit = RuntimeDraftContent::default();
+        let saved = repo
+            .save_composer_draft(&u, &w, &r, 2, &inherit)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 3);
+        assert!(saved.draft.is_none());
+        let got = repo.composer_draft(&u, &w, &r).await.unwrap();
+        assert!(got.draft.is_none());
     }
 }

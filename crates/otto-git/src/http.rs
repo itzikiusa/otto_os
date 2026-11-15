@@ -88,6 +88,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
         )
         // local ops (#37–47)
         .route("/repos/{id}/status", get(repo_status::<S>))
+        .route("/repos/{id}/file", get(file_routes::repo_file::<S>))
         .route("/repos/{id}/branches", get(repo_branches::<S>))
         .route("/repos/{id}/refs", get(repo_refs::<S>))
         .route(
@@ -1144,10 +1145,7 @@ async fn detect_repo<S: GitCtx>(
     s.roles()
         .check(&user.0, &ws_id, WorkspaceRole::Editor)
         .await?;
-    if req.path.trim().is_empty() {
-        return Err(Error::Invalid("path must not be empty".into()).into());
-    }
-    let top = LocalGit::new(&req.path).toplevel().await?;
+    let top = file_routes::resolve_project_repo_toplevel(&req.path).await?;
     // Already registered at this root? Return it.
     let existing = s.store().list_repos(&ws_id).await?;
     if let Some(mut found) = existing.into_iter().find(|r| r.path == top) {
@@ -1176,10 +1174,7 @@ async fn register_repo<S: GitCtx>(
     // Resolve to the git work-tree root so registering the same repo (or any
     // subdirectory of one) is idempotent — and this also validates that `path`
     // actually IS a git repository (toplevel errors otherwise).
-    let top = LocalGit::new(path)
-        .toplevel()
-        .await
-        .map_err(|_| Error::Invalid(format!("not a git repository: {path}")))?;
+    let top = file_routes::resolve_project_repo_toplevel(path).await?;
     // De-dup: a repo already registered at this root in the workspace is returned
     // as-is instead of inserting a duplicate row (mirrors `detect_repo`). Without
     // this, re-adding the same local path mints a fresh id → a second, identical
@@ -1552,9 +1547,13 @@ async fn repo_status<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
+    Query(q): Query<file_routes::StatusQuery>,
 ) -> ApiResult<Response> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     watch_repo(&s, &repo, &git).await;
+    if q.fresh {
+        crate::status_cache::bump(&id);
+    }
     // Shared across windows: one walk per change, a 1 s memo between (see
     // `status_cache`). Tagged `x-otto-status-cache: hit|miss`.
     let (body, cache) = crate::status_cache::status_body(&id, &git).await?;
@@ -1565,13 +1564,13 @@ async fn repo_status<S: GitCtx>(
 /// asking for status/fetch is what marks a repo as "open". Arming runs off the
 /// request path, so it never delays the response.
 async fn watch_repo<S: GitCtx>(s: &S, repo: &Repo, git: &LocalGit) {
+    let root = PathBuf::from(&repo.path);
+    if otto_core::paths::is_broad_non_project_root(&root) {
+        return;
+    }
     let registry = crate::watch::global(s.events());
     let git_dir = git.git_dir().await;
-    let (id, ws, root) = (
-        repo.id.clone(),
-        repo.workspace_id.clone(),
-        PathBuf::from(&repo.path),
-    );
+    let (id, ws) = (repo.id.clone(), repo.workspace_id.clone());
     tokio::task::spawn_blocking(move || registry.touch(&id, &ws, &root, git_dir.as_deref()));
     // The session's first status also seeds a missing commit-graph (once,
     // guarded): a never-fetched repo otherwise never gets one, and the
@@ -3183,43 +3182,13 @@ async fn pr_commits<S: GitCtx>(
 // Tests — S4 credential ownership on the git use-paths
 // ---------------------------------------------------------------------------
 
+#[path = "http_file.rs"]
+mod file_routes;
+pub use file_routes::RepoFileResp;
+
 #[path = "http_gitops.rs"]
 mod gitops_routes;
 
 #[cfg(test)]
 #[path = "http_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-mod person_call_tests {
-    use otto_core::auth::{
-        carry_request_credential, request_is_person, with_request_credential, RequestCredential,
-        OUTSIDE_REQUEST,
-    };
-
-    /// S11-304: only a person's own credential makes a git route call
-    /// `person_initiated` (in-work-tree hooks run); an agent session's
-    /// credential, no request scope at all, and a task spawned off a person's
-    /// request without carrying the credential do not.
-    #[tokio::test]
-    async fn only_a_person_s_credential_runs_in_worktree_hooks() {
-        let person = RequestCredential::default();
-        let agent = RequestCredential {
-            agent: true,
-            root_withheld: true,
-        };
-        assert!(with_request_credential(person, async { request_is_person() }).await);
-        assert!(!with_request_credential(agent, async { request_is_person() }).await);
-        assert!(!with_request_credential(OUTSIDE_REQUEST, async { request_is_person() }).await);
-        assert!(!request_is_person());
-        let (spawned, carried) = with_request_credential(person, async {
-            let spawned = tokio::spawn(async { request_is_person() }).await.unwrap();
-            let carried = tokio::spawn(carry_request_credential(async { request_is_person() }))
-                .await
-                .unwrap();
-            (spawned, carried)
-        })
-        .await;
-        assert!(!spawned && carried);
-    }
-}

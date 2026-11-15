@@ -20,7 +20,7 @@
   import { PATH_LINK_CTX } from '../../../lib/pathLinks/open';
   import { personalAgentOf } from '../../../lib/personalAgentBadges';
   import { formatEffortShort, formatModelLabel, supportsEffortSelection } from '../../../lib/providerModels';
-  import { harnessLabel } from '../../../lib/providers';
+  import { harnessLabel, sessionProviderSlug } from '../../../lib/providers';
   import type { RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
   import {
     INTERACTIVE_SLASH_COMMANDS,
@@ -202,7 +202,7 @@
 
   let pickerOpen = $state(false);
   let agentEl = $state<HTMLButtonElement | null>(null);
-  const provider = $derived(session?.provider ?? '');
+  const provider = $derived(session ? sessionProviderSlug(session) : '');
   const agentName = $derived(harnessLabel(provider).replace(/ Code$/, ''));
   const chosenModel = $derived(resolveEffectiveDraftModel(draft.model, session?.model));
   const agentLabel = $derived.by(() => {
@@ -211,9 +211,9 @@
   });
 
   const accessMode = $derived(accessModeOverride ?? draft.pickedMode ?? session?.access_mode ?? 'approval-required');
-  const canImages = $derived(attachmentSupport(provider).images);
-  const canFiles = $derived(attachmentSupport(provider).files);
-  const takes = (f: File): boolean => takesFile(provider, f);
+  const canImages = $derived(attachmentSupport(provider, auth.meta).images);
+  const canFiles = $derived(attachmentSupport(provider, auth.meta).files);
+  const takes = (f: File): boolean => takesFile(provider, f, auth.meta);
   let fileEl = $state<HTMLInputElement | null>(null);
 
   $effect(() => {
@@ -248,7 +248,7 @@
           text: finalPrompt,
           ...(modelOverride !== undefined ? { model: modelOverride } : {}),
           ...(sent.effort ? { effort: sent.effort } : {}),
-          ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
+          ...(pics.length ? { images: pics.map(({ name, mime, data_base64 }) => ({ ...(name ? { name } : {}), mime, data_base64 })) } : {}),
           ...(docs.length ? { files: docs } : {}),
           ...(effectiveAccess ? { access_mode: effectiveAccess } : {}),
           ...(sent.fresh_context ? { fresh_context: true } : {}),
@@ -469,17 +469,16 @@
             onshowtasks={hostCommands?.showTasks ? () => hostCommands.showTasks!(sessionId) : undefined}
             queued={p?.queued ?? []}
             {running}
-            canSteer={providerSupportsSteer(provider)}
+            canSteer={providerSupportsSteer(provider, auth.meta)}
             {closed}
             {dormant}
             reopening={draft.reopening}
             onreopen={() => void reopen()}
-            onedit={(t, restoredAtts) => {
-              draft.text = mergeQueuedEdit(draft.text, t);
-              if (restoredAtts.length > 0) {
-                draft.images = mergeQueuedAttachments(draft.images, restoredAtts);
-              }
-              focusComposer();
+            onedit={(t, restoredAtts, editedSessionId) => {
+              const targetDraft = runtimeDrafts.for(editedSessionId);
+              targetDraft.text = mergeQueuedEdit(targetDraft.text, t);
+              if (restoredAtts.length > 0) targetDraft.images = mergeQueuedAttachments(targetDraft.images, restoredAtts);
+              if (editedSessionId === sessionId) focusComposer();
             }}
           />
         {:else if key === 'fresh'}
@@ -579,7 +578,7 @@
               onpointerenter={() => ModelPicker.prefetch()}
               onclick={() => (pickerOpen = true)}
             >
-              {#if session && hasProviderIcon(session.provider)}<ProviderIcon provider={session.provider} size={13} />{/if}
+              {#if session && hasProviderIcon(provider)}<ProviderIcon {provider} size={13} />{/if}
               <span class="ellipsis">{agentLabel}</span>
             </button>
             <RuntimeAccessChip
@@ -635,7 +634,7 @@
     effort={draft.effort}
     mode="full"
     onmodel={(m) => (draft.model = m)}
-    oneffort={supportsEffortSelection(provider) ? (e) => (draft.effort = e) : undefined}
+    oneffort={supportsEffortSelection(provider, auth.meta) ? (e) => (draft.effort = e) : undefined}
     onclose={() => (pickerOpen = false)}
   />
 {/if}

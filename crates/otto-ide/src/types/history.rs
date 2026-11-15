@@ -235,7 +235,12 @@ pub struct IdeHistorySnapshotReq {
     pub label: Option<String>,
     #[serde(default = "default_true", alias = "record_local_history")]
     pub local_history_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "retention_days",
+        alias = "localHistoryRetentionDays",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub local_history_retention_days: Option<u32>,
 }
 

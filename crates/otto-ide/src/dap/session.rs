@@ -15,7 +15,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
 
 use super::adapters::{
-    normalize_target_path, preflight_debug_request, resolve_dap_adapter_with_manager,
+    display_target_path, normalize_target_path, preflight_debug_request,
+    resolve_dap_adapter_with_manager,
 };
 pub(super) use super::session_entry::{
     ActiveConnection, BoxRead, BoxWrite, DapWireClient, SessionEntry,
@@ -40,7 +41,7 @@ pub(crate) const MAX_DEBUG_OUTPUT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_TERMINATED_DEBUG_SESSIONS: usize = 4;
 
 /// Optional host/environment context passed when starting a debug session.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct DapStartContext {
     pub ssh: Option<IdeSshSpec>,
     pub effective_env: BTreeMap<String, String>,
@@ -50,8 +51,25 @@ pub struct DapStartContext {
     pub run_config: Option<IdeRunConfig>,
     pub plugin_adapters: Vec<PluginDapAdapterSpec>,
     pub netbridge: Option<Arc<crate::netbridge::NetBridgeLease>>,
+    pub(crate) dormant_netbridge: Option<crate::netbridge::DormantNetBridge>,
     pub caller_is_root: bool,
     pub owner_user_id: String,
+}
+
+impl std::fmt::Debug for DapStartContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let eff_keys: Vec<&str> = self.effective_env.keys().map(String::as_str).collect();
+        let shell_keys: Vec<&str> = self.shell_env_snapshot.keys().map(String::as_str).collect();
+        f.debug_struct("DapStartContext")
+            .field("ssh_present", &self.ssh.is_some())
+            .field("effective_env_keys", &eff_keys)
+            .field("shell_env_keys", &shell_keys)
+            .field("go_build_tags", &self.go_build_tags)
+            .field("netbridge_present", &self.netbridge.is_some())
+            .field("caller_is_root", &self.caller_is_root)
+            .field("owner_user_id", &self.owner_user_id)
+            .finish()
+    }
 }
 
 impl DapStartContext {
@@ -98,6 +116,7 @@ impl DapStartContext {
         mut self,
         netbridge: Option<Arc<crate::netbridge::NetBridgeLease>>,
     ) -> Self {
+        self.dormant_netbridge = netbridge.as_ref().map(|nb| nb.dormant_handle());
         self.netbridge = netbridge;
         self
     }
@@ -209,6 +228,67 @@ impl DapManager {
         Some((entry.value().owner_user_id.clone(), target))
     }
 
+    /// If debug session `id` had an enabled [`crate::types::IdeNetworkBridgeConfig`]
+    /// whose active lease was released on target exit, return `(target, bridge_cfg, confirm_prod_targets)`
+    /// so the HTTP handler can re-authorize and re-acquire a fresh lease before `Restart`.
+    pub fn session_restart_netbridge_spec(
+        &self,
+        id: &str,
+    ) -> Option<(IdeTargetSpec, crate::types::IdeNetworkBridgeConfig, bool)> {
+        let entry = self.sessions.get(id)?;
+        let ctx_guard = entry
+            .value()
+            .orig_ctx
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if ctx_guard.netbridge.is_some() {
+            return None;
+        }
+        let nb = ctx_guard
+            .project_env
+            .as_ref()
+            .and_then(|p| p.network_bridge.as_ref())
+            .filter(|nb| nb.enabled)?
+            .clone();
+        drop(ctx_guard);
+        let req_guard = entry
+            .value()
+            .orig_req
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        Some((req_guard.target.clone(), nb, req_guard.confirm_prod_targets))
+    }
+
+    /// Attach a freshly re-acquired [`crate::netbridge::NetBridgeLease`] onto session `id`
+    /// prior to `Restart`.
+    pub fn set_session_netbridge(
+        &self,
+        id: &str,
+        lease: Option<Arc<crate::netbridge::NetBridgeLease>>,
+    ) {
+        if let Some(entry) = self.sessions.get(id) {
+            let mut ctx_guard = entry
+                .value()
+                .orig_ctx
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(ref l) = lease {
+                ctx_guard.dormant_netbridge = Some(l.dormant_handle());
+            }
+            ctx_guard.netbridge = lease;
+        }
+    }
+
+    /// Stop and tear down all active debug sessions on daemon shutdown.
+    pub async fn shutdown(&self) {
+        let entries: Vec<Arc<SessionEntry>> =
+            self.sessions.iter().map(|e| e.value().clone()).collect();
+        for entry in entries {
+            stop_entry(&entry).await;
+        }
+        self.sessions.clear();
+    }
+
     /// Return the newest active debug session for `target` owned by `owner_user_id`.
     pub fn active_session_for_target_and_owner(
         &self,
@@ -266,7 +346,7 @@ impl DapManager {
         initial_output: Vec<IdeDebugOutputEntry>,
     ) -> Arc<SessionEntry> {
         for bp in &mut req.breakpoints {
-            bp.path = normalize_target_path(&req.target, &bp.path);
+            bp.path = display_target_path(&req.target, &bp.path);
         }
         let id = format!("dbg_{}", new_id());
         let title = build_session_title(req, &adapter);
@@ -358,6 +438,7 @@ impl DapManager {
             provisional_adapter,
             Vec::new(),
         );
+        let my_gen = entry.boot_generation.load(Ordering::SeqCst);
         let rx = entry.events_tx.subscribe();
         let initial_snap = entry.read_snapshot();
 
@@ -384,6 +465,9 @@ impl DapManager {
                 let shell_vars = environments.shell_env_resolver().vars_or_load().await;
                 EnvironmentManager::merge_late_shell_vars(&mut ctx.effective_env, shell_vars);
             }
+            if entry.boot_generation.load(Ordering::SeqCst) != my_gen || entry.is_terminal() {
+                return;
+            }
             let resolved = match otto_telemetry::context::measure_result(
                 "ide.dap.resolve_adapter",
                 resolve_dap_adapter_with_manager(&data_dir, &req, &ctx, Some(&environments)),
@@ -392,13 +476,17 @@ impl DapManager {
             {
                 Ok(r) => r,
                 Err(err) => {
-                    if !entry.is_terminal() {
+                    let _guard = entry.lifecycle_lock.lock().await;
+                    if entry.boot_generation.load(Ordering::SeqCst) == my_gen
+                        && !entry.is_terminal()
+                    {
                         entry.fail_and_evict(&sessions, err.to_string());
                     }
                     return;
                 }
             };
-            if entry.is_terminal() {
+            let _guard = entry.lifecycle_lock.lock().await;
+            if entry.boot_generation.load(Ordering::SeqCst) != my_gen || entry.is_terminal() {
                 return;
             }
             for item in &resolved.initial_output {
@@ -414,7 +502,7 @@ impl DapManager {
             )
             .await
             {
-                if !entry.is_terminal() {
+                if entry.boot_generation.load(Ordering::SeqCst) == my_gen && !entry.is_terminal() {
                     entry.fail_and_evict(&sessions, err.to_string());
                 }
             }
@@ -483,7 +571,7 @@ impl DapManager {
             .target
             .clone();
         for bp in &mut req.breakpoints {
-            bp.path = normalize_target_path(&target, &bp.path);
+            bp.path = display_target_path(&target, &bp.path);
         }
         if let Ok(mut b) = entry.break_on_exceptions.lock() {
             *b = req.break_on_exceptions;
@@ -596,3 +684,7 @@ mod tests;
 #[cfg(test)]
 #[path = "session_security_tests.rs"]
 mod security_tests;
+
+#[cfg(test)]
+#[path = "session_round5_tests.rs"]
+mod round5_tests;

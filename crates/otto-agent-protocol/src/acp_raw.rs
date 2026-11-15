@@ -356,59 +356,126 @@ impl AcpDriver {
         actions: Vec<SidebandAction>,
     ) {
         for action in actions {
-            match action {
-                SidebandAction::TurnStarted => {
+            self.apply_one_sideband_action(step, None, None, action);
+        }
+    }
+
+    fn apply_one_sideband_action(
+        &mut self,
+        step: &mut DriverStep,
+        child_session_id: Option<&str>,
+        parent_tool_id: Option<&str>,
+        action: SidebandAction,
+    ) {
+        let is_child_scoped = child_session_id.is_some() || parent_tool_id.is_some();
+        match action {
+            SidebandAction::ChildScope {
+                session_id,
+                parent_tool_id: inner_pid,
+                inner,
+            } => {
+                self.apply_one_sideband_action(
+                    step,
+                    session_id.as_deref().or(child_session_id),
+                    inner_pid.as_deref().or(parent_tool_id),
+                    *inner,
+                );
+            }
+            SidebandAction::TurnStarted => {
+                if !is_child_scoped {
                     self.ensure_autonomous_turn(step);
                 }
-                SidebandAction::SystemWakeup { sender, content } => {
+            }
+            SidebandAction::SystemWakeup { sender, content } => {
+                if !is_child_scoped {
                     self.ensure_autonomous_turn_for_sideband_wakeup(step);
                     self.settle_bg_on_system_wakeup(step, sender.as_deref(), &content);
                 }
-                SidebandAction::Thought { text, streaming } => {
-                    self.ensure_autonomous_turn(step);
+            }
+            SidebandAction::Thought { text, streaming } => {
+                self.ensure_autonomous_turn(step);
+                if let Some(pcid) = self.resolve_sideband_parent_call_id(
+                    None,
+                    None,
+                    None,
+                    child_session_id,
+                    parent_tool_id,
+                ) {
+                    self.append_child_text(step, &pcid, SegmentKind::Thought, &text, None);
+                    if !streaming {
+                        self.close_child_segment(step, &pcid);
+                    }
+                } else if !is_child_scoped {
                     self.append_text(step, SegmentKind::Thought, &text, None);
                     if !streaming {
                         self.close_segment(step);
                     }
                 }
-                SidebandAction::Message {
-                    text,
-                    message_id,
-                    streaming,
-                } => {
-                    self.ensure_autonomous_turn(step);
+            }
+            SidebandAction::Message {
+                text,
+                message_id,
+                streaming,
+            } => {
+                self.ensure_autonomous_turn(step);
+                if let Some(pcid) = self.resolve_sideband_parent_call_id(
+                    None,
+                    None,
+                    None,
+                    child_session_id,
+                    parent_tool_id,
+                ) {
+                    self.append_child_text(step, &pcid, SegmentKind::Message, &text, message_id);
+                    if !streaming {
+                        self.close_child_segment(step, &pcid);
+                    }
+                } else if !is_child_scoped {
                     self.append_text(step, SegmentKind::Message, &text, message_id);
                     if !streaming {
                         self.close_segment(step);
                     }
                 }
-                SidebandAction::ToolStart {
-                    id,
+            }
+            SidebandAction::ToolStart {
+                id,
+                title,
+                kind,
+                status,
+                raw_input,
+                file,
+                diff,
+            } => {
+                self.state.retired_tool_ids.retain(|r| r != &id);
+                self.ensure_autonomous_turn(step);
+                let pcid = self.resolve_sideband_parent_call_id(
+                    Some(&id),
+                    Some(&title),
+                    raw_input.as_ref(),
+                    child_session_id,
+                    parent_tool_id,
+                );
+                if pcid.is_none() {
+                    if is_child_scoped {
+                        return;
+                    }
+                    self.close_segment(step);
+                }
+                let diffs = match (&file, &diff) {
+                    (Some(f), Some((old, new))) => vec![(f.clone(), old.clone(), new.clone())],
+                    _ => Vec::new(),
+                };
+                let mut t = Tool {
                     title,
                     kind,
                     status,
                     raw_input,
                     file,
                     diff,
-                } => {
-                    self.state.retired_tool_ids.retain(|r| r != &id);
-                    self.ensure_autonomous_turn(step);
-                    self.close_segment(step);
-                    let diffs = match (&file, &diff) {
-                        (Some(f), Some((old, new))) => vec![(f.clone(), old.clone(), new.clone())],
-                        _ => Vec::new(),
-                    };
-                    let mut t = Tool {
-                        title,
-                        kind,
-                        status,
-                        raw_input,
-                        file,
-                        diff,
-                        diffs,
-                        ..Tool::default()
-                    };
-                    self.emit_tool_or_subagent(step, &id, &t, None, None, None);
+                    diffs,
+                    ..Tool::default()
+                };
+                self.emit_tool_or_subagent(step, &id, &t, None, None, pcid.as_deref());
+                if pcid.is_none() {
                     if !self
                         .state
                         .subagents
@@ -419,43 +486,65 @@ impl AcpDriver {
                     }
                     self.state.tools.insert(id, t);
                 }
-                SidebandAction::ToolUpdate {
-                    id,
-                    status,
-                    title,
-                    kind,
-                    raw_input,
-                    output,
-                    file,
-                    diff,
-                } => {
-                    self.ensure_autonomous_turn(step);
+            }
+            SidebandAction::ToolUpdate {
+                id,
+                status,
+                title,
+                kind,
+                raw_input,
+                output,
+                file,
+                diff,
+            } => {
+                self.ensure_autonomous_turn(step);
+                let pcid = self.resolve_sideband_parent_call_id(
+                    Some(&id),
+                    title.as_deref(),
+                    raw_input.as_ref(),
+                    child_session_id,
+                    parent_tool_id,
+                );
+                if pcid.is_none() {
+                    if is_child_scoped {
+                        return;
+                    }
                     self.close_segment(step);
-                    let mut t = self.state.tools.remove(&id).unwrap_or_default();
-                    t.status = status;
-                    if let Some(title) = title {
-                        t.title = title;
+                }
+                let mut t = if pcid.is_some() {
+                    self.state
+                        .child_tools
+                        .get(&id)
+                        .map(|e| e.tool.clone())
+                        .unwrap_or_default()
+                } else {
+                    self.state.tools.remove(&id).unwrap_or_default()
+                };
+                t.status = status;
+                if let Some(title) = title {
+                    t.title = title;
+                }
+                if let Some(kind) = kind {
+                    t.kind = kind;
+                }
+                if let Some(raw_input) = raw_input {
+                    t.raw_input = Some(raw_input);
+                }
+                if let Some(f) = file {
+                    t.file = Some(f);
+                }
+                if let Some((old, new)) = diff {
+                    if let Some(path) = t.file.clone() {
+                        t.diffs.retain(|(p, _, _)| *p != path);
+                        t.diffs.push((path, old.clone(), new.clone()));
                     }
-                    if let Some(kind) = kind {
-                        t.kind = kind;
-                    }
-                    if let Some(raw_input) = raw_input {
-                        t.raw_input = Some(raw_input);
-                    }
-                    if let Some(f) = file {
-                        t.file = Some(f);
-                    }
-                    if let Some((old, new)) = diff {
-                        if let Some(path) = t.file.clone() {
-                            t.diffs.retain(|(p, _, _)| *p != path);
-                            t.diffs.push((path, old.clone(), new.clone()));
-                        }
-                        t.diff = Some((old, new));
-                    }
-                    if let Some(out) = output {
-                        t.output = out;
-                    }
-                    self.emit_tool_or_subagent(step, &id, &t, None, None, None);
+                    t.diff = Some((old, new));
+                }
+                if let Some(out) = output {
+                    t.output = out;
+                }
+                self.emit_tool_or_subagent(step, &id, &t, None, None, pcid.as_deref());
+                if pcid.is_none() {
                     if !self
                         .state
                         .subagents
@@ -466,7 +555,9 @@ impl AcpDriver {
                     }
                     self.state.tools.insert(id, t);
                 }
-                SidebandAction::Plan(steps) => {
+            }
+            SidebandAction::Plan(steps) => {
+                if !is_child_scoped {
                     self.ensure_autonomous_turn(step);
                     self.close_segment(step);
                     step.push(DriverEvent::Plan {
@@ -474,11 +565,15 @@ impl AcpDriver {
                         explanation: None,
                     });
                 }
-                SidebandAction::Usage(usage) => {
+            }
+            SidebandAction::Usage(usage) => {
+                if !is_child_scoped {
                     self.ensure_autonomous_turn(step);
                     step.push(DriverEvent::Usage(usage));
                 }
-                SidebandAction::TurnCompleted { reason } => {
+            }
+            SidebandAction::TurnCompleted { reason } => {
+                if !is_child_scoped {
                     let status = if reason.as_deref() == Some("cancelled") {
                         TurnTerminalStatus::Interrupted
                     } else {
@@ -489,6 +584,75 @@ impl AcpDriver {
                 }
             }
         }
+    }
+
+    fn resolve_sideband_parent_call_id(
+        &mut self,
+        self_tool_id: Option<&str>,
+        title: Option<&str>,
+        raw_input: Option<&Value>,
+        child_session_id: Option<&str>,
+        parent_tool_id: Option<&str>,
+    ) -> Option<String> {
+        if self.state.subagents.is_empty() {
+            return None;
+        }
+        if let Some(tid) = self_tool_id {
+            if self.state.subagents.contains_key(tid) {
+                return None;
+            }
+            if let Some(existing) = self.state.child_tools.get(tid) {
+                if self.state.subagents.contains_key(&existing.parent_call_id) {
+                    return Some(existing.parent_call_id.clone());
+                }
+            }
+        }
+        if let Some(pid) = parent_tool_id {
+            if self.state.subagents.contains_key(pid) {
+                return Some(pid.to_string());
+            }
+            if let Some((cid, _)) = self
+                .state
+                .subagents
+                .iter()
+                .find(|(_, a)| a.task_id.as_deref() == Some(pid) || a.item_id == pid)
+            {
+                return Some(cid.clone());
+            }
+        }
+        if let Some(sid) = child_session_id {
+            if self.state.session_id.as_deref() != Some(sid) {
+                if let Some((cid, _)) = self.state.subagents.iter().find(|(_, a)| {
+                    a.child_session_id.as_deref() == Some(sid) || a.task_id.as_deref() == Some(sid)
+                }) {
+                    return Some(cid.clone());
+                }
+                let mut open_cards = self
+                    .state
+                    .subagents
+                    .iter_mut()
+                    .filter(|(_, a)| a.status.is_open() && a.child_session_id.is_none());
+                if let Some((cid, card)) = open_cards.next() {
+                    if open_cards.next().is_none() {
+                        card.child_session_id = Some(sid.to_string());
+                        return Some(cid.clone());
+                    }
+                }
+            }
+        }
+        let is_new_subagent = title.is_some_and(|t| {
+            super::subagent::parse::canonical_subagent_tool_name(t, raw_input).is_some()
+        });
+        if !is_new_subagent && self_tool_id.is_some() {
+            return self
+                .state
+                .subagents
+                .iter()
+                .filter(|(_, a)| !a.background && a.status.is_open())
+                .max_by_key(|(_, a)| a.started_at)
+                .map(|(cid, _)| cid.clone());
+        }
+        None
     }
 }
 

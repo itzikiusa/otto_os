@@ -40,6 +40,7 @@ use std::sync::Arc;
 use axum::Router;
 use otto_core::auth::{AuthContext, RoleChecker};
 
+pub use acp_sideband::confinement::validate_confined_tail_path;
 pub use driver::{
     ActiveTailChunk, ActiveTailKind, ActiveTailSource, ChildSignal, DriverError, DriverEvent,
     DriverFactory, DriverStep, LaunchContext, LaunchSpec, McpDelivery, McpServerDef,

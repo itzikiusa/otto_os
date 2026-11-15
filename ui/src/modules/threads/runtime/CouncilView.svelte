@@ -15,10 +15,11 @@
   import { announceShown } from '../../../lib/announce.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
-  import type { CouncilRound, RuntimeProvider } from '../../../lib/api/types';
+  import type { CouncilRound, RuntimeProviderOrSlug } from '../../../lib/api/types';
   import { loadErrorText } from '../../../lib/loadError';
-  import { agentProviders, harnessLabel, providerReadiness } from '../../../lib/providers';
+  import { agentProviders, harnessLabel, providerReadiness, sessionProviderSlug } from '../../../lib/providers';
   import type { RuntimeEmbedStatus } from '../../../lib/runtimeThreadPort';
+  import { auth } from '../../../lib/stores/auth.svelte';
   import { now } from '../../../lib/stores/now.svelte';
   import { getTransientComposerDraft, saveTransientComposerDraft } from '../../../lib/stores/runtimeDraftCursor';
   import { toastError } from '../../../lib/toastError';
@@ -48,7 +49,7 @@
   const working = (id: string): boolean => statuses[id] === 'working' || runtimeThreads.get(id)?.status === 'working';
   /** The seat a phone shows (index into `seats`, or -1 = the synthesis). */
   let picked = $state(0);
-  let judge = $state<RuntimeProvider | null>(null);
+  let judge = $state<string | null>(null);
   let judgeEl = $state<HTMLButtonElement | null>(null);
   let synthesizing = $state(false);
   let synthError = $state<string | null>(null);
@@ -113,7 +114,7 @@
     ...seats.map((_, i) => ({ id: String(i), label: `Seat ${seatNo(i)}`, testid: `council-tab-${seatNo(i)}` })),
     ...(synthesis ? [{ id: '-1', label: 'Synthesis', testid: 'council-tab-synthesis' }] : []),
   ]);
-  const judgeProvider = $derived<RuntimeProvider>(judge ?? seats[0]?.provider ?? 'claude');
+  const judgeProvider = $derived<RuntimeProviderOrSlug>(judge ?? (seats[0] ? sessionProviderSlug(seats[0]) : 'claude'));
   const blocker = $derived(
     seats.length
       ? roundSynthBlocker(current.n, currentSeats, synthesis ? working(synthesis.id) : false, seats[0]?.status === 'closed')
@@ -166,7 +167,7 @@
 
   function pickJudge(): void {
     if (!judgeEl) return;
-    const options = agentProviders().filter(isRuntimeProvider);
+    const options = agentProviders().filter((p) => isRuntimeProvider(p, auth.meta));
     ctxMenu.showAt(
       judgeEl,
       options.map((p) => ({

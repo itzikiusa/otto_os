@@ -14,6 +14,72 @@ use tokio::time::timeout;
 /// presence and letting the spawned version probe finish in the background.
 const COLD_INLINE_BUDGET: Duration = Duration::from_millis(300);
 
+/// Extract the executable token from a custom provider command string,
+/// skipping leading `KEY=VALUE` environment assignments and stripping trailing
+/// arguments (including `{cwd}` / `{sid}` flag templates). Returns `None` when
+/// the executable token itself is empty or contains `{cwd}` / `{sid}`.
+pub fn extract_custom_cmd_executable(cmd: &str) -> Option<String> {
+    let is_env_assign = |tok: &str| {
+        let Some((k, _)) = tok.split_once('=') else {
+            return false;
+        };
+        let mut chars = k.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let bin = cmd
+        .split_whitespace()
+        .find(|tok| !is_env_assign(tok))?
+        .trim();
+    if bin.is_empty() || bin.contains("{cwd}") || bin.contains("{sid}") {
+        return None;
+    }
+    Some(bin.to_string())
+}
+
+/// Probe whether a custom provider command (`cmd`) is runnable on this machine:
+/// returns `None` when the executable token itself uses `{cwd}` / `{sid}`
+/// templates (unchecked until spawn), `Some(true)` when found on `$PATH` /
+/// filesystem, in shell rc aliases/functions, or via bounded (`1.5s`) login
+/// shell `command -v`, and `Some(false)` otherwise.
+pub async fn probe_custom_command_available(cmd: &str) -> Option<bool> {
+    let bin = extract_custom_cmd_executable(cmd)?;
+    if executable_in_path_or_fs(&bin) {
+        return Some(true);
+    }
+    if bin.contains('/') {
+        return Some(false);
+    }
+    Some(
+        rc_defines_alias_or_fn(&bin) || shell_knows_within(&bin, Duration::from_millis(1500)).await,
+    )
+}
+
+/// Batch custom-command availability probe keyed by provider slug.
+pub async fn probe_custom_command_statuses<I, K, V>(cmds: I) -> BTreeMap<String, Option<bool>>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    let tasks: Vec<_> = cmds
+        .into_iter()
+        .map(|(k, v)| {
+            let (k, v) = (k.into(), v.into());
+            tokio::spawn(async move { (k, probe_custom_command_available(&v).await) })
+        })
+        .collect();
+    let mut out = BTreeMap::new();
+    for task in tasks {
+        if let Ok((k, status)) = task.await {
+            out.insert(k, status);
+        }
+    }
+    out
+}
+
 /// Fast in-process executable check (`is_file` + execute bit on Unix) across
 /// explicit paths or `$PATH`, avoiding a `which` subprocess per tool.
 pub fn executable_in_path_or_fs(program: &str) -> bool {
@@ -204,8 +270,19 @@ type ToolsCache = Option<(
 )>;
 
 static TOOLS_CACHE: tokio::sync::Mutex<ToolsCache> = tokio::sync::Mutex::const_new(None);
+static TOOLS_CACHE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// One background refresh at a time.
 static TOOLS_REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Synchronously invalidate `/meta`'s tool availability cache (e.g. after CLI
+/// installation or provider login).
+pub fn invalidate_tools_cache() {
+    use std::sync::atomic::Ordering;
+    TOOLS_CACHE_GEN.fetch_add(1, Ordering::AcqRel);
+    if let Ok(mut guard) = TOOLS_CACHE.try_lock() {
+        *guard = None;
+    }
+}
 
 /// What a cached probe of `age` may be used for.
 #[derive(Debug, PartialEq, Eq)]
@@ -262,14 +339,25 @@ async fn run_tool_probe(specs: &BTreeMap<String, String>) -> Vec<ToolStatus> {
 /// up at once. A stale probe of the same specs is served while one background
 /// refresh replaces it (see [`freshness`]).
 pub async fn probe_tools_cached(specs: BTreeMap<String, String>) -> Vec<ToolStatus> {
+    probe_tools_cached_with_status(specs).await.0
+}
+
+/// Like [`probe_tools_cached`], also returning whether the returned vector is a
+/// cold-boot provisional fast snapshot while the background probe is still in
+/// flight.
+pub async fn probe_tools_cached_with_status(
+    specs: BTreeMap<String, String>,
+) -> (Vec<ToolStatus>, bool) {
     use std::sync::atomic::Ordering;
     let mut slot = TOOLS_CACHE.lock().await;
+    let cur_gen = TOOLS_CACHE_GEN.load(Ordering::Acquire);
     if let Some((at, cached_specs, tools)) = slot.as_ref() {
         if *cached_specs == specs {
             match freshness(at.elapsed(), tools) {
-                Freshness::Fresh => return tools.clone(),
+                Freshness::Fresh => return (tools.clone(), false),
                 Freshness::Stale => {
                     if !TOOLS_REFRESHING.swap(true, Ordering::AcqRel) {
+                        let start_gen = cur_gen;
                         tokio::spawn(async move {
                             // Cleared even if the probe panics.
                             struct Done;
@@ -280,24 +368,26 @@ pub async fn probe_tools_cached(specs: BTreeMap<String, String>) -> Vec<ToolStat
                             }
                             let _done = Done;
                             let tools = run_tool_probe(&specs).await;
-                            *TOOLS_CACHE.lock().await =
-                                Some((std::time::Instant::now(), specs, tools));
+                            let mut guard = TOOLS_CACHE.lock().await;
+                            if TOOLS_CACHE_GEN.load(Ordering::Acquire) == start_gen {
+                                *guard = Some((std::time::Instant::now(), specs, tools));
+                            }
                         });
                     }
-                    return tools.clone();
+                    return (tools.clone(), false);
                 }
                 Freshness::Expired => {}
             }
         }
     }
     if TOOLS_REFRESHING.load(Ordering::Acquire) {
-        return slot
-            .as_ref()
-            .filter(|(_, s, _)| *s == specs)
-            .map(|(_, _, t)| t.clone())
-            .unwrap_or_else(|| fast_tool_statuses(&specs));
+        return match slot.as_ref().filter(|(_, s, _)| *s == specs) {
+            Some((_, _, t)) => (t.clone(), true),
+            None => (fast_tool_statuses(&specs), true),
+        };
     }
     let specs_bg = specs.clone();
+    let start_gen = cur_gen;
     let (tx, rx) = tokio::sync::oneshot::channel::<Vec<ToolStatus>>();
     TOOLS_REFRESHING.store(true, Ordering::Release);
     tokio::spawn(async move {
@@ -310,14 +400,19 @@ pub async fn probe_tools_cached(specs: BTreeMap<String, String>) -> Vec<ToolStat
         let _done = Done;
         let tools = run_tool_probe(&specs_bg).await;
         let _ = tx.send(tools.clone());
-        *TOOLS_CACHE.lock().await = Some((std::time::Instant::now(), specs_bg, tools));
+        let mut guard = TOOLS_CACHE.lock().await;
+        if TOOLS_CACHE_GEN.load(Ordering::Acquire) == start_gen {
+            *guard = Some((std::time::Instant::now(), specs_bg, tools));
+        }
     });
     match timeout(COLD_INLINE_BUDGET, rx).await {
         Ok(Ok(tools)) => {
-            *slot = Some((std::time::Instant::now(), specs, tools.clone()));
-            tools
+            if TOOLS_CACHE_GEN.load(Ordering::Acquire) == start_gen {
+                *slot = Some((std::time::Instant::now(), specs, tools.clone()));
+            }
+            (tools, false)
         }
-        _ => fast_tool_statuses(&specs),
+        _ => (fast_tool_statuses(&specs), true),
     }
 }
 
@@ -328,10 +423,13 @@ static PROBE_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 /// A template cannot be checked until a session supplies its cwd/id. Omit its
 /// row so callers report unchecked rather than disabling a valid provider.
 fn configure_provider_probe(tools: &mut BTreeMap<String, String>, name: &str, program: String) {
-    if program.contains("{cwd}") || program.contains("{sid}") {
-        tools.remove(name);
-    } else {
-        tools.insert(name.to_string(), program);
+    match extract_custom_cmd_executable(&program) {
+        Some(bin) => {
+            tools.insert(name.to_string(), bin);
+        }
+        None => {
+            tools.remove(name);
+        }
     }
 }
 
@@ -383,6 +481,10 @@ async fn detect_tool(name: &str, program: &str) -> ToolStatus {
 /// script. 15s cap: interactive rc plugins can take several seconds under
 /// post-deploy boot load, and the result is cached for [`TOOLS_TTL`].
 async fn shell_knows(program: &str) -> bool {
+    shell_knows_within(program, Duration::from_millis(1500)).await
+}
+
+async fn shell_knows_within(program: &str, budget: Duration) -> bool {
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -390,14 +492,14 @@ async fn shell_knows(program: &str) -> bool {
     let mut cmd = Command::new(shell);
     cmd.args([
         "-ilc",
-        r#"command -v "$1" >/dev/null"#,
+        r#"shopt -s expand_aliases 2>/dev/null; command -v "$1" >/dev/null 2>&1 || alias "$1" >/dev/null 2>&1"#,
         "otto-probe",
         program,
     ])
     .stdin(std::process::Stdio::null())
     .kill_on_drop(true);
     matches!(
-        timeout(Duration::from_secs(15), cmd.output()).await,
+        timeout(budget, cmd.output()).await,
         Ok(Ok(out)) if out.status.success()
     )
 }

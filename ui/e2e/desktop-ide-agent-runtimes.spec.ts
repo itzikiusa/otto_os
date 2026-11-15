@@ -20,7 +20,7 @@ import {
 //   4. Live Workspace Terminal PTY (IdeTerminalPanel): spawn, I/O, axe a11y & kill
 
 const SCREENSHOT_DIR =
-  '/Users/itziklavon/.gemini/antigravity-cli/brain/4814dd52-6e20-428a-88b9-51174ddd8f0e/scratch/screenshots';
+  process.env.OTTO_IDE_SHOTS_DIR ?? join(tmpdir(), 'otto-ide-e2e-shots');
 
 interface IdeTargetSpec {
   kind: 'local' | 'ssh';

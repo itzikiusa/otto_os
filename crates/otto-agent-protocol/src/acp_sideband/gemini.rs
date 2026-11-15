@@ -253,31 +253,82 @@ impl GeminiState {
             }
             let name = call.get("name").and_then(Value::as_str).unwrap_or("tool");
             let args = call.get("args").cloned();
+            let parent_cid = call
+                .get("parentCallId")
+                .or_else(|| call.get("parent_call_id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
             let desc = classify_tool(name, args.as_ref());
             if prev.is_none() {
                 mirrored.tool_calls = mirrored.tool_calls.saturating_add(1);
                 mirrored.preseed_tool_id(&id);
-                actions.push(SidebandAction::ToolStart {
-                    id: id.clone(),
-                    title: desc.title.clone(),
-                    kind: desc.kind,
-                    status: ToolCallStatus::InProgress,
-                    raw_input: args.clone(),
-                    file: desc.file.clone(),
-                    diff: desc.diff.clone(),
-                });
+                actions.push(super::wrap_child_action(
+                    None,
+                    parent_cid,
+                    SidebandAction::ToolStart {
+                        id: id.clone(),
+                        title: desc.title.clone(),
+                        kind: desc.kind,
+                        status: ToolCallStatus::InProgress,
+                        raw_input: args.clone(),
+                        file: desc.file.clone(),
+                        diff: desc.diff.clone(),
+                    },
+                ));
+            }
+            if let Some(sub_calls) = call
+                .get("subCalls")
+                .or_else(|| call.get("childToolCalls"))
+                .and_then(Value::as_array)
+            {
+                for (si, sub) in sub_calls.iter().enumerate() {
+                    let sid = sub
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("{id}-sub-{si}"));
+                    if self.seen_tool_status.contains_key(&sid) {
+                        continue;
+                    }
+                    insert_bounded_map(
+                        &mut self.seen_tool_status,
+                        sid.clone(),
+                        "completed".to_string(),
+                    );
+                    let sname = sub.get("name").and_then(Value::as_str).unwrap_or("tool");
+                    let sargs = sub.get("args").cloned();
+                    let sdesc = classify_tool(sname, sargs.as_ref());
+                    actions.push(super::wrap_child_action(
+                        None,
+                        Some(&id),
+                        SidebandAction::ToolStart {
+                            id: sid.clone(),
+                            title: sdesc.title,
+                            kind: sdesc.kind,
+                            status: ToolCallStatus::Completed,
+                            raw_input: sargs,
+                            file: sdesc.file,
+                            diff: sdesc.diff,
+                        },
+                    ));
+                }
             }
             if matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed) {
-                actions.push(SidebandAction::ToolUpdate {
-                    id,
-                    status,
-                    title: None,
-                    kind: None,
-                    raw_input: None,
-                    output: extract_gemini_tool_output(call),
-                    file: None,
-                    diff: None,
-                });
+                actions.push(super::wrap_child_action(
+                    None,
+                    parent_cid,
+                    SidebandAction::ToolUpdate {
+                        id,
+                        status,
+                        title: None,
+                        kind: None,
+                        raw_input: None,
+                        output: extract_gemini_tool_output(call),
+                        file: None,
+                        diff: None,
+                    },
+                ));
             }
         }
         open

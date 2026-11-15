@@ -19,7 +19,7 @@ use super::{
     record_claude_stdout_line, set_session_status, ActiveTurn, AgentRuntime, Live, PersistOp, Proc,
     ProcTransport, RequestIds,
 };
-use crate::holder::{adopt_socket, list_holder_sockets, LineStream};
+use crate::holder::{adopt_socket, best_effort_shutdown_socket, list_holder_sockets, LineStream};
 use crate::process::signal_group;
 
 impl AgentRuntime {
@@ -29,6 +29,10 @@ impl AgentRuntime {
     /// descendants, and flush pending SQLite writes. Non-held direct processes
     /// (if any) still terminate cleanly.
     pub async fn shutdown_for_restart(&self) {
+        if !self.inner.host.session_persistence_enabled().await {
+            self.shutdown().await;
+            return;
+        }
         let lives: Vec<Arc<Live>> = self
             .inner
             .live
@@ -82,8 +86,14 @@ impl AgentRuntime {
     pub async fn recover_and_adopt(&self) -> Result<HashSet<Id>> {
         let mut live_ids = HashSet::new();
         let mut handled_ids = HashSet::new();
+        let persist_enabled = self.inner.host.session_persistence_enabled().await;
         if let Some(holders_dir) = self.inner.config.holders_dir.clone() {
             for sock in list_holder_sockets(&holders_dir) {
+                if !persist_enabled {
+                    best_effort_shutdown_socket(&sock).await;
+                    let _ = tokio::fs::remove_file(&sock).await;
+                    continue;
+                }
                 if let Some((sid, is_alive)) = self.adopt_holder_socket(&sock).await {
                     if is_alive {
                         live_ids.insert(sid.clone());
@@ -102,7 +112,17 @@ impl AgentRuntime {
     async fn adopt_holder_socket(&self, socket_path: &Path) -> Option<(Id, bool)> {
         let adopted = match adopt_socket(socket_path).await {
             Ok(a) => a,
-            Err(_) => {
+            Err(e) => {
+                if !matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) {
+                    tracing::warn!(
+                        socket = %socket_path.display(),
+                        "could not adopt runtime holder ({e}); shutting it down before unlinking"
+                    );
+                    best_effort_shutdown_socket(socket_path).await;
+                }
                 let _ = tokio::fs::remove_file(socket_path).await;
                 return None;
             }
@@ -112,19 +132,24 @@ impl AgentRuntime {
             Ok(r) if !r.closed => r,
             _ => {
                 adopted.client.shutdown(Duration::from_millis(500)).await;
+                let _ = tokio::fs::remove_file(socket_path).await;
                 return None;
             }
         };
         let Some(mut driver) = self.inner.drivers.create(rec.session.provider) else {
             adopted.client.shutdown(Duration::from_millis(500)).await;
+            let _ = tokio::fs::remove_file(socket_path).await;
             return None;
         };
         if let Err(e) = driver.restore_state(&adopted.checkpoint.driver_state) {
             tracing::warn!(session = %sid, "runtime holder driver restore failed: {e}");
             adopted.client.shutdown(Duration::from_millis(500)).await;
+            let _ = tokio::fs::remove_file(socket_path).await;
             return None;
         }
         let Ok(live) = self.live(&sid).await else {
+            adopted.client.shutdown(Duration::from_millis(500)).await;
+            let _ = tokio::fs::remove_file(socket_path).await;
             return None;
         };
 

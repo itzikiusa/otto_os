@@ -10,6 +10,7 @@
 
 mod agy;
 pub(crate) mod burst;
+pub(crate) mod confinement;
 mod gemini;
 pub(crate) mod grok;
 pub(crate) mod io;
@@ -78,6 +79,26 @@ pub(crate) enum SidebandAction {
     TurnCompleted {
         reason: Option<String>,
     },
+    ChildScope {
+        session_id: Option<String>,
+        parent_tool_id: Option<String>,
+        inner: Box<SidebandAction>,
+    },
+}
+
+pub(crate) fn wrap_child_action(
+    session_id: Option<&str>,
+    parent_tool_id: Option<&str>,
+    action: SidebandAction,
+) -> SidebandAction {
+    if session_id.is_none() && parent_tool_id.is_none() {
+        return action;
+    }
+    SidebandAction::ChildScope {
+        session_id: session_id.map(str::to_string),
+        parent_tool_id: parent_tool_id.map(str::to_string),
+        inner: Box::new(action),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,16 +223,22 @@ impl AcpSideband {
         provider: RuntimeProvider,
         ready: bool,
         idle_between_prompts: bool,
+        poll_child_subagents: bool,
         cwd: &str,
         session_id: Option<&str>,
     ) -> Option<SidebandPoll> {
-        if !ready || !idle_between_prompts || self.native_autonomous_seen {
+        let allow_autonomous = idle_between_prompts && !self.native_autonomous_seen;
+        if !ready || (!allow_autonomous && !poll_child_subagents) {
             return None;
         }
         let now = now_ms();
         let allow_dir_scan = now >= self.unresolved_until_ms;
         let source = self.source_for(provider, cwd, session_id, allow_dir_scan)?;
-        let mut interval = self.poll_interval_at(now);
+        let mut interval = if poll_child_subagents && !idle_between_prompts {
+            POLL_FAST_INTERVAL
+        } else {
+            self.poll_interval_at(now)
+        };
         if !allow_dir_scan
             && self.custom_file.is_none()
             && ((provider == RuntimeProvider::Gemini && self.gemini.resolved_path.is_none())
@@ -320,6 +347,7 @@ impl AcpSideband {
 
     pub fn finish_prompted_turn(&mut self) {
         self.burst = BurstFilter::default();
+        self.mirrored = MirroredCounts::default();
         let now = now_ms();
         self.idle_since_ms = now;
         self.last_active_ms = now;
@@ -422,6 +450,7 @@ impl AcpSideband {
                         resolved_path,
                         next_offset,
                         &bytes,
+                        session_id,
                         self.idle_since_ms,
                         &mut self.mirrored,
                     )
@@ -452,8 +481,13 @@ impl AcpSideband {
             }
             SidebandPayload::OpencodeSqlite { stamp, rows_jsonl } => {
                 self.unresolved_until_ms = 0;
-                self.opencode
-                    .parse_rows(stamp, &rows_jsonl, self.idle_since_ms, &mut self.mirrored)
+                self.opencode.parse_rows(
+                    stamp,
+                    &rows_jsonl,
+                    session_id,
+                    self.idle_since_ms,
+                    &mut self.mirrored,
+                )
             }
             SidebandPayload::Batch { primary, .. } => match primary {
                 Some(inner) => return self.on_payload(provider, session_id, *inner),

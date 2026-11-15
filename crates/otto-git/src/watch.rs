@@ -260,8 +260,14 @@ impl RepoWatchers {
         git_dir: Option<&Path>,
         now: Instant,
     ) -> Option<Entry> {
+        if otto_core::paths::is_broad_non_project_root(root) {
+            return None;
+        }
         // FSEvents reports real paths (/private/var/…, resolved symlinks).
         let root = std::fs::canonicalize(root).ok()?;
+        if otto_core::paths::is_broad_non_project_root(&root) {
+            return None;
+        }
         let git_dir = git_dir
             .and_then(|g| std::fs::canonicalize(g).ok())
             .unwrap_or_else(|| root.join(".git"));

@@ -10,7 +10,8 @@ use crate::types::{IdeSshSpec, IdeTargetKind, IdeTargetSpec};
 
 use super::fs_ops::{enforce_non_root_path, resolve_local_existing_in_roots};
 use super::sdk_paths::{
-    collect_readonly_sdk_roots, discover_local_go_replace_roots, strip_file_uri,
+    collect_readonly_sdk_roots, discover_local_go_replace_roots, is_virtual_archive_uri,
+    resolve_local_readable, strip_file_uri,
 };
 use super::{ResolvedTarget, TargetManager};
 
@@ -490,6 +491,62 @@ impl TargetManager {
                 ..
             } => {
                 let (p, _) = resolve_remote_in_roots(root, additional_roots, raw_path)?;
+                Ok(p)
+            }
+        }
+    }
+
+    /// Resolve and confine `raw_path` for read-only LSP buffer operations (`diagnostics`,
+    /// `hover`, `navigation`, `code_actions`), allowing existing workspace files,
+    /// allowlisted read-only SDK files, and unsaved prospective workspace buffers.
+    pub async fn resolve_readable_or_prospective_path(
+        &self,
+        target: &ResolvedTarget,
+        raw_path: &str,
+    ) -> Result<String> {
+        match target {
+            ResolvedTarget::Local {
+                root,
+                additional_roots,
+                readonly_roots,
+                is_root_user,
+                ..
+            } => {
+                if is_virtual_archive_uri(raw_path) {
+                    return Ok(raw_path.trim().to_string());
+                }
+                let root_c = root.clone();
+                let extra_c = additional_roots.clone();
+                let ro_c = readonly_roots.clone();
+                let is_root = *is_root_user;
+                let raw_c = raw_path.to_string();
+                let readable = tokio::task::spawn_blocking(move || {
+                    resolve_local_readable(&root_c, &extra_c, &ro_c, is_root, &raw_c)
+                })
+                .await
+                .map_err(|e| Error::Internal(format!("resolve_readable_path join: {e}")))?;
+                match readable {
+                    Ok((p, _)) => Ok(p.to_string_lossy().into_owned()),
+                    Err(Error::NotFound(_)) => {
+                        let (p, _) = resolve_local_prospective_in_roots(
+                            root,
+                            additional_roots,
+                            *is_root_user,
+                            raw_path,
+                            false,
+                        )
+                        .await?;
+                        Ok(p.to_string_lossy().into_owned())
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            ResolvedTarget::Ssh {
+                root,
+                additional_roots,
+                ..
+            } => {
+                let (p, _) = resolve_remote_in_roots_or_sdk(root, additional_roots, raw_path)?;
                 Ok(p)
             }
         }

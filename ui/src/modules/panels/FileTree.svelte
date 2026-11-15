@@ -16,7 +16,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import CodeEditor from '../../lib/components/CodeEditor.svelte';
+  import CodeEditor from '../../lib/components/LazyCodeEditor.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   const FolderPickerModal = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));

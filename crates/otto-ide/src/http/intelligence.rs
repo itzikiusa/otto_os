@@ -106,8 +106,9 @@ pub(super) async fn lsp_references<S: IdeCtx>(
 pub(super) async fn lsp_rename<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeRenameReq>,
+    Json(mut req): Json<IdeRenameReq>,
 ) -> ApiResult<Json<IdeRenameResp>> {
+    req.target.absorb_project_folders(&req.project_folders);
     if req.apply {
         let _ = ctx
             .ide()
@@ -339,6 +340,13 @@ pub(super) async fn history_restore<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeHistoryRestoreReq>,
 ) -> ApiResult<Json<IdeHistoryRestoreResp>> {
+    if req
+        .target
+        .as_ref()
+        .is_some_and(|t| t.kind == crate::types::IdeTargetKind::Ssh)
+    {
+        return Err(Error::Invalid("local history requires a local target".into()).into());
+    }
     let (canon_root, extra_roots) =
         authorize_history_root(&ctx, &user, req.effective_root(), true).await?;
     let store = ctx.ide().history.clone();
@@ -356,6 +364,13 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeHistorySnapshotReq>,
 ) -> ApiResult<Json<IdeHistorySnapshotResp>> {
+    if req
+        .target
+        .as_ref()
+        .is_some_and(|t| t.kind == crate::types::IdeTargetKind::Ssh)
+    {
+        return Err(Error::Invalid("local history requires a local target".into()).into());
+    }
     if !req.local_history_enabled {
         return Err(Error::Invalid("local history is disabled in preferences".into()).into());
     }

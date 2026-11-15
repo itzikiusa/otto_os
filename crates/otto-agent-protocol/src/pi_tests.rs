@@ -252,6 +252,7 @@ fn steer_sends_rpc_steer_mid_turn_and_surfaces_refusal_without_ending_turn() {
         images: vec![PromptImage {
             mime: "image/png".into(),
             data_base64: "iVBORw0KGgo=".into(),
+            name: None,
         }],
         ..RuntimePromptReq::of("check edge case")
     };
@@ -464,7 +465,17 @@ fn subagent_and_background_bash_emit_subagent_cards_bg_tasks_and_notices() {
     assert!(bg_sub_done.events.iter().any(|e| matches!(
         e,
         DriverEvent::TurnItem(i)
-            if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message == "Background agent finished: Background Worker")
+            if matches!(
+                &i.kind,
+                TurnItemKind::SystemNotice {
+                    message,
+                    task_settlement: Some(ts),
+                } if message == "Background agent finished: Background Worker"
+                    && ts.task_id == "pi-agent-99"
+                    && ts.kind == "agent"
+                    && ts.status == "completed"
+                    && ts.label == "Background Worker"
+            )
     )));
 
     // 3. Background `bash` (`run_in_background: true`) streams `CommandOutput` and settles with notice.
@@ -490,9 +501,123 @@ fn subagent_and_background_bash_emit_subagent_cards_bg_tasks_and_notices() {
     assert!(bg_bash_end.events.iter().any(|e| matches!(
         e,
         DriverEvent::TurnItem(i)
-            if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message == "Background command finished: ./run_suite.sh")
+            if matches!(
+                &i.kind,
+                TurnItemKind::SystemNotice {
+                    message,
+                    task_settlement: Some(ts),
+                } if message == "Background command finished: ./run_suite.sh"
+                    && ts.status == "completed"
+            )
     )));
     assert!(bg_bash_end.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::BackgroundTasks(tasks) if tasks.is_empty()
+    )));
+}
+
+#[test]
+fn pi_subagent_routes_child_tools_messages_and_preserves_bg_across_turn_end() {
+    let mut d = PiDriver::with_program("pi");
+    let st = sent(&d.start(&ctx(None, RuntimeAccessMode::FullAccess)), 0);
+    d.on_line(&format!(
+        r#"{{"id":"{}","type":"response","command":"get_state","success":true,"data":{{"sessionId":"sess-pi-child"}}}}"#,
+        st["id"].as_str().unwrap()
+    ));
+    let p = sent(
+        &d.prompt("t1", &RuntimePromptReq::of("investigate"))
+            .unwrap(),
+        0,
+    );
+    d.on_line(&format!(
+        r#"{{"id":"{}","type":"response","command":"prompt","success":true}}"#,
+        p["id"].as_str().unwrap()
+    ));
+
+    // Foreground subagent opens: nested thought, tool call, and message inherit `parent_item_id`.
+    d.on_line(
+        r#"{"type":"tool_execution_start","toolCallId":"sub-fg","toolName":"delegate","args":{"role":"researcher","description":"Inspect auth","prompt":"Read auth.rs"}}"#,
+    );
+    let child_th = d.on_line(
+        r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"Checking auth.rs"}}"#,
+    );
+    assert!(child_th.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if i.parent_item_id.as_deref() == Some("t1:tool:sub-fg")
+                && matches!(&i.kind, TurnItemKind::Reasoning { text, .. } if text == "Checking auth.rs")
+    )));
+    let child_tool = d.on_line(
+        r#"{"type":"tool_execution_start","toolCallId":"c-read","toolName":"read","args":{"path":"src/auth.rs"}}"#,
+    );
+    assert!(child_tool.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if i.id == "t1:tool:c-read" && i.parent_item_id.as_deref() == Some("t1:tool:sub-fg")
+    )));
+    assert!(child_tool.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if i.id == "t1:tool:sub-fg"
+                && matches!(
+                    &i.kind,
+                    TurnItemKind::Subagent { tool_uses: 1, last_tool: Some(lt), .. } if lt == "read"
+                )
+    )));
+    let child_done = d.on_line(
+        r#"{"type":"tool_execution_end","toolCallId":"c-read","toolName":"read","result":"fn auth() {}","isError":false}"#,
+    );
+    assert!(child_done.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if i.id == "t1:tool:c-read"
+                && i.status == TurnItemStatus::Completed
+                && i.completed_at.is_some()
+                && i.parent_item_id.as_deref() == Some("t1:tool:sub-fg")
+    )));
+    let sub_done = d.on_line(
+        r#"{"type":"tool_execution_end","toolCallId":"sub-fg","toolName":"delegate","result":"Auth verified","isError":false}"#,
+    );
+    assert!(sub_done.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if i.id == "t1:tool:sub-fg"
+                && i.status == TurnItemStatus::Completed
+                && i.completed_at.is_some()
+                && matches!(&i.kind, TurnItemKind::Subagent { tool_uses: 1, .. })
+    )));
+
+    // Schedule timer sets `due_at`, and open background bash survives `agent_end`,
+    // then settles with `status == "stopped"` on `on_exit()`.
+    let timer_start = d.on_line(
+        r#"{"type":"tool_execution_start","toolCallId":"tm-1","toolName":"schedule","args":{"DurationSeconds":30,"Prompt":"Wake me"}}"#,
+    );
+    assert!(timer_start.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::BackgroundTasks(tasks)
+            if tasks.iter().any(|t| t.id == "tm-1" && t.kind == "timer" && t.due_at.is_some())
+    )));
+    d.on_line(
+        r#"{"type":"tool_execution_start","toolCallId":"bg-cmd","toolName":"bash","args":{"command":"sleep 60","run_in_background":true}}"#,
+    );
+    let turn_end = d.on_line(
+        r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"aborted"}],"willRetry":false}"#,
+    );
+    assert!(!turn_end.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i) if i.id == "t1:tool:bg-cmd" && !i.status.is_open()
+    )));
+    let exit_step = d.on_exit(Some(0));
+    assert!(exit_step.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if matches!(
+                &i.kind,
+                TurnItemKind::SystemNotice { task_settlement: Some(ts), .. }
+                    if ts.task_id == "bg-cmd" && ts.status == "stopped"
+            )
+    )));
+    assert!(exit_step.events.iter().any(|e| matches!(
         e,
         DriverEvent::BackgroundTasks(tasks) if tasks.is_empty()
     )));

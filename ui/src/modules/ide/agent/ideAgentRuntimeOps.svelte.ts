@@ -141,18 +141,22 @@ export async function dispatchPromptToRuntimeSession(
   const attached = opts.files ?? [];
   const pics: PromptImage[] = attached
     .filter((f) => f.mime.startsWith('image/'))
-    .map(({ mime, data_base64 }) => ({ mime, data_base64 }));
+    .map(({ name, mime, data_base64 }) => ({ ...(name ? { name } : {}), mime, data_base64 }));
   const docs = attached.filter((f) => !f.mime.startsWith('image/'));
-  return runtimeThreads.prompt(sid, {
-    text,
-    ...(opts.model ? { model: opts.model } : {}),
-    ...(opts.effort ? { effort: opts.effort } : {}),
-    ...(pics.length > 0 ? { images: pics } : {}),
-    ...(docs.length > 0 ? { files: docs } : {}),
-    ...(opts.accessMode ? { access_mode: opts.accessMode } : {}),
-    ...(opts.freshContext ? { fresh_context: true } : {}),
-    ...(turnBusy && !opts.freshContext ? { delivery: 'queue' as const } : {}),
-  });
+  return runtimeThreads.prompt(
+    sid,
+    {
+      text,
+      ...(opts.model ? { model: opts.model } : {}),
+      ...(opts.effort ? { effort: opts.effort } : {}),
+      ...(pics.length > 0 ? { images: pics } : {}),
+      ...(docs.length > 0 ? { files: docs } : {}),
+      ...(opts.accessMode ? { access_mode: opts.accessMode } : {}),
+      ...(opts.freshContext ? { fresh_context: true } : {}),
+      ...(turnBusy && !opts.freshContext ? { delivery: 'queue' as const } : {}),
+    },
+    attached,
+  );
 }
 
 export function waitForInlineTurnCompletion(

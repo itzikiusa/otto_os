@@ -24,7 +24,8 @@ use otto_transcript::roots::{home_dir, RootKind, RootsEnv};
 use serde::Deserialize;
 
 use super::{
-    claude, cli, tilde, unknown_row, AccountLimits, ClaudeCheck, LimitsResp, CLAUDE_REASON,
+    claude, cli, tilde, unknown_row, AccountLimits, ActiveLimitProviders, ClaudeCheck, LimitsResp,
+    CLAUDE_REASON,
 };
 
 /// `settings` key of the per-login switch map.
@@ -67,12 +68,27 @@ impl ClaudeLogin {
 
 /// Root: the machine's Claude config dirs that hold transcripts; everyone:
 /// their own Claude subscription profiles.
+#[cfg(test)]
 pub(crate) fn claude_logins(
     accounts: &[ProviderAccount],
     is_root: bool,
     data_dir: &Path,
     home: &Path,
     env: &RootsEnv,
+) -> Vec<ClaudeLogin> {
+    claude_logins_filtered(accounts, is_root, data_dir, home, env, None)
+}
+
+/// [`claude_logins`] scoped to the providers currently enabled in Settings
+/// (`active = Some(…)`), hiding leftover `~/.claude-*` folders whose custom
+/// provider was removed or disabled.
+pub(crate) fn claude_logins_filtered(
+    accounts: &[ProviderAccount],
+    is_root: bool,
+    data_dir: &Path,
+    home: &Path,
+    env: &RootsEnv,
+    active: Option<&ActiveLimitProviders>,
 ) -> Vec<ClaudeLogin> {
     let mut out = Vec::new();
     if is_root {
@@ -83,6 +99,16 @@ pub(crate) fn claude_logins(
             .filter(|r| r.kind != RootKind::Account && r.dir.is_dir())
         {
             let dir = root.dir.parent().unwrap_or(&root.dir).to_path_buf();
+            if let Some(active) = active {
+                let allowed = if root.kind == RootKind::Default {
+                    active.is_enabled("claude")
+                } else {
+                    active.matches_claude_config_dir(&dir)
+                };
+                if !allowed {
+                    continue;
+                }
+            }
             let (label, source) = if root.kind == RootKind::Default {
                 ("Default Claude login".to_string(), "default")
             } else {
@@ -97,18 +123,20 @@ pub(crate) fn claude_logins(
             });
         }
     }
-    let homes = data_dir.join("provider-accounts");
-    for account in accounts.iter().filter(|a| a.provider == "claude") {
-        let Some(id) = otto_core::paths::safe_component(&account.id) else {
-            continue;
-        };
-        out.push(ClaudeLogin {
-            key: format!("claude:account:{id}"),
-            account_id: Some(account.id.clone()),
-            label: account.label.clone(),
-            source: "account",
-            dir: homes.join(id),
-        });
+    if active.is_none_or(|a| a.is_enabled("claude")) {
+        let homes = data_dir.join("provider-accounts");
+        for account in accounts.iter().filter(|a| a.provider == "claude") {
+            let Some(id) = otto_core::paths::safe_component(&account.id) else {
+                continue;
+            };
+            out.push(ClaudeLogin {
+                key: format!("claude:account:{id}"),
+                account_id: Some(account.id.clone()),
+                label: account.label.clone(),
+                source: "account",
+                dir: homes.join(id),
+            });
+        }
     }
     out
 }
@@ -179,6 +207,7 @@ pub(crate) async fn load_checks(pool: &DbPool) -> Checks {
 }
 
 /// The caller's login for `key`, or a 404 (another user's, or none).
+#[allow(clippy::too_many_arguments)]
 async fn login_for(
     pool: &DbPool,
     user_id: &Id,
@@ -187,13 +216,19 @@ async fn login_for(
     env: &RootsEnv,
     home: &Path,
     key: &str,
+    active: Option<&ActiveLimitProviders>,
 ) -> otto_core::Result<ClaudeLogin> {
     let accounts = ProviderAccountsRepo::new(pool.clone())
         .list(user_id)
         .await?;
-    let (data_dir, env, home) = (data_dir.to_path_buf(), env.clone(), home.to_path_buf());
+    let (data_dir, env, home, active) = (
+        data_dir.to_path_buf(),
+        env.clone(),
+        home.to_path_buf(),
+        active.cloned(),
+    );
     let logins = tokio::task::spawn_blocking(move || {
-        claude_logins(&accounts, is_root, &data_dir, &home, &env)
+        claude_logins_filtered(&accounts, is_root, &data_dir, &home, &env, active.as_ref())
     })
     .await
     .map_err(|e| Error::Internal(format!("list Claude logins: {e}")))?;
@@ -227,12 +262,34 @@ pub async fn set_claude_check(
     data_dir: &Path,
     req: &ClaudeCheckReq,
 ) -> otto_core::Result<LimitsResp> {
-    let is_root = person_only(is_root)?;
-    let env = RootsEnv::from_process();
-    set_with(pool, user_id, is_root, data_dir, (&env, &home_dir()), req).await?;
-    super::remaining_limits(pool, user_id, is_root, data_dir).await
+    set_claude_check_filtered(pool, user_id, is_root, data_dir, req, None).await
 }
 
+/// [`set_claude_check`] scoped to the enabled providers (`active`).
+pub async fn set_claude_check_filtered(
+    pool: &DbPool,
+    user_id: &Id,
+    is_root: bool,
+    data_dir: &Path,
+    req: &ClaudeCheckReq,
+    active: Option<&ActiveLimitProviders>,
+) -> otto_core::Result<LimitsResp> {
+    let is_root = person_only(is_root)?;
+    let env = RootsEnv::from_process();
+    set_with_active(
+        pool,
+        user_id,
+        is_root,
+        data_dir,
+        (&env, &home_dir()),
+        req,
+        active,
+    )
+    .await?;
+    super::remaining_limits_filtered(pool, user_id, is_root, data_dir, active).await
+}
+
+#[cfg(test)]
 async fn set_with(
     pool: &DbPool,
     user_id: &Id,
@@ -241,8 +298,23 @@ async fn set_with(
     (env, home): (&RootsEnv, &Path),
     req: &ClaudeCheckReq,
 ) -> otto_core::Result<()> {
+    set_with_active(pool, user_id, is_root, data_dir, (env, home), req, None).await
+}
+
+async fn set_with_active(
+    pool: &DbPool,
+    user_id: &Id,
+    is_root: bool,
+    data_dir: &Path,
+    (env, home): (&RootsEnv, &Path),
+    req: &ClaudeCheckReq,
+    active: Option<&ActiveLimitProviders>,
+) -> otto_core::Result<()> {
     let is_root = person_only(is_root)?;
-    let login = login_for(pool, user_id, is_root, data_dir, env, home, &req.key).await?;
+    let login = login_for(
+        pool, user_id, is_root, data_dir, env, home, &req.key, active,
+    )
+    .await?;
     let repo = SettingsRepo::new(pool.clone());
     let mut map = repo
         .get(CHECKS_KEY)
@@ -275,8 +347,21 @@ pub async fn run_claude_check(
     key: &str,
     program: Option<String>,
 ) -> otto_core::Result<LimitsResp> {
+    run_claude_check_filtered(pool, user_id, is_root, data_dir, key, program, None).await
+}
+
+/// [`run_claude_check`] scoped to the enabled providers (`active`).
+pub async fn run_claude_check_filtered(
+    pool: &DbPool,
+    user_id: &Id,
+    is_root: bool,
+    data_dir: &Path,
+    key: &str,
+    program: Option<String>,
+    active: Option<&ActiveLimitProviders>,
+) -> otto_core::Result<LimitsResp> {
     let is_root = person_only(is_root)?;
-    run_with(
+    run_with_active(
         pool,
         user_id,
         is_root,
@@ -285,11 +370,13 @@ pub async fn run_claude_check(
         key,
         program,
         cli::CHECK_TIMEOUT,
+        active,
     )
     .await?;
-    super::remaining_limits(pool, user_id, is_root, data_dir).await
+    super::remaining_limits_filtered(pool, user_id, is_root, data_dir, active).await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)] // the pub entry point's inputs plus the injected env/timeout tests need
 async fn run_with(
     pool: &DbPool,
@@ -301,8 +388,34 @@ async fn run_with(
     program: Option<String>,
     timeout: Duration,
 ) -> otto_core::Result<()> {
+    run_with_active(
+        pool,
+        user_id,
+        is_root,
+        data_dir,
+        (env, home),
+        key,
+        program,
+        timeout,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_with_active(
+    pool: &DbPool,
+    user_id: &Id,
+    is_root: bool,
+    data_dir: &Path,
+    (env, home): (&RootsEnv, &Path),
+    key: &str,
+    program: Option<String>,
+    timeout: Duration,
+    active: Option<&ActiveLimitProviders>,
+) -> otto_core::Result<()> {
     let is_root = person_only(is_root)?;
-    let login = login_for(pool, user_id, is_root, data_dir, env, home, key).await?;
+    let login = login_for(pool, user_id, is_root, data_dir, env, home, key, active).await?;
     if !load_checks(pool).await.contains(&login.key) {
         return Err(Error::Invalid(
             "Turn on Check with Anthropic for this login first.".into(),
@@ -643,5 +756,28 @@ mod tests {
         // A non-root caller sees only the profile.
         let own = claude_logins(&accounts, false, dir.path(), &home, &env);
         assert_eq!(own.len(), 1);
+    }
+
+    #[test]
+    fn inactive_claude_config_dirs_are_hidden_when_active_providers_are_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".claude/projects")).unwrap();
+        std::fs::create_dir_all(home.join(".claude-work/projects")).unwrap();
+        std::fs::create_dir_all(home.join(".claude-sub/projects")).unwrap();
+        let env = RootsEnv {
+            explicit: None,
+            isolated: false,
+            codex_home: None,
+        };
+        let args = vec!["--dangerously-skip-permissions".to_string()];
+        let active = ActiveLimitProviders::from_specs([
+            ("claude", "claude", args.as_slice(), Some("claude")),
+            ("claudework", "claude-work", args.as_slice(), Some("claude")),
+            ("codex", "codex", &[][..], Some("codex")),
+        ]);
+        let logins = claude_logins_filtered(&[], true, dir.path(), &home, &env, Some(&active));
+        let keys: Vec<&str> = logins.iter().map(|l| l.key.as_str()).collect();
+        assert_eq!(keys, ["claude:~/.claude", "claude:~/.claude-work"]);
     }
 }

@@ -96,6 +96,18 @@ const ideRunItemsField = StateField.define<Map<number, IdeGutterItem>>({
         return n;
       }
     }
+    if (tr.docChanged && m.size > 0) {
+      const next = new Map<number, IdeGutterItem>();
+      let moved = false;
+      for (const [ln, it] of m) {
+        if (ln < 1 || ln > tr.startState.doc.lines) continue;
+        const mappedPos = tr.changes.mapPos(tr.startState.doc.line(ln).from, 1);
+        const newLn = tr.state.doc.lineAt(Math.min(mappedPos, tr.state.doc.length)).number;
+        if (newLn !== ln) moved = true;
+        if (!next.has(newLn)) next.set(newLn, newLn === ln ? it : { ...it, line: newLn });
+      }
+      if (moved || next.size !== m.size) return next;
+    }
     return m;
   },
 });
@@ -141,6 +153,7 @@ class CombinedGutterMarker extends GutterMarker {
   }
   toDOM(): HTMLElement {
     const wrap = document.createElement('span'); wrap.className = 'cm-ide-bp-cell';
+    const bpSlot = document.createElement('span'); bpSlot.className = 'cm-ide-bp-slot';
     if (this.bpKind) {
       const el = document.createElement('span');
       const isDirectPaused = this.bpKind === 'paused';
@@ -155,7 +168,7 @@ class CombinedGutterMarker extends GutterMarker {
       else el.setAttribute('aria-hidden', 'true');
       const shape = isDirectPaused ? 'play' : this.bpKind === 'logpoint' ? 'diamond' : (this.bpKind === 'disabled' || this.bpKind === 'muted') ? 'hollow' : 'enabled';
       el.appendChild(gutterSvg(shape, this.verified, this.bpKind === 'conditional'));
-      wrap.appendChild(el);
+      bpSlot.appendChild(el);
       if (this.alsoPaused && !isDirectPaused) {
         const execBadge = document.createElement('span');
         execBadge.className = 'cm-ide-exec-arrow is-combo';
@@ -164,9 +177,11 @@ class CombinedGutterMarker extends GutterMarker {
         execBadge.setAttribute('role', 'img');
         execBadge.setAttribute('aria-label', `Execution paused at line ${this.line}`);
         execBadge.appendChild(gutterSvg('play'));
-        wrap.appendChild(execBadge);
+        bpSlot.appendChild(execBadge);
       }
     }
+    wrap.appendChild(bpSlot);
+    const actSlot = document.createElement('span'); actSlot.className = 'cm-ide-act-slot';
     if (this.runItem) {
       const item = this.runItem, btn = document.createElement('button');
       btn.type = 'button'; btn.className = `cm-ide-gutter-run-btn cm-ide-run-btn is-${item.kind}`;
@@ -179,10 +194,13 @@ class CombinedGutterMarker extends GutterMarker {
         const cbs = this.getCallbacks();
         ctxMenu.showAt(btn, [
           { label: `Run '${item.label}'`, icon: 'play', action: () => cbs.onGutterAction?.(item, 'run') },
+          ...(item.kind === 'test'
+            ? [{ label: `Run '${item.label}' (keep containers)`, icon: 'play' as const, action: () => cbs.onGutterAction?.(item, 'run_keep_tc') }]
+            : []),
           { label: `Debug '${item.label}'`, icon: isIconName('bug') ? 'bug' : 'target', action: () => cbs.onGutterAction?.(item, 'debug') },
         ]);
       });
-      wrap.appendChild(btn);
+      actSlot.appendChild(btn);
     } else if (this.showBulb) {
       const bulb = document.createElement('button');
       bulb.type = 'button'; bulb.className = 'cm-ide-lightbulb-btn'; bulb.dataset.testid = 'ide-gutter-lightbulb';
@@ -192,8 +210,9 @@ class CombinedGutterMarker extends GutterMarker {
         const r = bulb.getBoundingClientRect();
         this.getCallbacks().onQuickFix?.({ line: this.line, column: 1, clientX: r.left, clientY: r.bottom + 4 });
       });
-      wrap.appendChild(bulb);
+      actSlot.appendChild(bulb);
     }
+    wrap.appendChild(actSlot);
     return wrap;
   }
 }
@@ -201,9 +220,11 @@ class CombinedGutterMarker extends GutterMarker {
 const bpSpacer = new (class extends GutterMarker {
   toDOM(): HTMLElement {
     const s = document.createElement('span');
-    s.className = 'cm-ide-bp-spacer';
+    s.className = 'cm-ide-bp-cell cm-ide-bp-spacer';
     s.setAttribute('aria-hidden', 'true');
-    s.appendChild(gutterSvg('enabled'));
+    const bpSlot = document.createElement('span'); bpSlot.className = 'cm-ide-bp-slot';
+    const actSlot = document.createElement('span'); actSlot.className = 'cm-ide-act-slot';
+    s.appendChild(bpSlot); s.appendChild(actSlot);
     return s;
   }
 })();
@@ -228,15 +249,31 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
     },
     update(val, tr) {
       let { map, muted, pausedLine, hoverLine } = val;
+      let bpSet = false;
       for (const ef of tr.effects) {
         if (ef.is(setBreakpointsEffect)) {
           const raw = ef.value, list = Array.isArray(raw) ? raw : raw.breakpoints;
           if (!Array.isArray(raw) && raw.muted !== undefined) muted = raw.muted;
           map = new Map(); for (const bp of list) map.set(bp.line, bp);
+          bpSet = true;
         } else if (ef.is(setDebugDecorationsEffect)) pausedLine = ef.value.pausedLine;
         else if (ef.is(setHoverBpLineEffect)) hoverLine = ef.value;
       }
-      if (tr.docChanged && hoverLine != null && hoverLine > tr.state.doc.lines) hoverLine = null;
+      if (tr.docChanged) {
+        if (!bpSet && map.size > 0) {
+          const nextMap = new Map<number, IdeBreakpoint>();
+          let moved = false;
+          for (const [ln, bp] of map) {
+            if (ln < 1 || ln > tr.startState.doc.lines) continue;
+            const mappedPos = tr.changes.mapPos(tr.startState.doc.line(ln).from, 1);
+            const newLn = tr.state.doc.lineAt(Math.min(mappedPos, tr.state.doc.length)).number;
+            if (newLn !== ln) moved = true;
+            if (!nextMap.has(newLn)) nextMap.set(newLn, newLn === ln ? bp : { ...bp, line: newLn });
+          }
+          if (moved || nextMap.size !== map.size) map = nextMap;
+        }
+        if (hoverLine != null && hoverLine > tr.state.doc.lines) hoverLine = null;
+      }
       if (map === val.map && muted === val.muted && pausedLine === val.pausedLine && hoverLine === val.hoverLine && !tr.docChanged) return val;
       return { map, muted, pausedLine, hoverLine, decos: buildBpLineDecos(tr.state.doc, map, muted) };
     },
@@ -268,9 +305,11 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
   const handleBpCtx = (v: EditorView, ln: number, me: MouseEvent): boolean => {
     const cbs = opts.getCallbacks();
     if (!cbs.onToggleBreakpoint && !cbs.onEditBreakpoint) return false;
+    const bp = v.state.field(bpField).map.get(ln);
+    const el = me.target instanceof Element ? me.target : null;
+    if (el?.closest('.cm-lineNumbers') && !bp) return false;
     me.preventDefault(); me.stopPropagation();
     if (cbs.onEditBreakpoint) { cbs.onEditBreakpoint(ln, me); return true; }
-    const bp = v.state.field(bpField).map.get(ln);
     ctxMenu.show(me, [{ label: bp ? 'Remove breakpoint' : 'Add breakpoint', icon: bp ? 'trash' : 'plus', action: () => cbs.onToggleBreakpoint?.(ln) }]);
     return true;
   };
@@ -481,17 +520,19 @@ const ideEditorTheme = EditorView.baseTheme({
   '.cm-ide-peer-slot-2': { '--ide-peer-color': 'var(--cat-3)' }, '.cm-ide-peer-slot-3': { '--ide-peer-color': 'var(--cat-4)' },
   '.cm-ide-peer-slot-4': { '--ide-peer-color': 'var(--cat-5)' }, '.cm-ide-peer-slot-5': { '--ide-peer-color': 'var(--cat-6)' },
   '.cm-gutters, .cm-ide-bp-gutter, .cm-lineNumbers': { cursor: 'pointer', userSelect: 'none' },
-  '.cm-ide-bp-gutter': { minWidth: '22px' },
-  '.cm-ide-bp-gutter .cm-gutterElement': { display: 'flex', alignItems: 'center', justifyContent: 'center', paddingInline: '2px' },
-  '.cm-ide-bp-cell': { display: 'inline-flex', alignItems: 'center', gap: '2px' },
-  '.cm-ide-bp-spacer': { visibility: 'hidden', display: 'inline-flex' },
+  '.cm-ide-bp-gutter': { inlineSize: '34px', minInlineSize: '34px', maxInlineSize: '34px', boxSizing: 'border-box', overflow: 'hidden' },
+  '.cm-ide-bp-gutter .cm-gutterElement': { inlineSize: '34px', minInlineSize: '34px', maxInlineSize: '34px', display: 'flex', alignItems: 'center', justifyContent: 'center', paddingInline: '2px 1px', boxSizing: 'border-box', overflow: 'hidden' },
+  '.cm-ide-bp-cell': { inlineSize: '31px', minInlineSize: '31px', maxInlineSize: '31px', display: 'inline-grid', gridTemplateColumns: '14px 15px', columnGap: '2px', alignItems: 'center', justifyItems: 'center' },
+  '.cm-ide-bp-slot': { position: 'relative', inlineSize: '14px', blockSize: '15px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
+  '.cm-ide-act-slot': { inlineSize: '15px', blockSize: '15px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
+  '.cm-ide-bp-spacer': { visibility: 'hidden' },
   '.cm-ide-bp-marker': { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '12px', height: '12px', lineHeight: '1', color: 'var(--danger)' },
   '.cm-ide-bp-marker.cm-ide-bp-preview': { opacity: '0.45', color: 'var(--danger)' },
   '.cm-ide-bp-marker.cm-ide-bp-muted': { color: 'var(--text-dim)' },
   '.cm-ide-bp-marker.cm-ide-bp-disabled': { color: 'var(--danger)' },
   '.cm-ide-bp-marker.cm-ide-bp-logpoint, .cm-ide-bp-marker.cm-ide-bp-paused': { color: 'var(--warning)' },
   '.cm-ide-exec-arrow': { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '12px', height: '12px', lineHeight: '1', color: 'var(--warning)', filter: 'drop-shadow(0 0 1px var(--bg))' },
-  '.cm-ide-exec-arrow.is-combo': { marginInlineStart: '-3px' },
+  '.cm-ide-exec-arrow.is-combo': { position: 'absolute', insetInlineEnd: '-2px', insetBlockEnd: '-1px', width: '9px', height: '9px', pointerEvents: 'none' },
   '.cm-ide-bp-line': { backgroundColor: 'color-mix(in srgb, var(--danger) 9%, transparent)' },
   '.cm-ide-gutter-run-btn, .cm-ide-lightbulb-btn': { appearance: 'none', border: 'none', background: 'transparent', color: 'var(--success)', fontSize: 'var(--fs-xs)', lineHeight: '1', padding: '0', width: '15px', height: '15px', borderRadius: 'var(--radius-s)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
   '.cm-ide-lightbulb-btn': { color: 'var(--warning)' },

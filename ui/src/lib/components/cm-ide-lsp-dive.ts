@@ -4,6 +4,7 @@
 import { EditorState, Prec, StateEffect, StateField, type Extension } from '@codemirror/state';
 import { Decoration, EditorView, type DecorationSet } from '@codemirror/view';
 import { ctxMenu } from '../contextmenu.svelte';
+import { fileUriToPath } from '../fileUri.ts';
 import { posToLsp, type LspRange } from './cm-ide-lsp-completion.ts';
 
 export interface IdeLspJumpTarget {
@@ -29,12 +30,7 @@ interface RawLspLocation {
 }
 
 export function lspUriToPath(uri: string): string {
-  if (!uri.startsWith('file://')) return uri;
-  try {
-    return decodeURIComponent(uri.slice('file://'.length));
-  } catch {
-    return uri.slice('file://'.length);
-  }
+  return fileUriToPath(uri);
 }
 
 export function pathBasename(p: string): string {

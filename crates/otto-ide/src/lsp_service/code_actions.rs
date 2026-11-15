@@ -28,13 +28,27 @@ pub async fn code_actions<S: IdeCtx>(
     req: IdeCodeActionsReq,
 ) -> Result<IdeCodeActionsResp> {
     req.target.validate()?;
+    let resolved_opt =
+        if !req.target.root.trim().is_empty() || !user.is_root || req.content.is_none() {
+            let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
+            let _ = ctx
+                .ide()
+                .targets
+                .resolve_readable_or_prospective_path(&resolved, &req.path)
+                .await?;
+            Some(resolved)
+        } else {
+            None
+        };
     let content = match req.content.clone() {
         Some(c) => c,
         None => {
-            let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
+            let resolved = resolved_opt
+                .as_ref()
+                .expect("resolved when content is None");
             ctx.ide()
                 .targets
-                .read_file(&resolved, &req.path)
+                .read_file(resolved, &req.path)
                 .await?
                 .content
         }
@@ -95,7 +109,7 @@ pub async fn code_actions<S: IdeCtx>(
     Ok(IdeCodeActionsResp { actions })
 }
 
-/// Compute minimal 1-based `IdeTextEdit` converting `original` into `replaced`.
+/// Compute minimal 1-based UTF-16 `IdeTextEdit` converting `original` into `replaced`.
 pub(crate) fn compute_minimal_text_edit(
     path: &str,
     original: &str,
@@ -104,28 +118,53 @@ pub(crate) fn compute_minimal_text_edit(
     if original == replaced {
         return Vec::new();
     }
-    let orig_chars: Vec<char> = original.chars().collect();
-    let rep_chars: Vec<char> = replaced.chars().collect();
-    let min_len = orig_chars.len().min(rep_chars.len());
+    let orig_bytes = original.as_bytes();
+    let rep_bytes = replaced.as_bytes();
+    let min_len = orig_bytes.len().min(rep_bytes.len());
 
     let mut prefix = 0usize;
-    while prefix < min_len && orig_chars[prefix] == rep_chars[prefix] {
+    while prefix < min_len && orig_bytes[prefix] == rep_bytes[prefix] {
         prefix += 1;
     }
+    while prefix > 0 && (!original.is_char_boundary(prefix) || !replaced.is_char_boundary(prefix)) {
+        prefix -= 1;
+    }
+    if prefix > 0
+        && orig_bytes.get(prefix - 1) == Some(&b'\r')
+        && (orig_bytes.get(prefix) == Some(&b'\n') || rep_bytes.get(prefix) == Some(&b'\n'))
+    {
+        prefix -= 1;
+    }
 
-    let mut orig_end = orig_chars.len();
-    let mut rep_end = rep_chars.len();
+    let mut orig_end = orig_bytes.len();
+    let mut rep_end = rep_bytes.len();
     while orig_end > prefix
         && rep_end > prefix
-        && orig_chars[orig_end - 1] == rep_chars[rep_end - 1]
+        && orig_bytes[orig_end - 1] == rep_bytes[rep_end - 1]
     {
         orig_end -= 1;
         rep_end -= 1;
     }
+    while orig_end < orig_bytes.len()
+        && rep_end < rep_bytes.len()
+        && (!original.is_char_boundary(orig_end) || !replaced.is_char_boundary(rep_end))
+    {
+        orig_end += 1;
+        rep_end += 1;
+    }
+    if orig_end < orig_bytes.len()
+        && rep_end < rep_bytes.len()
+        && orig_bytes.get(orig_end) == Some(&b'\n')
+        && ((orig_end > prefix && orig_bytes.get(orig_end - 1) == Some(&b'\r'))
+            || (rep_end > prefix && rep_bytes.get(rep_end - 1) == Some(&b'\r')))
+    {
+        orig_end += 1;
+        rep_end += 1;
+    }
 
-    let (start_line, start_col) = char_offset_to_line_col(&orig_chars, prefix);
-    let (end_line, end_col) = char_offset_to_line_col(&orig_chars, orig_end);
-    let new_text: String = rep_chars[prefix..rep_end].iter().collect();
+    let (start_line, start_col) = crate::text_pos::byte_offset_to_line_utf16_col(original, prefix);
+    let (end_line, end_col) = crate::text_pos::byte_offset_to_line_utf16_col(original, orig_end);
+    let new_text = replaced[prefix..rep_end].to_string();
 
     vec![IdeTextEdit {
         path: path.to_string(),
@@ -137,56 +176,32 @@ pub(crate) fn compute_minimal_text_edit(
     }]
 }
 
-fn char_offset_to_line_col(chars: &[char], offset: usize) -> (u32, u32) {
-    let mut line = 1u32;
-    let mut col = 1u32;
-    for &ch in chars.iter().take(offset) {
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
+pub(crate) fn apply_edits_to_text(original: &str, edits: &[IdeTextEdit]) -> Option<String> {
+    if edits.is_empty() {
+        return None;
+    }
+    let mut resolved: Vec<(usize, usize, &str)> = Vec::with_capacity(edits.len());
+    for e in edits {
+        let start_off =
+            crate::text_pos::line_utf16_col_to_byte_offset(original, e.start_line, e.start_col);
+        let end_off =
+            crate::text_pos::line_utf16_col_to_byte_offset(original, e.end_line, e.end_col);
+        if start_off > end_off || end_off > original.len() {
+            return None;
+        }
+        resolved.push((start_off, end_off, e.new_text.as_str()));
+    }
+    resolved.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    for pair in resolved.windows(2) {
+        if pair[0].1 > pair[1].0 {
+            return None;
         }
     }
-    (line, col)
-}
-
-fn apply_edits_to_text(original: &str, edits: &[IdeTextEdit]) -> Option<String> {
-    let first = edits.first()?;
-    if edits.len() > 1 {
-        return None;
+    let mut out = original.to_string();
+    for (start_off, end_off, new_text) in resolved.into_iter().rev() {
+        out.replace_range(start_off..end_off, new_text);
     }
-    let chars: Vec<char> = original.chars().collect();
-    let start_off = line_col_to_char_offset(&chars, first.start_line, first.start_col);
-    let end_off = line_col_to_char_offset(&chars, first.end_line, first.end_col);
-    if start_off > end_off || end_off > chars.len() {
-        return None;
-    }
-    let mut out = String::with_capacity(original.len() + first.new_text.len());
-    out.extend(&chars[..start_off]);
-    out.push_str(&first.new_text);
-    out.extend(&chars[end_off..]);
     Some(out)
-}
-
-fn line_col_to_char_offset(chars: &[char], target_line: u32, target_col: u32) -> usize {
-    let mut line = 1u32;
-    let mut col = 1u32;
-    for (idx, &ch) in chars.iter().enumerate() {
-        if line == target_line && col == target_col {
-            return idx;
-        }
-        if ch == '\n' {
-            if line == target_line {
-                return idx;
-            }
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    chars.len()
 }
 
 pub(super) fn make_action(
@@ -275,9 +290,10 @@ pub fn generate_code_actions(
 }
 
 pub(super) fn join_preserving_nl(lines: &[String], original: &str) -> String {
-    let mut out = lines.join("\n");
+    let eol = crate::text_pos::detect_eol(original);
+    let mut out = lines.join(eol);
     if original.ends_with('\n') && !out.is_empty() {
-        out.push('\n');
+        out.push_str(eol);
     }
     out
 }

@@ -73,7 +73,7 @@
     if (bridge?.council.on) return bridge.councilAgentLabel(auth.meta);
     const m = ideAgent.effectiveModel;
     const base = m ? formatModelLabel(activeProvider, m, auth.meta) : harnessLabel(activeProvider);
-    return supportsEffortSelection(activeProvider) && ideAgent.effort
+    return supportsEffortSelection(activeProvider, auth.meta) && ideAgent.effort
       ? `${base} · ${formatEffortShort(ideAgent.effort)}`
       : base;
   });
@@ -207,8 +207,8 @@
   }
 
   function onPaste(e: ClipboardEvent): void {
-    if (!attachmentSupport(activeProvider).images) return;
-    const files = [...(e.clipboardData?.files ?? [])].filter((f) => takesFile(activeProvider, f));
+    if (!attachmentSupport(activeProvider, auth.meta).images) return;
+    const files = [...(e.clipboardData?.files ?? [])].filter((f) => takesFile(activeProvider, f, auth.meta));
     if (files.length === 0) return;
     e.preventDefault();
     void ideAgent.addAttachments(files);
@@ -399,7 +399,7 @@
         <span class="ellipsis">{agentChipLabel}</span>
       </button>
 
-      {#if isRuntimeProvider(activeProvider) && bridge}
+      {#if isRuntimeProvider(activeProvider, auth.meta) && bridge}
         <bridge.RuntimeAccessChip
           mode={ideAgent.effectiveRuntimeAccessMode}
           agent={harnessLabel(activeProvider)}
@@ -452,8 +452,8 @@
       bridge?.council.pick({ provider: ideAgent.provider, model: m, effort: ideAgent.effort });
       ideAgent.model = m;
     }}
-    oneffort={supportsEffortSelection(activeProvider) ? (e) => (ideAgent.effort = e) : undefined}
-    onmode={supportsInteractionMode(activeProvider) ? (m) => ideAgent.setInteractionMode(m) : undefined}
+    oneffort={supportsEffortSelection(activeProvider, auth.meta) ? (e) => (ideAgent.effort = e) : undefined}
+    onmode={supportsInteractionMode(activeProvider, auth.meta) ? (m) => ideAgent.setInteractionMode(m) : undefined}
     onclose={() => (pickerOpen = false)}
   />
 {/if}

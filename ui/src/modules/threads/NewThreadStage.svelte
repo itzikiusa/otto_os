@@ -83,9 +83,9 @@
   const homePath = $derived(ws.scratch?.root_path ?? '~');
   const scratchActive = $derived(useScratch || ws.current === null);
   const targetWs = $derived(scratchActive ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
-  const runtime = $derived(isRuntimeProvider(provider));
-  const files = new StageAttachments(() => provider, () => runtime && !council.on);
-  const modeSupported = $derived(supportsInteractionMode(provider) && !runtime);
+  const runtime = $derived(isRuntimeProvider(provider, auth.meta));
+  const files = new StageAttachments(() => provider, () => runtime && !council.on, () => auth.meta);
+  const modeSupported = $derived(supportsInteractionMode(provider, auth.meta) && !runtime);
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
   const stageDraftKey = $derived(`threads-stage:${cleanCwd || targetWs}`);
   const stageViewStateArg = $derived({ key: stageDraftKey, hasText: prompt.length > 0 });
@@ -117,7 +117,7 @@
     const meta = auth.meta;
     if (council.on) return councilAgentLabel(meta);
     const model = selectedModel ? formatModelLabel(provider, selectedModel, meta) : harnessLabel(provider);
-    return supportsEffortSelection(provider) && selectedEffort ? `${model} · ${formatEffortShort(selectedEffort)}` : model;
+    return supportsEffortSelection(provider, meta) && selectedEffort ? `${model} · ${formatEffortShort(selectedEffort)}` : model;
   });
 
   $effect(() => {
@@ -307,7 +307,7 @@
       const asCouncil = withPrompt && council.ready;
       const created = asCouncil
         ? (await council.start(targetWs, { prompt: firstMsg, title, cwd: dir || null }))[0]
-        : runtime && isRuntimeProvider(provider)
+        : runtime && isRuntimeProvider(provider, auth.meta)
           ? await runtimeThreads.start(targetWs, {
               provider,
               title,
@@ -390,7 +390,7 @@
     } else {
       provider = o.provider;
       selectedModel = o.model || null;
-      if (!supportsEffortSelection(o.provider)) selectedEffort = null;
+      if (!supportsEffortSelection(o.provider, auth.meta)) selectedEffort = null;
     }
   }
 

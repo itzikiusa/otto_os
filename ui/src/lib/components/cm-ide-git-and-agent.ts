@@ -227,6 +227,10 @@ export function rollbackDiffHunk(view: EditorView, hunk: IdeDiffHunk): boolean {
   const oldText = hunk.oldLines.join('\n');
 
   if (hunk.kind === 'del') {
+    if (doc.length === 0) {
+      view.dispatch({ changes: { from: 0, to: 0, insert: oldText }, selection: EditorSelection.cursor(0), userEvent: 'undo' });
+      return true;
+    }
     const insertBeforeLine = hunk.newStartLine;
     if (insertBeforeLine <= doc.lines) {
       const pos = doc.line(insertBeforeLine).from;
@@ -275,9 +279,22 @@ class InlineBlameWidget extends WidgetType {
 }
 
 const ideDiffGutterTheme = EditorView.baseTheme({
-  '.cm-ide-diff-gutter': { width: '7px', userSelect: 'none', cursor: 'pointer' },
+  '.cm-ide-diff-gutter': {
+    inlineSize: '7px',
+    minInlineSize: '7px',
+    maxInlineSize: '7px',
+    boxSizing: 'border-box',
+    overflow: 'hidden',
+    userSelect: 'none',
+    cursor: 'pointer',
+  },
   '.cm-ide-diff-gutter .cm-gutterElement': {
     padding: '0',
+    inlineSize: '7px',
+    minInlineSize: '7px',
+    maxInlineSize: '7px',
+    boxSizing: 'border-box',
+    overflow: 'hidden',
     display: 'flex',
     alignItems: 'stretch',
     justifyContent: 'center',
@@ -290,10 +307,10 @@ const ideDiffGutterTheme = EditorView.baseTheme({
     blockSize: '100%',
     minBlockSize: '1.2em',
     borderRadius: '1.5px',
-    transition: 'inline-size var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out)',
+    transition: 'transform var(--dur-fast) var(--ease-out)',
   },
   '.cm-ide-diff-gutter .cm-gutterElement:hover .cm-ide-diff-bar': {
-    inlineSize: '6px',
+    transform: 'scaleX(1.35)',
   },
   '.cm-ide-diff-add': { backgroundColor: 'var(--success)' },
   '.cm-ide-diff-mod': { backgroundColor: 'var(--info)' },
@@ -479,6 +496,7 @@ export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions
 
   const diffGutter = gutter({
     class: 'cm-ide-diff-gutter',
+    initialSpacer: () => addLineMarker,
     markers: (view) => view.state.field(diffField).markers,
     domEventHandlers: {
       mousedown(view, line, event) {

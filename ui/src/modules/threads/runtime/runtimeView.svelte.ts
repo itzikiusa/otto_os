@@ -435,9 +435,9 @@ export class RuntimeViews {
   }
 
   /** Lazily fetch full output/diff/input for a compacted historical `TurnItem`. */
-  ensureItemDetail(id: string, itemId: string): Promise<TurnItem | null> {
+  ensureItemDetail(id: string, itemId: string, opts?: { force?: boolean }): Promise<TurnItem | null> {
     const cur = this.projections[id]?.items.find((it) => it.id === itemId);
-    if (cur && !cur.detail_omitted) return Promise.resolve(cur);
+    if (cur && !cur.detail_omitted && !opts?.force) return Promise.resolve(cur);
     const key = `${id}:${itemId}`;
     const existing = this.inFlightItems.get(key);
     if (existing) return existing;

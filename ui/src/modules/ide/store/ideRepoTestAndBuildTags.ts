@@ -3,15 +3,17 @@
 // Strictly scopes test execution and Go build tags to a single repository root
 // (never lumping unrelated repos in a multi-repo umbrella project).
 
-import { extractGoBuildTagsFromSource } from '../../../lib/goBuildTags.ts';
+import {
+  extractGoBuildTagsFromSource,
+  resolveEffectiveRepoGoBuildTags,
+  sanitizeGoBuildTags,
+} from '../../../lib/goBuildTags.ts';
 import type {
   IdeFsEntry,
   IdeProjectEnvironment,
   IdeProjectRoot,
   IdeRunConfig,
 } from './ideTypes.ts';
-
-const VALID_BUILD_TAG_RE = /^[A-Za-z0-9_.-]+$/;
 
 function cleanPath(p: string): string {
   const norm = p.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -27,22 +29,7 @@ function repoBaseName(repoPath: string): string {
 export function normalizeGoBuildTags(
   raw: string | readonly string[] | null | undefined,
 ): string[] {
-  if (!raw) return [];
-  const items = typeof raw === 'string' ? raw.split(/[,\s]+/) : raw;
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (let i = 0; i < items.length; i++) {
-    let tok = (items[i] ?? '').trim();
-    if (!tok) continue;
-    if (tok.startsWith('-tags=')) tok = tok.slice('-tags='.length).trim();
-    for (const part of tok.split(/[,\s]+/)) {
-      const clean = part.trim();
-      if (!clean || !VALID_BUILD_TAG_RE.test(clean) || seen.has(clean)) continue;
-      seen.add(clean);
-      out.push(clean);
-    }
-  }
-  return out;
+  return sanitizeGoBuildTags(typeof raw === 'string' ? [raw] : raw);
 }
 
 export function resolveRepoRootForPath(
@@ -82,29 +69,14 @@ export function resolveRepoGoBuildTags(
   repoRoot: string,
   sourceContent?: string | null,
 ): string[] {
-  const normPrimary = cleanPath(primaryRoot);
-  const normRepo = cleanPath(repoRoot);
-  const modMap = env?.module_go_build_tags ?? {};
-
-  let bestModLen = -1;
-  let modTags: string[] | undefined;
-  for (const [rawModRoot, list] of Object.entries(modMap)) {
-    const mr = cleanPath(rawModRoot);
-    if ((normRepo === mr || normRepo.startsWith(`${mr}/`)) && mr.length > bestModLen) {
-      bestModLen = mr.length;
-      modTags = list;
-    }
-  }
-
-  const baseTags =
-    modTags !== undefined
-      ? modTags
-      : normRepo === normPrimary
-        ? (env?.go_build_tags ?? [])
-        : (env?.go_build_tags ?? []);
-
-  const fileTags = sourceContent ? extractGoBuildTagsFromSource(sourceContent) : [];
-  return normalizeGoBuildTags([...baseTags, ...fileTags]);
+  const configured = resolveEffectiveRepoGoBuildTags(
+    repoRoot,
+    primaryRoot,
+    env?.go_build_tags ?? [],
+    env?.module_go_build_tags,
+  );
+  if (!sourceContent) return configured;
+  return sanitizeGoBuildTags([...configured, ...extractGoBuildTagsFromSource(sourceContent)]);
 }
 
 export function mergeGoBuildTagsIntoFlags(

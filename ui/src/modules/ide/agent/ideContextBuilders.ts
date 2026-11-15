@@ -6,6 +6,7 @@ import type { RuntimeAccessMode, RuntimeSession, Session, SessionStatus } from '
 import {
   harnessLabel,
   isPlainShellSession,
+  sessionProviderSlug,
 } from '../../../lib/providers';
 import { inThreadsScope } from '../../../lib/stores/sessionBuckets';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
@@ -152,10 +153,11 @@ export function collectIdeThreadEntries(opts: {
       continue;
     }
     seen.add(r.id);
+    const provSlug = sessionProviderSlug(r);
     list.push({
       id: r.id,
-      title: r.title?.trim() || `${harnessLabel(r.provider)} thread`,
-      provider: r.provider,
+      title: r.title?.trim() || `${harnessLabel(provSlug)} thread`,
+      provider: provSlug,
       kind: 'runtime',
       status: r.status,
       workspace_id: r.workspace_id,

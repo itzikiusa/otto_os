@@ -23,16 +23,7 @@ use self::complete_scan::{complete_in_dir, search_across_roots};
 const BLOCKED_ABS_PREFIXES: &[&str] = &["/proc", "/dev", "/System/Volumes"];
 
 pub(super) fn expand_tilde(raw: &str) -> PathBuf {
-    let trimmed = raw.trim();
-    if trimmed == "~" {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
-    }
-    if let Some(rest) = trimmed.strip_prefix("~/") {
-        if let Some(h) = dirs::home_dir() {
-            return h.join(rest);
-        }
-    }
-    PathBuf::from(trimmed)
+    PathBuf::from(otto_core::paths::expand_tilde(raw.trim()))
 }
 
 pub(super) fn clean_lexical(path: &Path) -> PathBuf {
@@ -322,8 +313,9 @@ pub fn complete_fs_paths_for_roots(
         .iter()
         .find(|r| canon_dir.starts_with(r))
         .unwrap_or(&canon_dir);
+    let fmt = fmt.with_canonical_base(&canon_dir);
     let items = complete_in_dir(
-        &dir_prefix,
+        &canon_dir,
         owning_root,
         &leaf_query,
         &fmt,
@@ -334,7 +326,7 @@ pub fn complete_fs_paths_for_roots(
     );
     IdeFsCompleteResp {
         items,
-        base_dir: dir_prefix.to_string_lossy().into_owned(),
+        base_dir: canon_dir.to_string_lossy().into_owned(),
         elapsed_ms: started.elapsed().as_millis() as u64,
     }
 }

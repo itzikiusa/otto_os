@@ -589,7 +589,7 @@ fn is_allowed_standard_runner_command(runner: IdeRunnerKind, cmd: &str) -> bool 
 }
 
 #[allow(clippy::disallowed_methods)]
-fn validate_target_confined_subpath(
+pub(super) fn validate_target_confined_subpath(
     target: &IdeTargetSpec,
     raw_subpath: &str,
     field_name: &str,
@@ -628,7 +628,9 @@ fn validate_target_confined_subpath(
 
     match target.kind {
         IdeTargetKind::Local => {
-            let cand = if Path::new(normalized).is_absolute() {
+            let cand = if normalized.starts_with('~') {
+                otto_core::paths::expand_home_strict(normalized).map_err(Error::Forbidden)?
+            } else if Path::new(normalized).is_absolute() {
                 PathBuf::from(normalized)
             } else {
                 Path::new(&target.root).join(normalized)
@@ -652,6 +654,11 @@ fn validate_target_confined_subpath(
             Ok(())
         }
         IdeTargetKind::Ssh => {
+            if normalized.starts_with('~') {
+                return Err(Error::Forbidden(format!(
+                    "'{field_name}' escapes remote workspace roots"
+                )));
+            }
             if normalized.starts_with('/') {
                 let in_roots = allowed.iter().any(|r| {
                     let rt = r.trim().trim_end_matches('/');

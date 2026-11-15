@@ -226,9 +226,45 @@ impl IdePluginRegistry {
             .map_err(|e| Error::Internal(format!("failed to remove plugin '{slug}': {e}")))?;
         let mut state = self.load_state();
         state.enabled.remove(slug);
-        let _ = self.save_state(&state);
+        self.save_state(&state)?;
         self.reload();
         Ok(())
+    }
+
+    /// Force every managed IDE plugin in `<data_dir>/ide-plugins` (except slugs
+    /// already present in `keep_enabled` prior to an archive restore) to
+    /// `enabled: false` in `state.json` and refresh the in-memory cache so
+    /// restored plugins never auto-execute until root explicitly enables them.
+    #[allow(clippy::disallowed_methods)]
+    pub fn disable_managed_except(
+        &self,
+        keep_enabled: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<IdePluginInfo>> {
+        let mut state = self.load_state();
+        for (slug, flag) in &mut state.enabled {
+            if !keep_enabled.contains(slug) {
+                *flag = false;
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&self.plugins_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                let dir_name = name.to_string_lossy();
+                if dir_name.starts_with('.') || !path.is_dir() {
+                    continue;
+                }
+                if let Ok(Some(info)) = Self::load_from_dir(&path, "managed") {
+                    if !keep_enabled.contains(&info.slug) {
+                        state.enabled.insert(info.slug, false);
+                    }
+                } else if is_valid_slug(&dir_name) && !keep_enabled.contains(dir_name.as_ref()) {
+                    state.enabled.insert(dir_name.into_owned(), false);
+                }
+            }
+        }
+        self.save_state(&state)?;
+        Ok(self.reload())
     }
 
     pub async fn install(&self, raw_source: &str) -> Result<IdePluginInfo> {
@@ -407,11 +443,27 @@ impl IdePluginRegistry {
             .unwrap_or_default()
     }
 
+    #[allow(clippy::disallowed_methods)]
     fn save_state(&self, state: &PersistedPluginState) -> Result<()> {
-        let _ = std::fs::create_dir_all(&self.plugins_dir);
+        use std::io::Write;
+        std::fs::create_dir_all(&self.plugins_dir)
+            .map_err(|e| Error::Internal(format!("create ide-plugins dir: {e}")))?;
         let state_path = self.plugins_dir.join(STATE_FILE);
+        let tmp_path = self
+            .plugins_dir
+            .join(format!(".{STATE_FILE}.{}.tmp", new_id()));
         let raw = serde_json::to_string_pretty(state)?;
-        std::fs::write(&state_path, raw)
-            .map_err(|e| Error::Internal(format!("save plugin state: {e}")))
+        {
+            let mut f = std::fs::File::create(&tmp_path)
+                .map_err(|e| Error::Internal(format!("create plugin state tmp: {e}")))?;
+            f.write_all(raw.as_bytes())
+                .map_err(|e| Error::Internal(format!("write plugin state tmp: {e}")))?;
+            let _ = f.sync_all();
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, &state_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(Error::Internal(format!("save plugin state: {e}")));
+        }
+        Ok(())
     }
 }

@@ -244,7 +244,10 @@
       try {
         await ide.setLocalTarget(root, localWsId);
         if (pendingBridge) {
-          await ide.saveEnvironment({ network_bridge: pendingBridge });
+          await ide.saveEnvironment({
+            network_bridge: pendingBridge,
+            ...(pendingBridge.enabled ? { confirm_prod_targets: true } : {}),
+          });
           bridgeDirty = false;
         }
         toasts.success('Switched to local workspace', root);

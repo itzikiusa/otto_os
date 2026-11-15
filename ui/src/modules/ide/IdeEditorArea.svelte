@@ -27,18 +27,11 @@
   import IdeEditorSubbar from './editor/IdeEditorSubbar.svelte';
   import IdeTabBar from './editor/IdeTabBar.svelte';
   import {
-    areIdeBreakpointsMuted,
-    classifyIdeFile,
-    fetchIdeGitBlame,
-    flushAutoLocalHistorySnapshot,
-    getIdeProjectFolders,
-    ideEditorPrefs,
-    navigateIdeBack,
-    navigateIdeForward,
-    performIdeDive,
-    pushIdeNavLocation,
-    putIdeLocalHistoryLabel,
-    resolveIdeGitBaseContent,
+    areIdeBreakpointsMuted, classifyIdeFile, evictPersistedIdeGitBase, fetchIdeGitBlame,
+    flushAutoLocalHistorySnapshot, getIdeProjectFolders, getPersistedIdeGitBaseDigest,
+    getPersistedIdeGitBaseSnapshot, ideEditorPrefs, navigateIdeBack, navigateIdeForward,
+    performIdeDive, pushIdeNavLocation, putIdeLocalHistoryLabel, resolveIdeGitBaseContent,
+    setPersistedIdeGitBase,
   } from './editor/ideEditorStoreBridge.svelte';
   import type { ideGit as IdeGitSingleton } from './git/ideGitController.svelte';
   import type { IdeOutlineNode } from './editor/ideLangAnalyzer';
@@ -108,8 +101,7 @@
   let manifestDepsByPath = $state<Record<string, CmIdeDepsMod.IdeDepItem[]>>({});
   let blameEnabledByPath = $state<Record<string, boolean>>({});
   let blameByPath = $state<Record<string, Record<number, string> | null>>({});
-  let gitBaseByPath = $state<Record<string, string | null>>({});
-  const lastGitBaseDigestByPath = new Map<string, string>();
+  let gitBaseByPath = $state<Record<string, string | null>>(getPersistedIdeGitBaseSnapshot());
   const gitBaseCtlByPath = new Map<string, AbortController>();
   let splitRatio = $state(readSavedSplitRatio());
   let prefs = $state(readIdePreferences());
@@ -120,21 +112,19 @@
     const filePath = tab.path;
     if (!filePath || filePath.startsWith('untitled:') || filePath.startsWith('jdt://')) return;
     const digest = liveGit ? liveGit.fileStatusDigest(filePath) : 'pending';
-    if (!force && lastGitBaseDigestByPath.get(filePath) === digest && filePath in gitBaseByPath) return;
+    if (!force && getPersistedIdeGitBaseDigest(filePath) === digest && filePath in gitBaseByPath) return;
     gitBaseCtlByPath.get(filePath)?.abort();
     const ctl = new AbortController();
     gitBaseCtlByPath.set(filePath, ctl);
     void resolveIdeGitBaseContent(filePath, tab.savedContent, ctl.signal)
       .then((base) => {
         if (ctl.signal.aborted) return;
-        lastGitBaseDigestByPath.set(filePath, digest);
+        setPersistedIdeGitBase(filePath, base, digest);
         if (gitBaseByPath[filePath] !== base || !(filePath in gitBaseByPath)) {
           gitBaseByPath = { ...gitBaseByPath, [filePath]: base };
         }
       })
-      .catch(() => {
-        /* ignore aborted or non-git paths */
-      });
+      .catch(() => { /* ignore aborted or non-git paths */ });
   }
 
   $effect(() => {
@@ -281,14 +271,15 @@
     }
     if (pathList === 'all') {
       for (const ctl of gitBaseCtlByPath.values()) ctl.abort();
-      gitBaseCtlByPath.clear(); lastGitBaseDigestByPath.clear(); gitBaseByPath = {};
+      gitBaseCtlByPath.clear(); evictPersistedIdeGitBase('all'); gitBaseByPath = {};
       blameEnabledByPath = {}; blameByPath = {}; tableModeByPath = {}; manifestModeByPath = {}; manifestDepsByPath = {};
       bpEditor = null; intentionState = null; disposeAllPooledLsp(); return;
     }
+    evictPersistedIdeGitBase(pathList);
     const nextBlame = { ...blameByPath }, nextBlameOn = { ...blameEnabledByPath }, nextGitBase = { ...gitBaseByPath };
     const nextMode = { ...tableModeByPath }, nextManMode = { ...manifestModeByPath }, nextManDeps = { ...manifestDepsByPath };
     for (const p of pathList) {
-      gitBaseCtlByPath.get(p)?.abort(); gitBaseCtlByPath.delete(p); lastGitBaseDigestByPath.delete(p); delete nextGitBase[p];
+      gitBaseCtlByPath.get(p)?.abort(); gitBaseCtlByPath.delete(p); delete nextGitBase[p];
       delete nextBlame[p]; delete nextBlameOn[p]; delete nextMode[p]; delete nextManMode[p]; delete nextManDeps[p];
       if (bpEditor?.path === p) bpEditor = null;
       if (intentionState?.path === p) intentionState = null;
@@ -302,6 +293,8 @@
     flushAutoLocalHistorySnapshot(savedPath);
     if (savedPath === stagedPrimaryTab?.path) primaryEditorRef?.notifyDidSave?.();
     if (savedPath === stagedSplitTab?.path) splitEditorRef?.notifyDidSave?.();
+    if (liveGit) liveGit.onIdeFileSaved(savedPath);
+    else void import('./git/ideGitController.svelte').then((m) => m.ideGit.onIdeFileSaved(savedPath)).catch(() => {});
   });
 
   onDestroy(() => {
@@ -469,8 +462,11 @@
     if (!panesEl) return;
     e.preventDefault();
     const down = ide.splitDirection === 'down', rect = panesEl.getBoundingClientRect();
+    const rtl = getComputedStyle(panesEl).direction === 'rtl';
     const onMove = (me: MouseEvent) => {
-      const raw = down ? (me.clientY - rect.top) / Math.max(1, rect.height) : (me.clientX - rect.left) / Math.max(1, rect.width);
+      const raw = down
+        ? (me.clientY - rect.top) / Math.max(1, rect.height)
+        : (rtl ? rect.right - me.clientX : me.clientX - rect.left) / Math.max(1, rect.width);
       splitRatio = Math.max(0.2, Math.min(0.8, raw));
     };
     const onUp = () => {

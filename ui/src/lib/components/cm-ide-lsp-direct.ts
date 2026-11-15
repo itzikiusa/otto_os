@@ -4,6 +4,7 @@ import { EditorView, ViewPlugin, type ViewUpdate } from '@codemirror/view';
 import type { Extension } from '@codemirror/state';
 import { setDiagnostics, type Diagnostic } from '@codemirror/lint';
 import type { IdeDiagnostic } from '../api/types';
+import { fileUriToPath } from '../fileUri.ts';
 import { markLiveLspDiagnostics } from './cm-ide-drafts.ts';
 import {
   buildLspInitializationOptions,
@@ -31,12 +32,7 @@ export interface DirectLspOptions {
 }
 
 function uriToFsPath(uri: string): string {
-  if (!uri.startsWith('file://')) return uri;
-  try {
-    return decodeURIComponent(uri.slice('file://'.length));
-  } catch {
-    return uri.slice('file://'.length);
-  }
+  return fileUriToPath(uri);
 }
 
 function baseName(p: string): string {

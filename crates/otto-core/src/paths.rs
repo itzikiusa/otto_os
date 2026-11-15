@@ -109,6 +109,150 @@ pub fn expand_home_strict(p: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(expand_tilde(p)))
 }
 
+/// True when `path` is the filesystem root, an OS/system container directory,
+/// a shared temp root, or the current user's `$HOME` itself — directories that
+/// must never be auto-registered, recursively watched, or scanned as a single
+/// standalone Git project root (e.g. when a dotfile repo `.git` lives in
+/// `$HOME`). Subdirectories *inside* `$HOME` or `/tmp` (such as
+/// `~/koala-common-go` or `/tmp/my-repo`) return `false`.
+pub fn is_broad_non_project_root(path: &Path) -> bool {
+    const BROAD_ROOTS: &[&str] = &[
+        "/",
+        "/Users",
+        "/home",
+        "/System",
+        "/Library",
+        "/Applications",
+        "/Volumes",
+        "/Network",
+        "/cores",
+        "/dev",
+        "/etc",
+        "/private/etc",
+        "/opt",
+        "/proc",
+        "/sbin",
+        "/bin",
+        "/usr",
+        "/tmp",
+        "/private/tmp",
+        "/var",
+        "/private/var",
+        "/var/folders",
+        "/private/var/folders",
+    ];
+    let check_one = |p: &Path| -> bool {
+        let trimmed = p.to_string_lossy();
+        let norm = if trimmed.len() > 1 {
+            trimmed.trim_end_matches('/')
+        } else {
+            trimmed.as_ref()
+        };
+        if BROAD_ROOTS.contains(&norm) {
+            return true;
+        }
+        for var in ["HOME", "USERPROFILE"] {
+            if let Ok(home) = std::env::var(var) {
+                let h = home.trim_end_matches('/');
+                if !h.is_empty() && norm == h {
+                    return true;
+                }
+                if let Ok(hc) = Path::new(h).canonicalize() {
+                    if p == hc.as_path() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    };
+    if check_one(path) {
+        return true;
+    }
+    if let Ok(canon) = path.canonicalize() {
+        if check_one(&canon) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Encode an absolute filesystem path into an RFC 3986 `file://` URI,
+/// percent-encoding spaces, `#`, `?`, `%`, brackets, and non-ASCII UTF-8 bytes
+/// so LSP servers and URI parsers never truncate query/fragment characters or
+/// reject unencoded whitespace.
+pub fn path_to_file_uri(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    let mut normalized = raw.replace('\\', "/");
+    if !normalized.starts_with('/') {
+        normalized.insert(0, '/');
+    }
+    let mut out = String::with_capacity("file://".len() + normalized.len() + 16);
+    out.push_str("file://");
+    let bytes = normalized.as_bytes();
+    for (idx, &b) in bytes.iter().enumerate() {
+        let is_win_drive_colon =
+            idx == 2 && b == b':' && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic();
+        let unreserved_or_sep = b.is_ascii_alphanumeric()
+            || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~')
+            || is_win_drive_colon;
+        if unreserved_or_sep {
+            out.push(b as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
+/// Decode an RFC 3986 `file://` URI (`file:///path`, `file://localhost/path`,
+/// or `file:///C:/path`) into a `PathBuf` with full UTF-8 percent-decoding.
+/// Returns `None` if `uri` is not a `file:` URI or decodes to invalid UTF-8 /
+/// NUL bytes.
+pub fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let path_part = if let Some(after_host) = rest.strip_prefix("localhost/") {
+        format!("/{after_host}")
+    } else if rest.starts_with('/') {
+        rest.to_string()
+    } else {
+        return None;
+    };
+    let decoded = percent_decode_utf8(&path_part)?;
+    if decoded.contains('\0') {
+        return None;
+    }
+    let bytes = decoded.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
+        return Some(PathBuf::from(&decoded[1..]));
+    }
+    Some(PathBuf::from(decoded))
+}
+
+/// Decode `%XX` sequences as raw bytes and validate UTF-8 (never `b as char`
+/// Latin-1 widening).
+pub fn percent_decode_utf8(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push(((hi << 4) | lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,5 +330,37 @@ mod tests {
         assert_eq!(expand_tilde("rel/dir"), "rel/dir");
         // `~user` expansion is intentionally unsupported — pass through.
         assert_eq!(expand_tilde("~bob/x"), "~bob/x");
+    }
+
+    #[test]
+    fn broad_non_project_root_rejects_home_and_system_roots_but_allows_subprojects() {
+        let home = std::env::var("HOME").expect("HOME set in tests");
+        assert!(is_broad_non_project_root(Path::new("/")));
+        assert!(is_broad_non_project_root(Path::new("/Users")));
+        assert!(is_broad_non_project_root(Path::new("/tmp")));
+        assert!(is_broad_non_project_root(Path::new("/private/tmp")));
+        assert!(is_broad_non_project_root(Path::new(&home)));
+        assert!(!is_broad_non_project_root(
+            &Path::new(&home).join("koala-common-go")
+        ));
+        assert!(!is_broad_non_project_root(Path::new("/tmp/my-test-repo")));
+    }
+
+    #[test]
+    fn file_uri_round_trips_spaces_fragments_unicode_and_localhost() {
+        let p = Path::new("/tmp/my dir/c#?%file 🚀 שלום.go");
+        let uri = path_to_file_uri(p);
+        assert!(uri.starts_with("file:///tmp/my%20dir/"));
+        assert!(!uri.contains(' ') && !uri.contains('#') && !uri.contains('?'));
+        assert_eq!(file_uri_to_path(&uri).as_deref(), Some(p));
+        assert_eq!(
+            file_uri_to_path("file://localhost/tmp/a%20b.rs").as_deref(),
+            Some(Path::new("/tmp/a b.rs"))
+        );
+        assert_eq!(
+            file_uri_to_path("file:///C:/Users/dev/main.go").as_deref(),
+            Some(Path::new("C:/Users/dev/main.go"))
+        );
+        assert!(file_uri_to_path("https://example.com/a").is_none());
     }
 }

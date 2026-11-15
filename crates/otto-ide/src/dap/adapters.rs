@@ -36,7 +36,7 @@ use crate::types::{
 };
 
 /// Transport mechanism used by [`super::session::DapManager`] to connect to an adapter.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum DapAdapterTransport {
     /// Adapter speaks `Content-Length` DAP directly on child stdin/stdout.
     Stdio {
@@ -62,8 +62,97 @@ pub enum DapAdapterTransport {
     ShellBridge(ShellBridgeSpec),
 }
 
+impl std::fmt::Debug for NodeInspectorBridgeSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env_keys: Vec<&str> = self.env.keys().map(String::as_str).collect();
+        f.debug_struct("NodeInspectorBridgeSpec")
+            .field("node_bin", &self.node_bin)
+            .field("node_flags", &self.node_flags)
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("env_keys", &env_keys)
+            .field("attach_port", &self.attach_port)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for JavaJdwpBridgeSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env_keys: Vec<&str> = self.env.keys().map(String::as_str).collect();
+        f.debug_struct("JavaJdwpBridgeSpec")
+            .field("java_bin", &self.java_bin)
+            .field("jvm_flags", &self.jvm_flags)
+            .field("main_class", &self.main_class)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("env_keys", &env_keys)
+            .field("attach_port", &self.attach_port)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ShellBridgeSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env_keys: Vec<&str> = self.env.keys().map(String::as_str).collect();
+        f.debug_struct("ShellBridgeSpec")
+            .field("shell_bin", &self.shell_bin)
+            .field("flavor", &self.flavor)
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("env_keys", &env_keys)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for DapAdapterTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stdio {
+                command,
+                args,
+                cwd,
+                env,
+            } => {
+                let env_keys: Vec<&str> = env.keys().map(String::as_str).collect();
+                f.debug_struct("Stdio")
+                    .field("command", command)
+                    .field("args", args)
+                    .field("cwd", cwd)
+                    .field("env_keys", &env_keys)
+                    .finish()
+            }
+            Self::TcpListen {
+                command,
+                args,
+                cwd,
+                env,
+            } => {
+                let env_keys: Vec<&str> = env.keys().map(String::as_str).collect();
+                f.debug_struct("TcpListen")
+                    .field("command", command)
+                    .field("args", args)
+                    .field("cwd", cwd)
+                    .field("env_keys", &env_keys)
+                    .finish()
+            }
+            Self::DirectTcpAttach { host, port } => f
+                .debug_struct("DirectTcpAttach")
+                .field("host", host)
+                .field("port", port)
+                .finish(),
+            Self::NodeInspectorBridge(spec) => {
+                f.debug_tuple("NodeInspectorBridge").field(spec).finish()
+            }
+            Self::JavaJdwpBridge(spec) => f.debug_tuple("JavaJdwpBridge").field(spec).finish(),
+            Self::ShellBridge(spec) => f.debug_tuple("ShellBridge").field(spec).finish(),
+        }
+    }
+}
+
 /// Fully resolved DAP launch/attach plan ready to start a session.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedDapAdapter {
     pub adapter_name: String,
     pub language: String,
@@ -74,6 +163,18 @@ pub struct ResolvedDapAdapter {
     pub launch_args: Value,
     pub normalized_cwd: String,
     pub initial_output: Vec<IdeDebugOutputEntry>,
+}
+
+impl std::fmt::Debug for ResolvedDapAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedDapAdapter")
+            .field("adapter_name", &self.adapter_name)
+            .field("language", &self.language)
+            .field("transport", &self.transport)
+            .field("launch_command", &self.launch_command)
+            .field("normalized_cwd", &self.normalized_cwd)
+            .finish()
+    }
 }
 
 pub(super) async fn locate_binary(

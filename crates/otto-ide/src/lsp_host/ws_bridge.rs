@@ -201,7 +201,7 @@ pub async fn prepare_lsp_ws_session<C, F, Fut>(
 ) -> std::result::Result<PreparedLspSession, LspWsError>
 where
     C: IdeCtx,
-    F: FnOnce(PathBuf) -> Fut,
+    F: Fn(PathBuf) -> Fut,
     Fut: Future<Output = otto_core::Result<bool>>,
 {
     let ide = ctx.ide();
@@ -277,6 +277,7 @@ where
                 lang: remote.lang,
                 root: norm_root,
                 ssh: Some(ssh_spec),
+                go_build_tags: Vec::new(),
             },
             launch: SpawnLaunch {
                 cmd: remote.primary_cmd,
@@ -288,9 +289,73 @@ where
         });
     }
 
+    let expanded_root_buf =
+        otto_core::paths::expand_home_strict(&root).map_err(LspWsError::bad_request)?;
+    let expanded_root = expanded_root_buf.to_string_lossy().into_owned();
+    let file_hint = match file_hint {
+        Some(fh) => {
+            let p = otto_core::paths::expand_home_strict(&fh).map_err(LspWsError::bad_request)?;
+            Some(p.to_string_lossy().into_owned())
+        }
+        None => None,
+    };
+
+    // Enforce secret-path denial and live RBAC on requested `root` (and `file` hint)
+    // BEFORE probing filesystem existence or walking parent directories for module roots.
+    if !user.is_root {
+        let root_for_secret = expanded_root_buf.clone();
+        let file_for_secret = file_hint.as_ref().map(PathBuf::from);
+        let pre_secret = tokio::task::spawn_blocking(move || {
+            if let Some(why) = secret_root_denial(&canonical_or_ancestor(&root_for_secret)) {
+                return Some(why);
+            }
+            if let Some(fh) = file_for_secret {
+                if let Some(why) = secret_root_denial(&canonical_or_ancestor(&fh)) {
+                    return Some(why);
+                }
+            }
+            None
+        })
+        .await
+        .map_err(|_| LspWsError::internal("path secret check failed"))?;
+        if let Some(why) = pre_secret {
+            return Err(LspWsError::forbidden(why));
+        }
+
+        match local_root_ok(expanded_root_buf.clone()).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(LspWsError::forbidden(
+                    "root is not inside a workspace you can access",
+                ));
+            }
+            Err(e) => {
+                tracing::warn!("lsp: workspace lookup failed: {e}");
+                return Err(LspWsError::internal("workspace lookup failed"));
+            }
+        }
+
+        if let Some(ref fh) = file_hint {
+            let fh_path = Path::new(fh);
+            let fh_dir = fh_path.parent().unwrap_or(fh_path).to_path_buf();
+            match local_root_ok(fh_dir).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(LspWsError::forbidden(
+                        "file is not inside a workspace you can access",
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!("lsp: file workspace lookup failed: {e}");
+                    return Err(LspWsError::internal("workspace lookup failed"));
+                }
+            }
+        }
+    }
+
     let resolved_root = {
         let lang_cl = lang.clone();
-        let root_cl = root.clone();
+        let root_cl = expanded_root.clone();
         let fh_cl = file_hint.clone();
         tokio::task::spawn_blocking(move || {
             resolve_local_lsp_module_root(&lang_cl, &root_cl, fh_cl)
@@ -299,18 +364,7 @@ where
         .map_err(|_| LspWsError::internal("local module root resolution failed"))??
     };
 
-    if !user.is_root {
-        if let Some(ref fh) = file_hint {
-            let fh_cl = PathBuf::from(fh);
-            let secret_why = tokio::task::spawn_blocking(move || {
-                secret_root_denial(&canonical_or_ancestor(&fh_cl))
-            })
-            .await
-            .map_err(|_| LspWsError::internal("file secret check failed"))?;
-            if let Some(why) = secret_why {
-                return Err(LspWsError::forbidden(why));
-            }
-        }
+    if !user.is_root && Path::new(&resolved_root) != expanded_root_buf.as_path() {
         match local_root_ok(PathBuf::from(&resolved_root)).await {
             Ok(true) => {}
             Ok(false) => {
@@ -354,12 +408,16 @@ where
         )));
     }
 
-    if resolved.lang == "go" {
+    let canon_go_tags = if resolved.lang == "go" {
         let eff_tags = ide
             .environments
             .effective_go_build_tags_for_local_root(&resolved_root);
-        ide.lsp_pool.set_go_build_tags(&resolved_root, eff_tags);
-    }
+        ide.lsp_pool
+            .set_go_build_tags(&resolved_root, eff_tags.clone());
+        crate::go_build_tags::canonicalize_go_build_tags(&eff_tags)
+    } else {
+        Vec::new()
+    };
 
     Ok(PreparedLspSession {
         key: PoolKey {
@@ -367,6 +425,7 @@ where
             lang: resolved.lang,
             root: resolved_root,
             ssh: None,
+            go_build_tags: canon_go_tags,
         },
         launch: SpawnLaunch::primary(resolved.command, resolved.args),
         file_hint,
@@ -434,13 +493,14 @@ fn resolve_local_lsp_module_root(
     root: &str,
     file_hint: Option<String>,
 ) -> std::result::Result<String, LspWsError> {
-    let root_path = Path::new(root);
-    if !root_path.exists() || !root_path.is_dir() {
+    let expanded = PathBuf::from(otto_core::paths::expand_tilde(root));
+    if !expanded.exists() || !expanded.is_dir() {
         return Err(LspWsError::bad_request(format!(
             "root does not exist or is not a directory: {root}"
         )));
     }
-    servers::resolve_lsp_module_root(lang, root, file_hint.as_deref(), &[])
+    let expanded_str = expanded.to_string_lossy();
+    servers::resolve_lsp_module_root(lang, &expanded_str, file_hint.as_deref(), &[])
         .map_err(|e| LspWsError::bad_request(e.to_string()))
 }
 

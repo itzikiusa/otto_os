@@ -141,16 +141,18 @@ pub fn resolve_lsp_module_root(
             "LSP root path must not be empty",
         ));
     }
-    let root_path = Path::new(trimmed);
+    let expanded_root = PathBuf::from(otto_core::paths::expand_tilde(trimmed));
+    let root_path = expanded_root.as_path();
     if !root_path.exists() {
         // Preserve synthetic in-memory test roots (`/r`, `/repo-lru-test`).
-        return Ok(trimmed.trim_end_matches('/').to_string());
+        let expanded_str = root_path.to_string_lossy();
+        return Ok(expanded_str.trim_end_matches('/').to_string());
     }
     let canon_root = std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
     let start_dir = if let Some(hint) = file_hint.map(str::trim).filter(|s| !s.is_empty()) {
-        let hp = Path::new(hint);
+        let hp = PathBuf::from(otto_core::paths::expand_tilde(hint));
         let full = if hp.is_absolute() {
-            hp.to_path_buf()
+            hp
         } else {
             canon_root.join(hp)
         };
@@ -172,7 +174,17 @@ pub fn resolve_lsp_module_root(
         canon_root.clone()
     };
 
+    if otto_core::paths::is_broad_non_project_root(&start_dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to spawn language server on a broad non-project directory",
+        ));
+    }
+
     let within_allowed = |cand: &Path| -> bool {
+        if otto_core::paths::is_broad_non_project_root(cand) {
+            return false;
+        }
         if allowed_roots.is_empty() {
             let home = dirs::home_dir();
             cand.parent().is_some() && home.as_deref() != Some(cand)

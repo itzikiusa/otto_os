@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use serde::de::IgnoredAny;
@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use super::super::servers;
 use super::{Init, Mux};
+use crate::go_build_tags::is_gopls_build_tag_exclusion_msg;
 
 #[derive(Deserialize)]
 struct RpcEnvelopeProbe<'a> {
@@ -60,36 +61,6 @@ fn detect_local_python_path(root: &str) -> Option<String> {
     None
 }
 
-fn decode_local_file_uri(uri: &str) -> Option<PathBuf> {
-    let raw = uri.strip_prefix("file://")?;
-    let mut bytes = Vec::with_capacity(raw.len());
-    let src = raw.as_bytes();
-    let mut i = 0;
-    while i < src.len() {
-        if src[i] == b'%' && i + 2 < src.len() {
-            if let (Some(hi), Some(lo)) = (
-                (src[i + 1] as char).to_digit(16),
-                (src[i + 2] as char).to_digit(16),
-            ) {
-                bytes.push(((hi << 4) | lo) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        bytes.push(src[i]);
-        i += 1;
-    }
-    let decoded = String::from_utf8(bytes).ok()?;
-    let p = PathBuf::from(decoded);
-    p.is_absolute().then_some(p)
-}
-
-fn is_gopls_build_tag_exclusion_msg(message: &str) -> bool {
-    message.contains("No packages found for open file")
-        || message.contains("excluded due to its build tags")
-        || message.contains("build constraints exclude all Go files")
-}
-
 #[allow(clippy::disallowed_methods)]
 fn read_go_file_header(path: &Path) -> Option<String> {
     let mut f = std::fs::File::open(path).ok()?;
@@ -118,7 +89,7 @@ fn maybe_rewrite_go_build_tag_diagnostics(
         return false;
     }
 
-    let Some(file_path) = decode_local_file_uri(&uri) else {
+    let Some(file_path) = otto_core::paths::file_uri_to_path(&uri) else {
         return false;
     };
     if file_path.extension().and_then(|e| e.to_str()) != Some("go") {
@@ -181,12 +152,94 @@ fn maybe_rewrite_go_build_tag_diagnostics(
 }
 
 impl Mux {
-    fn workspace_folders_json(&self) -> Vec<Value> {
-        let primary_uri = if self.key.root.starts_with("file://") {
+    fn is_blocked_non_root_method(method: &str) -> bool {
+        matches!(
+            method,
+            "workspace/didChangeWorkspaceFolders"
+                | "workspace/executeCommand"
+                | "workspace/applyEdit"
+                | "rust-analyzer/runSingle"
+                | "experimental/runTest"
+        ) || method.starts_with("gopls/")
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    fn is_confined_local_file_uri(&self, uri: &str) -> bool {
+        let Some(ref canon_root) = self.canon_root else {
+            return false;
+        };
+        let Some(path) = otto_core::paths::file_uri_to_path(uri) else {
+            return false;
+        };
+        let Some(canon) = std::fs::canonicalize(&path)
+            .ok()
+            .or_else(|| otto_core::secret_paths::canonicalize_prospective(&path))
+        else {
+            return false;
+        };
+        canon.starts_with(canon_root)
+            && !otto_core::secret_paths::is_denied_file(&canon)
+            && !otto_core::secret_paths::in_protected_dir(&canon)
+            && crate::target::enforce_non_root_path(&canon).is_ok()
+    }
+
+    fn check_non_root_value_uris(&self, v: &Value, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        match v {
+            Value::String(s) => {
+                if s.len() >= 7 && s[..7].eq_ignore_ascii_case("file://") {
+                    self.is_confined_local_file_uri(s)
+                } else {
+                    true
+                }
+            }
+            Value::Array(arr) => arr
+                .iter()
+                .all(|item| self.check_non_root_value_uris(item, depth + 1)),
+            Value::Object(map) => map
+                .values()
+                .all(|val| self.check_non_root_value_uris(val, depth + 1)),
+            _ => true,
+        }
+    }
+
+    fn check_non_root_message_confined(&self, method: &str, msg: &Value) -> bool {
+        if self.owner_is_root || self.key.ssh.is_some() {
+            return true;
+        }
+        if matches!(
+            method,
+            "initialize" | "initialized" | "shutdown" | "exit" | "$/cancelRequest"
+        ) {
+            return true;
+        }
+        if method.starts_with("textDocument/") {
+            if let Some(u) = str_at(msg, &["params", "textDocument", "uri"])
+                .or_else(|| str_at(msg, &["params", "uri"]))
+            {
+                if u.len() < 7 || !u[..7].eq_ignore_ascii_case("file://") {
+                    return false;
+                }
+            }
+        }
+        match msg.get("params") {
+            Some(params) => self.check_non_root_value_uris(params, 0),
+            None => true,
+        }
+    }
+
+    fn primary_root_uri(&self) -> String {
+        if self.key.root.starts_with("file://") {
             self.key.root.clone()
         } else {
-            format!("file://{}", self.key.root)
-        };
+            otto_core::paths::path_to_file_uri(Path::new(&self.key.root))
+        }
+    }
+
+    fn workspace_folders_json(&self) -> Vec<Value> {
+        let primary_uri = self.primary_root_uri();
         let primary_name = Path::new(&self.key.root)
             .file_name()
             .and_then(|n| n.to_str())
@@ -199,11 +252,7 @@ impl Mux {
         let Some(params) = msg.get_mut("params").and_then(Value::as_object_mut) else {
             return;
         };
-        let primary_uri = if self.key.root.starts_with("file://") {
-            self.key.root.clone()
-        } else {
-            format!("file://{}", self.key.root)
-        };
+        let primary_uri = self.primary_root_uri();
         params.insert("rootUri".into(), Value::String(primary_uri));
         params.insert("rootPath".into(), Value::String(self.key.root.clone()));
         params.insert(
@@ -217,7 +266,7 @@ impl Mux {
                 "initializationOptions".into(),
                 default_gopls_settings(&self.go_build_tags),
             );
-        } else if norm_lang == "python" && self.key.ssh.is_none() {
+        } else if norm_lang == "python" && self.key.ssh.is_none() && self.owner_is_root {
             if let Some(py_path) = detect_local_python_path(&self.key.root) {
                 params.insert(
                     "initializationOptions".into(),
@@ -238,7 +287,7 @@ impl Mux {
             .cloned()
             .unwrap_or_default();
         let norm_lang = servers::normalize_lsp_lang(&self.key.lang);
-        let py_path = if norm_lang == "python" && self.key.ssh.is_none() {
+        let py_path = if norm_lang == "python" && self.key.ssh.is_none() && self.owner_is_root {
             detect_local_python_path(&self.key.root)
         } else {
             None
@@ -266,18 +315,23 @@ impl Mux {
         }
         self.touch();
 
-        // Fast-path high-frequency buffer notifications without constructing a Value DOM.
-        if let Ok(probe) = serde_json::from_str::<RpcEnvelopeProbe<'_>>(text) {
-            if probe.id.is_none()
-                && matches!(
-                    probe.method.as_deref(),
-                    Some(
-                        "textDocument/didChange" | "textDocument/didSave" | "textDocument/willSave"
+        // Fast-path high-frequency buffer notifications without constructing a Value DOM
+        // (enabled for root or remote SSH; non-root local sessions inspect every URI).
+        if self.owner_is_root || self.key.ssh.is_some() {
+            if let Ok(probe) = serde_json::from_str::<RpcEnvelopeProbe<'_>>(text) {
+                if probe.id.is_none()
+                    && matches!(
+                        probe.method.as_deref(),
+                        Some(
+                            "textDocument/didChange"
+                                | "textDocument/didSave"
+                                | "textDocument/willSave"
+                        )
                     )
-                )
-            {
-                self.to_server_raw(text);
-                return;
+                {
+                    self.to_server_raw(text);
+                    return;
+                }
             }
         }
 
@@ -286,6 +340,39 @@ impl Mux {
         };
         let method = msg.get("method").and_then(Value::as_str).map(str::to_owned);
         let id = msg.get("id").filter(|v| !v.is_null()).cloned();
+
+        if !self.owner_is_root {
+            if let Some(ref m) = method {
+                if Self::is_blocked_non_root_method(m) {
+                    if let Some(req_id) = id {
+                        let reply = json!({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {
+                                "code": -32600,
+                                "message": format!("{m} requires root authority")
+                            }
+                        });
+                        self.send_client(client, reply.to_string());
+                    }
+                    return;
+                }
+                if !self.check_non_root_message_confined(m, &msg) {
+                    if let Some(req_id) = id {
+                        let reply = json!({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {
+                                "code": -32600,
+                                "message": "URI escapes authorized workspace root"
+                            }
+                        });
+                        self.send_client(client, reply.to_string());
+                    }
+                    return;
+                }
+            }
+        }
         match (method.as_deref(), id) {
             (Some("initialize"), Some(id)) => {
                 if let Init::Done(result) = &self.init {
@@ -344,7 +431,7 @@ impl Mux {
                             }
                         }
                     }));
-                } else if norm_lang == "python" && self.key.ssh.is_none() {
+                } else if norm_lang == "python" && self.key.ssh.is_none() && self.owner_is_root {
                     let settings = match detect_local_python_path(&self.key.root) {
                         Some(py) => json!({ "python": { "pythonPath": py } }),
                         None => json!({}),

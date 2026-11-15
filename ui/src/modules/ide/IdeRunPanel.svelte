@@ -209,7 +209,8 @@
         class="btn small run-compact-btn"
         disabled={!ide.hasTarget || isRunning}
         title={!ide.hasTarget ? 'Select a workspace target to run' : isRunning ? 'A run is currently in progress' : 'Re-run'}
-        onclick={() => void ide.startRun()}
+        onclick={() => void ide.rerunRun(shownRun.id)}
+        data-testid="ide-run-rerun"
       >
         <Icon name="refresh" size={12} />
         <span>Re-run</span>

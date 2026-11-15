@@ -97,6 +97,68 @@ impl IdeFileQuery {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IdeGitBaseQuery {
+    #[serde(default)]
+    pub kind: Option<IdeTargetKind>,
+    #[serde(default)]
+    pub workspace_id: Option<Id>,
+    #[serde(default)]
+    pub root: String,
+    #[serde(default)]
+    pub connection_id: Option<Id>,
+    pub path: String,
+}
+
+impl IdeGitBaseQuery {
+    pub fn target_spec(&self) -> Result<IdeTargetSpec> {
+        let inferred_root = if !self.root.trim().is_empty() {
+            self.root.clone()
+        } else {
+            let p = std::path::Path::new(self.path.trim());
+            p.parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let spec = IdeTargetSpec {
+            kind: self.kind.unwrap_or(IdeTargetKind::Local),
+            workspace_id: self.workspace_id.clone(),
+            root: inferred_root,
+            connection_id: self.connection_id.clone().filter(|c| !c.trim().is_empty()),
+            additional_roots: Vec::new(),
+            project_folders: Vec::new(),
+        };
+        spec.validate()?;
+        Ok(spec)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeGitBaseResp {
+    pub in_repo: bool,
+    pub repo_root: Option<String>,
+    pub rel_path: Option<String>,
+    pub head_exists: bool,
+    pub content: Option<String>,
+    pub binary: bool,
+    pub truncated: bool,
+}
+
+impl IdeGitBaseResp {
+    pub const fn not_in_repo() -> Self {
+        Self {
+            in_repo: false,
+            repo_root: None,
+            rel_path: None,
+            head_exists: false,
+            content: None,
+            binary: false,
+            truncated: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeFileReadResp {
     pub path: String,
@@ -118,6 +180,8 @@ pub struct IdeFileWriteReq {
     pub expected_sha256: Option<String>,
     #[serde(default)]
     pub create_dirs: bool,
+    #[serde(default)]
+    pub allow_overwrite_large: bool,
     #[serde(default = "default_true", alias = "record_local_history")]
     pub local_history_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1547,6 +1547,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/ide/deps/action"
                     | "/ide/runs"
                     | "/ide/debug/sessions"
+                    | "/workspaces/{id}/lsp/install"
                     // MCP governance + the servers it spawns (`command`/`args`).
                     | "/mcp/otto-server"
                     | "/mcp/auto-approve"
@@ -3310,49 +3311,8 @@ mod tests {
             Require(Browser, Edit)
         );
     }
-
-    #[test]
-    fn ide_routes_require_agents_edit_except_guest_collab_and_person_only_admin() {
-        assert_eq!(
-            pol(Method::POST, "/api/v1/ide/fs/tree"),
-            Require(Agents, Edit)
-        );
-        assert_eq!(
-            pol(Method::GET, "/api/v1/ide/toolchains"),
-            Require(Agents, Edit)
-        );
-        assert_eq!(
-            pol(Method::GET, "/api/v1/ide/collab/guest/{room_id}"),
-            Exempt
-        );
-        assert_eq!(
-            pol(Method::POST, "/api/v1/ide/collab/guest/{room_id}/edit"),
-            Exempt
-        );
-        assert_eq!(
-            route_class(&Method::POST, "/api/v1/ide/collab/rooms"),
-            Some(RouteClass::Secret)
-        );
-        assert_eq!(
-            route_class(&Method::POST, "/api/v1/ide/toolchains/install"),
-            Some(RouteClass::Admin)
-        );
-        assert_eq!(
-            route_class(&Method::POST, "/api/v1/ide/plugins/install"),
-            Some(RouteClass::Admin)
-        );
-        assert_eq!(route_class(&Method::GET, "/api/v1/ide/plugins"), None);
-        assert_eq!(
-            pol(Method::GET, "/api/v1/ide/lsp/status"),
-            Require(Agents, Edit)
-        );
-        assert_eq!(
-            pol(Method::GET, "/api/v1/ide/runs/{run_id}/events"),
-            Require(Agents, Edit)
-        );
-        assert_eq!(
-            route_class(&Method::POST, "/api/v1/ide/build-tools/run"),
-            None
-        );
-    }
 }
+
+#[cfg(test)]
+#[path = "policy_ide_tests.rs"]
+mod policy_ide_tests;

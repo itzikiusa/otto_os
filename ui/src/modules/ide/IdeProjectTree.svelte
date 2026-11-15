@@ -80,6 +80,7 @@
   $effect(() => {
     void ide.target.root;
     void ide.projectRoots.length;
+    void ide.treeRootEntries.length;
     void ide.activePath;
     const enabled = ideDockPrefs.gitStatusInTree;
     const g = liveGit;
@@ -183,7 +184,11 @@
 
   function resolveGitLetter(node: FlatTreeNode): IdeGitLetter | null {
     if (!ideDockPrefs.gitStatusInTree || node.entry.kind === 'dir') return null;
-    const live = liveGit?.treeGitOverlay.files.get(normPath(node.entry.path));
+    const norm = normPath(node.entry.path);
+    if (liveGit?.isRepoStatusLoaded(norm)) {
+      return liveGit.treeGitOverlay.files.get(norm) ?? null;
+    }
+    const live = liveGit?.treeGitOverlay.files.get(norm);
     if (live) return live;
     const raw = node.entry.git_status;
     if (raw === 'M' || raw === 'A' || raw === 'D' || raw === 'U' || raw === 'R' || raw === 'C') return raw;

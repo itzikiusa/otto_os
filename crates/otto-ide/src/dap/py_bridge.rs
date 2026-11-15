@@ -295,26 +295,58 @@ sys.path.insert(0, cwd)
 if prog:
     prog = os.path.realpath(prog if os.path.isabs(prog) else os.path.join(cwd, prog))
 tname = dbg.launch_cfg.get('testName')
+_exit_code = 0
 try:
-    if tname and os.path.isfile(prog):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location('__otto_test_mod__', prog)
-        mod = importlib.util.module_from_spec(spec)
-        dbg.runcall(spec.loader.exec_module, mod)
-        parts = [p for p in str(tname).split('::') if p and not p.endswith('.py')]
-        target_obj = mod
-        for idx_p, part in enumerate(parts):
-            if hasattr(target_obj, part):
-                attr = getattr(target_obj, part)
-                target_obj = attr() if (isinstance(attr, type) and idx_p + 1 < len(parts)) else attr
-        if callable(target_obj):
-            dbg.runcall(target_obj)
+    if tname:
+        if not os.path.isfile(prog):
+            sys.stderr.write('otto py_bridge: test file not found: %s\n' % prog)
+            sys.stderr.flush()
+            _exit_code = 4
+        else:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location('__otto_test_mod__', prog)
+            mod = importlib.util.module_from_spec(spec)
+            dbg.runcall(spec.loader.exec_module, mod)
+            parts = [p for p in str(tname).split('::') if p and not p.endswith('.py')]
+            target_obj = mod
+            resolved_ok = bool(parts)
+            for idx_p, part in enumerate(parts):
+                if hasattr(target_obj, part):
+                    attr = getattr(target_obj, part)
+                    target_obj = attr() if (isinstance(attr, type) and idx_p + 1 < len(parts)) else attr
+                else:
+                    resolved_ok = False
+                    break
+            if resolved_ok and callable(target_obj):
+                dbg.runcall(target_obj)
+            else:
+                sys.stderr.write("otto py_bridge: test target '%s' not found or not callable in %s\n" % (tname, prog))
+                sys.stderr.flush()
+                _exit_code = 4
     else:
         sys.argv = [prog] + list(dbg.launch_cfg.get('args') or [])
         dbg.run('runpy.run_path(%r, run_name="__main__")' % prog, {'runpy': runpy})
-except SystemExit:
-    pass
+except SystemExit as _exc:
+    if _exc.code is None or _exc.code is False or _exc.code == 0:
+        _exit_code = 0
+    elif _exc.code is True:
+        _exit_code = 1
+    elif isinstance(_exc.code, int):
+        _exit_code = int(_exc.code)
+        if _exit_code == 4:
+            sys.stderr.write('pytest exited with code 4 (collection / usage error)\n')
+            sys.stderr.flush()
+        elif _exit_code == 5:
+            sys.stderr.write('pytest exited with code 5 (no tests were collected)\n')
+            sys.stderr.flush()
+    else:
+        sys.stderr.write('%s\n' % (_exc.code,))
+        sys.stderr.flush()
+        _exit_code = 1
 except Exception:
     traceback.print_exc()
+    sys.stderr.flush()
+    _exit_code = 1
+_send({'type': 'event', 'event': 'exited', 'body': {'exitCode': _exit_code}})
 _send({'type': 'event', 'event': 'terminated', 'body': {}})
 "#;

@@ -42,24 +42,66 @@ pub(super) fn is_reserved_internal_env_key(key: &str) -> bool {
 }
 
 /// Environment variables that hijack dynamic linkers, JVM/Node/Python/Go/Rust
-/// startup hooks, or non-interactive shells (`Sec-P1-2`). Forbidden for non-root callers.
+/// startup hooks, SDK roots, `PATH`, or non-interactive shells (`Sec-P1-1`/`Sec-P1-2`).
+/// Forbidden for non-root callers across `env_vars`, `.env` files, and run overrides.
 pub(super) fn is_dangerous_loader_env_key(key: &str) -> bool {
     let upper = key.trim().to_ascii_uppercase();
     upper.starts_with("DYLD_")
         || upper.starts_with("LD_")
+        || upper.starts_with("GIT_CONFIG_")
+        || upper.starts_with("NPM_CONFIG_")
+        || (upper.starts_with("CARGO_TARGET_")
+            && (upper.ends_with("_LINKER") || upper.ends_with("_RUNNER")))
         || matches!(
             upper.as_str(),
-            "JAVA_TOOL_OPTIONS"
+            "PATH"
+                | "VIRTUAL_ENV"
+                | "PYTHONHOME"
+                | "PYTHONPATH"
+                | "PYTHONUSERBASE"
+                | "PYTHONSTARTUP"
+                | "GOROOT"
+                | "GOPATH"
+                | "GOFLAGS"
+                | "GOENV"
+                | "JAVA_HOME"
+                | "JAVA_TOOL_OPTIONS"
                 | "JDK_JAVA_OPTIONS"
                 | "_JAVA_OPTIONS"
-                | "NODE_OPTIONS"
-                | "PYTHONSTARTUP"
-                | "PYTHONPATH"
-                | "GOFLAGS"
-                | "RUSTC_WRAPPER"
+                | "MAVEN_OPTS"
+                | "GRADLE_OPTS"
+                | "CARGO_HOME"
+                | "RUSTUP_HOME"
+                | "RUSTUP_TOOLCHAIN"
+                | "CARGO_BUILD_RUSTC"
                 | "CARGO_BUILD_RUSTC_WRAPPER"
+                | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
+                | "RUSTC"
+                | "RUSTC_WRAPPER"
+                | "RUSTC_WORKSPACE_WRAPPER"
+                | "RUSTFLAGS"
+                | "CARGO_ENCODED_RUSTFLAGS"
+                | "NODE_OPTIONS"
+                | "NODE_PATH"
                 | "BASH_ENV"
                 | "ENV"
+                | "ZDOTDIR"
+                | "SHELLOPTS"
+                | "BASHOPTS"
+                | "CDPATH"
+                | "IFS"
+                | "GIT_SSH"
+                | "GIT_SSH_COMMAND"
+                | "GIT_EXEC_PATH"
+                | "GIT_TEMPLATE_DIR"
+                | "GIT_EXTERNAL_DIFF"
+                | "GIT_ASKPASS"
+                | "SSH_ASKPASS"
+                | "PERL5OPT"
+                | "PERL5LIB"
+                | "RUBYOPT"
+                | "RUBYLIB"
+                | "GLIBC_TUNABLES"
         )
 }
 

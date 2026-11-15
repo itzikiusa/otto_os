@@ -1378,7 +1378,7 @@ fn agy_subagent_transcript_tailing_background_log_slash_id_and_timer_expiry() {
             "toolCallId":"cmd-1",
             "status":"completed",
             "content":[{"type":"content","content":{"type":"text","text":
-                "Command is still running in the background as a background task with task id: eaf6440b-3dbd-4661-9f38-63372630db72/task-9459\nTask logs are available at: file:///tmp/agy-cmd-9459.log"
+                "Command is still running in the background as a background task with task id: eaf6440b-3dbd-4661-9f38-63372630db72/task-9459\nTask logs are available at: file:///tmp/test-agy-subagent-brain/eaf6440b-3dbd-4661-9f38-63372630db72/.system_generated/tasks/task-9459.log"
             }}]
         }}})
         .to_string(),
@@ -1496,61 +1496,53 @@ fn agy_subagent_transcript_tailing_background_log_slash_id_and_timer_expiry() {
                 )
     )));
     // Both timer and subagent emitted their background settlement `SystemNotice`s.
-    assert!(batch.events.iter().any(|e| matches!(
-        e,
-        DriverEvent::TurnItem(i)
-            if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message.starts_with("Background timer finished:"))
-    )));
-    assert!(batch.events.iter().any(|e| matches!(
-        e,
-        DriverEvent::TurnItem(i)
-            if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message == "Background agent finished: Backend Fixer")
-    )));
+    let has_notice = |evs: &[DriverEvent], pred: fn(&str) -> bool| {
+        evs.iter().any(|e| {
+            matches!(
+                e,
+                DriverEvent::TurnItem(i)
+                    if matches!(&i.kind, TurnItemKind::SystemNotice { message, .. } if pred(message))
+            )
+        })
+    };
+    assert!(has_notice(&batch.events, |m| {
+        m.starts_with("Background timer finished:")
+    }));
+    assert!(has_notice(&batch.events, |m| {
+        m == "Background agent finished: Backend Fixer"
+    }));
 
-    // 5. Turn 2: `manage_task(Action="kill")` matches the slash-containing task ID, and
-    //    `manage_subagents(Action="kill")` stops an active subagent.
-    let p2 = d.prompt("t2", &RuntimePromptReq::of("cleanup")).unwrap();
-    let _ = p2;
-    d.on_line(
-        &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{
-            "sessionUpdate":"tool_call",
-            "toolCallId":"inv-2",
-            "title":"invoke_subagent",
-            "kind":"other",
-            "status":"completed",
-            "rawInput":{"TypeName":"research","Role":"Helper","Prompt":"Research"},
-            "content":[{"type":"content","content":{"type":"text","text":"{\"conversationId\":\"sub-to-kill\"}"}}]
+    // 5. Turn 2: `manage_task(Action="kill")` and `manage_subagents(Action="kill")`.
+    d.prompt("t2", &RuntimePromptReq::of("cleanup")).unwrap();
+    let upd = |id: &str, title: &str, input: Value, content: Value| {
+        json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{
+            "sessionUpdate":"tool_call","toolCallId":id,"title":title,"kind":"other",
+            "status":"completed","rawInput":input,"content":content
         }}})
-        .to_string(),
-    );
-    let kill_cmd = d.on_line(
-        &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{
-            "sessionUpdate":"tool_call",
-            "toolCallId":"mk-1",
-            "title":"manage_task",
-            "kind":"other",
-            "status":"completed",
-            "rawInput":{"Action":"kill","TaskId":"eaf6440b-3dbd-4661-9f38-63372630db72/task-9459"}
-        }}})
-        .to_string(),
-    );
-    assert!(kill_cmd.events.iter().any(|e| matches!(
-        e,
-        DriverEvent::TurnItem(i)
-            if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message == "Background command stopped: python3 -m http.server")
-    )));
+        .to_string()
+    };
+    d.on_line(&upd(
+        "inv-2",
+        "invoke_subagent",
+        json!({"TypeName":"research","Role":"Helper","Prompt":"Research"}),
+        json!([{"type":"content","content":{"type":"text","text":"{\"conversationId\":\"sub-to-kill\"}"}}]),
+    ));
+    let kill_cmd = d.on_line(&upd(
+        "mk-1",
+        "manage_task",
+        json!({"Action":"kill","TaskId":"eaf6440b-3dbd-4661-9f38-63372630db72/task-9459"}),
+        json!([]),
+    ));
+    assert!(has_notice(&kill_cmd.events, |m| {
+        m == "Background command stopped: python3 -m http.server"
+    }));
 
-    let kill_sub = d.on_line(
-        &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{
-            "sessionUpdate":"tool_call",
-            "toolCallId":"ms-1",
-            "title":"manage_subagents",
-            "kind":"other",
-            "status":"completed",
-            "rawInput":{"Action":"kill","ConversationIds":["sub-to-kill"]}
-        }}})
-        .to_string(),
-    );
+    let kill_sub = d.on_line(&upd(
+        "ms-1",
+        "manage_subagents",
+        json!({"Action":"kill","ConversationIds":["sub-to-kill"]}),
+        json!([]),
+    ));
     assert!(kill_sub.events.iter().any(|e| matches!(
         e,
         DriverEvent::TurnItem(i)
@@ -1639,10 +1631,7 @@ fn acp_grok_gemini_opencode_subagent_promotion_and_child_routing() {
     let child_msg = oc.on_line(
         &json!({"jsonrpc":"2.0","method":"session/update","params":{
             "sessionId":"ses_child_999",
-            "update":{
-                "sessionUpdate":"agent_message_chunk",
-                "content":{"type":"text","text":"Found 12 endpoints"}
-            }
+            "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Found 12 endpoints"}}
         }})
         .to_string(),
     );
@@ -1656,9 +1645,7 @@ fn acp_grok_gemini_opencode_subagent_promotion_and_child_routing() {
     // Synchronous `task` completes directly when its tool call finishes.
     let sub_end = oc.on_line(
         &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":root_sid,"update":{
-            "sessionUpdate":"tool_call_update",
-            "toolCallId":"task-call-1",
-            "status":"completed",
+            "sessionUpdate":"tool_call_update","toolCallId":"task-call-1","status":"completed",
             "content":[{"type":"content","content":{"type":"text","text":"12 endpoints audited"}}]
         }}})
         .to_string(),
@@ -1725,6 +1712,10 @@ fn acp_grok_gemini_opencode_subagent_promotion_and_child_routing() {
     assert!(g_poll.events.iter().any(|e| matches!(
         e,
         DriverEvent::TurnItem(i)
-            if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message == "Background agent finished: Grok Coder")
+            if matches!(
+                &i.kind,
+                TurnItemKind::SystemNotice { message, .. }
+                    if message == "Background agent finished: Grok Coder"
+            )
     )));
 }

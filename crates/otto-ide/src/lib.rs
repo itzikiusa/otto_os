@@ -14,6 +14,7 @@ pub mod db_watch;
 pub mod deps_inspector;
 pub mod environments;
 pub mod go_build_cache;
+pub mod go_build_tags;
 pub mod gutter;
 pub mod http;
 pub mod java_workspace;
@@ -25,6 +26,7 @@ pub mod netbridge;
 pub mod plugins;
 pub mod projects;
 pub mod target;
+pub mod text_pos;
 pub mod toolchains;
 pub mod toolchains_catalog;
 pub mod types;
@@ -168,6 +170,15 @@ impl IdeEngine {
         sessions: Vec<types::IdeDebugSessionSnapshot>,
     ) -> Vec<types::IdeDebugSessionSnapshot> {
         self.dap.filter_sessions_for_user(user, sessions)
+    }
+
+    /// Gracefully terminate all active IDE runs, DAP debuggers, pooled LSP servers,
+    /// and network bridges on daemon shutdown.
+    pub async fn shutdown(&self) {
+        self.environments.shutdown().await;
+        self.dap.shutdown().await;
+        self.lsp_pool.shutdown();
+        self.netbridge.shutdown().await;
     }
 }
 

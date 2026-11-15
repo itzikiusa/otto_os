@@ -220,6 +220,20 @@ pub(super) fn relink_current(link: &Path, target: &Path) {
     {
         if let Some(p) = link.parent() {
             let _ = std::fs::create_dir_all(p);
+            let tmp_link = p.join(format!(
+                ".{}.{}.tmp",
+                link.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("current"),
+                otto_core::new_id()
+            ));
+            let _ = std::fs::remove_file(&tmp_link);
+            if std::os::unix::fs::symlink(target, &tmp_link).is_ok() {
+                if std::fs::rename(&tmp_link, link).is_ok() {
+                    return;
+                }
+                let _ = std::fs::remove_file(&tmp_link);
+            }
         }
         let _ = std::fs::remove_file(link);
         let _ = std::os::unix::fs::symlink(target, link);

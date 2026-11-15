@@ -18,6 +18,9 @@ mod provider_models_catalog;
 pub use provider_models_catalog::*;
 
 const MODELS_TTL: Duration = Duration::from_secs(60);
+/// Short retry TTL when a CLI family (`opencode`, `pi`, `grok`, or `agy` live
+/// discovery) returned an incomplete/fallback catalog on cold boot or pre-auth.
+const MODELS_PROVISIONAL_TTL: Duration = Duration::from_secs(3);
 /// Past [`MODELS_TTL`] a catalog is still served — and refreshed behind the
 /// response — for this long. `/meta` is on the app's boot path, and `agy
 /// models` is a process spawn; model lists change on CLI upgrades, not
@@ -68,6 +71,7 @@ impl ModelProbe {
 type ModelsCache = Option<(
     u64,
     Instant,
+    bool,
     ModelProbe,
     HashMap<String, Vec<ProviderModelOption>>,
 )>;
@@ -88,30 +92,57 @@ pub fn invalidate_provider_models_cache(provider: Option<&str>) {
     }
 }
 
+/// Post-login cache invalidation hook: clears both the model catalog cache and
+/// the tool availability cache so newly authenticated CLIs (`agy`, `opencode`,
+/// `pi`, `grok`, `claude`, `codex`) immediately re-discover live models.
+pub fn invalidate_caches_after_login(provider: Option<&str>) {
+    invalidate_provider_models_cache(provider);
+    crate::tool_probe::invalidate_tools_cache();
+}
+
+/// Whether background CLI model discovery is currently running.
+pub fn is_provider_models_refreshing() -> bool {
+    REFRESHING.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Discover selectable models per provider at most once per [`MODELS_TTL`];
 /// a stale catalog for the same inputs is served while ONE background
 /// refresh replaces it.
 pub async fn probe_provider_models_cached(
     probe: &ModelProbe,
 ) -> HashMap<String, Vec<ProviderModelOption>> {
+    probe_provider_models_cached_with_status(probe).await.0
+}
+
+/// Like [`probe_provider_models_cached`], also returning whether the returned
+/// catalog is provisional (`true` while cold CLI probes for `opencode`, `pi`,
+/// `grok`, or live `agy` models are still in flight or fell back pre-auth).
+pub async fn probe_provider_models_cached_with_status(
+    probe: &ModelProbe,
+) -> (HashMap<String, Vec<ProviderModelOption>>, bool) {
     use std::sync::atomic::Ordering;
     let mut slot = CACHE.lock().await;
     let cur_gen = CACHE_GEN.load(Ordering::Acquire);
-    if slot.as_ref().is_some_and(|(g, _, _, _)| *g != cur_gen) {
+    if slot.as_ref().is_some_and(|(g, _, _, _, _)| *g != cur_gen) {
         *slot = None;
     }
-    if let Some((_, at, cached, models)) = slot.as_ref() {
+    if let Some((_, at, provisional, cached, models)) = slot.as_ref() {
         if cached == probe {
             let age = at.elapsed();
-            if age < MODELS_TTL {
-                return models.clone();
+            let ttl = if *provisional {
+                MODELS_PROVISIONAL_TTL
+            } else {
+                MODELS_TTL
+            };
+            if age < ttl {
+                let busy = *provisional || REFRESHING.load(Ordering::Acquire);
+                return (models.clone(), busy);
             }
             if age < MODELS_MAX_STALE {
                 if !REFRESHING.swap(true, Ordering::AcqRel) {
                     let probe = probe.clone();
                     let start_gen = cur_gen;
                     tokio::spawn(async move {
-                        // Cleared even if discovery panics.
                         struct Done;
                         impl Drop for Done {
                             fn drop(&mut self) {
@@ -119,28 +150,29 @@ pub async fn probe_provider_models_cached(
                             }
                         }
                         let _done = Done;
-                        let fresh = discover_models(&probe).await;
+                        let (fresh, incomplete) = discover_models_with_status(&probe).await;
                         let mut guard = CACHE.lock().await;
                         if CACHE_GEN.load(Ordering::Acquire) == start_gen {
-                            *guard = Some((start_gen, Instant::now(), probe, fresh));
+                            *guard = Some((start_gen, Instant::now(), incomplete, probe, fresh));
                         }
                     });
                 }
-                return models.clone();
+                return (models.clone(), *provisional);
             }
         }
     }
     if REFRESHING.load(Ordering::Acquire) {
-        if let Some((_, _, cached, models)) = slot.as_ref() {
+        if let Some((_, _, _, cached, models)) = slot.as_ref() {
             if cached == probe {
-                return models.clone();
+                return (models.clone(), true);
             }
         }
-        return fast_models(probe).await;
+        return (fast_models(probe).await, true);
     }
     let probe_bg = probe.clone();
     let start_gen = cur_gen;
-    let (tx, rx) = tokio::sync::oneshot::channel::<HashMap<String, Vec<ProviderModelOption>>>();
+    let (tx, rx) =
+        tokio::sync::oneshot::channel::<(HashMap<String, Vec<ProviderModelOption>>, bool)>();
     REFRESHING.store(true, Ordering::Release);
     tokio::spawn(async move {
         struct Done;
@@ -150,19 +182,25 @@ pub async fn probe_provider_models_cached(
             }
         }
         let _done = Done;
-        let fresh = discover_models(&probe_bg).await;
-        let _ = tx.send(fresh.clone());
+        let (fresh, incomplete) = discover_models_with_status(&probe_bg).await;
+        let _ = tx.send((fresh.clone(), incomplete));
         let mut guard = CACHE.lock().await;
         if CACHE_GEN.load(Ordering::Acquire) == start_gen {
-            *guard = Some((start_gen, Instant::now(), probe_bg, fresh));
+            *guard = Some((start_gen, Instant::now(), incomplete, probe_bg, fresh));
         }
     });
     match timeout(MODELS_COLD_BUDGET, rx).await {
-        Ok(Ok(out)) => {
+        Ok(Ok((out, incomplete))) => {
             if CACHE_GEN.load(Ordering::Acquire) == start_gen {
-                *slot = Some((start_gen, Instant::now(), probe.clone(), out.clone()));
+                *slot = Some((
+                    start_gen,
+                    Instant::now(),
+                    incomplete,
+                    probe.clone(),
+                    out.clone(),
+                ));
             }
-            out
+            (out, incomplete)
         }
         _ => {
             let provisional = fast_models(probe).await;
@@ -170,9 +208,15 @@ pub async fn probe_provider_models_cached(
                 .checked_sub(MODELS_TTL + Duration::from_secs(1))
                 .unwrap_or_else(Instant::now);
             if CACHE_GEN.load(Ordering::Acquire) == start_gen {
-                *slot = Some((start_gen, stale_at, probe.clone(), provisional.clone()));
+                *slot = Some((
+                    start_gen,
+                    stale_at,
+                    true,
+                    probe.clone(),
+                    provisional.clone(),
+                ));
             }
-            provisional
+            (provisional, true)
         }
     }
 }
@@ -208,7 +252,14 @@ async fn fast_models(probe: &ModelProbe) -> HashMap<String, Vec<ProviderModelOpt
         .collect()
 }
 
+#[cfg(test)]
 async fn discover_models(probe: &ModelProbe) -> HashMap<String, Vec<ProviderModelOption>> {
+    discover_models_with_status(probe).await.0
+}
+
+async fn discover_models_with_status(
+    probe: &ModelProbe,
+) -> (HashMap<String, Vec<ProviderModelOption>>, bool) {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
@@ -232,48 +283,57 @@ async fn discover_models(probe: &ModelProbe) -> HashMap<String, Vec<ProviderMode
         let opencode_program = probe.opencode_program.clone();
         let pi_program = probe.pi_program.clone();
         tasks.push(tokio::spawn(async move {
-            let models = match family.as_str() {
-                "claude" => discover_claude_models(&home).await,
-                "codex" => discover_codex_models(&codex_home).await,
+            let (models, incomplete) = match family.as_str() {
+                "claude" => (discover_claude_models(&home).await, false),
+                "codex" => (discover_codex_models(&codex_home).await, false),
                 "agy" => {
                     let prog = resolve_cli_program(agy_program).await;
-                    discover_agy_models(prog.as_deref()).await
+                    discover_agy_models_with_status(prog.as_deref()).await
                 }
-                "gemini" => fallback_gemini_models(),
+                "gemini" => (fallback_gemini_models(), false),
                 "grok" => {
                     let prog = resolve_cli_program(grok_program).await;
-                    discover_grok_models(prog.as_deref()).await
+                    let m = discover_grok_models(prog.as_deref()).await;
+                    let inc = prog.is_some() && m.is_empty();
+                    (m, inc)
                 }
                 "opencode" => {
                     let prog = resolve_cli_program(opencode_program).await;
                     let out = run_models(prog.as_deref(), &["models"], 20).await;
-                    parse_opencode_models_output(&out)
+                    let m = parse_opencode_models_output(&out);
+                    let inc = prog.is_some() && m.is_empty();
+                    (m, inc)
                 }
                 "pi" => {
                     let prog = resolve_cli_program(pi_program).await;
                     let out =
                         run_models(prog.as_deref(), &["--offline", "--list-models"], 15).await;
-                    parse_pi_models_output(&out)
+                    let m = parse_pi_models_output(&out);
+                    let inc = prog.is_some() && m.is_empty();
+                    (m, inc)
                 }
-                _ => Vec::new(),
+                _ => (Vec::new(), false),
             };
-            (family, models)
+            (family, models, incomplete)
         }));
     }
     let mut by_family: HashMap<String, Vec<ProviderModelOption>> = HashMap::new();
+    let mut any_incomplete = false;
     for task in tasks {
-        if let Ok((family, models)) = task.await {
+        if let Ok((family, models, incomplete)) = task.await {
+            any_incomplete |= incomplete;
             by_family.insert(family, models);
         }
     }
-    probe
+    let map = probe
         .families
         .iter()
         .filter_map(|(provider, family)| {
             let models = by_family.get(family.as_str())?;
             (!models.is_empty()).then(|| (provider.clone(), models.clone()))
         })
-        .collect()
+        .collect();
+    (map, any_incomplete)
 }
 
 fn default_efforts() -> Vec<String> {
@@ -287,13 +347,29 @@ fn default_efforts() -> Vec<String> {
 }
 
 async fn resolve_cli_program(program: Option<String>) -> Option<String> {
-    let prog = program?;
+    let prog = crate::tool_probe::extract_custom_cmd_executable(&program?)?;
     tokio::task::spawn_blocking(move || {
-        crate::tool_probe::executable_in_path_or_fs(&prog).then_some(prog)
+        (crate::tool_probe::executable_in_path_or_fs(&prog)
+            || (!prog.contains('/') && crate::tool_probe::rc_defines_alias_or_fn(&prog)))
+        .then_some(prog)
     })
     .await
     .ok()
     .flatten()
+}
+
+fn cli_models_command(prog: &str, args: &[&str]) -> Command {
+    if crate::tool_probe::executable_in_path_or_fs(prog) {
+        let mut cmd = Command::new(prog);
+        cmd.args(args);
+        cmd
+    } else {
+        let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let (shell, wrapped) = crate::providers::shell_wrapped(prog, owned);
+        let mut cmd = Command::new(shell);
+        cmd.args(wrapped);
+        cmd
+    }
 }
 
 async fn discover_claude_models(home: &Path) -> Vec<ProviderModelOption> {
@@ -516,12 +592,13 @@ fn fallback_codex_models() -> Vec<ProviderModelOption> {
     ]
 }
 
-async fn discover_agy_models(program: Option<&str>) -> Vec<ProviderModelOption> {
+async fn discover_agy_models_with_status(
+    program: Option<&str>,
+) -> (Vec<ProviderModelOption>, bool) {
     if let Some(prog) = program {
         if let Ok(Ok(out)) = timeout(
             Duration::from_secs(20),
-            Command::new(prog)
-                .arg("models")
+            cli_models_command(prog, &["models"])
                 .stdin(std::process::Stdio::null())
                 .kill_on_drop(true)
                 .output(),
@@ -531,12 +608,13 @@ async fn discover_agy_models(program: Option<&str>) -> Vec<ProviderModelOption> 
             if out.status.success() {
                 let parsed = parse_agy_models_output(&String::from_utf8_lossy(&out.stdout));
                 if !parsed.is_empty() {
-                    return parsed;
+                    return (parsed, false);
                 }
             }
         }
+        return (fallback_agy_models(), true);
     }
-    fallback_agy_models()
+    (fallback_agy_models(), false)
 }
 
 fn strip_ansi_line(raw: &str) -> String {
@@ -817,8 +895,7 @@ async fn run_models(program: Option<&str>, args: &[&str], secs: u64) -> String {
     };
     let Ok(Ok(out)) = timeout(
         Duration::from_secs(secs),
-        Command::new(prog)
-            .args(args)
+        cli_models_command(prog, args)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
             .output(),
@@ -893,8 +970,7 @@ async fn discover_grok_models(program: Option<&str>) -> Vec<ProviderModelOption>
     };
     let Ok(Ok(out)) = timeout(
         Duration::from_secs(15),
-        Command::new(prog)
-            .arg("models")
+        cli_models_command(prog, &["models"])
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
             .output(),
@@ -951,263 +1027,5 @@ pub fn parse_grok_models_output(raw: &str) -> Vec<ProviderModelOption> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    static TEST_CACHE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// `/meta` answers from a stale catalog at once; one background refresh
-    /// replaces it (no provider here, so the refresh is an empty map).
-    #[tokio::test]
-    async fn stale_catalog_is_served_then_refreshed_in_the_background() {
-        let _serial = TEST_CACHE_LOCK.lock().await;
-        use std::sync::atomic::Ordering;
-        let marker = HashMap::from([("stale".to_string(), Vec::new())]);
-        let aged = Instant::now()
-            .checked_sub(Duration::from_secs(600))
-            .unwrap();
-        let epoch = CACHE_GEN.load(Ordering::Acquire);
-        *CACHE.lock().await = Some((epoch, aged, ModelProbe::default(), marker));
-        let served = probe_provider_models_cached(&ModelProbe::default()).await;
-        assert!(served.contains_key("stale"), "served stale");
-        for _ in 0..200 {
-            if !REFRESHING.load(Ordering::Acquire) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(probe_provider_models_cached(&ModelProbe::default())
-            .await
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn invalidate_provider_models_cache_forces_immediate_rediscovery() {
-        let _serial = TEST_CACHE_LOCK.lock().await;
-        use std::sync::atomic::Ordering;
-        let epoch = CACHE_GEN.load(Ordering::Acquire);
-        let marker = HashMap::from([("cached-only".to_string(), Vec::new())]);
-        *CACHE.lock().await = Some((epoch, Instant::now(), ModelProbe::default(), marker));
-        assert!(probe_provider_models_cached(&ModelProbe::default())
-            .await
-            .contains_key("cached-only"));
-
-        invalidate_provider_models_cache(Some("claude"));
-        assert!(
-            probe_provider_models_cached(&ModelProbe::default())
-                .await
-                .is_empty(),
-            "invalidated cache must not serve pre-refresh snapshot"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn cold_discovery_returns_within_cold_budget_then_populates_slow_cli() {
-        let _serial = TEST_CACHE_LOCK.lock().await;
-        use std::os::unix::fs::PermissionsExt;
-        use std::sync::atomic::Ordering;
-
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("slow-opencode");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nsleep 0.45\nprintf 'openai/gpt-slow-test\\n'\n",
-        )
-        .unwrap();
-        let mut perms = std::fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).unwrap();
-
-        *CACHE.lock().await = None;
-        let probe = ModelProbe {
-            families: vec![
-                ("claude".into(), "claude".into()),
-                ("opencode".into(), "opencode".into()),
-            ],
-            opencode_program: Some(script.to_string_lossy().into_owned()),
-            ..Default::default()
-        };
-
-        let t0 = Instant::now();
-        let provisional = probe_provider_models_cached(&probe).await;
-        let elapsed = t0.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(420),
-            "cold /meta exceeded inline budget: {elapsed:?}"
-        );
-        assert!(
-            provisional.get("claude").is_some_and(|m| !m.is_empty()),
-            "provisional catalog serves local/fallback claude models immediately"
-        );
-        assert!(
-            !provisional.contains_key("opencode"),
-            "slow CLI has not finished yet"
-        );
-
-        for _ in 0..100 {
-            if !REFRESHING.load(Ordering::Acquire) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let refreshed = probe_provider_models_cached(&probe).await;
-        assert_eq!(
-            refreshed
-                .get("opencode")
-                .map(|v| v.iter().map(|m| m.id.as_str()).collect::<Vec<_>>()),
-            Some(vec!["openai/gpt-slow-test"])
-        );
-    }
-
-    #[test]
-    fn agy_parser_strips_ansi_csi_spinners_and_colors() {
-        let raw = "\x1b[?25l\x1b[2K\r\x1b[36m⠋ Fetching models...\x1b[0m\r\x1b[2K\
-                   \x1b[32mgemini-4-carbon-low\x1b[0m\tGemini 4 Carbon (Low)\n\
-                   \x1b[32mgemini-4-carbon-high\x1b[0m\tGemini 4 Carbon (High)\n\
-                   \x1b[?25h";
-        let got = parse_agy_models_output(raw);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].id, "gemini-4-carbon");
-        assert_eq!(got[0].label, "Gemini 4 Carbon");
-        assert_eq!(got[0].supported_efforts, vec!["low", "high"]);
-    }
-
-    #[test]
-    fn parses_claude_codex_and_agy_catalogs() {
-        let claude = parse_claude_catalog_json(
-            r#"{"catalog":{"config":{"models":[
-                {"id":"claude-old","name":"Old","section":"overflow","runtime":{"default_effort":"high","effort_levels":["low","high"]}},
-                {"id":"claude-opus-5-5","name":"Opus 5.5","description":"Everyday tasks","section":"main","runtime":{"default_effort":"medium","effort_levels":["low","medium","high","xhigh","max"]}}
-            ]}}}"#,
-        );
-        assert_eq!(claude.len(), 2);
-        assert_eq!(
-            claude[0].id, "claude-opus-5-5",
-            "main section sorts ahead of overflow"
-        );
-        assert_eq!(claude[0].default_effort.as_deref(), Some("medium"));
-        assert_eq!(claude[0].supported_efforts.len(), 5);
-
-        let codex = parse_codex_models_cache_json(
-            r#"{"models":[
-                {"slug":"gpt-hidden","display_name":"Hidden","visibility":"hide"},
-                {"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","description":"Workhorse","visibility":"list","default_reasoning_level":"low","supported_reasoning_levels":[{"effort":"low"},{"effort":"high"},{"effort":"max"}]}
-            ]}"#,
-        );
-        assert_eq!(codex.len(), 1);
-        assert_eq!(codex[0].id, "gpt-6.1-sol");
-        assert_eq!(codex[0].supported_efforts, vec!["low", "high", "max"]);
-
-        let agy = parse_agy_models_output(
-            "\r⠋ Fetching available models...\rgemini-4-carbon-medium         Gemini 4 Carbon (Medium)\n\
-             gemini-4-carbon-high           Gemini 4 Carbon (High)\n\
-             gemini-4-carbon-low            Gemini 4 Carbon (Low)\n\
-             gemini-4-hydrogen-high         Gemini 4 Hydrogen (High)\n\
-             gemini-4-hydrogen-xhigh        Gemini 4 Hydrogen (XHigh)\n\
-             gemini-pro-orchestrator        Orchestrator (Carbon)\n\
-             claude-opus-5-5-low            Claude Opus 5.5 (Low)\n\
-             claude-opus-5-5-medium         Claude Opus 5.5 (Medium)\n\
-             claude-opus-5-5-high           Claude Opus 5.5 (High)\n\
-             gpt-oss-120b-medium            GPT-OSS 120B (Medium)\n",
-        );
-        assert_eq!(
-            agy.iter()
-                .map(|m| (m.id.as_str(), m.label.as_str()))
-                .collect::<Vec<_>>(),
-            [
-                ("gemini-4-carbon", "Gemini 4 Carbon"),
-                ("gemini-4-hydrogen", "Gemini 4 Hydrogen"),
-                ("gemini-pro-orchestrator", "Orchestrator (Carbon)"),
-                ("claude-opus-5-5", "Claude Opus 5.5"),
-                ("gpt-oss-120b-medium", "GPT-OSS 120B"),
-            ]
-        );
-        assert_eq!(agy[0].default_effort.as_deref(), Some("medium"));
-        assert_eq!(agy[0].supported_efforts, vec!["low", "medium", "high"]);
-        assert_eq!(agy[1].default_effort.as_deref(), Some("high"));
-        assert_eq!(agy[1].supported_efforts, vec!["high", "xhigh"]);
-        assert_eq!(agy[2].default_effort, None);
-        assert!(agy[2].supported_efforts.is_empty());
-        assert_eq!(agy[3].default_effort.as_deref(), Some("medium"));
-        assert_eq!(agy[3].supported_efforts, vec!["low", "medium", "high"]);
-        assert_eq!(agy[4].default_effort.as_deref(), Some("medium"));
-        assert_eq!(agy[4].supported_efforts, vec!["medium"]);
-
-        let grok = parse_grok_models_output(
-            "You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n\nAvailable models:\n  * grok-4.6 (default)\n",
-        );
-        assert_eq!(
-            grok.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            ["grok-4.6", "grok-4.5"]
-        );
-
-        let pi = parse_pi_models_output(
-            "provider      model                context  max-out  thinking  images\nopenai-codex  gpt-5.5              272K     128K     yes       yes   \nx  tiny  8K  1K  no  no\n",
-        );
-        assert_eq!(pi[0].id, "openai-codex/gpt-5.5");
-        assert_eq!(pi[0].supported_efforts.len(), 4);
-        assert!(pi[1].supported_efforts.is_empty());
-
-        let oc = parse_opencode_models_output(
-            "anthropic/claude-sonnet-4\nopenai/gpt-5\nsome log line\n",
-        );
-        assert_eq!(oc.len(), 2);
-    }
-
-    /// Verbatim output of the installed CLIs (pi 1.5.0 `--offline
-    /// --list-models`, opencode 1.19.5 `models`, stdout then stderr as
-    /// `run_models` joins them).
-    #[test]
-    fn parses_real_pi_1_5_and_opencode_1_19_output() {
-        let pi = parse_pi_models_output(
-            "provider      model          context  max-out  thinking  images\n\
-             openai-codex  gpt-5.6-luna   272K     128K     yes       yes   \n\
-             openai-codex  gpt-6.1-terra  500K     128K     yes       yes   \n\
-             opencode      big-pickle     200K     32K      yes       no    \n\
-             \n",
-        );
-        assert_eq!(
-            pi.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            [
-                "openai-codex/gpt-5.6-luna",
-                "openai-codex/gpt-6.1-terra",
-                "opencode/big-pickle"
-            ]
-        );
-        assert_eq!(pi[1].label, "gpt-6.1-terra");
-        assert_eq!(pi[1].description, "openai-codex · 500K context");
-        assert_eq!(pi[0].default_effort.as_deref(), Some("medium"));
-
-        let oc = parse_opencode_models_output(
-            "opencode/beam-free\nopencode/big-pickle\ngithub-copilot/claude-haiku-4.5\n\
-             google/gemini-3.8-flash\nopenai/gpt-5.6-luna-fast\n\
-             \n[auto-update-checker] Package not found, nothing to invalidate: x\n",
-        );
-        assert_eq!(
-            oc.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            [
-                "opencode/beam-free",
-                "opencode/big-pickle",
-                "github-copilot/claude-haiku-4.5",
-                "google/gemini-3.8-flash",
-                "openai/gpt-5.6-luna-fast"
-            ]
-        );
-    }
-
-    /// Every provider of a family gets that family's list under its own name.
-    #[tokio::test]
-    async fn custom_providers_share_their_family_catalog() {
-        let probe = ModelProbe {
-            families: vec![
-                ("claude".into(), "claude".into()),
-                ("claude-work".into(), "claude".into()),
-            ],
-            ..Default::default()
-        };
-        let got = discover_models(&probe).await;
-        assert!(!got["claude-work"].is_empty());
-        assert_eq!(got["claude-work"], got["claude"]);
-    }
-}
+#[path = "provider_models_tests.rs"]
+mod tests;

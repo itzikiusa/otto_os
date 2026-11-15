@@ -86,7 +86,7 @@ export function loadSource(
       }
       // Pure, dependency-free shared helpers (load-error copy, the HTML
       // escaper, the byte formatter, the git auto-fetch policy) run for real unless a test overrides them.
-      const pure = /(?:^|\/)(loadError|html|metric-format|gitAutoFetchConfig|personalAgentBadges|providerRegistry)(?:\.ts)?$/.exec(name);
+      const pure = /(?:^|\/)(loadError|html|metric-format|gitAutoFetchConfig|personalAgentBadges|providerRegistry|fileUri|goBuildTags)(?:\.ts)?$/.exec(name);
       if (!(name in imports) && pure) {
         return loadSource(new URL(`../src/lib/${pure[1]}.ts`, import.meta.url), {}, globals);
       }

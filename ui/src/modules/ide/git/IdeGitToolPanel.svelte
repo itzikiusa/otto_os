@@ -5,6 +5,7 @@
   import Badge from '../../../lib/components/Badge.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { isBroadNonProjectRootClient } from '../../../lib/fileUri';
   import { router } from '../../../lib/router.svelte';
   import { git } from '../../../lib/stores/git.svelte';
   import { ide, ideBasename } from '../ideStore.svelte';
@@ -24,6 +25,7 @@
 
   $effect(() => {
     void ide.projectRoots.length;
+    void ide.treeRootEntries.length;
     void ide.activePath;
     ideGit.syncVisibleRoots({ probeAll: false });
     const root = ideGit.activeRoot;
@@ -52,16 +54,33 @@
     }
   }
 
-  function openInGitModule(): void {
-    const repo = activeRepo;
-    if (repo) git.openRepoTab(repo.id);
-    router.openModule('git');
+  async function openInGitModule(): Promise<void> {
+    const targetPath = ide.activePath || ideGit.activeRoot?.path || ide.target.root;
+    const repo = activeRepo ?? (targetPath ? await ideGit.resolveRepoForPath(targetPath) : null);
+    if (repo && !isBroadNonProjectRootClient(repo.path)) {
+      git.upsertRepo(repo);
+      git.openRepoTab(repo.id, 'graph');
+    }
+    router.go('git');
   }
 </script>
 
 <div class="ig-root" data-testid="ide-git-panel">
   <header class="ig-bar">
-    {#if ide.projectRoots.length > 1}
+    {#if ideGit.repos.length > 1}
+      <select
+        class="ig-repo-select"
+        dir="ltr"
+        aria-label="Select repository"
+        value={activeRepo?.id ?? ''}
+        onchange={(e) => ideGit.selectRepo((e.currentTarget as HTMLSelectElement).value)}
+        data-testid="ide-git-repo-select"
+      >
+        {#each ideGit.repos as repoOpt (repoOpt.id)}
+          <option value={repoOpt.id}>{repoOpt.name}</option>
+        {/each}
+      </select>
+    {:else if ide.projectRoots.length > 1}
       <select
         class="ig-repo-select"
         dir="ltr"
@@ -211,7 +230,7 @@
     <button
       type="button"
       class="btn small ghost ig-open-mod"
-      onclick={openInGitModule}
+      onclick={() => void openInGitModule()}
       data-testid="ide-git-open-module"
     >
       <Icon name="external" size={12} />

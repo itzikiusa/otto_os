@@ -3,17 +3,18 @@
 // PTY thread input fallback, and zero-polling inline-edit execution.
 
 import { api } from '../../../lib/api/client';
-import type { PromptImage, RuntimeAccessMode, RuntimeProvider } from '../../../lib/api/types';
+import type { PromptImage, RuntimeAccessMode, RuntimeProviderOrSlug } from '../../../lib/api/types';
 import { ideWorkspacePort } from '../../../lib/ideWorkspacePort.svelte';
 import { loadErrorText } from '../../../lib/loadError';
 import { normalizeEffort, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
-import { harnessLabel, isRuntimeProvider } from '../../../lib/providers';
+import { harnessLabel, isRuntimeProvider, sessionProviderSlug } from '../../../lib/providers';
 import { router } from '../../../lib/router.svelte';
 import {
   getIdeRuntimeComposerUi,
   openInThreads,
   type RuntimeSessionPort,
 } from '../../../lib/runtimeThreadPort';
+import { auth } from '../../../lib/stores/auth.svelte';
 import { runtimeDrafts, type ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import { transcript } from '../../../lib/stores/transcript.svelte';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
@@ -137,7 +138,7 @@ export async function loadSelectedIdeSessionMeta(
   if (!row) return null;
   void bridge.runtimeThreads.loadLinked(id).catch(() => {});
   return {
-    provider: row.provider,
+    provider: sessionProviderSlug(row),
     ...(row.model ? { model: row.model } : {}),
     ...(row.access_mode ? { accessMode: row.access_mode } : {}),
   };
@@ -145,7 +146,7 @@ export async function loadSelectedIdeSessionMeta(
 
 export async function ensureIdeRuntimeSession(opts: {
   existingId: string | null;
-  targetProvider: RuntimeProvider;
+  targetProvider: RuntimeProviderOrSlug;
   seedTitle: string;
   wsId: string;
   localCwd: string | null;
@@ -162,7 +163,7 @@ export async function ensureIdeRuntimeSession(opts: {
       (ws.getSession(opts.existingId)
         ? undefined
         : await runtimeThreads.loadOne(opts.existingId).catch(() => undefined));
-    if (row && row.provider === opts.targetProvider) {
+    if (row && (sessionProviderSlug(row) === opts.targetProvider || row.provider === opts.targetProvider)) {
       if (row.status === 'closed' || row.status === 'dormant') await runtimeThreads.reopen(opts.existingId);
       opts.syncSubscriptions();
       return opts.existingId;
@@ -216,7 +217,7 @@ export async function executeIdeInlineEdit(opts: {
   const effort = normalizeEffort(st.effort);
   const sid = await ensureIdeRuntimeSession({
     existingId: opts.existingSessionId,
-    targetProvider: st.provider as RuntimeProvider,
+    targetProvider: st.provider,
     seedTitle: query,
     wsId: opts.wsId,
     localCwd: opts.localCwd,
@@ -259,11 +260,11 @@ export async function executeIdePromptSend(opts: {
   const composerUi = ideAgentState.composerUi ?? getIdeRuntimeComposerUi();
   const pics: PromptImage[] = opts.files
     .filter((f) => f.mime.startsWith('image/'))
-    .map(({ mime, data_base64 }) => ({ mime, data_base64 }));
+    .map(({ name, mime, data_base64 }) => ({ ...(name ? { name } : {}), mime, data_base64 }));
 
   if (
     opts.currentSessionId &&
-    isRuntimeProvider(opts.provider) &&
+    isRuntimeProvider(opts.provider, auth.meta) &&
     composerUi &&
     composerUi.askTargets.for(opts.currentSessionId).length > 0
   ) {
@@ -291,7 +292,7 @@ export async function executeIdePromptSend(opts: {
     return;
   }
 
-  if (isRuntimeProvider(opts.provider)) {
+  if (isRuntimeProvider(opts.provider, auth.meta)) {
     const sid = await ensureIdeRuntimeSession({
       existingId: opts.currentSessionId,
       targetProvider: opts.provider,
@@ -359,7 +360,7 @@ export async function runIdeInlineEditStateTurn(opts: {
   if (!st || !st.open || st.busy) return;
   const q = (opts.query ?? st.query).trim();
   if (!q) return;
-  if (!isRuntimeProvider(st.provider)) {
+  if (!isRuntimeProvider(st.provider, auth.meta)) {
     opts.handoffAndSend();
     return;
   }

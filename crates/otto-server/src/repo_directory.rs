@@ -279,11 +279,16 @@ fn match_path<'a>(entries: &'a [RepoEntry], path: &str) -> Vec<&'a RepoEntry> {
     let Some(path) = normalize_path(path) else {
         return Vec::new();
     };
+    if otto_core::paths::is_broad_non_project_root(std::path::Path::new(&path)) {
+        return Vec::new();
+    }
     let hits: Vec<&RepoEntry> = entries
         .iter()
         .filter(|e| {
-            normalize_path(&e.repo.path)
-                .is_some_and(|root| path == root || path.starts_with(&format!("{root}/")))
+            normalize_path(&e.repo.path).is_some_and(|root| {
+                !otto_core::paths::is_broad_non_project_root(std::path::Path::new(&root))
+                    && (path == root || path.starts_with(&format!("{root}/")))
+            })
         })
         .collect();
     let deepest = hits.iter().map(|e| e.repo.path.len()).max().unwrap_or(0);
@@ -603,11 +608,18 @@ async fn resolve_checkout_remote<'a>(
     path: &str,
     prefer_ws: Option<&str>,
 ) -> Option<RefMatch<'a>> {
-    if !std::path::Path::new(path).is_absolute() || tokio::fs::metadata(path).await.is_err() {
+    let p = std::path::Path::new(path);
+    if !p.is_absolute()
+        || otto_core::paths::is_broad_non_project_root(p)
+        || tokio::fs::metadata(path).await.is_err()
+    {
         return None;
     }
     let git = otto_git::LocalGit::new(path);
     let top = git.toplevel().await.ok()?;
+    if otto_core::paths::is_broad_non_project_root(std::path::Path::new(&top)) {
+        return None;
+    }
     // The checkout's root may itself be registered (the path pointed below it
     // through a symlinked parent, say).
     if let m @ RefMatch::One(..) = settle(match_path(entries, &top), MatchedBy::Path, prefer_ws) {
@@ -705,7 +717,13 @@ pub async fn repo_resolve(
 mod tests {
     use super::*;
 
-    fn entry(id: &str, ws: &str, name: &str, path: &str, remote: Option<&str>) -> RepoEntry {
+    pub(super) fn entry(
+        id: &str,
+        ws: &str,
+        name: &str,
+        path: &str,
+        remote: Option<&str>,
+    ) -> RepoEntry {
         RepoEntry {
             repo: Repo {
                 id: id.into(),
@@ -722,7 +740,7 @@ mod tests {
         }
     }
 
-    fn fixture() -> Vec<RepoEntry> {
+    pub(super) fn fixture() -> Vec<RepoEntry> {
         vec![
             entry(
                 "r-promo",
@@ -937,19 +955,19 @@ mod tests {
     use otto_state::NewRepo;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    struct World {
+    pub(super) struct World {
         pool: DbPool,
-        git: GitStore,
+        pub(super) git: GitStore,
         roles: otto_rbac::RbacRoleChecker,
         workspaces: WorkspacesRepo,
-        ws_a: Id,
-        ws_b: Id,
-        repo_a: Id,
-        repo_b: Id,
+        pub(super) ws_a: Id,
+        pub(super) ws_b: Id,
+        pub(super) repo_a: Id,
+        pub(super) repo_b: Id,
     }
 
     impl World {
-        fn src(&self) -> RepoSources<'_> {
+        pub(super) fn src(&self) -> RepoSources<'_> {
             RepoSources {
                 grants: GrantsRepo::new(self.pool.clone()),
                 git: &self.git,
@@ -960,12 +978,12 @@ mod tests {
     }
 
     /// Whether an error's candidate listing (its `- ` rows) names `needle`.
-    fn listed(msg: &str, needle: &str) -> bool {
+    pub(super) fn listed(msg: &str, needle: &str) -> bool {
         msg.lines()
             .any(|l| l.starts_with("- ") && l.contains(needle))
     }
 
-    fn user(id: &str, root: bool) -> User {
+    pub(super) fn user(id: &str, root: bool) -> User {
         User {
             id: id.into(),
             username: id.into(),
@@ -976,7 +994,7 @@ mod tests {
         }
     }
 
-    fn auth_for(u: User, scope: Option<McpScope>) -> AuthContext {
+    pub(super) fn auth_for(u: User, scope: Option<McpScope>) -> AuthContext {
         AuthContext {
             real_user: u.clone(),
             effective_user: u,
@@ -993,7 +1011,7 @@ mod tests {
     /// `owner` admins workspaces A and B. `alice` (Git:View) is a Viewer of A
     /// only; `bob` is a member of A but holds no Git grant. `games` lives in B,
     /// `tools` in A.
-    async fn world() -> World {
+    pub(super) async fn world() -> World {
         let opts = SqliteConnectOptions::new()
             .in_memory(true)
             .foreign_keys(true);
@@ -1169,50 +1187,8 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, Error::Forbidden(_)), "{err}");
     }
-
-    /// A token pinned to workspace A cannot reach B's repo through resolution —
-    /// not by name, not by raw id, not by filtering to B.
-    #[tokio::test]
-    async fn a_workspace_pinned_token_cannot_resolve_outside_its_pin() {
-        let w = world().await;
-        let pinned = auth_for(
-            user("owner", false),
-            Some(McpScope {
-                tools: None,
-                allow_writes: true,
-                workspace_id: Some(w.ws_a.clone()),
-            }),
-        );
-        for reference in ["games", w.repo_b.as_str()] {
-            let err = resolve_repo_in(&w.src(), &pinned, None, Some(reference), None)
-                .await
-                .unwrap_err();
-            assert!(matches!(err, Error::NotFound(_)), "{reference}: {err}");
-            assert!(!listed(&err.to_string(), w.repo_b.as_str()), "{err}");
-        }
-        let err = resolve_repo_in(&w.src(), &pinned, None, Some("games"), Some(&w.ws_b))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, Error::Forbidden(_)), "{err}");
-        // Inside the pin it still resolves.
-        let r = resolve_repo_in(&w.src(), &pinned, None, Some("tools"), None)
-            .await
-            .unwrap();
-        assert_eq!(r.entry.repo.id, w.repo_a);
-    }
-
-    #[test]
-    fn listing_puts_the_current_workspace_first() {
-        let mut es = fixture();
-        sort_for_listing(&mut es, Some("ws-b"));
-        let first_a = es
-            .iter()
-            .position(|e| e.repo.workspace_id == "ws-a")
-            .unwrap();
-        assert!(es[..first_a].iter().all(|e| e.repo.workspace_id == "ws-b"));
-        assert_eq!(es[0].repo.name, "games_management");
-        let row = es[0].to_json(Some("ws-b"));
-        assert_eq!(row["workspace_name"], "ws-b-name");
-        assert_eq!(row["current"], true);
-    }
 }
+
+#[cfg(test)]
+#[path = "repo_directory_round5_tests.rs"]
+mod repo_directory_round5_tests;

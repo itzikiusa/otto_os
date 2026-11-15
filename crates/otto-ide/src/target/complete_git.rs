@@ -5,20 +5,35 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use dashmap::DashMap;
+use tokio::io::AsyncReadExt;
 
 use super::super::{is_allowed_path, score_candidate};
 
 const GIT_LS_CACHE_TTL: Duration = Duration::from_secs(8);
 const GIT_LS_CACHE_CAP: usize = 64;
+const GIT_LS_TIMEOUT: Duration = Duration::from_millis(1500);
+const MAX_GIT_LS_STDOUT_BYTES: usize = 8 * 1024 * 1024;
 
 struct CachedGitFiles {
     fetched_at: Instant,
     index_mtime: Option<SystemTime>,
     files: Arc<Vec<String>>,
+}
+
+struct PgKillGuard(Option<u32>);
+
+impl Drop for PgKillGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.0.take() {
+            crate::lsp_host::pool_spawn::kill_process_group_sync(pgid);
+        }
+    }
 }
 
 fn git_ls_cache() -> &'static DashMap<PathBuf, CachedGitFiles> {
@@ -32,8 +47,73 @@ pub(super) fn has_fresh_git_ls_cache(canon_repo: &Path) -> bool {
         .is_some_and(|c| c.fetched_at.elapsed() < GIT_LS_CACHE_TTL)
 }
 
+async fn run_git_ls_files_bounded(canon_repo: &Path) -> Option<Vec<u8>> {
+    let mut cmd = otto_git_cmd::hardened_command();
+    cmd.arg("-C")
+        .arg(canon_repo)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = cmd.spawn().ok()?;
+    let mut pg_guard = PgKillGuard(child.id());
+    let mut stdout = child.stdout.take()?;
+
+    let read_res = tokio::time::timeout(GIT_LS_TIMEOUT, async {
+        let mut buf = Vec::with_capacity(16 * 1024);
+        let mut limited = (&mut stdout).take((MAX_GIT_LS_STDOUT_BYTES + 1) as u64);
+        limited.read_to_end(&mut buf).await?;
+        let status = child.wait().await?;
+        Ok::<(std::process::ExitStatus, Vec<u8>), std::io::Error>((status, buf))
+    })
+    .await;
+
+    match read_res {
+        Ok(Ok((status, buf))) => {
+            pg_guard.0 = None;
+            drop(pg_guard);
+            if !status.success() || buf.len() > MAX_GIT_LS_STDOUT_BYTES {
+                return None;
+            }
+            Some(buf)
+        }
+        _ => {
+            let _ = child.start_kill();
+            drop(pg_guard);
+            None
+        }
+    }
+}
+
+fn query_git_ls_files_sync(canon_repo: &Path) -> Option<Vec<u8>> {
+    let repo_owned = canon_repo.to_path_buf();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        rt.block_on(run_git_ls_files_bounded(&repo_owned))
+    })
+    .join()
+    .ok()
+    .flatten()
+}
+
 fn load_or_query_git_ls_files(repo_root: &Path) -> Option<(PathBuf, Arc<Vec<String>>)> {
     let canon_repo = fs::canonicalize(repo_root).ok()?;
+    if otto_core::paths::is_broad_non_project_root(&canon_repo) {
+        return None;
+    }
     let index_mtime = fs::metadata(canon_repo.join(".git/index"))
         .and_then(|m| m.modified())
         .ok();
@@ -44,20 +124,8 @@ fn load_or_query_git_ls_files(repo_root: &Path) -> Option<(PathBuf, Arc<Vec<Stri
         }
     }
 
-    let mut cmd = otto_git_cmd::hardened_std_command();
-    cmd.arg("-C").arg(&canon_repo).args([
-        "ls-files",
-        "-z",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-    ]);
-    let out = cmd.output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let files: Vec<String> = out
-        .stdout
+    let stdout = query_git_ls_files_sync(&canon_repo)?;
+    let files: Vec<String> = stdout
         .split(|&b| b == 0)
         .filter(|raw| !raw.is_empty())
         .filter_map(|raw| std::str::from_utf8(raw).ok().map(str::to_string))
@@ -95,9 +163,9 @@ pub(super) fn collect_git_ls_files(
     workspace_roots: &[PathBuf],
     seen: &mut HashSet<PathBuf>,
     scored: &mut Vec<(i32, PathBuf, bool)>,
-) {
+) -> bool {
     let Some((canon_repo, rel_files)) = load_or_query_git_ls_files(repo_root) else {
-        return;
+        return false;
     };
     let canon_prefix = fs::canonicalize(dir_prefix).unwrap_or_else(|_| dir_prefix.to_path_buf());
     let sub_prefix = canon_prefix
@@ -152,4 +220,5 @@ pub(super) fn collect_git_ls_files(
         scored.push((sc, lexical_full, false));
         accepted += 1;
     }
+    true
 }

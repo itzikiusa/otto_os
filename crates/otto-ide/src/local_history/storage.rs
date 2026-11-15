@@ -196,8 +196,14 @@ pub(super) fn write_atomic_sync(dest: &Path, bytes: &[u8]) -> Result<()> {
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".otto-lh-{}-{seq}.tmp", std::process::id()));
     let existing_perms = std::fs::metadata(dest).ok().map(|m| m.permissions());
-    std::fs::write(&tmp, bytes)
-        .map_err(|e| Error::Internal(format!("write temp file '{}': {e}", tmp.display())))?;
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)
+            .map_err(|e| Error::Internal(format!("create temp file '{}': {e}", tmp.display())))?;
+        f.write_all(bytes)
+            .map_err(|e| Error::Internal(format!("write temp file '{}': {e}", tmp.display())))?;
+        let _ = f.sync_all();
+    }
     if let Some(perms) = existing_perms {
         let _ = std::fs::set_permissions(&tmp, perms);
     }

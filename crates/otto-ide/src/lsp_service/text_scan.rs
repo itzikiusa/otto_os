@@ -23,31 +23,59 @@ pub fn is_valid_identifier(s: &str) -> bool {
 }
 
 pub fn extract_identifier_at(content: &str, line: u32, column: u32) -> Option<String> {
-    let line_str = content.lines().nth(line.saturating_sub(1) as usize)?;
-    let chars: Vec<char> = line_str.chars().collect();
-    if chars.is_empty() {
+    let raw_line = content.lines().nth(line.saturating_sub(1) as usize)?;
+    let line_str = crate::text_pos::strip_cr(raw_line);
+    if line_str.is_empty() {
         return None;
     }
-    let mut pos = (column.saturating_sub(1) as usize).min(chars.len() - 1);
-    if !is_ident_char(chars[pos]) {
-        if pos > 0 && is_ident_char(chars[pos - 1]) {
-            pos -= 1;
-        } else if pos + 1 < chars.len() && is_ident_char(chars[pos + 1]) {
-            pos += 1;
+    let mut b_pos =
+        crate::text_pos::utf16_col_to_byte_idx(line_str, column.saturating_sub(1) as usize);
+    if b_pos >= line_str.len() {
+        b_pos = line_str
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+    }
+    let cur_ch = line_str[b_pos..].chars().next()?;
+    if !is_ident_char(cur_ch) {
+        let prev_ident = line_str[..b_pos]
+            .char_indices()
+            .next_back()
+            .filter(|(_, ch)| is_ident_char(*ch))
+            .map(|(i, _)| i);
+        if let Some(prev_i) = prev_ident {
+            b_pos = prev_i;
+        } else if let Some((next_rel, next_ch)) =
+            line_str[b_pos + cur_ch.len_utf8()..].char_indices().next()
+        {
+            if is_ident_char(next_ch) {
+                b_pos = b_pos + cur_ch.len_utf8() + next_rel;
+            } else {
+                return None;
+            }
         } else {
             return None;
         }
     }
-    let mut start = pos;
-    while start > 0 && is_ident_char(chars[start - 1]) {
-        start -= 1;
+    let mut start = b_pos;
+    while let Some((prev_i, prev_ch)) = line_str[..start].char_indices().next_back() {
+        if is_ident_char(prev_ch) {
+            start = prev_i;
+        } else {
+            break;
+        }
     }
-    let mut end = pos;
-    while end + 1 < chars.len() && is_ident_char(chars[end + 1]) {
-        end += 1;
+    let mut end = b_pos;
+    for (rel_i, ch) in line_str[b_pos..].char_indices() {
+        if is_ident_char(ch) {
+            end = b_pos + rel_i + ch.len_utf8();
+        } else {
+            break;
+        }
     }
-    let ident: String = chars[start..=end].iter().collect();
-    is_valid_identifier(&ident).then_some(ident)
+    let ident = &line_str[start..end];
+    is_valid_identifier(ident).then(|| ident.to_string())
 }
 
 pub(crate) fn code_mask_for_line(lang: &str, line: &str, in_block_comment: &mut bool) -> Vec<bool> {
@@ -141,10 +169,11 @@ pub fn find_symbol_occurrences_in_text(
 ) -> Vec<IdeReferenceLocation> {
     let mut out = Vec::new();
     let mut in_block = false;
-    for (idx, line) in content.lines().enumerate() {
+    for (idx, raw_line) in content.lines().enumerate() {
+        let line = crate::text_pos::strip_cr(raw_line);
         let mask = code_mask_for_line(lang, line, &mut in_block);
         for (byte_start, _) in find_word_byte_ranges_on_line(line, &mask, symbol) {
-            let col = line[..byte_start].chars().count() as u32 + 1;
+            let col = crate::text_pos::byte_idx_to_utf16_col(line, byte_start) as u32 + 1;
             out.push(IdeReferenceLocation {
                 path: path.to_string(),
                 line: (idx + 1) as u32,
@@ -163,10 +192,12 @@ pub fn rename_identifier_in_text(
     symbol: &str,
     new_name: &str,
 ) -> Option<(String, IdeRenameFileEdit)> {
+    let eol = crate::text_pos::detect_eol(content);
     let trailing_nl = content.ends_with('\n');
     let (mut in_block, mut occurrences) = (false, 0usize);
     let (mut new_lines, mut preview_lines) = (Vec::new(), Vec::new());
-    for (idx, line) in content.lines().enumerate() {
+    for (idx, raw_line) in content.lines().enumerate() {
+        let line = crate::text_pos::strip_cr(raw_line);
         let mask = code_mask_for_line(lang, line, &mut in_block);
         let ranges = find_word_byte_ranges_on_line(line, &mask, symbol);
         if ranges.is_empty() {
@@ -196,9 +227,9 @@ pub fn rename_identifier_in_text(
     if occurrences == 0 {
         return None;
     }
-    let mut updated = new_lines.join("\n");
+    let mut updated = new_lines.join(eol);
     if trailing_nl {
-        updated.push('\n');
+        updated.push_str(eol);
     }
     Some((
         updated,

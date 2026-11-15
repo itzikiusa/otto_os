@@ -135,6 +135,10 @@ pub async fn spawn_held(
     socket_path: &Path,
     spec: &HolderSpawnSpec,
 ) -> io::Result<HeldChild> {
+    if tokio::fs::symlink_metadata(socket_path).await.is_ok() {
+        best_effort_shutdown_socket(socket_path).await;
+        let _ = tokio::fs::remove_file(socket_path).await;
+    }
     let mut cmd = Command::new(&launcher.program);
     cmd.args(&launcher.prefix_args)
         .arg("--socket")
@@ -184,6 +188,65 @@ pub async fn spawn_held(
         client: adopted.client,
         events: adopted.events,
     })
+}
+
+/// Best-effort teardown of an unadoptable `<sid>.sock` during boot recovery:
+/// if a live `runtime-holder` is listening on `socket_path`, send `SHUTDOWN`
+/// and (when its `HELLO` reports valid PIDs that remain alive) terminate the
+/// orphaned child group + holder before the caller unlinks the socket file.
+pub async fn best_effort_shutdown_socket(socket_path: &Path) {
+    let Ok(Ok(stream)) =
+        tokio::time::timeout(Duration::from_millis(500), UnixStream::connect(socket_path)).await
+    else {
+        return;
+    };
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    let mut buf = Vec::new();
+    let _ = write_frame(
+        &mut write_half,
+        &DaemonFrame::Hello {
+            proto_version: PROTO_VERSION,
+        },
+    )
+    .await;
+    let pids = match tokio::time::timeout(
+        Duration::from_millis(300),
+        read_frame::<_, serde_json::Value>(&mut reader, &mut buf),
+    )
+    .await
+    {
+        Ok(Ok(Some(v))) => {
+            let hpid = v
+                .get("holder_pid")
+                .and_then(|x| x.as_u64())
+                .and_then(|n| u32::try_from(n).ok());
+            let cpid = v
+                .get("child_pid")
+                .and_then(|x| x.as_u64())
+                .and_then(|n| u32::try_from(n).ok());
+            Some((hpid, cpid))
+        }
+        _ => None,
+    };
+    let _ = write_frame(&mut write_half, &DaemonFrame::Shutdown { grace_ms: 500 }).await;
+    let _ = write_half.shutdown().await;
+    if let Some((Some(hpid), cpid)) = pids {
+        if hpid > 1 && hpid != std::process::id() {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            // SAFETY: `kill(pid, 0)` only probes process existence.
+            let still_alive = unsafe { libc::kill(hpid as libc::pid_t, 0) == 0 };
+            if still_alive {
+                if let Some(cpid) = cpid.filter(|&p| p > 1) {
+                    crate::process::signal_group(cpid, libc::SIGTERM);
+                }
+                // SAFETY: `hpid` came directly from the connected live holder's HELLO frame.
+                unsafe {
+                    let _ = libc::kill(hpid as libc::pid_t, libc::SIGTERM);
+                }
+            }
+        }
+    }
 }
 
 /// Attach to an existing `runtime-holder` socket during daemon boot recovery.
@@ -238,6 +301,7 @@ async fn adopt_socket_inner(
                     format!("unsupported runtime holder protocol version {proto_version}"),
                 ));
             }
+            let cp = HolderCheckpoint::from_wire_value(checkpoint)?;
             let mut replay = Vec::new();
             loop {
                 let frame = read_frame::<_, HolderFrame>(&mut reader, &mut buf)
@@ -257,7 +321,7 @@ async fn adopt_socket_inner(
                     _ => {}
                 }
             }
-            Ok::<_, io::Error>((holder_pid, child_pid, *checkpoint, exited, replay))
+            Ok::<_, io::Error>((holder_pid, child_pid, cp, exited, replay))
         })
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "holder handshake timed out"))??;
@@ -286,7 +350,13 @@ async fn adopt_socket_inner(
                             }
                         }
                         Some(ClientCmd::Detach(checkpoint)) => {
-                            let _ = write_frame(&mut write_half, &DaemonFrame::Checkpoint { checkpoint }).await;
+                            let _ = write_frame(
+                                &mut write_half,
+                                &DaemonFrame::Checkpoint {
+                                    checkpoint: checkpoint.to_wire_value(),
+                                },
+                            )
+                            .await;
                             let _ = write_frame(&mut write_half, &DaemonFrame::Detach).await;
                             let _ = write_half.shutdown().await;
                             break;
@@ -307,7 +377,9 @@ async fn adopt_socket_inner(
                     if let Some(cp) = next_cp {
                         if write_frame(
                             &mut write_half,
-                            &DaemonFrame::Checkpoint { checkpoint: Box::new(cp) },
+                            &DaemonFrame::Checkpoint {
+                                checkpoint: cp.to_wire_value(),
+                            },
                         ).await.is_err() {
                             break;
                         }

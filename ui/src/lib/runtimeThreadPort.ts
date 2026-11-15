@@ -46,7 +46,7 @@ import type {
   RuntimeAccessMode,
   RuntimePromptReq,
   RuntimePromptResp,
-  RuntimeProvider,
+  RuntimeProviderOrSlug,
   RuntimeRequest,
   RuntimeSession,
   TurnItem,
@@ -258,7 +258,7 @@ export interface RuntimeSessionPort {
     start(
       workspaceId: string,
       req: {
-        provider: RuntimeProvider;
+        provider: RuntimeProviderOrSlug;
         cwd: string | null;
         title: string;
         model: string | null;
@@ -268,7 +268,11 @@ export interface RuntimeSessionPort {
       },
     ): Promise<RuntimeSession>;
     reopen(id: string): Promise<RuntimeSession>;
-    prompt: (id: string, req: RuntimePromptReq) => Promise<RuntimePromptResp>;
+    prompt: (
+      id: string,
+      req: RuntimePromptReq,
+      localAttachments?: readonly ComposerFile[],
+    ) => Promise<RuntimePromptResp>;
     interrupt(id: string): Promise<void>;
     respond(id: string, requestId: string, decision: ApprovalDecision): Promise<void>;
     askChildren(parentId: string, req: AskChildReq): Promise<RuntimeSession[]>;

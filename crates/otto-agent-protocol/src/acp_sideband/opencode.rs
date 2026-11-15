@@ -130,6 +130,7 @@ impl OpencodeState {
         &mut self,
         stamp: (u64, u64, u64, u64),
         rows_jsonl: &[u8],
+        root_session_id: Option<&str>,
         idle_since_ms: u64,
         mirrored: &mut MirroredCounts,
     ) -> Vec<SidebandAction> {
@@ -159,6 +160,14 @@ impl OpencodeState {
             if role != "assistant" {
                 continue;
             }
+            let row_sid = row
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let is_child_session =
+                matches!((row_sid, root_session_id), (Some(rs), Some(root)) if rs != root);
+            let child_sid = is_child_session.then(|| row_sid.unwrap_or_default());
             let msg_time_created = row
                 .get("msg_time_created")
                 .and_then(Value::as_i64)
@@ -189,19 +198,33 @@ impl OpencodeState {
             let Some(ptype) = data.get("type").and_then(Value::as_str) else {
                 continue;
             };
+            let parent_cid = data
+                .pointer("/state/metadata/parentCallId")
+                .or_else(|| data.get("parentCallId"))
+                .or_else(|| data.get("parent_call_id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
 
+            let is_child_action = child_sid.is_some() || parent_cid.is_some();
             match ptype {
                 "reasoning" => {
                     let full = data.get("text").and_then(Value::as_str).unwrap_or("");
                     if let Some(delta) =
                         take_part_delta(&mut self.seen_text_chars, part_id, full, baseline_only)
                     {
-                        mirrored.thought_chars =
-                            mirrored.thought_chars.saturating_add(delta.chars().count());
-                        actions.push(SidebandAction::Thought {
-                            text: delta,
-                            streaming: true,
-                        });
+                        if !is_child_action {
+                            mirrored.thought_chars =
+                                mirrored.thought_chars.saturating_add(delta.chars().count());
+                        }
+                        actions.push(super::wrap_child_action(
+                            child_sid,
+                            parent_cid,
+                            SidebandAction::Thought {
+                                text: delta,
+                                streaming: true,
+                            },
+                        ));
                     }
                 }
                 "text" => {
@@ -209,21 +232,41 @@ impl OpencodeState {
                     if let Some(delta) =
                         take_part_delta(&mut self.seen_text_chars, part_id, full, baseline_only)
                     {
-                        mirrored.msg_chars =
-                            mirrored.msg_chars.saturating_add(delta.chars().count());
+                        if !is_child_action {
+                            mirrored.msg_chars =
+                                mirrored.msg_chars.saturating_add(delta.chars().count());
+                        }
                         let mid = row
                             .get("message_id")
                             .and_then(Value::as_str)
                             .map(str::to_string);
-                        actions.push(SidebandAction::Message {
-                            text: delta,
-                            message_id: mid,
-                            streaming: true,
-                        });
+                        actions.push(super::wrap_child_action(
+                            child_sid,
+                            parent_cid,
+                            SidebandAction::Message {
+                                text: delta,
+                                message_id: mid,
+                                streaming: true,
+                            },
+                        ));
                     }
                 }
                 "tool" => {
-                    self.ingest_tool_part(part_id, &data, baseline_only, mirrored, &mut actions);
+                    let before_len = actions.len();
+                    self.ingest_tool_part(
+                        part_id,
+                        &data,
+                        baseline_only,
+                        !is_child_action,
+                        mirrored,
+                        &mut actions,
+                    );
+                    if is_child_action {
+                        for act in &mut actions[before_len..] {
+                            let inner = std::mem::replace(act, SidebandAction::Plan(Vec::new()));
+                            *act = super::wrap_child_action(child_sid, parent_cid, inner);
+                        }
+                    }
                 }
                 "step-finish" => {
                     if !insert_bounded_set(&mut self.seen_step_finish, part_id.to_string())
@@ -231,20 +274,23 @@ impl OpencodeState {
                     {
                         continue;
                     }
-                    let reason = data.get("reason").and_then(Value::as_str).unwrap_or("");
-                    self.awaiting_step_finish = matches!(reason, "tool-calls" | "function_call");
-                    if self.awaiting_step_finish {
-                        self.awaiting_since_ms = now_ms();
-                    }
                     if let Some(usage) = parse_opencode_tokens(data.get("tokens")) {
                         actions.push(SidebandAction::Usage(usage));
                     }
-                    if !self.awaiting_step_finish {
-                        let clean_reason = (!matches!(reason, "" | "stop" | "end_turn"))
-                            .then(|| reason.to_string());
-                        actions.push(SidebandAction::TurnCompleted {
-                            reason: clean_reason,
-                        });
+                    if !is_child_session {
+                        let reason = data.get("reason").and_then(Value::as_str).unwrap_or("");
+                        self.awaiting_step_finish =
+                            matches!(reason, "tool-calls" | "function_call");
+                        if self.awaiting_step_finish {
+                            self.awaiting_since_ms = now_ms();
+                        }
+                        if !self.awaiting_step_finish {
+                            let clean_reason = (!matches!(reason, "" | "stop" | "end_turn"))
+                                .then(|| reason.to_string());
+                            actions.push(SidebandAction::TurnCompleted {
+                                reason: clean_reason,
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -258,6 +304,7 @@ impl OpencodeState {
         part_id: &str,
         data: &Value,
         baseline_only: bool,
+        record_mirrored: bool,
         mirrored: &mut MirroredCounts,
         actions: &mut Vec<SidebandAction>,
     ) {
@@ -293,10 +340,12 @@ impl OpencodeState {
         };
 
         if prev.is_none() {
-            mirrored.tool_calls = mirrored.tool_calls.saturating_add(1);
-            mirrored.preseed_tool_id(call_id);
-            self.awaiting_step_finish = true;
-            self.awaiting_since_ms = now_ms();
+            if record_mirrored {
+                mirrored.tool_calls = mirrored.tool_calls.saturating_add(1);
+                mirrored.preseed_tool_id(call_id);
+                self.awaiting_step_finish = true;
+                self.awaiting_since_ms = now_ms();
+            }
             actions.push(SidebandAction::ToolStart {
                 id: call_id.to_string(),
                 title: desc.title,
@@ -308,7 +357,9 @@ impl OpencodeState {
             });
         }
         if matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed) {
-            self.awaiting_since_ms = now_ms();
+            if record_mirrored {
+                self.awaiting_since_ms = now_ms();
+            }
             let output = state
                 .and_then(|s| {
                     s.get("output")

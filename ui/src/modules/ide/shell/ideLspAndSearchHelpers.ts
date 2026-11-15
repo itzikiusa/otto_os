@@ -14,6 +14,9 @@ import {
 } from '../store/ideBufferPerf';
 import {
   collabGuestPost,
+  detectTextEol,
+  normalizeEditorLf,
+  serializeTabDiskContent,
   type IdeCodeAction,
   type IdeCollabRole,
   type IdeCollabRoom,
@@ -69,16 +72,35 @@ export interface IdeLspSearchHost extends IdeBufferHost {
   loadPlugins(): Promise<void>;
 }
 
+async function flushDirtyOpenTabsForWorkspaceOp(
+  host: IdeLspSearchHost,
+  bufPerf?: IdeBufferPerfController,
+  persistAllDirty = false,
+): Promise<void> {
+  if (!bufPerf) return;
+  bufPerf.flushAll(host);
+  if (!host.canEditCollab || host.collabIsGuest) return;
+  if (!persistAllDirty && !readIdePreferences().autoSave) return;
+  const dirtyTabs = host.tabs.filter(
+    (t) => !t.readOnly && !t.truncated && bufPerf.isTabDirty(t) && !bufPerf.conflictedPaths.has(t.path),
+  );
+  for (let i = 0; i < dirtyTabs.length; i++) {
+    await host.saveFile(dirtyTabs[i].path, false, { silent: true });
+  }
+}
+
 export async function runFindReferences(
   host: IdeLspSearchHost,
   path: string,
   line: number,
   column: number,
   symbol?: string,
+  bufPerf?: IdeBufferPerfController,
 ): Promise<void> {
   host.usagesLoading = true;
   host.openBottomTab('usages');
   try {
+    await flushDirtyOpenTabsForWorkspaceOp(host, bufPerf, false);
     const resp = await api.post<{ symbol: string; locations: IdeReferenceLocation[] }>('/ide/lsp/references', {
       target: host.targetPayload,
       project_folders: host.targetPayload.project_folders,
@@ -108,6 +130,7 @@ export async function runPreviewRename(
   host.renameState.loading = true;
   host.renameState.error = null;
   try {
+    await flushDirtyOpenTabsForWorkspaceOp(host, bufPerf, false);
     const content = bufPerf ? bufPerf.flush(host, host.renameState.path) : host.getBuffer(host.renameState.path);
     const resp = await api.post<{ symbol: string; new_name: string; edits: IdeRenameEdit[] }>('/ide/lsp/rename', {
       target: host.targetPayload,
@@ -139,6 +162,7 @@ export async function runApplyRename(
   host.renameState.error = null;
   try {
     const prefs = readIdePreferences();
+    await flushDirtyOpenTabsForWorkspaceOp(host, bufPerf, true);
     const content = bufPerf.flush(host, host.renameState.path);
     const resp = await api.post<{ applied: boolean; edits: IdeRenameEdit[] }>('/ide/lsp/rename', {
       target: host.targetPayload,
@@ -172,18 +196,22 @@ export async function runFormatActiveFile(
   opts: { organizeImports?: boolean } = {},
 ): Promise<void> {
   const tab = host.activeTab;
-  if (!tab || tab.readOnly) return;
-  const content = bufPerf.flush(host, tab.path);
+  if (!tab || tab.readOnly || tab.truncated) return;
+  const targetPath = tab.path;
+  const content = bufPerf.flush(host, targetPath);
   try {
     const resp = await api.post<{ formatted: string; changed: boolean; formatter: string }>('/ide/lsp/format', {
       target: host.targetPayload,
-      path: tab.path,
+      path: targetPath,
       content,
       language: tab.language,
       organize_imports: Boolean(opts.organizeImports),
     });
     if (resp.changed && typeof resp.formatted === 'string') {
-      await host.applyAgentEdit(tab.path, resp.formatted);
+      if (bufPerf.getBuffer(host, targetPath) !== content || !host.tabs.some((t) => t.path === targetPath)) {
+        return;
+      }
+      await host.applyAgentEdit(targetPath, normalizeEditorLf(resp.formatted));
       toasts.info(opts.organizeImports ? 'Optimized imports' : `Formatted with ${resp.formatter || 'formatter'}`);
     }
   } catch (e) {
@@ -399,15 +427,19 @@ export async function runApplyQuickFixEdits(
       try {
         const prefs = readIdePreferences();
         const read = await api.get<IdeFileReadResp>(`/ide/fs/file?${host.targetQuery({ path: filePath })}`);
-        const prev = read.content ?? '';
+        if (read.truncated || read.read_only) continue;
+        const rawPrev = read.content ?? '';
+        const eol = detectTextEol(rawPrev);
+        const prevLf = normalizeEditorLf(rawPrev);
         if (prefs.localHistoryEnabled) {
-          void api.post('/ide/history/snapshot', { target: host.targetPayload, path: filePath, content: prev, label: 'Before Quick Fix' }).catch(() => {});
+          void api.post('/ide/history/snapshot', { target: host.targetPayload, path: filePath, content: rawPrev, label: 'Before Quick Fix' }).catch(() => {});
         }
-        const nextDoc = applyTextEditsToString(prev, fileEdits);
+        const nextLf = applyTextEditsToString(prevLf, fileEdits);
+        const nextDisk = serializeTabDiskContent({ eol }, nextLf);
         await api.put('/ide/fs/file', {
           target: host.targetPayload,
           path: filePath,
-          content: nextDoc,
+          content: nextDisk,
           expected_sha256: read.sha256 || undefined,
           create_dirs: false,
           local_history_enabled: prefs.localHistoryEnabled,
@@ -504,6 +536,7 @@ export async function runReplaceInWorkspace(
   if (!host.target.root || query.length === 0) return null;
   host.replaceLoading = true;
   try {
+    await flushDirtyOpenTabsForWorkspaceOp(host, bufPerf, !dryRun);
     const resp = await api.long.post<IdeReplaceResp>('/ide/replace', {
       target: host.targetPayload,
       query,

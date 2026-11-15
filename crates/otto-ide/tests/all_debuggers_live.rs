@@ -14,29 +14,12 @@
 
 mod common;
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use axum::http::{Method, StatusCode};
 use axum::Router;
-use common::{build_test_app, send_json};
+use common::{build_test_app, ensure_bins_or_skip, extended_path, find_bin, send_json};
 use serde_json::{json, Value};
-
-fn extended_path() -> String {
-    let cur = std::env::var("PATH").unwrap_or_default();
-    let home = std::env::var("HOME").unwrap_or_default();
-    format!("{home}/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{cur}")
-}
-
-fn find_bin(name: &str) -> Option<String> {
-    for dir in extended_path().split(':').filter(|s| !s.is_empty()) {
-        let cand = Path::new(dir).join(name);
-        if cand.is_file() {
-            return Some(cand.to_string_lossy().into_owned());
-        }
-    }
-    None
-}
 
 fn all_vars(snap: &Value) -> Vec<&Value> {
     snap["scopes"]
@@ -167,7 +150,7 @@ async fn set_breakpoints(app: &Router, sid: &str, path: &str, lines: &[u32]) {
 
 #[tokio::test]
 async fn live_go_dlv_dap_breakpoints_step_into_replace_module_and_midrun_breakpoints() {
-    if find_bin("go").is_none() || find_bin("dlv").is_none() {
+    if !ensure_bins_or_skip(&["go", "dlv"]) {
         return;
     }
     let tmp = tempfile::tempdir().unwrap();
@@ -297,7 +280,7 @@ func main() {
 
 #[tokio::test]
 async fn live_java_jdwp_multi_module_breakpoints_locals_fields_eval_step_and_midrun() {
-    if find_bin("java").is_none() || find_bin("javac").is_none() {
+    if !ensure_bins_or_skip(&["java", "javac"]) {
         return;
     }
     let tmp = tempfile::tempdir().unwrap();
@@ -469,7 +452,7 @@ public class AppMain {
 
 #[tokio::test]
 async fn live_python_bdb_bridge_breakpoints_locals_eval_step_and_midrun() {
-    if find_bin("python3").is_none() {
+    if !ensure_bins_or_skip(&["python3"]) {
         return;
     }
     let tmp = tempfile::tempdir().unwrap();
@@ -559,6 +542,9 @@ if __name__ == "__main__":
 
 #[tokio::test]
 async fn live_node_inspector_cdp_bridge_debugs_both_js_and_typescript() {
+    if !ensure_bins_or_skip(&["node"]) {
+        return;
+    }
     let Some(node_bin) = find_bin("node") else {
         return;
     };
@@ -696,7 +682,7 @@ async fn run_single_node_debug_assertion(
 
 #[tokio::test]
 async fn live_rust_lldb_bridge_builds_cargo_artifact_hits_breakpoint_reads_locals_and_steps() {
-    if find_bin("cargo").is_none() || find_bin("lldb").is_none() {
+    if !ensure_bins_or_skip(&["cargo", "lldb"]) {
         return;
     }
     let tmp = tempfile::tempdir().unwrap();

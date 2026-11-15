@@ -1,58 +1,13 @@
 //! Codex driver — `codex app-server` (JSON-RPC over stdio, one message per
-//! line, no `"jsonrpc"` member).
+//! line, no `"jsonrpc"` member), ported from T3 Code (`CodexAdapterV2.ts`, MIT,
+//! Copyright (c) 2026 T3 Tools Inc.) against `codex app-server` 0.166.0:
 //!
-//! Ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.):
-//! `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts` with the
-//! wire shapes of `packages/effect-codex-app-server` (generated from
-//! `openai/codex` `codex-rs/app-server-protocol`). The crates.io
-//! `codex-app-server-protocol` (0.63.0, published from a fork) lags the
-//! installed codex-cli 0.166.0 by a hundred releases, so — like T3 Code's
-//! generated client — Otto keeps a minimal typed surface here, checked
-//! against `codex app-server generate-json-schema` of 0.166.0:
-//!
-//! * spawn `codex app-server` (`codexLaunchArgs.ts:12-15`); Otto's context
-//!   hook adds `--add-dir=…`, `-c developer_instructions=…` (before the
-//!   subcommand) and `CODEX_HOME`, exactly as for a PTY codex session.
-//! * `initialize {clientInfo, capabilities: {experimentalApi,
-//!   optOutNotificationMethods: ["turn/diff/updated"]}}` then the
-//!   `initialized` notification (`CodexAdapterV2.ts:1763-1801`, `:233-237`).
-//! * `thread/start {cwd, model, approvalPolicy, sandbox}` or, with a native
-//!   id, `thread/resume {threadId, excludeTurns: true, …}` (`:7061-7108`); a
-//!   failed resume starts a fresh thread.
-//! * `turn/start {threadId, input: [{type: text}], approvalPolicy,
-//!   sandboxPolicy}` (`buildCodexTurnStartParams`, `:744-818`),
-//!   `turn/steer {threadId, input, expectedTurnId}` mid-turn, and
-//!   `turn/interrupt {threadId, turnId}` (`:7567`).
-//! * access mode, per turn (`codexRuntimeModeTurnDefaults`, `:703-742`):
-//!   approval-required → `approvalPolicy: "untrusted"` + `sandboxPolicy:
-//!   readOnly`; auto-accept-edits → `"on-request"` + `workspaceWrite`;
-//!   full-access → `"never"` + `dangerFullAccess`. Under Otto's Seatbelt the
-//!   inner sandbox is always `externalSandbox` (nested Seatbelt fails; the
-//!   PTY path drops codex's own sandbox the same way, `otto-sessions`
-//!   `interaction_mode_apply`). A failed item's error text (`error`, else
-//!   the command's output) rides the item. No file inputs: 0.166.0's
-//!   `UserInput` has none, so a PDF is refused.
-//! * notifications → entities (`:4364-4955`, `:6529`): `item/started` /
-//!   `item/completed` upsert one item per Codex item (`agentMessage` →
-//!   `assistant_message`, `reasoning`, `commandExecution` →
-//!   `command_execution`, `fileChange` → `file_change`, `mcpToolCall` /
-//!   `dynamicToolCall` → `dynamic_tool`, `webSearch` → `web_search`);
-//!   `item/agentMessage/delta` and `item/reasoning/*Delta` grow the text
-//!   (`streaming: true`); `item/commandExecution/outputDelta` →
-//!   `command_output.delta`; `turn/plan/updated` → the plan;
-//!   `thread/tokenUsage/updated` → usage; `turn/completed` → terminal
-//!   (`mapCodexTurnStatus`, `:359-372`); item status `codexItemStatus`
-//!   (`:392-414`).
-//! * approvals (`:5277-5420`): `item/commandExecution/requestApproval`,
-//!   `item/fileChange/requestApproval` answer `{decision: accept |
-//!   acceptForSession | decline | cancel}`; `item/permissions/requestApproval`
-//!   answers the requested profile with scope turn / session, or an empty
-//!   profile (`:609-621`). `serverRequest/resolved` closes a request Codex
-//!   settled. The v1 `execCommandApproval` / `applyPatchApproval` belong to
-//!   the conversation API Otto does not use.
-//! * `mcpServer/startupStatus/updated` with `status: "failed"` becomes a
-//!   `system_notice` in the running turn, or the next one when it arrives
-//!   between turns (T3 Code #34771); another status clears that server.
+//! * `initialize` + `initialized`, then `thread/start` or `thread/resume`.
+//! * `turn/start`, `turn/steer` mid-turn, and `turn/interrupt`, with per-turn
+//!   `approvalPolicy` + `sandboxPolicy` (`externalSandbox` under Otto Seatbelt).
+//! * `item/started`, `item/completed`, deltas, `turn/plan/updated`,
+//!   `thread/tokenUsage/updated`, approvals, and `collabAgentToolCall`
+//!   subagent tracking (`codex_subagent.rs`).
 
 #[path = "codex_subagent.rs"]
 mod subagent;
@@ -358,7 +313,10 @@ impl CodexDriver {
                 format!("{}:mcp-startup-failed:{name}", self.turn()),
                 TurnItemStatus::Completed,
                 Some(format!("MCP server {name} failed to start")),
-                TurnItemKind::SystemNotice { message: error },
+                TurnItemKind::SystemNotice {
+                    message: error,
+                    task_settlement: None,
+                },
             )));
         }
     }
@@ -875,6 +833,7 @@ pub(crate) fn project_codex_item(
         "contextCompaction" => (
             TurnItemKind::SystemNotice {
                 message: "Context compacted".into(),
+                task_settlement: None,
             },
             None,
         ),
@@ -1684,12 +1643,12 @@ mod tests {
             Some("MCP server jira failed to start")
         );
         assert!(
-            matches!(&notices[0].kind, TurnItemKind::SystemNotice { message } if message == "spawn jira-mcp: ENOENT")
+            matches!(&notices[0].kind, TurnItemKind::SystemNotice { message, .. } if message == "spawn jira-mcp: ENOENT")
         );
         // During a turn: shown at once, with a fallback text.
         let s = feed(&mut d, status("slack", "failed", json!("  ")));
         assert!(matches!(&s.events[0], DriverEvent::TurnItem(i)
-            if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message == "MCP server slack failed to start.")));
+            if matches!(&i.kind, TurnItemKind::SystemNotice { message, .. } if message == "MCP server slack failed to start.")));
         // Shown once: the next turn carries nothing.
         feed(
             &mut d,
@@ -1737,14 +1696,12 @@ mod tests {
     #[test]
     fn steer_sends_turn_steer_with_expected_turn_id_and_keeps_turn_open_on_rpc_error() {
         use otto_core::agent_runtime::{PromptFile, PromptImage};
-
         let mut d = CodexDriver::with_program("codex");
         ready(&mut d, false);
         assert!(
             d.steer(&RuntimePromptReq::of("too early")).is_err(),
             "idle driver cannot steer"
         );
-
         let start = d.prompt("t1", &RuntimePromptReq::of("work")).unwrap();
         let start_rpc = parse(&start.writes[0]);
         assert!(
@@ -1770,11 +1727,11 @@ mod tests {
             ..RuntimePromptReq::of("read")
         };
         assert!(d.steer(&with_pdf).is_err(), "PDFs are refused on steer too");
-
         let steer_req = RuntimePromptReq {
             images: vec![PromptImage {
                 mime: "image/png".into(),
                 data_base64: "iVBORw0KGgo=".into(),
+                name: None,
             }],
             ..RuntimePromptReq::of("focus on tests")
         };
@@ -2064,13 +2021,19 @@ mod tests {
         assert!(child_done.events.iter().any(|e| matches!(
             e,
             DriverEvent::TurnItem(i)
-                if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message == "Background agent finished: security-reviewer")
+                if matches!(
+                    &i.kind,
+                    TurnItemKind::SystemNotice {
+                        message,
+                        task_settlement: Some(ts),
+                    } if message == "Background agent finished: security-reviewer"
+                        && ts.status == "completed"
+                )
         )));
         assert!(child_done.events.iter().any(|e| matches!(
             e,
             DriverEvent::BackgroundTasks(tasks) if tasks.is_empty()
         )));
-
         // 4. Spawn a second child and close it via `closeAgent`.
         feed(
             &mut d,
@@ -2115,7 +2078,14 @@ mod tests {
         assert!(closed.events.iter().any(|e| matches!(
             e,
             DriverEvent::TurnItem(i)
-                if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message == "Background agent stopped: perf-helper")
+                if matches!(
+                    &i.kind,
+                    TurnItemKind::SystemNotice {
+                        message,
+                        task_settlement: Some(ts),
+                    } if message == "Background agent stopped: perf-helper"
+                        && ts.status == "stopped"
+                )
         )));
     }
 }

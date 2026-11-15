@@ -6,12 +6,14 @@ export * from '../store/ideDiffApplier';
 export type { IdeThreadEntry } from './ideContextBuilders';
 
 import { untrack } from 'svelte';
-import type { ApprovalDecision, RuntimeAccessMode, RuntimeProvider, RuntimeSession } from '../../../lib/api/types';
+import type { ApprovalDecision, RuntimeAccessMode, RuntimeProviderOrSlug, RuntimeSession } from '../../../lib/api/types';
 import { loadErrorText } from '../../../lib/loadError';
 import { normalizeEffort, supportsEffortSelection, type EffortLevel, type InteractionMode } from '../../../lib/providerModels';
-import { agentProviders, attachmentSupport, defaultAgentProvider, isRuntimeProvider, takesFile } from '../../../lib/providers';
+import { agentProviders, attachmentSupport, defaultAgentProvider, isRuntimeProvider, sessionProviderSlug, takesFile } from '../../../lib/providers';
 import { getIdeRuntimeComposerUi, type RuntimeProjectionView, type RuntimeSessionPort } from '../../../lib/runtimeThreadPort';
+import { auth } from '../../../lib/stores/auth.svelte';
 import { runtimeDrafts, type ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
+import { toasts } from '../../../lib/toast.svelte';
 import { ws } from '../../../lib/stores/workspace.svelte';
 import { ide, type IdeDebugSessionSnapshot, type IdeDiagnostic, type IdeSymbolNode, type IdeTestResult, type IdeVariable } from '../ideStore.svelte';
 import { matchesIdeProjectThread, resolveIdeHarnesses, resolveIdeInlineProviders, type IdeCodeProposal, type IdeContextChip, type IdeInlinePromptState } from '../store/ideDiffApplier';
@@ -204,12 +206,15 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   );
 
   readonly availableProviders = $derived.by((): string[] => {
-    const activeOpen = this.activeRuntimeSession?.provider ?? this.activeThread?.provider ?? null;
+    const activeOpen =
+      (this.activeRuntimeSession ? sessionProviderSlug(this.activeRuntimeSession) : null) ??
+      this.activeThread?.provider ??
+      null;
     return resolveIdeHarnesses(agentProviders(), activeOpen ? [activeOpen] : []);
   });
 
-  readonly inlineProviders = $derived.by((): RuntimeProvider[] =>
-    resolveIdeInlineProviders(this.availableProviders, agentProviders()),
+  readonly inlineProviders = $derived.by((): RuntimeProviderOrSlug[] =>
+    resolveIdeInlineProviders(this.availableProviders, agentProviders(), auth.meta),
   );
 
   readonly effectiveModel = $derived<string | null>(
@@ -217,11 +222,19 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   );
 
   readonly canAttachImages = $derived.by(
-    (): boolean => attachmentSupport(this.activeRuntimeSession?.provider ?? ideAgentState.provider).images,
+    (): boolean =>
+      attachmentSupport(
+        this.activeRuntimeSession ? sessionProviderSlug(this.activeRuntimeSession) : ideAgentState.provider,
+        auth.meta,
+      ).images,
   );
 
   readonly canAttachFiles = $derived.by(
-    (): boolean => attachmentSupport(this.activeRuntimeSession?.provider ?? ideAgentState.provider).files,
+    (): boolean =>
+      attachmentSupport(
+        this.activeRuntimeSession ? sessionProviderSlug(this.activeRuntimeSession) : ideAgentState.provider,
+        auth.meta,
+      ).files,
   );
 
   readonly projection = $derived<RuntimeProjectionView | null>(
@@ -390,7 +403,7 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
     if (ideAgentState.provider !== clean) {
       this.provider = clean;
       this.model = null;
-      if (!supportsEffortSelection(clean)) this.effort = null;
+      if (!supportsEffortSelection(clean, auth.meta)) this.effort = null;
     }
   }
 
@@ -436,13 +449,19 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   }
 
   async addAttachments(files: Iterable<File>): Promise<void> {
-    const p = this.activeRuntimeSession?.provider ?? ideAgentState.provider;
-    if (!attachmentSupport(p).images) return;
+    const p = this.activeRuntimeSession ? sessionProviderSlug(this.activeRuntimeSession) : ideAgentState.provider;
+    if (!attachmentSupport(p, auth.meta).images) return;
     const bridge = ideAgentState.runtimeBridge ?? (await ideAgentState.ensureBridge());
     if (!bridge) return;
-    const read = await bridge.readAttachments(files, (f) => takesFile(p, f));
+    const read = await bridge.readAttachments(files, (f) => takesFile(p, f, auth.meta));
     if (read.length > 0) {
-      this.attachments = [...this.attachments, ...read];
+      const combined = [...this.attachments, ...read];
+      if (combined.length > 20) {
+        toasts.error('Too many attachments', 'At most 20 images or PDFs per message.');
+        this.attachments = combined.slice(0, 20);
+      } else {
+        this.attachments = combined;
+      }
       this.syncSubscriptions();
     }
   }
@@ -560,10 +579,10 @@ class IdeAgentEngine implements IdeAgentEngineBridge {
   setInlineProvider(next: string): void {
     const st = ideAgentState.inlinePrompt;
     const clean = next.trim();
-    if (!st || !isRuntimeProvider(clean) || st.provider === clean) return;
+    if (!st || !isRuntimeProvider(clean, auth.meta) || st.provider === clean) return;
     st.provider = clean;
     st.model = null;
-    if (!supportsEffortSelection(clean)) st.effort = null;
+    if (!supportsEffortSelection(clean, auth.meta)) st.effort = null;
   }
 
   setInlineModel(next: string | null): void {

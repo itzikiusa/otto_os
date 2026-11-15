@@ -103,6 +103,7 @@ impl GrokState {
         resolved_path: Option<PathBuf>,
         next_offset: u64,
         bytes: &[u8],
+        root_session_id: Option<&str>,
         idle_since_ms: u64,
         mirrored: &mut MirroredCounts,
     ) -> Vec<SidebandAction> {
@@ -129,50 +130,82 @@ impl GrokState {
             let Some(tag) = up.get("sessionUpdate").and_then(Value::as_str) else {
                 continue;
             };
+            let line_sid = params
+                .get("sessionId")
+                .or_else(|| root.get("sessionId"))
+                .or_else(|| root.get("session_id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let parent_sid = params
+                .get("parentSessionId")
+                .or_else(|| params.get("parent_session_id"))
+                .or_else(|| root.get("parent_session_id"))
+                .or_else(|| up.get("parent_session_id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let parent_cid = crate::acp::subagent::parse::extract_parent_tool_id(params, Some(up));
+            let is_child = parent_cid.is_some()
+                || parent_sid.is_some_and(|ps| root_session_id.is_none_or(|r| ps == r))
+                || matches!((line_sid, root_session_id), (Some(ls), Some(r)) if ls != r);
+            let child_sid = is_child.then(|| line_sid.or(parent_sid)).flatten();
 
-            match tag {
-                "user_message_chunk" | "user_message" => {
-                    self.in_prompted_turn = true;
-                    self.prompted_turn_baseline = baseline_only;
-                    self.open_tools = 0;
-                    continue;
-                }
-                "turn_completed" => {
-                    let was_prompted = std::mem::replace(&mut self.in_prompted_turn, false);
-                    self.prompted_turn_baseline = false;
-                    self.open_tools = 0;
-                    if was_prompted || baseline_only {
+            if !is_child {
+                match tag {
+                    "user_message_chunk" | "user_message" => {
+                        self.in_prompted_turn = true;
+                        self.prompted_turn_baseline = baseline_only;
+                        self.open_tools = 0;
                         continue;
                     }
-                    if let Some(usage) = parse_grok_usage(up.get("usage")) {
-                        actions.push(SidebandAction::Usage(usage));
+                    "turn_completed" => {
+                        let was_prompted = std::mem::replace(&mut self.in_prompted_turn, false);
+                        self.prompted_turn_baseline = false;
+                        self.open_tools = 0;
+                        if was_prompted || baseline_only {
+                            continue;
+                        }
+                        if let Some(usage) = parse_grok_usage(up.get("usage")) {
+                            actions.push(SidebandAction::Usage(usage));
+                        }
+                        let reason = up
+                            .get("stop_reason")
+                            .or_else(|| up.get("stopReason"))
+                            .and_then(Value::as_str)
+                            .filter(|r| *r != "end_turn")
+                            .map(str::to_string);
+                        actions.push(SidebandAction::TurnCompleted { reason });
+                        continue;
                     }
-                    let reason = up
-                        .get("stop_reason")
-                        .or_else(|| up.get("stopReason"))
-                        .and_then(Value::as_str)
-                        .filter(|r| *r != "end_turn")
-                        .map(str::to_string);
-                    actions.push(SidebandAction::TurnCompleted { reason });
+                    _ => {}
+                }
+
+                if !baseline_only && self.prompted_turn_baseline {
+                    self.in_prompted_turn = false;
+                    self.prompted_turn_baseline = false;
+                }
+
+                if self.in_prompted_turn || baseline_only {
                     continue;
                 }
-                _ => {}
-            }
-
-            if !baseline_only && self.prompted_turn_baseline {
-                self.in_prompted_turn = false;
-                self.prompted_turn_baseline = false;
-            }
-
-            if self.in_prompted_turn || baseline_only {
+            } else if baseline_only
+                || matches!(
+                    tag,
+                    "user_message_chunk" | "user_message" | "turn_completed"
+                )
+            {
                 continue;
             }
 
+            let before_len = actions.len();
             match tag {
                 "agent_thought_chunk" | "agent_thought" => {
                     if let Some(text) = extract_update_text(up).filter(|s| !s.is_empty()) {
-                        mirrored.thought_chars =
-                            mirrored.thought_chars.saturating_add(text.chars().count());
+                        if !is_child {
+                            mirrored.thought_chars =
+                                mirrored.thought_chars.saturating_add(text.chars().count());
+                        }
                         actions.push(SidebandAction::Thought {
                             text,
                             streaming: true,
@@ -181,8 +214,10 @@ impl GrokState {
                 }
                 "agent_message_chunk" | "agent_message" => {
                     if let Some(text) = extract_update_text(up).filter(|s| !s.is_empty()) {
-                        mirrored.msg_chars =
-                            mirrored.msg_chars.saturating_add(text.chars().count());
+                        if !is_child {
+                            mirrored.msg_chars =
+                                mirrored.msg_chars.saturating_add(text.chars().count());
+                        }
                         let mid = up
                             .get("messageId")
                             .and_then(Value::as_str)
@@ -198,8 +233,10 @@ impl GrokState {
                     let Some(id) = up.get("toolCallId").and_then(Value::as_str) else {
                         continue;
                     };
-                    mirrored.tool_calls = mirrored.tool_calls.saturating_add(1);
-                    mirrored.preseed_tool_id(id);
+                    if !is_child {
+                        mirrored.tool_calls = mirrored.tool_calls.saturating_add(1);
+                        mirrored.preseed_tool_id(id);
+                    }
                     let raw_title = up.get("title").and_then(Value::as_str).unwrap_or("tool");
                     let raw_input = up.get("rawInput").cloned();
                     let classified = classify_tool(raw_title, raw_input.as_ref());
@@ -209,7 +246,9 @@ impl GrokState {
                         .unwrap_or(classified.kind);
                     let status = parse_raw_tool_status(up.get("status"))
                         .unwrap_or(ToolCallStatus::InProgress);
-                    if matches!(status, ToolCallStatus::Pending | ToolCallStatus::InProgress) {
+                    if !is_child
+                        && matches!(status, ToolCallStatus::Pending | ToolCallStatus::InProgress)
+                    {
                         self.open_tools = self.open_tools.saturating_add(1);
                         self.awaiting_since_ms = now_ms();
                     }
@@ -229,10 +268,12 @@ impl GrokState {
                     };
                     let status = parse_raw_tool_status(up.get("status"))
                         .unwrap_or(ToolCallStatus::Completed);
-                    if matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed) {
-                        self.open_tools = self.open_tools.saturating_sub(1);
+                    if !is_child {
+                        if matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed) {
+                            self.open_tools = self.open_tools.saturating_sub(1);
+                        }
+                        self.awaiting_since_ms = now_ms();
                     }
-                    self.awaiting_since_ms = now_ms();
                     let kind = up
                         .get("kind")
                         .and_then(|v| serde_json::from_value::<ToolKind>(v.clone()).ok());
@@ -270,6 +311,12 @@ impl GrokState {
                     }
                 }
                 _ => {}
+            }
+            if is_child {
+                for act in &mut actions[before_len..] {
+                    let inner = std::mem::replace(act, SidebandAction::Plan(Vec::new()));
+                    *act = super::wrap_child_action(child_sid, parent_cid.as_deref(), inner);
+                }
             }
         }
         actions

@@ -12,7 +12,7 @@
   import { focusAfterRowRemoval, rowListOf } from '../../lib/rowFocus';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import CodeEditor from '../../lib/components/CodeEditor.svelte';
+  import CodeEditor from '../../lib/components/LazyCodeEditor.svelte';
   import MethodTag from './MethodTag.svelte';
   import SaveRequestDialog from './SaveRequestDialog.svelte';
   import ImportDialog from './ImportDialog.svelte';

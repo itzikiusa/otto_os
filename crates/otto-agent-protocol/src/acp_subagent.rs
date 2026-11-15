@@ -9,16 +9,25 @@ use std::time::Duration;
 use agent_client_protocol::v1::schema::{ToolCallStatus, ToolKind};
 use chrono::{DateTime, Utc};
 use otto_core::agent_runtime::{
-    BackgroundTask, RuntimeProvider, TurnItem, TurnItemKind, TurnItemStatus,
+    BackgroundTask, RuntimeProvider, TaskSettlement, TurnItem, TurnItemKind, TurnItemStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{command_text, multi_file_patch, AcpDriver, Phase, SegmentKind, Tool};
-use crate::acp_sideband::burst::{classify_tool, is_safe_session_id, trim_ascii, unquote_args};
+use crate::acp_sideband::burst::{classify_tool, trim_ascii, unquote_args};
 use crate::driver::{
     item, tool_error, ActiveTailChunk, ActiveTailKind, ActiveTailSource, DriverEvent, DriverStep,
     SidebandPoll, SidebandSource,
+};
+
+#[path = "acp_subagent_parse.rs"]
+pub(crate) mod parse;
+
+use self::parse::{
+    canonical_subagent_tool_name, extract_parent_tool_id, extract_subagent_fields,
+    non_empty_trimmed, parse_agy_subagent_output, parse_command_log_exit_code,
+    parse_grok_bg_launch, short_tool_label,
 };
 
 const MAX_FINISHED_BG_IDS: usize = 256;
@@ -43,6 +52,8 @@ pub(crate) struct BgTaskMeta {
     pub accumulated_output: String,
     #[serde(default)]
     pub due_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub timer_condition: Option<String>,
     #[serde(default)]
     pub log_path: Option<PathBuf>,
     #[serde(default)]
@@ -92,6 +103,8 @@ pub(crate) struct AcpSubagent {
     #[serde(default)]
     pub turn_id: Option<String>,
     pub started_at: DateTime<Utc>,
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
     pub tool_name: String,
     pub title: String,
     #[serde(default)]
@@ -168,7 +181,11 @@ impl AcpDriver {
         );
         it.turn_id = a.turn_id.clone();
         it.started_at = Some(a.started_at);
-        it.completed_at = (!a.status.is_open()).then(Utc::now);
+        it.completed_at = if a.status.is_open() {
+            None
+        } else {
+            Some(a.completed_at.unwrap_or_else(Utc::now))
+        };
         it.error = a.error.clone();
         it
     }
@@ -180,8 +197,8 @@ impl AcpDriver {
     }
 
     /// Resolve whether an incoming `session/update` JSON object belongs to an
-    /// active subagent card (via `_meta.parentToolUseId` / `parentToolCallId`
-    /// or child `sessionId`).
+    /// active subagent card (via `_meta.parentToolUseId` / `parentToolCallId`,
+    /// child `sessionId`, or an active synchronous foreground subagent).
     pub(super) fn resolve_parent_subagent_call_id(&mut self, params: &Value) -> Option<String> {
         if self.state.subagents.is_empty() {
             return None;
@@ -221,12 +238,9 @@ impl AcpDriver {
             .filter(|s| !s.is_empty());
         if let (Some(sid), Some(root_sid)) = (notif_sid, self.state.session_id.as_deref()) {
             if sid != root_sid {
-                if let Some((cid, _)) = self
-                    .state
-                    .subagents
-                    .iter()
-                    .find(|(_, a)| a.child_session_id.as_deref() == Some(sid))
-                {
+                if let Some((cid, _)) = self.state.subagents.iter().find(|(_, a)| {
+                    a.child_session_id.as_deref() == Some(sid) || a.task_id.as_deref() == Some(sid)
+                }) {
                     return Some(cid.clone());
                 }
                 let mut open_cards = self
@@ -241,6 +255,25 @@ impl AcpDriver {
                     }
                 }
             }
+        }
+
+        // Synchronous foreground subagents (`codebase_investigator`, `cli_help`,
+        // `delegate_to_agent`, `task`, `spawn_subagent` with `background == false`)
+        // execute inside the parent tool call before it returns `completed`:
+        // attribute non-subagent child tool calls emitted while the foreground
+        // subagent is open.
+        let is_new_subagent = up.is_some_and(|u| {
+            let title = u.get("title").and_then(Value::as_str).unwrap_or("");
+            canonical_subagent_tool_name(title, u.get("rawInput")).is_some()
+        });
+        if !is_new_subagent && self_tool_id.is_some() {
+            return self
+                .state
+                .subagents
+                .iter()
+                .filter(|(_, a)| !a.background && a.status.is_open())
+                .max_by_key(|(_, a)| a.started_at)
+                .map(|(cid, _)| cid.clone());
         }
         None
     }
@@ -394,8 +427,15 @@ impl AcpDriver {
 
         let (desc, sub_type, prompt, req_bg, req_child_sid) =
             extract_subagent_fields(t.raw_input.as_ref(), &t.title, &canonical, meta, raw_output);
-        let agy_launch = parse_agy_subagent_output(&t.output, self.state.sideband.root_dir());
-        let grok_launch = parse_grok_bg_launch(&t.output);
+        let raw_json_fallback = t
+            .output
+            .trim()
+            .is_empty()
+            .then(|| raw_output.and_then(|v| serde_json::to_string(v).ok()))
+            .flatten();
+        let launch_src = raw_json_fallback.as_deref().unwrap_or(&t.output);
+        let agy_launch = parse_agy_subagent_output(launch_src, self.state.sideband.root_dir());
+        let grok_launch = parse_grok_bg_launch(launch_src);
         let implied_agy_bg =
             self.provider == RuntimeProvider::Agy && canonical == "invoke_subagent";
         let is_bg = req_bg || implied_agy_bg || agy_launch.is_some() || grok_launch.is_some();
@@ -409,6 +449,7 @@ impl AcpDriver {
                 item_id: format!("{turn_str}:tool:{call_id}"),
                 turn_id: turn_opt.clone(),
                 started_at: Utc::now(),
+                completed_at: None,
                 tool_name: canonical.clone(),
                 title: t.title.clone(),
                 description: desc.clone(),
@@ -446,6 +487,7 @@ impl AcpDriver {
         match t.status {
             ToolCallStatus::Failed => {
                 card.status = TurnItemStatus::Failed;
+                card.completed_at = Some(Utc::now());
                 let out = non_empty_trimmed(&t.output);
                 card.error = out.as_deref().and_then(tool_error);
                 card.output = out;
@@ -458,13 +500,12 @@ impl AcpDriver {
                 }
             }
             ToolCallStatus::Completed if card.background => {
-                // Async subagent launch RPC returned its handle (`conversationId`,
-                // `Agent ID`, or `run_in_background: true`): keep the Subagent card
-                // `Running` until the child actually settles or is killed!
-                card.status = TurnItemStatus::Running;
                 let (task_id, log_paths) = if let Some((cid, paths)) = agy_launch {
                     (cid, paths)
                 } else if let Some((aid, _)) = grok_launch {
+                    if card.child_session_id.is_none() {
+                        card.child_session_id = Some(aid.clone());
+                    }
                     (aid, None)
                 } else {
                     let fallback = card
@@ -474,6 +515,17 @@ impl AcpDriver {
                     (fallback, None)
                 };
                 card.task_id = Some(task_id.clone());
+                if self.state.finished_bg_ids.iter().any(|f| f == &task_id) {
+                    // Out-of-order settlement arrived before the launch RPC completed:
+                    // do not reopen or leave the card stuck in Running!
+                    card.status = TurnItemStatus::Completed;
+                    card.completed_at = Some(Utc::now());
+                    self.emit_subagent(step, call_id);
+                    self.finish_subagent_children(step, call_id, TurnItemStatus::Completed);
+                    self.state.subagents.remove(call_id);
+                    return;
+                }
+                card.status = TurnItemStatus::Running;
                 let label = card
                     .description
                     .clone()
@@ -484,35 +536,35 @@ impl AcpDriver {
                 let turn_id = card.turn_id.clone();
                 self.emit_subagent(step, call_id);
 
-                if !self.state.finished_bg_ids.iter().any(|f| f == &task_id) {
-                    let (log_path, fallback_log_path) = match log_paths {
-                        Some((p, fb)) => (Some(p), fb),
-                        None => (None, None),
-                    };
-                    self.register_bg_task(
-                        step,
-                        BgTaskMeta {
-                            id: task_id,
-                            kind: "agent".into(),
-                            label,
-                            started_at,
-                            call_id: Some(call_id.to_string()),
-                            item_id: Some(item_id),
-                            turn_id,
-                            command_input: None,
-                            accumulated_output: String::new(),
-                            due_at: None,
-                            log_path,
-                            fallback_log_path,
-                            tail_offset: 0,
-                            tail_using_fallback: false,
-                        },
-                    );
-                }
+                let (log_path, fallback_log_path) = match log_paths {
+                    Some((p, fb)) => (Some(p), fb),
+                    None => (None, None),
+                };
+                self.register_bg_task(
+                    step,
+                    BgTaskMeta {
+                        id: task_id,
+                        kind: "agent".into(),
+                        label,
+                        started_at,
+                        call_id: Some(call_id.to_string()),
+                        item_id: Some(item_id),
+                        turn_id,
+                        command_input: None,
+                        accumulated_output: String::new(),
+                        due_at: None,
+                        timer_condition: None,
+                        log_path,
+                        fallback_log_path,
+                        tail_offset: 0,
+                        tail_using_fallback: false,
+                    },
+                );
             }
             ToolCallStatus::Completed => {
                 // Synchronous subagent finished inside the parent tool call.
                 card.status = TurnItemStatus::Completed;
+                card.completed_at = Some(Utc::now());
                 if let Some(out) = non_empty_trimmed(&t.output) {
                     card.output = Some(out);
                 }
@@ -590,12 +642,16 @@ impl AcpDriver {
     }
 
     pub(super) fn register_bg_task(&mut self, step: &mut DriverStep, meta: BgTaskMeta) {
+        if self.state.finished_bg_ids.iter().any(|f| f == &meta.id) {
+            return;
+        }
         let task = BackgroundTask {
             id: meta.id.clone(),
             kind: meta.kind.clone(),
             label: meta.label.clone(),
             started_at: meta.started_at,
             item_id: meta.item_id.clone(),
+            due_at: meta.due_at,
         };
         self.state.bg_meta.insert(meta.id.clone(), meta);
         let changed = super::bg::upsert_bg_task(&mut self.state.bg_tasks, task);
@@ -659,6 +715,7 @@ impl AcpDriver {
             self.finish_subagent_children(step, &cid, status);
             if let Some(mut card) = self.state.subagents.remove(&cid) {
                 card.status = status;
+                card.completed_at = Some(Utc::now());
                 let final_out = output_override
                     .clone()
                     .filter(|s| !s.trim().is_empty())
@@ -718,10 +775,10 @@ impl AcpDriver {
                     "timer" | "schedule" => "timer",
                     _ => "command",
                 };
-                let verb = match status {
-                    TurnItemStatus::Completed => "finished",
-                    TurnItemStatus::Failed => "failed",
-                    _ => "stopped",
+                let (verb, settlement_status) = match status {
+                    TurnItemStatus::Completed => ("finished", "completed"),
+                    TurnItemStatus::Failed => ("failed", "failed"),
+                    _ => ("stopped", "stopped"),
                 };
                 let mut notice = item(
                     format!("bg:{task_id}"),
@@ -729,6 +786,12 @@ impl AcpDriver {
                     None,
                     TurnItemKind::SystemNotice {
                         message: format!("Background {noun} {verb}: {label}"),
+                        task_settlement: Some(TaskSettlement {
+                            task_id: task_id.to_string(),
+                            kind: noun.to_string(),
+                            status: settlement_status.to_string(),
+                            label: label.to_string(),
+                        }),
                     },
                 );
                 notice.turn_id = self
@@ -870,6 +933,12 @@ impl AcpDriver {
                     b.id == snd
                         || b.id.ends_with(&format!("/{snd}"))
                         || snd.ends_with(&format!("/{id}", id = b.id))
+                        || self
+                            .state
+                            .bg_meta
+                            .get(&b.id)
+                            .and_then(|m| m.timer_condition.as_deref())
+                            .is_some_and(|tc| tc == snd)
                 })
                 .map(|b| b.id.clone())
                 .or_else(|| {
@@ -883,9 +952,33 @@ impl AcpDriver {
                 self.settle_bg_task(step, &tid, TurnItemStatus::Completed, out, None);
                 return;
             }
-            if self.state.finished_bg_ids.iter().any(|f| f == snd) {
-                return;
+            // Only settle a `schedule` timer on an unrelated `sender` wakeup when
+            // `TimerCondition: "any"` was explicitly configured on that timer!
+            let any_conditioned_timer = self
+                .state
+                .bg_tasks
+                .iter()
+                .filter(|b| {
+                    (b.kind == "timer" || b.kind == "schedule")
+                        && self
+                            .state
+                            .bg_meta
+                            .get(&b.id)
+                            .and_then(|m| m.timer_condition.as_deref())
+                            .is_some_and(|tc| tc.eq_ignore_ascii_case("any"))
+                })
+                .min_by_key(|b| {
+                    self.state
+                        .bg_meta
+                        .get(&b.id)
+                        .and_then(|m| m.due_at)
+                        .unwrap_or(b.started_at)
+                })
+                .map(|b| b.id.clone());
+            if let Some(tid) = any_conditioned_timer {
+                self.settle_bg_task(step, &tid, TurnItemStatus::Completed, None, None);
             }
+            return;
         }
 
         // No explicit sender (e.g. a `<SYSTEM_MESSAGE>` timer firing slightly
@@ -914,6 +1007,11 @@ impl AcpDriver {
     }
 
     pub(super) fn active_tail_sources(&self) -> Vec<ActiveTailSource> {
+        let allowed_cwd = {
+            let c = self.state.cwd.trim();
+            (!c.is_empty()).then(|| PathBuf::from(c))
+        };
+        let agy_brain_dir = self.state.sideband.root_dir().map(PathBuf::from);
         let mut out = Vec::new();
         for bg in &self.state.bg_tasks {
             let Some(meta) = self.state.bg_meta.get(&bg.id) else {
@@ -936,6 +1034,8 @@ impl AcpDriver {
                 fallback_path: meta.fallback_log_path.clone(),
                 offset: meta.tail_offset,
                 using_fallback: meta.tail_using_fallback,
+                allowed_cwd: allowed_cwd.clone(),
+                agy_brain_dir: agy_brain_dir.clone(),
             });
             if out.len() >= 8 {
                 break;
@@ -949,10 +1049,15 @@ impl AcpDriver {
             return None;
         }
         let idle_between_prompts = self.state.prompt_id.is_none() && self.state.queued.is_none();
+        let poll_child_subagents = matches!(
+            self.provider,
+            RuntimeProvider::Opencode | RuntimeProvider::Grok
+        ) && self.state.subagents.values().any(|a| a.status.is_open());
         let primary = self.state.sideband.sideband_poll(
             self.provider,
             true,
             idle_between_prompts,
+            poll_child_subagents,
             &self.state.cwd,
             self.state.session_id.as_deref(),
         );
@@ -1326,381 +1431,4 @@ fn build_tool_turn_item(item_id: &str, t: &Tool) -> TurnItem {
     let mut it = item(item_id.to_string(), status, Some(t.title.clone()), kind);
     it.error = error;
     it
-}
-
-pub(super) fn canonical_subagent_tool_name(
-    title: &str,
-    raw_input: Option<&Value>,
-) -> Option<String> {
-    let norm = normalize_tool_name(title);
-    if norm.contains("invoke_subagent") {
-        return Some("invoke_subagent".into());
-    }
-    if norm.contains("delegate_to_agent") {
-        return Some("delegate_to_agent".into());
-    }
-    if norm.contains("spawn_subagent") {
-        return Some("spawn_subagent".into());
-    }
-    if norm.contains("spawn_agent") {
-        return Some("spawn_agent".into());
-    }
-    if norm == "task"
-        && raw_input.is_some_and(|v| {
-            v.get("subagent_type").is_some()
-                || v.get("TypeName").is_some()
-                || v.get("agent_type").is_some()
-                || v.get("Role").is_some()
-        })
-    {
-        return Some("task".into());
-    }
-    None
-}
-
-fn normalize_tool_name(raw: &str) -> String {
-    let mut s = raw.trim();
-    if let Some(rest) = s.strip_prefix("Run ") {
-        s = rest.trim();
-    }
-    if let Some((_, tail)) = s.rsplit_once(':') {
-        s = tail.trim();
-    }
-    if let Some((_, tail)) = s.rsplit_once('.') {
-        if !tail.contains('/') && !tail.contains(' ') {
-            s = tail.trim();
-        }
-    }
-    s.to_ascii_lowercase()
-}
-
-fn short_tool_label(raw: &str) -> String {
-    let mut s = raw.trim();
-    if let Some((_, tail)) = s.rsplit_once(':') {
-        s = tail.trim();
-    }
-    s.to_string()
-}
-
-fn extract_subagent_fields(
-    raw_input: Option<&Value>,
-    title: &str,
-    canonical: &str,
-    meta: Option<&Value>,
-    raw_output: Option<&Value>,
-) -> (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    bool,
-    Option<String>,
-) {
-    let str_in = |keys: &[&str]| -> Option<String> {
-        let v = raw_input?;
-        keys.iter().find_map(|k| {
-            v.get(*k)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        })
-    };
-    let description =
-        str_in(&["Role", "Description", "description", "AgentName", "name"]).or_else(|| {
-            let trimmed = title.trim();
-            let lower = normalize_tool_name(trimmed);
-            (!trimmed.is_empty() && lower != canonical && lower != "tool")
-                .then(|| trimmed.to_string())
-        });
-    let subagent_type = str_in(&["TypeName", "subagent_type", "agent_type"]);
-    let prompt = str_in(&["Prompt", "prompt", "task"]);
-    let background = raw_input.is_some_and(|v| {
-        ["run_in_background", "background", "async"]
-            .iter()
-            .any(|k| v.get(*k).and_then(Value::as_bool) == Some(true))
-    });
-    let child_sid = [meta, raw_output, raw_input]
-        .into_iter()
-        .flatten()
-        .find_map(|v| {
-            ["childSessionId", "child_session_id", "subagentSessionId"]
-                .iter()
-                .find_map(|k| {
-                    v.get(*k)
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                })
-        });
-    (description, subagent_type, prompt, background, child_sid)
-}
-
-fn extract_parent_tool_id(params: &Value, up: Option<&Value>) -> Option<String> {
-    const POINTERS: &[&str] = &[
-        "/_meta/parentToolUseId",
-        "/_meta/parent_tool_use_id",
-        "/_meta/parentToolCallId",
-        "/_meta/parent_tool_call_id",
-        "/_meta/parentId",
-        "/parentToolUseId",
-        "/parent_tool_use_id",
-        "/parentToolCallId",
-        "/parent_tool_call_id",
-    ];
-    for ptr in POINTERS {
-        if let Some(u) = up {
-            if let Some(s) = u
-                .pointer(ptr)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                return Some(s.to_string());
-            }
-        }
-        if let Some(s) = params
-            .pointer(ptr)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Some(s.to_string());
-        }
-    }
-    None
-}
-
-type AgySubagentLogPaths = (PathBuf, Option<PathBuf>);
-
-pub(super) fn parse_agy_subagent_output(
-    output: &str,
-    brain_root: Option<&str>,
-) -> Option<(String, Option<AgySubagentLogPaths>)> {
-    let trimmed = output.trim();
-    if trimmed.is_empty() || !trimmed.contains("conversationId") {
-        return None;
-    }
-    let parsed = parse_embedded_json(trimmed);
-    let conv_id = parsed
-        .as_ref()
-        .and_then(|v| {
-            v.get("conversationId")
-                .or_else(|| v.get("conversation_id"))
-                .and_then(Value::as_str)
-        })
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| extract_json_string_field(trimmed, "conversationId"))?;
-
-    let log_uri = parsed
-        .as_ref()
-        .and_then(|v| {
-            v.get("logAbsoluteUri")
-                .or_else(|| v.get("log_absolute_uri"))
-                .or_else(|| v.get("transcriptPath"))
-                .and_then(Value::as_str)
-        })
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| extract_json_string_field(trimmed, "logAbsoluteUri"));
-
-    let paths = resolve_agy_transcript_paths(&conv_id, log_uri.as_deref(), brain_root);
-    Some((conv_id, paths))
-}
-
-fn resolve_agy_transcript_paths(
-    conv_id: &str,
-    log_uri: Option<&str>,
-    brain_root: Option<&str>,
-) -> Option<(PathBuf, Option<PathBuf>)> {
-    if let Some(uri) = log_uri {
-        if let Some(p) = file_uri_to_path(uri) {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            if name == "transcript.jsonl" {
-                let dir = p.parent()?;
-                return Some((dir.join("transcript_full.jsonl"), Some(p)));
-            }
-            if name == "transcript_full.jsonl" {
-                let dir = p.parent()?;
-                return Some((p.clone(), Some(dir.join("transcript.jsonl"))));
-            }
-            let logs = if p.ends_with(".system_generated/logs") {
-                p
-            } else {
-                p.join(".system_generated").join("logs")
-            };
-            return Some((
-                logs.join("transcript_full.jsonl"),
-                Some(logs.join("transcript.jsonl")),
-            ));
-        }
-    }
-    let root = brain_root?.trim();
-    if root.is_empty() || !is_safe_session_id(conv_id) {
-        return None;
-    }
-    let logs = PathBuf::from(root)
-        .join(conv_id)
-        .join(".system_generated")
-        .join("logs");
-    Some((
-        logs.join("transcript_full.jsonl"),
-        Some(logs.join("transcript.jsonl")),
-    ))
-}
-
-pub(super) fn parse_grok_bg_launch(output: &str) -> Option<(String, bool)> {
-    let trimmed = output.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(v) = parse_embedded_json(trimmed) {
-        for key in ["subagent_id", "subagentId", "agent_id", "agentId"] {
-            if let Some(id) = v
-                .get(key)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                return Some((id.to_string(), true));
-            }
-        }
-        let is_bg_event = v
-            .get("type")
-            .or_else(|| v.get("event"))
-            .or_else(|| v.get("status"))
-            .and_then(Value::as_str)
-            .is_some_and(|s| s.eq_ignore_ascii_case("BackgroundTaskStarted"))
-            || trimmed.contains("BackgroundTaskStarted");
-        if is_bg_event {
-            for key in ["task_id", "taskId", "command_id", "commandId", "id"] {
-                if let Some(id) = v
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    return Some((id.to_string(), false));
-                }
-            }
-        }
-    }
-
-    if let Some((_, rest)) = split_once_ignore_ascii_case(trimmed, "agent id:") {
-        if let Some(tok) = take_id_token(rest) {
-            return Some((tok, true));
-        }
-    }
-    if let Some(id) = extract_json_string_field(trimmed, "subagent_id") {
-        return Some((id, true));
-    }
-    if let Some((_, rest)) = trimmed.split_once("BackgroundTaskStarted") {
-        let rest = rest.trim_start_matches([':', ' ', '-', '(']);
-        if let Some(tok) = take_id_token(rest) {
-            return Some((tok, false));
-        }
-    }
-    None
-}
-
-pub(super) fn file_uri_to_path(raw: &str) -> Option<PathBuf> {
-    let s = raw.trim().trim_matches(['"', '\'', ')', '>', '.', ',']);
-    if let Some(rest) = s.strip_prefix("file://") {
-        let path_part = rest.strip_prefix("localhost").unwrap_or(rest);
-        if path_part.is_empty() {
-            return None;
-        }
-        return Some(PathBuf::from(percent_decode(path_part)));
-    }
-    if s.starts_with('/') {
-        return Some(PathBuf::from(s));
-    }
-    None
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push((hi << 4) | lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-pub(super) fn parse_embedded_json(s: &str) -> Option<Value> {
-    if let Ok(v) = serde_json::from_str::<Value>(s) {
-        return Some(v);
-    }
-    let start = s.find('{')?;
-    let end = s.rfind('}')?;
-    (end > start)
-        .then(|| serde_json::from_str::<Value>(&s[start..=end]).ok())
-        .flatten()
-}
-
-fn extract_json_string_field(s: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\"");
-    let idx = s.find(&needle)?;
-    let rest = s[idx + needle.len()..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let rest = rest.strip_prefix('"')?;
-    let end = rest.find('"')?;
-    let val = rest[..end].trim();
-    (!val.is_empty()).then(|| val.to_string())
-}
-
-fn split_once_ignore_ascii_case<'a>(s: &'a str, pat_lower: &str) -> Option<(&'a str, &'a str)> {
-    let lower = s.to_ascii_lowercase();
-    let idx = lower.find(pat_lower)?;
-    Some((&s[..idx], &s[idx + pat_lower.len()..]))
-}
-
-pub(super) fn take_id_token(s: &str) -> Option<String> {
-    let tok = s
-        .split_whitespace()
-        .next()?
-        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_' | '/'));
-    (!tok.is_empty()).then(|| tok.to_string())
-}
-
-fn non_empty_trimmed(s: &str) -> Option<String> {
-    let t = s.trim();
-    (!t.is_empty()).then(|| s.to_string())
-}
-
-fn parse_command_log_exit_code(text: &str) -> Option<i32> {
-    for marker in ["Command exited with code ", "[Process exited with code "] {
-        if let Some((_, rest)) = text.rsplit_once(marker) {
-            let digits: String = rest
-                .trim_start()
-                .chars()
-                .take_while(|c| *c == '-' || c.is_ascii_digit())
-                .collect();
-            if let Ok(code) = digits.parse::<i32>() {
-                return Some(code);
-            }
-        }
-    }
-    None
 }

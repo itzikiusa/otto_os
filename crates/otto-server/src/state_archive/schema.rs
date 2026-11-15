@@ -1,3 +1,6 @@
+#[path = "schema_ide.rs"]
+mod schema_ide;
+
 use super::{invalid, ArchiveRow};
 use crate::error::ApiResult;
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -271,7 +274,7 @@ pub fn secret_key(key: &str) -> bool {
         ))
 }
 /// Sanitize structured transport credentials without rewriting free-form documents.
-fn scrub_string(text: &str) -> String {
+pub(super) fn scrub_string(text: &str) -> String {
     if text.starts_with("keychain:")
         || text.starts_with("secret:")
         || text.starts_with("otto-keychain:")
@@ -344,15 +347,28 @@ fn scrub_string(text: &str) -> String {
 fn has_credentials(value: &Value) -> bool {
     match value {
         Value::Object(map) => {
+            if map
+                .get("key")
+                .and_then(Value::as_str)
+                .is_some_and(schema_ide::is_otto_internal_key)
+            {
+                return false;
+            }
             map.get("type").and_then(Value::as_str).is_some_and(|kind| {
                 crate::api_secrets::secret_members(kind)
                     .iter()
                     .any(|key| map.contains_key(*key))
-            }) || map.keys().any(|k| secret_key(k) || k == "$secret")
+            }) || map
+                .keys()
+                .filter(|k| !schema_ide::is_otto_internal_key(k))
+                .any(|k| secret_key(k) || k == "$secret")
                 || ["key", "name"]
                     .iter()
                     .any(|k| map.get(*k).and_then(Value::as_str).is_some_and(secret_key))
-                || map.values().any(has_credentials)
+                || map
+                    .iter()
+                    .filter(|(k, _)| !schema_ide::is_otto_internal_key(k))
+                    .any(|(_, v)| has_credentials(v))
         }
         Value::Array(values) => values.iter().any(has_credentials),
         Value::String(text) => {
@@ -402,7 +418,7 @@ fn non_secret_short_p_command(segment: &str) -> bool {
 
 /// Scrub inline credentials and secret CLI/env arguments from shell command
 /// strings stored in portable run configurations (`command`, `before_launch`).
-fn scrub_shell_text(input: &str) -> (String, bool) {
+pub(super) fn scrub_shell_text(input: &str) -> (String, bool) {
     use regex::{Captures, Regex};
     use std::sync::OnceLock;
 
@@ -535,33 +551,6 @@ fn scrub_shell_text(input: &str) -> (String, bool) {
 
     let changed = text != input;
     (text, changed)
-}
-
-fn scrub_shell_json(value: &mut Value) -> bool {
-    match value {
-        Value::Object(map) => {
-            let mut changed = false;
-            for v in map.values_mut() {
-                changed |= scrub_shell_json(v);
-            }
-            changed
-        }
-        Value::Array(items) => {
-            let mut changed = false;
-            for v in items.iter_mut() {
-                changed |= scrub_shell_json(v);
-            }
-            changed
-        }
-        Value::String(s) => {
-            let (next, changed) = scrub_shell_text(s);
-            if changed {
-                *s = next;
-            }
-            changed
-        }
-        _ => false,
-    }
 }
 
 pub fn scrub_json(value: &mut Value) {
@@ -762,50 +751,12 @@ pub fn sanitize(
                     // User documents/history remain private, lossless content; only
                     // configuration/request JSON passes through credential filtering.
                     if table == "ide_project_environments" && column.name == "env_vars_json" {
-                        if let Some(entries) = document.as_array_mut() {
-                            let mut scrubbed_any = false;
-                            for entry in entries.iter_mut() {
-                                let Some(obj) = entry.as_object_mut() else {
-                                    continue;
-                                };
-                                let key_name = obj
-                                    .get("key")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_owned();
-                                if key_name == "__otto_module_sdks__" {
-                                    continue;
-                                }
-                                let is_sec =
-                                    obj.get("secret").and_then(Value::as_bool) == Some(true);
-                                if is_sec {
-                                    if obj.get("secret_ref").is_some_and(|v| !v.is_null())
-                                        || obj.get("value").is_some_and(|v| !v.is_null())
-                                    {
-                                        scrubbed_any = true;
-                                    }
-                                    obj.insert("secret_ref".into(), Value::Null);
-                                    obj.insert("value".into(), Value::Null);
-                                } else if secret_key(&key_name) {
-                                    if obj
-                                        .get("value")
-                                        .and_then(Value::as_str)
-                                        .is_some_and(|s| !s.is_empty())
-                                    {
-                                        scrubbed_any = true;
-                                    }
-                                    obj.insert("value".into(), json!(""));
-                                } else if let Some(Value::String(val_str)) = obj.get_mut("value") {
-                                    *val_str = scrub_string(val_str);
-                                }
-                            }
-                            if scrubbed_any {
-                                reconnect.insert(format!(
-                                    "{table}/{id}: review and reconnect saved credentials"
-                                ));
-                            }
-                            *text = document.to_string();
+                        if schema_ide::sanitize_ide_project_env_vars(&mut document) {
+                            reconnect.insert(format!(
+                                "{table}/{id}: review and reconnect saved credentials"
+                            ));
                         }
+                        *text = document.to_string();
                     } else if matches!(
                         table,
                         "settings"
@@ -832,7 +783,6 @@ pub fn sanitize(
                             | "swarm_channel_triggers"
                             | "goal_loops"
                             | "api_automations"
-                            | "ide_run_configs"
                     ) {
                         scrub_json(&mut document);
                         *text = document.to_string();
@@ -890,34 +840,10 @@ pub fn sanitize(
             }
         }
     }
-    if table == "ide_run_configs" {
-        let mut scrubbed_any = false;
-        for col in ["command", "before_launch"] {
-            if let Some(Value::String(text)) = row.get_mut(col) {
-                if let Ok(mut doc) = serde_json::from_str::<Value>(text) {
-                    if doc.is_object() || doc.is_array() {
-                        let before = doc.clone();
-                        scrub_json(&mut doc);
-                        let shell_changed = scrub_shell_json(&mut doc);
-                        if shell_changed || doc != before {
-                            *text = doc.to_string();
-                            scrubbed_any = true;
-                        }
-                        continue;
-                    }
-                }
-                let (next, changed) = scrub_shell_text(text);
-                if changed {
-                    *text = next;
-                    scrubbed_any = true;
-                }
-            }
-        }
-        if scrubbed_any {
-            reconnect.insert(format!(
-                "{table}/{id}: review and reconnect saved credentials"
-            ));
-        }
+    if table == "ide_run_configs" && schema_ide::sanitize_ide_run_config_row(row) {
+        reconnect.insert(format!(
+            "{table}/{id}: review and reconnect saved credentials"
+        ));
     }
     inert(table, row);
 }

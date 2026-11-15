@@ -1,45 +1,17 @@
 //! ACP (Agent Client Protocol, v1) client driver — used for Gemini
-//! (`gemini --acp`), Grok (`grok … agent stdio`) and by the tests' fake ACP
-//! agent. Per-agent differences live in an [`AcpFlavor`] (T3 Code: the
-//! `AcpFlavor` hooks of `packages/provider-acp/src/server/adapter.ts`, Grok's
-//! in `packages/provider-grok/src/server/acpSupport.ts`).
+//! (`gemini --acp`), Grok (`grok … agent stdio`), OpenCode, Antigravity (`agy`),
+//! and the fake ACP test agent. Per-agent differences live in [`AcpFlavor`].
 //!
-//! Wire types are the official SDK's (`agent-client-protocol` 5.0.0, schema
-//! 1.15.1); this module only does JSON-RPC framing + request correlation,
-//! because the runtime — not the SDK's connection — owns the process (every
-//! spawn passes Otto's safety pipeline) and the driver stays sans-IO.
-//!
-//! The lifecycle and the update → entity mapping are ported from T3 Code
-//! (MIT, Copyright (c) 2026 T3 Tools Inc.):
-//! * `packages/provider-acp/src/server/AcpSessionRuntime.ts` — `initialize`
-//!   with no fs / terminal client capabilities (Otto offers neither, like T3
-//!   Code for Claude/Gemini), then `session/load` when resuming and the agent
-//!   advertises `loadSession`, else `session/new`; a failed load falls back
-//!   to a fresh session; `session/cancel` on interrupt. `authenticate` is
-//!   lazy: only after `session/new|load` fails with `-32000` (auth
-//!   required), with the flavour's preferred method if advertised, else the
-//!   first `agent`-type method, then the session call is retried once
-//!   (`AcpSessionRuntime.ts:1065-1078`, `:2164-2208`).
-//! * `packages/provider-acp/src/server/runtimeModel.ts` + `adapter.ts` —
-//!   `agent_message_chunk` / `agent_thought_chunk` accumulate into one
-//!   `assistant_message` / `reasoning` item re-emitted whole with
-//!   `streaming: true` (a non-text update closes the segment); `tool_call` /
-//!   `tool_call_update` merge into one `command_execution` / `file_change` /
-//!   `dynamic_tool` item; `plan` → `plan.updated` + a `todo_list` item;
-//!   `session/request_permission` → a pending runtime request + an
-//!   `approval_request` item; answers pick `allow_once` for accept,
-//!   `allow_always` for accept-for-session (narrowed to `allow_once` when
-//!   the agent offers no session grant), `reject_once` for decline, and
-//!   `{outcome: cancelled}` for cancel or a missing option
-//!   (`adapter.ts:1255-1266`). Updates replayed by `session/load` are history
-//!   the agent re-sends; Otto keeps its own, so they are dropped.
-//! * access mode: the flavour's launch argv per mode (Grok,
-//!   `acpSupport.ts:47-58`; Gemini's `--approval-mode`); Gemini switches live
-//!   with `session/set_mode` when `session/new|load` advertised the mode
-//!   (`AcpSessionRuntime.ts:2671-2688`), otherwise the runtime respawns and
-//!   loads the session. A failed `tool_call_update` carries its content as
-//!   the item's `error`. PDFs go as an embedded `resource` blob only when the
-//!   agent advertises `promptCapabilities.embeddedContext`.
+//! Wire types come from `agent-client-protocol` 5.0.0; this module handles
+//! JSON-RPC framing + request correlation while keeping the driver sans-IO so
+//! every spawn passes Otto's safety pipeline. Lifecycle and entity mapping are
+//! ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.):
+//! * `AcpSessionRuntime.ts` — `initialize`, `session/load` or `session/new`,
+//!   lazy `authenticate` on `-32000`, and `session/cancel` on interrupt.
+//! * `runtimeModel.ts` + `adapter.ts` — message/thought chunk accumulation,
+//!   `tool_call` / `tool_call_update` merging, `plan` → `todo_list`,
+//!   `session/request_permission` → `approval_request`, and `session/set_mode`
+//!   or respawn for live access-mode transitions.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -71,7 +43,7 @@ mod bg;
 #[path = "acp_raw.rs"]
 mod raw;
 #[path = "acp_subagent.rs"]
-mod subagent;
+pub(crate) mod subagent;
 
 const M_INITIALIZE: &str = "initialize";
 const M_AUTHENTICATE: &str = "authenticate";
@@ -1752,10 +1724,10 @@ impl StructuredDriver for AcpDriver {
             self.resolve_effort_with(opts, raw)?;
         }
         let ready = self.state.phase == Phase::Ready;
-        if ready && !req.images.is_empty() && !self.state.images {
+        if !req.images.is_empty() && !self.state.images {
             return Err(DriverError(format!("{name} does not accept images")));
         }
-        if ready && !req.files.is_empty() && !self.state.embedded {
+        if !req.files.is_empty() && !self.state.embedded {
             return Err(DriverError(format!(
                 "{name} does not accept file attachments"
             )));
@@ -2158,7 +2130,17 @@ impl StructuredDriver for AcpDriver {
             self.state
                 .sideband
                 .on_payload(self.provider, self.state.session_id.as_deref(), prim);
-        if !ready_and_live || self.state.prompt_id.is_some() || self.state.queued.is_some() {
+        if !ready_and_live {
+            return step;
+        }
+        if self.state.prompt_id.is_some() || self.state.queued.is_some() {
+            let child_actions: Vec<_> = actions
+                .into_iter()
+                .filter(|a| matches!(a, crate::acp_sideband::SidebandAction::ChildScope { .. }))
+                .collect();
+            if !child_actions.is_empty() {
+                self.apply_sideband_actions(&mut step, child_actions);
+            }
             return step;
         }
         self.apply_sideband_actions(&mut step, actions);
@@ -2339,6 +2321,7 @@ mod tests {
             images: vec![otto_core::agent_runtime::PromptImage {
                 mime: "image/png".into(),
                 data_base64: "AAAA".into(),
+                name: None,
             }],
             ..RuntimePromptReq::of("look")
         };
@@ -3173,6 +3156,7 @@ mod tests {
                     images: vec![otto_core::agent_runtime::PromptImage {
                         mime: "image/png".into(),
                         data_base64: "AAAA".into(),
+                        name: None,
                     }],
                     ..RuntimePromptReq::of("steered follow-up")
                 },

@@ -109,7 +109,7 @@ pub struct ProviderSession {
 pub struct BackgroundTask {
     /// The provider's task id.
     pub id: String,
-    /// `command`, `agent`, or the provider's own task type.
+    /// `command`, `agent`, `timer`, or the provider's own task type.
     pub kind: String,
     /// What it is doing (the command, the subagent's description).
     pub label: String,
@@ -117,6 +117,21 @@ pub struct BackgroundTask {
     /// The turn item of the tool call that started it, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_id: Option<Id>,
+    /// Optional scheduled fire timestamp for one-shot timers (`schedule`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<DateTime<Utc>>,
+}
+
+/// Structured settlement metadata attached to a [`TurnItemKind::SystemNotice`]
+/// when background work (`command`, `agent`, `timer`) finishes, stops, or fails,
+/// eliminating English-prose regex coupling in the UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSettlement {
+    pub task_id: String,
+    pub kind: String,
+    /// `"completed"`, `"stopped"`, or `"failed"`.
+    pub status: String,
+    pub label: String,
 }
 
 /// Who started a turn: a person's prompt, or the agent itself (Claude Code
@@ -364,6 +379,8 @@ pub enum TurnItemKind {
     SessionBoundary,
     SystemNotice {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_settlement: Option<TaskSettlement>,
     },
     /// A subagent the agent launched (Claude's `Agent` / `Task` tool). Its
     /// own messages and tool calls are items whose `parent_item_id` is this
@@ -861,6 +878,10 @@ pub struct RuntimeSession {
     pub meta: Option<serde_json::Value>,
 }
 
+/// Server-owned `RuntimeSession::meta` key storing a custom provider slug from
+/// `ProviderRegistry` (e.g. `"claudework"` mapped onto `RuntimeProvider::Claude`).
+pub const PROVIDER_SLUG_META_KEY: &str = "provider_slug";
+
 impl RuntimeSession {
     /// A boolean flag in [`Self::meta`] (`read_only`, …); absent = false.
     pub fn meta_flag(&self, key: &str) -> bool {
@@ -871,10 +892,22 @@ impl RuntimeSession {
             == Some(true)
     }
 
+    /// Custom provider slug from `meta.provider_slug` when created from a
+    /// custom `ProviderRegistry` entry, or the built-in `RuntimeProvider` id.
+    pub fn provider_slug(&self) -> &str {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.get(PROVIDER_SLUG_META_KEY))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.provider.as_str())
+    }
+
     /// This thread in terminal-session shape, for surfaces keyed by session
     /// (agent UI control): `meta.runtime = "structured"`, its grant under
     /// `meta.ui_control`, no device pin (any of the owner's windows).
     pub fn into_session(self) -> crate::domain::Session {
+        let provider_slug = self.provider_slug().to_string();
         let mut meta = serde_json::json!({"runtime": "structured"});
         if let Some(serde_json::Value::Object(extra)) = self.meta {
             for (k, v) in extra {
@@ -890,7 +923,7 @@ impl RuntimeSession {
             id: self.id,
             workspace_id: self.workspace_id,
             kind: crate::domain::SessionKind::Agent,
-            provider: self.provider.as_str().to_string(),
+            provider: provider_slug,
             title: self.title,
             status: crate::domain::SessionStatus::Running,
             cwd: self.cwd,
@@ -957,12 +990,21 @@ pub struct EmbeddedOrigin {
 }
 
 /// `POST /workspaces/{id}/runtime-sessions` body: the create fields plus the
-/// two a client may set on the server-owned meta. Nothing else in the body
-/// reaches `meta` (`CreateRuntimeSessionReq::meta` stays `serde(skip)`).
+/// two a client may set on the server-owned meta, and optional custom provider
+/// slug support (`provider: "claudework"`). Nothing else in the body reaches
+/// `meta` (`CreateRuntimeSessionReq::meta` stays `serde(skip)`).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CreateRuntimeSessionBody {
-    #[serde(flatten)]
-    pub req: CreateRuntimeSessionReq,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub access_mode: Option<RuntimeAccessMode>,
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
@@ -970,15 +1012,57 @@ pub struct CreateRuntimeSessionBody {
 }
 
 impl CreateRuntimeSessionBody {
-    /// The create request, its meta `{source, origin}` when the body names an
-    /// embedded source. Refuses (400) a source outside
-    /// [`EMBEDDED_THREAD_SOURCES`], an `origin` without a `source`, an origin
-    /// kind that does not match the source, and an empty or over-long id /
-    /// over-long label.
+    /// Convert into [`CreateRuntimeSessionReq`] for built-in [`RuntimeProvider`]
+    /// names only (rejects unknown provider names with `400 Invalid`).
     pub fn into_req(self) -> crate::Result<CreateRuntimeSessionReq> {
-        let mut req = self.req;
-        req.meta = embedded_meta(self.source.as_deref(), self.origin)?;
-        Ok(req)
+        self.into_req_with_resolver(|_| None)
+    }
+
+    /// Convert into [`CreateRuntimeSessionReq`], resolving non-built-in custom
+    /// provider slugs (e.g. `"claudework"` -> `RuntimeProvider::Claude`) via
+    /// `resolve_custom` and storing `meta.provider_slug` when resolved.
+    pub fn into_req_with_resolver<F>(
+        self,
+        resolve_custom: F,
+    ) -> crate::Result<CreateRuntimeSessionReq>
+    where
+        F: FnOnce(&str) -> Option<RuntimeProvider>,
+    {
+        let mut meta = embedded_meta(self.source.as_deref(), self.origin)?;
+        let provider = match self
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            None => None,
+            Some(raw) => {
+                if let Some(builtin) = RuntimeProvider::parse(raw) {
+                    Some(builtin)
+                } else if let Some(mapped) = resolve_custom(raw) {
+                    let obj = meta.get_or_insert_with(|| Value::Object(serde_json::Map::new()));
+                    if let Some(map) = obj.as_object_mut() {
+                        map.insert(
+                            PROVIDER_SLUG_META_KEY.into(),
+                            Value::String(raw.to_string()),
+                        );
+                    }
+                    Some(mapped)
+                } else {
+                    return Err(crate::Error::Invalid(format!(
+                        "unknown or disabled runtime provider '{raw}'"
+                    )));
+                }
+            }
+        };
+        Ok(CreateRuntimeSessionReq {
+            provider,
+            cwd: self.cwd,
+            title: self.title,
+            model: self.model,
+            access_mode: self.access_mode,
+            meta,
+        })
     }
 }
 
@@ -1150,14 +1234,64 @@ impl RuntimeSession {
     }
 }
 
+fn parse_provider_and_slug(
+    raw_provider: &str,
+    explicit_slug: Option<String>,
+) -> (RuntimeProvider, Option<String>) {
+    let trimmed = raw_provider.trim();
+    if let Some(p) = RuntimeProvider::parse(trimmed) {
+        let slug = explicit_slug
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != p.as_str());
+        (p, slug)
+    } else {
+        let slug = explicit_slug
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| trimmed.to_string());
+        (RuntimeProvider::Claude, Some(slug))
+    }
+}
+
 /// One agent of `POST /runtime-sessions/{id}/children`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AskChildTarget {
     pub provider: RuntimeProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_slug: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for AskChildTarget {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            provider: String,
+            #[serde(default)]
+            provider_slug: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            effort: Option<String>,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        if w.provider.trim().is_empty() {
+            return Err(serde::de::Error::custom("provider must not be empty"));
+        }
+        let (provider, provider_slug) = parse_provider_and_slug(&w.provider, w.provider_slug);
+        Ok(Self {
+            provider,
+            provider_slug,
+            model: w.model,
+            effort: w.effort,
+        })
+    }
 }
 
 /// `POST /runtime-sessions/{id}/children` — a person sends `prompt` to 1–4
@@ -1193,14 +1327,45 @@ pub const COUNCIL_META_KEY: &str = "council";
 
 /// One seat of `POST /workspaces/{id}/runtime-sessions/council`. The same
 /// provider may sit more than once (two efforts, two models).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CouncilSeatReq {
     pub provider: RuntimeProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_slug: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     /// Reasoning effort for the seat's first turn; omitted = the model's default.
     #[serde(default)]
     pub effort: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CouncilSeatReq {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            provider: String,
+            #[serde(default)]
+            provider_slug: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            effort: Option<String>,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        if w.provider.trim().is_empty() {
+            return Err(serde::de::Error::custom("provider must not be empty"));
+        }
+        let (provider, provider_slug) = parse_provider_and_slug(&w.provider, w.provider_slug);
+        Ok(Self {
+            provider,
+            provider_slug,
+            model: w.model,
+            effort: w.effort,
+        })
+    }
 }
 
 /// `POST /workspaces/{id}/runtime-sessions/council` — one prompt to 2–4 agents.
@@ -1224,13 +1389,44 @@ pub struct CouncilResp {
 }
 
 /// `POST /runtime-sessions/{id}/council/synthesize` — the judge.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SynthesizeCouncilReq {
     pub provider: RuntimeProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_slug: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for SynthesizeCouncilReq {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            provider: String,
+            #[serde(default)]
+            provider_slug: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            effort: Option<String>,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        if w.provider.trim().is_empty() {
+            return Err(serde::de::Error::custom("provider must not be empty"));
+        }
+        let (provider, provider_slug) = parse_provider_and_slug(&w.provider, w.provider_slug);
+        Ok(Self {
+            provider,
+            provider_slug,
+            model: w.model,
+            effort: w.effort,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1392,6 +1588,9 @@ pub struct ToolOutputImage {
 pub struct PromptImage {
     pub mime: String,
     pub data_base64: String,
+    /// Optional filename preserved across queue / unqueue (`Edit`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// A file attachment (`mime` is `application/pdf`).
@@ -1519,6 +1718,7 @@ mod tests {
                         label: "sleep 300".into(),
                         started_at: ts(),
                         item_id: None,
+                        due_at: None,
                     }],
                 },
             },
@@ -1656,6 +1856,7 @@ mod tests {
             parent_item_id: Some(card.id.clone()),
             kind: TurnItemKind::SystemNotice {
                 message: "x".into(),
+                task_settlement: None,
             },
             ..card.clone()
         };
@@ -1855,11 +2056,34 @@ mod tests {
         let body: CreateCouncilReq = serde_json::from_value(json!({
             "prompt": "which cache?",
             "seats": [{"provider": "claude", "model": "opus", "effort": "high"},
-                      {"provider": "claude"}]
+                      {"provider": "claudework"}]
         }))
         .unwrap();
         assert_eq!(body.seats.len(), 2);
+        assert_eq!(body.seats[0].provider_slug, None);
+        assert_eq!(body.seats[1].provider_slug.as_deref(), Some("claudework"));
         assert_eq!(body.seats[1].model, None);
         assert!(body.images.is_empty() && body.title.is_none());
+
+        let custom_body: CreateRuntimeSessionBody = serde_json::from_value(json!({
+            "provider": "claudework",
+            "cwd": "/tmp/p",
+            "model": "opus",
+        }))
+        .unwrap();
+        assert!(custom_body.clone().into_req().is_err());
+        let resolved = custom_body
+            .into_req_with_resolver(|slug| {
+                (slug == "claudework").then_some(RuntimeProvider::Claude)
+            })
+            .unwrap();
+        assert_eq!(resolved.provider, Some(RuntimeProvider::Claude));
+        assert_eq!(
+            resolved
+                .meta
+                .as_ref()
+                .and_then(|m| m.get(PROVIDER_SLUG_META_KEY)),
+            Some(&json!("claudework"))
+        );
     }
 }

@@ -113,6 +113,14 @@ const lastLine = (raw: string | null | undefined): string | null => {
 const BG_NOTICE = /^Background (command|agent|timer) (finished|failed|stopped): (.+)$/s;
 /** Matches one-shot `Timer (<seconds>s): ...` labels emitted by ACP `schedule`. */
 const ONESHOT_TIMER = /^Timer \((\d+)s\):/;
+/** Top-level `dynamic_tool` calls that spawn a subagent when no `subagent` card exists. */
+const SUBAGENT_DYNAMIC_TOOLS = new Set([
+  'invoke_subagent',
+  'delegate_to_agent',
+  'otto_personal_agent_delegate',
+  'mcp__otto__otto_personal_agent_delegate',
+  'mcp_otto_otto_personal_agent_delegate',
+]);
 
 function subagentFields(
   item: Extract<TurnItem, { type: 'subagent' }>,
@@ -224,6 +232,7 @@ export function agentTasks(
   let latestActivityMs = 0;
   const settledNotices: {
     id: string;
+    taskId: string | null;
     kind: string;
     label: string;
     status: AgentTaskStatus;
@@ -236,11 +245,32 @@ export function agentTasks(
     const ts = Date.parse(i.started_at ?? i.updated_at ?? '');
     if (Number.isFinite(ts) && ts > latestActivityMs) latestActivityMs = ts;
     if (i.type === 'system_notice') {
+      if (i.task_settlement) {
+        const tsSettle = i.task_settlement;
+        const settleStatus: AgentTaskStatus =
+          tsSettle.status === 'completed' || tsSettle.status === 'finished'
+            ? 'done'
+            : tsSettle.status === 'failed'
+              ? 'failed'
+              : tsSettle.status === 'stopped' || tsSettle.status === 'cancelled'
+                ? 'stopped'
+                : statusOf(i.status);
+        settledNotices.push({
+          id: i.id,
+          taskId: tsSettle.task_id || null,
+          kind: tsSettle.kind || 'command',
+          label: tsSettle.label || i.message,
+          status: settleStatus,
+          endedAt: i.updated_at,
+        });
+        continue;
+      }
       const m = BG_NOTICE.exec(i.message);
       if (m) {
         const noticeKind = m[1] === 'agent' ? 'agent' : m[1] === 'timer' ? 'timer' : 'command';
         settledNotices.push({
           id: i.id,
+          taskId: null,
           kind: noticeKind,
           label: m[3],
           status: noticeStatusOf(m[2], i.status),
@@ -253,6 +283,7 @@ export function agentTasks(
   const childrenByParent = subagentChildren(items);
   const rows: AgentTask[] = [];
   const listedSubagentIds = new Set<string>();
+  const listedDynamicToolIds = new Set<string>();
   const consumedNoticeIds = new Set<string>();
 
   for (let idx = 0; idx < background.length; idx++) {
@@ -269,7 +300,7 @@ export function agentTasks(
     }
 
     const timerMatch = ONESHOT_TIMER.exec(b.label);
-    const kind = timerMatch ? 'timer' : b.kind;
+    const kind = b.due_at || timerMatch ? 'timer' : b.kind;
     let status: AgentTaskStatus = 'running';
     let endedAt: string | null = null;
 
@@ -278,14 +309,22 @@ export function agentTasks(
     const matchingNotice = settledNotices.find(
       (n) =>
         !consumedNoticeIds.has(n.id) &&
-        (n.id === `bg:${b.id}` ||
-          (n.label === b.label &&
+        (n.taskId === b.id ||
+          n.id === `bg:${b.id}` ||
+          (!n.taskId &&
+            n.label === b.label &&
             (!b.started_at || !n.endedAt || Date.parse(n.endedAt) >= Date.parse(b.started_at)))),
     );
     if (matchingNotice) {
       consumedNoticeIds.add(matchingNotice.id);
       status = matchingNotice.status;
       endedAt = matchingNotice.endedAt;
+    } else if (b.due_at) {
+      const rawDueMs = Date.parse(b.due_at);
+      if (Number.isFinite(rawDueMs) && latestActivityMs > rawDueMs + 5_000) {
+        status = 'done';
+        endedAt = new Date(rawDueMs).toISOString();
+      }
     } else if (timerMatch && b.started_at) {
       const durSec = Number(timerMatch[1]);
       const dueMs = Date.parse(b.started_at) + (durSec + 5) * 1000;
@@ -318,6 +357,7 @@ export function agentTasks(
       continue;
     }
 
+    if (linked?.type === 'dynamic_tool') listedDynamicToolIds.add(linked.id);
     const liveOut = b.item_id ? outputMap[b.item_id] : undefined;
     rows.push({
       id: b.id,
@@ -350,6 +390,41 @@ export function agentTasks(
         childSessionId: null,
         ...subagentFields(i, children, status),
       });
+      continue;
+    }
+    if (
+      i.type === 'dynamic_tool' &&
+      !i.parent_item_id &&
+      !listedDynamicToolIds.has(i.id) &&
+      SUBAGENT_DYNAMIC_TOOLS.has(i.tool_name)
+    ) {
+      const inp = (i.input && typeof i.input === 'object' ? i.input : {}) as Record<
+        string,
+        unknown
+      >;
+      const dynLabel =
+        [inp.Role, inp.role, inp.description, inp.agent, inp.TypeName, inp.subagent_type, i.title]
+          .find((v): v is string => typeof v === 'string' && v.trim() !== '')
+          ?.trim() ?? 'Subagent';
+      const alreadyCovered =
+        rows.some((r) => r.itemId === i.id || (r.kind === 'agent' && r.label === dynLabel)) ||
+        Boolean(opts.childThreads?.some((c) => c.title === dynLabel));
+      if (!alreadyCovered) {
+        const status = statusOf(i.status);
+        const liveOut = outputMap[i.id];
+        rows.push({
+          id: i.id,
+          kind: 'agent',
+          label: dynLabel,
+          status,
+          background: false,
+          startedAt: i.started_at,
+          endedAt: status === 'running' ? null : i.updated_at,
+          itemId: i.id,
+          childSessionId: null,
+          ...toolFields(i, liveOut),
+        });
+      }
     }
   }
 

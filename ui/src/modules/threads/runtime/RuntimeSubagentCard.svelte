@@ -27,12 +27,20 @@
   let { sessionId = '', item, activity, output = {} }: Props = $props();
 
   let open = $state(false);
+  let attemptedForceKey = '';
+  const running = $derived(item.status === 'running' || item.status === 'pending' || item.status === 'waiting');
   $effect(() => {
-    if (open && item.detail_omitted && sessionId) {
+    if (!open || !sessionId) return;
+    if (item.detail_omitted) {
       void runtimeViews.ensureItemDetail(sessionId, item.id);
+      return;
+    }
+    const fKey = `${sessionId}:${item.id}`;
+    if (!running && !item.prompt && !item.output && !item.error && attemptedForceKey !== fKey) {
+      attemptedForceKey = fKey;
+      void runtimeViews.ensureItemDetail(sessionId, item.id, { force: true });
     }
   });
-  const running = $derived(item.status === 'running' || item.status === 'pending' || item.status === 'waiting');
   const statusText = $derived(
     running ? 'Running' : item.status === 'completed' ? 'Done' : item.status === 'failed' ? 'Failed' : 'Stopped',
   );
@@ -49,7 +57,7 @@
     return item.last_tool ?? last?.title ?? null;
   });
   const steps = $derived(item.tool_uses > 0 ? plural(item.tool_uses, 'step') : null);
-  const detailLoading = $derived(Boolean(item.detail_omitted && sessionId && runtimeViews.loadingItem[`${sessionId}:${item.id}`]));
+  const detailLoading = $derived(Boolean(sessionId && runtimeViews.loadingItem[`${sessionId}:${item.id}`]));
   const itemDetailError = $derived(sessionId ? (runtimeViews.itemError[`${sessionId}:${item.id}`] ?? null) : null);
   const tone = $derived<'live' | 'done' | 'failed' | 'off'>(running ? 'live' : item.status === 'completed' ? 'done' : item.status === 'failed' ? 'failed' : 'off');
   const sub = $derived([item.subagent_type && item.subagent_type !== name ? item.subagent_type : null, item.background ? 'Background' : null].filter(Boolean).join(' · ') || null);
@@ -65,7 +73,7 @@
   <RuntimeAgentRow {name} {sub} {tone} status={statusText} {elapsed} {result} expanded={open} ontoggle={() => (open = !open)} />
   {#if open}
     <div class="sa-body">
-      {#if item.detail_omitted && (detailLoading || (itemDetailError && sessionId))}
+      {#if detailLoading || (itemDetailError && sessionId)}
         <LoadState
           variant="compact"
           what="subagent details"
@@ -73,7 +81,7 @@
           error={itemDetailError}
           empty
           rows={1}
-          onretry={sessionId ? () => void runtimeViews.ensureItemDetail(sessionId, item.id) : undefined}
+          onretry={sessionId ? () => void runtimeViews.ensureItemDetail(sessionId, item.id, { force: true }) : undefined}
         />
       {/if}
       {#if item.prompt}

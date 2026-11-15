@@ -84,12 +84,15 @@ impl Drop for SshControlSocket {
         std::thread::spawn(move || {
             if Path::new(&ctl).exists() {
                 let ctl_opt = format!("ControlPath={ctl}");
-                let _ = std::process::Command::new("ssh")
+                if let Ok(mut child) = std::process::Command::new("ssh")
                     .args(["-o", &ctl_opt, "-O", "exit", "--", &target])
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
-                    .spawn();
+                    .spawn()
+                {
+                    let _ = child.wait();
+                }
             }
             #[allow(clippy::disallowed_methods)]
             let _ = std::fs::remove_dir_all(dir);

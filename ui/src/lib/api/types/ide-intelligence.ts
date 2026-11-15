@@ -70,6 +70,8 @@ export interface IdeRenameReq {
   character: number;
   new_name: string;
   apply?: boolean;
+  project_folders?: string[];
+  projectFolders?: string[];
   local_history_enabled?: boolean;
   local_history_retention_days?: number;
 }

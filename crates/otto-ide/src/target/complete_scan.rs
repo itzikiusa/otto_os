@@ -54,7 +54,8 @@ fn find_git_root(
 ) -> Option<PathBuf> {
     let mut cur = Some(dir);
     while let Some(d) = cur {
-        if Some(d) == home || d.parent().is_none() {
+        if Some(d) == home || d.parent().is_none() || otto_core::paths::is_broad_non_project_root(d)
+        {
             break;
         }
         if !is_root_user && !is_within_workspace_roots(d, workspace_roots) {
@@ -109,22 +110,30 @@ pub(super) fn complete_in_dir(
 
     let home_canon = home.and_then(|h| fs::canonicalize(h).ok());
     let dir_canon = fs::canonicalize(dir_prefix).ok();
-    let is_home_or_root = dir_prefix.parent().is_none()
+    let is_broad = otto_core::paths::is_broad_non_project_root(dir_prefix)
+        || dir_canon
+            .as_deref()
+            .is_some_and(otto_core::paths::is_broad_non_project_root);
+    let is_home_or_root = is_broad
+        || dir_prefix.parent().is_none()
         || home.is_some_and(|h| clean_lexical(h) == dir_prefix)
         || (home_canon.is_some() && home_canon == dir_canon);
     if !is_home_or_root && !q_lower.is_empty() {
-        if let Some(repo_root) = find_git_root(dir_prefix, home, is_root_user, workspace_roots) {
-            collect_git_ls_files(
-                &repo_root,
-                dir_prefix,
-                &q_lower,
-                limit,
-                is_root_user,
-                workspace_roots,
-                &mut seen,
-                &mut scored,
-            );
-        } else if dir_prefix.components().count() >= 3 {
+        let used_git = find_git_root(dir_prefix, home, is_root_user, workspace_roots).is_some_and(
+            |repo_root| {
+                collect_git_ls_files(
+                    &repo_root,
+                    dir_prefix,
+                    &q_lower,
+                    limit,
+                    is_root_user,
+                    workspace_roots,
+                    &mut seen,
+                    &mut scored,
+                )
+            },
+        );
+        if !used_git && dir_prefix.components().count() >= 3 {
             let deadline = Instant::now() + Duration::from_millis(SHALLOW_DEADLINE_MS);
             let mut visited = 0usize;
             walk_bounded(
@@ -272,18 +281,23 @@ fn complete_in_dir_scored(
         }
     }
 
-    if let Some(repo_root) = find_git_root(root, home, is_root_user, workspace_roots) {
-        collect_git_ls_files(
-            &repo_root,
-            root,
-            &q_lower,
-            limit,
-            is_root_user,
-            workspace_roots,
-            &mut seen,
-            &mut scored,
-        );
-    } else if root.components().count() >= 3 {
+    let used_git =
+        find_git_root(root, home, is_root_user, workspace_roots).is_some_and(|repo_root| {
+            collect_git_ls_files(
+                &repo_root,
+                root,
+                &q_lower,
+                limit,
+                is_root_user,
+                workspace_roots,
+                &mut seen,
+                &mut scored,
+            )
+        });
+    if !used_git
+        && root.components().count() >= 3
+        && !otto_core::paths::is_broad_non_project_root(root)
+    {
         let deadline = Instant::now() + Duration::from_millis(SHALLOW_DEADLINE_MS);
         let mut visited = 0usize;
         walk_bounded(

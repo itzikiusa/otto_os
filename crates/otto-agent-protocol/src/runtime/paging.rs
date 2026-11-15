@@ -1,6 +1,5 @@
 //! Tail snapshot slicing and cursor-based older-turn pagination for
-//! `GET /runtime-sessions/{id}/events` so long conversations open in <50 ms on
-//! mobile and desktop instead of serializing thousands of historical items at once.
+//! `GET /runtime-sessions/{id}/events`.
 
 use std::collections::HashSet;
 
@@ -92,7 +91,7 @@ fn estimate_item_lines(item: &TurnItem, compact: bool) -> usize {
                 + reason.as_deref().map_or(0, text_lines)
         }
         TurnItemKind::SessionBoundary => 1,
-        TurnItemKind::SystemNotice { message } => text_lines(message).max(1),
+        TurnItemKind::SystemNotice { message, .. } => text_lines(message).max(1),
         TurnItemKind::Subagent { prompt, output, .. } => {
             if omit_settled {
                 2 + output.as_deref().map_or(0, |s| text_lines(s).min(12)) + err_lines

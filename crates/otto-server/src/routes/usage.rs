@@ -409,16 +409,50 @@ pub fn read_routes() -> axum::Router<ServerCtx> {
         .route("/usage/limits/claude-check/run", post(limits_claude_run))
 }
 
+fn active_limit_providers(
+    manager: &otto_sessions::SessionManager,
+) -> otto_usage::limits::ActiveLimitProviders {
+    let reg = manager.providers();
+    let specs: Vec<_> = reg
+        .names()
+        .into_iter()
+        .filter_map(|name| reg.get(&name).map(|spec| (name, spec)))
+        .collect();
+    otto_usage::limits::ActiveLimitProviders::from_specs(specs.iter().map(|(name, spec)| {
+        (
+            name.as_str(),
+            spec.cmd.as_str(),
+            spec.args.as_slice(),
+            spec.model_family.as_deref(),
+        )
+    }))
+}
+
+fn enabled_provider_program(manager: &otto_sessions::SessionManager, p: &str) -> Option<String> {
+    manager
+        .providers()
+        .is_enabled(p)
+        .then(|| manager.provider_program(p))
+        .flatten()
+}
+
 /// `GET /usage/limits` — plan allowance left per provider login (`otto_usage::limits`).
 pub async fn limits(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<otto_usage::limits::LimitsResp>> {
     if user.is_root {
-        let program = |p| ctx.manager.provider_program(p);
+        let program = |p| enabled_provider_program(&ctx.manager, p);
         otto_usage::limits::refresh_cli_limits(program("agy"), program("grok")).await;
     }
-    let l = otto_usage::limits::remaining_limits(&ctx.pool, &user.id, user.is_root, &ctx.data_dir);
+    let active = active_limit_providers(&ctx.manager);
+    let l = otto_usage::limits::remaining_limits_filtered(
+        &ctx.pool,
+        &user.id,
+        user.is_root,
+        &ctx.data_dir,
+        Some(&active),
+    );
     Ok(Json(l.await.map_err(ApiError)?))
 }
 
@@ -430,7 +464,15 @@ pub async fn limits_claude_check(
     CurrentUser(u): CurrentUser,
     Json(req): Json<otto_usage::limits::ClaudeCheckReq>,
 ) -> Limits {
-    let l = otto_usage::limits::set_claude_check(&ctx.pool, &u.id, u.is_root, &ctx.data_dir, &req);
+    let active = active_limit_providers(&ctx.manager);
+    let l = otto_usage::limits::set_claude_check_filtered(
+        &ctx.pool,
+        &u.id,
+        u.is_root,
+        &ctx.data_dir,
+        &req,
+        Some(&active),
+    );
     Ok(Json(l.await.map_err(ApiError)?))
 }
 
@@ -442,7 +484,16 @@ pub async fn limits_claude_run(
 ) -> Limits {
     let (pool, dir) = (&ctx.pool, &ctx.data_dir);
     let cli = ctx.manager.provider_program("claude");
-    let l = otto_usage::limits::run_claude_check(pool, &u.id, u.is_root, dir, &req.key, cli);
+    let active = active_limit_providers(&ctx.manager);
+    let l = otto_usage::limits::run_claude_check_filtered(
+        pool,
+        &u.id,
+        u.is_root,
+        dir,
+        &req.key,
+        cli,
+        Some(&active),
+    );
     Ok(Json(l.await.map_err(ApiError)?))
 }
 

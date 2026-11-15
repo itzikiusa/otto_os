@@ -5,21 +5,27 @@
 // Otto a picked chip sends the message to a NEW thread on that agent, linked
 // to this one (POST /runtime-sessions/{id}/children). Pure
 // (unit/threadsChildren.test.ts).
-import type { AskChildTarget, RuntimeProvider } from '../../../lib/api/types';
+import type { AskChildTarget, MetaResp, RuntimeProvider, RuntimeProviderOrSlug } from '../../../lib/api/types.ts';
+import { isRuntimeProvider, orderThreadHarnesses } from '../../../lib/providerRegistry.ts';
 
-/** The runtime providers a child thread can run on. */
+/** The built-in runtime providers a child thread can run on. */
 export const ASK_PROVIDERS: readonly RuntimeProvider[] = ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'];
 /** Agents one ask reaches (the daemon's ASK_CHILD_MAX_TARGETS). */
 export const ASK_MAX_TARGETS = 4;
 
-/** Filter `ASK_PROVIDERS` down to enabled providers in `/meta.providers`. */
-export function askableProviders(registered: readonly string[]): RuntimeProvider[] {
+/** Filter registered `/meta.providers` down to enabled structured-runtime providers
+ *  (including custom providers like `claudework` mapped to a runtime driver). */
+export function askableProviders(
+  registered: readonly string[],
+  meta?: Pick<MetaResp, 'provider_models' | 'providers'> | null,
+): RuntimeProviderOrSlug[] {
   const clean = registered.map((p) => p.trim()).filter((p) => p && p !== 'shell');
-  return clean.length > 0 ? ASK_PROVIDERS.filter((p) => clean.includes(p)) : [...ASK_PROVIDERS];
+  if (clean.length === 0) return [...ASK_PROVIDERS];
+  return orderThreadHarnesses(clean).filter((p) => isRuntimeProvider(p, meta));
 }
 
 export interface AskOption {
-  provider: RuntimeProvider;
+  provider: RuntimeProviderOrSlug;
   /** null = the provider's default model. */
   model: string | null;
   label: string;
@@ -43,10 +49,10 @@ export function dropMention(text: string, start: number): string {
  *  the model's id or its label. */
 export function mentionOptions(
   query: string,
-  modelsOf: (p: RuntimeProvider) => readonly { id: string; label: string }[],
-  nameOf: (p: RuntimeProvider) => string,
+  modelsOf: (p: RuntimeProviderOrSlug) => readonly { id: string; label: string }[],
+  nameOf: (p: RuntimeProviderOrSlug) => string,
   limit = 8,
-  providers: readonly RuntimeProvider[] = ASK_PROVIDERS,
+  providers: readonly RuntimeProviderOrSlug[] = ASK_PROVIDERS,
 ): AskOption[] {
   const words = query.toLowerCase().split(/[:/\s-]+/).filter(Boolean);
   const all: AskOption[] = [];

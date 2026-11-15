@@ -31,12 +31,7 @@ pub(super) async fn create_collab_room<S: IdeCtx>(
 ) -> ApiResult<Json<IdeCreateCollabRoomResp>> {
     ctx.ide()
         .environments
-        .enrich_target_roots(
-            &ctx.pool(),
-            Some(&ctx.ide().projects),
-            Some(&user),
-            &mut req.target,
-        )
+        .enrich_target_roots_authorized(&ctx, &user, &mut req.target, true)
         .await;
     let resolved = ctx
         .ide()
@@ -156,9 +151,6 @@ pub(super) fn extract_collab_token(
     headers: &HeaderMap,
     query_token: Option<&str>,
 ) -> Result<String> {
-    if let Some(tok) = query_token.map(str::trim).filter(|s| !s.is_empty()) {
-        return Ok(tok.to_string());
-    }
     if let Some(hv) = headers
         .get("x-ide-collab-token")
         .and_then(|v| v.to_str().ok())
@@ -180,7 +172,26 @@ pub(super) fn extract_collab_token(
             return Ok(tok.to_string());
         }
     }
+    if let Some(tok) = query_token.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(tok.to_string());
+    }
     Err(Error::Unauthorized)
+}
+
+fn fill_peer_secret_from_headers(headers: &HeaderMap, peer_secret: &mut String) {
+    if !peer_secret.trim().is_empty() {
+        return;
+    }
+    if let Some(hv) = headers
+        .get("x-ide-collab-peer-secret")
+        .or_else(|| headers.get("x-ide-collab-token"))
+        .and_then(|v| v.to_str().ok())
+    {
+        let trimmed = hv.trim();
+        if !trimmed.is_empty() {
+            *peer_secret = trimmed.to_string();
+        }
+    }
 }
 
 pub(super) async fn collab_guest_join<S: IdeCtx>(
@@ -237,8 +248,10 @@ pub(super) async fn collab_guest_events<S: IdeCtx>(
 pub(super) async fn collab_guest_cursor<S: IdeCtx>(
     State(ctx): State<S>,
     Path(room_id): Path<String>,
-    Json(req): Json<IdeCollabCursorReq>,
+    headers: HeaderMap,
+    Json(mut req): Json<IdeCollabCursorReq>,
 ) -> ApiResult<Json<IdeOkResp>> {
+    fill_peer_secret_from_headers(&headers, &mut req.peer_secret);
     ctx.ide().collab.update_cursor(&room_id, req)?;
     Ok(Json(IdeOkResp { ok: true }))
 }
@@ -246,17 +259,23 @@ pub(super) async fn collab_guest_cursor<S: IdeCtx>(
 pub(super) async fn collab_guest_edit<S: IdeCtx>(
     State(ctx): State<S>,
     Path(room_id): Path<String>,
-    Json(req): Json<IdeCollabEditReq>,
+    headers: HeaderMap,
+    Json(mut req): Json<IdeCollabEditReq>,
 ) -> ApiResult<Json<IdeCollabEditResp>> {
-    let (target, _host_user_id) = ctx.ide().collab.validate_edit_precheck(&room_id, &req)?;
+    fill_peer_secret_from_headers(&headers, &mut req.peer_secret);
+    let (target, host_user) = ctx.ide().collab.validate_edit_precheck(&room_id, &req)?;
     ctx.ide()
         .targets
         .validate_subpath(&target, &req.path, false)
         .await?;
-    let mut saved_to_target = false;
-    if req.save {
-        let resolved = match target.kind {
-            IdeTargetKind::Local => ctx.ide().targets.resolve_local(&target, false)?,
+    let resolved_for_save = if req.save {
+        let host_resolved = ctx
+            .ide()
+            .targets
+            .resolve_write(&ctx, &host_user, &target)
+            .await?;
+        Some(match target.kind {
+            IdeTargetKind::Local => host_resolved,
             IdeTargetKind::Ssh => {
                 ctx.ide()
                     .collab
@@ -267,25 +286,41 @@ pub(super) async fn collab_guest_edit<S: IdeCtx>(
                         )
                     })?
             }
-        };
-        ctx.ide()
-            .targets
-            .write_file(&resolved, &req.path, &req.content, None, false)
-            .await?;
-        saved_to_target = true;
-    }
+        })
+    } else {
+        None
+    };
+
+    // Commit buffer version under the room lock BEFORE writing to disk so a racing
+    // `base_version` conflict never overwrites target files.
     let version = ctx
         .ide()
         .collab
-        .apply_edit(&room_id, &req, saved_to_target)?;
+        .apply_edit(&room_id, &req, resolved_for_save.is_some())?;
+
+    if let Some(resolved) = resolved_for_save {
+        if let Err(err) = ctx
+            .ide()
+            .targets
+            .write_file(&resolved, &req.path, &req.content, None, false)
+            .await
+        {
+            ctx.ide()
+                .collab
+                .mark_buffer_dirty(&room_id, &req.path, version);
+            return Err(err.into());
+        }
+    }
     Ok(Json(IdeCollabEditResp { version }))
 }
 
 pub(super) async fn collab_guest_debug_action<S: IdeCtx>(
     State(ctx): State<S>,
     Path(room_id): Path<String>,
-    Json(req): Json<IdeCollabDebugActionReq>,
+    headers: HeaderMap,
+    Json(mut req): Json<IdeCollabDebugActionReq>,
 ) -> ApiResult<Json<IdeDebugSessionResp>> {
+    fill_peer_secret_from_headers(&headers, &mut req.peer_secret);
     let (target, host_user_id) = ctx.ide().collab.authorize_debug_action(&room_id, &req)?;
     let owns_session = ctx
         .ide()

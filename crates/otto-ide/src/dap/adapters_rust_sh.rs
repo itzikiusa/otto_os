@@ -485,7 +485,12 @@ fn find_cargo_dir(
             cur = cur.parent().unwrap_or(cur);
         }
         loop {
-            if !allowed_roots.is_empty() && !allowed_roots.iter().any(|r| cur.starts_with(r)) {
+            let check_cur = std::fs::canonicalize(cur).unwrap_or_else(|_| cur.to_path_buf());
+            if !allowed_roots.is_empty()
+                && !allowed_roots
+                    .iter()
+                    .any(|r| cur.starts_with(r) || check_cur.starts_with(r))
+            {
                 break;
             }
             if cur.join("Cargo.toml").is_file() {

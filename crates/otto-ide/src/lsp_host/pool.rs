@@ -24,7 +24,7 @@ use super::pool_mux::run_actor;
 use super::pool_spawn::build_process_spawner;
 pub use super::pool_spawn::{build_remote_lsp_script, posix_quote};
 use super::servers;
-use crate::environments::module_sdks::effective_go_build_tags_for_paths;
+use crate::environments::module_sdks::effective_go_build_tags_for_paths_in_project;
 use crate::environments::EnvironmentManager;
 use crate::types::{IdeProjectEnvironment, IdeSshSpec};
 
@@ -48,12 +48,17 @@ const CLIENT_CAPACITY: usize = 1024;
 pub(super) const SERVER_CAPACITY: usize = 256;
 
 /// Identity of a pooled server.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// For local `go` (`gopls`) servers, `go_build_tags` holds the canonical sorted
+/// build tags (`(root, sorted_tags)`) so distinct build-tag configurations never
+/// collide on the same pool entry.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct PoolKey {
     pub owner: String,
     pub lang: String,
     pub root: String,
     pub ssh: Option<IdeSshSpec>,
+    pub go_build_tags: Vec<String>,
 }
 
 /// Optional fallback command + args (used by Remote SSH spawning).
@@ -159,6 +164,7 @@ pub struct LspPool {
     pub(super) environments: Option<EnvironmentManager>,
     owner_privileges: Arc<DashMap<String, bool>>,
     pub(super) go_build_tags_by_root: DashMap<String, Vec<String>>,
+    pub(super) project_go_tag_roots: DashMap<String, Vec<String>>,
     pub(super) rss_probe_override: Option<RssProbe>,
 }
 
@@ -237,6 +243,7 @@ impl LspPool {
             environments: Some(environments),
             owner_privileges,
             go_build_tags_by_root: DashMap::new(),
+            project_go_tag_roots: DashMap::new(),
             rss_probe_override: None,
         })
     }
@@ -264,6 +271,7 @@ impl LspPool {
             environments,
             owner_privileges: Arc::new(DashMap::new()),
             go_build_tags_by_root: DashMap::new(),
+            project_go_tag_roots: DashMap::new(),
             rss_probe_override,
         })
     }
@@ -295,7 +303,7 @@ impl LspPool {
         if norm.is_empty() {
             return;
         }
-        let clean = crate::lsp_service::validate_go_build_tags(&tags).unwrap_or_default();
+        let clean = crate::go_build_tags::validate_go_build_tags(&tags).unwrap_or_default();
         self.go_build_tags_by_root.insert(norm, clean);
         self.evict_stale_go_servers();
     }
@@ -327,11 +335,17 @@ impl LspPool {
     }
 
     /// Synchronize project-level and per-module Go build tags after `PUT /ide/environments`,
-    /// evicting affected local `go` servers whose effective tags changed.
+    /// evicting affected local `go` servers (including cleared sibling module roots)
+    /// whose effective tags changed.
     pub fn sync_project_go_build_tags(&self, project_root: &str, env: &IdeProjectEnvironment) {
         let norm = Self::normalize_tag_root(project_root);
         if norm.is_empty() {
             return;
+        }
+        if let Some((_, prev_roots)) = self.project_go_tag_roots.remove(&norm) {
+            for r in prev_roots {
+                self.go_build_tags_by_root.remove(&r);
+            }
         }
         let norm_path = Path::new(&norm);
         let stale_keys: Vec<String> = self
@@ -344,25 +358,47 @@ impl LspPool {
             self.go_build_tags_by_root.remove(&k);
         }
 
-        let root_tags = effective_go_build_tags_for_paths(env, std::slice::from_ref(&norm), true);
-        self.go_build_tags_by_root.insert(norm, root_tags);
+        let mut tracked_roots = Vec::new();
+        let root_tags = effective_go_build_tags_for_paths_in_project(
+            Some(&norm),
+            env,
+            std::slice::from_ref(&norm),
+            true,
+        );
+        self.go_build_tags_by_root.insert(norm.clone(), root_tags);
+        tracked_roots.push(norm.clone());
 
         for ar in &env.additional_roots {
             let ar_norm = Self::normalize_tag_root(ar);
             if !ar_norm.is_empty() {
-                let ar_tags =
-                    effective_go_build_tags_for_paths(env, std::slice::from_ref(&ar_norm), true);
-                self.go_build_tags_by_root.insert(ar_norm, ar_tags);
+                let ar_tags = effective_go_build_tags_for_paths_in_project(
+                    Some(&norm),
+                    env,
+                    std::slice::from_ref(&ar_norm),
+                    true,
+                );
+                self.go_build_tags_by_root.insert(ar_norm.clone(), ar_tags);
+                if !tracked_roots.contains(&ar_norm) {
+                    tracked_roots.push(ar_norm);
+                }
             }
         }
         for mod_root in env.module_go_build_tags.keys() {
             let mr_norm = Self::normalize_tag_root(mod_root);
             if !mr_norm.is_empty() {
-                let mr_tags =
-                    effective_go_build_tags_for_paths(env, std::slice::from_ref(&mr_norm), true);
-                self.go_build_tags_by_root.insert(mr_norm, mr_tags);
+                let mr_tags = effective_go_build_tags_for_paths_in_project(
+                    Some(&norm),
+                    env,
+                    std::slice::from_ref(&mr_norm),
+                    true,
+                );
+                self.go_build_tags_by_root.insert(mr_norm.clone(), mr_tags);
+                if !tracked_roots.contains(&mr_norm) {
+                    tracked_roots.push(mr_norm);
+                }
             }
         }
+        self.project_go_tag_roots.insert(norm, tracked_roots);
         self.evict_stale_go_servers();
     }
 
@@ -410,6 +446,18 @@ impl LspPool {
         if key.ssh.is_none() {
             key.root = servers::resolve_lsp_module_root(&key.lang, &key.root, file_hint, &[])?;
         }
+        let go_tags = if key.lang == "go" && key.ssh.is_none() {
+            let resolved = if key.go_build_tags.is_empty() {
+                self.go_build_tags(&key.root)
+            } else {
+                key.go_build_tags.clone()
+            };
+            key.go_build_tags = crate::go_build_tags::canonicalize_go_build_tags(&resolved);
+            resolved
+        } else {
+            key.go_build_tags.clear();
+            Vec::new()
+        };
 
         let client = self.next_client.fetch_add(1, Ordering::Relaxed);
         let (out_tx, rx) = mpsc::channel(CLIENT_CAPACITY);
@@ -470,11 +518,6 @@ impl LspPool {
         };
         Self::finish_evicted_entries(evicted_pre);
 
-        let go_tags = if key.lang == "go" && key.ssh.is_none() {
-            self.go_build_tags(&key.root)
-        } else {
-            Vec::new()
-        };
         let owner_is_root = self.owner_is_root(&key.owner);
 
         let io = (self.spawner)(&key, launch)?;

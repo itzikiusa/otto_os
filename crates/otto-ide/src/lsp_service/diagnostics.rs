@@ -32,9 +32,19 @@ pub async fn diagnostics<S: IdeCtx>(
     req: IdeDiagnosticsReq,
 ) -> Result<IdeDiagnosticsResp> {
     let target_spec_opt = resolve_effective_target_spec(&req);
+    if !user.is_root && target_spec_opt.is_none() {
+        return Err(Error::Forbidden("workspace target is required".into()));
+    }
     let resolved_opt = match target_spec_opt {
         Some(spec) => {
             let resolved = ctx.ide().targets.resolve(ctx, user, &spec).await?;
+            if !req.path.trim().is_empty() {
+                let _ = ctx
+                    .ide()
+                    .targets
+                    .resolve_readable_or_prospective_path(&resolved, &req.path)
+                    .await?;
+            }
             Some((resolved, spec))
         }
         None => None,

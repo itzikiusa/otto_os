@@ -50,7 +50,7 @@ const WARM_IDLE_TTL: Duration = Duration::from_secs(300);
 
 /// Resolved Kubernetes cluster & namespace execution parameters supplied by
 /// [`crate::IdeCtx::resolve_k8s_cluster`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IdeK8sSpec {
     pub cluster_id: Id,
     pub cluster_name: String,
@@ -63,6 +63,23 @@ pub struct IdeK8sSpec {
     /// Args WITHOUT `--request-timeout` for long-running `port-forward`.
     pub kubectl_base_args: Vec<String>,
     pub kubectl_env: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for IdeK8sSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env_keys: Vec<&str> = self.kubectl_env.iter().map(|(k, _)| k.as_str()).collect();
+        f.debug_struct("IdeK8sSpec")
+            .field("cluster_id", &self.cluster_id)
+            .field("cluster_name", &self.cluster_name)
+            .field("environment", &self.environment)
+            .field("namespace", &self.namespace)
+            .field("allow_cross_namespace", &self.allow_cross_namespace)
+            .field("kubectl_program", &self.kubectl_program)
+            .field("kubectl_query_args", &self.kubectl_query_args)
+            .field("kubectl_base_args", &self.kubectl_base_args)
+            .field("kubectl_env_keys", &env_keys)
+            .finish()
+    }
 }
 
 impl IdeK8sSpec {
@@ -130,6 +147,56 @@ impl NetBridgeLease {
     pub async fn summary_banner(&self) -> String {
         self.instance.summary_banner().await
     }
+
+    /// Create a weak dormant handle that does not hold an active lease count,
+    /// allowing a terminated debug session to re-acquire the warm bridge on restart.
+    pub fn dormant_handle(&self) -> DormantNetBridge {
+        DormantNetBridge {
+            instance: Arc::downgrade(&self.instance),
+            counters: Arc::clone(&self.counters),
+            pool: self.pool.clone(),
+            pool_key: self.pool_key.clone(),
+            idle_ttl: self.idle_ttl,
+        }
+    }
+}
+
+/// Weak handle to a warm [`tunnel::NetBridgeInstance`] retained across target exit
+/// so `Restart` on a debug session can re-acquire the bridge lease without leaking
+/// active tunnels while the session sits idle.
+#[derive(Clone)]
+pub struct DormantNetBridge {
+    instance: Weak<tunnel::NetBridgeInstance>,
+    counters: Arc<Mutex<LeaseCounters>>,
+    pool: Weak<BridgePoolMap>,
+    pool_key: (String, String),
+    idle_ttl: Duration,
+}
+
+impl std::fmt::Debug for DormantNetBridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DormantNetBridge(..)")
+    }
+}
+
+impl DormantNetBridge {
+    pub async fn reacquire(&self) -> Option<Arc<NetBridgeLease>> {
+        let instance = self.instance.upgrade()?;
+        if !instance.is_healthy() {
+            return None;
+        }
+        instance.ensure_host_mapping_listeners().await;
+        if let Ok(mut c) = self.counters.lock() {
+            c.active_leases += 1;
+        }
+        Some(Arc::new(NetBridgeLease {
+            instance,
+            counters: Arc::clone(&self.counters),
+            pool: self.pool.clone(),
+            pool_key: self.pool_key.clone(),
+            idle_ttl: self.idle_ttl,
+        }))
+    }
 }
 
 impl Drop for NetBridgeLease {
@@ -195,6 +262,17 @@ impl NetBridgeManager {
             .collect();
         for key in keys {
             self.pool.remove(&key);
+        }
+    }
+
+    /// Tear down all pooled network bridge tunnels and port-forwards on daemon shutdown.
+    pub async fn shutdown(&self) {
+        let slots: Vec<PooledBridgeSlot> = self.pool.iter().map(|e| e.value().clone()).collect();
+        self.pool.clear();
+        for slot in slots {
+            if let Some(pb) = slot.lock().await.take() {
+                pb.instance.stop_idle_listeners();
+            }
         }
     }
 

@@ -17,6 +17,12 @@ pub(super) async fn sync_all_breakpoints(
     conn: &ActiveConnection,
 ) -> Result<()> {
     let mut bps = entry.read_snapshot().breakpoints;
+    let target = entry
+        .orig_req
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .target
+        .clone();
     let temp_rtc = entry.temp_run_to_cursor.lock().ok().and_then(|g| g.clone());
 
     let mut by_file: BTreeMap<String, Vec<(Option<usize>, Value)>> = BTreeMap::new();
@@ -27,6 +33,7 @@ pub(super) async fn sync_all_breakpoints(
     }
 
     for (idx, bp) in bps.iter_mut().enumerate() {
+        bp.path = display_target_path(&target, &bp.path);
         if !bp.enabled {
             bp.verified = None;
             bp.message = None;
@@ -42,10 +49,8 @@ pub(super) async fn sync_all_breakpoints(
         if let Some(log) = bp.log_message.as_deref().filter(|s| !s.trim().is_empty()) {
             obj["logMessage"] = json!(log);
         }
-        by_file
-            .entry(bp.path.clone())
-            .or_default()
-            .push((Some(idx), obj));
+        let wire_path = normalize_target_path(&target, &bp.path);
+        by_file.entry(wire_path).or_default().push((Some(idx), obj));
     }
 
     if let Some((rtc_path, rtc_line)) = temp_rtc {
@@ -260,12 +265,19 @@ pub(super) fn apply_breakpoint_event(entry: &SessionEntry, body: &Value) {
         .target
         .clone();
     let norm_path = raw_path.map(|p| normalize_target_path(&target, p));
+    let disp_path = raw_path.map(|p| display_target_path(&target, p));
 
     entry.mutate_and_broadcast(|snap| {
         for bp in &mut snap.breakpoints {
-            let path_matches = norm_path.as_deref().is_none_or(|np| bp.path == np);
+            let path_matches = match (disp_path.as_deref(), norm_path.as_deref()) {
+                (Some(dp), Some(np)) => bp.path == dp || bp.path == np,
+                (Some(dp), None) => bp.path == dp,
+                (None, Some(np)) => bp.path == np,
+                (None, None) => true,
+            };
             let line_matches = line.is_some_and(|ln| bp.line == ln);
             if path_matches && line_matches {
+                bp.path = display_target_path(&target, &bp.path);
                 bp.verified = Some(verified);
                 if message.is_some() {
                     bp.message = message.clone();
@@ -330,7 +342,13 @@ pub(super) async fn handle_stopped_event(
         (None, None, None, Vec::new(), Vec::new())
     };
 
+    if entry.is_terminal() || conn.wire.is_retired() {
+        return;
+    }
     entry.mutate_and_broadcast(|snap| {
+        if matches!(snap.state, IdeDebugState::Terminated | IdeDebugState::Error) {
+            return;
+        }
         snap.state = IdeDebugState::Paused;
         snap.stopped_reason = Some(reason);
         snap.active_thread_id = Some(active_tid);

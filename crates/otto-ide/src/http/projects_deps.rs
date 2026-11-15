@@ -179,20 +179,15 @@ async fn resolve_manifest_target<S: IdeCtx>(
             IdeTargetSpec::local(dir.to_string_lossy().into_owned())
         }
     };
-    ctx.ide()
-        .environments
-        .enrich_target_roots(
-            &ctx.pool(),
-            Some(&ctx.ide().projects),
-            Some(user),
-            &mut target,
-        )
-        .await;
     let resolved = if write {
         ctx.ide().targets.resolve_write(ctx, user, &target).await?
     } else {
         ctx.ide().targets.resolve(ctx, user, &target).await?
     };
+    ctx.ide()
+        .environments
+        .enrich_target_roots_authorized(ctx, user, &mut target, write)
+        .await;
     let crate::target::ResolvedTarget::Local {
         root: canon_root,
         additional_roots,
@@ -338,11 +333,11 @@ pub(super) async fn build_tools_model<S: IdeCtx>(
     let mut authorized_any = false;
     if let Some(target) = &mut req.target {
         if !target.root.trim().is_empty() {
+            let _ = ctx.ide().targets.resolve(&ctx, &user, target).await?;
             ctx.ide()
                 .environments
-                .enrich_target_roots(&ctx.pool(), Some(&ctx.ide().projects), Some(&user), target)
+                .enrich_target_roots_authorized(&ctx, &user, target, false)
                 .await;
-            let _ = ctx.ide().targets.resolve(&ctx, &user, target).await?;
             authorized_any = true;
         }
     }

@@ -8,6 +8,7 @@
 mod pool_mux_rpc;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +21,18 @@ use super::framing;
 use super::pool::{Ctl, Data, LspPool, PoolKey, ServerIo, POST_DOC_IDLE_GRACE, SERVER_CAPACITY};
 #[cfg(unix)]
 use super::pool_spawn::{kill_process_group_sync, terminate_process_group};
+
+#[cfg(unix)]
+struct PgidDropGuard(Option<u32>);
+
+#[cfg(unix)]
+impl Drop for PgidDropGuard {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0 {
+            kill_process_group_sync(pgid);
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_actor(
@@ -42,6 +55,8 @@ pub(super) async fn run_actor(
     } = io;
     #[cfg(unix)]
     let child_pgid = child.as_ref().and_then(tokio::process::Child::id);
+    #[cfg(unix)]
+    let _pgid_guard = PgidDropGuard(child_pgid);
 
     let (w_tx, mut w_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let backlog = Arc::new(AtomicUsize::new(0));
@@ -217,6 +232,7 @@ enum Init {
 
 struct Mux {
     key: PoolKey,
+    canon_root: Option<PathBuf>,
     to_server_tx: mpsc::UnboundedSender<Vec<u8>>,
     backlog: Arc<AtomicUsize>,
     open_docs: Arc<AtomicUsize>,
@@ -245,8 +261,21 @@ impl Mux {
         owner_is_root: bool,
         go_build_tags: Vec<String>,
     ) -> Self {
+        #[allow(clippy::disallowed_methods)]
+        let canon_root = key
+            .ssh
+            .is_none()
+            .then(|| {
+                std::fs::canonicalize(&key.root).ok().or_else(|| {
+                    otto_core::secret_paths::canonicalize_prospective(std::path::Path::new(
+                        &key.root,
+                    ))
+                })
+            })
+            .flatten();
         Self {
             key,
+            canon_root,
             to_server_tx,
             backlog,
             open_docs,

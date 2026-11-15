@@ -24,43 +24,23 @@ use super::map_io_err;
 /// bytes such as `%20` (spaces) and `%40` (`@` in Go `$GOMODCACHE` module paths).
 pub(crate) fn strip_file_uri(raw: &str) -> String {
     let trimmed = raw.trim();
-    let rest = if let Some(r) = trimmed.strip_prefix("file://localhost/") {
-        format!("/{r}")
-    } else if let Some(r) = trimmed.strip_prefix("file:///") {
-        format!("/{r}")
-    } else if let Some(r) = trimmed.strip_prefix("file://") {
-        r.to_string()
-    } else {
-        return trimmed.to_string();
-    };
-    percent_decode(&rest)
+    if trimmed.starts_with("file://") {
+        if let Some(p) = otto_core::paths::file_uri_to_path(trimmed) {
+            return p.to_string_lossy().into_owned();
+        }
+        let rest = trimmed
+            .strip_prefix("file://localhost/")
+            .map(|r| format!("/{r}"))
+            .or_else(|| trimmed.strip_prefix("file:///").map(|r| format!("/{r}")))
+            .or_else(|| trimmed.strip_prefix("file://").map(str::to_string))
+            .unwrap_or_else(|| trimmed.to_string());
+        return percent_decode(&rest);
+    }
+    trimmed.to_string()
 }
 
 pub(crate) fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push((hi << 4) | lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+    otto_core::paths::percent_decode_utf8(input).unwrap_or_else(|| input.to_string())
 }
 
 /// True when `path` is a virtual Java source/class reference (`jdt://...`,

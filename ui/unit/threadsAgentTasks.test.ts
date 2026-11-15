@@ -120,3 +120,73 @@ test('elapsed reads seconds, minutes and hours, live while running', () => {
   assert.equal(taskElapsed({ startedAt: '2026-11-13T08:00:00Z', endedAt: '2026-11-13T09:05:00Z' }, now), '1h 5m');
   assert.equal(taskElapsed({ startedAt: null, endedAt: null }, now), null);
 });
+
+test('structured task_settlement, due_at deadlines, and top-level dynamic_tool subagents work across all providers', () => {
+  const items = [
+    {
+      ...base,
+      id: 't1:dyn:agy1',
+      ordinal: 1,
+      status: 'running',
+      started_at: '2026-11-13T10:00:00Z',
+      type: 'dynamic_tool',
+      tool_name: 'invoke_subagent',
+      input: { Role: 'Architecture Reviewer', TypeName: 'research', Prompt: 'Audit layer boundaries' },
+    } as never,
+    {
+      ...base,
+      id: 't1:dyn:done1',
+      ordinal: 2,
+      status: 'completed',
+      started_at: '2026-11-13T10:00:01Z',
+      completed_at: '2026-11-13T10:00:12Z',
+      type: 'dynamic_tool',
+      tool_name: 'otto_personal_agent_delegate',
+      input: { agent: 'qa-bot', task: 'Run smoke checks' },
+      output: 'All 14 smoke checks passed',
+    } as never,
+    {
+      ...base,
+      id: 'notice:settle:1',
+      ordinal: 3,
+      status: 'completed',
+      started_at: null,
+      updated_at: '2026-11-13T10:01:30Z',
+      type: 'system_notice',
+      message: 'Custom provider notice text',
+      task_settlement: {
+        task_id: 'cmd-42',
+        label: 'cargo test -p otto-ide',
+        kind: 'command',
+        status: 'failed',
+      },
+    } as never,
+  ];
+
+  const background = [
+    {
+      id: 'timer-due-1',
+      kind: 'timer',
+      label: 'Check deploy health',
+      started_at: '2026-11-13T10:00:05Z',
+      due_at: '2026-11-13T10:01:00Z',
+    },
+  ];
+
+  const t = agentTasks(items, background);
+  assert.equal(t.running.length, 1);
+  assert.equal(t.running[0].label, 'Architecture Reviewer');
+  assert.equal(t.running[0].sublabel, 'invoke_subagent');
+  assert.equal(t.running[0].prompt, 'Audit layer boundaries');
+
+  // Structured task_settlement + due_at-expired timer + completed dynamic_tool subagent all settle cleanly!
+  assert.deepEqual(
+    t.finished.map((f) => [f.label, f.kind, f.status]),
+    [
+      ['cargo test -p otto-ide', 'command', 'failed'],
+      ['Check deploy health', 'timer', 'done'],
+      ['qa-bot', 'agent', 'done'],
+    ],
+  );
+  assert.equal(t.finished[2].output, 'All 14 smoke checks passed');
+});

@@ -64,12 +64,18 @@ impl LocalGit {
                 "core.fsmonitor=true",
             ]);
         }
+        let broad_root = otto_core::paths::is_broad_non_project_root(self.path());
+        let untracked_flag = if broad_root {
+            "--untracked-files=no"
+        } else {
+            "--untracked-files=all"
+        };
         args.extend([
             "status",
             "--porcelain=v2",
             "--branch",
             "-z",
-            "--untracked-files=all",
+            untracked_flag,
             STATUS_IGNORE_SUBMODULES,
         ]);
         let out = self.exec_text(&GitCmd::read(&args)).await?;

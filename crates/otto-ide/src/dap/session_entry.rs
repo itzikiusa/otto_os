@@ -1,7 +1,7 @@
 //! Multiplexed DAP wire client and per-session state entry (`SessionEntry`).
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -82,6 +82,10 @@ impl DapWireClient {
         self.retired.store(true, Ordering::SeqCst);
     }
 
+    pub(super) fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::SeqCst)
+    }
+
     pub(super) fn abort_pending(&self) {
         if let Ok(mut map) = self.pending.lock() {
             map.clear();
@@ -138,6 +142,14 @@ pub(super) struct ActiveConnection {
     pub(super) exception_filters: Vec<String>,
 }
 
+impl ActiveConnection {
+    pub(super) fn shutdown_immediately(&self) {
+        self.wire.retire();
+        self.wire.abort_pending();
+        self.guard.kill_all();
+    }
+}
+
 pub(super) struct SessionEntry {
     pub(super) created_seq: u64,
     pub(super) owner_user_id: String,
@@ -154,6 +166,8 @@ pub(super) struct SessionEntry {
     pub(super) halted_notify: Arc<Notify>,
     pub(super) suppress_transient_pause: AtomicBool,
     pub(super) restarting: AtomicBool,
+    pub(super) boot_generation: AtomicU64,
+    pub(super) lifecycle_lock: tokio::sync::Mutex<()>,
 }
 
 impl SessionEntry {
@@ -193,6 +207,7 @@ impl SessionEntry {
             output: Vec::new(),
             error: None,
         };
+        let initial_break_exc = req.break_on_exceptions;
         Arc::new(Self {
             created_seq,
             owner_user_id,
@@ -202,13 +217,15 @@ impl SessionEntry {
             output_buf: Mutex::new(output_buf),
             configured_bp_files: Mutex::new(BTreeSet::new()),
             temp_run_to_cursor: Mutex::new(None),
-            break_on_exceptions: Mutex::new(false),
+            break_on_exceptions: Mutex::new(initial_break_exc),
             conn: RwLock::new(None),
             events_tx,
             initialized_notify: Arc::new(Notify::new()),
             halted_notify: Arc::new(Notify::new()),
             suppress_transient_pause: AtomicBool::new(false),
             restarting: AtomicBool::new(false),
+            boot_generation: AtomicU64::new(1),
+            lifecycle_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -230,18 +247,22 @@ impl SessionEntry {
         matches!(state, IdeDebugState::Terminated | IdeDebugState::Error)
     }
 
+    fn release_active_netbridge(&self) {
+        let mut ctx_guard = self.orig_ctx.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(lease) = ctx_guard.netbridge.take() {
+            if ctx_guard.dormant_netbridge.is_none() {
+                ctx_guard.dormant_netbridge = Some(lease.dormant_handle());
+            }
+        }
+    }
+
     pub(super) fn disconnect_and_kill(&self) {
         if self.restarting.load(Ordering::SeqCst) {
             return;
         }
-        self.orig_ctx
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .netbridge = None;
+        self.release_active_netbridge();
         if let Some(conn) = self.conn.write().unwrap_or_else(|e| e.into_inner()).take() {
-            conn.wire.retire();
-            conn.wire.abort_pending();
-            conn.guard.kill_all();
+            conn.shutdown_immediately();
         }
     }
 
@@ -249,12 +270,11 @@ impl SessionEntry {
         if self.restarting.load(Ordering::SeqCst) {
             return;
         }
-        self.orig_ctx
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .netbridge = None;
+        self.release_active_netbridge();
         self.mutate_and_broadcast(|snap| {
-            snap.state = IdeDebugState::Terminated;
+            if snap.state != IdeDebugState::Error {
+                snap.state = IdeDebugState::Terminated;
+            }
             snap.stopped_reason = None;
             snap.paused_line = None;
             snap.threads.clear();

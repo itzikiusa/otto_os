@@ -227,7 +227,9 @@ fn assemble(
     if options.include_files {
         let mut sources = Vec::new();
         for directory in files::DATA_ROOTS {
-            if options.portable && !matches!(*directory, "library" | "canvas" | "product") {
+            if options.portable
+                && !matches!(*directory, "library" | "canvas" | "product" | "ide-plugins")
+            {
                 continue;
             }
             let path = data_dir.join(directory);
@@ -754,6 +756,14 @@ async fn restore_owned(
             "Restore has conflicts; choose skip existing or use another profile".into(),
         )));
     }
+    let pre_existing_enabled_plugins: BTreeSet<String> = ctx
+        .ide
+        .plugins
+        .reload()
+        .into_iter()
+        .filter(|p| p.enabled)
+        .map(|p| p.slug)
+        .collect();
     // Publish from the stage on the blocking pool: a no-replace rename per
     // file (the bytes are already durable), so the lock is held for metadata
     // operations only — no second write, read-back or per-file fsync.
@@ -789,7 +799,17 @@ async fn restore_owned(
     }
     let _ = ctx.ide.projects.reload_from_db(&ctx.pool).await;
     ctx.ide.environments.reload_from_db(&ctx.pool).await;
-    let _ = ctx.ide.plugins.reload();
+    if published
+        .iter()
+        .any(|(rel, _)| rel == "ide-plugins" || rel.starts_with("ide-plugins/"))
+    {
+        let _ = ctx
+            .ide
+            .plugins
+            .disable_managed_except(&pre_existing_enabled_plugins);
+    } else {
+        let _ = ctx.ide.plugins.reload();
+    }
     Ok(RestoreResult {
         records_inserted: rows.inserted,
         records_skipped: rows.skipped,
@@ -939,37 +959,5 @@ fn rollback_files(ctx: &ServerCtx, files: &[(String, String)]) {
 mod tests;
 
 #[cfg(test)]
-mod restore_publish_tests {
-    use super::*;
-
-    /// backend-performance-4-01: a staged file is moved into place without
-    /// replacing an existing one, and a symlinked parent is refused.
-    #[test]
-    fn staged_files_are_renamed_into_place_without_replacing() {
-        let data = tempfile::TempDir::new().unwrap();
-        let stage = data.path().join("stage");
-        std::fs::create_dir(&stage).unwrap();
-        std::fs::write(stage.join("0"), b"new").unwrap();
-        std::fs::write(stage.join("1"), b"other").unwrap();
-        let stage_fd = rustix::fs::open(&stage, dir_flags(), rustix::fs::Mode::empty()).unwrap();
-        assert_eq!(
-            publish_renamed(data.path(), &stage_fd, "0", "a/b/f.txt").unwrap(),
-            Some(true)
-        );
-        assert_eq!(
-            std::fs::read(data.path().join("a/b/f.txt")).unwrap(),
-            b"new"
-        );
-        assert!(!stage.join("0").exists(), "moved, not copied");
-        assert_eq!(
-            publish_renamed(data.path(), &stage_fd, "1", "a/b/f.txt").unwrap(),
-            Some(false)
-        );
-        assert_eq!(
-            std::fs::read(data.path().join("a/b/f.txt")).unwrap(),
-            b"new"
-        );
-        std::os::unix::fs::symlink(data.path().join("a"), data.path().join("link")).unwrap();
-        assert!(publish_renamed(data.path(), &stage_fd, "1", "link/f.txt").is_err());
-    }
-}
+#[path = "state_archive/restore_tests.rs"]
+mod restore_publish_tests;

@@ -1,6 +1,7 @@
 // Provider model catalogs, reasoning-effort levels, and interaction modes
 // shared between NewThreadStage and the live thread Composer.
 import type { MetaResp, ProviderModelOption, Session } from './api/types';
+import { inferProviderFamily } from './providerRegistry.ts';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export type InteractionMode = 'full' | 'accept-edits' | 'plan';
@@ -140,6 +141,22 @@ export const FALLBACK_PROVIDER_MODELS: Record<string, ProviderModelOption[]> = {
       supported_efforts: ['medium'],
     },
   ],
+  gemini: [
+    {
+      id: 'gemini-2.5-pro',
+      label: 'Gemini 2.5 Pro',
+      description: 'Google Gemini flagship coding and reasoning model',
+      default_effort: 'medium',
+      supported_efforts: ['low', 'medium', 'high'],
+    },
+    {
+      id: 'gemini-2.5-flash',
+      label: 'Gemini 2.5 Flash',
+      description: 'Fast low-latency Gemini model',
+      default_effort: 'low',
+      supported_efforts: ['low', 'medium', 'high'],
+    },
+  ],
 };
 
 const VALID_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
@@ -152,31 +169,7 @@ export function providerFamily(
   provider: string,
   meta?: Pick<MetaResp, 'provider_models'> | null,
 ): string {
-  const p = provider.trim().toLowerCase();
-  if (
-    p === 'claude' ||
-    p === 'codex' ||
-    p === 'agy' ||
-    p === 'gemini' ||
-    p === 'grok' ||
-    p === 'opencode' ||
-    p === 'pi' ||
-    p === 'shell'
-  ) {
-    return p;
-  }
-  if (p === 'antigravity' || p.startsWith('agy') || p.startsWith('antigravity')) return 'agy';
-  if (p.startsWith('claude')) return 'claude';
-  if (p.startsWith('codex')) return 'codex';
-  if (p.startsWith('gemini')) return 'gemini';
-  if (p.startsWith('grok')) return 'grok';
-  if (p.startsWith('opencode')) return 'opencode';
-  if (p === 'pi' || p.startsWith('pi-') || p.startsWith('pi_')) return 'pi';
-  const live = meta?.provider_models?.[provider];
-  if (live?.some((m) => m.id.startsWith('gemini-4-') || m.id.startsWith('gemini-pro-orchestrator'))) {
-    return 'agy';
-  }
-  return p;
+  return inferProviderFamily(provider, meta);
 }
 
 function mapRawTier(raw: string): EffortLevel {

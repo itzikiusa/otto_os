@@ -12,19 +12,23 @@
 // `providerRegistry.ts` and are re-exported here so callers have one import.
 
 import { auth } from './stores/auth.svelte';
-import { SHELL_PROVIDER } from './providerRegistry.ts';
+import { inferProviderFamily, KNOWN_AGENT_FAMILIES, SHELL_PROVIDER } from './providerRegistry.ts';
 
 export {
   attachmentSupport,
   harnessLabel,
   IDE_RUNTIME_PROVIDERS,
+  inferProviderFamily,
   isPlainShellSession,
   isRuntimeProvider,
+  KNOWN_AGENT_FAMILIES,
   orderThreadHarnesses,
   providerSubtitle,
+  providerSupportsSteer,
   resolveIdeHarnesses,
   resolveIdeInlineProviders,
   RUNTIME_PROVIDERS,
+  sessionProviderSlug,
   SHELL_PROVIDER,
   takesFile,
   type IdeRuntimeProvider,
@@ -95,17 +99,6 @@ export function defaultAgentProvider(): string {
 export function providerSupportsModel(provider: string): boolean {
   const flags = auth.meta?.model_flags;
   if (flags && provider in flags) return flags[provider];
-  const p = provider.trim().toLowerCase();
-  return (
-    p.startsWith('claude') ||
-    p.startsWith('codex') ||
-    p === 'antigravity' ||
-    p.startsWith('agy') ||
-    p.startsWith('antigravity') ||
-    p.startsWith('grok') ||
-    p.startsWith('opencode') ||
-    p === 'pi' ||
-    p.startsWith('pi-') ||
-    p.startsWith('pi_')
-  );
+  const fam = inferProviderFamily(provider, auth.meta);
+  return (KNOWN_AGENT_FAMILIES as readonly string[]).includes(fam);
 }

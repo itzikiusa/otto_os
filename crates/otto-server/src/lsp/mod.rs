@@ -138,8 +138,10 @@ async fn lsp_ws(
     let user = auth.effective_user.clone();
     let ctx_for_check = st.ctx.clone();
     let user_for_check = user.clone();
-    let prepared = match prepare_lsp_ws_session(&st.ctx, &user, q, move |root_buf| async move {
-        ide_local_root_authorized(&ctx_for_check, &user_for_check, &root_buf, false).await
+    let prepared = match prepare_lsp_ws_session(&st.ctx, &user, q, move |root_buf| {
+        let ctx_cl = ctx_for_check.clone();
+        let user_cl = user_for_check.clone();
+        async move { ide_local_root_authorized(&ctx_cl, &user_cl, &root_buf, false).await }
     })
     .await
     {

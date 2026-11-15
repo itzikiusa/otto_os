@@ -148,6 +148,34 @@ export function fetchIdeGitBlame(rootPath: string, filePath: string, signal?: Ab
   return import('./ideEditorActionsLazy').then((m) => m.runFetchIdeGitBlame(rootPath, filePath, signal));
 }
 
+const persistedGitBaseByPath: Record<string, string | null> = {};
+const persistedGitBaseDigestByPath = new Map<string, string>();
+
+export function getPersistedIdeGitBaseSnapshot(): Record<string, string | null> {
+  return { ...persistedGitBaseByPath };
+}
+
+export function getPersistedIdeGitBaseDigest(filePath: string): string | undefined {
+  return persistedGitBaseDigestByPath.get(filePath);
+}
+
+export function setPersistedIdeGitBase(filePath: string, base: string | null, digest: string): void {
+  persistedGitBaseByPath[filePath] = base;
+  persistedGitBaseDigestByPath.set(filePath, digest);
+}
+
+export function evictPersistedIdeGitBase(paths: Iterable<string> | 'all'): void {
+  if (paths === 'all') {
+    for (const k of Object.keys(persistedGitBaseByPath)) delete persistedGitBaseByPath[k];
+    persistedGitBaseDigestByPath.clear();
+    return;
+  }
+  for (const p of paths) {
+    delete persistedGitBaseByPath[p];
+    persistedGitBaseDigestByPath.delete(p);
+  }
+}
+
 export function resolveIdeGitBaseContent(
   filePath: string,
   diskSavedContent: string | null,

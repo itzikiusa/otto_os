@@ -1,18 +1,8 @@
-//! `/runtime-sessions/*` REST router (contract: `docs/contracts/api.md`
-//! "Structured agent runtime"). Page-level authorization is the server's
-//! policy table (`Agents` View for reads, Edit for writes); the handlers add:
-//!
-//! * workspace `viewer`+ membership, then owner-or-admin on the session (the
-//!   same rule as PTY sessions' `require_session_owner_or_admin`);
-//! * every write requires a PERSON's credential — an agent session's token,
-//!   an MCP or share credential may not open sessions, drive them, or answer
-//!   permission prompts (an agent approving its own tool call is exactly
-//!   what the prompt exists to prevent);
-//! * the ONE agent-writable surface is linked threads (`/peers`): a thread's
-//!   own agent (its session-bound credential, `managed_session_id == {id}`)
-//!   or its owner may open threads linked to it and message / read them —
-//!   same owner, same workspace, never a wider access mode than the
-//!   opener's, every message visible in the receiving thread.
+//! `/runtime-sessions/*` REST router (contract: `docs/contracts/api.md`).
+//! Enforces workspace `viewer`+ / session owner-or-admin RBAC and requires a
+//! human credential for writes (except `/peers`, where a session's own agent
+//! token may open/message/read same-owner, same-workspace linked threads at no
+//! wider access mode).
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
@@ -352,9 +342,7 @@ async fn list_all<S: RuntimeCtx>(
     Ok(Json(out))
 }
 
-/// POST /workspaces/{id}/runtime-sessions — create + spawn (editor+). The
-/// body may name an embedded `source` / `origin` (validated, the only
-/// client input that reaches the server-owned meta).
+/// POST /workspaces/{id}/runtime-sessions — create + spawn (editor+).
 async fn create<S: RuntimeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -364,8 +352,9 @@ async fn create<S: RuntimeCtx>(
 ) -> ApiResult<(StatusCode, Json<RuntimeSession>)> {
     require_human(&ctx, &auth)?;
     ctx.roles().check(&user, &ws, WorkspaceRole::Editor).await?;
-    let req = body.into_req()?;
-    let s = ctx.agent_runtime().create(&user.id, &ws, req).await?;
+    let rt = ctx.agent_runtime();
+    let req = body.into_req_with_resolver(|slug| rt.resolve_custom_provider(slug))?;
+    let s = rt.create(&user.id, &ws, req).await?;
     Ok((StatusCode::CREATED, Json(s)))
 }
 

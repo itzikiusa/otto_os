@@ -368,3 +368,39 @@ pub fn urlencode(raw: &str) -> String {
     }
     out
 }
+
+pub fn extended_path() -> String {
+    let cur = std::env::var("PATH").unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+    format!("{home}/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{cur}")
+}
+
+pub fn find_bin(name: &str) -> Option<String> {
+    for dir in extended_path().split(':').filter(|s| !s.is_empty()) {
+        let cand = Path::new(dir).join(name);
+        if cand.is_file() {
+            return Some(cand.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+pub fn ensure_bins_or_skip(bins: &[&str]) -> bool {
+    let missing: Vec<&str> = bins
+        .iter()
+        .copied()
+        .filter(|b| find_bin(b).is_none())
+        .collect();
+    if missing.is_empty() {
+        return true;
+    }
+    let required = std::env::var("OTTO_REQUIRE_TOOLCHAINS")
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+    assert!(
+        !required,
+        "OTTO_REQUIRE_TOOLCHAINS=1: missing required debugger toolchain binary/binaries: {}",
+        missing.join(", ")
+    );
+    false
+}

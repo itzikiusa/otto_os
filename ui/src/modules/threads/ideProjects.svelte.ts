@@ -272,7 +272,16 @@ export function openProjectInIde(
 ): void {
   const cleanRoot = trimTrailingSlashes(root);
   if (!cleanRoot) {
-    router.go('ide');
+    if (sessionId) {
+      ideWorkspacePort.setAgentDockOpen(true);
+      lsSet(IDE_OPEN_HANDOFF_KEY, JSON.stringify({ root: '', projectId: null, sessionId, ts: Date.now() }));
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent(IDE_OPEN_THREAD_EVENT, { detail: { root: '', projectId: null, sessionId } }));
+      }
+      router.go(`ide?session=${encodeURIComponent(sessionId)}&t=${Date.now()}`);
+    } else {
+      router.go('ide');
+    }
     return;
   }
   const named = ideProjects.namedProjects;
@@ -300,6 +309,7 @@ export function openProjectInIde(
   const qs = new URLSearchParams();
   if (matchedNamed) qs.set('project', matchedNamed.id);
   qs.set('root', cleanRoot);
+  if (sessionId) qs.set('session', sessionId);
   qs.set('t', String(Date.now()));
   router.go(`ide?${qs.toString()}`);
 }

@@ -58,6 +58,7 @@ export function installRuntimeDraftRecovery(): void {
         void [
           wire.text,
           wire.model,
+          wire.model_default,
           wire.effort,
           wire.access_mode,
           wire.fresh_context,

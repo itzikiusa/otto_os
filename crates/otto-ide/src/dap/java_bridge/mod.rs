@@ -30,7 +30,7 @@ use super::{spawn_target_process, ssh_tunnel_config, BridgeGuard};
 use crate::types::{IdeSshSpec, IdeTargetKind, IdeTargetSpec};
 
 /// Launch/attach parameters for the built-in binary JDWP-to-DAP bridge.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct JavaJdwpBridgeSpec {
     pub java_bin: String,
     pub jvm_flags: Vec<String>,

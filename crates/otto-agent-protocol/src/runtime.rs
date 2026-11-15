@@ -22,6 +22,7 @@ mod fresh;
 mod held_adopt;
 mod held_proc;
 mod paging;
+mod peers;
 mod request_ids;
 use request_ids::RequestIds;
 
@@ -34,12 +35,11 @@ use chrono::Utc;
 use dashmap::DashMap;
 use otto_core::agent_runtime::{
     ApprovalDecision, Attachment, AttachmentKind, CancelReason, CreateRuntimeSessionReq,
-    OpenPeerReq, PeerInfo, PeerReply, PlanArtifact, PromptDelivery, ProviderFailure,
-    ProviderSession, ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus,
-    QueuedPrompt, ResponseCapability, RuntimeEvent, RuntimeEventBody, RuntimePromptReq,
-    RuntimePromptResp, RuntimeReplay, RuntimeRequest, RuntimeRequestStatus, RuntimeSession,
-    RuntimeSessionStatus, RuntimeSnapshot, TurnItem, TurnItemKind, TurnItemStatus, TurnOrigin,
-    TurnTerminalStatus,
+    PlanArtifact, PromptDelivery, ProviderFailure, ProviderSession, ProviderSessionStatus,
+    ProviderThread, ProviderTurn, ProviderTurnStatus, QueuedPrompt, ResponseCapability,
+    RuntimeEvent, RuntimeEventBody, RuntimePromptReq, RuntimePromptResp, RuntimeReplay,
+    RuntimeRequest, RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus, RuntimeSnapshot,
+    TurnItem, TurnItemKind, TurnItemStatus, TurnOrigin, TurnTerminalStatus,
 };
 use otto_core::{new_id, Error, Id, Result};
 use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RawRuntimeEntityRow, RuntimeEntityRow};
@@ -751,268 +751,6 @@ impl AgentRuntime {
         Ok(s)
     }
 
-    // ---- linked threads (agent ↔ agent) ----------------------------------
-
-    /// The linked group `caller` belongs to: its root and every thread opened
-    /// under it, same owner, not closed — `caller` first-class among them.
-    async fn group(&self, caller: &RuntimeSession) -> Result<Vec<RuntimeSession>> {
-        let root = caller
-            .parent_id
-            .clone()
-            .unwrap_or_else(|| caller.id.clone());
-        Ok(self
-            .list(&caller.workspace_id, Some(&caller.created_by))
-            .await?
-            .into_iter()
-            .filter(|s| s.status != RuntimeSessionStatus::Closed)
-            .filter(|s| s.id == root || s.parent_id.as_ref() == Some(&root))
-            .collect())
-    }
-
-    /// 409 when `c`'s linked group has no room for another thread. One
-    /// confused agent must not fan out without bound: `group` lists the OPEN
-    /// threads of this linked group, the root included.
-    async fn ensure_group_room(&self, c: &RuntimeSession) -> Result<()> {
-        if self.group(c).await?.len() > MAX_LINKED_OPEN {
-            return Err(Error::Conflict(format!(
-                "this thread group already has {MAX_LINKED_OPEN} open linked threads — close \
-                 one (otto_thread_close) before opening another"
-            )));
-        }
-        Ok(())
-    }
-
-    fn peer_info(s: &RuntimeSession, caller: &Id) -> PeerInfo {
-        PeerInfo {
-            id: s.id.clone(),
-            provider: s.provider,
-            title: s.title.clone(),
-            status: s.status,
-            is_self: &s.id == caller,
-        }
-    }
-
-    /// `peer` when it is in `caller`'s group (and not `caller` itself).
-    async fn group_member(&self, caller: &RuntimeSession, peer: &Id) -> Result<RuntimeSession> {
-        if peer == &caller.id {
-            return Err(Error::Invalid("that is this thread itself".into()));
-        }
-        self.group(caller)
-            .await?
-            .into_iter()
-            .find(|s| &s.id == peer)
-            .ok_or_else(|| {
-                Error::NotFound(format!(
-                    "no linked thread '{peer}' (list them with otto_thread_list)"
-                ))
-            })
-    }
-
-    /// The header a peer's message arrives under, so the receiving agent
-    /// knows who wrote it and how to answer.
-    fn peer_header(from: &RuntimeSession, verb: &str) -> String {
-        format!(
-            "[{verb} thread \"{}\" ({}, id {}). Answer it with the otto_thread_message tool \
-             (session_id {}); see every linked thread with otto_thread_list.]",
-            from.title,
-            from.provider.as_str(),
-            from.id,
-            from.id
-        )
-    }
-
-    /// Open a linked thread from `caller`: same owner, workspace, cwd and
-    /// access mode (never wider than the opener's), grouped under the
-    /// caller's root; the opening prompt (if any) is sent framed. The
-    /// daemon-only `req.cwd` / `req.meta` give the thread its own folder and
-    /// meta (a delegated personal agent); a read-only opener's thread is
-    /// read-only too, whatever `req.meta` says.
-    pub async fn open_peer(&self, caller: &Id, mut req: OpenPeerReq) -> Result<RuntimeSession> {
-        // A plain `otto.thread_open`: its answers come back to this agent
-        // (children.rs). A daemon caller's own meta reports back its own way.
-        if req.meta.is_none() {
-            req.meta = Some(children::child_meta(
-                caller,
-                otto_core::agent_runtime::ChildOpener::Agent,
-            ));
-        }
-        self.open_linked(caller, req, true).await
-    }
-
-    /// [`Self::open_peer`]. `framed = false` (daemon-only) sends the opening
-    /// prompt as it is, without the "Opened by …" header: a prompt the daemon
-    /// built itself (a council synthesis) that no thread's agent wrote.
-    async fn open_linked(
-        &self,
-        caller: &Id,
-        req: OpenPeerReq,
-        framed: bool,
-    ) -> Result<RuntimeSession> {
-        let c = self.get(caller).await?;
-        if c.status == RuntimeSessionStatus::Closed {
-            return Err(Error::Conflict("the session is closed".into()));
-        }
-        self.ensure_group_room(&c).await?;
-        let root = c.parent_id.clone().unwrap_or_else(|| c.id.clone());
-        let mut meta = req.meta;
-        if c.meta_flag("read_only") {
-            let m = meta.get_or_insert_with(|| serde_json::json!({}));
-            if let Some(o) = m.as_object_mut() {
-                o.insert("read_only".into(), serde_json::Value::Bool(true));
-            }
-        }
-        inherit_embedded_origin(&c, &mut meta);
-        let created = self
-            .create_linked(
-                &c.created_by,
-                &c.workspace_id,
-                CreateRuntimeSessionReq {
-                    provider: Some(req.provider),
-                    cwd: Some(req.cwd.unwrap_or_else(|| c.cwd.clone())),
-                    title: req.title,
-                    model: req.model,
-                    access_mode: Some(c.access_mode),
-                    meta,
-                },
-                Some(root),
-            )
-            .await?;
-        if let Some(p) = req.prompt.filter(|p| !p.trim().is_empty()) {
-            let text = if framed {
-                format!("{}\n\n{p}", Self::peer_header(&c, "Opened by"))
-            } else {
-                p
-            };
-            let mut prompt = RuntimePromptReq::of(&text);
-            prompt.effort = req.effort.filter(|e| !e.trim().is_empty());
-            self.prompt_with(&created.id, &prompt).await?;
-        }
-        self.get(&created.id).await
-    }
-
-    /// Every thread in `caller`'s linked group.
-    pub async fn peers(&self, caller: &Id) -> Result<Vec<PeerInfo>> {
-        let c = self.get(caller).await?;
-        Ok(self
-            .group(&c)
-            .await?
-            .iter()
-            .map(|s| Self::peer_info(s, caller))
-            .collect())
-    }
-
-    /// Send `text` to linked thread `peer` as its next turn. A peer still
-    /// working its turn refuses (409) — read it with [`Self::peer_reply`]
-    /// and send again.
-    pub async fn message_peer(
-        &self,
-        caller: &Id,
-        peer: &Id,
-        text: &str,
-    ) -> Result<RuntimePromptResp> {
-        if text.trim().is_empty() {
-            return Err(Error::Invalid("message text is empty".into()));
-        }
-        let c = self.get(caller).await?;
-        let p = self.group_member(&c, peer).await?;
-        let framed = format!("{}\n\n{text}", Self::peer_header(&c, "Message from"));
-        self.prompt(&p.id, &framed).await.map_err(|e| match e {
-            Error::Conflict(m) if m.contains("turn is already running") => Error::Conflict(format!(
-                "thread \"{}\" is busy with a turn — wait for it with otto_thread_read, then send again",
-                p.title
-            )),
-            other => other,
-        })
-    }
-
-    /// Close linked thread `peer` (stop its agent; it stays in History). A
-    /// thread closes the ones in its group, never itself or the group's
-    /// root (the lead a person opened) — those stay the person's to close.
-    pub async fn close_peer(&self, caller: &Id, peer: &Id) -> Result<RuntimeSession> {
-        let c = self.get(caller).await?;
-        let p = self.group_member(&c, peer).await?;
-        if p.parent_id.is_none() {
-            return Err(Error::Forbidden(
-                "that is the group's lead thread — only a person closes it".into(),
-            ));
-        }
-        self.close(&p.id).await
-    }
-
-    /// Linked thread `peer`'s latest reply: waits up to `wait` for its
-    /// running turn to settle, then returns that turn's assistant text.
-    pub async fn peer_reply(&self, caller: &Id, peer: &Id, wait: Duration) -> Result<PeerReply> {
-        let c = self.get(caller).await?;
-        let p = self.group_member(&c, peer).await?;
-        let mut reply = self.latest_reply(&p.id, wait).await?;
-        reply.peer.is_self = false;
-        Ok(reply)
-    }
-
-    /// Session `id`'s latest reply: waits up to `wait` for it to settle —
-    /// no turn running (the person's or one the agent started itself) and
-    /// no background work pending — then returns the assistant messages of
-    /// its last turn that has any, joined (a subagent's own messages are
-    /// not the agent's answer). `busy` = the wait ran out. What a
-    /// daemon-driven run (a personal agent's) waits on for its result.
-    pub async fn latest_reply(&self, id: &Id, wait: Duration) -> Result<PeerReply> {
-        let deadline = Instant::now() + wait;
-        let live = self.live(id).await?;
-        loop {
-            if Instant::now() >= deadline {
-                break;
-            }
-            if !is_busy(&live.lock()) {
-                // A background task that just ended is followed, a moment
-                // later, by the agent's own continuation turn. Only a thread
-                // that STAYS idle is done; without this a waiter could be
-                // handed the answer from before the background work.
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                if !is_busy(&live.lock()) {
-                    break;
-                }
-                continue;
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        let st = live.lock();
-        let busy = is_busy(&st);
-        let snap = st.proj.snapshot();
-        let session = st.session.clone();
-        drop(st);
-        let mut turns: Vec<&ProviderTurn> = snap.turns.iter().collect();
-        turns.sort_by_key(|t| std::cmp::Reverse(t.ordinal));
-        let answer = |t: &ProviderTurn| {
-            snap.turn_items
-                .iter()
-                .filter(|i| i.turn_id.as_ref() == Some(&t.id) && i.parent_item_id.is_none())
-                .filter_map(|i| match &i.kind {
-                    TurnItemKind::AssistantMessage { text, .. } if !text.trim().is_empty() => {
-                        Some(text.as_str())
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        };
-        let last = turns.first().copied();
-        let text = turns
-            .iter()
-            .map(|t| answer(t))
-            .find(|t| !t.is_empty())
-            .unwrap_or_default();
-        Ok(PeerReply {
-            peer: Self::peer_info(&session, id),
-            busy,
-            background_tasks: session.background_tasks.len().min(u32::MAX as usize) as u32,
-            turn_status: last
-                .filter(|t| t.status.is_terminal())
-                .and_then(|t| serde_json::to_value(t.status).ok())
-                .and_then(|v| v.as_str().map(str::to_string)),
-            text,
-        })
-    }
-
     pub async fn get(&self, id: &Id) -> Result<RuntimeSession> {
         if let Some(live) = self.inner.live.get(id).map(|l| Arc::clone(l.value())) {
             return Ok(live.lock().session.clone());
@@ -1231,25 +969,27 @@ impl AgentRuntime {
             env: spec.env,
         };
         if let Some(holders_dir) = self.inner.config.holders_dir.as_deref() {
-            let launcher = self
-                .inner
-                .config
-                .holder_launcher
-                .clone()
-                .or_else(crate::holder::HolderLauncher::auto_detect);
-            if let Some(launcher) = launcher {
-                return held_proc::spawn_via_holder(
-                    &self.inner,
-                    live,
-                    &session,
-                    driver,
-                    &ctx,
-                    cmd,
-                    claude_login,
-                    holders_dir,
-                    &launcher,
-                )
-                .await;
+            if self.inner.host.session_persistence_enabled().await {
+                let launcher = self
+                    .inner
+                    .config
+                    .holder_launcher
+                    .clone()
+                    .or_else(crate::holder::HolderLauncher::auto_detect);
+                if let Some(launcher) = launcher {
+                    return held_proc::spawn_via_holder(
+                        &self.inner,
+                        live,
+                        &session,
+                        driver,
+                        &ctx,
+                        cmd,
+                        claude_login,
+                        holders_dir,
+                        &launcher,
+                    )
+                    .await;
+                }
             }
         }
         let child = spawn_child(&cmd).map_err(|e| {
@@ -1455,6 +1195,17 @@ impl AgentRuntime {
             return Err(Error::Invalid(
                 "the fresh agent could not start — retry the message".into(),
             ));
+        }
+        if !req.images.is_empty() || !req.files.is_empty() {
+            let still_starting = live.lock().proj.session.as_ref().is_none_or(|p| {
+                matches!(
+                    p.status,
+                    ProviderSessionStatus::Starting | ProviderSessionStatus::Stopped
+                )
+            });
+            if still_starting {
+                let _ = self.wait_started(&live).await;
+            }
         }
         let attachments = self.store_attachments(id, req).await?;
         let res = self.start_turn(&live, req, attachments.clone());
@@ -1713,6 +1464,7 @@ impl AgentRuntime {
                     None,
                     TurnItemKind::SystemNotice {
                         message: format!("A queued message could not be sent: {e}"),
+                        task_settlement: None,
                     },
                 );
                 n.turn_id = None;
@@ -1731,10 +1483,14 @@ impl AgentRuntime {
     /// Write the prompt's images and files under the session's folder.
     async fn store_attachments(&self, id: &Id, req: &RuntimePromptReq) -> Result<Vec<Attachment>> {
         use base64::Engine;
-        let images = req
-            .images
-            .iter()
-            .map(|i| (AttachmentKind::Image, &i.mime, None, &i.data_base64));
+        let images = req.images.iter().map(|i| {
+            (
+                AttachmentKind::Image,
+                &i.mime,
+                i.name.as_ref(),
+                &i.data_base64,
+            )
+        });
         let files = req
             .files
             .iter()
@@ -2023,7 +1779,19 @@ impl AgentRuntime {
                         st.proc.is_none() && st.turn.is_none() && st.starting == 0
                     };
                     if idle {
-                        let _ = rt.spawn_resuming(&sid, &live_bg).await;
+                        if let Err(e) = rt.spawn_resuming(&sid, &live_bg).await {
+                            tracing::warn!(session = %sid, "background reopen_fast resume failed: {e}");
+                            let mut st = live_bg.lock();
+                            if st.proc.is_none() && st.turn.is_none() {
+                                set_session_status(
+                                    &rt.inner,
+                                    &live_bg,
+                                    &mut st,
+                                    ProviderSessionStatus::Error,
+                                    Some(e.to_string()),
+                                );
+                            }
+                        }
                     }
                 }
                 let queued = {
@@ -2145,6 +1913,7 @@ impl AgentRuntime {
             None,
             TurnItemKind::SystemNotice {
                 message: message.to_string(),
+                task_settlement: None,
             },
         );
         n.turn_id = st.turn.as_ref().map(|t| t.id.clone());
@@ -2554,14 +2323,23 @@ fn open_agent_turn(inner: &Inner, live: &Live, st: &mut State, turn_id: String) 
 }
 
 /// The process (and so its background work) is gone: settle every
-/// background subagent still open and clear the background list.
+/// background subagent or background command still open and clear the list.
 fn settle_background(inner: &Inner, live: &Live, st: &mut State, status: TurnItemStatus) {
     let now = Utc::now();
+    let bg_item_ids: std::collections::HashSet<String> = st
+        .session
+        .background_tasks
+        .iter()
+        .filter_map(|b| b.item_id.clone())
+        .collect();
     let mut open: Vec<TurnItem> = st
         .proj
         .items
         .values()
-        .filter(|i| i.is_background_open())
+        .filter(|i| {
+            i.is_background_open()
+                || ((i.status.is_open() || i.is_streaming()) && bg_item_ids.contains(&i.id))
+        })
         .cloned()
         .collect();
     open.sort_by_key(|i| i.ordinal);
@@ -2574,6 +2352,27 @@ fn settle_background(inner: &Inner, live: &Live, st: &mut State, status: TurnIte
         let (status, last_error) = current_status(st);
         set_session_status(inner, live, st, status, last_error);
     }
+}
+
+fn is_open_bg_item_or_child(st: &State, i: &TurnItem) -> bool {
+    if i.is_background_open() {
+        return true;
+    }
+    if st
+        .session
+        .background_tasks
+        .iter()
+        .any(|b| b.item_id.as_deref() == Some(i.id.as_str()))
+    {
+        return true;
+    }
+    i.parent_item_id.as_deref().is_some_and(|pid| {
+        st.held
+            .iter()
+            .find(|h| h.id == pid)
+            .or_else(|| st.proj.items.get(pid))
+            .is_some_and(TurnItem::is_background_open)
+    })
 }
 
 fn has_pending(st: &State) -> bool {
@@ -2776,12 +2575,57 @@ fn upsert_item(inner: &Inner, live: &Live, st: &mut State, mut item: TurnItem) {
         }
     };
     item.updated_at = now_utc;
+    let settled_subagent =
+        matches!(item.kind, TurnItemKind::Subagent { .. }) && !item.status.is_open();
+    let parent_id = settled_subagent.then(|| item.id.clone());
+    let parent_status = item.status;
     emit(
         inner,
         live,
         st,
         RuntimeEventBody::TurnItemUpdated { turn_item: item },
     );
+    if let Some(pid) = parent_id {
+        settle_children_of(inner, live, st, &pid, parent_status, now_utc);
+    }
+}
+
+fn settle_children_of(
+    inner: &Inner,
+    live: &Live,
+    st: &mut State,
+    parent_id: &str,
+    status: TurnItemStatus,
+    now: chrono::DateTime<Utc>,
+) {
+    let mut child_map: HashMap<Id, TurnItem> = st
+        .proj
+        .items
+        .values()
+        .filter(|i| {
+            i.id != parent_id
+                && i.parent_item_id.as_deref() == Some(parent_id)
+                && (i.status.is_open() || i.is_streaming())
+        })
+        .map(|i| (i.id.clone(), i.clone()))
+        .collect();
+    for h in &st.held {
+        if h.id != parent_id
+            && h.parent_item_id.as_deref() == Some(parent_id)
+            && (h.status.is_open() || h.is_streaming())
+        {
+            child_map.insert(h.id.clone(), h.clone());
+        }
+    }
+    if child_map.is_empty() {
+        return;
+    }
+    let mut children: Vec<TurnItem> = child_map.into_values().collect();
+    children.sort_by_key(|i| i.ordinal);
+    for mut child in children {
+        settle_item(&mut child, status, now);
+        upsert_item(inner, live, st, child);
+    }
 }
 
 fn settle_item(item: &mut TurnItem, status: TurnItemStatus, now: chrono::DateTime<Utc>) {
@@ -2903,7 +2747,7 @@ fn finish_turn(
         .filter(|i| {
             (i.turn_id.as_deref() == Some(active.id.as_str()) || i.turn_id.is_none())
                 && (i.status.is_open() || i.is_streaming())
-                && !i.is_background_open()
+                && !is_open_bg_item_or_child(st, i)
         })
         .cloned()
         .collect();
@@ -2968,6 +2812,7 @@ fn finish_turn(
                     "Stopped: the agent showed no progress for about {mins} min. \
                      Send a message to continue."
                 ),
+                task_settlement: None,
             },
         );
         n.turn_id = Some(active.id.clone());

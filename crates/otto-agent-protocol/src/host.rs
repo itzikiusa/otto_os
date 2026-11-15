@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use otto_core::agent_runtime::{RuntimeAccessMode, RuntimeEvent, RuntimeSession};
+use otto_core::agent_runtime::{RuntimeAccessMode, RuntimeEvent, RuntimeProvider, RuntimeSession};
 use otto_core::domain::{Session, SessionKind, SessionStatus, Workspace};
 use otto_core::event::Event;
 use otto_core::{Id, Result};
@@ -45,6 +45,17 @@ pub trait RuntimeHost: Send + Sync + 'static {
         RuntimeAccessMode::ApprovalRequired
     }
 
+    /// Resolve a custom provider slug (e.g. `"claudework"`) to its underlying
+    /// structured [`RuntimeProvider`] when enabled in `ProviderRegistry`.
+    fn resolve_custom_provider(&self, _slug: &str) -> Option<RuntimeProvider> {
+        None
+    }
+
+    /// Whether session persistence across daemon restarts is enabled.
+    async fn session_persistence_enabled(&self) -> bool {
+        true
+    }
+
     /// Deliver one event to WebSocket clients (owner / admin / root).
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>);
 }
@@ -68,7 +79,7 @@ pub fn as_agent_session(s: &RuntimeSession) -> Session {
         id: s.id.clone(),
         workspace_id: s.workspace_id.clone(),
         kind: SessionKind::Agent,
-        provider: s.provider.as_str().to_string(),
+        provider: s.provider_slug().to_string(),
         title: s.title.clone(),
         status: SessionStatus::Running,
         cwd: s.cwd.clone(),
@@ -154,6 +165,14 @@ impl RuntimeHost for SessionManagerHost {
         } else {
             RuntimeAccessMode::ApprovalRequired
         }
+    }
+
+    fn resolve_custom_provider(&self, slug: &str) -> Option<RuntimeProvider> {
+        self.manager.providers().runtime_provider_for(slug)
+    }
+
+    async fn session_persistence_enabled(&self) -> bool {
+        self.manager.session_persistence_enabled().await
     }
 
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>) {

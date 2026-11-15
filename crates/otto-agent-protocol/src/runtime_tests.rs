@@ -939,36 +939,25 @@ async fn prompt_validates_attachment_magic_bytes_and_rejects_dash_prefixed_model
         },
     );
 
-    // Dash-prefixed model rejected on session creation.
+    let mk_req = |model: Option<&str>| CreateRuntimeSessionReq {
+        provider: Some(RuntimeProvider::Claude),
+        cwd: Some(cwd.clone()),
+        title: None,
+        model: model.map(str::to_string),
+        access_mode: Some(RuntimeAccessMode::FullAccess),
+        meta: None,
+    };
     let bad_create = rt
         .create(
             &"u1".into(),
             &"w1".into(),
-            CreateRuntimeSessionReq {
-                provider: Some(RuntimeProvider::Claude),
-                cwd: Some(cwd.clone()),
-                title: None,
-                model: Some("-oProxyCommand=evil".into()),
-                access_mode: Some(RuntimeAccessMode::FullAccess),
-                meta: None,
-            },
+            mk_req(Some("-oProxyCommand=evil")),
         )
         .await;
     assert!(matches!(bad_create, Err(otto_core::Error::Invalid(_))));
 
     let s = rt
-        .create(
-            &"u1".into(),
-            &"w1".into(),
-            CreateRuntimeSessionReq {
-                provider: Some(RuntimeProvider::Claude),
-                cwd: Some(cwd),
-                title: None,
-                model: None,
-                access_mode: Some(RuntimeAccessMode::FullAccess),
-                meta: None,
-            },
-        )
+        .create(&"u1".into(), &"w1".into(), mk_req(None))
         .await
         .unwrap();
 
@@ -985,23 +974,23 @@ async fn prompt_validates_attachment_magic_bytes_and_rejects_dash_prefixed_model
     svg_req.images.push(PromptImage {
         mime: "image/svg+xml".into(),
         data_base64: "PHN2Zz48L3N2Zz4=".into(),
+        name: None,
     });
     assert!(matches!(
         rt.prompt_with(&s.id, &svg_req).await,
         Err(otto_core::Error::UnsupportedMedia(_))
     ));
-
     // Spoofed PNG bytes ("test") rejected by magic-byte check.
     let mut spoof_png = RuntimePromptReq::of("png");
     spoof_png.images.push(PromptImage {
         mime: "image/png".into(),
         data_base64: "dGVzdA==".into(),
+        name: None,
     });
     assert!(matches!(
         rt.prompt_with(&s.id, &spoof_png).await,
         Err(otto_core::Error::Invalid(_))
     ));
-
     // Spoofed PDF bytes ("test") rejected by magic-byte check.
     let mut spoof_pdf = RuntimePromptReq::of("pdf");
     spoof_pdf.files.push(PromptFile {

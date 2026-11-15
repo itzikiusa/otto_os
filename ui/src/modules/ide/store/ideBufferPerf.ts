@@ -10,12 +10,14 @@ import {
 } from '../../../lib/components/cm-ide-drafts';
 import { readIdePreferences } from '../../../lib/components/cm-ide-prefs';
 import { confirmer } from '../../../lib/confirm.svelte';
+import { normalizeMacPrivatePath } from '../../../lib/fileUri';
 import { loadErrorText } from '../../../lib/loadError';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { isPathExternal } from '../shell/ideProjectHelpers';
 import {
-  detectIdeLanguage, ideBasename, isReadOnlySdkOrCachePath,
+  detectIdeLanguage, detectTextEol, ideBasename, isReadOnlySdkOrCachePath,
+  normalizeEditorLf, serializeTabDiskContent,
   type IdeDiagnostic, type IdeEditorHandle, type IdeEditorSelectionRange, type IdeFileReadResp,
   type IdeGutterItem, type IdeOpenTab, type IdeProjectRoot, type IdeSymbolNode, type IdeTargetSpec,
 } from './ideTypes';
@@ -95,7 +97,7 @@ export interface IdeBufferHost {
   symbolsLoading: boolean; problems: IdeDiagnostic[]; collabIsGuest: boolean; readonly canEditCollab: boolean;
   cursorInfo: { line: number; col: number; cursors: number; selections: { anchor: number; head: number }[] };
   resolvePath(p: string): string; targetQuery(extra?: Record<string, string | boolean | null | undefined>): string;
-  openFile(rawPath: string, opts?: { line?: number; col?: number; preview?: boolean; inSplit?: boolean }): Promise<void>;
+  openFile(rawPath: string, opts?: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean }): Promise<void>;
   closeSplit(): void; saveFile(path?: string, forceOverwrite?: boolean, opts?: { silent?: boolean }): Promise<boolean>;
   updateBuffer(path: string, content: string): void; sendCollabEdit(path: string, content: string, save?: boolean): Promise<boolean>;
   loadGutter(path: string, content?: string): Promise<void>; loadSymbols(path: string, content?: string): Promise<void>;
@@ -442,18 +444,25 @@ export async function performOpenFile(
       existing.error = null; existing.loading = true;
       try {
         const res = await api.get<IdeFileReadResp>(readFileUrl());
-        perf.markClean(existing, res.content, res.sha256);
+        const eol = detectTextEol(res.content);
+        const normContent = normalizeEditorLf(res.content);
+        existing.eol = eol;
+        perf.markClean(existing, normContent, res.sha256);
         existing.language = res.language || detectIdeLanguage(fullPath);
-        existing.readOnly = Boolean(res.read_only) || sdkReadOnly; existing.truncated = res.truncated; existing.loading = false;
+        existing.truncated = Boolean(res.truncated);
+        existing.readOnly = Boolean(res.read_only) || Boolean(res.truncated) || sdkReadOnly;
+        existing.loading = false;
       } catch (e) { existing.loading = false; existing.error = loadErrorText(e); }
     }
     if (!opts.background && opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1);
     if (!opts.background && !isNavigatingHistory) host.pushNavLocation(fullPath, opts.line ?? 1, opts.col ?? 1);
     return;
   }
-  const buf = host.sharedBuffers[fullPath]?.content ?? '';
+  const rawShared = host.sharedBuffers[fullPath]?.content ?? '';
+  const sharedEol = detectTextEol(rawShared);
+  const buf = normalizeEditorLf(rawShared);
   const placeholder: IdeOpenTab = {
-    path: fullPath, name: ideBasename(fullPath), content: buf, savedContent: buf, dirty: false, sha256: '',
+    path: fullPath, name: ideBasename(fullPath), content: buf, savedContent: buf, dirty: false, eol: sharedEol, sha256: '',
     language: detectIdeLanguage(fullPath), readOnly: sdkReadOnly, truncated: false, loading: !isGuest, error: null,
     preview: false, pinned: false, external, lastAccessedAt: nextTabAccessStamp(),
   };
@@ -464,32 +473,39 @@ export async function performOpenFile(
   if (isGuest) { if (!opts.background && opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1); return; }
   try {
     const res = await api.get<IdeFileReadResp>(readFileUrl());
+    const eol = detectTextEol(res.content);
+    const normContent = normalizeEditorLf(res.content);
+    const isReadOnly = Boolean(res.read_only) || Boolean(res.truncated) || sdkReadOnly;
     const tab = host.tabs.find((t) => t.path === fullPath);
     if (tab) {
+      tab.eol = eol;
       const persisted = !opts.reload ? readIdeUndoDraft(fullPath) : null;
+      const persistedSaved = persisted && typeof persisted.savedContent === 'string' ? normalizeEditorLf(persisted.savedContent) : null;
+      const persistedDraft = persisted && typeof persisted.draftContent === 'string' ? normalizeEditorLf(persisted.draftContent) : null;
       if (
-        persisted &&
-        typeof persisted.draftContent === 'string' &&
-        persisted.savedContent === res.content &&
-        persisted.draftContent !== res.content &&
-        !Boolean(res.read_only) &&
-        !sdkReadOnly
+        persistedSaved !== null &&
+        persistedDraft !== null &&
+        persistedSaved === normContent &&
+        persistedDraft !== normContent &&
+        !isReadOnly
       ) {
-        tab.savedContent = res.content;
-        tab.content = persisted.draftContent;
+        tab.savedContent = normContent;
+        tab.content = persistedDraft;
         tab.dirty = true;
         tab.sha256 = res.sha256;
       } else {
-        perf.markClean(tab, res.content, res.sha256);
+        perf.markClean(tab, normContent, res.sha256);
       }
       tab.language = res.language || detectIdeLanguage(fullPath);
-      tab.readOnly = Boolean(res.read_only) || sdkReadOnly; tab.truncated = res.truncated; tab.loading = false;
+      tab.truncated = Boolean(res.truncated);
+      tab.readOnly = isReadOnly;
+      tab.loading = false;
       if (host.target.root) saveWorkspaceOpenTabs(host.target.root, host.tabs.map((t) => t.path), host.activePath, host.splitPath);
     }
     if (!opts.background && opts.line) host.jumpTo(fullPath, opts.line, opts.col ?? 1);
     if (host.activePath === fullPath || host.splitPath === fullPath) {
-      void host.loadGutter(fullPath, res.content);
-      void host.loadSymbols(fullPath, res.content);
+      void host.loadGutter(fullPath, normContent);
+      void host.loadSymbols(fullPath, normContent);
     }
   } catch (e) {
     const tab = host.tabs.find((t) => t.path === fullPath);
@@ -505,9 +521,10 @@ export async function performSaveFile(
   opts: { silent?: boolean } = {},
 ): Promise<boolean> {
   const targetPath = path ? host.resolvePath(path) : host.activePath;
-  const contentToSave = perf.flush(host, targetPath);
+  const rawFlushed = perf.flush(host, targetPath);
+  const contentToSave = normalizeEditorLf(rawFlushed);
   const tab = targetPath ? host.tabs.find((t) => t.path === targetPath) : null;
-  if (!targetPath || !tab || tab.readOnly || !host.canEditCollab) return false;
+  if (!targetPath || !tab || tab.readOnly || tab.truncated || !host.canEditCollab) return false;
   if (host.collabIsGuest) {
     const ok = await host.sendCollabEdit(targetPath, contentToSave, true);
     if (!ok) return false;
@@ -526,8 +543,9 @@ export async function performSaveFile(
     const saveTarget = !inProject && host.target.kind === 'local'
       ? { ...host.targetPayload, additional_roots: [...(host.targetPayload.additional_roots ?? []), parentDir] }
       : host.targetPayload;
+    const diskContent = serializeTabDiskContent(tab, contentToSave);
     const resp = await api.put<{ path: string; size: number; sha256: string }>('/ide/fs/file', {
-      target: saveTarget, path: targetPath, content: contentToSave,
+      target: saveTarget, path: targetPath, content: diskContent,
       expected_sha256: forceOverwrite || !tab.sha256 ? undefined : tab.sha256,
       local_history_enabled: prefs.localHistoryEnabled,
       local_history_retention_days: prefs.localHistoryRetentionDays,
@@ -551,7 +569,7 @@ export async function performSaveFile(
         title: 'File conflict on disk', options: [{ label: 'Overwrite disk', value: 'overwrite', kind: 'danger' }, { label: 'Reload from disk', value: 'reload', kind: 'normal' }],
       });
       if (choice.value === 'overwrite') return host.saveFile(targetPath, true);
-      if (choice.value === 'reload') { host.tabs = host.tabs.filter((t) => t.path !== targetPath); perf.evictPaths(host, [targetPath], false); await host.openFile(targetPath); }
+      if (choice.value === 'reload') { await host.openFile(targetPath, { reload: true }); }
       return false;
     }
     if (!opts.silent) toastError(`Couldn’t save ${tab.name}`, e);
@@ -559,30 +577,35 @@ export async function performSaveFile(
   }
 }
 
-function stripMacPrivatePrefix(p: string): string {
-  return p.startsWith('/private/var/') || p.startsWith('/private/tmp/') ? p.slice('/private'.length) : p;
-}
-
 export async function reloadTabsFromDisk(host: IdeBufferHost, perf: IdeBufferPerfController, paths: Set<string>): Promise<void> {
   const normalized = new Set<string>();
   for (const p of paths) {
     normalized.add(p);
-    normalized.add(stripMacPrivatePrefix(p));
+    normalized.add(normalizeMacPrivatePath(p));
     const resolved = host.resolvePath(p);
     normalized.add(resolved);
-    normalized.add(stripMacPrivatePrefix(resolved));
+    normalized.add(normalizeMacPrivatePath(resolved));
   }
-  for (const tab of host.tabs) {
-    if (normalized.has(tab.path) || normalized.has(stripMacPrivatePrefix(tab.path))) {
+  const matching = host.tabs.filter(
+    (tab) => normalized.has(tab.path) || normalized.has(normalizeMacPrivatePath(tab.path)),
+  );
+  await Promise.allSettled(
+    matching.map(async (tab) => {
       const fresh = await api.get<IdeFileReadResp>(`/ide/fs/file?${host.targetQuery({ path: tab.path })}`);
-      perf.markClean(tab, fresh.content, fresh.sha256);
-      notifySaved(tab.path, fresh.content);
+      const eol = detectTextEol(fresh.content);
+      const normContent = normalizeEditorLf(fresh.content);
+      tab.eol = eol;
+      tab.truncated = Boolean(fresh.truncated);
+      tab.readOnly = Boolean(fresh.read_only) || Boolean(fresh.truncated) || isReadOnlySdkOrCachePath(tab.path);
+      tab.error = null;
+      perf.markClean(tab, normContent, fresh.sha256);
+      notifySaved(tab.path, normContent);
       if (tab.path === host.activePath || tab.path === host.splitPath) {
-        void host.loadGutter(tab.path, fresh.content);
-        void host.loadSymbols(tab.path, fresh.content);
+        void host.loadGutter(tab.path, normContent);
+        void host.loadSymbols(tab.path, normContent);
       }
-    }
-  }
+    }),
+  );
 }
 
 export function computeFallbackSelection(content: string, cursorInfo: IdeBufferHost['cursorInfo']): IdeEditorSelectionRange {

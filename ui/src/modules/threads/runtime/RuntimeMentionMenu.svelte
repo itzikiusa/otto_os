@@ -108,7 +108,7 @@
       (p) => modelsForProvider(p, auth.meta),
       (p) => harnessLabel(p),
       8,
-      askableProviders(agentProviders()),
+      askableProviders(agentProviders(), auth.meta),
     ).map((o) => ({
       ...o,
       label: o.model ? `${harnessLabel(o.provider)} · ${formatModelLabel(o.provider, o.model, auth.meta)}` : o.label,

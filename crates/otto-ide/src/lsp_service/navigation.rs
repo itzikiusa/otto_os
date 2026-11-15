@@ -81,6 +81,13 @@ pub async fn goto_definition<S: IdeCtx>(
 ) -> Result<IdeReferencesResp> {
     req.target.absorb_project_folders(&req.project_folders);
     let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
+    if !req.path.trim().is_empty() {
+        let _ = ctx
+            .ide()
+            .targets
+            .resolve_readable_or_prospective_path(&resolved, &req.path)
+            .await?;
+    }
     let col = req.effective_column().max(1);
     let content = match req.content.clone() {
         Some(c) => c,
@@ -353,6 +360,13 @@ pub async fn goto_implementation<S: IdeCtx>(
 ) -> Result<IdeReferencesResp> {
     req.target.absorb_project_folders(&req.project_folders);
     let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
+    if !req.path.trim().is_empty() {
+        let _ = ctx
+            .ide()
+            .targets
+            .resolve_readable_or_prospective_path(&resolved, &req.path)
+            .await?;
+    }
     let col = req.effective_column().max(1);
     let content = match req.content.clone() {
         Some(c) => c,

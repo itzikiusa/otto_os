@@ -10,7 +10,7 @@ use otto_core::{Error, Result};
 
 use crate::types::{
     IdeFileReadResp, IdeFileWriteResp, IdeFsMutateOp, IdeFsMutateResp, IdeFsTreeResp,
-    IdePlatformInfo,
+    IdeGitBaseResp, IdePlatformInfo,
 };
 
 use super::fs_ops::{
@@ -249,6 +249,16 @@ impl TargetManager {
         .await
     }
 
+    /// Read the clean `HEAD` Git base blob for `path` (`GET /ide/fs/git-base`),
+    /// following staged index renames (`R`) and rejecting broad non-project roots.
+    pub async fn read_git_base(
+        &self,
+        target: &ResolvedTarget,
+        path: &str,
+    ) -> Result<IdeGitBaseResp> {
+        super::git_base::read_git_base_for_target(target, path).await
+    }
+
     /// Atomically write a UTF-8 file honoring explicit [`HistoryWriteOpts`] preferences.
     pub async fn write_file_with_history(
         &self,
@@ -257,6 +267,31 @@ impl TargetManager {
         content: &str,
         expected_sha256: Option<&str>,
         create_dirs: bool,
+        history_opts: HistoryWriteOpts,
+    ) -> Result<IdeFileWriteResp> {
+        self.write_file_with_options(
+            target,
+            path,
+            content,
+            expected_sha256,
+            create_dirs,
+            false,
+            history_opts,
+        )
+        .await
+    }
+
+    /// Atomically write a UTF-8 file, refusing to overwrite an existing `> 4 MiB`
+    /// file unless `allow_overwrite_large` is explicitly `true`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_file_with_options(
+        &self,
+        target: &ResolvedTarget,
+        path: &str,
+        content: &str,
+        expected_sha256: Option<&str>,
+        create_dirs: bool,
+        allow_overwrite_large: bool,
         history_opts: HistoryWriteOpts,
     ) -> Result<IdeFileWriteResp> {
         if is_virtual_archive_uri(path) {
@@ -281,6 +316,15 @@ impl TargetManager {
                     create_dirs,
                 )
                 .await?;
+                if !allow_overwrite_large {
+                    if let Ok(meta) = tokio::fs::metadata(&dest).await {
+                        if meta.is_file() && meta.len() > MAX_FILE_READ_BYTES {
+                            return Err(Error::Conflict(
+                                "refusing to overwrite >4 MiB file from a truncated buffer".into(),
+                            ));
+                        }
+                    }
+                }
                 if let Some(exp) = expected_sha256.filter(|s| !s.is_empty()) {
                     verify_local_expected_sha(&dest, exp).await?;
                 }
@@ -347,6 +391,15 @@ impl TargetManager {
             } => {
                 let (remote_path, _) = resolve_remote_in_roots(root, additional_roots, path)?;
                 let sftp = self.acquire_sftp(actor_id, spec)?;
+                if !allow_overwrite_large {
+                    if let Ok(existing_sz) = sftp.file_size(&remote_path).await {
+                        if existing_sz > MAX_FILE_READ_BYTES {
+                            return Err(Error::Conflict(
+                                "refusing to overwrite >4 MiB file from a truncated buffer".into(),
+                            ));
+                        }
+                    }
+                }
                 if let Some(exp) = expected_sha256.filter(|s| !s.is_empty()) {
                     verify_remote_expected_sha(&sftp, &remote_path, exp).await?;
                 }

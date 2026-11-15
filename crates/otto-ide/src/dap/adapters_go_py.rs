@@ -138,14 +138,7 @@ pub(super) async fn resolve_go_adapter(
         });
     }
 
-    let is_test = req.launch.test_name.is_some()
-        || raw_prog.ends_with("_test.go")
-        || raw_prog.ends_with("/...")
-        || ctx
-            .run_config
-            .as_ref()
-            .is_some_and(|rc| rc.runner == crate::types::IdeRunnerKind::GoTest)
-        || (req.target.kind == IdeTargetKind::Local && dir_contains_go_tests(&raw_prog));
+    let is_test = should_debug_go_as_test(req, ctx, &raw_prog);
     let (resolved_test_pkg_dir, initial_output) = if is_test {
         resolve_go_test_pkg_dir(&req.target, &raw_prog, &effective_cwd, &req.breakpoints)
     } else {
@@ -159,7 +152,7 @@ pub(super) async fn resolve_go_adapter(
         is_test.then_some(resolved_test_pkg_dir.as_str()),
         &req.breakpoints,
     );
-    crate::lsp_service::merge_go_tags_into_args(&mut flag_parts, &merged_go_tags);
+    crate::go_build_tags::merge_go_tags_into_args(&mut flag_parts, &merged_go_tags);
     let build_flags = flag_parts.join(" ");
     if req.target.kind == IdeTargetKind::Local {
         let mut go_cands = Vec::new();
@@ -482,13 +475,23 @@ fn collect_dap_go_build_tags(
     breakpoints: &[IdeBreakpoint],
 ) -> Vec<String> {
     let mut tags: Vec<String> = Vec::new();
-    for t in ctx
-        .go_build_tags
-        .iter()
-        .chain(ctx.project_env.iter().flat_map(|p| p.go_build_tags.iter()))
-    {
-        if !t.is_empty() && !tags.contains(t) {
-            tags.push(t.clone());
+    if !ctx.go_build_tags.is_empty() {
+        for t in &ctx.go_build_tags {
+            if !t.is_empty() && !tags.contains(t) {
+                tags.push(t.clone());
+            }
+        }
+    } else if let Some(proj) = &ctx.project_env {
+        let probe_paths = vec![raw_prog.to_string(), effective_cwd.to_string()];
+        for t in crate::environments::effective_go_build_tags_for_paths_in_project(
+            Some(&target.root),
+            proj,
+            &probe_paths,
+            target.kind == IdeTargetKind::Local,
+        ) {
+            if !t.is_empty() && !tags.contains(&t) {
+                tags.push(t);
+            }
         }
     }
     if target.kind != IdeTargetKind::Local {
@@ -533,7 +536,7 @@ fn collect_dap_go_build_tags(
     }
     for file in files_to_scan {
         if let Ok(src) = std::fs::read_to_string(&file) {
-            for t in crate::lsp_service::extract_go_file_build_tags(&src) {
+            for t in crate::go_build_tags::extract_go_file_build_tags(&src) {
                 if !tags.contains(&t) {
                     tags.push(t);
                 }
@@ -541,6 +544,47 @@ fn collect_dap_go_build_tags(
         }
     }
     tags
+}
+
+/// Decide whether a Go DAP launch should run in test mode (`dlv test` / `go test -c`)
+/// or binary mode (`dlv debug` / `dlv exec`).
+///
+/// Non-test `.go` files (e.g. `main.go`) and explicit `GoRun` configs without a
+/// `test_name` NEVER switch into test mode even when sibling `*_test.go` files
+/// exist in the same package directory.
+pub(crate) fn should_debug_go_as_test(
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    raw_prog: &str,
+) -> bool {
+    let has_test_name = req
+        .launch
+        .test_name
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty());
+    if has_test_name || raw_prog.ends_with("_test.go") || raw_prog.ends_with("/...") {
+        return true;
+    }
+    if raw_prog.ends_with(".go") {
+        // Explicit non-test `.go` entrypoint (e.g. `main.go`).
+        return false;
+    }
+    if let Some(rc) = &ctx.run_config {
+        if rc.runner == crate::types::IdeRunnerKind::GoTest {
+            return true;
+        }
+        if rc.runner == crate::types::IdeRunnerKind::GoRun {
+            return false;
+        }
+    }
+    if req.target.kind == IdeTargetKind::Local {
+        let prog_path = Path::new(raw_prog);
+        if prog_path.is_dir() && inspect_go_package_dir(prog_path).1 {
+            return false;
+        }
+        return dir_contains_go_tests(raw_prog);
+    }
+    false
 }
 
 fn find_go_mod_dir(
@@ -551,19 +595,10 @@ fn find_go_mod_dir(
 ) -> String {
     let clean_prog = program.trim_end_matches("/...").trim_end_matches('/');
     if target.kind == IdeTargetKind::Local && !clean_prog.is_empty() {
-        let mut cur = Path::new(clean_prog);
-        if cur.is_file() {
-            cur = cur.parent().unwrap_or(cur);
-        }
-        loop {
-            if !allowed_roots.is_empty() && !allowed_roots.iter().any(|r| cur.starts_with(r)) {
-                break;
-            }
-            if cur.join("go.work").is_file() || cur.join("go.mod").is_file() {
-                return cur.to_string_lossy().into_owned();
-            }
-            let Some(parent) = cur.parent() else { break };
-            cur = parent;
+        let found =
+            crate::go_build_cache::find_go_module_root(Path::new(clean_prog), allowed_roots);
+        if found.join("go.work").is_file() || found.join("go.mod").is_file() {
+            return super::adapters::display_target_path(target, &found.to_string_lossy());
         }
     }
     fallback_cwd.to_string()
@@ -668,42 +703,5 @@ fn inspect_go_package_dir(dir: &Path) -> (usize, bool) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_go_test_pkg_dir_and_extracts_build_tags_for_all_tests_debug() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path();
-        std::fs::write(repo.join("go.mod"), "module example.com/svc\n\ngo 1.24\n").unwrap();
-        let sub_a = repo.join("tests/feature_a");
-        let sub_b = repo.join("tests/feature_b");
-        std::fs::create_dir_all(&sub_a).unwrap();
-        std::fs::create_dir_all(&sub_b).unwrap();
-        std::fs::write(
-            sub_a.join("a_test.go"),
-            "//go:build integration\n\npackage feature_a\n",
-        )
-        .unwrap();
-        let bp_file = sub_b.join("b_component_test.go");
-        std::fs::write(&bp_file, "//go:build component\n\npackage feature_b\n").unwrap();
-
-        let target = IdeTargetSpec::local(repo.to_string_lossy().into_owned());
-        let cwd = repo.to_string_lossy().into_owned();
-        let bps = vec![IdeBreakpoint {
-            path: bp_file.to_string_lossy().into_owned(),
-            line: 5,
-            enabled: true,
-            ..Default::default()
-        }];
-        let raw_prog = format!("{cwd}/...");
-        let (pkg_dir, notes) = resolve_go_test_pkg_dir(&target, &raw_prog, &cwd, &bps);
-        assert_eq!(pkg_dir, sub_b.to_string_lossy());
-        assert_eq!(notes.len(), 1);
-        assert!(notes[0].text.contains("feature_b"));
-
-        let ctx = DapStartContext::new().with_go_build_tags(vec!["e2e".into()]);
-        let tags = collect_dap_go_build_tags(&target, &ctx, &raw_prog, &cwd, Some(&pkg_dir), &bps);
-        assert_eq!(tags, vec!["e2e".to_string(), "component".to_string()]);
-    }
-}
+#[path = "adapters_go_py_tests.rs"]
+mod tests;

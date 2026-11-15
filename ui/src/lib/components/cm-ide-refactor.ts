@@ -3,8 +3,8 @@
 // Generate (`⌘N`), and Cascading Editor Context Menu (`Refactor ▸`, `Folding ▸`, …).
 
 import {
-  Decoration, EditorView, WidgetType, keymap, rectangularSelection,
-  type DecorationSet,
+  Decoration, EditorView, ViewPlugin, WidgetType, keymap, rectangularSelection,
+  type DecorationSet, type ViewUpdate,
 } from '@codemirror/view';
 import {
   EditorSelection, EditorState, Prec, StateEffect, StateField,
@@ -140,13 +140,15 @@ function buildCodeVisionDecorations(
   return ranges.length ? Decoration.set(ranges, true) : Decoration.none;
 }
 
+const setCodeVisionDecosEffect = StateEffect.define<DecorationSet>();
+
 export function createIdeRefactorCodeVisionExtension(opts: {
   diskSavedContent?: string | null;
   savedContent?: string | null;
   language?: string;
   getCallbacks: () => IdeEditorCallbacks;
 }): Extension {
-  return StateField.define<{ diskBase: string | null; gitBase: string | null; decos: DecorationSet }>({
+  const field = StateField.define<{ diskBase: string | null; gitBase: string | null; decos: DecorationSet }>({
     create(st) {
       const diskBase = opts.diskSavedContent ?? null;
       const gitBase = opts.savedContent ?? null;
@@ -156,7 +158,7 @@ export function createIdeRefactorCodeVisionExtension(opts: {
       return { diskBase, gitBase, decos };
     },
     update(cur, tr) {
-      let { diskBase, gitBase } = cur;
+      let { diskBase, gitBase, decos } = cur;
       let baseChanged = false;
       for (const ef of tr.effects) {
         if (ef.is(setDiskSavedContentEffect) && ef.value !== diskBase) {
@@ -165,16 +167,48 @@ export function createIdeRefactorCodeVisionExtension(opts: {
         } else if (ef.is(setSavedContentEffect) && ef.value !== gitBase) {
           gitBase = ef.value;
           baseChanged = true;
+        } else if (ef.is(setCodeVisionDecosEffect)) {
+          decos = ef.value;
         }
       }
-      if (!tr.docChanged && !baseChanged && tr.state.readOnly === tr.startState.readOnly) return cur;
-      const decos = tr.state.readOnly
-        ? Decoration.none
-        : buildCodeVisionDecorations(tr.state.doc, diskBase, gitBase, opts.language, opts.getCallbacks);
+      if (tr.state.readOnly) return decos === Decoration.none && !baseChanged ? cur : { diskBase, gitBase, decos: Decoration.none };
+      if (baseChanged || tr.state.readOnly !== tr.startState.readOnly) {
+        return {
+          diskBase,
+          gitBase,
+          decos: buildCodeVisionDecorations(tr.state.doc, diskBase, gitBase, opts.language, opts.getCallbacks),
+        };
+      }
+      if (tr.docChanged && decos !== Decoration.none) {
+        decos = decos.map(tr.changes);
+      }
+      if (diskBase === cur.diskBase && gitBase === cur.gitBase && decos === cur.decos) return cur;
       return { diskBase, gitBase, decos };
     },
     provide: (f) => EditorView.decorations.from(f, (v) => v.decos),
   });
+
+  const debouncer = ViewPlugin.fromClass(class {
+    private timer: ReturnType<typeof setTimeout> | null = null;
+    update(u: ViewUpdate): void {
+      if (!u.docChanged || u.state.readOnly) return;
+      if (this.timer !== null) clearTimeout(this.timer);
+      const target = u.view;
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        const st = target.state.field(field, false);
+        if (!st || target.state.readOnly) return;
+        const next = buildCodeVisionDecorations(target.state.doc, st.diskBase, st.gitBase, opts.language, opts.getCallbacks);
+        target.dispatch({ effects: setCodeVisionDecosEffect.of(next) });
+      }, 180);
+    }
+    destroy(): void {
+      if (this.timer !== null) clearTimeout(this.timer);
+      this.timer = null;
+    }
+  });
+
+  return [field, debouncer];
 }
 
 function applyStringManipulationInView(view: EditorView, kind: StringManipKind): boolean {

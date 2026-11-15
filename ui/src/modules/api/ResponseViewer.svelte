@@ -8,7 +8,7 @@
   // do; SSE / WebSocket requests get a live message console instead.
   import Icon from '../../lib/components/Icon.svelte';
   import Tabs from '../../lib/components/Tabs.svelte';
-  import CodeEditor from '../../lib/components/CodeEditor.svelte';
+  import CodeEditor from '../../lib/components/LazyCodeEditor.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
   import StatusChip from './StatusChip.svelte';

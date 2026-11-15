@@ -122,7 +122,7 @@ export const GENERAL_KW = new Set(
 
 const BOGUS_JAVA_PREFIXES = [
   'com.nonexistent.', 'org.nonexistent.', 'net.nonexistent.',
-  'invalid.', 'bogus.', 'fake.', 'unknown.', 'does.not.exist.', 'nonexistent.',
+  'does.not.exist.', 'nonexistent.',
 ];
 
 export function skipLiteralOrComment(src: string, idx: number, limit: number): number {

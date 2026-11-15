@@ -91,7 +91,11 @@ pub struct IdeReferencesResp {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeRenameReq {
     pub target: IdeTargetSpec,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        alias = "projectFolders",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub project_folders: Vec<String>,
     pub path: String,
     pub line: u32,
@@ -108,7 +112,12 @@ pub struct IdeRenameReq {
     pub apply: bool,
     #[serde(default = "super::default_true", alias = "record_local_history")]
     pub local_history_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "retention_days",
+        alias = "localHistoryRetentionDays",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub local_history_retention_days: Option<u32>,
 }
 

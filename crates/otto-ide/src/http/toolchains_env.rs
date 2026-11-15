@@ -361,21 +361,16 @@ pub(super) async fn get_environments<S: IdeCtx>(
     Query(q): Query<IdeTargetQuery>,
 ) -> ApiResult<Json<IdeEnvironmentsResp>> {
     let mut target = q.into_target_spec()?;
-    ctx.ide()
-        .environments
-        .enrich_target_roots(
-            &ctx.pool(),
-            Some(&ctx.ide().projects),
-            Some(&user),
-            &mut target,
-        )
-        .await;
     let ssh = ctx
         .ide()
         .targets
         .resolve(&ctx, &user, &target)
         .await?
         .into_ssh_spec();
+    ctx.ide()
+        .environments
+        .enrich_target_roots_authorized(&ctx, &user, &mut target, false)
+        .await;
     let resp = ctx
         .ide()
         .environments
@@ -394,7 +389,7 @@ pub(super) async fn get_environments<S: IdeCtx>(
 pub(super) async fn put_environments<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeUpdateEnvironmentReq>,
+    Json(mut req): Json<IdeUpdateEnvironmentReq>,
 ) -> ApiResult<Json<IdeEnvironmentResp>> {
     let _ = ctx
         .ide()
@@ -411,6 +406,10 @@ pub(super) async fn put_environments<S: IdeCtx>(
             }
         }
     }
+    ctx.ide()
+        .environments
+        .enrich_target_roots_authorized(&ctx, &user, &mut req.target, true)
+        .await;
     let prev_nb = ctx
         .ide()
         .environments
@@ -423,9 +422,16 @@ pub(super) async fn put_environments<S: IdeCtx>(
         let clean_nb_opt = crate::netbridge::sanitize_network_bridge(Some(raw_nb.clone()))?;
         if let Some(ref clean_nb) = clean_nb_opt {
             if clean_nb.enabled {
+                let same_prod_targets = prev_nb.as_ref().is_some_and(|p| {
+                    p.enabled
+                        && p.k8s_cluster_id == clean_nb.k8s_cluster_id
+                        && p.k8s_namespace == clean_nb.k8s_namespace
+                        && p.ssh_tunnel_connection_id == clean_nb.ssh_tunnel_connection_id
+                });
+                let effective_confirm = req.confirm_prod_targets || same_prod_targets;
                 ctx.ide()
                     .netbridge
-                    .authorize_config_with_confirm(&ctx, &user, clean_nb, req.confirm_prod_targets)
+                    .authorize_config_with_confirm(&ctx, &user, clean_nb, effective_confirm)
                     .await?;
             } else {
                 let prev_k8s = prev_nb.as_ref().and_then(|p| p.k8s_cluster_id.as_ref());

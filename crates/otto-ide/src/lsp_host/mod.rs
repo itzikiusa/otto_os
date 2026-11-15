@@ -6,7 +6,9 @@ pub mod framing;
 pub mod pool;
 mod pool_evict;
 mod pool_mux;
-mod pool_spawn;
+#[cfg(test)]
+mod pool_round5_tests;
+pub(crate) mod pool_spawn;
 #[cfg(test)]
 mod pool_tests;
 pub mod servers;

@@ -438,7 +438,7 @@
           {/if}
           <span class="ctx-label">{item.label}</span>
           {#if itemHasSub}
-            <span class="ctx-chevron"><Icon name={isRtl() ? 'chevronLeft' : 'chevronRight'} size={12} /></span>
+            <span class="ctx-chevron"><Icon name="chevronRight" size={12} /></span>
           {:else if item.hint}
             <span class="ctx-hint">{item.hint}</span>
           {/if}

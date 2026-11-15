@@ -2,15 +2,14 @@
 // fetching for `IdeTabBar` and `ideEditorStoreBridge`.
 
 import { api } from '../../../lib/api/client';
-import type { DiffResp } from '../../../lib/api/types';
+import type { BlameLine, IdeGitBaseResp } from '../../../lib/api/types';
 import { copyWithToast } from '../../../lib/clipboard';
 import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
-import { git } from '../../../lib/stores/git.svelte';
+import { isBroadNonProjectRootClient, normalizeMacPrivatePath } from '../../../lib/fileUri';
 import { ideGit } from '../git/ideGitController.svelte';
-import { reconstructFileFromDiff } from '../history/ideCompareEngine';
 import { ide, ideBasename, type IdeOpenTab } from '../ideStore.svelte';
 import { ideAgent } from '../store/ideAgentController.svelte';
-import type { IdeReferenceLocation } from '../store/ideTypes';
+import { normalizeEditorLf, type IdeReferenceLocation } from '../store/ideTypes';
 import {
   closeAllIdeTabs,
   closeUnmodifiedIdeTabs,
@@ -92,10 +91,6 @@ export function openIdeOverflowTabsMenu(anchor: HTMLElement | null): void {
   ctxMenu.showAt(anchor, items, { align: 'end' });
 }
 
-function stripMacPrivatePrefix(p: string): string {
-  return p.startsWith('/private/var/') || p.startsWith('/private/tmp/') ? p.slice('/private'.length) : p;
-}
-
 function isImportBindingLine(lineText: string): boolean {
   return /^\s*(?:import\b|(?:const|let|var)\s+.*=\s*require\()/.test(lineText);
 }
@@ -112,7 +107,7 @@ export async function runPerformIdeDive(
 
   let sameFileImportFallback: { path: string; line: number; column: number } | null = null;
   if (target.path) {
-    const sameFile = stripMacPrivatePrefix(ide.resolvePath(target.path)) === stripMacPrivatePrefix(ide.resolvePath(fromPath));
+    const sameFile = normalizeMacPrivatePath(ide.resolvePath(target.path)) === normalizeMacPrivatePath(ide.resolvePath(fromPath));
     const destLineText = sameFile ? (content.split(/\r?\n/)[target.line - 1] ?? '') : '';
     if (mode === 'definition' && sameFile && isImportBindingLine(destLineText)) {
       sameFileImportFallback = { path: target.path, line: target.line, column: target.column };
@@ -170,33 +165,41 @@ export async function runPerformIdeDive(
   await ide.findReferences(fromPath, originLine, originCol, target.symbol);
 }
 
-interface BlameEntry { start_line?: number; end_line?: number; line?: number; author?: string; summary?: string; commit?: string; date?: string; }
+type RawBlameEntry = Partial<BlameLine> & {
+  start_line?: number;
+  end_line?: number;
+  line?: number;
+  commit?: string;
+};
 
 export async function runFetchIdeGitBlame(rootPath: string, filePath: string, signal?: AbortSignal): Promise<Record<number, string> | null> {
   try {
+    const normFile = normalizeMacPrivatePath(filePath);
     let repoId = '';
     let relPath = '';
-    const resolvedRepo = await ideGit.resolveRepoForPath(filePath);
-    if (resolvedRepo) {
-      const rel = ideGit.repoRelativePath(resolvedRepo, filePath);
+    const resolvedRepo = await ideGit.resolveRepoForPath(normFile);
+    if (resolvedRepo && !isBroadNonProjectRootClient(resolvedRepo.path)) {
+      const rel = ideGit.repoRelativePath(resolvedRepo, normFile);
       if (rel) {
         repoId = resolvedRepo.id;
         relPath = rel;
       }
     }
     if (!repoId || !relPath) {
-      const repos = await api.bg.get<Array<{ id: string; path: string }>>('/repos');
+      const repos = await api.bg.get<Array<{ id: string; path: string }>>('/git/repos', signal);
       const matches = (repos ?? [])
-        .map((r) => ({ id: r.id, root: r.path.replace(/\/+$/, '') }))
-        .filter((r) => filePath === r.root || filePath.startsWith(`${r.root}/`))
+        .filter((r) => !isBroadNonProjectRootClient(r.path))
+        .map((r) => ({ id: r.id, root: normalizeMacPrivatePath(r.path).replace(/\/+$/, '') }))
+        .filter((r) => normFile === r.root || normFile.startsWith(`${r.root}/`))
         .sort((a, b) => b.root.length - a.root.length);
-      if (!matches.length && (!rootPath || !filePath.startsWith(rootPath))) return null;
+      const normRoot = rootPath ? normalizeMacPrivatePath(rootPath) : '';
+      if (!matches.length && (!normRoot || !normFile.startsWith(normRoot))) return null;
       if (!matches.length) return null;
       repoId = matches[0].id;
-      relPath = filePath.slice(matches[0].root.length).replace(/^\/+/, '');
+      relPath = normFile.slice(matches[0].root.length).replace(/^\/+/, '');
     }
     if (!relPath) return null;
-    const resp = await api.bg.get<{ lines?: BlameEntry[]; hunks?: BlameEntry[] } | BlameEntry[]>(
+    const resp = await api.bg.get<{ lines?: RawBlameEntry[]; hunks?: RawBlameEntry[] } | RawBlameEntry[]>(
       `/repos/${encodeURIComponent(repoId)}/blame?path=${encodeURIComponent(relPath)}`,
       signal,
     );
@@ -204,11 +207,15 @@ export async function runFetchIdeGitBlame(rootPath: string, filePath: string, si
     if (!list.length) return null;
     const map: Record<number, string> = {};
     for (const item of list) {
-      const sha = item.commit ? item.commit.slice(0, 7) : '';
+      const sha = item.short_sha || (item.sha ?? item.commit ?? '').slice(0, 7);
       const label = [item.author, sha, item.summary].filter(Boolean).join(' · ').slice(0, 56);
-      if (!label) continue;
-      if (item.line != null) map[item.line] = label;
-      else if (item.start_line != null) map[item.start_line] = label;
+      const start = item.line_start ?? item.start_line ?? item.line;
+      if (!label || start == null) continue;
+      const count = Math.max(
+        1,
+        item.count ?? (item.end_line != null ? item.end_line - start + 1 : 1),
+      );
+      for (let ln = start; ln < start + count; ln++) map[ln] = label;
     }
     return Object.keys(map).length > 0 ? map : null;
   } catch {
@@ -217,9 +224,13 @@ export async function runFetchIdeGitBlame(rootPath: string, filePath: string, si
 }
 
 /**
- * Resolve the Git `HEAD` baseline content for `filePath` so editor gutter change
- * bars (`add` green / `mod` light-blue / `del` triangle) always compare the live
- * buffer against Git `HEAD` rather than the last disk save (`savedContent`).
+ * Resolve the Git `HEAD` baseline content for `filePath` via `/ide/fs/git-base`
+ * so editor gutter change bars (`add` green / `mod` light-blue / `del` triangle)
+ * compare the live buffer directly against Git `HEAD` — independent of repo
+ * registration races, staged-vs-unstaged state, or session restarts.
+ *
+ * Transient network/API errors are intentionally NOT swallowed here so callers
+ * do not memoize a stale `diskSavedContent` fallback as if `HEAD` matched disk.
  */
 export async function runResolveIdeGitBaseContent(
   filePath: string,
@@ -230,31 +241,24 @@ export async function runResolveIdeGitBaseContent(
     ide.target.kind !== 'local' ||
     !filePath ||
     diskSavedContent == null ||
+    filePath.startsWith('untitled:') ||
     filePath.startsWith('jdt://') ||
     filePath.startsWith('jar:')
   ) {
     return diskSavedContent;
   }
-  try {
-    const repo = await ideGit.resolveRepoForPath(filePath);
-    if (!repo) return diskSavedContent;
-    const relPath = ideGit.repoRelativePath(repo, filePath);
-    if (!relPath) return diskSavedContent;
-
-    const st = git.statusById[repo.id];
-    const change = st?.changes.find((c) => c.path.replace(/^\/+/, '') === relPath);
-    if (change && (change.kind === 'untracked' || (change.kind === 'added' && !change.orig_path))) {
-      return '';
-    }
-
-    const encRepo = encodeURIComponent(repo.id);
-    const encPath = encodeURIComponent(relPath);
-    const workingDiff = await api.bg.get<DiffResp>(
-      `/repos/${encRepo}/diff?target=working&path=${encPath}&full=true`,
-      signal,
-    );
-    return reconstructFileFromDiff(diskSavedContent, workingDiff, 'reverse');
-  } catch {
-    return diskSavedContent;
-  }
+  const normFile = normalizeMacPrivatePath(filePath);
+  const folders = getIdeProjectFolders()
+    .map((f) => normalizeMacPrivatePath(f).replace(/\/+$/, ''))
+    .filter((f) => f && (normFile === f || normFile.startsWith(`${f}/`)))
+    .sort((a, b) => b.length - a.length);
+  const root = folders[0] || ide.target.root;
+  const resp = await api.bg.get<IdeGitBaseResp>(
+    `/ide/fs/git-base?${ide.targetQuery({ root, path: filePath })}`,
+    signal,
+  );
+  if (resp.binary) return null;
+  if (!resp.in_repo) return diskSavedContent;
+  if (!resp.head_exists) return '';
+  return normalizeEditorLf(resp.content ?? '');
 }

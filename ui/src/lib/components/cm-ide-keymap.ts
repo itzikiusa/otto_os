@@ -84,7 +84,7 @@ export function lspLanguageIdFor(filePath: string, ideMode: boolean, language?: 
 export interface IdeEditorCallbacks {
   onToggleBreakpoint?: ((line: number) => void) | null;
   onEditBreakpoint?: ((line: number, event?: MouseEvent) => void) | null;
-  onGutterAction?: ((item: IdeGutterItem, mode: 'run' | 'debug') => void) | null;
+  onGutterAction?: ((item: IdeGutterItem, mode: 'run' | 'debug' | 'run_keep_tc') => void) | null;
   onDefinitionJump?: ((target: { path?: string; line: number; column: number; symbol?: string; originLine?: number; originColumn?: number }) => void) | null;
   onImplementationJump?: ((target: { path?: string; line: number; column: number; symbol?: string; originLine?: number; originColumn?: number }) => void) | null;
   onFindUsages?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;

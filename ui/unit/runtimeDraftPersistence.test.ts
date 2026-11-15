@@ -217,3 +217,68 @@ test('composer cursor and scrollTop state persists across thread switches and cl
   clearComposerCursorStates();
   assert.equal(getComposerCursorState('rt:ses_alpha'), null);
 });
+
+test('explicit "Default model" choice (model: null) persists as model_default: true and recovers without spurious saves', async () => {
+  const { composerContent } = await import('../src/lib/stores/runtimeDraftPersistence.ts');
+  const composer = {
+    text: '',
+    images: [],
+    context: [],
+    model: undefined as string | null | undefined,
+    effort: null,
+    pickedMode: null,
+    freshContext: false,
+  };
+  let serverDraft: ReturnType<typeof emptyDraft> | null = null;
+  let serverRev = 0;
+  let writeCount = 0;
+
+  const p1 = new DraftPersistence(
+    composerContent(composer),
+    {
+      load: async () => ({ revision: serverRev, draft: serverDraft ? structuredClone(serverDraft) : null }),
+      save: async (d, r) => {
+        writeCount++;
+        serverRev = r + 1;
+        serverDraft = structuredClone(d);
+        return { revision: serverRev, draft: structuredClone(d) };
+      },
+    },
+    () => true,
+  );
+
+  await p1.load();
+  assert.equal(composer.model, undefined, 'unchosen model stays undefined so session.model is inherited');
+
+  // User explicitly chooses "Default model" (`model = null`) on a session with a pinned model.
+  composer.model = null;
+  await p1.save();
+  assert.equal(writeCount, 1);
+  assert.equal((serverDraft as ReturnType<typeof emptyDraft> | null)?.model_default, true);
+
+  // Fresh window recovers the draft: `composer.model` comes back `null` (not `undefined`), with zero extra writes.
+  const composer2 = {
+    text: '',
+    images: [],
+    context: [],
+    model: undefined as string | null | undefined,
+    effort: null,
+    pickedMode: null,
+    freshContext: false,
+  };
+  const p2 = new DraftPersistence(
+    composerContent(composer2),
+    {
+      load: async () => ({ revision: serverRev, draft: serverDraft ? structuredClone(serverDraft) : null }),
+      save: async (d, r) => {
+        writeCount++;
+        return { revision: r + 1, draft: structuredClone(d) };
+      },
+    },
+    () => true,
+  );
+  await p2.load();
+  assert.equal(composer2.model, null, 'explicit Default model survives round-trip as null');
+  await p2.save();
+  assert.equal(writeCount, 1, 'recovering unchanged model_default draft must not write a new revision');
+});

@@ -50,7 +50,7 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SCREENSHOT_DIR =
-  '/Users/itziklavon/.gemini/antigravity-cli/brain/4814dd52-6e20-428a-88b9-51174ddd8f0e/scratch/screenshots';
+  process.env.OTTO_IDE_SHOTS_DIR ?? join(tmpdir(), 'otto-ide-e2e-shots');
 const KOTLIN_PLUGIN_DIR = resolve(process.cwd(), '..', 'examples', 'ide-plugins', 'kotlin-ide');
 
 interface IdeTargetSpec {

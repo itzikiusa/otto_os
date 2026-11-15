@@ -21,7 +21,7 @@ import {
   type StateEffect,
   type Text,
 } from '@codemirror/state';
-import { crosshairCursor, EditorView, keymap, rectangularSelection } from '@codemirror/view';
+import { crosshairCursor, EditorView, gutter, keymap, rectangularSelection } from '@codemirror/view';
 import {
   forgetEditorState,
   loadEditorState,
@@ -110,7 +110,46 @@ export const lightEditorTheme = EditorView.theme(
 
 export const placeholderEditorTheme = EditorView.theme({
   '.cm-placeholder': { color: 'var(--text-dim)', fontStyle: 'normal' },
+  '.cm-foldGutter, .cm-foldGutter .cm-gutterElement': {
+    inlineSize: '14px',
+    minInlineSize: '14px',
+    maxInlineSize: '14px',
+    padding: '0',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    boxSizing: 'border-box',
+  },
 });
+
+export function createIdeColdGutterPlaceholders(): { bp: Extension; diff: Extension } {
+  return {
+    bp: [
+      gutter({ class: 'cm-ide-bp-gutter' }),
+      EditorView.baseTheme({
+        '.cm-ide-bp-gutter, .cm-ide-bp-gutter .cm-gutterElement': {
+          inlineSize: '34px',
+          minInlineSize: '34px',
+          maxInlineSize: '34px',
+          paddingInline: '2px 1px',
+          boxSizing: 'border-box',
+        },
+      }),
+    ],
+    diff: [
+      gutter({ class: 'cm-ide-diff-gutter' }),
+      EditorView.baseTheme({
+        '.cm-ide-diff-gutter, .cm-ide-diff-gutter .cm-gutterElement': {
+          inlineSize: '7px',
+          minInlineSize: '7px',
+          maxInlineSize: '7px',
+          padding: '0',
+          boxSizing: 'border-box',
+        },
+      }),
+    ],
+  };
+}
 
 export function hasLongLine(doc: Text, limit: number): boolean {
   if (doc.length <= limit) return false;

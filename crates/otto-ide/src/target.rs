@@ -9,6 +9,7 @@
 pub mod complete;
 mod fs_mutate;
 mod fs_ops;
+mod git_base;
 mod manager_ops;
 mod path_resolve;
 pub(crate) mod sdk_archives;
@@ -277,6 +278,9 @@ impl TargetManager {
                     }
                 }
 
+                // Validate the caller's explicitly requested primary + extra roots first.
+                ctx.authorize_local_target(user, spec, write).await?;
+
                 let mut merged_spec = spec.clone();
                 let proj_env_opt = ctx
                     .ide()
@@ -287,10 +291,11 @@ impl TargetManager {
                             .as_ref()
                             .and_then(|e| e.cached_project_env(&spec.project_key()))
                     });
+                let mut server_candidates: Vec<String> = Vec::new();
                 if let Some(proj_env) = &proj_env_opt {
                     for ar in &proj_env.additional_roots {
-                        if !ar.trim().is_empty() && !merged_spec.additional_roots.contains(ar) {
-                            merged_spec.additional_roots.push(ar.clone());
+                        if !ar.trim().is_empty() && !server_candidates.contains(ar) {
+                            server_candidates.push(ar.clone());
                         }
                     }
                 }
@@ -299,10 +304,8 @@ impl TargetManager {
                     .projects
                     .folders_for_root_for_user(&spec.root, user)
                 {
-                    if !proj_ar.trim().is_empty()
-                        && !merged_spec.additional_roots.contains(&proj_ar)
-                    {
-                        merged_spec.additional_roots.push(proj_ar);
+                    if !proj_ar.trim().is_empty() && !server_candidates.contains(&proj_ar) {
+                        server_candidates.push(proj_ar);
                     }
                 }
                 for legacy_ar in ctx
@@ -310,20 +313,26 @@ impl TargetManager {
                     .projects
                     .legacy_unowned_folders_for_root(&spec.root, user.is_root)
                 {
-                    if !legacy_ar.trim().is_empty()
-                        && !merged_spec.additional_roots.contains(&legacy_ar)
-                        && ctx
-                            .authorize_local_target(user, &IdeTargetSpec::local(&legacy_ar), write)
+                    if !legacy_ar.trim().is_empty() && !server_candidates.contains(&legacy_ar) {
+                        server_candidates.push(legacy_ar);
+                    }
+                }
+                // Scope server-stored additional_roots and shared Named Project folders
+                // per user so an unpermitted secondary root is filtered out rather than
+                // poisoning primary workspace access with 403.
+                for cand_ar in server_candidates {
+                    if merged_spec.additional_roots.contains(&cand_ar) {
+                        continue;
+                    }
+                    if user.is_root
+                        || ctx
+                            .authorize_local_target(user, &IdeTargetSpec::local(&cand_ar), write)
                             .await
                             .is_ok()
                     {
-                        merged_spec.additional_roots.push(legacy_ar);
+                        merged_spec.additional_roots.push(cand_ar);
                     }
                 }
-
-                // Single batched RBAC check covering primary root + all merged secondary roots.
-                ctx.authorize_local_target(user, &merged_spec, write)
-                    .await?;
 
                 let toolchains_dir = ctx.ide().toolchains.toolchains_dir();
                 let reg_sdks = ctx.ide().toolchains.cached_local_sdks(&pool).await;

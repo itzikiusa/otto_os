@@ -146,10 +146,11 @@ pub(super) fn add_language_specific_actions(
                 .get(idx + 1)
                 .is_some_and(|n| n.trim().starts_with("if err != nil"))
         {
+            let eol = crate::text_pos::detect_eol(content);
             let mut updated: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
             updated.insert(
                 idx + 1,
-                format!("{indent}if err != nil {{\n{indent}\treturn err\n{indent}}}"),
+                format!("{indent}if err != nil {{{eol}{indent}\treturn err{eol}{indent}}}"),
             );
             out.push(make_action(
                 path,
@@ -219,6 +220,12 @@ pub(super) fn add_language_specific_actions(
             _ => None,
         };
         if let Some(snippet) = stub {
+            let eol = crate::text_pos::detect_eol(content);
+            let formatted_snippet = if eol == "\r\n" {
+                snippet.replace('\n', "\r\n")
+            } else {
+                snippet.clone()
+            };
             out.push(make_action(
                 path,
                 content,
@@ -226,7 +233,7 @@ pub(super) fn add_language_specific_actions(
                 format!("Generate unit test stub for '{name}'"),
                 "refactor.TestStub",
                 snippet.trim().to_string(),
-                format!("{}{}", content.trim_end(), snippet),
+                format!("{}{formatted_snippet}", content.trim_end()),
             ));
         }
     }
@@ -252,7 +259,12 @@ pub(super) fn add_language_specific_actions(
     if lang == "json" {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
             if let Ok(compact) = serde_json::to_string(&val) {
-                let compact_nl = format!("{compact}\n");
+                let eol = crate::text_pos::detect_eol(content);
+                let compact_nl = if content.ends_with('\n') {
+                    format!("{compact}{eol}")
+                } else {
+                    compact.clone()
+                };
                 if compact_nl != content {
                     out.push(make_action(
                         path,

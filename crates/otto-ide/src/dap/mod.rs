@@ -119,32 +119,12 @@ impl BridgeGuard {
             .unwrap_or_default();
 
         #[cfg(unix)]
-        let need_thread = !pgids_to_kill.is_empty() || !dirs_to_remove.is_empty();
-        #[cfg(not(unix))]
-        let need_thread = !dirs_to_remove.is_empty();
+        for pgid in pgids_to_kill {
+            crate::lsp_host::pool_spawn::terminate_process_group(pgid);
+        }
 
-        if need_thread {
+        if !dirs_to_remove.is_empty() {
             std::thread::spawn(move || {
-                #[cfg(unix)]
-                for pgid in pgids_to_kill {
-                    if pgid > 1 {
-                        let neg = format!("-{pgid}");
-                        #[allow(clippy::disallowed_methods)] // dedicated cleanup OS thread
-                        let _ = std::process::Command::new("/bin/kill")
-                            .args(["-TERM", "--", &neg])
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .status();
-                        #[allow(clippy::disallowed_methods)] // dedicated cleanup OS thread
-                        let _ = std::process::Command::new("/bin/kill")
-                            .args(["-KILL", "--", &neg])
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .status();
-                    }
-                }
                 for d in dirs_to_remove {
                     #[allow(clippy::disallowed_methods)] // dedicated cleanup OS thread
                     let _ = std::fs::remove_dir_all(d);

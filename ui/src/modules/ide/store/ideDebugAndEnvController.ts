@@ -61,6 +61,12 @@ export interface DebugAndEnvHost {
   replEntries: IdeReplEntry[];
   debugLoading: boolean;
   debugStreamActive?: boolean;
+  lastDebugLaunch?: {
+    configId?: string;
+    language?: string;
+    launch?: { program: string; args?: string[]; build_flags?: string[]; cwd?: string; test_name?: string; attach_port?: number; env?: Record<string, string> };
+  } | null;
+  recordRunLaunch?(runId: string, memo: { configId?: string; adhoc?: Partial<IdeRunConfig>; keepTestcontainers?: boolean; coverage?: boolean }): void;
   activeMavenProfiles: string[];
   activeSpringProfiles: string[];
   buildSkipTests: boolean;
@@ -406,6 +412,9 @@ export async function launchIdeRun(
       ...(opts.confirmProdTargets ? { confirm_prod_targets: true } : {}),
     });
     host.activeRun = resp.run;
+    host.recordRunLaunch?.(resp.run.id, {
+      configId: opts.configId, adhoc: opts.adhoc, keepTestcontainers: opts.keepTestcontainers, coverage: opts.coverage,
+    });
     prevPoller?.stop();
     prevSseCtl?.abort();
     const sseCtl = new AbortController();
@@ -564,6 +573,7 @@ export async function launchDebugSession(
       breakpoints: host.effectiveBreakpoints,
       ...(opts.confirmProdTargets ? { confirm_prod_targets: true } : {}),
     });
+    host.lastDebugLaunch = { configId: opts.configId, language: opts.language, launch: opts.launch };
     host.expandedVariables = {};
     onSnapshot(resp.session);
     prevCtl?.abort();

@@ -8,15 +8,26 @@
 //! `item/commandExecution/outputDelta`, `subAgentActivity`, `turn/completed`)
 //! onto child [`TurnItem`]s with `parent_item_id = Some(subagent_item_id)`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
-use otto_core::agent_runtime::{BackgroundTask, TurnItem, TurnItemKind, TurnItemStatus};
+use otto_core::agent_runtime::{
+    BackgroundTask, TaskSettlement, TurnItem, TurnItemKind, TurnItemStatus,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{project_codex_item, CodexDriver};
 use crate::driver::{item, DriverEvent, DriverStep};
+
+#[path = "codex_subagent_parse.rs"]
+mod parse;
+
+use self::parse::{
+    child_tool_label, extract_agent_states, extract_collab_error, extract_target_thread_ids,
+    first_line_label, item_status_is_terminal, normalize_collab_tool, parse_status_str, str_any,
+    CollabKind,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CodexSubagent {
@@ -48,6 +59,8 @@ pub(crate) struct CodexSubagent {
     pub status: TurnItemStatus,
     pub started_at: DateTime<Utc>,
     #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub seen_child_tools: HashSet<String>,
     #[serde(default)]
     pub settled: bool,
@@ -73,6 +86,11 @@ impl CodexSubagent {
         ti.turn_id = self.turn_id.clone();
         ti.parent_item_id = self.parent_item_id.clone();
         ti.started_at = Some(self.started_at);
+        ti.completed_at = if self.status.is_open() {
+            None
+        } else {
+            Some(self.completed_at.unwrap_or_else(Utc::now))
+        };
         ti.error = self.error.clone();
         ti
     }
@@ -92,12 +110,6 @@ impl CodexSubagent {
             .map(str::to_string)
             .unwrap_or_else(|| "Subagent".to_string())
     }
-}
-
-#[derive(Debug, Clone)]
-struct ParsedAgentState {
-    status: Option<TurnItemStatus>,
-    message: Option<String>,
 }
 
 impl CodexDriver {
@@ -216,6 +228,7 @@ impl CodexDriver {
                 error: None,
                 status: TurnItemStatus::Running,
                 started_at: Utc::now(),
+                completed_at: None,
                 seen_child_tools: HashSet::new(),
                 settled: false,
             });
@@ -248,6 +261,7 @@ impl CodexDriver {
             };
             card.status = status;
             card.settled = true;
+            card.completed_at = Some(Utc::now());
             card.error = extract_collab_error(it);
             let ti = card.to_turn_item();
             step.push(DriverEvent::TurnItem(ti));
@@ -303,6 +317,7 @@ impl CodexDriver {
                 label,
                 started_at,
                 item_id: Some(card_item_id),
+                due_at: None,
             });
         }
         step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
@@ -369,6 +384,7 @@ impl CodexDriver {
             if card.settled {
                 card.settled = false;
                 card.status = TurnItemStatus::Running;
+                card.completed_at = None;
                 card.error = None;
                 let bg_id = card.bg_id();
                 let label = card.label();
@@ -383,6 +399,7 @@ impl CodexDriver {
                         label,
                         started_at,
                         item_id: Some(item_id),
+                        due_at: None,
                     });
                     step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
                 }
@@ -638,6 +655,7 @@ impl CodexDriver {
             }
             card.settled = true;
             card.status = status;
+            card.completed_at = Some(Utc::now());
             if let Some(out) = output.or_else(|| card.last_message.clone()) {
                 if !out.trim().is_empty() {
                     card.output = Some(out);
@@ -662,10 +680,10 @@ impl CodexDriver {
         if self.remove_bg_task_ids(&[bg_id.clone(), key_id]) {
             step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
         }
-        let verb = match status {
-            TurnItemStatus::Failed => "failed",
-            TurnItemStatus::Cancelled => "stopped",
-            _ => "finished",
+        let (verb, settlement_status) = match status {
+            TurnItemStatus::Failed => ("failed", "failed"),
+            TurnItemStatus::Cancelled | TurnItemStatus::Interrupted => ("stopped", "stopped"),
+            _ => ("finished", "completed"),
         };
         let mut notice = item(
             format!("bg:{bg_id}"),
@@ -673,6 +691,12 @@ impl CodexDriver {
             None,
             TurnItemKind::SystemNotice {
                 message: format!("Background agent {verb}: {label}"),
+                task_settlement: Some(TaskSettlement {
+                    task_id: bg_id,
+                    kind: "agent".into(),
+                    status: settlement_status.into(),
+                    label,
+                }),
             },
         );
         notice.turn_id = turn_id;
@@ -684,195 +708,5 @@ impl CodexDriver {
         self.bg_tasks
             .retain(|t| !ids.iter().any(|id| !id.is_empty() && id == &t.id));
         self.bg_tasks.len() != before
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CollabKind {
-    Spawn,
-    SendInput,
-    Wait,
-    Close,
-    Resume,
-}
-
-fn normalize_collab_tool(raw: &str) -> CollabKind {
-    match raw {
-        "sendInput" | "send_input" => CollabKind::SendInput,
-        "wait" | "waitForAgents" | "wait_for_agents" => CollabKind::Wait,
-        "closeAgent" | "close_agent" => CollabKind::Close,
-        "resumeAgent" | "resume_agent" => CollabKind::Resume,
-        _ => CollabKind::Spawn,
-    }
-}
-
-fn item_status_is_terminal(it: &Value) -> bool {
-    matches!(
-        it.get("status").and_then(Value::as_str),
-        Some("completed" | "failed" | "declined")
-    )
-}
-
-fn str_any(v: &Value, keys: &[&str]) -> Option<String> {
-    for k in keys {
-        if let Some(s) = v
-            .get(*k)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Some(s.to_string());
-        }
-    }
-    None
-}
-
-fn first_line_label(s: &str) -> Option<String> {
-    let line = s.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let mut out: String = line.chars().take(80).collect();
-    if line.chars().count() > 80 {
-        out.push('…');
-    }
-    Some(out)
-}
-
-fn extract_target_thread_ids(it: &Value) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut push_unique = |s: &str| {
-        let trimmed = s.trim();
-        if !trimmed.is_empty() && !out.iter().any(|e| e == trimmed) {
-            out.push(trimmed.to_string());
-        }
-    };
-    for key in [
-        "newThreadId",
-        "new_thread_id",
-        "agentThreadId",
-        "agent_thread_id",
-        "receiverThreadId",
-        "receiver_thread_id",
-    ] {
-        if let Some(s) = it.get(key).and_then(Value::as_str) {
-            push_unique(s);
-        }
-    }
-    for key in ["receiverThreadIds", "receiver_thread_ids"] {
-        if let Some(arr) = it.get(key).and_then(Value::as_array) {
-            for v in arr.iter().filter_map(Value::as_str) {
-                push_unique(v);
-            }
-        }
-    }
-    for key in ["agentsStates", "agents_states"] {
-        if let Some(obj) = it.get(key).and_then(Value::as_object) {
-            let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
-            keys.sort_unstable();
-            for k in keys {
-                push_unique(k);
-            }
-        }
-    }
-    out
-}
-
-fn extract_agent_states(it: &Value) -> HashMap<String, ParsedAgentState> {
-    let mut out = HashMap::new();
-    for key in ["agentsStates", "agents_states"] {
-        let Some(obj) = it.get(key).and_then(Value::as_object) else {
-            continue;
-        };
-        for (tid, val) in obj {
-            out.insert(tid.clone(), parse_agent_state(val));
-        }
-    }
-    out
-}
-
-fn parse_agent_state(val: &Value) -> ParsedAgentState {
-    if let Some(s) = val.as_str() {
-        return ParsedAgentState {
-            status: parse_status_str(s),
-            message: None,
-        };
-    }
-    let Some(obj) = val.as_object() else {
-        return ParsedAgentState {
-            status: None,
-            message: None,
-        };
-    };
-    let status = obj
-        .get("status")
-        .or_else(|| obj.get("state"))
-        .and_then(Value::as_str)
-        .and_then(parse_status_str)
-        .or_else(|| {
-            if obj.contains_key("completed") {
-                Some(TurnItemStatus::Completed)
-            } else if obj.contains_key("errored") || obj.contains_key("failed") {
-                Some(TurnItemStatus::Failed)
-            } else if obj.contains_key("shutdown") || obj.contains_key("interrupted") {
-                Some(TurnItemStatus::Cancelled)
-            } else {
-                None
-            }
-        });
-    let message = str_any(
-        val,
-        &[
-            "message",
-            "output",
-            "finalOutput",
-            "final_output",
-            "error",
-            "completed",
-            "errored",
-        ],
-    )
-    .or_else(|| {
-        obj.get("completed")
-            .or_else(|| obj.get("errored"))
-            .and_then(|nested| str_any(nested, &["message", "output", "error"]))
-    });
-    ParsedAgentState { status, message }
-}
-
-fn parse_status_str(s: &str) -> Option<TurnItemStatus> {
-    match s {
-        "pendingInit" | "pending_init" | "pending" | "running" | "inProgress" | "in_progress" => {
-            Some(TurnItemStatus::Running)
-        }
-        "completed" | "done" | "succeeded" => Some(TurnItemStatus::Completed),
-        "errored" | "failed" | "error" | "notFound" | "not_found" => Some(TurnItemStatus::Failed),
-        "shutdown" | "closed" | "interrupted" | "cancelled" | "declined" => {
-            Some(TurnItemStatus::Cancelled)
-        }
-        _ => None,
-    }
-}
-
-fn extract_collab_error(it: &Value) -> Option<String> {
-    match it.get("error") {
-        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
-        Some(v @ Value::Object(_)) => str_any(v, &["message", "error"]),
-        _ => None,
-    }
-}
-
-fn child_tool_label(raw_item: &Value, ti: &TurnItem) -> Option<String> {
-    match &ti.kind {
-        TurnItemKind::CommandExecution { input, .. } => {
-            first_line_label(input).or_else(|| Some("Command".into()))
-        }
-        TurnItemKind::FileChange { file_name, .. } => Some(format!("Edit {file_name}")),
-        TurnItemKind::DynamicTool { tool_name, .. } => Some(tool_name.clone()),
-        TurnItemKind::WebSearch { patterns } => patterns
-            .first()
-            .map(|q| format!("Search {q}"))
-            .or_else(|| Some("Web search".into())),
-        _ => raw_item
-            .get("type")
-            .and_then(Value::as_str)
-            .map(str::to_string),
     }
 }

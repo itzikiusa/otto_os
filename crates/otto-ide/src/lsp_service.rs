@@ -31,9 +31,10 @@ mod diagnostics_go;
 mod diagnostics_polyglot;
 mod formatting;
 pub mod go_mod_nav;
-pub use go_mod_nav::{
-    extract_go_file_build_tags, is_valid_go_build_tag, merge_go_tags_into_args,
-    validate_go_build_tags,
+pub use crate::go_build_tags::{
+    canonicalize_go_build_tags, extract_go_file_build_tags, is_gopls_build_tag_exclusion_msg,
+    is_valid_go_build_tag, merge_go_tags_into_args, strip_go_tags_from_args,
+    unify_go_build_flags_and_args, validate_go_build_tags,
 };
 mod go_mod_resolve;
 pub mod hover;
@@ -76,13 +77,29 @@ pub async fn document_symbols<S: IdeCtx>(
     req: IdeSymbolsReq,
 ) -> Result<IdeSymbolsResp> {
     req.target.validate()?;
+    let resolved_opt =
+        if !req.target.root.trim().is_empty() || !user.is_root || req.content.is_none() {
+            let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
+            if !req.path.trim().is_empty() {
+                let _ = ctx
+                    .ide()
+                    .targets
+                    .resolve_readable_or_prospective_path(&resolved, &req.path)
+                    .await?;
+            }
+            Some(resolved)
+        } else {
+            None
+        };
     let content = match req.content {
         Some(c) => c,
         None => {
-            let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
+            let resolved = resolved_opt
+                .as_ref()
+                .expect("resolved when content is None");
             ctx.ide()
                 .targets
-                .read_file(&resolved, &req.path)
+                .read_file(resolved, &req.path)
                 .await?
                 .content
         }
@@ -101,6 +118,13 @@ pub async fn find_references<S: IdeCtx>(
 ) -> Result<IdeReferencesResp> {
     req.target.absorb_project_folders(&req.project_folders);
     let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
+    if !req.path.trim().is_empty() {
+        let _ = ctx
+            .ide()
+            .targets
+            .resolve_readable_or_prospective_path(&resolved, &req.path)
+            .await?;
+    }
     let col = req.effective_column().max(1);
     let symbol = match req
         .symbol

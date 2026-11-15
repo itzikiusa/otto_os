@@ -238,7 +238,7 @@ export function readJournalMap(storage?: Pick<Storage, 'getItem'> | null): UndoJ
     const raw = store.getItem(IDE_UNDO_JOURNAL_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
-    return parsed && typeof parsed === 'object' ? (parsed as UndoJournalMap) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as UndoJournalMap) : {};
   } catch {
     return {};
   }
@@ -265,7 +265,7 @@ function readDraftIndex(storage?: Pick<Storage, 'getItem'> | null): UndoDraftInd
   try {
     const raw = store.getItem(IDE_UNDO_DRAFT_INDEX_KEY);
     const parsed = raw ? (JSON.parse(raw) as unknown) : null;
-    return parsed && typeof parsed === 'object' ? (parsed as UndoDraftIndexMap) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as UndoDraftIndexMap) : {};
   } catch {
     return {};
   }
@@ -315,13 +315,16 @@ export function readIdeUndoDraft(
   try {
     const raw = store.getItem(`${IDE_UNDO_DRAFT_PREFIX}${filePath}`);
     if (raw) {
-      const parsed = JSON.parse(raw) as Partial<IdeUndoDraftRecord>;
-      if (typeof parsed?.savedContent === 'string' && typeof parsed?.draftContent === 'string') {
-        return {
-          savedContent: parsed.savedContent,
-          draftContent: parsed.draftContent,
-          updatedAt: Number(parsed.updatedAt ?? 0),
-        };
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const rec = parsed as Partial<IdeUndoDraftRecord>;
+        if (typeof rec.savedContent === 'string' && typeof rec.draftContent === 'string') {
+          return {
+            savedContent: rec.savedContent,
+            draftContent: rec.draftContent,
+            updatedAt: Number(rec.updatedAt ?? 0),
+          };
+        }
       }
     }
   } catch { /* fall back to journal entry */ }
