@@ -580,15 +580,11 @@ impl AgentRuntime {
         let live = self.live(id).await?;
         if before_turn_ordinal.is_none() {
             otto_telemetry::context::measure("threads.sideband_poll", async {
-                for _ in 0..4 {
-                    if !poll_driver_sideband(&self.inner, &live, None).await {
-                        break;
-                    }
-                }
+                let _ = poll_driver_sideband(&self.inner, &live, None).await;
             })
             .await;
         }
-        otto_telemetry::context::measure_result("threads.snapshot_slice", async {
+        let res = otto_telemetry::context::measure_result("threads.snapshot_slice", async {
             let mut st = live.lock();
             flush_held(&self.inner, &live, &mut st);
             let last_sequence = st.next_seq - 1;
@@ -634,7 +630,10 @@ impl AgentRuntime {
                 snapshot: Box::new(snap),
             })
         })
-        .await
+        .await;
+        drop(live);
+        super::try_evict_dead(&self.inner, id);
+        res
     }
 }
 

@@ -11,6 +11,7 @@ import {
 } from '../git/ideGitQuickMenu';
 import { ide, ideBasename, type IdeFsEntry } from '../ideStore.svelte';
 import { ideAgent } from '../store/ideAgentController.svelte';
+import { resolveRepoRootForPath } from '../store/ideRepoTestAndBuildTags';
 import { promptPutLocalHistoryLabel, type IdeCompareMode } from './ideComparisonLoader';
 import { buildManifestMenuItems } from './ideManifestActions';
 
@@ -146,6 +147,27 @@ export function showTreeNodeContextMenu(
   };
 
   const items: MenuItem[] = [];
+  if (isDir) {
+    const repo = resolveRepoRootForPath(ide.target.root, ide.projectRoots, entry.path);
+    items.push(
+      {
+        label: `Run All Tests (${repo.name})`,
+        icon: 'play',
+        action: () => void ide.runRepoTests(repo.path, 'run'),
+      },
+      {
+        label: `Run All Tests with Coverage (${repo.name})`,
+        icon: 'shield',
+        action: () => void ide.runRepoTests(repo.path, 'coverage'),
+      },
+      {
+        label: `Debug All Tests (${repo.name})`,
+        icon: 'bug',
+        action: () => void ide.runRepoTests(repo.path, 'debug'),
+      },
+      { separator: true },
+    );
+  }
   if (!isDir) {
     items.push(
       { label: 'Open', icon: 'file', action: () => void ide.openFile(entry.path, { preview: false }) },

@@ -89,7 +89,7 @@ pub(super) async fn upsert_run_config<S: IdeCtx>(
     let config = ctx
         .ide()
         .environments
-        .upsert_run_config(&ctx.pool(), req)
+        .upsert_run_config_for_user(&ctx.pool(), req, user.is_root)
         .await?;
     Ok(Json(IdeRunConfigResp { config }))
 }
@@ -134,6 +134,12 @@ pub(super) async fn start_run<S: IdeCtx>(
     Json(mut req): Json<IdeStartRunReq>,
 ) -> ApiResult<Json<IdeRunResp>> {
     req.target.absorb_project_folders(&req.project_folders);
+    if !user.is_root && req.target.kind == IdeTargetKind::Local {
+        return Err(Error::Forbidden(
+            "local unsandboxed execution requires root; use a remote SSH target".into(),
+        )
+        .into());
+    }
     let ssh = ctx
         .ide()
         .targets
@@ -151,7 +157,13 @@ pub(super) async fn start_run<S: IdeCtx>(
         Some(nb) => {
             ctx.ide()
                 .netbridge
-                .acquire_for_launch(&ctx, &user, &req.target, nb)
+                .acquire_for_launch_with_confirm(
+                    &ctx,
+                    &user,
+                    &req.target,
+                    nb,
+                    req.confirm_prod_targets,
+                )
                 .await?
         }
         None => None,
@@ -241,31 +253,10 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
         .await?
         .into_ssh_spec();
     if !user.is_root && req.target.kind == IdeTargetKind::Local {
-        if req.launch.attach_port.is_some() {
-            return Err(Error::Forbidden(
-                "non-root users cannot attach local debuggers by host port".into(),
-            )
-            .into());
-        }
-        let prog = req.launch.program.trim();
-        if !prog.is_empty() {
-            ctx.ide()
-                .targets
-                .validate_subpath(&req.target, prog, false)
-                .await?;
-        }
-        if let Some(cwd) = req
-            .launch
-            .cwd
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            ctx.ide()
-                .targets
-                .validate_subpath(&req.target, cwd, false)
-                .await?;
-        }
+        return Err(Error::Forbidden(
+            "local unsandboxed debugging requires root; use a remote SSH target".into(),
+        )
+        .into());
     }
     let run_config = match req.config_id.as_deref().filter(|s| !s.is_empty()) {
         Some(cid) => Some(
@@ -305,17 +296,25 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
         Some(nb) => {
             ctx.ide()
                 .netbridge
-                .acquire_for_launch(&ctx, &user, &req.target, nb)
+                .acquire_for_launch_with_confirm(
+                    &ctx,
+                    &user,
+                    &req.target,
+                    nb,
+                    req.confirm_prod_targets,
+                )
                 .await?
         }
         None => None,
     };
+    let go_build_tags = loaded_proj.go_build_tags.clone();
     let project_env = Some(loaded_proj);
     let plugin_adapters = ctx.ide().plugins.active_dap_adapters();
     let start_ctx = DapStartContext::new()
         .with_ssh(ssh)
         .with_effective_env(effective_env)
         .with_project_env(project_env)
+        .with_go_build_tags(go_build_tags)
         .with_run_config(run_config)
         .with_plugin_adapters(plugin_adapters)
         .with_netbridge(netbridge)

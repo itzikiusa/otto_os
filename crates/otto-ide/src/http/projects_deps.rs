@@ -163,12 +163,12 @@ async fn resolve_manifest_target<S: IdeCtx>(
     target_opt: Option<IdeTargetSpec>,
     raw_path: &str,
     write: bool,
-) -> Result<(IdeTargetSpec, PathBuf, PathBuf)> {
+) -> Result<(IdeTargetSpec, PathBuf, PathBuf, Vec<PathBuf>)> {
     let trimmed = raw_path.trim();
     if trimmed.is_empty() {
         return Err(Error::Invalid("manifest 'path' is required".into()));
     }
-    let target = match target_opt {
+    let mut target = match target_opt {
         Some(t) if !t.root.trim().is_empty() => t,
         _ => {
             let p = FsPath::new(trimmed);
@@ -179,6 +179,15 @@ async fn resolve_manifest_target<S: IdeCtx>(
             IdeTargetSpec::local(dir.to_string_lossy().into_owned())
         }
     };
+    ctx.ide()
+        .environments
+        .enrich_target_roots(
+            &ctx.pool(),
+            Some(&ctx.ide().projects),
+            Some(user),
+            &mut target,
+        )
+        .await;
     let resolved = if write {
         ctx.ide().targets.resolve_write(ctx, user, &target).await?
     } else {
@@ -202,14 +211,20 @@ async fn resolve_manifest_target<S: IdeCtx>(
     } else {
         canon_root.join(trimmed)
     };
-    let canon_manifest = std::fs::canonicalize(&cand)
-        .ok()
-        .or_else(|| otto_core::secret_paths::canonicalize_prospective(&cand))
-        .ok_or_else(|| Error::NotFound(format!("manifest '{trimmed}' not found")))?;
+    let trimmed_owned = trimmed.to_string();
+    let canon_manifest = tokio::task::spawn_blocking(move || {
+        #[allow(clippy::disallowed_methods)]
+        let resolved_p = std::fs::canonicalize(&cand)
+            .ok()
+            .or_else(|| otto_core::secret_paths::canonicalize_prospective(&cand));
+        resolved_p.ok_or_else(|| Error::NotFound(format!("manifest '{trimmed_owned}' not found")))
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("manifest canonicalize worker failed: {e}")))??;
 
-    let in_roots = std::iter::once(&canon_root)
-        .chain(additional_roots.iter())
-        .any(|r| canon_manifest.starts_with(r));
+    let mut allowed_roots = vec![canon_root.clone()];
+    allowed_roots.extend(additional_roots);
+    let in_roots = allowed_roots.iter().any(|r| canon_manifest.starts_with(r));
     if !in_roots {
         return Err(Error::Forbidden(format!(
             "manifest '{}' escapes workspace root '{}'",
@@ -220,7 +235,7 @@ async fn resolve_manifest_target<S: IdeCtx>(
     if !user.is_root {
         enforce_non_root_path(&canon_manifest)?;
     }
-    Ok((target, canon_root, canon_manifest))
+    Ok((target, canon_root, canon_manifest, allowed_roots))
 }
 
 pub(super) async fn deps_inspect<S: IdeCtx>(
@@ -228,7 +243,7 @@ pub(super) async fn deps_inspect<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeDepsInspectReq>,
 ) -> ApiResult<Json<IdeDepsInspectResp>> {
-    let (target, _, manifest_path) =
+    let (target, _, manifest_path, allowed_roots) =
         resolve_manifest_target(&ctx, &user, req.target, &req.path, false).await?;
     let env_map = match ctx
         .ide()
@@ -246,10 +261,12 @@ pub(super) async fn deps_inspect<S: IdeCtx>(
             Default::default()
         }
     };
-    let resp = crate::deps_inspector::inspect_dependencies(
+    let resp = crate::deps_inspector::inspect_dependencies_scoped(
         &manifest_path,
         req.content.as_deref(),
         &env_map,
+        &allowed_roots,
+        user.is_root,
     )
     .await;
     Ok(Json(resp))
@@ -260,7 +277,8 @@ pub(super) async fn deps_action<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeDepsActionReq>,
 ) -> ApiResult<Json<IdeDepsActionResp>> {
-    let (target, canon_root, manifest_path) =
+    super::require_root_user(&user)?;
+    let (target, canon_root, manifest_path, allowed_roots) =
         resolve_manifest_target(&ctx, &user, req.target.clone(), &req.path, true).await?;
     let env_map = ctx
         .ide()
@@ -275,8 +293,9 @@ pub(super) async fn deps_action<S: IdeCtx>(
             );
             err
         })?;
-    let resp = crate::deps_inspector::run_deps_action_as(
+    let resp = crate::deps_inspector::run_deps_action_scoped(
         &canon_root,
+        &allowed_roots,
         &manifest_path,
         &req,
         &env_map,

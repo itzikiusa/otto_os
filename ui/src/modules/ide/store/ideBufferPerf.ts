@@ -529,7 +529,7 @@ export async function performSaveFile(
     const resp = await api.put<{ path: string; size: number; sha256: string }>('/ide/fs/file', {
       target: saveTarget, path: targetPath, content: contentToSave,
       expected_sha256: forceOverwrite || !tab.sha256 ? undefined : tab.sha256,
-      record_local_history: prefs.localHistoryEnabled,
+      local_history_enabled: prefs.localHistoryEnabled,
       local_history_retention_days: prefs.localHistoryRetentionDays,
     });
     tab.savedContent = contentToSave; tab.sha256 = resp.sha256;

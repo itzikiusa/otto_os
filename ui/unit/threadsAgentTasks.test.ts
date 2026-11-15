@@ -1,5 +1,5 @@
-// Every subagent and background task of a runtime thread (agentTasks.ts):
-// the strip above the composer and Thread details' "Agents & tasks".
+// Every subagent, child thread, and background task of a runtime thread (agentTasks.ts):
+// the strip above the composer and Thread details' "Agents & tasks" drill-down.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { agentTasks, backgroundStripText, taskElapsed } from '../src/modules/threads/runtime/agentTasks.ts';
@@ -38,6 +38,79 @@ test('finished work is newest first: settled cards and background command notice
     ['npm test', 'done', 'command'],
     ['alpha probe', 'done', 'agent'],
   ]);
+});
+
+test('drill-down surfaces live subagent child steps, streaming command output, child threads, and settles expired timers', () => {
+  const items = [
+    card('t1:sa:1', 'IDE Backend Fixer', 'running', '2026-11-13T10:00:00Z', {
+      subagent_type: 'self',
+      prompt: 'Fix gopls build tags',
+      tool_uses: 3,
+      last_tool: 'edit_file',
+    }),
+    {
+      ...base,
+      id: 't1:cmd:1',
+      ordinal: 2,
+      status: 'running',
+      started_at: '2026-11-13T10:00:02Z',
+      type: 'command_execution',
+      input: 'cargo nextest run -p otto-ide',
+      cwd: '/Users/dev/claude_ade-ide',
+      output: '',
+    } as never,
+    {
+      ...base,
+      id: 't2:msg:1',
+      turn_id: 't2',
+      ordinal: 3,
+      status: 'completed',
+      started_at: '2026-11-13T10:02:00Z',
+      updated_at: '2026-11-13T10:02:00Z',
+      type: 'user_message',
+      text: 'Status check',
+    } as never,
+  ];
+  const background = [
+    bg('sa-1', 'IDE Backend Fixer', '2026-11-13T10:00:00Z', 't1:sa:1'),
+    { id: 'task-9', kind: 'command', label: 'cargo nextest run -p otto-ide', started_at: '2026-11-13T10:00:02Z', item_id: 't1:cmd:1' },
+    { id: 'sched-1', kind: 'command', label: 'Timer (35s): Verify Post-Round-3 deploy receipt', started_at: '2026-11-13T10:00:05Z' },
+  ];
+  const t = agentTasks(items, background, {
+    output: { 't1:cmd:1': 'Compiling otto-ide v0.1.0\nPASS [ 0.42s] pool_tests::warm_reuse\n' },
+    childThreads: [
+      {
+        id: 'rt_child_1',
+        title: 'Security Reviewer',
+        provider: 'codex',
+        model: 'gpt-5.4',
+        status: 'working',
+        createdAt: '2026-11-13T10:00:10Z',
+        updatedAt: '2026-11-13T10:01:00Z',
+        stepSummary: 'Read 6 files',
+      },
+    ],
+  });
+
+  // One-shot 35s timer started at 10:00:05Z with activity at 10:02:00Z settles to finished!
+  assert.deepEqual(t.running.map((r) => r.label), [
+    'IDE Backend Fixer',
+    'cargo nextest run -p otto-ide',
+    'Security Reviewer',
+  ]);
+  assert.equal(t.running[0].sublabel, 'self');
+  assert.equal(t.running[0].stepSummary, '3 steps · last: edit_file');
+  assert.equal(t.running[0].prompt, 'Fix gopls build tags');
+  assert.equal(t.running[1].stepSummary, 'PASS [ 0.42s] pool_tests::warm_reuse');
+  assert.equal(t.running[1].output, 'Compiling otto-ide v0.1.0\nPASS [ 0.42s] pool_tests::warm_reuse\n');
+  assert.equal(t.running[2].childSessionId, 'rt_child_1');
+  assert.equal(t.running[2].sublabel, 'codex · gpt-5.4');
+  assert.equal(t.running[2].stepSummary, 'Read 6 files');
+  assert.equal(backgroundStripText([t.running[0]]), 'Running in the background: IDE Backend Fixer (3 steps · last: edit_file)');
+
+  assert.equal(t.finished.length, 1);
+  assert.equal(t.finished[0].kind, 'timer');
+  assert.equal(t.finished[0].status, 'done');
 });
 
 test('elapsed reads seconds, minutes and hours, live while running', () => {

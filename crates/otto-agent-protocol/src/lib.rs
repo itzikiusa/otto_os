@@ -41,9 +41,9 @@ use axum::Router;
 use otto_core::auth::{AuthContext, RoleChecker};
 
 pub use driver::{
-    ChildSignal, DriverError, DriverEvent, DriverFactory, DriverStep, LaunchContext, LaunchSpec,
-    McpDelivery, McpServerDef, SidebandPayload, SidebandPoll, SidebandResumeSeed, SidebandSource,
-    StructuredDriver,
+    ActiveTailChunk, ActiveTailKind, ActiveTailSource, ChildSignal, DriverError, DriverEvent,
+    DriverFactory, DriverStep, LaunchContext, LaunchSpec, McpDelivery, McpServerDef,
+    SidebandPayload, SidebandPoll, SidebandResumeSeed, SidebandSource, StructuredDriver,
 };
 pub use host::{RuntimeHost, SessionManagerHost};
 pub use runtime::{AgentRuntime, RuntimeConfig};

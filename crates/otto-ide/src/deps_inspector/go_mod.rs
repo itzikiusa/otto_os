@@ -30,6 +30,7 @@ fn go_updates_cache() -> &'static Mutex<HashMap<PathBuf, CachedGoUpdates>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[allow(clippy::disallowed_methods)]
 fn file_stamp(path: &Path) -> FileStamp {
     let Ok(meta) = fs::metadata(path) else {
         return (0, 0);
@@ -123,11 +124,11 @@ fn parse_go_require_spec(raw_line: &str, line_no: u32, strip_kw: bool) -> Option
             .map(|s| s.trim().to_string())
     });
 
-    let work = if strip_kw {
+    let (work, search_from) = if strip_kw {
         let pos = code_part.find("require")? + "require".len();
-        &code_part[pos..]
+        (&code_part[pos..], pos)
     } else {
-        code_part
+        (code_part, 0)
     };
     let trimmed_work = work.trim();
     let inner_work = trimmed_work
@@ -140,12 +141,12 @@ fn parse_go_require_spec(raw_line: &str, line_no: u32, strip_kw: bool) -> Option
     if mod_name.starts_with('(') || mod_name.starts_with(')') {
         return None;
     }
-    let name_byte = raw_line.find(mod_name)?;
+    let name_byte = search_from + code_part[search_from..].find(mod_name)?;
     let ver_search_start = name_byte + mod_name.len();
-    let ver_byte = ver_search_start + raw_line[ver_search_start..].find(ver)?;
-    let name_col = (raw_line[..name_byte].chars().count() + 1) as u32;
+    let ver_byte = ver_search_start + code_part[ver_search_start..].find(ver)?;
+    let name_col = (code_part[..name_byte].chars().count() + 1) as u32;
     let name_end_col = name_col + mod_name.chars().count() as u32;
-    let version_col = (raw_line[..ver_byte].chars().count() + 1) as u32;
+    let version_col = (code_part[..ver_byte].chars().count() + 1) as u32;
     let version_end_col = version_col + ver.chars().count() as u32;
 
     Some(IdeDepItem {
@@ -187,6 +188,7 @@ fn apply_go_updates(items: &mut [IdeDepItem], updates: &GoUpdateMap) {
     }
 }
 
+#[allow(clippy::disallowed_methods)]
 pub(super) async fn enrich_go_mod_updates(
     manifest_path: &Path,
     items: &mut [IdeDepItem],

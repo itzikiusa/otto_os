@@ -112,6 +112,7 @@ impl otto_ide::IdeCtx for ServerCtx {
                 user: params.user.unwrap_or_default(),
                 identity_file: params.identity_file,
                 proxy_jump: params.jump,
+                environment: Some(conn.environment.as_str().to_string()),
             })
         })
     }
@@ -258,10 +259,16 @@ impl otto_ide::IdeCtx for ServerCtx {
             }
             let allow_cross_namespace =
                 otto_k8s::access::allowed(&self.pool, user, cluster_id, "exec", None).await?;
+            let cluster_env = serde_json::to_value(&cluster).ok().and_then(|v| {
+                v.get("environment")
+                    .and_then(|e| e.as_str())
+                    .map(str::to_string)
+            });
             let k = otto_k8s::clusters::kubectl_for(self, &cluster).await?;
             Ok(otto_ide::netbridge::IdeK8sSpec {
                 cluster_id: cluster.id,
                 cluster_name: cluster.name,
+                environment: cluster_env,
                 namespace: ns,
                 allow_cross_namespace,
                 kubectl_program: k.program,

@@ -387,7 +387,7 @@ export async function createTemplatedFile(
       path: fullPath,
       content: template,
       create_dirs: true,
-      record_local_history: prefs.localHistoryEnabled,
+      local_history_enabled: prefs.localHistoryEnabled,
       local_history_retention_days: prefs.localHistoryRetentionDays,
     });
     const containingRoot = findContainingRoot(fullPath, host.projectRoots);

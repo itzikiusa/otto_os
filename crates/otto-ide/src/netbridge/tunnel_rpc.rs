@@ -12,7 +12,9 @@ use tokio::net::UnixStream;
 use super::k8s_discover::{resolve_destination, should_intercept_dns};
 use super::socks5::constant_time_eq;
 use super::tunnel::NetBridgeInstance;
-use super::tunnel_forward::{ensure_not_metadata_target, is_ssh_routable_private_ip};
+use super::tunnel_forward::{
+    ensure_not_metadata_target, is_ssh_routable_private_ip, LocalForwardTarget,
+};
 
 impl NetBridgeInstance {
     fn check_token(&self, candidate: &str) -> bool {
@@ -56,9 +58,13 @@ impl NetBridgeInstance {
                     wr.write_all(b"ERR bad_port\n").await?;
                     return Ok(());
                 };
-                match self.resolve_connect_port(ip_str, port).await {
-                    Ok(Some(lport)) => {
+                match self.resolve_connect_target(ip_str, port).await {
+                    Ok(Some(LocalForwardTarget::TcpPort(lport))) => {
                         wr.write_all(format!("PORT {lport}\n").as_bytes()).await?;
+                    }
+                    Ok(Some(LocalForwardTarget::UnixSocket(upath))) => {
+                        wr.write_all(format!("UNIX {}\n", upath.display()).as_bytes())
+                            .await?;
                     }
                     Ok(None) => {
                         wr.write_all(b"PASSTHROUGH\n").await?;
@@ -76,29 +82,32 @@ impl NetBridgeInstance {
         wr.flush().await
     }
 
-    async fn resolve_connect_port(
+    pub(super) async fn resolve_connect_target(
         self: &Arc<Self>,
         ip_str: &str,
         req_port: u16,
-    ) -> Result<Option<u16>> {
+    ) -> Result<Option<LocalForwardTarget>> {
         let snap = self.current_k8s_snapshot().await;
         if let Ok(v4) = ip_str.parse::<Ipv4Addr>() {
             if let Some(host_entry) = self.vip_to_host.get(&v4) {
                 let host = host_entry.value().clone();
                 drop(host_entry);
                 ensure_not_metadata_target(&host)?;
-                let Some(dest) = resolve_destination(
+                if let Some(dest) = resolve_destination(
                     &host,
                     req_port,
                     &self.cfg,
                     snap.as_deref(),
                     self.ssh_cfg.is_some(),
-                ) else {
-                    return Err(Error::NotFound(format!(
-                        "no bridge route for {host}:{req_port}"
-                    )));
-                };
-                return self.ensure_local_forward_port(dest).await.map(Some);
+                ) {
+                    return self.ensure_local_forward_target(dest).await.map(Some);
+                }
+                // DNS interception was triggered by a port-scoped `HostMapping` on another
+                // port: connect directly to `(host, req_port)` instead of failing `NotFound`.
+                return self
+                    .ensure_direct_local_relay(&host, req_port)
+                    .await
+                    .map(|p| Some(LocalForwardTarget::UnixSocket(p)));
             }
         }
 
@@ -111,7 +120,7 @@ impl NetBridgeInstance {
             )));
         }
 
-        // Direct ClusterIP or RFC1918 IP connection (`OTTO_NETBRIDGE_PRIVATE_IPS=1`).
+        // Direct ClusterIP or RFC1918/CGNAT IP connection (`OTTO_NETBRIDGE_PRIVATE_IPS=1`).
         if let Some(s) = snap.as_deref() {
             if let Some(svc_name) = s.cluster_ips.get(ip_str) {
                 if let Some(entry) = s.services.get(svc_name) {
@@ -119,7 +128,7 @@ impl NetBridgeInstance {
                     return self
                         .ensure_k8s_port_forward(&s.namespace, &entry.name, port)
                         .await
-                        .map(Some);
+                        .map(|p| Some(LocalForwardTarget::TcpPort(p)));
                 }
             }
         }
@@ -127,7 +136,7 @@ impl NetBridgeInstance {
             return self
                 .ensure_ssh_local_relay(ip_str, req_port)
                 .await
-                .map(Some);
+                .map(|p| Some(LocalForwardTarget::UnixSocket(p)));
         }
         Ok(None)
     }

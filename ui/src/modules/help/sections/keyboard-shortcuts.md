@@ -132,6 +132,7 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 | `⌘M` | Minimise the window |
 | `⌃⌘F` | Enter or exit full screen |
 | `⌘A` | Select all |
+| `⌃⌘Space` | Emoji & Symbols picker |
 
 **System-wide (desktop app, work in any app)**
 

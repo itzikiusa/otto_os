@@ -22,6 +22,7 @@ import {
   DEFAULT_LSP_TOKEN_MODIFIERS,
   DEFAULT_LSP_TOKEN_TYPES,
   detectLspCompletionTrigger,
+  extractGoBuildTagsFromSource,
   IDLE_CLOSE_MS,
   isPosInCommentOrString,
   LSP_CODE_LANGUAGES,
@@ -30,6 +31,7 @@ import {
   normalizeIdeLspLanguage,
   posToLsp,
   resolveIdeLspModuleRoot,
+  rewriteGoBuildTagDiagnostic,
   shouldAttachIdeLsp,
   toAbsoluteIdeFilePath,
   type LspPos,
@@ -66,6 +68,7 @@ export {
   DEFAULT_LSP_TOKEN_MODIFIERS,
   DEFAULT_LSP_TOKEN_TYPES,
   detectLspCompletionTrigger,
+  extractGoBuildTagsFromSource,
   hasLiveLspDiagnosticsForFile,
   IDLE_CLOSE_MS,
   isPosInCommentOrString,
@@ -77,6 +80,7 @@ export {
   normalizeIdeLspLanguage,
   requestIdeDiveAtPos,
   resolveIdeLspModuleRoot,
+  rewriteGoBuildTagDiagnostic,
   shouldAttachIdeLsp,
   toAbsoluteIdeFilePath,
   tokenSpanAtPos,
@@ -95,21 +99,76 @@ type MarimoMod = typeof import('@marimo-team/codemirror-languageserver');
 
 interface PooledClientEntry {
   key: string;
+  aliasKeys: Set<string>;
   rootPath: string;
   client: InstanceType<MarimoMod['LanguageServerClient']>;
   transport: InstanceType<MarimoMod['WebSocketTransport']>;
   offTransportClose: (() => void) | null;
   evictFn: () => void;
   diagListeners: Map<string, Set<(diags: IdeDiagnostic[]) => void>>;
+  openViews: Map<string, EditorView>;
   refCount: number;
   closeTimer: ReturnType<typeof setTimeout> | null;
   disposed: boolean;
 }
 
+const MODULE_SCOPED_LSP_LANGS = new Set(['go', 'rust', 'java', 'python']);
+
 let marimoPromise: Promise<MarimoMod> | null = null;
 let marimoCache: MarimoMod | null = null;
 const clientPool = new Map<string, PooledClientEntry>();
+const canonicalModuleRootByDir = new Map<string, string>();
 const unavailableLangUntil = new Map<string, number>();
+
+function parentDirOf(absPath: string): string {
+  const clean = absPath.replace(/\\/g, '/').replace(/\/+$/, '');
+  const idx = clean.lastIndexOf('/');
+  return idx > 0 ? clean.slice(0, idx) : '/';
+}
+
+function recordCanonicalModuleRoot(
+  serverLang: string,
+  connKey: string,
+  fileDir: string,
+  canonRoot: string,
+): void {
+  const normCanon = canonRoot.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+  let cur = fileDir.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+  for (let depth = 0; depth < 32; depth++) {
+    canonicalModuleRootByDir.set(`${serverLang}::${connKey}::${cur}`, normCanon);
+    if (cur === normCanon || !cur.startsWith(`${normCanon}/`)) break;
+    const next = parentDirOf(cur);
+    if (next === cur) break;
+    cur = next;
+  }
+}
+
+function resolvePoolKeyForFile(
+  serverLang: string,
+  connId: string | null | undefined,
+  resolvedRoot: string,
+  filePath?: string | null,
+): string {
+  const connKey = connId ?? 'local';
+  const normRoot = resolvedRoot.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+  if (!filePath || !MODULE_SCOPED_LSP_LANGS.has(serverLang)) {
+    return `${serverLang}::${connKey}::${normRoot}`;
+  }
+  const absFile = toAbsoluteIdeFilePath(normRoot, filePath);
+  if (!absFile) return `${serverLang}::${connKey}::${normRoot}`;
+  const fileDir = parentDirOf(absFile);
+  let probe = fileDir;
+  for (let depth = 0; depth < 32; depth++) {
+    const knownCanon = canonicalModuleRootByDir.get(`${serverLang}::${connKey}::${probe}`);
+    if (knownCanon) return `${serverLang}::${connKey}::${knownCanon}`;
+    if (probe === normRoot || !probe.startsWith(`${normRoot}/`)) break;
+    const next = parentDirOf(probe);
+    if (next === probe) break;
+    probe = next;
+  }
+  if (fileDir === normRoot) return `${serverLang}::${connKey}::${normRoot}`;
+  return `${serverLang}::${connKey}::dir:${fileDir}`;
+}
 
 function loadMarimo(): Promise<MarimoMod> {
   if (marimoCache) return Promise.resolve(marimoCache);
@@ -148,8 +207,13 @@ function disposePooledEntry(entry: PooledClientEntry): void {
     entry.closeTimer = null;
   }
   if (clientPool.get(entry.key) === entry) clientPool.delete(entry.key);
+  for (const ak of entry.aliasKeys) {
+    if (clientPool.get(ak) === entry) clientPool.delete(ak);
+  }
+  entry.aliasKeys.clear();
   clearLiveLspDiagnostics(entry.rootPath);
   entry.diagListeners.clear();
+  entry.openViews.clear();
   try {
     entry.offTransportClose?.();
   } catch {
@@ -173,26 +237,40 @@ function scheduleIdleDispose(entry: PooledClientEntry, delayMs = IDLE_CLOSE_MS):
   }, delayMs);
 }
 
-/** True when a live pooled client already exists for `(lang, connId, resolvedRoot)`. */
+/** True when a live pooled client already exists for `(lang, connId, resolvedRoot, filePath)`. */
 export function hasWarmPooledLspClient(
   languageId: string,
   resolvedRoot: string,
   connId?: string | null,
+  filePath?: string | null,
 ): boolean {
   const serverLang = normalizeIdeLspLanguage(languageId) ?? languageId;
-  const entry = clientPool.get(`${serverLang}::${connId ?? 'local'}::${resolvedRoot}`);
+  const key = resolvePoolKeyForFile(serverLang, connId, resolvedRoot, filePath);
+  const entry = clientPool.get(key) ?? clientPool.get(`${serverLang}::${connId ?? 'local'}::${resolvedRoot}`);
   return Boolean(entry && !entry.disposed);
 }
 
-/** Deterministically close pooled LSP WebSocket clients (e.g. on project switch or closing tabs). */
+/** Deterministically close pooled LSP WebSocket clients (e.g. on project switch, build-tag change, or closing tabs). */
 export function disposePooledLspClients(opts?: {
   rootPath?: string;
   forceAll?: boolean;
   exceptKey?: string;
 }): void {
-  for (const entry of [...clientPool.values()]) {
+  const normFilter = opts?.rootPath ? opts.rootPath.replace(/\\/g, '/').replace(/\/+$/, '') : '';
+  if (normFilter && opts?.forceAll) {
+    for (const [dirKey, canon] of [...canonicalModuleRootByDir.entries()]) {
+      if (canon === normFilter || canon.startsWith(`${normFilter}/`) || dirKey.endsWith(`::${normFilter}`) || dirKey.includes(`::${normFilter}/`)) {
+        canonicalModuleRootByDir.delete(dirKey);
+      }
+    }
+  }
+  const uniqueEntries = new Set<PooledClientEntry>(clientPool.values());
+  for (const entry of uniqueEntries) {
     if (opts?.exceptKey && entry.key === opts.exceptKey) continue;
-    if (opts?.rootPath && entry.rootPath !== opts.rootPath) continue;
+    if (normFilter) {
+      const entryRoot = entry.rootPath.replace(/\\/g, '/').replace(/\/+$/, '');
+      if (entryRoot !== normFilter && !entryRoot.startsWith(`${normFilter}/`)) continue;
+    }
     if (opts?.forceAll || entry.refCount <= 0) disposePooledEntry(entry);
   }
 }
@@ -211,7 +289,10 @@ export interface AttachPooledLspOptions {
 
 function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resolvedRoot: string): PooledClientEntry {
   const serverLang = normalizeIdeLspLanguage(opts.languageId) ?? opts.languageId;
-  const key = `${serverLang}::${opts.connId ?? 'local'}::${resolvedRoot}`;
+  const connKey = opts.connId ?? 'local';
+  const absFile = toAbsoluteIdeFilePath(resolvedRoot, opts.filePath) || opts.filePath;
+  const fileDir = absFile ? parentDirOf(absFile) : resolvedRoot;
+  const key = resolvePoolKeyForFile(serverLang, opts.connId, resolvedRoot, absFile);
   const existing = clientPool.get(key);
   if (existing && !existing.disposed) {
     clientPool.delete(key);
@@ -223,25 +304,34 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
     return existing;
   }
 
-  while (clientPool.size >= MAX_POOLED_LSP_CLIENTS) {
+  const distinctPooled = () => new Set(clientPool.values());
+  while (distinctPooled().size >= MAX_POOLED_LSP_CLIENTS) {
     let victim: PooledClientEntry | undefined;
-    for (const candidate of clientPool.values()) {
+    for (const candidate of distinctPooled()) {
       if (candidate.refCount <= 0) {
         victim = candidate;
         break;
       }
     }
-    victim ??= clientPool.values().next().value;
+    victim ??= distinctPooled().values().next().value;
     if (!victim) break;
     disposePooledEntry(victim);
   }
 
   const rootUri = `file://${resolvedRoot}`;
-  const langProbeKey = `${serverLang}::${opts.connId ?? 'local'}`;
+  const langProbeKey = `${serverLang}::${connKey}`;
+  const openViews = new Map<string, EditorView>();
   const transport = new mod.WebSocketTransport(opts.wsUri, opts.protocols);
   const origOnMessage = transport.onMessage.bind(transport);
   transport.onMessage = (handler) =>
-    origOnMessage((msg) => handler(dedupeLspJsonRpcMessage(msg)));
+    origOnMessage((msg) =>
+      handler(
+        dedupeLspJsonRpcMessage(msg, (uri) => {
+          const v = openViews.get(uri);
+          return v ? v.state.sliceDoc(0, Math.min(v.state.doc.length, 4096)) : null;
+        }),
+      ),
+    );
   const diagListeners = new Map<string, Set<(diags: IdeDiagnostic[]) => void>>();
 
   let onHandshakeAborted: (() => void) | null = null;
@@ -335,12 +425,14 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
 
   const entry: PooledClientEntry = {
     key,
+    aliasKeys: new Set<string>(),
     rootPath: resolvedRoot,
     client,
     transport,
     offTransportClose: null,
     evictFn: () => {},
     diagListeners,
+    openViews,
     refCount: 0,
     closeTimer: null,
     disposed: false,
@@ -360,25 +452,48 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
   }) ?? null;
 
   client.onNotification((n) => {
-    if (entry.disposed || n.method !== 'textDocument/publishDiagnostics' || !n.params?.uri) return;
+    if (entry.disposed) return;
+    const rawNotif = n as unknown as { method?: string; params?: Record<string, unknown> };
+    if (rawNotif.method === 'otto/lspAttached' && typeof rawNotif.params?.root === 'string' && rawNotif.params.root) {
+      const canonRoot = rawNotif.params.root.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+      entry.rootPath = canonRoot;
+      recordCanonicalModuleRoot(serverLang, connKey, fileDir, canonRoot);
+      const canonKey = `${serverLang}::${connKey}::${canonRoot}`;
+      if (canonKey !== entry.key) {
+        entry.aliasKeys.add(canonKey);
+        const curCanon = clientPool.get(canonKey);
+        if (!curCanon || curCanon.disposed) clientPool.set(canonKey, entry);
+      }
+      return;
+    }
+    if (n.method !== 'textDocument/publishDiagnostics' || !n.params?.uri) return;
     const fPath = lspUriToPath(n.params.uri);
-    markLiveLspDiagnostics(resolvedRoot, fPath);
+    markLiveLspDiagnostics(entry.rootPath, fPath);
+    if (resolvedRoot !== entry.rootPath) markLiveLspDiagnostics(resolvedRoot, fPath);
     if (opts.rootPath && opts.rootPath !== resolvedRoot) {
       markLiveLspDiagnostics(opts.rootPath, fPath);
     }
     const subs = diagListeners.get(n.params.uri);
     if (!subs || subs.size === 0) return;
-    const mapped: IdeDiagnostic[] = (n.params.diagnostics ?? []).map((d) => ({
-      path: fPath,
-      line: d.range.start.line + 1,
-      column: d.range.start.character + 1,
-      end_line: d.range.end.line + 1,
-      end_column: d.range.end.character + 1,
-      severity: d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : d.severity === 4 ? 'hint' : 'info',
-      message: typeof d.message === 'string' ? d.message : d.message.value,
-      source: d.source ?? null,
-      code: d.code != null ? String(d.code) : null,
-    }));
+    const viewForDoc = openViews.get(n.params.uri);
+    const headerText = viewForDoc ? viewForDoc.state.sliceDoc(0, Math.min(viewForDoc.state.doc.length, 4096)) : null;
+    const mapped: IdeDiagnostic[] = (n.params.diagnostics ?? []).map((d) => {
+      const rawMsg = typeof d.message === 'string' ? d.message : d.message.value;
+      const rw = rewriteGoBuildTagDiagnostic(rawMsg, d.code, headerText);
+      return {
+        path: fPath,
+        line: d.range.start.line + 1,
+        column: d.range.start.character + 1,
+        end_line: d.range.end.line + 1,
+        end_column: d.range.end.character + 1,
+        severity: rw.isBuildTagDiag
+          ? 'warning'
+          : d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : d.severity === 4 ? 'hint' : 'info',
+        message: rw.message,
+        source: rw.isBuildTagDiag && d.source === 'go list' ? 'gopls (build tags)' : (d.source ?? null),
+        code: rw.isBuildTagDiag ? 'otto_go_build_tag' : (d.code != null ? String(d.code) : null),
+      };
+    });
     for (const cb of subs) cb(mapped);
   });
 
@@ -410,12 +525,24 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
 
   const lifecycleCleanup = ViewPlugin.fromClass(class {
     private unsubDiag: (() => void) | null = null;
-    constructor() {
+    constructor(view: EditorView) {
       if (pooled.closeTimer !== null) {
         clearTimeout(pooled.closeTimer);
         pooled.closeTimer = null;
       }
       pooled.refCount += 1;
+      pooled.openViews.set(documentUri, view);
+      if (pooled.client.ready) {
+        markLiveLspDiagnostics(pooled.rootPath, absFile);
+        if (opts.rootPath && opts.rootPath !== pooled.rootPath) markLiveLspDiagnostics(opts.rootPath, absFile);
+      } else {
+        void pooled.client.initializePromise?.then(() => {
+          if (!pooled.disposed && pooled.client.ready && pooled.openViews.get(documentUri) === view) {
+            markLiveLspDiagnostics(pooled.rootPath, absFile);
+            if (opts.rootPath && opts.rootPath !== pooled.rootPath) markLiveLspDiagnostics(opts.rootPath, absFile);
+          }
+        }).catch(() => {});
+      }
       if (opts.onDiagnostics) {
         const cb = opts.onDiagnostics;
         let set = pooled.diagListeners.get(documentUri);
@@ -431,6 +558,7 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
       }
     }
     destroy() {
+      pooled.openViews.delete(documentUri);
       this.unsubDiag?.();
       this.unsubDiag = null;
       pooled.refCount = Math.max(0, pooled.refCount - 1);
@@ -509,27 +637,57 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
   return [lspTooltipTheme, lifecycleCleanup, ...exts, completionExt, semanticExt];
 }
 
-/** Query raw hover markdown from an active pooled LSP client if available, for `cm-ide-hover.ts`. */
-export async function queryPooledLspHoverMarkdown(view: EditorView, pos: number): Promise<string | null> {
+export interface PooledLspHoverResult {
+  markdown: string;
+  definedIn: { path: string; line: number; column?: number } | null;
+}
+
+/** Query raw hover markdown + authoritative definition location from an active pooled LSP client. */
+export async function queryPooledLspHover(view: EditorView, pos: number): Promise<PooledLspHoverResult | null> {
   if (!marimoCache) return null;
   const plugin = marimoCache.getLanguageServerPlugin(view);
-  if (!plugin || !plugin.client.ready || !plugin.client.hasCapability('textDocument/hover')) return null;
+  if (!plugin) return null;
+  if (!plugin.client.ready) {
+    try {
+      await Promise.race([
+        plugin.client.initializePromise,
+        new Promise<void>((resolve) => setTimeout(resolve, 1200)),
+      ]);
+    } catch {
+      return null;
+    }
+  }
+  if (!plugin.client.ready) return null;
   try {
-    const res = await plugin.client.textDocumentHover({
-      textDocument: { uri: plugin.documentUri },
-      position: posToLsp(view.state.doc, pos),
-    });
-    if (!res?.contents) return null;
+    const hoverPromise = plugin.client.hasCapability('textDocument/hover')
+      ? plugin.client.textDocumentHover({
+          textDocument: { uri: plugin.documentUri },
+          position: posToLsp(view.state.doc, pos),
+        }).catch(() => null)
+      : Promise.resolve(null);
+    const defPromise = queryPluginLocations(view, pos, 'definition').catch(() => []);
+    const [res, locs] = await Promise.all([hoverPromise, defPromise]);
+    const definedIn = locs.length > 0 ? { path: locs[0].path, line: locs[0].line, column: locs[0].column } : null;
+    if (!res?.contents) {
+      return definedIn ? { markdown: '', definedIn } : null;
+    }
     const parts = Array.isArray(res.contents) ? res.contents : [res.contents];
     const text = parts
       .map((p) => (typeof p === 'string' ? p : 'value' in p && typeof p.value === 'string' ? p.value : ''))
       .filter(Boolean)
       .join('\n\n')
       .trim();
-    return text || null;
+    if (!text && !definedIn) return null;
+    return { markdown: text, definedIn };
   } catch {
     return null;
   }
+}
+
+/** Query raw hover markdown from an active pooled LSP client if available, for `cm-ide-hover.ts`. */
+export async function queryPooledLspHoverMarkdown(view: EditorView, pos: number): Promise<string | null> {
+  const res = await queryPooledLspHover(view, pos);
+  return res?.markdown || null;
 }
 
 /** Notify the active LSP plugin on `view` that the buffer was saved (`willSave` / `didSave`). */

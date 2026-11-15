@@ -350,6 +350,10 @@ pub struct IdeProjectEnvironment {
     pub additional_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub module_sdks: BTreeMap<String, String>,
+    #[serde(default)]
+    pub go_build_tags: Vec<String>,
+    #[serde(default)]
+    pub module_go_build_tags: BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_bridge: Option<IdeNetworkBridgeConfig>,
     #[serde(default, alias = "vars")]
@@ -369,6 +373,8 @@ impl Default for IdeProjectEnvironment {
             inherit_shell_env: true,
             additional_roots: Vec::new(),
             module_sdks: BTreeMap::new(),
+            go_build_tags: Vec::new(),
+            module_go_build_tags: BTreeMap::new(),
             network_bridge: None,
             env_vars: Vec::new(),
         }
@@ -399,9 +405,15 @@ pub struct IdeUpdateEnvironmentReq {
     #[serde(default)]
     pub module_sdks: Option<BTreeMap<String, String>>,
     #[serde(default)]
+    pub go_build_tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub module_go_build_tags: Option<BTreeMap<String, Vec<String>>>,
+    #[serde(default)]
     pub network_bridge: Option<IdeNetworkBridgeConfig>,
     #[serde(default, alias = "vars")]
     pub env_vars: Vec<IdeEnvVarEntry>,
+    #[serde(default)]
+    pub confirm_prod_targets: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -519,6 +531,8 @@ pub struct IdeRunConfig {
     pub skip_tests: bool,
     #[serde(default)]
     pub offline: bool,
+    #[serde(default)]
+    pub coverage: bool,
 }
 
 impl Default for IdeRunConfig {
@@ -545,6 +559,7 @@ impl Default for IdeRunConfig {
             spring_profiles: Vec::new(),
             skip_tests: false,
             offline: false,
+            coverage: false,
         }
     }
 }
@@ -612,7 +627,7 @@ pub struct IdeTestCaseResult {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IdeRunState {
     pub id: String,
     pub title: String,
@@ -627,9 +642,13 @@ pub struct IdeRunState {
     pub output_seq: u64,
     pub output: Vec<String>,
     pub tests: Vec<IdeTestCaseResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_summary: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeStartRunReq {
     pub target: IdeTargetSpec,
     #[serde(default)]
@@ -650,6 +669,10 @@ pub struct IdeStartRunReq {
     pub skip_tests: bool,
     #[serde(default)]
     pub offline: bool,
+    #[serde(default)]
+    pub coverage: bool,
+    #[serde(default)]
+    pub confirm_prod_targets: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,7 +694,7 @@ pub struct IdeToolchainPythonVenvResp {
     pub interpreter_path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IdeRunResp {
     pub run: IdeRunState,
 }

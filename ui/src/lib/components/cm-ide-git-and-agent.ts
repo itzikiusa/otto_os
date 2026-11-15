@@ -2,8 +2,8 @@
 // & One-Click Rollback, Inline Active-Line Git Blame, and AI Agent + GoLand Context Menu.
 
 import {
-  Decoration, EditorView, GutterMarker, WidgetType, gutter, keymap,
-  type DecorationSet,
+  Decoration, EditorView, GutterMarker, ViewPlugin, WidgetType, gutter, keymap,
+  type DecorationSet, type ViewUpdate,
 } from '@codemirror/view';
 import {
   EditorSelection, EditorState, Prec, RangeSet, StateEffect, StateField,
@@ -28,7 +28,7 @@ export interface IdeAgentMenuCallbacks {
   onFindUsages?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
   onFileStructure?: (() => void) | null;
   onQuickFix?: ((ctx: { line: number; column: number; symbol?: string }) => void) | null;
-  onRenameSymbol?: ((ctx: { line: number; column: number; symbol: string }) => void) | null;
+  onRenameSymbol?: ((ctx: { line: number; column: number; symbol: string; newName?: string }) => void) | null;
   onFormat?: (() => void) | null;
   onToggleBlame?: (() => void) | null;
 }
@@ -49,7 +49,9 @@ export interface IdeDiffHunk {
 export const setSavedContentEffect = StateEffect.define<string | null>();
 export const setBlameLinesEffect = StateEffect.define<Record<number, string> | null>();
 
-const MAX_DIFF_GUTTER_LINES = 4_000;
+export const MAX_DIFF_GUTTER_LINES = 25_000;
+const MAX_EXACT_MYERS_LINES = 6_000;
+const SVG_NS = 'http://www.w3.org/2000/svg';
 
 export function selectionOrCurrentLine(state: EditorState): IdeEditorSelectionRange {
   const { from, to } = state.selection.main;
@@ -73,11 +75,23 @@ class DiffGutterMarker extends GutterMarker {
     bar.className = `cm-ide-diff-bar cm-ide-diff-${this.kind}`;
     bar.dataset.diffKind = this.kind;
     bar.title = this.kind === 'add'
-      ? 'Added lines — click to inspect or rollback hunk'
+      ? 'Added lines (vs Git HEAD) — click to inspect or rollback hunk'
       : this.kind === 'del'
-        ? 'Deleted lines — click to inspect or restore hunk'
-        : 'Modified lines — click to inspect or rollback hunk';
+        ? 'Deleted lines (vs Git HEAD) — click to inspect or restore hunk'
+        : 'Modified lines (vs Git HEAD) — click to inspect or rollback hunk';
     bar.setAttribute('aria-hidden', 'true');
+    if (this.kind === 'del') {
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('viewBox', '0 0 8 8');
+      svg.setAttribute('width', '7');
+      svg.setAttribute('height', '7');
+      svg.setAttribute('aria-hidden', 'true');
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', 'M1 1L7 4L1 7Z');
+      path.setAttribute('fill', 'currentColor');
+      svg.appendChild(path);
+      bar.appendChild(svg);
+    }
     return bar;
   }
 }
@@ -86,10 +100,18 @@ const addLineMarker = new DiffGutterMarker('add');
 const modLineMarker = new DiffGutterMarker('mod');
 const delLineMarker = new DiffGutterMarker('del');
 
-function parseSavedLines(savedContent: string | null | undefined): string[] | null {
+export function parseSavedLines(savedContent: string | null | undefined): string[] | null {
   if (savedContent == null) return null;
+  if (savedContent === '') return [];
   const lines = savedContent.split(/\r\n?|\n/);
   return lines.length <= MAX_DIFF_GUTTER_LINES ? lines : null;
+}
+
+export function computeIdeDiffHunks(docText: string, savedContent: string | null | undefined): IdeDiffHunk[] {
+  const savedLines = parseSavedLines(savedContent);
+  if (!savedLines) return [];
+  const st = EditorState.create({ doc: docText });
+  return buildDiffState(st.doc, savedLines).hunks;
 }
 
 function buildDiffState(
@@ -99,6 +121,19 @@ function buildDiffState(
   const newLen = doc.lines;
   if (!savedLines || newLen === 0 || newLen > MAX_DIFF_GUTTER_LINES) {
     return { markers: RangeSet.empty, hunks: [] };
+  }
+  if (doc.length === 0) {
+    if (savedLines.length === 0) return { markers: RangeSet.empty, hunks: [] };
+    const h: IdeDiffHunk = {
+      kind: 'del',
+      newStartLine: 1,
+      newEndLine: 0,
+      markerStartLine: 1,
+      markerEndLine: 1,
+      oldLines: savedLines,
+      newLines: [],
+    };
+    return { markers: RangeSet.of([delLineMarker.range(0)], true), hunks: [h] };
   }
   const oldLen = savedLines.length;
   let prefix = 0;
@@ -150,7 +185,7 @@ function buildDiffState(
     }
   };
 
-  if (oldMid === 0 || newMid === 0) {
+  if (oldMid === 0 || newMid === 0 || oldMid + newMid > MAX_EXACT_MYERS_LINES) {
     pushHunk(prefix, prefix + oldMid, prefix, prefix + newMid);
   } else {
     const oldSlice = savedLines.slice(prefix, prefix + oldMid);
@@ -240,7 +275,7 @@ class InlineBlameWidget extends WidgetType {
 }
 
 const ideDiffGutterTheme = EditorView.baseTheme({
-  '.cm-ide-diff-gutter': { width: '6px', userSelect: 'none', cursor: 'pointer' },
+  '.cm-ide-diff-gutter': { width: '7px', userSelect: 'none', cursor: 'pointer' },
   '.cm-ide-diff-gutter .cm-gutterElement': {
     padding: '0',
     display: 'flex',
@@ -248,23 +283,32 @@ const ideDiffGutterTheme = EditorView.baseTheme({
     justifyContent: 'center',
   },
   '.cm-ide-diff-bar': {
-    display: 'block',
-    inlineSize: '3px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    inlineSize: '4px',
     blockSize: '100%',
     minBlockSize: '1.2em',
-    borderRadius: '1px',
-    transition: 'inline-size var(--dur-fast) var(--ease-out)',
+    borderRadius: '1.5px',
+    transition: 'inline-size var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out)',
   },
   '.cm-ide-diff-gutter .cm-gutterElement:hover .cm-ide-diff-bar': {
-    inlineSize: '5px',
+    inlineSize: '6px',
   },
   '.cm-ide-diff-add': { backgroundColor: 'var(--success)' },
   '.cm-ide-diff-mod': { backgroundColor: 'var(--info)' },
   '.cm-ide-diff-del': {
-    backgroundColor: 'var(--warning)',
-    blockSize: '6px',
-    minBlockSize: '6px',
+    backgroundColor: 'transparent',
+    color: 'var(--text-dim)',
+    inlineSize: '7px',
+    blockSize: '8px',
+    minBlockSize: '8px',
     alignSelf: 'flex-end',
+  },
+  '.cm-ide-diff-gutter .cm-gutterElement:hover .cm-ide-diff-del': {
+    color: 'var(--warning)',
+    inlineSize: '7px',
+    transform: 'scale(1.15)',
   },
   '.cm-ide-inline-blame': {
     color: 'var(--text-dim)',
@@ -285,6 +329,8 @@ export interface CreateIdeGitAndAgentOptions {
 }
 
 export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions): Extension {
+  const setComputedDiffEffect = StateEffect.define<{ markers: RangeSet<GutterMarker>; hunks: IdeDiffHunk[] }>();
+
   const diffField = StateField.define<{ savedLines: string[] | null; markers: RangeSet<GutterMarker>; hunks: IdeDiffHunk[] }>({
     create(st) {
       const savedLines = parseSavedLines(opts.savedContent);
@@ -297,11 +343,37 @@ export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions
         if (ef.is(setSavedContentEffect)) {
           savedLines = parseSavedLines(ef.value);
           baselineChanged = true;
+        } else if (ef.is(setComputedDiffEffect)) {
+          return { savedLines, markers: ef.value.markers, hunks: ef.value.hunks };
         }
       }
-      if (!baselineChanged && !tr.docChanged) return cur;
-      return { savedLines, ...buildDiffState(tr.state.doc, savedLines) };
+      if (baselineChanged) {
+        return { savedLines, ...buildDiffState(tr.state.doc, savedLines) };
+      }
+      if (!tr.docChanged) return cur;
+      return { savedLines, markers: cur.markers.map(tr.changes), hunks: cur.hunks };
     },
+  });
+
+  const diffComputePlugin = ViewPlugin.fromClass(class {
+    private timer: ReturnType<typeof setTimeout> | null = null;
+    private destroyed = false;
+    update(u: ViewUpdate) {
+      if (!u.docChanged) return;
+      if (this.timer) clearTimeout(this.timer);
+      const targetView = u.view;
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        if (this.destroyed || !targetView.dom.isConnected) return;
+        const st = targetView.state.field(diffField, false);
+        if (!st) return;
+        targetView.dispatch({ effects: setComputedDiffEffect.of(buildDiffState(targetView.state.doc, st.savedLines)) });
+      }, 200);
+    }
+    destroy() {
+      this.destroyed = true;
+      if (this.timer) clearTimeout(this.timer);
+    }
   });
 
   const blameField = StateField.define<{ byLine: Record<number, string> | null; decos: DecorationSet }>({
@@ -371,9 +443,35 @@ export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions
         action: () => void copyWithToast(hunk.oldLines.join('\n'), 'original hunk'),
       });
     }
+    if (hunks.length > 1) {
+      const idx = hunks.indexOf(hunk);
+      const jumpToHunk = (target: IdeDiffHunk): void => {
+        const targetLn = Math.max(1, Math.min(view.state.doc.lines, target.markerStartLine));
+        const pos = view.state.doc.line(targetLn).from;
+        view.dispatch({ selection: EditorSelection.cursor(pos), effects: EditorView.scrollIntoView(pos, { y: 'center' }) });
+        view.focus();
+      };
+      items.push(
+        { separator: true },
+        { label: 'Next Change', icon: 'chevronDown', action: () => jumpToHunk(hunks[(idx + 1) % hunks.length]) },
+        { label: 'Previous Change', icon: 'chevronUp', action: () => jumpToHunk(hunks[(idx - 1 + hunks.length) % hunks.length]) },
+      );
+    }
+    items.push(
+      { separator: true },
+      {
+        label: 'Compare with Git HEAD…',
+        icon: 'git',
+        action: () => {
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('otto:ide-open-compare', { detail: { mode: 'git' } }));
+          }
+        },
+      },
+    );
     const cbs = opts.getCallbacks();
     if (cbs.onToggleBlame) {
-      items.push({ separator: true }, { label: 'Toggle Git blame annotations', icon: 'commit', action: () => cbs.onToggleBlame?.() });
+      items.push({ label: 'Toggle Git blame annotations', icon: 'commit', action: () => cbs.onToggleBlame?.() });
     }
     ctxMenu.show(event, items);
     return true;
@@ -451,5 +549,5 @@ export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions
     { key: 'Mod-i', run: (v) => runAgent(v, 'inline') },
   ]));
 
-  return [ideDiffGutterTheme, diffField, blameField, diffGutter, agentHandlers, agentKeymap];
+  return [ideDiffGutterTheme, diffField, diffComputePlugin, blameField, diffGutter, agentHandlers, agentKeymap];
 }

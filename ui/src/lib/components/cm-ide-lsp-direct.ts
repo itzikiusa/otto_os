@@ -13,6 +13,7 @@ import {
   DEFAULT_LSP_TOKEN_MODIFIERS,
   DEFAULT_LSP_TOKEN_TYPES,
   lspToPos,
+  rewriteGoBuildTagDiagnostic,
   shouldAttachIdeLsp,
   type LspRange,
   type RawLspCompletionItem,
@@ -168,49 +169,80 @@ export function createDirectLspExtension(
           markLiveLspDiagnostics(rootPath, opts.filePath);
           const raw = dedupeLspDiagnostics(params?.diagnostics ?? []);
           const doc = liveView.state.doc;
+          const headerText = doc.sliceString(0, Math.min(doc.length, 4096));
           const cmDiags: Diagnostic[] = raw.map((d) => {
             const from = Math.max(0, Math.min(doc.length, lspToPos(doc, d.range.start)));
             const to = Math.max(from, Math.min(doc.length, lspToPos(doc, d.range.end)));
+            const rw = rewriteGoBuildTagDiagnostic(d.message, d.code, headerText);
             return {
               from,
               to,
-              severity: d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : 'info',
-              message: d.message,
-              source: d.source,
+              severity: rw.isBuildTagDiag ? 'warning' : (d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : 'info'),
+              message: rw.message,
+              source: rw.isBuildTagDiag && d.source === 'go list' ? 'gopls (build tags)' : d.source,
+              actions: rw.isBuildTagDiag && rw.tags.length > 0
+                ? [{
+                    name: `Enable Go build tag "${rw.tags.join(',')}"`,
+                    apply: (v) => {
+                      v.dom.dispatchEvent(
+                        new CustomEvent('otto:ide-enable-go-build-tag', {
+                          bubbles: true,
+                          detail: { tags: rw.tags, filePath: opts.filePath },
+                        }),
+                      );
+                    },
+                  }]
+                : undefined,
             };
           });
           liveView.dispatch(setDiagnostics(liveView.state, cmDiags));
           opts.onDiagnostics?.(
-            raw.map((d) => ({
-              path: opts.filePath,
-              line: d.range.start.line + 1,
-              column: d.range.start.character + 1,
-              end_line: d.range.end.line + 1,
-              end_column: d.range.end.character + 1,
-              severity: d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : d.severity === 4 ? 'hint' : 'info',
-              message: d.message,
-              source: d.source ?? null,
-              code: d.code != null ? String(d.code) : null,
-            })),
+            raw.map((d) => {
+              const rw = rewriteGoBuildTagDiagnostic(d.message, d.code, headerText);
+              return {
+                path: opts.filePath,
+                line: d.range.start.line + 1,
+                column: d.range.start.character + 1,
+                end_line: d.range.end.line + 1,
+                end_column: d.range.end.character + 1,
+                severity: rw.isBuildTagDiag
+                  ? 'warning'
+                  : (d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : d.severity === 4 ? 'hint' : 'info'),
+                message: rw.message,
+                source: rw.isBuildTagDiag && d.source === 'go list' ? 'gopls (build tags)' : (d.source ?? null),
+                code: rw.isBuildTagDiag ? 'otto_go_build_tag' : (d.code != null ? String(d.code) : null),
+              };
+            }),
           );
         }
       });
     }
+    private changeTimer: ReturnType<typeof setTimeout> | null = null;
     update(u: ViewUpdate) {
       if (u.docChanged && ready) {
-        version++;
-        send({
-          jsonrpc: '2.0',
-          method: 'textDocument/didChange',
-          params: {
-            textDocument: { uri: opts.documentUri, version },
-            contentChanges: [{ text: u.state.doc.toString() }],
-          },
-        });
+        if (this.changeTimer) clearTimeout(this.changeTimer);
+        const viewRef = u.view;
+        this.changeTimer = setTimeout(() => {
+          this.changeTimer = null;
+          if (closed || !ready || !viewRef.dom.isConnected) return;
+          version++;
+          send({
+            jsonrpc: '2.0',
+            method: 'textDocument/didChange',
+            params: {
+              textDocument: { uri: opts.documentUri, version },
+              contentChanges: [{ text: viewRef.state.doc.toString() }],
+            },
+          });
+        }, 150);
       }
     }
     destroy() {
       closed = true;
+      if (this.changeTimer) {
+        clearTimeout(this.changeTimer);
+        this.changeTimer = null;
+      }
       if (ready && socket?.readyState === WebSocket.OPEN) {
         try {
           socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'textDocument/didClose', params: { textDocument: { uri: opts.documentUri } } }));

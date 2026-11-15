@@ -1,31 +1,23 @@
-//! Dynamic **model catalog** (personal-agents design §3): discover each
-//! provider's model ids at runtime — no hardcoded lists, no API keys.
+//! Dynamic **model catalog** HTTP routes + `otto-netguard` refresher adapter.
 //!
-//! An hourly refresher (plus the manual `POST /providers/models/refresh`) runs a
-//! per-provider source chain, first success wins:
-//!
-//!   1. **CLI probe** — `agy models` lists ids non-interactively (checked at
-//!      impl time; `claude` and `codex` have no model-listing subcommand, so
-//!      they skip straight to the scrape).
-//!   2. **Docs scrape** — the provider's public models page, fetched through
-//!      the `otto-netguard` SSRF check with a 15s timeout. Parsing is
-//!      defensive id-shaped-token extraction (no DOM selectors): quoted
-//!      `claude-<family>-<version>` strings, `<code>gpt-…</code>` cells,
-//!      `gemini-…` tokens.
-//!   3. **models.dev JSON** — the community catalog as a generic fallback,
-//!      filtered to the provider's model family.
-//!
-//! A failed chain NEVER wipes the last good list ([`ProviderModelsRepo`]
-//! enforces it); the failure is kept in-memory per provider and surfaced as
-//! `last_error` + `stale` on the read route.
+//! Pure CLI probing, HTML token extraction, `models.dev` parsing, and status
+//! tracking live in [`otto_sessions::provider_models`]; this module wires them
+//! to `otto-netguard`, [`ProviderModelsRepo`], and the `/providers/models` routes.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::extract::State;
 use axum::Json;
 use chrono::{DateTime, Utc};
+use otto_sessions::provider_models::{
+    catalog_last_error, catalog_scrape_target, invalidate_provider_models_cache, probe_catalog_cli,
+    set_catalog_fetch_status, CATALOG_STALE_AFTER_HOURS, KNOWN_CATALOG_PROVIDERS,
+};
+pub use otto_sessions::provider_models::{
+    extract_claude_ids, extract_codex_ids, extract_gemini_ids,
+    parse_agy_catalog_output as parse_agy_models_output, parse_models_dev,
+};
 use otto_state::{ProviderModel, ProviderModelsRepo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,241 +28,9 @@ use crate::auth::CurrentUser;
 use crate::error::ApiResult;
 use crate::state::ServerCtx;
 
-/// Providers the refresher knows how to source. Custom providers can still get
-/// rows via the manual-add repo path; they just have no automatic source.
-const KNOWN_PROVIDERS: [&str; 5] = ["claude", "codex", "agy", "opencode", "pi"];
-
-/// Outbound fetch budget per source attempt.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
-/// Background refresh cadence.
 const REFRESH_EVERY: Duration = Duration::from_secs(60 * 60);
-/// A list older than this is flagged `stale` in the read route (the hourly
-/// refresher failing for a full day is worth surfacing).
-const STALE_AFTER_HOURS: i64 = 24;
 
-// ---------------------------------------------------------------------------
-// In-memory per-provider fetch status (survives only for the daemon lifetime;
-// the durable part — the rows — lives in SQLite).
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Default)]
-struct FetchStatus {
-    last_error: Option<String>,
-}
-
-fn status_map() -> &'static Mutex<HashMap<String, FetchStatus>> {
-    static STATUS: OnceLock<Mutex<HashMap<String, FetchStatus>>> = OnceLock::new();
-    STATUS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn set_status(provider: &str, err: Option<String>) {
-    let mut m = status_map().lock().unwrap_or_else(|p| p.into_inner());
-    m.insert(provider.to_string(), FetchStatus { last_error: err });
-}
-
-fn last_error_of(provider: &str) -> Option<String> {
-    let m = status_map().lock().unwrap_or_else(|p| p.into_inner());
-    m.get(provider).and_then(|s| s.last_error.clone())
-}
-
-// ---------------------------------------------------------------------------
-// Defensive id extraction (no regex dep, no DOM paths — just token scanning).
-// ---------------------------------------------------------------------------
-
-fn is_id_char(c: char) -> bool {
-    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.'
-}
-
-/// Every maximal `[a-z0-9.-]` token starting with `prefix` at a non-id-char
-/// boundary, in order of appearance, deduped, trailing punctuation trimmed.
-fn scan_tokens(text: &str, prefix: &str) -> Vec<String> {
-    let bytes = text.as_bytes();
-    let mut out: Vec<String> = Vec::new();
-    let mut from = 0;
-    while let Some(pos) = text[from..].find(prefix) {
-        let start = from + pos;
-        from = start + prefix.len();
-        // Reject a match glued to a preceding id char (e.g. `xgpt-4`).
-        if start > 0 {
-            let prev = bytes[start - 1] as char;
-            if is_id_char(prev) {
-                continue;
-            }
-        }
-        let tail: String = text[start..]
-            .chars()
-            .take_while(|c| is_id_char(*c))
-            .collect();
-        let token = tail.trim_end_matches(['.', '-']).to_string();
-        if token.len() > prefix.len() && !out.contains(&token) {
-            out.push(token);
-        }
-    }
-    out
-}
-
-/// True when every `-`-separated segment of `rest` is purely numeric — the
-/// shape of a Claude version tail (`5`, `4-5`, `4-5-20251001`). Filters out
-/// doc slugs like `…-system-card` or `…-and-claude-mythos-5`.
-fn all_numeric_segments(rest: &str) -> bool {
-    !rest.is_empty()
-        && rest
-            .split('-')
-            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
-}
-
-/// Claude docs page → API ids. The overview page carries ids as quoted strings
-/// (`"claude-fable-5"`) amid many look-alike doc slugs, so the filter is the
-/// id GRAMMAR: `claude-<family>-<numeric version…>`.
-pub fn extract_claude_ids(html: &str) -> Vec<String> {
-    const FAMILIES: [&str; 5] = ["fable", "mythos", "opus", "sonnet", "haiku"];
-    scan_tokens(html, "claude-")
-        .into_iter()
-        .filter(|t| {
-            let rest = &t["claude-".len()..];
-            FAMILIES.iter().any(|f| {
-                rest.strip_prefix(f)
-                    .and_then(|r| r.strip_prefix('-'))
-                    .is_some_and(all_numeric_segments)
-            })
-        })
-        .collect()
-}
-
-/// Codex docs page → gpt ids. Model ids appear as `<code>gpt-…</code>` cells;
-/// prefer those (clean), fall back to a filtered raw scan if the markup ever
-/// changes (dropping asset/domain look-alikes like `gpt-5.4.jpg`).
-pub fn extract_codex_ids(html: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut from = 0;
-    while let Some(pos) = html[from..].find("<code") {
-        let start = from + pos;
-        let Some(gt) = html[start..].find('>') else {
-            break;
-        };
-        let inner_start = start + gt + 1;
-        let Some(end) = html[inner_start..].find("</code>") else {
-            break;
-        };
-        from = inner_start + end;
-        let inner = html[inner_start..inner_start + end].trim();
-        if inner.starts_with("gpt-")
-            && inner.len() > 4
-            && inner.chars().nth(4).is_some_and(|c| c.is_ascii_digit())
-            && inner.chars().all(is_id_char)
-            && !out.contains(&inner.to_string())
-        {
-            out.push(inner.to_string());
-        }
-    }
-    if !out.is_empty() {
-        return out;
-    }
-    scan_tokens(html, "gpt-")
-        .into_iter()
-        .filter(|t| {
-            t.chars().nth(4).is_some_and(|c| c.is_ascii_digit())
-                && !t.ends_with(".jpg")
-                && !t.ends_with(".webp")
-                && !t.ends_with(".png")
-                && !t.contains(".com")
-                && !t.contains("localhost")
-        })
-        .collect()
-}
-
-/// Gemini docs page → gemini ids (raw token scan; the page carries them in
-/// code spans and JSON blobs alike).
-pub fn extract_gemini_ids(html: &str) -> Vec<String> {
-    scan_tokens(html, "gemini-")
-        .into_iter()
-        .filter(|t| {
-            t.chars()
-                .nth("gemini-".len())
-                .is_some_and(|c| c.is_ascii_digit())
-                && !t.ends_with(".jpg")
-                && !t.ends_with(".webp")
-                && !t.ends_with(".png")
-                && !t.contains(".com")
-        })
-        .collect()
-}
-
-/// `agy models` stdout → (id, label) pairs, reusing `otto_sessions`'s unified
-/// family-collapsing + ANSI-stripping parser so Settings and Threads agree.
-pub fn parse_agy_models_output(stdout: &str) -> Vec<(String, String)> {
-    otto_sessions::provider_models::parse_agy_models_output(stdout)
-        .into_iter()
-        .map(|m| (m.id, m.label))
-        .collect()
-}
-
-/// models.dev `api.json` → (id, label) pairs for one of our providers.
-/// Shape (verified at impl time): `{ "<provider>": { "models": { "<id>":
-/// { "id", "name", … } } } }` — parsed defensively, unknown shapes yield [].
-pub fn parse_models_dev(json: &Value, provider: &str) -> Vec<(String, String)> {
-    if matches!(provider, "opencode" | "pi") {
-        let mut out: Vec<(String, String)> = Vec::new();
-        for (vendor, family) in [
-            ("anthropic", "claude-"),
-            ("openai", "gpt-"),
-            ("google", "gemini-"),
-        ] {
-            let Some(models) = json
-                .get(vendor)
-                .and_then(|p| p.get("models"))
-                .and_then(Value::as_object)
-            else {
-                continue;
-            };
-            for (id, m) in models.iter().filter(|(id, _)| id.starts_with(family)) {
-                let full_id = format!("{vendor}/{id}");
-                let label = m
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&full_id)
-                    .to_string();
-                out.push((full_id, label));
-            }
-        }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        return out;
-    }
-    let (key, family) = match provider {
-        "claude" => ("anthropic", "claude-"),
-        "codex" => ("openai", "gpt-"),
-        "agy" => ("google", "gemini-"),
-        _ => return Vec::new(),
-    };
-    let Some(models) = json
-        .get(key)
-        .and_then(|p| p.get("models"))
-        .and_then(Value::as_object)
-    else {
-        return Vec::new();
-    };
-    let mut out: Vec<(String, String)> = models
-        .iter()
-        .filter(|(id, _)| id.starts_with(family))
-        .map(|(id, m)| {
-            let label = m
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or(id)
-                .to_string();
-            (id.clone(), label)
-        })
-        .collect();
-    // The JSON map has no meaningful order — sort for determinism.
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
-}
-
-// ---------------------------------------------------------------------------
-// Source chain
-// ---------------------------------------------------------------------------
-
-/// Netguard-checked GET with the shared redirect policy + fetch budget.
 async fn guarded_fetch_text(url: &str) -> Result<String, String> {
     otto_netguard::check_url(url).await?;
     let client = otto_netguard::guarded_client_builder()
@@ -285,83 +45,8 @@ async fn guarded_fetch_text(url: &str) -> Result<String, String> {
     resp.text().await.map_err(|e| e.to_string())
 }
 
-/// Source 1 — CLI probe (`agy models`, `opencode models`, `pi --offline
-/// --list-models`). `claude`/`codex` have no non-interactive model-listing
-/// subcommand, so they return None and the chain moves on. Never launches a
-/// TUI: stdin is null and the process is hard-capped at the fetch budget.
-async fn cli_probe(
-    ctx: &ServerCtx,
-    provider: &str,
-) -> Option<Result<Vec<(String, String)>, String>> {
-    let args: &[&str] = match provider {
-        "agy" | "opencode" => &["models"],
-        "pi" => &["--offline", "--list-models"],
-        _ => return None,
-    };
-    let program = ctx
-        .manager
-        .providers()
-        .program_for(provider)
-        .unwrap_or_else(|| provider.to_string());
-    let cmd_label = format!("{provider} {}", args.join(" "));
-    let run = async {
-        let out = tokio::process::Command::new(&program)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .env("TERM", "dumb")
-            .kill_on_drop(true)
-            .output();
-        match tokio::time::timeout(FETCH_TIMEOUT, out).await {
-            Err(_) => Err(format!("{cmd_label}: timed out")),
-            Ok(Err(e)) => Err(format!("{cmd_label}: {e}")),
-            Ok(Ok(o)) if !o.status.success() => Err(format!("{cmd_label}: exit {}", o.status)),
-            Ok(Ok(o)) => {
-                let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-                if provider != "agy" {
-                    text.push('\n');
-                    text.push_str(&String::from_utf8_lossy(&o.stderr));
-                }
-                let models: Vec<(String, String)> = match provider {
-                    "agy" => parse_agy_models_output(&text),
-                    "opencode" => {
-                        otto_sessions::provider_models::parse_opencode_models_output(&text)
-                            .into_iter()
-                            .map(|m| (m.id, m.label))
-                            .collect()
-                    }
-                    "pi" => otto_sessions::provider_models::parse_pi_models_output(&text)
-                        .into_iter()
-                        .map(|m| (m.id, m.label))
-                        .collect(),
-                    _ => Vec::new(),
-                };
-                if models.is_empty() {
-                    Err(format!("{cmd_label}: no ids in output"))
-                } else {
-                    Ok(models)
-                }
-            }
-        }
-    };
-    Some(run.await)
-}
-
-/// Source 2 — docs scrape (the primary source in practice for claude/codex).
 async fn docs_scrape(provider: &str) -> Option<Result<Vec<(String, String)>, String>> {
-    let (url, extract): (&str, fn(&str) -> Vec<String>) = match provider {
-        "claude" => (
-            "https://platform.claude.com/docs/en/models/overview",
-            extract_claude_ids,
-        ),
-        "codex" => ("https://learn.chatgpt.com/docs/models", extract_codex_ids),
-        "agy" => (
-            "https://ai.google.dev/gemini-api/docs/models",
-            extract_gemini_ids,
-        ),
-        _ => return None,
-    };
+    let (url, extract) = catalog_scrape_target(provider)?;
     Some(match guarded_fetch_text(url).await {
         Err(e) => Err(e),
         Ok(html) => {
@@ -375,7 +60,6 @@ async fn docs_scrape(provider: &str) -> Option<Result<Vec<(String, String)>, Str
     })
 }
 
-/// Source 3 — models.dev community catalog (generic fallback).
 async fn catalog_fallback(provider: &str) -> Result<Vec<(String, String)>, String> {
     let body = guarded_fetch_text("https://models.dev/api.json").await?;
     let json: Value = serde_json::from_str(&body).map_err(|e| format!("models.dev: {e}"))?;
@@ -387,21 +71,24 @@ async fn catalog_fallback(provider: &str) -> Result<Vec<(String, String)>, Strin
     }
 }
 
-/// Run the chain for one provider and persist the first success. On total
-/// failure the table is untouched and the error is recorded for the routes.
+/// Run the source chain for one provider and persist the first success.
 pub async fn refresh_provider(ctx: &ServerCtx, provider: &str) {
     let repo = ProviderModelsRepo::new(ctx.pool.clone());
     let mut errors: Vec<String> = Vec::new();
+    let program = ctx
+        .manager
+        .providers()
+        .program_for(provider)
+        .unwrap_or_else(|| provider.to_string());
 
-    // Lazily walk the chain so a CLI hit skips the network sources entirely.
     for source in ["cli", "scrape", "catalog"] {
         let attempt = match source {
-            "cli" => cli_probe(ctx, provider).await,
+            "cli" => probe_catalog_cli(provider, &program, FETCH_TIMEOUT).await,
             "scrape" => docs_scrape(provider).await,
             _ => Some(catalog_fallback(provider).await),
         };
         match attempt {
-            None => continue, // source not applicable to this provider
+            None => continue,
             Some(Err(e)) => errors.push(format!("{source}: {e}")),
             Some(Ok(models)) => {
                 match repo.upsert_batch(provider, source, &models).await {
@@ -412,11 +99,11 @@ pub async fn refresh_provider(ctx: &ServerCtx, provider: &str) {
                             count = models.len(),
                             "model catalog refreshed"
                         );
-                        set_status(provider, None);
+                        set_catalog_fetch_status(provider, None);
                     }
                     Err(e) => {
                         warn!(provider, %e, "model catalog persist failed");
-                        set_status(provider, Some(format!("persist: {e}")));
+                        set_catalog_fetch_status(provider, Some(format!("persist: {e}")));
                     }
                 }
                 return;
@@ -425,21 +112,20 @@ pub async fn refresh_provider(ctx: &ServerCtx, provider: &str) {
     }
     let joined = errors.join("; ");
     warn!(provider, error = %joined, "model catalog refresh failed (keeping last good list)");
-    set_status(provider, Some(joined));
+    set_catalog_fetch_status(provider, Some(joined));
 }
 
 /// Refresh every enabled known provider sequentially.
 pub async fn refresh_all(ctx: &ServerCtx) {
     let enabled = ctx.manager.providers().names();
-    for p in KNOWN_PROVIDERS {
+    for p in KNOWN_CATALOG_PROVIDERS {
         if enabled.iter().any(|e| e == p) {
             refresh_provider(ctx, p).await;
         }
     }
 }
 
-/// Hourly background refresher, started with the daemon. The first pass runs
-/// shortly after boot so a fresh install has a catalog within seconds.
+/// Hourly background refresher, started with the daemon.
 pub fn spawn_refresher(ctx: ServerCtx) -> JoinHandle<()> {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -449,10 +135,6 @@ pub fn spawn_refresher(ctx: ServerCtx) -> JoinHandle<()> {
         }
     })
 }
-
-// ---------------------------------------------------------------------------
-// Routes
-// ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
 pub struct CatalogModel {
@@ -464,7 +146,6 @@ pub struct CatalogModel {
 #[derive(Serialize)]
 pub struct ProviderCatalog {
     pub models: Vec<CatalogModel>,
-    /// RFC3339 of the newest fetched row (None = never fetched).
     pub fetched_at: Option<String>,
     pub stale: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -478,7 +159,6 @@ pub struct ModelsResp {
 
 #[derive(Deserialize, Default)]
 pub struct RefreshReq {
-    /// Refresh just this provider; omitted = all known providers.
     #[serde(default)]
     pub provider: Option<String>,
 }
@@ -486,20 +166,18 @@ pub struct RefreshReq {
 fn group(rows: Vec<ProviderModel>, enabled: &[String]) -> HashMap<String, ProviderCatalog> {
     let is_enabled = |name: &str| enabled.iter().any(|e| e == name);
     let mut providers: HashMap<String, ProviderCatalog> = HashMap::new();
-    // Enabled known providers always appear (even empty) so the UI can show status.
-    for p in KNOWN_PROVIDERS {
-        if !is_enabled(p) {
-            continue;
+    for p in KNOWN_CATALOG_PROVIDERS {
+        if is_enabled(p) {
+            providers.insert(
+                p.to_string(),
+                ProviderCatalog {
+                    models: Vec::new(),
+                    fetched_at: None,
+                    stale: true,
+                    last_error: catalog_last_error(p),
+                },
+            );
         }
-        providers.insert(
-            p.to_string(),
-            ProviderCatalog {
-                models: Vec::new(),
-                fetched_at: None,
-                stale: true,
-                last_error: last_error_of(p),
-            },
-        );
     }
     for row in rows {
         if !is_enabled(&row.provider) {
@@ -511,9 +189,8 @@ fn group(rows: Vec<ProviderModel>, enabled: &[String]) -> HashMap<String, Provid
                 models: Vec::new(),
                 fetched_at: None,
                 stale: true,
-                last_error: last_error_of(&row.provider),
+                last_error: catalog_last_error(&row.provider),
             });
-        // Staleness tracks the fetched rows; manual rows never age out.
         if row.source != "manual"
             && entry
                 .fetched_at
@@ -534,7 +211,7 @@ fn group(rows: Vec<ProviderModel>, enabled: &[String]) -> HashMap<String, Provid
                 .ok()
                 .map(|d| d.with_timezone(&Utc))
         }) {
-            Some(at) => Utc::now() - at > chrono::Duration::hours(STALE_AFTER_HOURS),
+            Some(at) => Utc::now() - at > chrono::Duration::hours(CATALOG_STALE_AFTER_HOURS),
             None => true,
         };
     }
@@ -558,29 +235,26 @@ pub async fn list(
 }
 
 /// `POST /api/v1/providers/models/refresh` — run the source chain now
-/// (optionally for one provider) and return the updated catalog.
+/// (optionally for one provider), invalidate `/meta`'s cache, and return the
+/// updated catalog.
 pub async fn refresh(
     State(ctx): State<ServerCtx>,
     CurrentUser(_user): CurrentUser,
     body: Option<Json<RefreshReq>>,
 ) -> ApiResult<Json<ModelsResp>> {
     let req = body.map(|Json(r)| r).unwrap_or_default();
-    match req
+    let target = req
         .provider
         .as_deref()
         .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
+        .filter(|p| !p.is_empty());
+    match target {
         Some(p) => refresh_provider(&ctx, p).await,
         None => refresh_all(&ctx).await,
     }
+    invalidate_provider_models_cache(target);
     Ok(Json(payload(&ctx).await?))
 }
-
-// ---------------------------------------------------------------------------
-// Parser tests against saved snapshots of the real pages (fetched 2026-09-01,
-// trimmed to the relevant chunks + representative noise).
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -605,7 +279,6 @@ mod tests {
                 "missing {expect} in {ids:?}"
             );
         }
-        // Doc slugs that share the prefix must NOT survive the grammar filter.
         for reject in ids.iter() {
             assert!(!reject.contains("system-card"), "slug leaked: {reject}");
             assert!(!reject.ends_with("-and"), "slug leaked: {reject}");
@@ -630,7 +303,6 @@ mod tests {
 
     #[test]
     fn codex_raw_fallback_filters_assets() {
-        // No <code> tags → the raw-scan fallback engages and still drops noise.
         let html = r#"see "gpt-5.4" and img gpt-5.4.jpg plus gpt-staging.com and gpt-5.5"#;
         let ids = extract_codex_ids(html);
         assert_eq!(ids, vec!["gpt-5.4".to_string(), "gpt-5.5".to_string()]);
@@ -644,7 +316,6 @@ mod tests {
             models.iter().any(|(id, _)| id.starts_with("gemini-")),
             "{models:?}"
         );
-        // Labels come from the second column, not the id.
         let (_, label) = models.iter().find(|(id, _)| id.contains("pro")).unwrap();
         assert!(label.contains(' '), "label should be human text: {label}");
     }
@@ -670,12 +341,12 @@ mod tests {
         assert!(claude.iter().all(|(id, _)| id.starts_with("claude-")));
         assert!(!claude.is_empty());
         let agy = parse_models_dev(&json, "agy");
-        // gemma-* entries in google's map must be filtered out by family.
         assert!(
             agy.iter().all(|(id, _)| id.starts_with("gemini-")),
             "{agy:?}"
         );
         assert!(!agy.is_empty());
+        assert_eq!(agy, parse_models_dev(&json, "gemini"));
         let opencode = parse_models_dev(&json, "opencode");
         assert!(!opencode.is_empty());
         assert!(opencode
@@ -687,12 +358,11 @@ mod tests {
             .any(|(id, _)| id.starts_with("google/gemini-")));
         assert_eq!(opencode, parse_models_dev(&json, "pi"));
         assert!(parse_models_dev(&json, "unknown").is_empty());
-        // Defensive: garbage shape → empty, not panic.
         assert!(parse_models_dev(&Value::Null, "claude").is_empty());
     }
 
     #[test]
-    fn group_excludes_disabled_providers_and_includes_enabled_builtins() {
+    fn group_excludes_disabled_providers_and_includes_all_seven_enabled_builtins() {
         let rows = vec![
             ProviderModel {
                 provider: "claude".into(),
@@ -711,9 +381,16 @@ mod tests {
                 notes: String::new(),
             },
         ];
-        let enabled = vec!["claude".to_string(), "pi".to_string()];
+        let enabled = vec![
+            "claude".to_string(),
+            "gemini".to_string(),
+            "grok".to_string(),
+            "pi".to_string(),
+        ];
         let grouped = group(rows, &enabled);
         assert!(grouped.contains_key("claude"));
+        assert!(grouped.contains_key("gemini"));
+        assert!(grouped.contains_key("grok"));
         assert!(grouped.contains_key("pi"));
         assert!(
             !grouped.contains_key("opencode"),

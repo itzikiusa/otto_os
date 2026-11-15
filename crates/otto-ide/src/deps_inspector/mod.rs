@@ -10,15 +10,17 @@ mod parsers;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::java_workspace::{parse_pom_properties, strip_xml_comments};
+use crate::java_workspace::{
+    parse_pom_properties_scoped, resolve_confined_parent_pom, strip_xml_comments,
+};
 use crate::types::{IdeDepItem, IdeDepManagedIn, IdeDepsInspectResp};
 
-pub use self::actions::{run_deps_action, run_deps_action_as};
+pub use self::actions::{run_deps_action, run_deps_action_as, run_deps_action_scoped};
 use self::enrich::{
     enrich_crates_updates, enrich_maven_updates, enrich_npm_updates, enrich_osv_vulnerabilities,
     enrich_pypi_updates,
@@ -35,9 +37,51 @@ pub async fn inspect_dependencies(
     content_override: Option<&str>,
     env_map: &BTreeMap<String, String>,
 ) -> IdeDepsInspectResp {
+    let default_root = manifest_path
+        .parent()
+        .and_then(|d| {
+            #[allow(clippy::disallowed_methods)]
+            let c = fs::canonicalize(d).ok();
+            c
+        })
+        .unwrap_or_else(|| {
+            manifest_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_path_buf()
+        });
+    inspect_dependencies_scoped(
+        manifest_path,
+        content_override,
+        env_map,
+        &[default_root],
+        false,
+    )
+    .await
+}
+
+/// Scoped variant of [`inspect_dependencies`] that confines `<relativePath>`
+/// parent-POM traversal to `allowed_roots` when `!caller_is_root` and rejects
+/// `otto_core::secret_paths`.
+pub async fn inspect_dependencies_scoped(
+    manifest_path: &Path,
+    content_override: Option<&str>,
+    env_map: &BTreeMap<String, String>,
+    allowed_roots: &[PathBuf],
+    caller_is_root: bool,
+) -> IdeDepsInspectResp {
     let content = match content_override {
         Some(c) => c.to_string(),
-        None => fs::read_to_string(manifest_path).unwrap_or_default(),
+        None => {
+            let p = manifest_path.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                #[allow(clippy::disallowed_methods)]
+                let s = fs::read_to_string(&p).unwrap_or_default();
+                s
+            })
+            .await
+            .unwrap_or_default()
+        }
     };
     let fname = manifest_path
         .file_name()
@@ -49,7 +93,14 @@ pub async fn inspect_dependencies(
         enrich_go_mod_updates(manifest_path, &mut list, env_map).await;
         ("go", "Go", list)
     } else if fname == "pom.xml" {
-        let mut list = parse_pom_dependencies(manifest_path, &content);
+        let mp = manifest_path.to_path_buf();
+        let roots = allowed_roots.to_vec();
+        let xml = content.clone();
+        let mut list = tokio::task::spawn_blocking(move || {
+            parse_pom_dependencies_scoped(&mp, &xml, &roots, caller_is_root)
+        })
+        .await
+        .unwrap_or_default();
         enrich_maven_updates(&mut list, env_map).await;
         ("maven", "Maven", list)
     } else if fname == "build.gradle" || fname == "build.gradle.kts" {
@@ -87,11 +138,24 @@ pub async fn inspect_dependencies(
 
 // ── 2. Java (`pom.xml` & `build.gradle*`) ───────────────────────────────────
 
+#[allow(clippy::disallowed_methods)]
 pub fn parse_pom_dependencies(manifest_path: &Path, content: &str) -> Vec<IdeDepItem> {
     let dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let default_root = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    parse_pom_dependencies_scoped(manifest_path, content, &[default_root], false)
+}
+
+#[allow(clippy::disallowed_methods)]
+pub fn parse_pom_dependencies_scoped(
+    manifest_path: &Path,
+    content: &str,
+    allowed_roots: &[PathBuf],
+    caller_is_root: bool,
+) -> Vec<IdeDepItem> {
+    let dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let stripped = strip_xml_comments(content);
-    let props = parse_pom_properties(&stripped, dir);
-    let parent_managed = load_parent_managed_deps(&stripped, dir);
+    let props = parse_pom_properties_scoped(&stripped, dir, allowed_roots, caller_is_root);
+    let parent_managed = load_parent_managed_deps(&stripped, dir, allowed_roots, caller_is_root);
 
     let lines: Vec<&str> = stripped.lines().collect();
     let mut items = Vec::new();
@@ -205,28 +269,29 @@ pub fn parse_pom_dependencies(manifest_path: &Path, content: &str) -> Vec<IdeDep
     items
 }
 
+#[allow(clippy::disallowed_methods)]
 fn load_parent_managed_deps(
     stripped_xml: &str,
     dir: &Path,
+    allowed_roots: &[PathBuf],
+    caller_is_root: bool,
 ) -> HashMap<(String, String), (String, IdeDepManagedIn)> {
     let mut out = HashMap::new();
-    let rel = crate::java_workspace::extract_first_tag_block(stripped_xml, "parent")
-        .and_then(|b| crate::java_workspace::extract_tag_text(b, "relativePath"))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "../pom.xml".into());
-    let parent_pom = if rel.ends_with(".xml") {
-        dir.join(rel)
-    } else {
-        dir.join(rel).join("pom.xml")
-    };
-    let Ok(canon_parent) = fs::canonicalize(&parent_pom) else {
+    let Some(canon_parent) =
+        resolve_confined_parent_pom(stripped_xml, dir, allowed_roots, caller_is_root)
+    else {
         return out;
     };
     let Ok(praw) = fs::read_to_string(&canon_parent) else {
         return out;
     };
     let pstrip = strip_xml_comments(&praw);
-    let pprops = parse_pom_properties(&pstrip, canon_parent.parent().unwrap_or(dir));
+    let pprops = parse_pom_properties_scoped(
+        &pstrip,
+        canon_parent.parent().unwrap_or(dir),
+        allowed_roots,
+        caller_is_root,
+    );
     let plines: Vec<&str> = pstrip.lines().collect();
     let mut in_dm = false;
     let mut idx = 0usize;

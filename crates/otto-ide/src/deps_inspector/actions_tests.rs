@@ -222,3 +222,102 @@ async fn go_mod_tidy_passes_ssh_auth_sock_only_for_root_actor() {
         }
     }
 }
+
+#[test]
+fn merge_go_mod_requires_and_bump_preserve_inline_comments() {
+    let go_mod = "module example.com/app\n\ngo 1.22\n\nrequire (\n\tgithub.com/foo/pinned v1.2.3 // pinned: see ISSUE-123\n\tgithub.com/foo/upgradable v1.0.0\n)\n\nrequire (\n\tgithub.com/foo/codegen v0.4.0 // indirect; needed for codegen\n\tgithub.com/foo/plain-ind v0.1.0 // indirect\n)\n";
+    let bumped = bump_go_mod_in_place(go_mod, "github.com/foo/upgradable", "v1.1.0")
+        .expect("bump upgradable module");
+    assert!(
+        bumped.contains("\tgithub.com/foo/pinned v1.2.3 // pinned: see ISSUE-123\n"),
+        "bumping one module must leave sibling inline comments intact:\n{bumped}"
+    );
+    let merged = merge_go_mod_requires(&bumped);
+    assert!(
+        merged.contains("\tgithub.com/foo/pinned v1.2.3 // pinned: see ISSUE-123\n"),
+        "merge_go_mod_requires must preserve inline comments on direct deps:\n{merged}"
+    );
+    assert!(
+        merged.contains("\tgithub.com/foo/upgradable v1.1.0\n"),
+        "merge_go_mod_requires must include updated version:\n{merged}"
+    );
+    assert!(
+        merged.contains("\tgithub.com/foo/codegen v0.4.0 // indirect; needed for codegen\n"),
+        "merge_go_mod_requires must preserve extended comments on indirect deps:\n{merged}"
+    );
+    assert!(
+        merged.contains("\tgithub.com/foo/plain-ind v0.1.0 // indirect\n"),
+        "merge_go_mod_requires must keep // indirect on standard indirect deps:\n{merged}"
+    );
+}
+
+#[test]
+fn pom_dependencies_scoped_confines_parent_relative_path_for_non_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let outside = base.join("outside");
+    let workspace = base.join("workspace").join("child");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(&workspace).unwrap();
+
+    fs::write(
+        outside.join("pom.xml"),
+        r#"<project>
+  <properties>
+    <secret.parent.version>9.9.9-LEAKED</secret.parent.version>
+  </properties>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.slf4j</groupId>
+        <artifactId>slf4j-api</artifactId>
+        <version>2.0.99-LEAKED</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>"#,
+    )
+    .unwrap();
+
+    let child_pom = r#"<project>
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>parent</artifactId>
+    <version>1.0.0</version>
+    <relativePath>../../outside/pom.xml</relativePath>
+  </parent>
+  <dependencies>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId>
+      <version>${secret.parent.version}</version>
+    </dependency>
+  </dependencies>
+</project>"#;
+    let child_path = workspace.join("pom.xml");
+    fs::write(&child_path, child_pom).unwrap();
+
+    let allowed = vec![base.join("workspace")];
+    let non_root_items = parse_pom_dependencies_scoped(&child_path, child_pom, &allowed, false);
+    let slf4j = non_root_items
+        .iter()
+        .find(|i| i.name == "org.slf4j:slf4j-api")
+        .unwrap();
+    assert_eq!(
+        slf4j.current_version, "",
+        "non-root caller must not read parent POM outside allowed_roots"
+    );
+    assert!(slf4j.managed_in.is_none());
+    let guava = non_root_items
+        .iter()
+        .find(|i| i.name == "com.google.guava:guava")
+        .unwrap();
+    assert_eq!(
+        guava.current_version, "${secret.parent.version}",
+        "non-root caller must not interpolate properties from parent POM outside allowed_roots"
+    );
+}

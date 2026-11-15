@@ -196,6 +196,7 @@ async fn local_and_ssh_roots_never_share_a_pooled_server() {
         user: "dev".into(),
         identity_file: None,
         proxy_jump: None,
+        environment: None,
     });
     let _remote = pool.attach(remote_key, "gopls", &[]).unwrap();
     assert_eq!(fake.spawns.load(Ordering::SeqCst), 2);
@@ -483,4 +484,239 @@ fn language_memory_caps_set_go_java_rust_and_node_flags() {
         );
     }
     assert!(java_args.contains(&"-data".to_string()));
+}
+
+#[tokio::test]
+#[allow(clippy::disallowed_methods)]
+async fn go_build_tags_overwrite_init_options_rewrite_excluded_diagnostic_and_evict_on_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let canon_dir = std::fs::canonicalize(dir.path()).unwrap();
+    let root_str = canon_dir.to_string_lossy().into_owned();
+    let comp_file = canon_dir.join("assign_frb_component_test.go");
+    std::fs::write(
+        &comp_file,
+        "//go:build component\n\npackage tests\n\nfunc TestComponent() {}\n",
+    )
+    .unwrap();
+    let comp_uri = format!("file://{}", comp_file.display());
+
+    let seen_msgs: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_cl = Arc::clone(&seen_msgs);
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let spawns_cl = Arc::clone(&spawns);
+
+    let spawner: Spawner = Arc::new(move |_key: &PoolKey, _launch: &SpawnLaunch| {
+        spawns_cl.fetch_add(1, Ordering::SeqCst);
+        let (pool_side_w, server_r) = tokio::io::duplex(1 << 16);
+        let (server_w, pool_side_r) = tokio::io::duplex(1 << 16);
+        let seen = Arc::clone(&seen_cl);
+        tokio::spawn(async move {
+            let mut r = BufReader::new(server_r);
+            let mut w = server_w;
+            while let Ok(Some(body)) = framing::read_message(&mut r).await {
+                let msg: Value = serde_json::from_slice(&body).unwrap();
+                seen.lock().unwrap().push(msg.clone());
+                let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+                let reply = match method {
+                    "initialize" => Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": msg["id"],
+                        "result": { "capabilities": { "hoverProvider": true } }
+                    })),
+                    "textDocument/didOpen" => {
+                        let uri = msg["params"]["textDocument"]["uri"]
+                            .as_str()
+                            .unwrap_or_default();
+                        Some(json!({
+                            "jsonrpc": "2.0",
+                            "method": "textDocument/publishDiagnostics",
+                            "params": {
+                                "uri": uri,
+                                "diagnostics": [{
+                                    "range": {
+                                        "start": { "line": 0, "character": 0 },
+                                        "end": { "line": 0, "character": 10 }
+                                    },
+                                    "severity": 1,
+                                    "message": "No packages found for open file /tmp/x.go: file is excluded due to its build tags."
+                                }]
+                            }
+                        }))
+                    }
+                    "workspace/executeCommand" => Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": msg["id"],
+                        "result": { "ran": true }
+                    })),
+                    _ => None,
+                };
+                if let Some(reply) = reply {
+                    let bytes = serde_json::to_vec(&reply).unwrap();
+                    if framing::write_message(&mut w, &bytes).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(ServerIo {
+            reader: Box::new(BufReader::new(pool_side_r)),
+            writer: Box::new(pool_side_w),
+            child: None,
+        })
+    });
+
+    let pool = LspPool::new_inner(spawner, IDLE_TIMEOUT, WRITE_QUEUE_MAX_BYTES, None, None);
+    pool.record_owner_privilege("viewer1", false);
+    pool.record_owner_privilege("root1", true);
+
+    let go_key = PoolKey {
+        owner: "viewer1".into(),
+        lang: "go".into(),
+        root: root_str.clone(),
+        ssh: None,
+    };
+    let mut a = pool.attach(go_key.clone(), "gopls", &[]).unwrap();
+    assert_eq!(a.lang, "go");
+    assert_eq!(a.root, root_str);
+
+    // Untrusted client initializationOptions must be overwritten with default_gopls_settings.
+    let malicious_init = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "rootUri": "file:///evil",
+            "initializationOptions": {
+                "env": { "LD_PRELOAD": "/tmp/evil.so" },
+                "buildFlags": ["-exec=/tmp/evil"]
+            }
+        }
+    });
+    assert!(a.send(malicious_init.to_string()).await);
+    let init_resp = recv(&mut a).await;
+    assert_eq!(init_resp["id"], json!(1));
+
+    {
+        let log = seen_msgs.lock().unwrap();
+        let srv_init = log
+            .iter()
+            .find(|m| m["method"] == "initialize")
+            .expect("initialize sent");
+        assert_eq!(
+            srv_init["params"]["initializationOptions"]["buildFlags"],
+            json!(["-mod=mod"])
+        );
+        assert!(srv_init["params"]["initializationOptions"]
+            .get("env")
+            .is_none());
+    }
+
+    // Non-root workspace/executeCommand is rejected by the mux before reaching gopls.
+    assert!(
+        a.send(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "workspace/executeCommand",
+                "params": { "command": "gopls.run_tests" }
+            })
+            .to_string()
+        )
+        .await
+    );
+    let exec_err = recv(&mut a).await;
+    assert_eq!(exec_err["id"], json!(99));
+    assert_eq!(exec_err["error"]["code"], json!(-32600));
+
+    // Opening a `//go:build component` file rewrites gopls's exclusion diagnostic.
+    assert!(
+        a.send(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": comp_uri,
+                        "languageId": "go",
+                        "version": 1,
+                        "text": "//go:build component\n\npackage tests\n"
+                    }
+                }
+            })
+            .to_string()
+        )
+        .await
+    );
+    let diag_msg = recv(&mut a).await;
+    let first_diag = &diag_msg["params"]["diagnostics"][0];
+    assert_eq!(first_diag["code"], json!("otto_go_build_tag"));
+    assert!(
+        first_diag["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Excluded by //go:build component — enable Go build tag \"component\""),
+        "unexpected diagnostic: {first_diag}"
+    );
+
+    // Updating Go build tags evicts the active gopls instance so the next attach gets `-tags=component`.
+    pool.set_go_build_tags(&root_str, vec!["component".into()]);
+    assert_eq!(pool.go_build_tags(&root_str), vec!["component".to_string()]);
+    assert_eq!(pool.live_servers(), 0);
+
+    seen_msgs.lock().unwrap().clear();
+    let root_key = PoolKey {
+        owner: "root1".into(),
+        lang: "go".into(),
+        root: root_str.clone(),
+        ssh: None,
+    };
+    let mut b = pool.attach(root_key, "gopls", &[]).unwrap();
+    assert_eq!(spawns.load(Ordering::SeqCst), 2);
+    init(&mut b, 10).await;
+
+    // Root user may invoke workspace/executeCommand, and workspace/didChangeConfiguration uses server settings.
+    assert!(
+        b.send(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "workspace/didChangeConfiguration",
+                "params": { "settings": { "gopls": { "buildFlags": ["-exec=/bin/sh"] } } }
+            })
+            .to_string()
+        )
+        .await
+    );
+    assert!(
+        b.send(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "workspace/executeCommand",
+                "params": { "command": "gopls.tidy" }
+            })
+            .to_string()
+        )
+        .await
+    );
+    let root_exec = recv(&mut b).await;
+    assert_eq!(root_exec["id"], json!(11));
+    assert_eq!(root_exec["result"]["ran"], json!(true));
+
+    let log = seen_msgs.lock().unwrap();
+    let srv_init2 = log
+        .iter()
+        .find(|m| m["method"] == "initialize")
+        .expect("second initialize sent");
+    assert_eq!(
+        srv_init2["params"]["initializationOptions"]["buildFlags"],
+        json!(["-mod=mod", "-tags=component"])
+    );
+    let srv_cfg = log
+        .iter()
+        .find(|m| m["method"] == "workspace/didChangeConfiguration")
+        .expect("sanitized didChangeConfiguration sent");
+    assert_eq!(
+        srv_cfg["params"]["settings"]["gopls"]["buildFlags"],
+        json!(["-mod=mod", "-tags=component"])
+    );
 }

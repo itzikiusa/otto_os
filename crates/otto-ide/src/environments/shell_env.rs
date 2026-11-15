@@ -276,12 +276,17 @@ impl ShellEnvResolver {
             guard.error = None;
             return state_to_resp(&guard);
         }
-        while self
-            .warming
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            let _ = tokio::time::timeout(Duration::from_secs(4), self.notify.notified()).await;
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            if self
+                .warming
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(4), &mut notified).await;
         }
         self.refresh_inner().await;
         let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
@@ -428,7 +433,7 @@ pub async fn probe_remote_shell_env(
     let start_marker = format!("__OTTO_REMOTE_ENV_BEGIN_{token}__");
     let end_marker = format!("__OTTO_REMOTE_ENV_END_{token}__");
     let script = format!(
-        "sh_bin=\"${{SHELL:-/bin/sh}}\"; \"$sh_bin\" -lc 'printf \"%s\" \"{start_marker}\"; (env -0 2>/dev/null || printenv -0 2>/dev/null); printf \"%s\" \"{end_marker}\"; printf \"\\n__OTTO_SHELL__=%s\\n\" \"${{SHELL:-/bin/sh}}\"'"
+        "sh_bin=\"${{SHELL:-/bin/sh}}\"; printf \"__OTTO_SHELL__=%s\\n\" \"$sh_bin\"; exec \"$sh_bin\" -lc 'exec /bin/sh -c \"printf %s {start_marker}; env -0 2>/dev/null || printenv -0 2>/dev/null; printf %s {end_marker}\"'"
     );
     let out = targets
         .exec_shell(

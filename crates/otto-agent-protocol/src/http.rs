@@ -23,7 +23,7 @@ use otto_core::agent_runtime::{
     AskChildReq, AskChildResp, CouncilResp, CreateCouncilReq, CreateRuntimeSessionBody,
     OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, QueuedDeliverReq, RuntimePromptReq,
     RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq, RuntimeSession,
-    SynthesizeCouncilReq, TurnItem, UpdateRuntimeSessionReq,
+    SynthesizeCouncilReq, TurnItem, UnqueuePromptResp, UpdateRuntimeSessionReq,
 };
 use otto_core::api::Problem;
 use otto_core::auth::{AuthContext, AuthUser};
@@ -34,7 +34,7 @@ use serde::Deserialize;
 use crate::runtime::council::{CouncilFollowUpReq, CouncilRoundsResp};
 use crate::RuntimeCtx;
 
-mod drafts;
+pub(crate) mod drafts;
 
 pub(crate) struct ApiErr(pub Error);
 
@@ -568,17 +568,23 @@ async fn deliver_queued<S: RuntimeCtx>(
     Ok((StatusCode::ACCEPTED, Json(r)))
 }
 
-/// DELETE /runtime-sessions/{id}/queue/{queued_id} — drop a queued message.
+/// DELETE /runtime-sessions/{id}/queue/{queued_id} — drop a queued message
+/// and return its text + attachments so Edit can restore them into the composer.
 async fn unqueue<S: RuntimeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Extension(auth): Extension<AuthContext>,
     Path((id, queued_id)): Path<(Id, String)>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<Json<UnqueuePromptResp>> {
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
-    if ctx.agent_runtime().unqueue(&id, &queued_id).await? {
-        Ok(StatusCode::NO_CONTENT)
+    if let Some(req) = ctx.agent_runtime().unqueue_prompt(&id, &queued_id).await? {
+        Ok(Json(UnqueuePromptResp {
+            ok: true,
+            text: Some(req.text),
+            images: req.images,
+            files: req.files,
+        }))
     } else {
         Err(ApiErr(Error::NotFound(
             "that message is no longer queued".into(),

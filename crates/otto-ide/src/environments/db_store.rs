@@ -17,7 +17,7 @@ use crate::types::{
     IdeTargetKind, IdeTargetSpec,
 };
 
-use super::module_sdks::sanitize_module_sdks;
+use super::module_sdks::{sanitize_module_go_build_tags, sanitize_module_sdks};
 
 /// Reserved internal `StoredEnvVar.key` persisted inside `env_vars_json` to store
 /// per-module SDK overrides (`IdeProjectEnvironment.module_sdks`) without altering
@@ -25,6 +25,43 @@ use super::module_sdks::sanitize_module_sdks;
 /// exposed in `env_vars` or exported as an OS environment variable.
 pub(super) const RESERVED_MODULE_SDKS_KEY: &str = "__otto_module_sdks__";
 pub(super) const RESERVED_NETBRIDGE_KEY: &str = "__otto_network_bridge__";
+pub(super) const RESERVED_GO_BUILD_TAGS_KEY: &str = "__otto_go_build_tags__";
+pub(super) const RESERVED_MODULE_GO_BUILD_TAGS_KEY: &str = "__otto_module_go_build_tags__";
+pub(super) const RESERVED_RUN_COVERAGE_KEY: &str = "__otto_coverage__";
+
+pub(super) fn is_reserved_internal_env_key(key: &str) -> bool {
+    key.starts_with("__otto_")
+        || matches!(
+            key,
+            RESERVED_MODULE_SDKS_KEY
+                | RESERVED_NETBRIDGE_KEY
+                | RESERVED_GO_BUILD_TAGS_KEY
+                | RESERVED_MODULE_GO_BUILD_TAGS_KEY
+                | RESERVED_RUN_COVERAGE_KEY
+        )
+}
+
+/// Environment variables that hijack dynamic linkers, JVM/Node/Python/Go/Rust
+/// startup hooks, or non-interactive shells (`Sec-P1-2`). Forbidden for non-root callers.
+pub(super) fn is_dangerous_loader_env_key(key: &str) -> bool {
+    let upper = key.trim().to_ascii_uppercase();
+    upper.starts_with("DYLD_")
+        || upper.starts_with("LD_")
+        || matches!(
+            upper.as_str(),
+            "JAVA_TOOL_OPTIONS"
+                | "JDK_JAVA_OPTIONS"
+                | "_JAVA_OPTIONS"
+                | "NODE_OPTIONS"
+                | "PYTHONSTARTUP"
+                | "PYTHONPATH"
+                | "GOFLAGS"
+                | "RUSTC_WRAPPER"
+                | "CARGO_BUILD_RUSTC_WRAPPER"
+                | "BASH_ENV"
+                | "ENV"
+        )
+}
 
 /// Internal SQLite representation inside `ide_project_environments.env_vars_json`.
 /// Never stores plaintext values when `secret == true`; stores `secret_ref` only.
@@ -286,6 +323,8 @@ fn decode_project_env_row(
     let raw_stored: Vec<StoredEnvVar> = serde_json::from_str(&raw_json).unwrap_or_default();
     let mut module_sdks: BTreeMap<String, String> = BTreeMap::new();
     let mut network_bridge: Option<IdeNetworkBridgeConfig> = None;
+    let mut go_build_tags: Vec<String> = Vec::new();
+    let mut module_go_build_tags: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut stored: Vec<StoredEnvVar> = Vec::with_capacity(raw_stored.len());
     for item in raw_stored {
         if item.key == RESERVED_MODULE_SDKS_KEY {
@@ -300,7 +339,23 @@ fn decode_project_env_row(
                     network_bridge = sanitize_network_bridge(Some(parsed)).ok().flatten();
                 }
             }
-        } else {
+        } else if item.key == RESERVED_GO_BUILD_TAGS_KEY {
+            if let Some(raw_tags) = &item.value {
+                if let Ok(parsed) = serde_json::from_str::<Vec<String>>(raw_tags) {
+                    go_build_tags =
+                        crate::lsp_service::validate_go_build_tags(&parsed).unwrap_or_default();
+                }
+            }
+        } else if item.key == RESERVED_MODULE_GO_BUILD_TAGS_KEY {
+            if let Some(raw_mod_tags) = &item.value {
+                if let Ok(parsed) =
+                    serde_json::from_str::<BTreeMap<String, Vec<String>>>(raw_mod_tags)
+                {
+                    module_go_build_tags =
+                        sanitize_module_go_build_tags(&parsed).unwrap_or_default();
+                }
+            }
+        } else if !is_reserved_internal_env_key(&item.key) {
             stored.push(item);
         }
     }
@@ -321,6 +376,8 @@ fn decode_project_env_row(
         inherit_shell_env,
         additional_roots,
         module_sdks,
+        go_build_tags,
+        module_go_build_tags,
         network_bridge,
         env_vars: Vec::new(),
     };
@@ -393,6 +450,12 @@ pub(super) fn row_to_run_config(row: &sqlx::sqlite::SqliteRow) -> IdeRunConfig {
     let inherit_shell_env = row.try_get::<i64, _>("inherit_shell_env").unwrap_or(1) != 0;
     let skip_tests = row.try_get::<i64, _>("skip_tests").unwrap_or(0) != 0;
     let offline = row.try_get::<i64, _>("offline").unwrap_or(0) != 0;
+    let mut env_overrides: BTreeMap<String, String> =
+        serde_json::from_str(&env_s).unwrap_or_default();
+    let coverage = env_overrides
+        .remove(RESERVED_RUN_COVERAGE_KEY)
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    env_overrides.retain(|k, _| !is_reserved_internal_env_key(k));
 
     IdeRunConfig {
         id: row.try_get("id").unwrap_or_default(),
@@ -402,7 +465,7 @@ pub(super) fn row_to_run_config(row: &sqlx::sqlite::SqliteRow) -> IdeRunConfig {
         args: serde_json::from_str(&args_s).unwrap_or_default(),
         build_flags: serde_json::from_str(&flags_s).unwrap_or_default(),
         cwd: row.try_get("cwd").ok().flatten(),
-        env_overrides: serde_json::from_str(&env_s).unwrap_or_default(),
+        env_overrides,
         env_file: row.try_get("env_file").ok().flatten(),
         inherit_shell_env,
         sdk_path: row.try_get("sdk_path").ok().flatten(),
@@ -415,6 +478,7 @@ pub(super) fn row_to_run_config(row: &sqlx::sqlite::SqliteRow) -> IdeRunConfig {
         spring_profiles: serde_json::from_str(&spring_s).unwrap_or_default(),
         skip_tests,
         offline,
+        coverage,
         auto_detected: false,
     }
 }

@@ -15,6 +15,7 @@ pub(super) fn formatter_candidates(
     lang: &str,
     path: &str,
     organize_imports: bool,
+    caller_is_root: bool,
 ) -> Vec<(&'static str, String, Vec<String>)> {
     let _ = organize_imports;
     match lang {
@@ -51,22 +52,25 @@ pub(super) fn formatter_candidates(
             vec!["-i".into(), "2".into(), "-ci".into(), "-".into()],
         )],
         "javascript" | "typescript" | "json" | "jsonc" | "css" | "scss" | "html" | "markdown"
-        | "yaml" | "graphql" | "svelte" => vec![
-            (
-                "prettier",
-                "prettier".into(),
-                vec!["--stdin-filepath".into(), path.to_string()],
-            ),
-            (
-                "biome",
-                "biome".into(),
-                vec![
-                    "format".into(),
-                    "--stdin-file-path".into(),
-                    path.to_string(),
-                ],
-            ),
-        ],
+        | "yaml" | "graphql" | "svelte" => {
+            let mut prettier_args = Vec::new();
+            if !caller_is_root {
+                prettier_args.push("--no-config".into());
+            }
+            prettier_args.extend(["--stdin-filepath".into(), path.to_string()]);
+            vec![
+                ("prettier", "prettier".into(), prettier_args),
+                (
+                    "biome",
+                    "biome".into(),
+                    vec![
+                        "format".into(),
+                        "--stdin-file-path".into(),
+                        path.to_string(),
+                    ],
+                ),
+            ]
+        }
         "protobuf" => vec![("buf", "buf".into(), vec!["format".into(), "-".into()])],
         _ => Vec::new(),
     }
@@ -206,10 +210,14 @@ pub(super) async fn run_stdin_formatter<S: IdeCtx>(
     env_map: &BTreeMap<String, String>,
     input: &str,
 ) -> Option<String> {
+    let cwd = match resolved {
+        ResolvedTarget::Local { root, .. } => Some(root.to_string_lossy().into_owned()),
+        ResolvedTarget::Ssh { root, .. } => Some(root.clone()),
+    };
     let mut child = ctx
         .ide()
         .targets
-        .spawn_piped(resolved, cmd, args, None, env_map)
+        .spawn_piped(resolved, cmd, args, cwd.as_deref(), env_map)
         .await
         .ok()?;
     if let Some(mut stdin) = child.stdin.take() {

@@ -219,6 +219,7 @@ impl ToolchainManager {
                 final_path = p;
             }
         }
+        crate::lsp_host::servers::invalidate_detect_cache();
         Ok(final_path)
     }
 

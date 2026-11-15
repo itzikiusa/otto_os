@@ -300,11 +300,52 @@ pub(super) fn stored_project_matches(entry: &StoredProject, lookup: &str) -> boo
         || entry.raw_folders.iter().any(|f| eq_any(f))
 }
 
+const MAX_SCAN_REPOS_ENTRIES: usize = 200;
+const MAX_SCAN_RAW_DIR_ENTRIES: usize = 1_024;
+
+#[allow(clippy::disallowed_methods)]
+fn is_broad_system_scan_root(parent: &Path, is_root_user: bool) -> bool {
+    let s = parent.to_string_lossy();
+    let trimmed = s.trim_end_matches('/');
+    if trimmed.is_empty()
+        || matches!(
+            trimmed,
+            "/Users"
+                | "/home"
+                | "/tmp"
+                | "/private/tmp"
+                | "/var"
+                | "/private/var"
+                | "/etc"
+                | "/private/etc"
+                | "/System"
+                | "/Volumes"
+        )
+    {
+        return true;
+    }
+    if !is_root_user {
+        if let Some(home) = dirs::home_dir() {
+            let home_canon = std::fs::canonicalize(&home).unwrap_or(home);
+            if parent == home_canon {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Fast 1-level scan of `parent_path` returning child repositories and folders
 /// so users can bulk-select multi-repo workspaces into one Named IDE Project.
 #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
 pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeScanReposResp> {
     let parent = canonicalize_local_root_dir(parent_path, is_root_user)?;
+    if is_broad_system_scan_root(&parent, is_root_user) {
+        return Err(Error::Invalid(format!(
+            "refusing to scan broad system directory '{}'; choose a workspace parent folder",
+            parent.display()
+        )));
+    }
     let rd = fs::read_dir(&parent).map_err(|e| {
         Error::NotFound(format!("cannot read directory '{}': {e}", parent.display()))
     })?;
@@ -312,7 +353,10 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
     let mut repos: Vec<IdeScannedRepo> = Vec::new();
     let mut seen_by_path: std::collections::HashMap<String, (usize, bool)> =
         std::collections::HashMap::new();
-    for entry in rd.flatten() {
+    for entry in rd.flatten().take(MAX_SCAN_RAW_DIR_ENTRIES) {
+        if repos.len() >= MAX_SCAN_REPOS_ENTRIES {
+            break;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') || matches!(name.as_str(), "node_modules" | "target" | "Library") {
             continue;
@@ -435,5 +479,24 @@ mod tests {
         assert_eq!(scanned.repos[0].name, "m_real");
         assert_eq!(scanned.repos[0].kind, "git");
         assert!(scanned.repos[0].has_git);
+    }
+
+    #[test]
+    fn scan_parent_repos_refuses_broad_system_roots_and_caps_entries_at_200() {
+        for broad in ["/", "/tmp", "/var"] {
+            let err =
+                scan_parent_repos(broad, true).expect_err("broad system root must be refused");
+            assert!(
+                matches!(err, Error::Invalid(_)),
+                "expected Error::Invalid for {broad}, got {err:?}"
+            );
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for i in 0..235 {
+            fs::create_dir_all(tmp.path().join(format!("repo_{i:03}"))).expect("mkdir child");
+        }
+        let scanned = scan_parent_repos(&tmp.path().to_string_lossy(), true).expect("scan capped");
+        assert_eq!(scanned.repos.len(), MAX_SCAN_REPOS_ENTRIES);
     }
 }

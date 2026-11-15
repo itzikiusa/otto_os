@@ -27,7 +27,7 @@ async fn non_root_rbac_secret_paths_and_cross_user_isolation_are_enforced() {
     std::fs::write(ws_alice.join("main.go"), "package main\n").unwrap();
     std::fs::write(ws_bob.join("secret.go"), "package bob\n").unwrap();
 
-    let (ctx, _app_root) = build_test_app(data_dir.clone(), &db_path).await;
+    let (ctx, app_root) = build_test_app(data_dir.clone(), &db_path).await;
     let app_alice = router_as(&ctx, non_root_user("u_alice"), vec![ws_alice.clone()]);
     let app_bob = router_as(&ctx, non_root_user("u_bob"), vec![ws_bob.clone()]);
 
@@ -127,17 +127,118 @@ async fn non_root_rbac_secret_paths_and_cross_user_isolation_are_enforced() {
     .await;
     assert_eq!(st_tc_del, StatusCode::FORBIDDEN);
 
-    // 4. Alice cannot delete Bob's run configuration (with or without `root` query param):
+    // 4. Non-root Sec-P1-2 guards: dangerous env/SDK/runner overrides & local execution are forbidden,
+    //    while safe standard runner configs + Go build tags succeed and stay isolated across users:
+    for bad_rc in [
+        json!({
+            "target": { "kind": "local", "root": bob_str },
+            "name": "Bob Arbitrary Cmd",
+            "runner": "shell",
+            "command": "echo bob",
+            "args": [],
+        }),
+        json!({
+            "target": { "kind": "local", "root": bob_str },
+            "name": "Bob Hook",
+            "runner": "go_test",
+            "before_launch": "sh -c id",
+            "args": ["./..."],
+        }),
+        json!({
+            "target": { "kind": "local", "root": bob_str },
+            "name": "Bob Loader",
+            "runner": "go_test",
+            "env_overrides": { "DYLD_INSERT_LIBRARIES": "/tmp/evil.dylib" },
+            "args": ["./..."],
+        }),
+        json!({
+            "target": { "kind": "local", "root": bob_str },
+            "name": "Bob Escape Cwd",
+            "runner": "go_test",
+            "cwd": "../alice-ws",
+            "args": ["./..."],
+        }),
+    ] {
+        let (st_bad_rc, body_bad_rc) =
+            send_json(&app_bob, Method::POST, "/ide/run-configs", Some(bad_rc)).await;
+        assert_eq!(
+            st_bad_rc,
+            StatusCode::FORBIDDEN,
+            "expected 403 for non-root dangerous run-config: {body_bad_rc}"
+        );
+    }
+
+    for bad_env in [
+        json!({
+            "target": { "kind": "local", "root": bob_str },
+            "java_home": "/tmp/fake-jdk",
+        }),
+        json!({
+            "target": { "kind": "local", "root": bob_str },
+            "extra_path": "/tmp/evil-bin",
+        }),
+        json!({
+            "target": { "kind": "local", "root": bob_str },
+            "env_vars": [{ "key": "LD_PRELOAD", "value": "/tmp/evil.so", "secret": false }],
+        }),
+    ] {
+        let (st_bad_env, body_bad_env) =
+            send_json(&app_bob, Method::PUT, "/ide/environments", Some(bad_env)).await;
+        assert_eq!(
+            st_bad_env,
+            StatusCode::FORBIDDEN,
+            "expected 403 for non-root dangerous env override: {body_bad_env}"
+        );
+    }
+
+    // Item B Go build tags validation & persistence over HTTP:
+    let (st_bad_tag, _) = send_json(
+        &app_bob,
+        Method::PUT,
+        "/ide/environments",
+        Some(json!({
+            "target": { "kind": "local", "root": bob_str },
+            "go_build_tags": ["-exec=/bin/sh"],
+        })),
+    )
+    .await;
+    assert_eq!(st_bad_tag, StatusCode::BAD_REQUEST);
+
+    let (st_ok_tags, ok_tags_body) = send_json(
+        &app_bob,
+        Method::PUT,
+        "/ide/environments",
+        Some(json!({
+            "target": { "kind": "local", "root": bob_str },
+            "go_build_tags": ["component", "integration"],
+            "module_go_build_tags": { &bob_str: ["e2e"] },
+        })),
+    )
+    .await;
+    assert_eq!(
+        st_ok_tags,
+        StatusCode::OK,
+        "save go_build_tags: {ok_tags_body}"
+    );
+    assert_eq!(
+        ok_tags_body["env"]["go_build_tags"],
+        json!(["component", "integration"])
+    );
+    assert_eq!(
+        ok_tags_body["env"]["module_go_build_tags"][&bob_str],
+        json!(["e2e"])
+    );
+
     let (st_cfg, cfg_body) = send_json(
         &app_bob,
         Method::POST,
         "/ide/run-configs",
         Some(json!({
             "target": { "kind": "local", "root": bob_str },
-            "name": "Bob Deploy",
-            "runner": "shell",
-            "command": "echo bob",
-            "args": [],
+            "name": "Bob Go Tests",
+            "runner": "go_test",
+            "args": ["./..."],
+            "coverage": true,
         })),
     )
     .await;
@@ -146,6 +247,7 @@ async fn non_root_rbac_secret_paths_and_cross_user_isolation_are_enforced() {
         StatusCode::OK,
         "bob upsert config failed: {cfg_body}"
     );
+    assert_eq!(cfg_body["config"]["coverage"], true);
     let bob_cfg_id = cfg_body["config"]["id"].as_str().unwrap().to_string();
 
     let (st_no_root, _) = send_json(
@@ -166,18 +268,44 @@ async fn non_root_rbac_secret_paths_and_cross_user_isolation_are_enforced() {
     .await;
     assert_eq!(st_bob_root, StatusCode::FORBIDDEN);
 
-    // 5. Cross-user run & named-project isolation + SQLite persistence across restart:
-    let (st_run, run_body) = send_json(
+    // 5. Non-root Local process execution (`POST /ide/runs` & `POST /ide/deps/action`) is forbidden,
+    //    and cross-user run & named-project isolation + SQLite persistence hold across restart:
+    let (st_non_root_run, _) = send_json(
         &app_bob,
         Method::POST,
         "/ide/runs",
         Some(json!({
             "target": { "kind": "local", "root": bob_str },
+            "config_id": bob_cfg_id,
+        })),
+    )
+    .await;
+    assert_eq!(st_non_root_run, StatusCode::FORBIDDEN);
+
+    let (st_non_root_deps, _) = send_json(
+        &app_bob,
+        Method::POST,
+        "/ide/deps/action",
+        Some(json!({
+            "target": { "kind": "local", "root": bob_str },
+            "path": format!("{bob_str}/go.mod"),
+            "action": "tidy",
+        })),
+    )
+    .await;
+    assert_eq!(st_non_root_deps, StatusCode::FORBIDDEN);
+
+    let (st_run, run_body) = send_json(
+        &app_root,
+        Method::POST,
+        "/ide/runs",
+        Some(json!({
+            "target": { "kind": "local", "root": bob_str },
             "adhoc": {
-                "name": "Bob Sleep",
+                "name": "Root Sleep",
                 "runner": "shell",
-                "command": "sleep 5",
-                "args": [],
+                "command": "sh",
+                "args": ["-c", "sleep 5"],
             }
         })),
     )
@@ -204,7 +332,7 @@ async fn non_root_rbac_secret_paths_and_cross_user_isolation_are_enforced() {
     assert_eq!(st_alice_stop_run, StatusCode::FORBIDDEN);
 
     let _ = send_json(
-        &app_bob,
+        &app_root,
         Method::POST,
         &format!("/ide/runs/{bob_run_id}/stop"),
         None,
@@ -248,6 +376,30 @@ async fn non_root_rbac_secret_paths_and_cross_user_isolation_are_enforced() {
     assert_eq!(st_bob_projs, StatusCode::OK);
     assert_eq!(bob_projs["projects"].as_array().unwrap().len(), 1);
     assert_eq!(bob_projs["projects"][0]["id"], bob_proj_id);
+
+    let (st_bob_env, bob_env) = send_json(
+        &app_bob2,
+        Method::GET,
+        &format!("/ide/environments?root={bob_enc}"),
+        None,
+    )
+    .await;
+    assert_eq!(st_bob_env, StatusCode::OK);
+    assert_eq!(
+        bob_env["env"]["go_build_tags"],
+        json!(["component", "integration"])
+    );
+    assert_eq!(
+        bob_env["env"]["module_go_build_tags"][&bob_str],
+        json!(["e2e"])
+    );
+    let saved_cfg = bob_env["configs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == bob_cfg_id)
+        .expect("reloaded bob_cfg_id");
+    assert_eq!(saved_cfg["coverage"], true);
 }
 
 #[tokio::test]

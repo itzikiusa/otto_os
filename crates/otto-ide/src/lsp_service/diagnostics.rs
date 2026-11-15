@@ -128,7 +128,13 @@ pub async fn diagnostics<S: IdeCtx>(
             analyze_shell_diagnostics(&req.path, &lang, &content).await
         }
         "javascript" | "typescript" | "svelte" => {
-            analyze_js_ts_diagnostics(&req.path, &content, &project_roots)
+            let path_c = req.path.clone();
+            let content_c = content.clone();
+            tokio::task::spawn_blocking(move || {
+                analyze_js_ts_diagnostics(&path_c, &content_c, &project_roots)
+            })
+            .await
+            .unwrap_or_default()
         }
         "rust" => analyze_rust_diagnostics(&req.path, &content),
         _ => Vec::new(),

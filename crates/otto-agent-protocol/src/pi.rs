@@ -37,8 +37,8 @@
 use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, ProviderFailure, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider,
-    TurnItemKind, TurnItemStatus, TurnTerminalStatus,
+    ApprovalDecision, BackgroundTask, ProviderFailure, RuntimeAccessMode, RuntimePromptReq,
+    RuntimeProvider, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
 };
 use serde_json::{json, Value};
 
@@ -75,6 +75,34 @@ fn thinking_level(effort: &str) -> Option<&'static str> {
 struct Tool {
     name: String,
     args: Value,
+    #[serde(default)]
+    turn_id: Option<String>,
+    #[serde(default = "chrono::Utc::now")]
+    started_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    streamed_output: String,
+    #[serde(default)]
+    tool_uses: u32,
+    #[serde(default)]
+    last_tool: Option<String>,
+    #[serde(default)]
+    bg_id: Option<String>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct PiBgEntry {
+    call_id: String,
+    item_id: String,
+    turn_id: Option<String>,
+    name: String,
+    args: Value,
+    kind: String,
+    label: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    tool_uses: u32,
+    #[serde(default)]
+    last_tool: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -92,6 +120,10 @@ struct PiDriverState {
     tools: HashMap<String, Tool>,
     settles: bool,
     ended: Option<(TurnTerminalStatus, Option<ProviderFailure>)>,
+    #[serde(default)]
+    bg_tasks: Vec<BackgroundTask>,
+    #[serde(default)]
+    bg_entries: HashMap<String, PiBgEntry>,
 }
 
 pub struct PiDriver {
@@ -113,6 +145,8 @@ pub struct PiDriver {
     /// non-retrying `agent_end` only stashes its outcome in `ended`.
     settles: bool,
     ended: Option<(TurnTerminalStatus, Option<ProviderFailure>)>,
+    bg_tasks: Vec<BackgroundTask>,
+    bg_entries: HashMap<String, PiBgEntry>,
 }
 
 impl PiDriver {
@@ -132,6 +166,8 @@ impl PiDriver {
             tools: HashMap::new(),
             settles: false,
             ended: None,
+            bg_tasks: Vec::new(),
+            bg_entries: HashMap::new(),
         }
     }
 
@@ -277,8 +313,99 @@ impl PiDriver {
         step.push(DriverEvent::TurnItem(it));
     }
 
-    fn tool_kind(name: &str, args: &Value, output: Option<String>) -> TurnItemKind {
+    fn is_subagent_tool(name: &str, args: &Value) -> bool {
+        let lower = name.trim().to_ascii_lowercase();
+        let bare = lower
+            .rsplit_once("__")
+            .map(|(_, tail)| tail)
+            .unwrap_or(lower.as_str());
+        matches!(
+            bare,
+            "subagent"
+                | "task"
+                | "spawn_agent"
+                | "spawn_subagent"
+                | "delegate_to_agent"
+                | "invoke_subagent"
+        ) || args.get("subagent_type").is_some()
+            || args.get("subagentType").is_some()
+            || args.get("agent_type").is_some()
+            || args.get("agentType").is_some()
+            || args.get("TypeName").is_some()
+    }
+
+    fn is_background_call(args: &Value) -> bool {
+        args.get("run_in_background").and_then(Value::as_bool) == Some(true)
+            || args.get("background").and_then(Value::as_bool) == Some(true)
+    }
+
+    fn arg_str(args: &Value, keys: &[&str]) -> Option<String> {
+        for k in keys {
+            if let Some(s) = args
+                .get(*k)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(s.to_string());
+            }
+        }
+        None
+    }
+
+    fn first_line_truncated(s: &str) -> Option<String> {
+        let line = s.lines().map(str::trim).find(|l| !l.is_empty())?;
+        let mut out: String = line.chars().take(80).collect();
+        if line.chars().count() > 80 {
+            out.push('…');
+        }
+        Some(out)
+    }
+
+    fn subagent_fields(args: &Value) -> (Option<String>, Option<String>, Option<String>, bool) {
+        let prompt = Self::arg_str(args, &["prompt", "Prompt", "task", "message"]);
+        let subagent_type = Self::arg_str(
+            args,
+            &[
+                "subagent_type",
+                "subagentType",
+                "agent_type",
+                "agentType",
+                "TypeName",
+                "agent",
+                "role",
+            ],
+        );
+        let description = Self::arg_str(
+            args,
+            &["description", "Description", "Role", "name", "title"],
+        )
+        .or_else(|| prompt.as_deref().and_then(Self::first_line_truncated));
+        let background = Self::is_background_call(args);
+        (description, subagent_type, prompt, background)
+    }
+
+    fn tool_kind(
+        name: &str,
+        args: &Value,
+        output: Option<String>,
+        tool_uses: u32,
+        last_tool: Option<String>,
+    ) -> TurnItemKind {
         let s = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
+        if Self::is_subagent_tool(name, args) {
+            let (description, subagent_type, prompt, background) = Self::subagent_fields(args);
+            return TurnItemKind::Subagent {
+                tool_name: name.to_string(),
+                description,
+                subagent_type,
+                prompt,
+                background,
+                tool_uses,
+                last_tool,
+                output,
+            };
+        }
         match name {
             "bash" => TurnItemKind::CommandExecution {
                 input: s("command").unwrap_or_default(),
@@ -311,7 +438,215 @@ impl PiDriver {
         }
     }
 
+    fn tool_title(name: &str, args: &Value) -> Option<String> {
+        if Self::is_subagent_tool(name, args) {
+            let (description, subagent_type, _, _) = Self::subagent_fields(args);
+            return description
+                .or(subagent_type)
+                .or_else(|| Some(name.to_string()));
+        }
+        Some(name.to_string())
+    }
+
+    fn bg_kind_and_label(name: &str, args: &Value) -> (&'static str, String) {
+        if Self::is_subagent_tool(name, args) {
+            let (description, subagent_type, _, _) = Self::subagent_fields(args);
+            let label = description
+                .or(subagent_type)
+                .unwrap_or_else(|| name.to_string());
+            ("agent", label)
+        } else if name == "bash" {
+            let label = args
+                .get("description")
+                .and_then(Value::as_str)
+                .and_then(Self::first_line_truncated)
+                .or_else(|| {
+                    args.get("command")
+                        .and_then(Value::as_str)
+                        .and_then(Self::first_line_truncated)
+                })
+                .unwrap_or_else(|| "bash".into());
+            ("command", label)
+        } else {
+            ("command", name.to_string())
+        }
+    }
+
+    fn extract_launched_bg_id(result: &Value, output: Option<&str>) -> Option<(String, bool)> {
+        let details = result.get("details");
+        if let Some(d) = details {
+            let id = Self::arg_str(
+                d,
+                &[
+                    "taskId",
+                    "task_id",
+                    "backgroundTaskId",
+                    "agentId",
+                    "agent_id",
+                    "shellId",
+                    "shell_id",
+                    "id",
+                ],
+            );
+            let status = d
+                .get("status")
+                .or_else(|| d.get("state"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let still_running = matches!(
+                status,
+                "running" | "started" | "in_progress" | "inProgress" | "background" | "pending"
+            ) || (id.is_some() && status.is_empty());
+            if let Some(id) = id {
+                return Some((id, still_running));
+            }
+            if still_running {
+                return Some((String::new(), true));
+            }
+        }
+        if let Some(text) = output {
+            let trimmed = text.trim();
+            for prefix in [
+                "Background task started:",
+                "Started background task:",
+                "Task ID:",
+                "Agent ID:",
+            ] {
+                if let Some(rest) = trimmed.strip_prefix(prefix) {
+                    let token: String = rest
+                        .trim()
+                        .chars()
+                        .take_while(|c| {
+                            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.')
+                        })
+                        .collect();
+                    if !token.is_empty() {
+                        return Some((token, true));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn settle_bg_entry(
+        &mut self,
+        step: &mut DriverStep,
+        bg_id: &str,
+        status: TurnItemStatus,
+        output: Option<String>,
+        emit_card: bool,
+    ) {
+        let Some(entry) = self.bg_entries.remove(bg_id) else {
+            return;
+        };
+        let before = self.bg_tasks.len();
+        self.bg_tasks
+            .retain(|t| t.id != bg_id && t.id != entry.call_id);
+        if emit_card {
+            let mut it = item(
+                entry.item_id.clone(),
+                status,
+                Self::tool_title(&entry.name, &entry.args),
+                Self::tool_kind(
+                    &entry.name,
+                    &entry.args,
+                    output.clone(),
+                    entry.tool_uses,
+                    entry.last_tool.clone(),
+                ),
+            );
+            it.turn_id = entry.turn_id.clone();
+            it.started_at = Some(entry.started_at);
+            if status == TurnItemStatus::Failed {
+                it.error = output.as_deref().and_then(tool_error);
+            }
+            step.push(DriverEvent::TurnItem(it));
+        }
+        if self.bg_tasks.len() != before {
+            step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
+        }
+        let verb = match status {
+            TurnItemStatus::Failed => "failed",
+            TurnItemStatus::Cancelled => "stopped",
+            _ => "finished",
+        };
+        let mut notice = item(
+            format!("bg:{bg_id}"),
+            status,
+            None,
+            TurnItemKind::SystemNotice {
+                message: format!("Background {} {verb}: {}", entry.kind, entry.label),
+            },
+        );
+        notice.turn_id = entry.turn_id.or_else(|| self.turn_id.clone());
+        step.push(DriverEvent::TurnItem(notice));
+    }
+
+    fn maybe_handle_bg_control_tool(
+        &mut self,
+        step: &mut DriverStep,
+        name: &str,
+        args: &Value,
+        result: &Value,
+        output: Option<&str>,
+        failed: bool,
+    ) {
+        let lower = name.trim().to_ascii_lowercase();
+        let bare = lower
+            .rsplit_once("__")
+            .map(|(_, tail)| tail)
+            .unwrap_or(lower.as_str());
+        let Some(target_id) = Self::arg_str(
+            args,
+            &[
+                "task_id", "taskId", "shell_id", "shellId", "agent_id", "agentId", "id",
+            ],
+        ) else {
+            return;
+        };
+        if matches!(
+            bare,
+            "kill_shell"
+                | "killshell"
+                | "task_stop"
+                | "stop_task"
+                | "cancel_subagent"
+                | "kill_task"
+        ) && !failed
+        {
+            self.settle_bg_entry(
+                step,
+                &target_id,
+                TurnItemStatus::Cancelled,
+                output.map(str::to_string),
+                true,
+            );
+        } else if matches!(
+            bare,
+            "task_output" | "bash_output" | "subagent_output" | "get_task_output"
+        ) && !failed
+        {
+            let still_running = result
+                .pointer("/details/status")
+                .and_then(Value::as_str)
+                .is_some_and(|s| matches!(s, "running" | "in_progress" | "pending"));
+            if !still_running {
+                self.settle_bg_entry(
+                    step,
+                    &target_id,
+                    TurnItemStatus::Completed,
+                    output.map(str::to_string),
+                    true,
+                );
+            }
+        }
+    }
+
     fn result_text(result: &Value) -> Option<String> {
+        if let Some(s) = result.as_str().filter(|s| !s.is_empty()) {
+            return Some(s.to_string());
+        }
         let text: Vec<&str> = result
             .get("content")
             .and_then(Value::as_array)?
@@ -417,62 +752,9 @@ impl PiDriver {
                 self.close_thought(step);
                 self.close_message(step);
             }
-            Some("tool_execution_start") => {
-                self.ensure_autonomous_turn(step);
-                if self.turn_id.is_none() {
-                    return;
-                }
-                self.close_thought(step);
-                self.close_message(step);
-                let call = v
-                    .get("toolCallId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool");
-                let name = v
-                    .get("toolName")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool")
-                    .to_string();
-                let args = v.get("args").cloned().unwrap_or(Value::Null);
-                let id = format!("{}:tool:{call}", self.turn());
-                step.push(DriverEvent::TurnItem(item(
-                    id,
-                    TurnItemStatus::Running,
-                    Some(name.clone()),
-                    Self::tool_kind(&name, &args, None),
-                )));
-                self.tools.insert(call.to_string(), Tool { name, args });
-            }
-            Some("tool_execution_end") => {
-                let call = v
-                    .get("toolCallId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool");
-                let tool = self.tools.remove(call).unwrap_or_else(|| Tool {
-                    name: v
-                        .get("toolName")
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool")
-                        .into(),
-                    args: v.get("args").cloned().unwrap_or(Value::Null),
-                });
-                let output = Self::result_text(&v["result"]);
-                let failed = v.get("isError").and_then(Value::as_bool) == Some(true);
-                let mut it = item(
-                    format!("{}:tool:{call}", self.turn()),
-                    if failed {
-                        TurnItemStatus::Failed
-                    } else {
-                        TurnItemStatus::Completed
-                    },
-                    Some(tool.name.clone()),
-                    Self::tool_kind(&tool.name, &tool.args, output.clone()),
-                );
-                if failed {
-                    it.error = output.as_deref().and_then(tool_error);
-                }
-                step.push(DriverEvent::TurnItem(it));
-            }
+            Some("tool_execution_start") => self.on_tool_start(step, v),
+            Some("tool_execution_update") => self.on_tool_update(step, v),
+            Some("tool_execution_end") => self.on_tool_end(step, v),
             // pi will not continue on its own: the turn is over, with the
             // last run's outcome (an abort wins).
             Some("agent_settled") => {
@@ -509,6 +791,279 @@ impl PiDriver {
             }
             _ => {}
         }
+    }
+
+    fn on_tool_start(&mut self, step: &mut DriverStep, v: &Value) {
+        self.ensure_autonomous_turn(step);
+        if self.turn_id.is_none() {
+            return;
+        }
+        self.close_thought(step);
+        self.close_message(step);
+        let call = v
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .unwrap_or("tool");
+        let name = v
+            .get("toolName")
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+            .to_string();
+        let args = v.get("args").cloned().unwrap_or(Value::Null);
+        let started_at = chrono::Utc::now();
+        let turn_id = self.turn_id.clone();
+        let id = format!("{}:tool:{call}", self.turn());
+        let mut ti = item(
+            id.clone(),
+            TurnItemStatus::Running,
+            Self::tool_title(&name, &args),
+            Self::tool_kind(&name, &args, None, 0, None),
+        );
+        ti.turn_id = turn_id.clone();
+        ti.started_at = Some(started_at);
+        step.push(DriverEvent::TurnItem(ti));
+
+        let bg_id = if Self::is_background_call(&args) {
+            let (kind, label) = Self::bg_kind_and_label(&name, &args);
+            let bg_id = call.to_string();
+            self.bg_tasks.push(BackgroundTask {
+                id: bg_id.clone(),
+                kind: kind.to_string(),
+                label: label.clone(),
+                started_at,
+                item_id: Some(id.clone()),
+            });
+            self.bg_entries.insert(
+                bg_id.clone(),
+                PiBgEntry {
+                    call_id: call.to_string(),
+                    item_id: id,
+                    turn_id: turn_id.clone(),
+                    name: name.clone(),
+                    args: args.clone(),
+                    kind: kind.to_string(),
+                    label,
+                    started_at,
+                    tool_uses: 0,
+                    last_tool: None,
+                },
+            );
+            step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
+            Some(bg_id)
+        } else {
+            None
+        };
+
+        self.tools.insert(
+            call.to_string(),
+            Tool {
+                name,
+                args,
+                turn_id,
+                started_at,
+                streamed_output: String::new(),
+                tool_uses: 0,
+                last_tool: None,
+                bg_id,
+            },
+        );
+    }
+
+    fn on_tool_update(&mut self, step: &mut DriverStep, v: &Value) {
+        let Some(call) = v.get("toolCallId").and_then(Value::as_str) else {
+            return;
+        };
+        let partial = &v["partialResult"];
+        let partial_text = Self::result_text(partial);
+        let Some(tool) = self.tools.get_mut(call) else {
+            return;
+        };
+        let turn_str = tool
+            .turn_id
+            .as_deref()
+            .or(self.turn_id.as_deref())
+            .unwrap_or_default();
+        let item_id = format!("{turn_str}:tool:{call}");
+        if tool.name == "bash" {
+            if let Some(full) = partial_text {
+                if let Some(delta) = full.strip_prefix(tool.streamed_output.as_str()) {
+                    if !delta.is_empty() {
+                        let chunk = delta.to_string();
+                        tool.streamed_output = full;
+                        step.push(DriverEvent::CommandOutput { item_id, chunk });
+                    }
+                }
+            }
+        } else if Self::is_subagent_tool(&tool.name, &tool.args) {
+            let details = partial.get("details");
+            let uses = details
+                .and_then(|d| d.get("toolUses").or_else(|| d.get("tool_uses")))
+                .and_then(Value::as_u64)
+                .map(|n| n as u32);
+            let last = details
+                .and_then(|d| Self::arg_str(d, &["lastTool", "last_tool", "currentTool", "tool"]));
+            let mut dirty = false;
+            if let Some(u) = uses.filter(|u| *u != tool.tool_uses) {
+                tool.tool_uses = u;
+                dirty = true;
+            } else if last.is_some() && last != tool.last_tool {
+                tool.tool_uses = tool.tool_uses.saturating_add(1);
+                dirty = true;
+            }
+            if last.is_some() && last != tool.last_tool {
+                tool.last_tool = last;
+                dirty = true;
+            }
+            if dirty {
+                let mut ti = item(
+                    item_id,
+                    TurnItemStatus::Running,
+                    Self::tool_title(&tool.name, &tool.args),
+                    Self::tool_kind(
+                        &tool.name,
+                        &tool.args,
+                        partial_text,
+                        tool.tool_uses,
+                        tool.last_tool.clone(),
+                    ),
+                );
+                ti.turn_id = tool.turn_id.clone();
+                ti.started_at = Some(tool.started_at);
+                step.push(DriverEvent::TurnItem(ti));
+            }
+        }
+    }
+
+    fn on_tool_end(&mut self, step: &mut DriverStep, v: &Value) {
+        let call = v
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .unwrap_or("tool");
+        let tool = self.tools.remove(call).unwrap_or_else(|| Tool {
+            name: v
+                .get("toolName")
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .into(),
+            args: v.get("args").cloned().unwrap_or(Value::Null),
+            turn_id: self.turn_id.clone(),
+            started_at: chrono::Utc::now(),
+            streamed_output: String::new(),
+            tool_uses: 0,
+            last_tool: None,
+            bg_id: None,
+        });
+        let result = &v["result"];
+        let output = Self::result_text(result)
+            .or_else(|| (!tool.streamed_output.is_empty()).then(|| tool.streamed_output.clone()));
+        let failed = v.get("isError").and_then(Value::as_bool) == Some(true);
+        let turn_str = tool
+            .turn_id
+            .clone()
+            .or_else(|| self.turn_id.clone())
+            .unwrap_or_default();
+        let item_id = format!("{turn_str}:tool:{call}");
+
+        if let Some(orig_bg_id) = tool.bg_id.clone() {
+            if !failed {
+                if let Some((launched_id, true)) =
+                    Self::extract_launched_bg_id(result, output.as_deref())
+                {
+                    let new_id = if launched_id.is_empty() {
+                        orig_bg_id.clone()
+                    } else {
+                        launched_id
+                    };
+                    if new_id != orig_bg_id {
+                        if let Some(mut entry) = self.bg_entries.remove(&orig_bg_id) {
+                            entry.tool_uses = tool.tool_uses;
+                            entry.last_tool = tool.last_tool.clone();
+                            self.bg_entries.insert(new_id.clone(), entry);
+                        }
+                        if let Some(bt) = self.bg_tasks.iter_mut().find(|t| t.id == orig_bg_id) {
+                            bt.id = new_id;
+                            step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
+                        }
+                    } else if let Some(entry) = self.bg_entries.get_mut(&orig_bg_id) {
+                        entry.tool_uses = tool.tool_uses;
+                        entry.last_tool = tool.last_tool.clone();
+                    }
+                    let mut it = item(
+                        item_id,
+                        TurnItemStatus::Running,
+                        Self::tool_title(&tool.name, &tool.args),
+                        Self::tool_kind(
+                            &tool.name,
+                            &tool.args,
+                            output,
+                            tool.tool_uses,
+                            tool.last_tool,
+                        ),
+                    );
+                    it.turn_id = tool.turn_id;
+                    it.started_at = Some(tool.started_at);
+                    step.push(DriverEvent::TurnItem(it));
+                    return;
+                }
+            }
+
+            let status = if failed {
+                TurnItemStatus::Failed
+            } else {
+                TurnItemStatus::Completed
+            };
+            let mut it = item(
+                item_id,
+                status,
+                Self::tool_title(&tool.name, &tool.args),
+                Self::tool_kind(
+                    &tool.name,
+                    &tool.args,
+                    output.clone(),
+                    tool.tool_uses,
+                    tool.last_tool,
+                ),
+            );
+            it.turn_id = tool.turn_id;
+            it.started_at = Some(tool.started_at);
+            if failed {
+                it.error = output.as_deref().and_then(tool_error);
+            }
+            step.push(DriverEvent::TurnItem(it));
+            self.settle_bg_entry(step, &orig_bg_id, status, output, false);
+            return;
+        }
+
+        let mut it = item(
+            item_id,
+            if failed {
+                TurnItemStatus::Failed
+            } else {
+                TurnItemStatus::Completed
+            },
+            Self::tool_title(&tool.name, &tool.args),
+            Self::tool_kind(
+                &tool.name,
+                &tool.args,
+                output.clone(),
+                tool.tool_uses,
+                tool.last_tool,
+            ),
+        );
+        it.turn_id = tool.turn_id;
+        it.started_at = Some(tool.started_at);
+        if failed {
+            it.error = output.as_deref().and_then(tool_error);
+        }
+        step.push(DriverEvent::TurnItem(it));
+        self.maybe_handle_bg_control_tool(
+            step,
+            &tool.name,
+            &tool.args,
+            result,
+            output.as_deref(),
+            failed,
+        );
     }
 
     fn on_response(&mut self, step: &mut DriverStep, v: &Value) {
@@ -725,6 +1280,8 @@ impl StructuredDriver for PiDriver {
 
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
         self.steer_reqs.clear();
+        self.bg_tasks.clear();
+        self.bg_entries.clear();
         DriverStep::default()
     }
 
@@ -743,6 +1300,8 @@ impl StructuredDriver for PiDriver {
             tools: self.tools.clone(),
             settles: self.settles,
             ended: self.ended.clone(),
+            bg_tasks: self.bg_tasks.clone(),
+            bg_entries: self.bg_entries.clone(),
         })
         .unwrap_or(Value::Null)
     }
@@ -766,6 +1325,8 @@ impl StructuredDriver for PiDriver {
         self.tools = s.tools;
         self.settles = s.settles;
         self.ended = s.ended;
+        self.bg_tasks = s.bg_tasks;
+        self.bg_entries = s.bg_entries;
         Ok(())
     }
 }

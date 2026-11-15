@@ -58,7 +58,7 @@
   }: Props = $props();
 
   const FAV_KEY = 'otto_model_favorites';
-  const PAGE = 8;
+  const PAGE = 12;
 
   function readFavs(): string[] {
     try {
@@ -123,7 +123,7 @@
     }
     return out;
   });
-  const efforts = $derived(oneffort && supportsEffortSelection(provider) ? effortsForModel(provider, current, meta) : []);
+  const efforts = $derived(oneffort && supportsEffortSelection(provider, meta) ? effortsForModel(provider, current, meta) : []);
 
   $effect(() => {
     void view;
@@ -136,13 +136,13 @@
   }
 
   function pick(p: string, id: string | null): void {
+    if (!pickable(p)) return;
     if (p !== provider) {
-      if (!pickable(p)) return;
       onprovider?.(p);
     }
     onmodel(id);
     if (effort !== null && oneffort) {
-      const nextEfforts = supportsEffortSelection(p) ? effortsForModel(p, id, meta) : [];
+      const nextEfforts = supportsEffortSelection(p, meta) ? effortsForModel(p, id, meta) : [];
       if (!nextEfforts.includes(effort)) {
         oneffort(null);
       }

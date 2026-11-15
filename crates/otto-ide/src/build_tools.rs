@@ -15,8 +15,8 @@ use regex::Regex;
 
 use self::gradle::{scan_gradle_tree, scan_spring_profiles, shorten_home_path};
 use crate::java_workspace::{
-    extract_first_tag_block, extract_tag_text, parse_pom_module, parse_pom_properties,
-    remove_all_tag_blocks, resolve_pom_props, strip_xml_comments,
+    extract_first_tag_block, extract_tag_text, parse_pom_module_scoped,
+    parse_pom_properties_scoped, remove_all_tag_blocks, resolve_pom_props, strip_xml_comments,
 };
 use crate::target::{canonicalize_local_root_dir, enforce_non_root_path};
 use crate::types::{
@@ -193,8 +193,8 @@ fn scan_maven_tree(
     }
     let raw = fs::read_to_string(&pom_path).ok()?;
     let stripped = strip_xml_comments(&raw);
-    let props = parse_pom_properties(&stripped, dir);
-    let (ws_mod, submodules) = parse_pom_module(dir, &raw);
+    let props = parse_pom_properties_scoped(&stripped, dir, st.canon_roots, st.is_root_user);
+    let (ws_mod, submodules) = parse_pom_module_scoped(dir, &raw, st.canon_roots, st.is_root_user);
 
     let mut header = stripped.clone();
     for tag in [

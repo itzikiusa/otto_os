@@ -64,9 +64,13 @@ export function needsEyes(entries: readonly WorkEntry[], pendingRequestIds: Read
 }
 
 /** The stretch is over: nothing in it runs and its turn(s) ended. */
-export function stretchDone(entries: readonly WorkEntry[], turns: readonly ProviderTurn[]): boolean {
+export function stretchDone(
+  entries: readonly WorkEntry[],
+  turns: readonly ProviderTurn[],
+  turnById?: ReadonlyMap<string, ProviderTurn>,
+): boolean {
   if (entries.some((e) => isLive(e.item))) return false;
-  const byId = new Map(turns.map((t) => [t.id, t] as const));
+  const byId = turnById ?? new Map(turns.map((t) => [t.id, t] as const));
   return entries.every(({ item }) => {
     const t = item.turn_id ? byId.get(item.turn_id) : undefined;
     return !t || (t.status !== 'running' && t.status !== 'pending');
@@ -99,11 +103,12 @@ export function shouldFold(
   entries: readonly WorkEntry[],
   turns: readonly ProviderTurn[],
   pendingRequestIds: ReadonlySet<string>,
+  turnById?: ReadonlyMap<string, ProviderTurn>,
 ): boolean {
   return (
     entries.length > 1 &&
     entries.every((e) => FOLDABLE.has(e.item.type) && threadCall(e.item)?.verb !== 'Opened') &&
-    stretchDone(entries, turns) &&
+    stretchDone(entries, turns, turnById) &&
     !needsEyes(entries, pendingRequestIds)
   );
 }

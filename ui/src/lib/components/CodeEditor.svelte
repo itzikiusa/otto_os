@@ -60,7 +60,8 @@
     gotoLine?: number | null; gotoCol?: number | null; findOwner?: boolean; placeholder?: string;
     wrap?: boolean; keepStates?: boolean; historyKey?: ((path: string) => { key: string; persist: boolean } | null) | null;
     oncopy?: ((text: string) => void) | null; lsp?: boolean; sqlDialect?: SqlDialectName; highlightLineLimit?: number;
-    ideMode?: boolean; connectionId?: string | null; projectFolders?: string[]; savedContent?: string | null;
+    ideMode?: boolean; connectionId?: string | null; projectFolders?: string[];
+    savedContent?: string | null; gitBaseContent?: string | null;
     breakpoints?: IdeBreakpoint[]; breakpointsMuted?: boolean; blameByLine?: Record<number, string> | null;
     onToggleBreakpoint?: ((line: number) => void) | null; onEditBreakpoint?: ((line: number, event?: MouseEvent) => void) | null;
     gutterItems?: IdeGutterItem[]; onGutterAction?: ((item: IdeGutterItem, mode: 'run' | 'debug') => void) | null;
@@ -73,7 +74,7 @@
     onFileStructure?: (() => void) | null; onJumpSymbol?: ((delta: -1 | 1) => void) | null;
     onNavigateBack?: (() => void) | null; onNavigateForward?: (() => void) | null;
     onQuickFix?: ((ctx: { line: number; column: number; symbol?: string; clientX?: number; clientY?: number }) => void) | null;
-    onRenameSymbol?: ((ctx: { line: number; column: number; symbol: string }) => void) | null;
+    onRenameSymbol?: ((ctx: { line: number; column: number; symbol: string; newName?: string }) => void) | null;
     onFormat?: (() => void) | null; onToggleBlame?: (() => void) | null;
     onDiagnostics?: ((diags: IdeDiagnostic[]) => void) | null;
     onAgentAction?: ((mode: 'chat' | 'inline', sel: CmIdeMod.IdeEditorSelectionRange) => void) | null;
@@ -87,7 +88,7 @@
     path, content, root, language, readOnly = true, onchange, completionSource = null, autoTriggerGate = null,
     minimal = false, onsubmit, onselect, gotoLine = null, gotoCol = null, findOwner = true, placeholder = '',
     wrap = false, keepStates = false, historyKey = null, oncopy = null, lsp = false, sqlDialect = 'standard',
-    highlightLineLimit = 0, ideMode = false, connectionId = null, projectFolders = [], savedContent = null,
+    highlightLineLimit = 0, ideMode = false, connectionId = null, projectFolders = [], savedContent = null, gitBaseContent = undefined,
     breakpoints = [], breakpointsMuted = false, blameByLine = null,
     onToggleBreakpoint = null, onEditBreakpoint = null, gutterItems = [], onGutterAction = null,
     pausedLine = null, executionLine = null, inlineValues = [], peerCursors = [], keymapPreset = 'jetbrains', fontLigatures, jumpToLine = null,
@@ -149,7 +150,7 @@
 
   function isIdeActive(): boolean {
     return Boolean(
-      ideMode || savedContent != null || blameByLine != null || onAgentAction || breakpoints.length > 0 ||
+      ideMode || savedContent != null || gitBaseContent != null || blameByLine != null || onAgentAction || breakpoints.length > 0 ||
       gutterItems.length > 0 || effectivePausedLine != null || inlineValues.length > 0 || peerCursors.length > 0 ||
       onToggleBreakpoint || onEditBreakpoint || onGutterAction || onDefinitionJump || onImplementationJump ||
       onFindUsages || onFileStructure || onQuickFix || onRenameSymbol || onFormat,
@@ -163,10 +164,13 @@
     onGoToLine, onPasteFromHistory,
   });
 
+  const effectiveDiffBaseline = (): string | null =>
+    gitBaseContent !== undefined ? gitBaseContent : savedContent;
+
   const buildIdeOpts = (forPath?: string): CmIdeMod.CreateIdeExtensionsOptions => ({
     filePath: forPath ?? (livePath || path), language, root, connectionId, projectFolders,
     breakpoints, breakpointsMuted, gutterItems, pausedLine: effectivePausedLine, inlineValues, peerCursors,
-    savedContent, blameByLine, keymapPreset, getCallbacks: getIdeCallbacks,
+    diskSavedContent: savedContent, savedContent: effectiveDiffBaseline(), blameByLine, keymapPreset, getCallbacks: getIdeCallbacks,
   });
 
   const buildIdeBpExtIfLoaded = (forPath?: string): Extension =>
@@ -332,9 +336,21 @@
 
   export function applyAgentEdit(nextContent: string, range?: { from: number; to: number }): boolean {
     if (!view || readOnly) return false;
+    const normInsert = nextContent.indexOf('\r') >= 0 ? nextContent.replace(/\r\n?/g, '\n') : nextContent;
     const docLen = view.state.doc.length;
-    const from = range ? Math.max(0, Math.min(docLen, range.from)) : 0, to = range ? Math.max(from, Math.min(docLen, range.to)) : docLen;
-    view.dispatch({ changes: { from, to, insert: nextContent }, selection: EditorSelection.cursor(from + nextContent.length), scrollIntoView: true, userEvent: 'input.complete' });
+    const from = range ? Math.max(0, Math.min(docLen, range.from)) : 0;
+    const to = range ? Math.max(from, Math.min(docLen, range.to)) : docLen;
+    const newDocLen = Math.max(0, docLen - (to - from) + normInsert.length);
+    const main = view.state.selection.main;
+    const nextCursor = range
+      ? Math.max(0, Math.min(newDocLen, from + normInsert.length))
+      : Math.max(0, Math.min(newDocLen, main.head));
+    view.dispatch({
+      changes: { from, to, insert: normInsert },
+      selection: EditorSelection.cursor(nextCursor),
+      scrollIntoView: Boolean(range),
+      userEvent: 'input.complete',
+    });
     changes.flush(); parkLive();
     return true;
   }
@@ -408,6 +424,17 @@
 
   export function disposeLspClients(rootPath?: string): void {
     ideMod?.disposePooledLspClients({ rootPath, forceAll: true });
+  }
+
+  export function reconnectLspClients(rootPath?: string): void {
+    ideMod?.disposePooledLspClients({ rootPath, forceAll: true });
+    if (!view || !isIdeActive() || !ideMod) return;
+    const p = livePath || path;
+    const normFilter = rootPath ? rootPath.replace(/\\/g, '/').replace(/\/+$/, '') : '';
+    const normPath = p.replace(/\\/g, '/');
+    if (!normFilter || normPath === normFilter || normPath.startsWith(`${normFilter}/`)) {
+      view.dispatch({ effects: ideCompartment.reconfigure(buildIdeExtIfLoaded(p)) });
+    }
   }
 
   $effect(() => registerFindProvider(buildEditorFindProviderSpec(() => view)));
@@ -662,14 +689,25 @@
     return () => window.removeEventListener('otto:ide-prefs-changed', onPrefs);
   });
 
-  function syncIdeEffect(needMount: boolean, makeEffect: (m: typeof CmIdeMod) => StateEffect<unknown>): void {
+  function syncIdeEffect(
+    needMount: boolean,
+    makeEffect: (m: typeof CmIdeMod) => StateEffect<unknown> | StateEffect<unknown>[],
+  ): void {
     untrack(() => {
       if (!view) return;
       if (!ideMounted && needMount) mountIdeExtensions(view);
       else if (ideMod && ideMounted) view.dispatch({ effects: makeEffect(ideMod) });
     });
   }
-  $effect(() => { const v = savedContent; if (livePath === path) liveSavedContent = v; syncIdeEffect(v != null, (m) => m.setSavedContentEffect.of(v)); });
+  $effect(() => {
+    const diskSaved = savedContent;
+    const diffBase = gitBaseContent !== undefined ? gitBaseContent : diskSaved;
+    if (livePath === path) liveSavedContent = diskSaved;
+    syncIdeEffect(
+      diffBase != null || diskSaved != null,
+      (m) => [m.setSavedContentEffect.of(diffBase), m.setDiskSavedContentEffect.of(diskSaved)],
+    );
+  });
   $effect(() => { const v = blameByLine; syncIdeEffect(v != null, (m) => m.setBlameLinesEffect.of(v)); });
   $effect(() => { const b = breakpoints, mu = breakpointsMuted; syncIdeEffect(b.length > 0 || !!onToggleBreakpoint, (m) => m.setBreakpointsEffect.of({ breakpoints: b, muted: mu })); });
   $effect(() => { const v = gutterItems; syncIdeEffect(v.length > 0, (m) => m.setGutterItemsEffect.of(v)); });

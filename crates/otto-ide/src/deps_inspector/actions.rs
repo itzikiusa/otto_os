@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use otto_core::{Error, Result};
@@ -14,7 +14,7 @@ use crate::types::{IdeDepsActionReq, IdeDepsActionResp};
 
 use super::{
     parse_cargo_toml, parse_go_mod, parse_gradle_dependencies, parse_package_json,
-    parse_pom_dependencies, parse_python_deps,
+    parse_pom_dependencies_scoped, parse_python_deps,
 };
 
 pub async fn run_deps_action(
@@ -29,6 +29,27 @@ pub async fn run_deps_action(
 
 pub async fn run_deps_action_as(
     canon_root: &Path,
+    manifest_path: &Path,
+    req: &IdeDepsActionReq,
+    env_map: &BTreeMap<String, String>,
+    history: &LocalHistoryStore,
+    actor_is_root: bool,
+) -> Result<IdeDepsActionResp> {
+    run_deps_action_scoped(
+        canon_root,
+        &[canon_root.to_path_buf()],
+        manifest_path,
+        req,
+        env_map,
+        history,
+        actor_is_root,
+    )
+    .await
+}
+
+pub async fn run_deps_action_scoped(
+    canon_root: &Path,
+    allowed_roots: &[PathBuf],
     manifest_path: &Path,
     req: &IdeDepsActionReq,
     env_map: &BTreeMap<String, String>,
@@ -189,7 +210,14 @@ pub async fn run_deps_action_as(
             .await?
         }
         (_, "vuln_scan") => {
-            let inspect = super::inspect_dependencies(manifest_path, None, env_map).await;
+            let inspect = super::inspect_dependencies_scoped(
+                manifest_path,
+                None,
+                env_map,
+                allowed_roots,
+                actor_is_root,
+            )
+            .await;
             let cves: usize = inspect.items.iter().map(|i| i.vulnerabilities.len()).sum();
             (
                 true,
@@ -208,7 +236,14 @@ pub async fn run_deps_action_as(
         ) => {
             let patch_only = action.ends_with("_patch");
             let direct_only = action.contains("_direct_");
-            let inspect = super::inspect_dependencies(manifest_path, None, env_map).await;
+            let inspect = super::inspect_dependencies_scoped(
+                manifest_path,
+                None,
+                env_map,
+                allowed_roots,
+                actor_is_root,
+            )
+            .await;
             let mut text = fs::read_to_string(manifest_path)
                 .map_err(|e| Error::Internal(format!("read {}: {e}", manifest_path.display())))?;
             let mut count = 0usize;
@@ -222,9 +257,15 @@ pub async fn run_deps_action_as(
                     item.latest_version.as_deref()
                 };
                 if let Some(v) = target_ver.filter(|v| *v != item.current_version) {
-                    if let Some(next) =
-                        bump_manifest_version_in_place(manifest_path, fname, &text, &item.name, v)
-                    {
+                    if let Some(next) = bump_manifest_version_in_place_scoped(
+                        manifest_path,
+                        fname,
+                        &text,
+                        &item.name,
+                        v,
+                        allowed_roots,
+                        actor_is_root,
+                    ) {
                         text = next;
                         count += 1;
                     }
@@ -242,8 +283,16 @@ pub async fn run_deps_action_as(
             let v = validate_dep_spec("version", req.version.as_deref().unwrap_or(""))?;
             let raw = fs::read_to_string(manifest_path)
                 .map_err(|e| Error::Internal(format!("read {}: {e}", manifest_path.display())))?;
-            let updated = bump_manifest_version_in_place(manifest_path, fname, &raw, m, v)
-                .ok_or_else(|| Error::Invalid(format!("dependency '{m}' not found in {fname}")))?;
+            let updated = bump_manifest_version_in_place_scoped(
+                manifest_path,
+                fname,
+                &raw,
+                m,
+                v,
+                allowed_roots,
+                actor_is_root,
+            )
+            .ok_or_else(|| Error::Invalid(format!("dependency '{m}' not found in {fname}")))?;
             fs::write(manifest_path, &updated)
                 .map_err(|e| Error::Internal(format!("write {}: {e}", manifest_path.display())))?;
             (true, format!("Updated {m} to {v}"))
@@ -354,6 +403,7 @@ pub fn bump_go_mod_in_place(content: &str, module: &str, new_ver: &str) -> Optio
     ))
 }
 
+#[allow(clippy::disallowed_methods)]
 pub fn bump_manifest_version_in_place(
     manifest_path: &Path,
     fname: &str,
@@ -361,10 +411,37 @@ pub fn bump_manifest_version_in_place(
     module: &str,
     new_ver: &str,
 ) -> Option<String> {
+    let dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let default_root = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    bump_manifest_version_in_place_scoped(
+        manifest_path,
+        fname,
+        content,
+        module,
+        new_ver,
+        &[default_root],
+        false,
+    )
+}
+
+pub fn bump_manifest_version_in_place_scoped(
+    manifest_path: &Path,
+    fname: &str,
+    content: &str,
+    module: &str,
+    new_ver: &str,
+    allowed_roots: &[PathBuf],
+    caller_is_root: bool,
+) -> Option<String> {
     match fname {
         "go.mod" => bump_go_mod_in_place(content, module, new_ver),
         "pom.xml" => {
-            let items = parse_pom_dependencies(manifest_path, content);
+            let items = parse_pom_dependencies_scoped(
+                manifest_path,
+                content,
+                allowed_roots,
+                caller_is_root,
+            );
             let hit = items
                 .iter()
                 .find(|i| i.name == module || i.name.ends_with(&format!(":{module}")))?;
@@ -493,10 +570,11 @@ pub(super) fn merge_go_mod_requires(content: &str) -> String {
     if items.is_empty() {
         return content.to_string();
     }
+    let raw_lines: Vec<&str> = content.lines().collect();
     let mut header_lines = Vec::new();
     let mut in_req = false;
-    for line in content.lines() {
-        let code_t = line.split_once("//").map_or(line, |(c, _)| c).trim();
+    for line in &raw_lines {
+        let code_t = line.split_once("//").map_or(*line, |(c, _)| c).trim();
         if let Some(rest) = code_t.strip_prefix("require") {
             if rest.is_empty() || rest.starts_with(char::is_whitespace) || rest.starts_with('(') {
                 let after = rest.trim();
@@ -512,18 +590,27 @@ pub(super) fn merge_go_mod_requires(content: &str) -> String {
             }
             continue;
         }
-        header_lines.push(line.to_string());
+        header_lines.push((*line).to_string());
     }
     while header_lines.last().is_some_and(|l| l.trim().is_empty()) {
         header_lines.pop();
     }
+    let inline_comment_for = |line_no: u32| -> Option<String> {
+        let line = raw_lines.get((line_no as usize).saturating_sub(1))?;
+        let (_, comment) = line.split_once("//")?;
+        let trimmed = comment.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    };
     let direct: Vec<_> = items.iter().filter(|d| !d.indirect).collect();
     let indirect: Vec<_> = items.iter().filter(|d| d.indirect).collect();
     if !direct.is_empty() {
         header_lines.push(String::new());
         header_lines.push("require (".into());
         for d in direct {
-            header_lines.push(format!("\t{} {}", d.name, d.current_version));
+            match inline_comment_for(d.line) {
+                Some(c) => header_lines.push(format!("\t{} {} // {c}", d.name, d.current_version)),
+                None => header_lines.push(format!("\t{} {}", d.name, d.current_version)),
+            }
         }
         header_lines.push(")".into());
     }
@@ -531,7 +618,12 @@ pub(super) fn merge_go_mod_requires(content: &str) -> String {
         header_lines.push(String::new());
         header_lines.push("require (".into());
         for d in indirect {
-            header_lines.push(format!("\t{} {} // indirect", d.name, d.current_version));
+            match inline_comment_for(d.line) {
+                Some(c) => header_lines.push(format!("\t{} {} // {c}", d.name, d.current_version)),
+                None => {
+                    header_lines.push(format!("\t{} {} // indirect", d.name, d.current_version))
+                }
+            }
         }
         header_lines.push(")".into());
     }

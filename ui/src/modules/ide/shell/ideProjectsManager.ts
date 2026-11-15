@@ -387,7 +387,7 @@ export async function performMutateFs(
       op,
       path,
       dest_path: destPath,
-      record_local_history: prefs.localHistoryEnabled,
+      local_history_enabled: prefs.localHistoryEnabled,
       local_history_retention_days: prefs.localHistoryRetentionDays,
     });
     const parentOf = (p: string) => (p.lastIndexOf('/') > 0 ? p.slice(0, p.lastIndexOf('/')) : (containing?.path ?? host.target.root));

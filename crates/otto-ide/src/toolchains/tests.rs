@@ -229,3 +229,72 @@ fn finished_install_jobs_are_bounded_to_prevent_memory_leak() {
     }
     assert!(mgr.jobs.len() <= MAX_FINISHED_JOBS);
 }
+
+#[tokio::test]
+async fn downloader_enforces_companion_sha256_and_removes_corrupt_archive() {
+    use sha2::{Digest, Sha256};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let payload = b"fake-uv-tarball-bytes";
+    let valid_hex = hex::encode(Sha256::digest(payload));
+    let wrong_hex = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let valid_sha_body = format!("{valid_hex}  uv.tar.gz\n");
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = [0u8; 1024];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let req_line = String::from_utf8_lossy(&buf[..n]);
+            let body: &[u8] = if req_line.contains("GET /uv.tar.gz.sha256 ") {
+                valid_sha_body.as_bytes()
+            } else {
+                payload.as_slice()
+            };
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes()).await;
+            let _ = stream.write_all(body).await;
+        }
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = ToolchainManager::new(tmp.path().join("data"));
+    mgr.allow_test_loopback.store(true, Ordering::Relaxed);
+    let url = format!("http://{addr}/uv.tar.gz");
+
+    let fetched_sha = installer::fetch_companion_sha256(&mgr, &url)
+        .await
+        .expect("fetch .sha256 companion");
+    assert_eq!(fetched_sha, valid_hex);
+
+    let corrupt_dest = tmp.path().join("corrupt.tar.gz");
+    let err = installer::download_https_to_file(
+        &mgr,
+        "job_bad",
+        &url,
+        &corrupt_dest,
+        Some(wrong_hex),
+        10,
+    )
+    .await
+    .expect_err("corrupt sha256 must fail");
+    assert!(err.contains("SHA-256 checksum mismatch"));
+    assert!(
+        !corrupt_dest.exists(),
+        "corrupted download must be unlinked immediately"
+    );
+
+    let ok_dest = tmp.path().join("verified.tar.gz");
+    installer::download_https_to_file(&mgr, "job_ok", &url, &ok_dest, Some(&fetched_sha), 10)
+        .await
+        .expect("matching sha256 must succeed");
+    assert_eq!(tokio::fs::read(&ok_dest).await.unwrap(), payload);
+    let _ = server.await;
+}

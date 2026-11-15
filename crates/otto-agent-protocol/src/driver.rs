@@ -223,6 +223,8 @@ pub fn rpc_failure(class: &str, e: &serde_json::Value) -> ProviderFailure {
 /// explicit `OTTO_ACP_SIDEBAND_FILE` stream).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebandSource {
+    /// No primary session transcript poll (active child tails / timer ticks only).
+    None,
     /// Append-only `\n`-terminated JSONL (`agy` `transcript_full.jsonl`, `grok`
     /// `updates.jsonl`, or `OTTO_ACP_SIDEBAND_FILE`).
     AppendLines {
@@ -242,6 +244,7 @@ pub enum SidebandSource {
         session_id: String,
         resolved_path: Option<std::path::PathBuf>,
         last_stamp: (u64, u64),
+        allow_scan: bool,
     },
     /// Read-only SQLite `part` + `message` rows (`opencode acp` `opencode.db`),
     /// queried only when `(db_mtime_ns, db_len, wal_mtime_ns, wal_len)` changes.
@@ -253,12 +256,44 @@ pub enum SidebandSource {
     },
 }
 
+/// Kind of auxiliary background file tailed off-lock alongside the session's
+/// primary sideband stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ActiveTailKind {
+    CommandLog,
+    AgySubagentTranscript,
+}
+
+/// One active background command `.log` or `agy` child `transcript.jsonl` to
+/// tail off-lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTailSource {
+    pub task_id: String,
+    pub kind: ActiveTailKind,
+    pub path: std::path::PathBuf,
+    pub fallback_path: Option<std::path::PathBuf>,
+    pub offset: u64,
+    pub using_fallback: bool,
+}
+
+/// Off-lock read chunk from an [`ActiveTailSource`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTailChunk {
+    pub task_id: String,
+    pub kind: ActiveTailKind,
+    pub using_fallback: bool,
+    pub next_offset: u64,
+    pub bytes: Vec<u8>,
+}
+
 /// Periodic sideband poll descriptor returned by a sans-IO driver while idle
-/// between `session/prompt` RPCs.
+/// between `session/prompt` RPCs (or while tailing active background tasks).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebandPoll {
     pub source: SidebandSource,
     pub interval: std::time::Duration,
+    pub active_tails: Vec<ActiveTailSource>,
+    pub timer_expired: bool,
 }
 
 /// Initial watermark seeded asynchronously before spawning a resumed session so
@@ -285,11 +320,21 @@ pub enum SidebandPayload {
     GeminiJson {
         resolved_path: std::path::PathBuf,
         stamp: (u64, u64),
-        bytes: Vec<u8>,
+        doc: serde_json::Value,
     },
     OpencodeSqlite {
         stamp: (u64, u64, u64, u64),
         rows_jsonl: Vec<u8>,
+    },
+    /// Directory scan attempted to locate an unresolved transcript file and
+    /// found no matching file; arms a negative-lookup backoff on the driver.
+    Unresolved,
+    /// Combined primary sideband payload, active child/command tail chunks,
+    /// and/or due timer tick.
+    Batch {
+        primary: Option<Box<SidebandPayload>>,
+        tails: Vec<ActiveTailChunk>,
+        timer_tick: bool,
     },
 }
 

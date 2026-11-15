@@ -612,6 +612,7 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘M', label: 'Minimise the window' },
       { keys: '⌃⌘F', label: 'Enter or exit full screen' },
       { keys: '⌘A', label: 'Select all' },
+      { keys: '⌃⌘Space', label: 'Emoji & Symbols picker' },
     ],
   },
   {

@@ -27,6 +27,8 @@ pub(crate) struct GrokState {
     #[serde(default)]
     pub in_prompted_turn: bool,
     #[serde(default)]
+    pub prompted_turn_baseline: bool,
+    #[serde(default)]
     pub open_tools: usize,
     #[serde(default)]
     pub awaiting_since_ms: u64,
@@ -35,6 +37,7 @@ pub(crate) struct GrokState {
 impl GrokState {
     pub fn reset_for_prompt(&mut self) {
         self.in_prompted_turn = false;
+        self.prompted_turn_baseline = false;
         self.open_tools = 0;
     }
 
@@ -66,6 +69,7 @@ impl GrokState {
         grok_home: &str,
         cwd: &str,
         session_id: &str,
+        allow_scan: bool,
     ) -> Option<SidebandSource> {
         if grok_home.is_empty() || !is_safe_session_id(session_id) {
             return None;
@@ -88,7 +92,7 @@ impl GrokState {
         Some(SidebandSource::AppendLines {
             path: primary,
             fallback_path: None,
-            scan_sessions_dir: Some((sessions_dir, session_id.to_string())),
+            scan_sessions_dir: allow_scan.then(|| (sessions_dir, session_id.to_string())),
             offset: self.offset,
             using_fallback: false,
         })
@@ -117,6 +121,7 @@ impl GrokState {
                 continue;
             };
             let ts_ms = envelope_timestamp_ms(&root);
+            let baseline_only = is_before_idle(ts_ms, idle_since_ms);
             let params = root.get("params").unwrap_or(&root);
             let Some(up) = params.get("update") else {
                 continue;
@@ -128,13 +133,15 @@ impl GrokState {
             match tag {
                 "user_message_chunk" | "user_message" => {
                     self.in_prompted_turn = true;
+                    self.prompted_turn_baseline = baseline_only;
                     self.open_tools = 0;
                     continue;
                 }
                 "turn_completed" => {
                     let was_prompted = std::mem::replace(&mut self.in_prompted_turn, false);
+                    self.prompted_turn_baseline = false;
                     self.open_tools = 0;
-                    if was_prompted || is_before_idle(ts_ms, idle_since_ms) {
+                    if was_prompted || baseline_only {
                         continue;
                     }
                     if let Some(usage) = parse_grok_usage(up.get("usage")) {
@@ -152,7 +159,12 @@ impl GrokState {
                 _ => {}
             }
 
-            if self.in_prompted_turn || is_before_idle(ts_ms, idle_since_ms) {
+            if !baseline_only && self.prompted_turn_baseline {
+                self.in_prompted_turn = false;
+                self.prompted_turn_baseline = false;
+            }
+
+            if self.in_prompted_turn || baseline_only {
                 continue;
             }
 
@@ -205,6 +217,7 @@ impl GrokState {
                         id: id.to_string(),
                         title: classified.title,
                         kind,
+                        status,
                         raw_input,
                         file: extract_location_path(up).or(classified.file),
                         diff: extract_diff(up).or(classified.diff),
@@ -264,7 +277,7 @@ impl GrokState {
 }
 
 fn is_before_idle(ts_ms: Option<u64>, idle_since_ms: u64) -> bool {
-    idle_since_ms > 0 && ts_ms.is_some_and(|ts| ts.saturating_add(50) < idle_since_ms)
+    idle_since_ms > 0 && ts_ms.is_some_and(|ts| ts <= idle_since_ms.saturating_add(50))
 }
 
 fn envelope_timestamp_ms(root: &Value) -> Option<u64> {

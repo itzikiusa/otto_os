@@ -4,7 +4,7 @@
   import { placeAnchored, type AnchorPlacement } from '../../../lib/anchorPlace';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { ide, type IdeRunConfig } from '../ideStore.svelte';
+  import { ide, ideBasename, type IdeRunConfig } from '../ideStore.svelte';
 
   interface Props {
     triggerEl: HTMLButtonElement | undefined;
@@ -28,6 +28,19 @@
   const detectedConfigs = $derived.by(() => {
     const q = filter.trim().toLowerCase();
     return ide.runConfigs.filter((c) => Boolean(c.auto_detected) && (!q || c.name.toLowerCase().includes(q) || c.runner.toLowerCase().includes(q)));
+  });
+
+  const repoSuites = $derived.by(() => {
+    const roots =
+      ide.projectRoots.length > 0
+        ? ide.projectRoots
+        : ide.target.root
+          ? [{ path: ide.target.root, name: ideBasename(ide.target.root), is_primary: true }]
+          : [];
+    const q = filter.trim().toLowerCase();
+    return roots.filter(
+      (r) => !q || r.name.toLowerCase().includes(q) || r.path.toLowerCase().includes(q),
+    );
   });
 
   function closePopover(restoreFocus = true): void {
@@ -55,6 +68,7 @@
   $effect(() => {
     void savedConfigs.length;
     void detectedConfigs.length;
+    void repoSuites.length;
     void tick().then(clampPosition);
   });
 
@@ -93,7 +107,7 @@
   style:max-block-size="{pos.maxH}px"
   data-testid="ide-run-config-popover"
 >
-  {#if ide.runConfigs.length > 4}
+  {#if ide.runConfigs.length + ide.projectRoots.length > 4}
     <div class="run-filter-row">
       <Icon name="search" size={12} />
       <input
@@ -131,7 +145,57 @@
       {/each}
     {/if}
 
-    {#if savedConfigs.length === 0 && detectedConfigs.length === 0}
+    {#if repoSuites.length > 0}
+      <div class="run-sec">Repository test suites</div>
+      {#each repoSuites as repo (repo.path)}
+        <div class="run-repo-row" data-testid="ide-repo-test-suite-row">
+          <span class="run-item-name" dir="ltr" title={repo.path}>{repo.name}</span>
+          <div class="run-repo-actions">
+            <button
+              type="button"
+              class="icon-btn"
+              aria-label={`Run all tests in ${repo.name}`}
+              title={`Run all tests (${repo.name})`}
+              onclick={() => {
+                closePopover(false);
+                void ide.runRepoTests(repo.path, 'run');
+              }}
+              data-testid="ide-repo-run-tests-btn"
+            >
+              <Icon name="play" size={12} />
+            </button>
+            <button
+              type="button"
+              class="icon-btn"
+              aria-label={`Run all tests with coverage in ${repo.name}`}
+              title={`Run all tests with coverage (${repo.name})`}
+              onclick={() => {
+                closePopover(false);
+                void ide.runRepoTests(repo.path, 'coverage');
+              }}
+              data-testid="ide-repo-coverage-tests-btn"
+            >
+              <Icon name="shield" size={12} />
+            </button>
+            <button
+              type="button"
+              class="icon-btn"
+              aria-label={`Debug all tests in ${repo.name}`}
+              title={`Debug all tests (${repo.name})`}
+              onclick={() => {
+                closePopover(false);
+                void ide.runRepoTests(repo.path, 'debug');
+              }}
+              data-testid="ide-repo-debug-tests-btn"
+            >
+              <Icon name="bug" size={12} />
+            </button>
+          </div>
+        </div>
+      {/each}
+    {/if}
+
+    {#if savedConfigs.length === 0 && detectedConfigs.length === 0 && repoSuites.length === 0}
       <div class="run-empty">Runs the active editor file automatically, or create a named configuration below.</div>
     {/if}
   </div>
@@ -171,6 +235,13 @@
   .run-item:hover { background: var(--hover); }
   .run-item.is-active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); font-weight: 600; }
   .run-item-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
+  .run-repo-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding-block: 4px; padding-inline: 8px; border-radius: var(--radius-s);
+    color: var(--text); font-size: var(--fs-xs);
+  }
+  .run-repo-row:hover { background: var(--hover); }
+  .run-repo-actions { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
   .run-footer { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; border-block-start: 1px solid var(--border); background: var(--surface-2); }
   .run-foot-btn {
     display: inline-flex; align-items: center; gap: 4px; padding-block: 4px; padding-inline: 8px;

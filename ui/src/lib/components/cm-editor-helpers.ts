@@ -56,31 +56,33 @@ export function computeMinimalTextUpdate(
   anchor: number,
   head: number,
 ): { from: number; to: number; insert: string; anchor: number; head: number } | null {
-  if (oldText === newText) return null;
-  const minLen = Math.min(oldText.length, newText.length);
+  const normOld = oldText.indexOf('\r') >= 0 ? oldText.replace(/\r\n?/g, '\n') : oldText;
+  const normNew = newText.indexOf('\r') >= 0 ? newText.replace(/\r\n?/g, '\n') : newText;
+  if (normOld === normNew) return null;
+  const minLen = Math.min(normOld.length, normNew.length);
   let prefix = 0;
-  while (prefix < minLen && oldText.charCodeAt(prefix) === newText.charCodeAt(prefix)) prefix++;
+  while (prefix < minLen && normOld.charCodeAt(prefix) === normNew.charCodeAt(prefix)) prefix++;
   let suffix = 0;
   const maxSuffix = minLen - prefix;
   while (
     suffix < maxSuffix &&
-    oldText.charCodeAt(oldText.length - 1 - suffix) === newText.charCodeAt(newText.length - 1 - suffix)
+    normOld.charCodeAt(normOld.length - 1 - suffix) === normNew.charCodeAt(normNew.length - 1 - suffix)
   ) {
     suffix++;
   }
   const from = prefix;
-  const to = oldText.length - suffix;
-  const insert = newText.slice(prefix, newText.length - suffix);
+  const to = normOld.length - suffix;
+  const insert = normNew.slice(prefix, normNew.length - suffix);
   const delta = insert.length - (to - from);
 
   const mapPos = (p: number): number => {
-    const clamped = Math.max(0, Math.min(oldText.length, Number.isFinite(p) ? Math.trunc(p) : 0));
+    const clamped = Math.max(0, Math.min(normOld.length, Number.isFinite(p) ? Math.trunc(p) : 0));
     if (clamped <= from) return clamped;
-    if (clamped >= to) return Math.max(0, Math.min(newText.length, clamped + delta));
-    return Math.max(0, Math.min(newText.length, from + Math.min(insert.length, clamped - from)));
+    if (clamped >= to) return Math.max(0, Math.min(normNew.length, clamped + delta));
+    return Math.max(0, Math.min(normNew.length, from + Math.min(insert.length, clamped - from)));
   };
 
-  const mapped = clampSelectionToDoc(newText.length, mapPos(anchor), mapPos(head));
+  const mapped = clampSelectionToDoc(normNew.length, mapPos(anchor), mapPos(head));
   return { from, to, insert, anchor: mapped.anchor, head: mapped.head };
 }
 

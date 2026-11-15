@@ -6,6 +6,7 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use common::{build_test_app, non_root_user, router_as, send_json, send_raw, urlencode};
+use otto_ide::types::{IdeRunConfig, IdeRunnerKind, IdeStartRunReq, IdeTargetSpec};
 use serde_json::json;
 
 #[tokio::test]
@@ -49,6 +50,22 @@ async fn run_config_scope_complete_confinement_history_sse_and_lsp_status() {
         .any(|p| p["name"] == "Legacy Migrated"));
     assert!(!data_dir.join("ide-projects.json").exists());
 
+    let (st_rc_custom_forbid, _) = send_json(
+        &app_bob,
+        Method::POST,
+        "/ide/run-configs",
+        Some(json!({
+            "target": { "kind": "local", "root": bob_str },
+            "id": "rc_shared",
+            "name": "Bob Custom Blocked",
+            "runner": "custom",
+            "command": "echo",
+            "args": ["bob"],
+        })),
+    )
+    .await;
+    assert_eq!(st_rc_custom_forbid, StatusCode::FORBIDDEN);
+
     let (st_rc_b, _) = send_json(
         &app_bob,
         Method::POST,
@@ -57,9 +74,8 @@ async fn run_config_scope_complete_confinement_history_sse_and_lsp_status() {
             "target": { "kind": "local", "root": bob_str },
             "id": "rc_shared",
             "name": "Bob Config",
-            "runner": "custom",
-            "command": "echo",
-            "args": ["bob"],
+            "runner": "go_test",
+            "args": ["./..."],
         })),
     )
     .await;
@@ -73,9 +89,8 @@ async fn run_config_scope_complete_confinement_history_sse_and_lsp_status() {
             "target": { "kind": "local", "root": alice_str },
             "id": "rc_shared",
             "name": "Alice Collision",
-            "runner": "custom",
-            "command": "echo",
-            "args": ["alice"],
+            "runner": "go_test",
+            "args": ["./..."],
         })),
     )
     .await;
@@ -179,7 +194,7 @@ async fn run_config_scope_complete_confinement_history_sse_and_lsp_status() {
     assert_eq!(lsp_body["max_global_servers"], 3);
     assert_eq!(lsp_body["rss_budget_bytes"], 1_288_490_188u64);
 
-    let (st_run, run_body) = send_json(
+    let (st_local_run_forbid, _) = send_json(
         &app_alice,
         Method::POST,
         "/ide/runs",
@@ -187,15 +202,40 @@ async fn run_config_scope_complete_confinement_history_sse_and_lsp_status() {
             "target": { "kind": "local", "root": alice_str },
             "adhoc": {
                 "name": "sse-echo",
-                "runner": "custom",
-                "command": "echo",
-                "args": ["SSE_STREAM_OK"],
+                "runner": "go_test",
+                "args": ["./..."],
             },
         })),
     )
     .await;
-    assert_eq!(st_run, StatusCode::OK);
-    let run_id = run_body["run"]["id"].as_str().unwrap().to_string();
+    assert_eq!(st_local_run_forbid, StatusCode::FORBIDDEN);
+
+    let alice_user = non_root_user("u_alice");
+    let started_run = ctx
+        .ide
+        .environments
+        .start_run_for_user(
+            &ctx.pool,
+            ctx.secrets.as_ref(),
+            &ctx.ide.targets,
+            Some(&ctx.ide.projects),
+            Some(&alice_user),
+            IdeStartRunReq {
+                target: IdeTargetSpec::local(alice_str.clone()),
+                adhoc: Some(IdeRunConfig {
+                    name: "sse-echo".into(),
+                    runner: IdeRunnerKind::Shell,
+                    command: Some("sh".into()),
+                    args: vec!["-c".into(), "echo SSE_STREAM_OK".into()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("start seeded run for alice SSE test");
+    let run_id = started_run.id;
 
     let (st_bob_sse, _, _) =
         send_raw(&app_bob, Method::GET, &format!("/ide/runs/{run_id}/events")).await;
@@ -240,6 +280,20 @@ async fn local_history_disabled_preference_suppresses_snapshots_across_writes_an
     )
     .await;
     assert_eq!(st_w, StatusCode::OK);
+
+    let (st_w_legacy_alias, _) = send_json(
+        &app,
+        Method::PUT,
+        "/ide/fs/file",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "path": "note.txt",
+            "content": "v2b\n",
+            "record_local_history": false,
+        })),
+    )
+    .await;
+    assert_eq!(st_w_legacy_alias, StatusCode::OK);
 
     let (st_del, _) = send_json(
         &app,

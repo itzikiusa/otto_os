@@ -106,6 +106,7 @@ async fn sqlite_crud_redacts_secrets_preserves_multiroot_and_layers_intellij_env
                         has_secret: false,
                     },
                 ],
+                ..Default::default()
             },
         )
         .await
@@ -395,6 +396,7 @@ async fn network_bridge_persists_preserves_when_omitted_and_clears_when_empty() 
                     secret: false,
                     has_secret: false,
                 }],
+                ..Default::default()
             },
         )
         .await
@@ -423,6 +425,7 @@ async fn network_bridge_persists_preserves_when_omitted_and_clears_when_empty() 
                 module_sdks: None,
                 network_bridge: None,
                 env_vars: saved.env_vars.clone(),
+                ..Default::default()
             },
         )
         .await
@@ -448,6 +451,7 @@ async fn network_bridge_persists_preserves_when_omitted_and_clears_when_empty() 
                 module_sdks: None,
                 network_bridge: Some(crate::types::IdeNetworkBridgeConfig::default()),
                 env_vars: saved.env_vars,
+                ..Default::default()
             },
         )
         .await

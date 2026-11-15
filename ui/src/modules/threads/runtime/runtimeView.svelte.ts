@@ -447,9 +447,12 @@ export class RuntimeViews {
     }
     this.loadingItem = { ...this.loadingItem, [key]: true };
     const req = api
-      .get<RuntimeTurnItemDetailResponse | TurnItem>(`/runtime-sessions/${id}/items/${encodeURIComponent(itemId)}`)
+      .get<RuntimeTurnItemDetailResponse>(`/runtime-sessions/${id}/items/${encodeURIComponent(itemId)}`)
       .then((res) => {
-        const item = res && typeof res === 'object' && 'item' in res ? res.item : res;
+        const item =
+          res && typeof res === 'object' && 'item' in res
+            ? (res as { item: TurnItem }).item
+            : res;
         const latest = this.projections[id];
         if (this.views.has(id) && latest) {
           this.projections[id] = replaceHydratedItem(latest, item);

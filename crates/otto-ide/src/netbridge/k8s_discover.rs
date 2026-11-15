@@ -68,6 +68,7 @@ pub struct IngressBackendTarget {
 #[derive(Debug, Clone, Default)]
 pub struct K8sDiscoverySnapshot {
     pub namespace: String,
+    pub loaded: bool,
     pub allow_cross_namespace: bool,
     pub services: BTreeMap<String, K8sServiceEntry>,
     pub cluster_ips: HashMap<String, String>,
@@ -319,6 +320,7 @@ pub fn parse_k8s_discovery_json(
 ) -> K8sDiscoverySnapshot {
     let mut snap = K8sDiscoverySnapshot {
         namespace: namespace.to_string(),
+        loaded: true,
         ..Default::default()
     };
     if let Some(items) = svc_json.get("items").and_then(Value::as_array) {

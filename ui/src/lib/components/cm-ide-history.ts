@@ -399,8 +399,8 @@ export function buildIdeVcsContextRows(
       },
     },
     { separator: true },
-    { label: 'Local History', icon: 'clock', hint: '▸', action: () => reopenSub(localHistorySubmenu) },
-    { label: 'Git', icon: 'branch', hint: '▸', action: () => reopenSub(gitSubmenu) },
+    { label: 'Local History', icon: 'clock', children: localHistorySubmenu, action: () => reopenSub(localHistorySubmenu) },
+    { label: 'Git', icon: 'branch', children: gitSubmenu, action: () => reopenSub(gitSubmenu) },
     {
       label: 'Compare with Clipboard',
       icon: 'split',

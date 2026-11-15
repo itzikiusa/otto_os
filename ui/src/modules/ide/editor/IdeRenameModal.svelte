@@ -26,6 +26,11 @@
     onclose={() => (ide.renameState.open = false)}
   >
     <div class="rename-modal">
+      {#if ide.renameState.symbol}
+        <div class="rename-origin" dir="ltr">
+          Renaming <code>{ide.renameState.symbol}</code> in {ide.relativePath(ide.renameState.path)}
+        </div>
+      {/if}
       <div class="rename-row">
         <input
           class="rename-input"
@@ -94,6 +99,8 @@
 
 <style>
   .rename-modal { display: flex; flex-direction: column; gap: 10px; }
+  .rename-origin { font-size: var(--fs-xs); color: var(--text-dim); }
+  .rename-origin code { font-family: var(--font-mono); color: var(--text); }
   .rename-row { display: flex; gap: var(--sp-3); }
   .rename-input {
     flex: 1; block-size: 32px; padding-inline: 10px; font-family: var(--font-mono); font-size: var(--fs-s);

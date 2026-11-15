@@ -111,7 +111,23 @@ fn match_explicit_mapping<'a>(
     })
 }
 
+fn is_mdns_machine_local(host_lc: &str) -> bool {
+    host_lc.ends_with(".local") && host_lc.matches('.').count() == 1
+}
+
+fn is_cloud_managed_host(host_lc: &str) -> bool {
+    host_lc.ends_with(".amazonaws.com")
+        || host_lc.contains(".rds.amazonaws.com")
+        || host_lc.contains(".cache.amazonaws.com")
+        || host_lc.ends_with(".azure.com")
+        || host_lc.ends_with(".database.windows.net")
+        || host_lc.ends_with(".googleapis.com")
+}
+
 fn is_internal_domain_host(host_lc: &str) -> bool {
+    if is_mdns_machine_local(host_lc) {
+        return false;
+    }
     !host_lc.contains('.')
         || host_lc.ends_with(".local")
         || host_lc.ends_with(".internal")
@@ -201,6 +217,14 @@ pub fn resolve_destination(
         }
     }
 
+    if matches!(
+        host_lc.as_str(),
+        "localhost" | "127.0.0.1" | "::1" | "0.0.0.0" | "::"
+    ) || is_mdns_machine_local(&host_lc)
+    {
+        return None;
+    }
+
     if let Some(snap) = k8s {
         if let Some(svc_name) = snap.cluster_ips.get(&host_lc) {
             if let Some(entry) = snap.services.get(svc_name) {
@@ -227,10 +251,15 @@ pub fn resolve_destination(
                         port: entry.resolve_service_port(req_port),
                     });
                 }
-                if !host_lc.contains('.')
-                    || host_lc.ends_with(".svc")
-                    || host_lc.ends_with(".cluster.local")
-                {
+                if !host_lc.contains('.') {
+                    if !snap.loaded && !has_ssh_tunnel {
+                        return Some(BridgeDestination::K8sService {
+                            namespace: target_ns,
+                            service: svc_name,
+                            port: req_port.max(80),
+                        });
+                    }
+                } else if host_lc.ends_with(".svc") || host_lc.ends_with(".cluster.local") {
                     return Some(BridgeDestination::K8sService {
                         namespace: target_ns,
                         service: svc_name,
@@ -248,7 +277,10 @@ pub fn resolve_destination(
             }
         }
         // Smart `.local` / `.internal` prefix match: e.g. `confsrv.stgco.local` -> `service/confsrv`.
-        if is_internal_domain_host(&host_lc) {
+        // Exclude cloud-managed DB/cache suffixes (`.amazonaws.com`, `.azure.com`, `.googleapis.com`)
+        // so e.g. `redis.prod.use1.cache.amazonaws.com` routes via SSH tunnel rather than colliding
+        // with an in-cluster `redis` Service.
+        if is_internal_domain_host(&host_lc) && !is_cloud_managed_host(&host_lc) {
             if let Some(first_label) = host_lc.split('.').next() {
                 if let Some(entry) = snap.services.get(first_label) {
                     return Some(BridgeDestination::K8sService {
@@ -274,8 +306,12 @@ pub fn resolve_destination(
 fn parse_k8s_svc_and_ns(host_lc: &str, default_ns: &str) -> Option<(String, String)> {
     let parts: Vec<&str> = host_lc.split('.').collect();
     match parts.as_slice() {
-        [svc] if is_valid_dns1123_label(svc) => Some(((*svc).to_string(), default_ns.to_string())),
-        [svc, ns] if is_valid_dns1123_label(svc) && is_valid_dns1123_label(ns) => {
+        [svc] if is_valid_dns1123_label(svc) && *svc != "localhost" => {
+            Some(((*svc).to_string(), default_ns.to_string()))
+        }
+        [svc, ns]
+            if is_valid_dns1123_label(svc) && is_valid_dns1123_label(ns) && *ns != "local" =>
+        {
             Some(((*svc).to_string(), (*ns).to_string()))
         }
         [svc, ns, "svc"] if is_valid_dns1123_label(svc) && is_valid_dns1123_label(ns) => {

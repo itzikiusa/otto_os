@@ -41,7 +41,10 @@ use self::db_store::{
     safe_join_allowed_roots, StoredEnvVar,
 };
 pub use self::discovery::discover_run_configs;
-use self::module_sdks::{apply_module_sdk_to_project_env, match_longest_module_sdk};
+use self::module_sdks::{
+    apply_module_sdk_to_project_env, effective_go_build_tags_for_paths,
+    match_longest_module_go_build_tags, match_longest_module_sdk,
+};
 use self::runner::ActiveRunHandle;
 pub use self::runner_parsers::parse_test_output;
 pub use self::shell_env::{parse_sentinel_env_zero, probe_remote_shell_env, ShellEnvResolver};
@@ -95,6 +98,18 @@ fn record_snapshot_into(
         for (mod_root, sdk_val) in &base_env.module_sdks {
             let mut mod_env = base_env.clone();
             apply_module_sdk_to_project_env(&mut mod_env, mod_root, sdk_val, None, None);
+            mod_env.go_build_tags =
+                effective_go_build_tags_for_paths(&base_env, std::slice::from_ref(mod_root), true);
+            let mod_key = format!("local:{}", mod_root.trim_end_matches('/'));
+            upsert_snapshot_entry(&mut guard, mod_key, mod_env);
+        }
+        for mod_root in base_env.module_go_build_tags.keys() {
+            if base_env.module_sdks.contains_key(mod_root) {
+                continue;
+            }
+            let mut mod_env = base_env.clone();
+            mod_env.go_build_tags =
+                effective_go_build_tags_for_paths(&base_env, std::slice::from_ref(mod_root), true);
             let mod_key = format!("local:{}", mod_root.trim_end_matches('/'));
             upsert_snapshot_entry(&mut guard, mod_key, mod_env);
         }
@@ -415,6 +430,48 @@ impl EnvironmentManager {
         lookup_snapshot_in(&self.snapshots, project_key_or_root)
             .map(|e| e.additional_roots)
             .unwrap_or_default()
+    }
+
+    /// Resolve effective Go build tags for `root` across exact module snapshots,
+    /// ancestor/umbrella project snapshots, `additional_roots`, and `module_go_build_tags`.
+    pub fn effective_go_build_tags_for_local_root(&self, root: &str) -> Vec<String> {
+        let trimmed = root.trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+        let cands = vec![trimmed.to_string()];
+        let local_key = format!("local:{trimmed}");
+        let guard = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        if let Some(exact) = guard.iter().rev().find(|s| {
+            let sk = s.key.trim_end_matches('/');
+            sk == trimmed || sk == local_key
+        }) {
+            for t in effective_go_build_tags_for_paths(&exact.env, &cands, true) {
+                push_unique(&mut out, t);
+            }
+        }
+        for snap in guard.iter().rev() {
+            let Some(snap_root) = snap.key.strip_prefix("local:") else {
+                continue;
+            };
+            let sr = snap_root.trim_end_matches('/');
+            let under_primary =
+                !sr.is_empty() && (trimmed == sr || trimmed.starts_with(&format!("{sr}/")));
+            let under_extra = snap.env.additional_roots.iter().any(|ar| {
+                let art = ar.trim().trim_end_matches('/');
+                !art.is_empty() && (trimmed == art || trimmed.starts_with(&format!("{art}/")))
+            });
+            let matches_mod =
+                match_longest_module_go_build_tags(&snap.env.module_go_build_tags, &cands, true)
+                    .is_some();
+            if under_primary || under_extra || matches_mod {
+                for t in effective_go_build_tags_for_paths(&snap.env, &cands, true) {
+                    push_unique(&mut out, t);
+                }
+            }
+        }
+        out
     }
 
     pub fn cached_effective_env_for_local_root(&self, root: &str) -> BTreeMap<String, String> {

@@ -867,6 +867,33 @@ pub fn parse_uv_release_json(raw: &str, platform: TargetPlatform) -> Vec<Catalog
             }
         }
     }
+    let expected_asset = format!("uv-{}.tar.gz", platform.rust_triple());
+    if let Some(assets) = val.get("assets").and_then(|v| v.as_array()) {
+        for asset in assets {
+            if asset.get("name").and_then(|v| v.as_str()) != Some(expected_asset.as_str()) {
+                continue;
+            }
+            let asset_url = asset
+                .get("browser_download_url")
+                .and_then(|v| v.as_str())
+                .filter(|u| u.starts_with("https://github.com/astral-sh/uv/releases/download/"))
+                .map(str::to_string);
+            let asset_sha = asset
+                .get("digest")
+                .and_then(|v| v.as_str())
+                .and_then(|d| d.strip_prefix("sha256:").or(Some(d)))
+                .and_then(|hex_str| normalize_sha256(Some(hex_str)));
+            for e in &mut entries {
+                if let Some(ref url) = asset_url {
+                    e.url = url.clone();
+                }
+                if asset_sha.is_some() {
+                    e.sha256 = asset_sha.clone();
+                }
+            }
+            break;
+        }
+    }
     entries
 }
 
@@ -1225,6 +1252,25 @@ mod tests {
         let rust_toml = "[pkg.cargo]\nversion = \"0.86.0\"\n[pkg.rust]\nversion = \"1.85.1 (4eb161250 2025-03-15)\"\n";
         let rust_entries = parse_rust_channel_toml(rust_toml, mac_arm);
         assert!(rust_entries[0].label.contains("1.85.1"));
+
+        let uv_json = r#"{
+            "tag_name": "0.6.9",
+            "assets": [{
+                "name": "uv-aarch64-apple-darwin.tar.gz",
+                "browser_download_url": "https://github.com/astral-sh/uv/releases/download/0.6.9/uv-aarch64-apple-darwin.tar.gz",
+                "digest": "sha256:11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff"
+            }]
+        }"#;
+        let py_entries = parse_uv_release_json(uv_json, mac_arm);
+        assert!(py_entries[0].label.contains("0.6.9"));
+        assert_eq!(
+            py_entries[0].url,
+            "https://github.com/astral-sh/uv/releases/download/0.6.9/uv-aarch64-apple-darwin.tar.gz"
+        );
+        assert_eq!(
+            py_entries[0].sha256.as_deref(),
+            Some("11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff")
+        );
     }
 
     #[test]

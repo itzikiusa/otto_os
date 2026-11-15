@@ -42,11 +42,23 @@ export interface JavaDiagPrefs {
   unusedImports?: boolean;
 }
 
+export interface MethodParamDecl {
+  name: string;
+  params: string[];
+  variadic: boolean;
+  recvIdent?: string;
+  recvType?: string;
+  scopeFrom: number;
+  scopeTo: number;
+}
+
 export interface FileSymbolModel {
   pkgVars: Set<string>;
   typeNames: Set<string>;
   importedPkgs: Set<string>;
   funcParams: Map<string, string[]>;
+  variadicFuncs: Set<string>;
+  methodDecls: MethodParamDecl[];
   funcDecls: Array<{ name: string; line: number; nameFrom: number; nameTo: number; lineEnd: number }>;
   paramScopes: Array<{ from: number; to: number; params: Set<string> }>;
   declStarts: Set<number>;
@@ -142,7 +154,7 @@ export function skipLiteralOrComment(src: string, idx: number, limit: number): n
   return idx;
 }
 
-function splitTopLevelCommas(raw: string): string[] {
+export function splitTopLevelCommas(raw: string): string[] {
   const parts: string[] = [];
   let depth = 0;
   let start = 0;
@@ -438,6 +450,8 @@ export function buildSymbolModel(
   const typeNames = new Set<string>();
   const importedPkgs = new Set<string>();
   const funcParams = new Map<string, string[]>();
+  const variadicFuncs = new Set<string>();
+  const methodDecls: MethodParamDecl[] = [];
   const funcDecls: FileSymbolModel['funcDecls'] = [];
   const paramScopes: FileSymbolModel['paramScopes'] = [];
   const unresolvedIdents = new Set<string>(extraUnresolved);
@@ -452,7 +466,16 @@ export function buildSymbolModel(
     unusedRanges.push(...goImp.unusedRanges);
   }
 
-  const registerFuncDecl = (fnName: string, lineIdx: number, line: string, lineStart: number, lineEnd: number, parenSearchFrom: number, extraParams?: string[]) => {
+  const registerFuncDecl = (
+    fnName: string,
+    lineIdx: number,
+    line: string,
+    lineStart: number,
+    lineEnd: number,
+    parenSearchFrom: number,
+    extraParams?: string[],
+    methodMeta?: { isMethod: boolean; recvIdent?: string; recvType?: string },
+  ) => {
     const nIdx = line.indexOf(fnName, Math.max(0, parenSearchFrom - lineStart - fnName.length - 2));
     const nFrom = lineStart + Math.max(0, nIdx >= 0 ? nIdx : line.indexOf(fnName));
     funcDecls.push({ name: fnName, line: lineIdx + 1, nameFrom: nFrom, nameTo: nFrom + fnName.length, lineEnd });
@@ -462,7 +485,23 @@ export function buildSymbolModel(
     const scoped = scanSignatureAndBodyScope(sample, openParenPos, lang);
     if (!scoped) return;
     const pList = splitParamNames(scoped.paramsRaw, lang);
-    if (pList.length) funcParams.set(fnName, pList);
+    const isVariadic = /\.\.\./.test(scoped.paramsRaw) || (lang === 'python' && /\*[A-Za-z_]/.test(scoped.paramsRaw));
+    if (pList.length) {
+      if (methodMeta?.isMethod) {
+        methodDecls.push({
+          name: fnName,
+          params: pList,
+          variadic: isVariadic,
+          recvIdent: methodMeta.recvIdent,
+          recvType: methodMeta.recvType,
+          scopeFrom: openParenPos,
+          scopeTo: scoped.bodyEndPos,
+        });
+      } else {
+        funcParams.set(fnName, pList);
+        if (isVariadic) variadicFuncs.add(fnName);
+      }
+    }
     const scopeParams = extraParams?.length ? [...extraParams, ...pList] : pList;
     if (scopeParams.length) {
       paramScopes.push({ from: openParenPos, to: scoped.bodyEndPos, params: new Set(scopeParams) });
@@ -498,14 +537,25 @@ export function buildSymbolModel(
       if (mTopVar && line[0] !== '\t' && line[0] !== ' ') pkgVars.add(mTopVar[1]);
       const mType = /^type\s+([A-Za-z_]\w*)\b/.exec(trimmed);
       if (mType) typeNames.add(mType[1]);
-      const mFn = /^func\s+(?:\(\s*(?:([A-Za-z_]\w*)\s+)?\*?[A-Za-z_][\w.[\]]*\s*\)\s*)?([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*\(/.exec(trimmed);
+      const mFn = /^func\s+(?:\(\s*(?:([A-Za-z_]\w*)\s+)?\*?([A-Za-z_]\w*)(?:\[[^\]]*\])?\s*\)\s*)?([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*\(/.exec(trimmed);
       if (mFn) {
-        const recvName = mFn[1] && mFn[1] !== '_' ? [mFn[1]] : undefined;
-        const fnName = mFn[2];
-        const recvEnd = /^func\s*\(/.test(trimmed) ? line.indexOf(')') + 1 : 0;
+        const isGoMethod = Boolean(mFn[2]);
+        const recvIdent = mFn[1] && mFn[1] !== '_' ? mFn[1] : undefined;
+        const recvName = recvIdent ? [recvIdent] : undefined;
+        const fnName = mFn[3];
+        const recvEnd = isGoMethod ? line.indexOf(')') + 1 : 0;
         const fnIdx = line.indexOf(fnName, Math.max(0, recvEnd));
         const fnOffset = fnIdx >= 0 ? fnIdx : Math.max(0, line.lastIndexOf(fnName));
-        registerFuncDecl(fnName, i, line, lineStart, lineEnd, lineStart + fnOffset + fnName.length, recvName);
+        registerFuncDecl(
+          fnName,
+          i,
+          line,
+          lineStart,
+          lineEnd,
+          lineStart + fnOffset + fnName.length,
+          recvName,
+          isGoMethod ? { isMethod: true, recvIdent, recvType: mFn[2] } : undefined,
+        );
       }
     } else if (lang === 'java') {
       const mType = /^(?:public|protected|private|abstract|final|static|sealed|\s)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)/.exec(trimmed);
@@ -541,7 +591,7 @@ export function buildSymbolModel(
   }
 
   const declStarts = new Set(funcDecls.map((d) => d.nameFrom));
-  return { pkgVars, typeNames, importedPkgs, funcParams, funcDecls, paramScopes, declStarts, unresolvedIdents, unusedRanges };
+  return { pkgVars, typeNames, importedPkgs, funcParams, variadicFuncs, methodDecls, funcDecls, paramScopes, declStarts, unresolvedIdents, unusedRanges };
 }
 
 function buildBracketIndex(docText: string): CachedBracketIndex {

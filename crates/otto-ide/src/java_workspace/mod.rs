@@ -95,14 +95,98 @@ impl JavaWorkspaceGraph {
     }
 }
 
+/// Validate and canonicalize a candidate directory or manifest file referenced
+/// from Maven (`<module>`, `<relativePath>`) or Gradle (`settings.gradle` `include` / `projectDir`).
+///
+/// Rejects `otto_core::secret_paths` unconditionally, and confines paths strictly
+/// within `allowed_roots` whenever `!caller_is_root` or `strict_roots` is set.
+pub fn confine_manifest_path(
+    cand: &Path,
+    allowed_roots: &[PathBuf],
+    caller_is_root: bool,
+    must_be_dir: bool,
+    strict_roots: bool,
+) -> Option<PathBuf> {
+    let canon = fs::canonicalize(cand).ok()?;
+    if must_be_dir {
+        if !canon.is_dir() {
+            return None;
+        }
+    } else if !canon.is_file() {
+        return None;
+    }
+    if otto_core::secret_paths::in_protected_dir(&canon)
+        || otto_core::secret_paths::is_denied_file(&canon)
+        || otto_core::secret_paths::is_denied_dir(&canon)
+    {
+        return None;
+    }
+    if !caller_is_root && crate::target::enforce_non_root_path(&canon).is_err() {
+        return None;
+    }
+    if (!caller_is_root || strict_roots)
+        && (allowed_roots.is_empty() || !allowed_roots.iter().any(|r| canon.starts_with(r)))
+    {
+        return None;
+    }
+    Some(canon)
+}
+
+/// Resolve and canonicalize a Maven `<parent><relativePath>` POM file, enforcing
+/// `allowed_roots` confinement when `!caller_is_root` and rejecting `secret_paths`.
+pub fn resolve_confined_parent_pom(
+    stripped_xml: &str,
+    dir: &Path,
+    allowed_roots: &[PathBuf],
+    caller_is_root: bool,
+) -> Option<PathBuf> {
+    let parent_block = extract_first_tag_block(stripped_xml, "parent")?;
+    let rel = match extract_tag_text(parent_block, "relativePath") {
+        Some(s) if s.is_empty() => return None,
+        Some(s) => s,
+        None => "../pom.xml".to_string(),
+    };
+    let parent_pom = if rel.ends_with(".xml") || rel.ends_with(".pom") {
+        dir.join(rel)
+    } else {
+        dir.join(rel).join("pom.xml")
+    };
+    confine_manifest_path(&parent_pom, allowed_roots, caller_is_root, false, false)
+}
+
 /// Scan all attached IDE project folders (and Maven `<modules>` / Gradle subprojects)
-/// to build a `JavaWorkspaceGraph`.
+/// to build a `JavaWorkspaceGraph`. Submodules and Gradle includes are strictly
+/// confined within `roots`.
 pub fn scan_java_workspace(roots: &[PathBuf]) -> JavaWorkspaceGraph {
+    scan_java_workspace_scoped(roots, false)
+}
+
+/// Scoped variant of [`scan_java_workspace`] carrying `caller_is_root` for
+/// `<relativePath>` parent-POM property resolution while always confining
+/// `<module>` and Gradle `include` / `projectDir` subprojects within `roots`.
+pub fn scan_java_workspace_scoped(roots: &[PathBuf], caller_is_root: bool) -> JavaWorkspaceGraph {
     let mut graph = JavaWorkspaceGraph::default();
-    let mut visited_dirs = HashSet::new();
+    let mut canon_roots = Vec::new();
     for root in roots {
-        let canon = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-        scan_java_dir_recursive(&canon, 0, &mut visited_dirs, &mut graph);
+        if let Ok(canon) = fs::canonicalize(root) {
+            if !caller_is_root && crate::target::enforce_non_root_path(&canon).is_err() {
+                continue;
+            }
+            if !canon_roots.contains(&canon) {
+                canon_roots.push(canon);
+            }
+        }
+    }
+    let mut visited_dirs = HashSet::new();
+    for canon in &canon_roots {
+        scan_java_dir_recursive(
+            canon,
+            0,
+            &canon_roots,
+            caller_is_root,
+            &mut visited_dirs,
+            &mut graph,
+        );
     }
     graph
 }
@@ -110,6 +194,8 @@ pub fn scan_java_workspace(roots: &[PathBuf]) -> JavaWorkspaceGraph {
 fn scan_java_dir_recursive(
     dir: &Path,
     depth: usize,
+    canon_roots: &[PathBuf],
+    caller_is_root: bool,
     visited: &mut HashSet<PathBuf>,
     graph: &mut JavaWorkspaceGraph,
 ) {
@@ -123,7 +209,8 @@ fn scan_java_dir_recursive(
     let mut subdirs_to_visit = Vec::new();
     if pom.is_file() {
         if let Ok(raw) = fs::read_to_string(&pom) {
-            let (module, submodules) = parse_pom_module(dir, &raw);
+            let (module, submodules) =
+                parse_pom_module_scoped(dir, &raw, canon_roots, caller_is_root);
             register_module(graph, module);
             for sub in submodules {
                 subdirs_to_visit.push(dir.join(sub));
@@ -166,8 +253,9 @@ fn scan_java_dir_recursive(
     }
 
     for sub in subdirs_to_visit {
-        let c = fs::canonicalize(&sub).unwrap_or(sub);
-        scan_java_dir_recursive(&c, depth + 1, visited, graph);
+        if let Some(c) = confine_manifest_path(&sub, canon_roots, caller_is_root, true, true) {
+            scan_java_dir_recursive(&c, depth + 1, canon_roots, caller_is_root, visited, graph);
+        }
     }
 }
 
@@ -188,8 +276,18 @@ fn register_module(graph: &mut JavaWorkspaceGraph, module: WorkspaceJavaModule) 
 }
 
 pub fn parse_pom_module(dir: &Path, xml: &str) -> (WorkspaceJavaModule, Vec<String>) {
+    let default_root = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    parse_pom_module_scoped(dir, xml, &[default_root], false)
+}
+
+pub fn parse_pom_module_scoped(
+    dir: &Path,
+    xml: &str,
+    allowed_roots: &[PathBuf],
+    caller_is_root: bool,
+) -> (WorkspaceJavaModule, Vec<String>) {
     let stripped = strip_xml_comments(xml);
-    let props = parse_pom_properties(&stripped, dir);
+    let props = parse_pom_properties_scoped(&stripped, dir, allowed_roots, caller_is_root);
     let parent_block = extract_first_tag_block(&stripped, "parent").unwrap_or("");
     let parent_group = extract_tag_text(parent_block, "groupId").unwrap_or_default();
     let parent_ver = extract_tag_text(parent_block, "version").unwrap_or_default();
@@ -272,16 +370,21 @@ pub fn parse_pom_module(dir: &Path, xml: &str) -> (WorkspaceJavaModule, Vec<Stri
 }
 
 pub fn parse_pom_properties(stripped_xml: &str, dir: &Path) -> HashMap<String, String> {
+    let default_root = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    parse_pom_properties_scoped(stripped_xml, dir, &[default_root], false)
+}
+
+pub fn parse_pom_properties_scoped(
+    stripped_xml: &str,
+    dir: &Path,
+    allowed_roots: &[PathBuf],
+    caller_is_root: bool,
+) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    if let Some(parent_block) = extract_first_tag_block(stripped_xml, "parent") {
-        let rel = extract_tag_text(parent_block, "relativePath")
-            .unwrap_or_else(|| "../pom.xml".to_string());
-        let parent_pom = if rel.ends_with(".xml") {
-            dir.join(rel)
-        } else {
-            dir.join(rel).join("pom.xml")
-        };
-        if let Ok(praw) = fs::read_to_string(&parent_pom) {
+    if let Some(canon_parent) =
+        resolve_confined_parent_pom(stripped_xml, dir, allowed_roots, caller_is_root)
+    {
+        if let Ok(praw) = fs::read_to_string(&canon_parent) {
             let pstrip = strip_xml_comments(&praw);
             if let Some(pblock) = extract_first_tag_block(&pstrip, "properties") {
                 extract_kv_tags(pblock, &mut map);
@@ -377,11 +480,15 @@ fn parse_gradle_module(dir: &Path, raw: &str) -> WorkspaceJavaModule {
 fn parse_gradle_includes(raw: &str) -> Vec<String> {
     let re = Regex::new(r#"include\s*\(?([^)\n]+)\)?"#).unwrap();
     let q_re = Regex::new(r#"['"]([^'"]+)['"]"#).unwrap();
+    let pdir_re = Regex::new(r#"projectDir\s*=\s*file\s*\(\s*['"]([^'"]+)['"]\s*\)"#).unwrap();
     let mut out = Vec::new();
     for cap in re.captures_iter(raw) {
         for q in q_re.captures_iter(&cap[1]) {
             out.push(q[1].to_string());
         }
+    }
+    for cap in pdir_re.captures_iter(raw) {
+        out.push(cap[1].to_string());
     }
     out
 }
@@ -506,4 +613,115 @@ pub fn resolve_external_dep_jar(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maven_parent_relative_path_and_modules_and_gradle_includes_stay_confined() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside-secret");
+        let ws_maven = tmp.path().join("ws-maven");
+        let child_maven = ws_maven.join("sub");
+        let ws_gradle = tmp.path().join("ws-gradle");
+        let valid_sub = ws_gradle.join("valid-sub");
+
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(&child_maven).unwrap();
+        fs::create_dir_all(&valid_sub).unwrap();
+
+        fs::write(
+            outside.join("pom.xml"),
+            "<project><groupId>leak</groupId><artifactId>outside-mod</artifactId><properties><secret.ver>9.9.9-LEAKED</secret.ver></properties></project>",
+        )
+        .unwrap();
+        fs::write(
+            outside.join("build.gradle"),
+            "group = 'leak'\nversion = '9.9.9'\n",
+        )
+        .unwrap();
+
+        fs::write(
+            ws_maven.join("pom.xml"),
+            "<project><groupId>acme</groupId><artifactId>parent</artifactId><version>1.0.0</version><properties><allowed.ver>2.4.0</allowed.ver></properties><modules><module>sub</module><module>../outside-secret</module></modules></project>",
+        )
+        .unwrap();
+        let child_xml = r#"<project>
+            <parent>
+                <groupId>acme</groupId>
+                <artifactId>parent</artifactId>
+                <version>1.0.0</version>
+                <relativePath>../../outside-secret/pom.xml</relativePath>
+            </parent>
+            <artifactId>sub</artifactId>
+            <version>${secret.ver}</version>
+        </project>"#;
+        fs::write(child_maven.join("pom.xml"), child_xml).unwrap();
+
+        let canon_ws_maven = fs::canonicalize(&ws_maven).unwrap();
+        let maven_graph = scan_java_workspace_scoped(std::slice::from_ref(&canon_ws_maven), false);
+        assert!(
+            maven_graph
+                .modules
+                .iter()
+                .all(|m| m.artifact_id != "outside-mod"),
+            "malicious <module>../outside-secret</module> must not be scanned: {:?}",
+            maven_graph.modules
+        );
+        let sub_mod = maven_graph
+            .modules
+            .iter()
+            .find(|m| m.artifact_id == "sub")
+            .expect("valid child module present");
+        assert_ne!(
+            sub_mod.version, "9.9.9-LEAKED",
+            "malicious <relativePath> outside allowed_roots must not leak parent properties"
+        );
+
+        // Legitimate parent inside allowed_roots resolves cleanly for non-root callers.
+        let valid_child_xml = r#"<project>
+            <parent><relativePath>../pom.xml</relativePath></parent>
+            <artifactId>sub</artifactId>
+        </project>"#;
+        let props = parse_pom_properties_scoped(
+            valid_child_xml,
+            &fs::canonicalize(&child_maven).unwrap(),
+            std::slice::from_ref(&canon_ws_maven),
+            false,
+        );
+        assert_eq!(props.get("allowed.ver").map(String::as_str), Some("2.4.0"));
+
+        // Gradle settings.gradle include / projectDir escape must be blocked.
+        fs::write(
+            ws_gradle.join("build.gradle"),
+            "group = 'acme'\nversion = '1.0.0'\n",
+        )
+        .unwrap();
+        fs::write(
+            ws_gradle.join("settings.gradle"),
+            "include(':valid-sub', ':../outside-secret')\nproject(':evil').projectDir = file('../outside-secret')\n",
+        )
+        .unwrap();
+        fs::write(
+            valid_sub.join("build.gradle"),
+            "group = 'acme'\nversion = '1.0.0'\n",
+        )
+        .unwrap();
+
+        let canon_ws_gradle = fs::canonicalize(&ws_gradle).unwrap();
+        let gradle_graph =
+            scan_java_workspace_scoped(std::slice::from_ref(&canon_ws_gradle), false);
+        let gradle_ids: Vec<&str> = gradle_graph
+            .modules
+            .iter()
+            .map(|m| m.artifact_id.as_str())
+            .collect();
+        assert!(gradle_ids.contains(&"valid-sub"));
+        assert!(
+            !gradle_ids.contains(&"outside-secret"),
+            "Gradle settings include/projectDir outside workspace root must be ignored: {gradle_ids:?}"
+        );
+    }
 }

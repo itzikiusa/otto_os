@@ -110,6 +110,8 @@ pub struct IdeStartDebugReq {
     pub skip_tests: bool,
     #[serde(default)]
     pub offline: bool,
+    #[serde(default)]
+    pub confirm_prod_targets: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

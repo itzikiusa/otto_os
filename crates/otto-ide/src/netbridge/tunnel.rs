@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use dashmap::DashMap;
 use otto_core::{Error, Result};
@@ -37,23 +37,31 @@ pub struct NetBridgeInstance {
     pub(super) k8s_spec: Option<IdeK8sSpec>,
     pub(super) ssh_cfg: Option<SshTunnelConfig>,
     pub(super) discovery_cache: Arc<DiscoveryCache>,
-    pub(super) cached_k8s: tokio::sync::RwLock<Option<Arc<K8sDiscoverySnapshot>>>,
+    pub(super) cached_k8s: RwLock<Option<Arc<K8sDiscoverySnapshot>>>,
     pub(super) interposer_lib: Option<PathBuf>,
     pub(super) auth_token: String,
     pub(super) sock_path: PathBuf,
-    _sock_dir: tempfile::TempDir,
+    pub(super) sock_dir: tempfile::TempDir,
     pub(super) socks_port: AtomicU16,
     pub(super) host_to_vip: DashMap<String, Ipv4Addr>,
     pub(super) vip_to_host: DashMap<Ipv4Addr, String>,
     next_vip_seq: AtomicU32,
+    pub(super) next_relay_seq: AtomicU32,
     pub(super) k8s_forwards: DashMap<K8sForwardKey, K8sForwardSlot>,
     pub(super) ssh_tunnel: tokio::sync::Mutex<Option<Arc<SshTunnel>>>,
     pub(super) ssh_relays: DashMap<(String, u16), SshRelaySlot>,
+    pub(super) direct_relays: DashMap<(String, u16), SshRelaySlot>,
+    host_mapping_aborts: Mutex<Vec<tokio::task::AbortHandle>>,
     abort_handles: Mutex<Vec<tokio::task::AbortHandle>>,
 }
 
 impl Drop for NetBridgeInstance {
     fn drop(&mut self) {
+        if let Ok(handles) = self.host_mapping_aborts.lock() {
+            for h in handles.iter() {
+                h.abort();
+            }
+        }
         if let Ok(handles) = self.abort_handles.lock() {
             for h in handles.iter() {
                 h.abort();
@@ -108,18 +116,21 @@ impl NetBridgeInstance {
             k8s_spec,
             ssh_cfg,
             discovery_cache,
-            cached_k8s: tokio::sync::RwLock::new(initial_snap.clone()),
+            cached_k8s: RwLock::new(initial_snap.clone()),
             interposer_lib,
             auth_token,
             sock_path,
-            _sock_dir: sock_dir,
+            sock_dir,
             socks_port: AtomicU16::new(0),
             host_to_vip: DashMap::new(),
             vip_to_host: DashMap::new(),
             next_vip_seq: AtomicU32::new(1),
+            next_relay_seq: AtomicU32::new(1),
             k8s_forwards: DashMap::new(),
             ssh_tunnel: tokio::sync::Mutex::new(initial_ssh),
             ssh_relays: DashMap::new(),
+            direct_relays: DashMap::new(),
+            host_mapping_aborts: Mutex::new(Vec::new()),
             abort_handles: Mutex::new(Vec::new()),
         });
 
@@ -154,8 +165,23 @@ impl NetBridgeInstance {
             }
         });
         aborts.push(unix_task.abort_handle());
+        if let Ok(mut guard) = inst.abort_handles.lock() {
+            guard.extend(aborts);
+        }
 
-        for mapping in &inst.cfg.host_mappings {
+        inst.ensure_host_mapping_listeners().await;
+
+        Ok(inst)
+    }
+
+    pub(crate) async fn ensure_host_mapping_listeners(self: &Arc<Self>) {
+        if let Ok(guard) = self.host_mapping_aborts.lock() {
+            if !guard.is_empty() {
+                return;
+            }
+        }
+        let mut mapping_aborts = Vec::new();
+        for mapping in &self.cfg.host_mappings {
             let fh = mapping.from_host.trim().to_ascii_lowercase();
             let Some(from_port) = mapping.from_port.filter(|&p| p > 0) else {
                 continue;
@@ -170,7 +196,7 @@ impl NetBridgeInstance {
             }
             match TcpListener::bind(("127.0.0.1", from_port)).await {
                 Ok(listener) => {
-                    let weak_l = Arc::downgrade(&inst);
+                    let weak_l = Arc::downgrade(self);
                     let join = tokio::spawn(async move {
                         loop {
                             let Ok((mut inbound, _)) = listener.accept().await else {
@@ -189,7 +215,7 @@ impl NetBridgeInstance {
                             });
                         }
                     });
-                    aborts.push(join.abort_handle());
+                    mapping_aborts.push(join.abort_handle());
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -201,12 +227,33 @@ impl NetBridgeInstance {
                 }
             }
         }
-
-        if let Ok(mut guard) = inst.abort_handles.lock() {
-            guard.extend(aborts);
+        if let Ok(mut guard) = self.host_mapping_aborts.lock() {
+            if guard.is_empty() {
+                *guard = mapping_aborts;
+            } else {
+                for h in mapping_aborts {
+                    h.abort();
+                }
+            }
         }
+    }
 
-        Ok(inst)
+    pub(crate) fn stop_idle_listeners(&self) {
+        if let Ok(mut guard) = self.host_mapping_aborts.lock() {
+            for h in guard.drain(..) {
+                h.abort();
+            }
+        }
+        self.ssh_relays.clear();
+        self.direct_relays.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_host_mapping_listener_count(&self) -> usize {
+        self.host_mapping_aborts
+            .lock()
+            .map(|g| g.len())
+            .unwrap_or(0)
     }
 
     pub fn is_healthy(&self) -> bool {
@@ -223,9 +270,9 @@ impl NetBridgeInstance {
             let svc_count = self
                 .cached_k8s
                 .read()
-                .await
-                .as_ref()
-                .map_or(0, |s| s.services.len());
+                .ok()
+                .and_then(|g| g.as_ref().map(|s| s.services.len()))
+                .unwrap_or(0);
             parts.push(format!(
                 "K8s {}/{} ({} services)",
                 spec.cluster_name, spec.namespace, svc_count
@@ -308,7 +355,7 @@ impl NetBridgeInstance {
                 .or_insert_with(|| "true".into());
         }
         if self.cfg.inject_k8s_service_env {
-            if let Ok(guard) = self.cached_k8s.try_read() {
+            if let Ok(guard) = self.cached_k8s.read() {
                 if let Some(snap) = guard.as_ref() {
                     for svc in snap.services.values().take(MAX_INJECTED_K8S_ENV_SERVICES) {
                         if svc.name == "kubernetes" {
@@ -377,10 +424,19 @@ impl NetBridgeInstance {
     pub(super) async fn current_k8s_snapshot(&self) -> Option<Arc<K8sDiscoverySnapshot>> {
         let spec = self.k8s_spec.as_ref()?;
         if let Ok(fresh) = self.discovery_cache.get_or_fetch(spec, false).await {
-            let mut guard = self.cached_k8s.write().await;
-            *guard = Some(Arc::clone(&fresh));
+            let unchanged = self
+                .cached_k8s
+                .read()
+                .ok()
+                .and_then(|g| g.as_ref().map(|cur| Arc::ptr_eq(cur, &fresh)))
+                .unwrap_or(false);
+            if !unchanged {
+                if let Ok(mut guard) = self.cached_k8s.write() {
+                    *guard = Some(Arc::clone(&fresh));
+                }
+            }
             return Some(fresh);
         }
-        self.cached_k8s.read().await.clone()
+        self.cached_k8s.read().ok().and_then(|g| g.clone())
     }
 }

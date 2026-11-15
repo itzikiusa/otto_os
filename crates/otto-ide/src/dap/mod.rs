@@ -162,25 +162,7 @@ impl Drop for BridgeGuard {
 
 /// Validate and convert [`IdeSshSpec`] into [`SshTunnelConfig`].
 pub(crate) fn ssh_tunnel_config(ssh: &IdeSshSpec) -> Result<SshTunnelConfig> {
-    crate::target::ssh_exec::validate_ssh_spec(ssh)?;
-    let identity_file = match ssh.identity_file.as_deref().map(str::trim) {
-        Some(s) if !s.is_empty() => Some(
-            otto_core::paths::expand_home_strict(s)
-                .map_err(Error::Invalid)?
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        _ => None,
-    };
-    let cfg = SshTunnelConfig {
-        host: ssh.host.clone(),
-        port: ssh.effective_port().unwrap_or(22),
-        user: ssh.user.clone(),
-        identity_file,
-        proxy_jump: ssh.proxy_jump.clone(),
-    };
-    cfg.validate()?;
-    Ok(cfg)
+    ssh.to_ssh_tunnel_config()
 }
 
 /// Safe POSIX single-quote shell escaping for remote SSH command strings.

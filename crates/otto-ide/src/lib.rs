@@ -39,6 +39,7 @@ use otto_core::secrets::SecretStore;
 use otto_core::{Id, Result};
 use otto_state::DbPool;
 
+pub use lsp_service::extract_go_file_build_tags;
 pub use types::IdeSshSpec;
 
 /// Host context required by `otto-ide`'s routers and services.

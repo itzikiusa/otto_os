@@ -12,7 +12,7 @@ mod fs_loader;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use otto_core::{new_id, Error, Result};
@@ -49,10 +49,11 @@ pub fn is_valid_slug(slug: &str) -> bool {
 }
 
 /// Thread-safe runtime IDE plugin registry.
+#[derive(Clone)]
 pub struct IdePluginRegistry {
     plugins_dir: PathBuf,
     sidecar_plugins_dir: Option<PathBuf>,
-    cache: RwLock<Vec<IdePluginInfo>>,
+    cache: Arc<RwLock<Vec<IdePluginInfo>>>,
 }
 
 impl Default for IdePluginRegistry {
@@ -74,7 +75,7 @@ impl IdePluginRegistry {
         let registry = Self {
             plugins_dir,
             sidecar_plugins_dir,
-            cache: RwLock::new(Vec::new()),
+            cache: Arc::new(RwLock::new(Vec::new())),
         };
         registry.reload();
         registry

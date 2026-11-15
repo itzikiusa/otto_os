@@ -20,9 +20,20 @@ impl AgentRuntimeRepo {
         workspace: &Id,
         session: &Id,
     ) -> Result<RuntimeDraftRecord> {
-        self.expire_drafts().await?;
-        let row = sqlx::query("SELECT revision, payload_json FROM runtime_composer_drafts WHERE user_id=? AND workspace_id=? AND session_id=?")
-            .bind(user).bind(workspace).bind(session).fetch_optional(&self.pool).await.map_err(dberr("load composer draft"))?;
+        let cutoff = Utc::now().timestamp() - RETENTION_SECONDS;
+        let row = sqlx::query(
+            "SELECT CASE WHEN payload_json IS NOT NULL AND updated_at < ? THEN revision + 1 ELSE revision END AS revision, \
+             CASE WHEN updated_at >= ? THEN payload_json ELSE NULL END AS payload_json \
+             FROM runtime_composer_drafts WHERE user_id=? AND workspace_id=? AND session_id=?",
+        )
+        .bind(cutoff)
+        .bind(cutoff)
+        .bind(user)
+        .bind(workspace)
+        .bind(session)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("load composer draft"))?;
         let Some(row) = row else {
             return Ok(RuntimeDraftRecord {
                 revision: 0,
@@ -256,5 +267,35 @@ mod tests {
         repo.save_composer_draft(&u, &w, &r, 2, &value)
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn composer_draft_get_is_strictly_read_only() {
+        let (repo, pool) = seeded().await;
+        let (u, w, r) = ("u1".into(), "w1".into(), "r1".into());
+        let value = RuntimeDraftContent {
+            text: "expired draft".into(),
+            ..Default::default()
+        };
+        repo.save_composer_draft(&u, &w, &r, 0, &value)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runtime_composer_drafts SET updated_at=0 WHERE session_id='r1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let got = repo.composer_draft(&u, &w, &r).await.unwrap();
+        assert_eq!(got.revision, 2);
+        assert!(got.draft.is_none());
+
+        let raw: (i64, Option<String>, i64) = sqlx::query_as(
+            "SELECT revision, payload_json, updated_at FROM runtime_composer_drafts WHERE session_id='r1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(raw.0, 1, "GET must not mutate stored revision");
+        assert!(raw.1.is_some(), "GET must not prune payload_json on read");
+        assert_eq!(raw.2, 0);
     }
 }

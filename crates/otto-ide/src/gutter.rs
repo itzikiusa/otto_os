@@ -112,6 +112,9 @@ fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>)
         Regex::new(r#"\b[A-Za-z_][A-Za-z0-9_]*\.Run\s*\(\s*(?:"([^"\\]+)"|`([^`]+)`)"#).unwrap()
     });
 
+    let go_tags = crate::lsp_service::extract_go_file_build_tags(content);
+    let tags_flag = (!go_tags.is_empty()).then(|| format!("-tags={}", go_tags.join(",")));
+
     let mut is_main_pkg = false;
     for line in content.lines() {
         if let Some(cap) = re_pkg.captures(line) {
@@ -135,6 +138,11 @@ fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>)
             let params = cap[2].trim();
 
             if fn_name == "main" && params.is_empty() && is_main_pkg {
+                let mut args = vec!["run".into()];
+                if let Some(ref tf) = tags_flag {
+                    args.push(tf.clone());
+                }
+                args.push(".".into());
                 out.push(IdeGutterItem {
                     line: line_no,
                     kind: IdeGutterKind::Main,
@@ -143,7 +151,7 @@ fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>)
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::GoRun,
                         command: Some("go".into()),
-                        args: vec!["run".into(), ".".into()],
+                        args,
                         cwd: Some(dir.to_string()),
                         target_path: Some(path.to_string()),
                         test_filter: None,
@@ -158,6 +166,11 @@ fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>)
             {
                 active_test_fn = Some((fn_name.to_string(), brace_depth));
                 let pattern = format!("^{fn_name}$");
+                let mut args = vec!["test".into()];
+                if let Some(ref tf) = tags_flag {
+                    args.push(tf.clone());
+                }
+                args.extend(["-v".into(), "-run".into(), pattern.clone(), ".".into()]);
                 out.push(IdeGutterItem {
                     line: line_no,
                     kind: IdeGutterKind::Test,
@@ -166,13 +179,7 @@ fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>)
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::GoTest,
                         command: Some("go".into()),
-                        args: vec![
-                            "test".into(),
-                            "-v".into(),
-                            "-run".into(),
-                            pattern.clone(),
-                            ".".into(),
-                        ],
+                        args,
                         cwd: Some(dir.to_string()),
                         target_path: Some(path.to_string()),
                         test_filter: Some(pattern.clone()),
@@ -182,6 +189,17 @@ fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>)
                 });
             } else if fn_name.starts_with("Benchmark") && params.contains("*testing.B") {
                 let pattern = format!("^{fn_name}$");
+                let mut args = vec!["test".into()];
+                if let Some(ref tf) = tags_flag {
+                    args.push(tf.clone());
+                }
+                args.extend([
+                    "-bench".into(),
+                    pattern.clone(),
+                    "-run".into(),
+                    "^$".into(),
+                    ".".into(),
+                ]);
                 out.push(IdeGutterItem {
                     line: line_no,
                     kind: IdeGutterKind::Bench,
@@ -190,14 +208,7 @@ fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>)
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::GoTest,
                         command: Some("go".into()),
-                        args: vec![
-                            "test".into(),
-                            "-bench".into(),
-                            pattern.clone(),
-                            "-run".into(),
-                            "^$".into(),
-                            ".".into(),
-                        ],
+                        args,
                         cwd: Some(dir.to_string()),
                         target_path: Some(path.to_string()),
                         test_filter: Some(pattern),
@@ -216,6 +227,11 @@ fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>)
                 {
                     let go_sub = regex::escape(&sub_name.replace(' ', "_"));
                     let pattern = format!("^{parent_fn}$/^{go_sub}$");
+                    let mut args = vec!["test".into()];
+                    if let Some(ref tf) = tags_flag {
+                        args.push(tf.clone());
+                    }
+                    args.extend(["-v".into(), "-run".into(), pattern.clone(), ".".into()]);
                     out.push(IdeGutterItem {
                         line: line_no,
                         kind: IdeGutterKind::Test,
@@ -224,13 +240,7 @@ fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>)
                         run_spec: IdeQuickRunSpec {
                             runner: IdeRunnerKind::GoTest,
                             command: Some("go".into()),
-                            args: vec![
-                                "test".into(),
-                                "-v".into(),
-                                "-run".into(),
-                                pattern.clone(),
-                                ".".into(),
-                            ],
+                            args,
                             cwd: Some(dir.to_string()),
                             target_path: Some(path.to_string()),
                             test_filter: Some(pattern.clone()),
@@ -1445,5 +1455,32 @@ function rollback_release {
         let deno_items = detect_gutter_items("/ws/deno.jsonc", deno_jsonc, &[]);
         assert_eq!(deno_items.len(), 1);
         assert_eq!(deno_items[0].label, "deno task dev");
+    }
+
+    #[test]
+    fn go_gutter_extracts_file_build_tags_into_args() {
+        let go_comp = "\
+//go:build component && !windows
+
+package tests
+
+import \"testing\"
+
+func TestAssignFrbToPlayers(t *testing.T) {}
+";
+        let items = detect_gutter_items(
+            "/ws/tests/assign_frb_to_players_component_test.go",
+            go_comp,
+            &[],
+        );
+        assert_eq!(items.len(), 1);
+        assert!(
+            items[0]
+                .run_spec
+                .args
+                .contains(&"-tags=component".to_string()),
+            "args={:?}",
+            items[0].run_spec.args
+        );
     }
 }

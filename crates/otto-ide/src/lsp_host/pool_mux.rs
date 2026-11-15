@@ -32,6 +32,8 @@ pub(super) async fn run_actor(
     open_docs: Arc<AtomicUsize>,
     _active_clients: Arc<AtomicUsize>,
     last_active: Arc<AtomicU64>,
+    owner_is_root: bool,
+    go_build_tags: Vec<String>,
 ) {
     let ServerIo {
         reader,
@@ -88,11 +90,13 @@ pub(super) async fn run_actor(
         open_docs,
         last_active,
         Arc::clone(&pool.activity_seq),
+        owner_is_root,
+        go_build_tags,
     );
     let write_cap = pool.write_cap;
     let mut idle_at: Option<Instant> = None;
     let mut was_evicted = false;
-    let mut rss_tick = tokio::time::interval(Duration::from_millis(800));
+    let mut rss_tick = tokio::time::interval(Duration::from_secs(15));
     rss_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let _ = rss_tick.tick().await;
 
@@ -124,8 +128,12 @@ pub(super) async fn run_actor(
                 None => break,
             },
             _ = rss_tick.tick() => {
-                let protect = (!mux.clients.is_empty()).then_some(&key);
-                pool.enforce_rss_budget(protect);
+                let protect = (!mux.clients.is_empty()).then(|| key.clone());
+                let pool_cl = Arc::clone(&pool);
+                let _ = tokio::task::spawn_blocking(move || {
+                    pool_cl.enforce_rss_budget(protect.as_ref());
+                })
+                .await;
             }
             _ = tokio::time::sleep_until(idle_at.unwrap_or_else(Instant::now)), if idle_at.is_some() => {
                 let mut entries = pool.lock();
@@ -214,6 +222,8 @@ struct Mux {
     open_docs: Arc<AtomicUsize>,
     last_active: Arc<AtomicU64>,
     activity_seq: Arc<AtomicU64>,
+    owner_is_root: bool,
+    go_build_tags: Vec<String>,
     clients: BTreeMap<u64, Client>,
     pending: HashMap<u64, (u64, Value)>,
     server_reqs: HashMap<String, (u64, Value)>,
@@ -224,6 +234,7 @@ struct Mux {
 }
 
 impl Mux {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         key: PoolKey,
         to_server_tx: mpsc::UnboundedSender<Vec<u8>>,
@@ -231,6 +242,8 @@ impl Mux {
         open_docs: Arc<AtomicUsize>,
         last_active: Arc<AtomicU64>,
         activity_seq: Arc<AtomicU64>,
+        owner_is_root: bool,
+        go_build_tags: Vec<String>,
     ) -> Self {
         Self {
             key,
@@ -239,6 +252,8 @@ impl Mux {
             open_docs,
             last_active,
             activity_seq,
+            owner_is_root,
+            go_build_tags,
             clients: BTreeMap::new(),
             pending: HashMap::new(),
             server_reqs: HashMap::new(),

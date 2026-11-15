@@ -74,19 +74,66 @@ class IdeGitController {
   private probeQueue: Array<() => void> = [];
   private histModeSeq = 0;
 
-  /** All unique detected Otto `Repo` objects across attached IDE project folders. */
+  /** All unique detected Otto `Repo` objects across attached IDE project folders (including nested repos). */
   readonly repos = $derived.by((): Repo[] => {
     const seen = new Set<string>();
     const out: Repo[] = [];
-    for (let i = 0; i < ide.projectRoots.length; i++) {
-      const r = this.repoByRoot[normSlash(ide.projectRoots[i].path)];
-      if (r && !seen.has(r.id)) {
-        seen.add(r.id);
-        out.push(r);
+    const pushRepo = (r: Repo | null | undefined): void => {
+      if (!r || seen.has(r.id)) return;
+      seen.add(r.id);
+      out.push(r);
+    };
+    const rootPaths = ide.projectRoots.map((r) => normSlash(r.path));
+    for (let i = 0; i < rootPaths.length; i++) {
+      pushRepo(this.repoByRoot[rootPaths[i]]);
+    }
+    for (const [, r] of Object.entries(this.repoByRoot)) {
+      if (!r) continue;
+      const rp = normSlash(r.path);
+      if (
+        rootPaths.length === 0 ||
+        rootPaths.some((rootP) => rp === rootP || rp.startsWith(`${rootP}/`) || rootP.startsWith(`${rp}/`))
+      ) {
+        pushRepo(r);
+      }
+    }
+    for (const r of git.repos) {
+      const rp = normSlash(r.path);
+      if (rootPaths.some((rootP) => rp === rootP || rp.startsWith(`${rootP}/`) || rootP.startsWith(`${rp}/`))) {
+        pushRepo(r);
       }
     }
     return out;
   });
+
+  /** Find the deepest known `Repo` containing `absPath` synchronously if already loaded. */
+  findKnownRepoForPath(absPath: string): Repo | null {
+    const clean = normSlash(absPath);
+    let best: Repo | null = null;
+    const candidates = [...Object.values(this.repoByRoot), ...this.repos, ...git.repos, ...git.allRepos];
+    for (let i = 0; i < candidates.length; i++) {
+      const r = candidates[i];
+      if (!r?.path) continue;
+      const rp = normSlash(r.path);
+      if (clean === rp || clean.startsWith(`${rp}/`)) {
+        if (!best || rp.length > normSlash(best.path).length) best = r;
+      }
+    }
+    return best;
+  }
+
+  /** Compact reactive digest of `absPath`'s git repo/branch/change state for editor diff gutter refresh. */
+  fileStatusDigest(absPath: string): string {
+    const clean = normSlash(absPath);
+    const repo = this.findKnownRepoForPath(clean);
+    if (!repo) return `norepo:${this.detectingCount}`;
+    const st = git.statusById[repo.id];
+    if (!st) return `${repo.id}:nostatus`;
+    const repoRoot = normSlash(repo.path);
+    const rel = clean === repoRoot ? '' : clean.slice(repoRoot.length + 1);
+    const ch = st.changes.find((c) => c.path.replace(/^\/+/, '').replace(/\/+$/, '') === rel);
+    return `${repo.id}:${st.branch}:${st.ahead}:${st.behind}:${ch ? `${ch.kind}:${ch.staged ? 1 : 0}` : 'clean'}`;
+  }
 
   /** Active project root selected in the IDE Git tool panel (defaults to active file's root). */
   readonly activeRoot = $derived.by((): IdeProjectRoot | null => {
@@ -105,6 +152,11 @@ class IdeGitController {
   });
 
   readonly activeRepo = $derived.by((): Repo | null => {
+    const curFile = ide.activePath;
+    if (curFile) {
+      const byFile = this.findKnownRepoForPath(curFile);
+      if (byFile) return byFile;
+    }
     const root = this.activeRoot;
     if (!root) return this.repos[0] ?? null;
     return this.repoByRoot[normSlash(root.path)] ?? this.repos[0] ?? null;
@@ -132,7 +184,7 @@ class IdeGitController {
       const dirtyDirs = new Set<string>();
       const seenRepos = new Set<string>();
 
-      for (const [, repo] of Object.entries(this.repoByRoot)) {
+      for (const repo of [...Object.values(this.repoByRoot), ...this.repos]) {
         if (!repo || seenRepos.has(repo.id)) continue;
         seenRepos.add(repo.id);
         const st = git.statusById[repo.id];
@@ -174,9 +226,24 @@ class IdeGitController {
   }
 
   async resolveRepoForPath(absPath: string): Promise<Repo | null> {
-    const root = this.rootContainingPath(absPath) ?? this.activeRoot;
-    if (!root) return this.activeRepo;
-    return (await this.ensureRootDetected(root.path)) ?? this.activeRepo;
+    const clean = normSlash(ide.resolvePath(absPath));
+    const known = this.findKnownRepoForPath(clean);
+    if (known) {
+      git.ensureStatus(known.id);
+      return known;
+    }
+    const root = this.rootContainingPath(clean) ?? this.activeRoot;
+    if (root) {
+      const fromRoot = await this.ensureRootDetected(root.path);
+      if (fromRoot) return fromRoot;
+    }
+    const slash = clean.lastIndexOf('/');
+    const parentDir = slash > 0 ? clean.slice(0, slash) : '';
+    if (parentDir && (!root || parentDir.length > normSlash(root.path).length)) {
+      const fromParent = await this.ensureRootDetected(parentDir);
+      if (fromParent) return fromParent;
+    }
+    return this.findKnownRepoForPath(clean) ?? this.activeRepo;
   }
 
   /** Sync active/expanded roots without flooding 35+ requests on cold multi-repo project open. */
@@ -215,7 +282,7 @@ class IdeGitController {
     const cleanAbs = normSlash(ide.resolvePath(absPath));
     const root = this.rootContainingPath(cleanAbs) ?? this.activeRoot;
     if (root) this.selectedRootPath = normSlash(root.path);
-    const repo = root ? await this.ensureRootDetected(root.path) : this.activeRepo;
+    const repo = await this.resolveRepoForPath(cleanAbs);
     if (!repo) {
       ide.openBottomTab('git' as IdeBottomTab);
       return;
@@ -259,7 +326,7 @@ class IdeGitController {
     const cleanAbs = normSlash(ide.resolvePath(absPath));
     const root = this.rootContainingPath(cleanAbs) ?? this.activeRoot;
     if (root) this.selectedRootPath = normSlash(root.path);
-    const repo = root ? await this.ensureRootDetected(root.path) : this.activeRepo;
+    const repo = await this.resolveRepoForPath(cleanAbs);
     if (repo) {
       const rel = this.repoRelativePath(repo, cleanAbs);
       if (rel) this.focusedChangePath = rel;
@@ -331,7 +398,12 @@ class IdeGitController {
 
       if (detected) {
         this.nonRepoRoots.delete(rootPath);
-        this.repoByRoot = { ...this.repoByRoot, [rootPath]: detected };
+        const canonRepoRoot = normSlash(detected.path);
+        this.repoByRoot = {
+          ...this.repoByRoot,
+          [rootPath]: detected,
+          [canonRepoRoot]: detected,
+        };
         void git.refreshStatus(detected.id);
         return detected;
       }
@@ -383,7 +455,12 @@ class IdeGitController {
     const req: DiscardReq = keepStaged ? { paths, keep_staged: true } : { paths };
     const s = await api.post<RepoStatusResp>(`/repos/${encodeURIComponent(repoId)}/discard`, req);
     git.setStatus(repoId, s);
-    const repo = this.repos.find((r) => r.id === repoId);
+    const repo = [
+      ...this.repos,
+      ...Object.values(this.repoByRoot),
+      ...git.repos,
+      ...git.allRepos,
+    ].find((r) => r?.id === repoId);
     if (repo) {
       const base = normSlash(repo.path);
       await ide.loadTree();
@@ -399,20 +476,15 @@ class IdeGitController {
     const clean = normSlash(ide.resolvePath(absPath));
     const existing = ide.tabs.find((t) => normSlash(t.path) === clean);
     if (!existing) return;
+    let fresh: IdeFileReadResp;
     try {
-      const root = this.rootContainingPath(clean)?.path || ide.target.root;
-      const fresh = await api.get<IdeFileReadResp>(
+      const root =
+        this.rootContainingPath(clean)?.path ||
+        this.findKnownRepoForPath(clean)?.path ||
+        ide.target.root;
+      fresh = await api.get<IdeFileReadResp>(
         `/ide/fs/file?${ide.targetQuery({ root, path: clean })}`,
       );
-      if (ide.activePath === existing.path) {
-        await ide.applyAgentEdit(existing.path, fresh.content);
-      } else {
-        ide.updateBuffer(existing.path, fresh.content);
-      }
-      existing.content = fresh.content;
-      existing.savedContent = fresh.content;
-      existing.dirty = false;
-      existing.sha256 = fresh.sha256;
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) {
         existing.dirty = false;
@@ -422,6 +494,30 @@ class IdeGitController {
         existing.error = loadErrorText(e);
         toastError(`Couldn’t reload ${ideBasename(existing.path)}`, e);
       }
+      return;
+    }
+
+    existing.error = null;
+    try {
+      if (ide.activePath === existing.path || ide.splitPath === existing.path) {
+        const applied = await ide.applyAgentEdit(existing.path, fresh.content);
+        if (!applied) ide.updateBuffer(existing.path, fresh.content);
+      } else {
+        ide.updateBuffer(existing.path, fresh.content);
+      }
+    } catch {
+      ide.updateBuffer(existing.path, fresh.content);
+    }
+    existing.content = fresh.content;
+    existing.savedContent = fresh.content;
+    existing.dirty = false;
+    existing.sha256 = fresh.sha256;
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('otto:ide-git-file-reloaded', {
+          detail: { path: existing.path, content: fresh.content },
+        }),
+      );
     }
   }
 

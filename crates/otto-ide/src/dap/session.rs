@@ -46,6 +46,7 @@ pub struct DapStartContext {
     pub effective_env: BTreeMap<String, String>,
     pub shell_env_snapshot: BTreeMap<String, String>,
     pub project_env: Option<IdeProjectEnvironment>,
+    pub go_build_tags: Vec<String>,
     pub run_config: Option<IdeRunConfig>,
     pub plugin_adapters: Vec<PluginDapAdapterSpec>,
     pub netbridge: Option<Arc<crate::netbridge::NetBridgeLease>>,
@@ -75,6 +76,11 @@ impl DapStartContext {
 
     pub fn with_project_env(mut self, env: Option<IdeProjectEnvironment>) -> Self {
         self.project_env = env;
+        self
+    }
+
+    pub fn with_go_build_tags(mut self, tags: Vec<String>) -> Self {
+        self.go_build_tags = tags;
         self
     }
 

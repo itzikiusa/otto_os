@@ -37,12 +37,55 @@ pub struct IdeSshSpec {
     pub identity_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_jump: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
 }
 
 impl IdeSshSpec {
     pub fn effective_port(&self) -> Option<u16> {
         self.port.filter(|&p| p > 0)
     }
+
+    /// Validate SSH parameters, expand a leading `~/` on `identity_file`, and
+    /// construct a validated [`otto_ssh::SshTunnelConfig`].
+    pub fn to_ssh_tunnel_config(&self) -> Result<otto_ssh::SshTunnelConfig> {
+        crate::target::ssh_exec::validate_ssh_spec(self)?;
+        let identity_file = match self.identity_file.as_deref().map(str::trim) {
+            Some(s) if !s.is_empty() => Some(
+                otto_core::paths::expand_home_strict(s)
+                    .map_err(Error::Invalid)?
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            _ => None,
+        };
+        let cfg = otto_ssh::SshTunnelConfig {
+            host: self.host.clone(),
+            port: self.effective_port().unwrap_or(22),
+            user: self.user.clone(),
+            identity_file,
+            proxy_jump: self.proxy_jump.clone(),
+        };
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Returns `true` when the SSH connection's environment or name targets production.
+    pub fn is_production(&self) -> bool {
+        is_production_label(self.environment.as_deref(), &self.name)
+    }
+}
+
+/// Returns `true` if `env` is `"prod"` / `"production"` or `name` has a whole-word
+/// `prod` / `production` token (e.g. `"prod-eks"`, `"Prod Bastion"`).
+pub fn is_production_label(env: Option<&str>, name: &str) -> bool {
+    if let Some(e) = env.map(str::trim) {
+        if e.eq_ignore_ascii_case("prod") || e.eq_ignore_ascii_case("production") {
+            return true;
+        }
+    }
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|tok| tok.eq_ignore_ascii_case("prod") || tok.eq_ignore_ascii_case("production"))
 }
 
 /// Execution / filesystem target kind.
@@ -400,5 +443,64 @@ mod tests {
         assert_eq!(detect_language("Dockerfile.prod"), Some("dockerfile"));
         assert_eq!(detect_language("src/App.kt"), Some("kotlin"));
         assert_eq!(detect_language("README"), None);
+    }
+
+    #[test]
+    fn local_history_alias_record_local_history_and_ssh_tilde_expansion() {
+        let w1: IdeFileWriteReq = serde_json::from_str(
+            r#"{"target":{"root":"/repo"},"path":"a.rs","content":"x","record_local_history":false}"#,
+        )
+        .unwrap();
+        assert!(!w1.local_history_enabled);
+
+        let w2: IdeFileWriteReq = serde_json::from_str(
+            r#"{"target":{"root":"/repo"},"path":"a.rs","content":"x","local_history_enabled":false}"#,
+        )
+        .unwrap();
+        assert!(!w2.local_history_enabled);
+
+        let w3: IdeFileWriteReq =
+            serde_json::from_str(r#"{"target":{"root":"/repo"},"path":"a.rs","content":"x"}"#)
+                .unwrap();
+        assert!(w3.local_history_enabled);
+
+        let m1: IdeFsMutateReq = serde_json::from_str(
+            r#"{"target":{"root":"/repo"},"op":"delete","path":"a.rs","record_local_history":false}"#,
+        )
+        .unwrap();
+        assert!(!m1.local_history_enabled);
+
+        let r1: IdeRenameReq = serde_json::from_str(
+            r#"{"target":{"root":"/repo"},"path":"a.rs","line":1,"new_name":"b","record_local_history":false}"#,
+        )
+        .unwrap();
+        assert!(!r1.local_history_enabled);
+
+        let s1: IdeHistorySnapshotReq =
+            serde_json::from_str(r#"{"root":"/repo","path":"a.rs","record_local_history":false}"#)
+                .unwrap();
+        assert!(!s1.local_history_enabled);
+
+        let spec = IdeSshSpec {
+            connection_id: "c1".into(),
+            name: "Prod Bastion".into(),
+            host: "10.0.0.5".into(),
+            port: Some(2222),
+            user: "ops".into(),
+            identity_file: Some("~/.ssh/id_ed25519".into()),
+            proxy_jump: None,
+            environment: Some("dev".into()),
+        };
+        assert!(spec.is_production());
+        let tcfg = spec.to_ssh_tunnel_config().unwrap();
+        assert_eq!(tcfg.port, 2222);
+        assert!(
+            !tcfg
+                .identity_file
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with('~'),
+            "identity_file tilde must be expanded"
+        );
     }
 }

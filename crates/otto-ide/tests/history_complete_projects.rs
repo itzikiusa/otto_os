@@ -794,3 +794,163 @@ fn collect_scope_vars(sess: &serde_json::Value) -> Vec<&serde_json::Value> {
         })
         .unwrap_or_default()
 }
+
+#[tokio::test]
+async fn chained_go_selector_hover_and_in_place_rename_usages_work_end_to_end() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("otto-data");
+    let db_path = tmp.path().join("state.db");
+    let ws = tmp.path().join("workspace");
+    let pkg_concurrency = ws.join("concurrency");
+    let pkg_ants = ws.join("ants");
+    let pkg_http = ws.join("httpclient");
+    std::fs::create_dir_all(&pkg_concurrency).unwrap();
+    std::fs::create_dir_all(&pkg_ants).unwrap();
+    std::fs::create_dir_all(&pkg_http).unwrap();
+
+    std::fs::write(ws.join("go.mod"), "module example.com/demo\n\ngo 1.22\n").unwrap();
+    let ants_file = pkg_ants.join("pool.go");
+    std::fs::write(
+        &ants_file,
+        "package ants\n\ntype Pool struct{}\n\n// Submit schedules task f onto the worker pool.\nfunc (p *Pool) Submit(task func()) error {\n\treturn nil\n}\n",
+    )
+    .unwrap();
+    let helper_file = pkg_concurrency.join("helper.go");
+    let helper_src = concat!(
+        "package concurrency\n\n",
+        "import \"example.com/demo/ants\"\n\n",
+        "type GoRoutineConcurrencyHelper struct {\n\tpool *ants.Pool\n}\n\n",
+        "// Submit submits a task with context.\n",
+        "func (g *GoRoutineConcurrencyHelper) Submit(ctx string, f func()) {\n",
+        "\terr := g.pool.Submit(f)\n",
+        "\t_ = err\n",
+        "}\n",
+    );
+    std::fs::write(&helper_file, helper_src).unwrap();
+
+    let (_ctx, app) = build_test_app(data_dir, &db_path).await;
+    let ws_str = ws.to_string_lossy().into_owned();
+
+    // 1. Definition & Hover on `g.pool.Submit(f)` (line 11, col 16) must resolve `ants.Pool.Submit`,
+    //    NEVER `GoRoutineConcurrencyHelper.Submit`!
+    let (st_def, def_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/lsp/definition",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "path": helper_file.to_string_lossy(),
+            "line": 11,
+            "column": 16,
+            "content": helper_src,
+        })),
+    )
+    .await;
+    assert_eq!(st_def, StatusCode::OK, "definition failed: {def_body}");
+    let locs = def_body["locations"].as_array().expect("locations");
+    assert!(
+        !locs.is_empty(),
+        "expected ants.Pool.Submit location: {def_body}"
+    );
+    assert!(
+        locs[0]["path"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("ants/pool.go"),
+        "expected first definition in ants/pool.go, got: {locs:?}"
+    );
+
+    let (st_hov, hov_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/lsp/hover",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "path": helper_file.to_string_lossy(),
+            "line": 11,
+            "column": 16,
+            "content": helper_src,
+        })),
+    )
+    .await;
+    assert_eq!(st_hov, StatusCode::OK, "hover failed: {hov_body}");
+    assert_eq!(hov_body["found"], true);
+    let sig = hov_body["signature"].as_str().unwrap_or("");
+    assert!(
+        sig.contains("(p *Pool) Submit(task func()) error"),
+        "expected ants.Pool.Submit signature on hover, got: {hov_body}"
+    );
+    assert!(
+        !sig.contains("GoRoutineConcurrencyHelper"),
+        "hover must never show enclosing GoRoutineConcurrencyHelper.Submit: {hov_body}"
+    );
+
+    // Also verify that if `ants` is from an unindexed external package, `g.extPool.Submit(f)`
+    // returns `found: false` instead of falsely falling back to `GoRoutineConcurrencyHelper.Submit`.
+    let unindexed_src = helper_src.replace(
+        "\"example.com/demo/ants\"",
+        "\"github.com/panjf2000/ants/v2\"",
+    );
+    let (st_ext, ext_hov) = send_json(
+        &app,
+        Method::POST,
+        "/ide/lsp/hover",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "path": helper_file.to_string_lossy(),
+            "line": 11,
+            "column": 16,
+            "content": unindexed_src,
+        })),
+    )
+    .await;
+    assert_eq!(st_ext, StatusCode::OK);
+    let ext_sig = ext_hov["signature"].as_str().unwrap_or("");
+    assert!(
+        !ext_sig.contains("GoRoutineConcurrencyHelper"),
+        "unindexed external selector must never fall back to enclosing method: {ext_hov}"
+    );
+
+    // 2. In-place `R✎ Rename usages`: disk has `Headers string`, editor buffer already edited
+    //    declaration to `aaHeaders string`, and `caller.go` still references `.Headers`.
+    let types_file = pkg_http.join("types.go");
+    let caller_file = pkg_http.join("caller.go");
+    std::fs::write(
+        &types_file,
+        "package httpclient\n\ntype GenericHttpResponse struct {\n\tHeaders string\n\tBody string\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &caller_file,
+        "package httpclient\n\nfunc ReadHdr(r GenericHttpResponse) string {\n\treturn r.Headers\n}\n",
+    )
+    .unwrap();
+    let unsaved_types =
+        "package httpclient\n\ntype GenericHttpResponse struct {\n\taaHeaders string\n\tBody string\n}\n";
+
+    let (st_ren, ren_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/lsp/rename",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "path": types_file.to_string_lossy(),
+            "line": 4,
+            "column": 2,
+            "symbol": "Headers",
+            "content": unsaved_types,
+            "new_name": "aaHeaders",
+            "apply": true,
+        })),
+    )
+    .await;
+    assert_eq!(st_ren, StatusCode::OK, "rename failed: {ren_body}");
+    assert_eq!(ren_body["applied"], true);
+    assert_eq!(ren_body["edits"].as_array().map(|a| a.len()), Some(2));
+    assert!(std::fs::read_to_string(&types_file)
+        .unwrap()
+        .contains("aaHeaders string"));
+    assert!(std::fs::read_to_string(&caller_file)
+        .unwrap()
+        .contains("return r.aaHeaders"));
+}

@@ -353,3 +353,147 @@ fn snapshot_and_restore_preserve_pi_streaming_text_tools_and_settlement_mode() {
         }
     )));
 }
+
+#[test]
+fn subagent_and_background_bash_emit_subagent_cards_bg_tasks_and_notices() {
+    let mut d = PiDriver::with_program("pi");
+    let st = sent(&d.start(&ctx(None, RuntimeAccessMode::FullAccess)), 0);
+    d.on_line(&format!(
+        r#"{{"id":"{}","type":"response","command":"get_state","success":true,"data":{{"sessionId":"sess-pi-bg"}}}}"#,
+        st["id"].as_str().unwrap()
+    ));
+    let p = sent(
+        &d.prompt("t1", &RuntimePromptReq::of("fan out")).unwrap(),
+        0,
+    );
+    d.on_line(&format!(
+        r#"{{"id":"{}","type":"response","command":"prompt","success":true}}"#,
+        p["id"].as_str().unwrap()
+    ));
+
+    // 1. Synchronous `task` / `subagent` tool emits `TurnItemKind::Subagent`, updates
+    //    `tool_uses`/`last_tool` on `tool_execution_update`, and completes with `output`.
+    let sub_start = d.on_line(
+        r#"{"type":"tool_execution_start","toolCallId":"sub-1","toolName":"task","args":{"subagent_type":"explorer","description":"Map callers","prompt":"Find all callers of login()"}}"#,
+    );
+    assert!(sub_start.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if i.id == "t1:tool:sub-1"
+                && i.status == TurnItemStatus::Running
+                && matches!(
+                    &i.kind,
+                    TurnItemKind::Subagent {
+                        tool_name,
+                        description: Some(desc),
+                        subagent_type: Some(st),
+                        prompt: Some(pr),
+                        background: false,
+                        ..
+                    } if tool_name == "task"
+                        && desc == "Map callers"
+                        && st == "explorer"
+                        && pr == "Find all callers of login()"
+                )
+    )));
+
+    let sub_upd = d.on_line(
+        r#"{"type":"tool_execution_update","toolCallId":"sub-1","toolName":"task","partialResult":{"details":{"toolUses":3,"lastTool":"grep"}}}"#,
+    );
+    assert!(sub_upd.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if i.id == "t1:tool:sub-1"
+                && matches!(
+                    &i.kind,
+                    TurnItemKind::Subagent {
+                        tool_uses: 3,
+                        last_tool: Some(lt),
+                        ..
+                    } if lt == "grep"
+                )
+    )));
+
+    let sub_end = d.on_line(
+        r#"{"type":"tool_execution_end","toolCallId":"sub-1","toolName":"task","result":{"content":[{"type":"text","text":"3 callers found"}]},"isError":false}"#,
+    );
+    assert!(sub_end.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if i.id == "t1:tool:sub-1"
+                && i.status == TurnItemStatus::Completed
+                && matches!(&i.kind, TurnItemKind::Subagent { output: Some(o), .. } if o == "3 callers found")
+    )));
+
+    // 2. Async `subagent` (`run_in_background: true`) stays Running on launch handle
+    //    return, tracks `BackgroundTasks`, and settles on `subagent_output`.
+    let bg_sub_start = d.on_line(
+        r#"{"type":"tool_execution_start","toolCallId":"sub-bg","toolName":"subagent","args":{"agent_type":"worker","description":"Background Worker","prompt":"Audit tests","run_in_background":true}}"#,
+    );
+    assert!(bg_sub_start.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::BackgroundTasks(tasks)
+            if tasks.iter().any(|t| t.id == "sub-bg" && t.kind == "agent" && t.label == "Background Worker")
+    )));
+    let bg_sub_launched = d.on_line(
+        r#"{"type":"tool_execution_end","toolCallId":"sub-bg","toolName":"subagent","result":{"details":{"taskId":"pi-agent-99","status":"running"},"content":[{"type":"text","text":"Started"}]},"isError":false}"#,
+    );
+    assert!(bg_sub_launched.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i) if i.id == "t1:tool:sub-bg" && i.status == TurnItemStatus::Running
+    )));
+    assert!(bg_sub_launched.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::BackgroundTasks(tasks) if tasks.iter().any(|t| t.id == "pi-agent-99")
+    )));
+
+    let bg_sub_settled = d.on_line(
+        r#"{"type":"tool_execution_start","toolCallId":"poll-1","toolName":"subagent_output","args":{"taskId":"pi-agent-99"}}"#,
+    );
+    let _ = bg_sub_settled;
+    let bg_sub_done = d.on_line(
+        r#"{"type":"tool_execution_end","toolCallId":"poll-1","toolName":"subagent_output","result":{"details":{"status":"completed"},"content":[{"type":"text","text":"Audit finished"}]},"isError":false}"#,
+    );
+    assert!(bg_sub_done.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if i.id == "t1:tool:sub-bg"
+                && i.status == TurnItemStatus::Completed
+                && matches!(&i.kind, TurnItemKind::Subagent { output: Some(o), .. } if o == "Audit finished")
+    )));
+    assert!(bg_sub_done.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message == "Background agent finished: Background Worker")
+    )));
+
+    // 3. Background `bash` (`run_in_background: true`) streams `CommandOutput` and settles with notice.
+    let bg_bash_start = d.on_line(
+        r#"{"type":"tool_execution_start","toolCallId":"bash-bg","toolName":"bash","args":{"command":"./run_suite.sh","run_in_background":true}}"#,
+    );
+    assert!(bg_bash_start.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::BackgroundTasks(tasks)
+            if tasks.iter().any(|t| t.id == "bash-bg" && t.kind == "command")
+    )));
+    let bg_bash_upd = d.on_line(
+        r#"{"type":"tool_execution_update","toolCallId":"bash-bg","toolName":"bash","partialResult":{"content":[{"type":"text","text":"step 1 ok\n"}]}}"#,
+    );
+    assert!(bg_bash_upd.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::CommandOutput { item_id, chunk }
+            if item_id == "t1:tool:bash-bg" && chunk == "step 1 ok\n"
+    )));
+    let bg_bash_end = d.on_line(
+        r#"{"type":"tool_execution_end","toolCallId":"bash-bg","toolName":"bash","result":{"content":[{"type":"text","text":"step 1 ok\nall passed\n"}]},"isError":false}"#,
+    );
+    assert!(bg_bash_end.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message == "Background command finished: ./run_suite.sh")
+    )));
+    assert!(bg_bash_end.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::BackgroundTasks(tasks) if tasks.is_empty()
+    )));
+}

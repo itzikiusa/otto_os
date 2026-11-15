@@ -19,8 +19,8 @@ use otto_core::{Error, Result};
 use crate::target::{HistoryWriteOpts, ResolvedTarget};
 use crate::types::{
     detect_language, IdeFormatReq, IdeFormatResp, IdeReferencesReq, IdeReferencesResp,
-    IdeRenameReq, IdeRenameResp, IdeSearchItemKind, IdeSearchMode, IdeSearchReq, IdeSymbolsReq,
-    IdeSymbolsResp,
+    IdeRenameFileEdit, IdeRenameLinePreview, IdeRenameReq, IdeRenameResp, IdeSearchItemKind,
+    IdeSearchMode, IdeSearchReq, IdeSymbolsReq, IdeSymbolsResp,
 };
 use crate::IdeCtx;
 
@@ -30,7 +30,11 @@ pub mod diagnostics;
 mod diagnostics_go;
 mod diagnostics_polyglot;
 mod formatting;
-pub(crate) mod go_mod_nav;
+pub mod go_mod_nav;
+pub use go_mod_nav::{
+    extract_go_file_build_tags, is_valid_go_build_tag, merge_go_tags_into_args,
+    validate_go_build_tags,
+};
 mod go_mod_resolve;
 pub mod hover;
 mod hover_doc;
@@ -166,8 +170,9 @@ pub async fn find_references<S: IdeCtx>(
 pub async fn rename_symbol<S: IdeCtx>(
     ctx: &S,
     user: &User,
-    req: IdeRenameReq,
+    mut req: IdeRenameReq,
 ) -> Result<IdeRenameResp> {
+    req.target.absorb_project_folders(&req.project_folders);
     let new_name = req.new_name.trim();
     if !is_valid_identifier(new_name) {
         return Err(Error::Invalid(format!(
@@ -184,12 +189,24 @@ pub async fn rename_symbol<S: IdeCtx>(
     };
     let col = req.effective_column().max(1);
     let origin = ctx.ide().targets.read_file(&resolved, &req.path).await?;
-    let symbol = extract_identifier_at(&origin.content, req.line, col).ok_or_else(|| {
-        Error::Invalid(format!(
-            "no identifier found at {}:{} in '{}'",
-            req.line, col, req.path
-        ))
-    })?;
+    let symbol = if let Some(explicit) = req
+        .symbol
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && is_valid_identifier(s))
+    {
+        explicit.to_string()
+    } else {
+        let source = req.content.as_deref().unwrap_or(&origin.content);
+        extract_identifier_at(source, req.line, col)
+            .or_else(|| extract_identifier_at(&origin.content, req.line, col))
+            .ok_or_else(|| {
+                Error::Invalid(format!(
+                    "no identifier found at {}:{} in '{}'",
+                    req.line, col, req.path
+                ))
+            })?
+    };
     if symbol == new_name {
         return Ok(IdeRenameResp {
             symbol,
@@ -199,18 +216,61 @@ pub async fn rename_symbol<S: IdeCtx>(
         });
     }
 
-    let candidates =
+    let mut candidates =
         collect_candidate_files(ctx, &resolved, &req.target, &symbol, &req.path).await?;
+    if !candidates
+        .iter()
+        .any(|c| c == &req.path || c == &origin.path)
+    {
+        candidates.insert(0, req.path.clone());
+    }
+    let mut seen_paths = std::collections::HashSet::with_capacity(candidates.len());
     let mut edits = Vec::new();
     let mut writes: Vec<(String, String, String)> = Vec::new();
     for path in candidates {
         let Ok(file) = ctx.ide().targets.read_file(&resolved, &path).await else {
             continue;
         };
-        if file.read_only || file.truncated {
+        if !seen_paths.insert(file.path.clone()) || file.read_only || file.truncated {
             continue;
         }
         let lang = resolve_language(ctx, &path, Some(&file.language));
+        if file.path == origin.path {
+            if let Some(ref unsaved) = req.content {
+                if let Some((updated, file_edit)) =
+                    rename_identifier_in_text(&path, &lang, unsaved, &symbol, new_name)
+                {
+                    edits.push(file_edit);
+                    if req.apply {
+                        writes.push((path, updated, file.sha256));
+                    }
+                } else if unsaved != &file.content {
+                    let file_edit =
+                        rename_identifier_in_text(&path, &lang, &file.content, &symbol, new_name)
+                            .map(|(_, fe)| fe)
+                            .unwrap_or_else(|| {
+                                let ln_idx = req.line.saturating_sub(1) as usize;
+                                let before =
+                                    file.content.lines().nth(ln_idx).unwrap_or("").to_string();
+                                let after = unsaved.lines().nth(ln_idx).unwrap_or("").to_string();
+                                IdeRenameFileEdit {
+                                    path: path.clone(),
+                                    occurrences: 1,
+                                    preview_lines: vec![IdeRenameLinePreview {
+                                        line: req.line.max(1),
+                                        before,
+                                        after,
+                                    }],
+                                }
+                            });
+                    edits.push(file_edit);
+                    if req.apply {
+                        writes.push((path, unsaved.clone(), file.sha256));
+                    }
+                }
+                continue;
+            }
+        }
         if let Some((updated, file_edit)) =
             rename_identifier_in_text(&path, &lang, &file.content, &symbol, new_name)
         {
@@ -255,9 +315,22 @@ pub async fn format_document<S: IdeCtx>(
     req: IdeFormatReq,
 ) -> Result<IdeFormatResp> {
     let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
-    let lang = resolve_language(ctx, &req.path, req.language.as_deref());
+    let confined_path = if req.path.trim().is_empty() {
+        String::new()
+    } else {
+        ctx.ide()
+            .targets
+            .resolve_path(&resolved, &req.path, false)
+            .await?
+    };
+    let effective_path = if confined_path.is_empty() {
+        req.path.as_str()
+    } else {
+        confined_path.as_str()
+    };
+    let lang = resolve_language(ctx, effective_path, req.language.as_deref());
     if matches!(lang.as_str(), "json" | "jsonl" | "csv" | "tsv") {
-        if let Some(formatted) = try_native_data_format(&lang, &req.path, &req.content) {
+        if let Some(formatted) = try_native_data_format(&lang, effective_path, &req.content) {
             let changed = formatted != req.content;
             return Ok(IdeFormatResp {
                 formatted,
@@ -278,7 +351,9 @@ pub async fn format_document<S: IdeCtx>(
         );
     }
 
-    for (label, cmd, args) in formatter_candidates(&lang, &req.path, req.organize_imports) {
+    for (label, cmd, args) in
+        formatter_candidates(&lang, effective_path, req.organize_imports, user.is_root)
+    {
         if let Some(raw_formatted) =
             run_stdin_formatter(ctx, &resolved, &cmd, &args, &env_map, &req.content).await
         {

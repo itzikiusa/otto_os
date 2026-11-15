@@ -145,6 +145,8 @@ impl RunStateInner {
             output_seq: self.output_seq,
             output,
             tests: self.parser.results.clone(),
+            coverage_pct: self.parser.coverage_pct,
+            coverage_summary: self.parser.coverage_summary.clone(),
         }
     }
 }

@@ -4,9 +4,10 @@
 import { foldEffect, foldService, foldedRanges, unfoldEffect } from '@codemirror/language';
 import { setDiagnostics, type Action as LintAction, type Diagnostic } from '@codemirror/lint';
 import { EditorState, StateEffect, StateField, type Extension, type Range } from '@codemirror/state';
-import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view';
+import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import type { IdeDiagnostic } from '../api/types.ts';
 import { hasLiveLspDiagnosticsForFile } from './cm-ide-drafts.ts';
+import { extractGoBuildTagsFromSource, rewriteGoBuildTagDiagnostic } from './cm-ide-lsp-completion.ts';
 import type { IdeEditorPreferences } from './cm-ide-theme.ts';
 import {
   analyzeGoImports,
@@ -19,6 +20,7 @@ import {
   getCachedSemanticDoc,
   GO_BUILTIN_TYPES,
   inferGoImportPkgNames,
+  splitTopLevelCommas,
   visibleBracketSpansFromIndex,
   type ClientDiagQuickFix,
   type ClientIdeDiagnostic,
@@ -302,78 +304,108 @@ export function computeImportFoldRange(
   return { from: foldFrom, to: foldTo, startLine, endLine };
 }
 
-class InlayHintWidget extends WidgetType {
+export interface InlayParamHintItem {
+  pos: number;
   label: string;
-  constructor(label: string) {
-    super();
-    this.label = label;
-  }
-  eq(o: InlayHintWidget): boolean {
-    return this.label === o.label;
-  }
-  toDOM(): HTMLElement {
-    const el = document.createElement('span');
-    el.className = 'cm-ide-inlay-hint';
-    el.textContent = `${this.label}:`;
-    return el;
-  }
+  argText: string;
 }
 
-class CodeVisionWidget extends WidgetType {
-  count: number;
-  line: number;
-  symbol: string;
-  onUsages: ((line: number, symbol: string) => void) | undefined;
-  constructor(count: number, line: number, symbol: string, onUsages?: (line: number, symbol: string) => void) {
-    super();
-    this.count = count;
-    this.line = line;
-    this.symbol = symbol;
-    this.onUsages = onUsages;
-  }
-  eq(o: CodeVisionWidget): boolean {
-    return this.count === o.count && this.line === o.line && this.symbol === o.symbol;
-  }
-  toDOM(): HTMLElement {
-    const el = document.createElement('span');
-    el.className = 'cm-ide-codevision';
-    el.dataset.testid = 'ide-codevision-usages';
-    el.textContent = `${this.count} ${this.count === 1 ? 'usage' : 'usages'}`;
-    if (this.onUsages) {
-      el.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.onUsages?.(this.line, this.symbol);
-      });
+export function computeInlayParameterHintsWithModel(
+  docText: string,
+  lang: SemanticLangKind,
+  model: FileSymbolModel,
+  visibleRanges: readonly { from: number; to: number }[],
+  maxHints = 24,
+): InlayParamHintItem[] {
+  if (!model.funcParams.size && !model.methodDecls.length) return [];
+  const docLen = docText.length;
+  const out: InlayParamHintItem[] = [];
+  for (const { from, to } of visibleRanges) {
+    const slice = docText.slice(from, to);
+    const callRe = /\b([A-Za-z_$][\w$]*)\s*\(([^()\n]{1,120})\)/g;
+    for (let m: RegExpExecArray | null; (m = callRe.exec(slice)) !== null && out.length < maxHints; ) {
+      const fnName = m[1];
+      const absCallStart = from + m.index;
+      if (model.declStarts.has(absCallStart)) continue;
+
+      // Inspect whether this call is dot/path qualified (`expr.fn(...)` or `pkg::fn(...)`).
+      let p = absCallStart - 1;
+      while (p >= 0 && (docText[p] === ' ' || docText[p] === '\t')) p--;
+      const isAfterDot = p >= 0 && docText[p] === '.' && (p === 0 || docText[p - 1] !== '.');
+      const isAfterColon = p >= 1 && docText[p] === ':' && docText[p - 1] === ':';
+
+      let pNames: string[] | undefined;
+      let isVariadic = false;
+
+      if (isAfterColon) {
+        continue;
+      } else if (isAfterDot) {
+        let q = p - 1;
+        while (q >= 0 && /[A-Za-z0-9_$.\]()]/.test(docText[q])) q--;
+        const qual = docText.slice(q + 1, p).trim();
+        // Chained calls like `g.pool.Submit(f)` MUST NEVER inherit `GoRoutineConcurrencyHelper.Submit(ctx, f)`.
+        if (!qual || qual.includes('.') || qual.includes('(') || qual.includes('[')) continue;
+        if (lang === 'go') {
+          const enclosingMeth = model.methodDecls.find(
+            (md) => md.name === fnName && absCallStart >= md.scopeFrom && absCallStart <= md.scopeTo && md.recvIdent === qual,
+          ) ?? model.methodDecls.find(
+            (md) =>
+              md.name === fnName &&
+              md.recvIdent === qual &&
+              model.methodDecls.some((enc) => absCallStart >= enc.scopeFrom && absCallStart <= enc.scopeTo && enc.recvIdent === qual && enc.recvType === md.recvType),
+          );
+          if (!enclosingMeth) continue;
+          pNames = enclosingMeth.params;
+          isVariadic = enclosingMeth.variadic;
+        } else if (qual === 'this' || qual === 'self') {
+          pNames = model.funcParams.get(fnName);
+          isVariadic = model.variadicFuncs.has(fnName);
+        } else {
+          continue;
+        }
+      } else {
+        pNames = model.funcParams.get(fnName);
+        isVariadic = model.variadicFuncs.has(fnName);
+      }
+
+      if (!pNames || pNames.length === 0) continue;
+      const rawArgs = splitTopLevelCommas(m[2]);
+      if (rawArgs.length === 0 || (rawArgs.length === 1 && !rawArgs[0].trim())) continue;
+      if (!isVariadic && rawArgs.length > pNames.length) continue;
+      if ((lang === 'go' || lang === 'java' || lang === 'rust') && (isVariadic ? rawArgs.length < pNames.length - 1 : rawArgs.length !== pNames.length)) {
+        continue;
+      }
+
+      const argsStart = absCallStart + m[0].indexOf('(') + 1;
+      let cursor = 0;
+      for (let aIdx = 0; aIdx < rawArgs.length && out.length < maxHints; aIdx++) {
+        if (aIdx >= pNames.length) break;
+        const rawArg = rawArgs[aIdx];
+        const trimmedArg = rawArg.trim();
+        const pName = pNames[aIdx];
+        if (trimmedArg && trimmedArg !== pName && !trimmedArg.startsWith(`${pName}:`) && !trimmedArg.startsWith(`${pName}=`)) {
+          const pos = Math.max(0, Math.min(docLen, argsStart + cursor + (rawArg.length - rawArg.trimStart().length)));
+          out.push({ pos, label: pName, argText: trimmedArg });
+        }
+        cursor += rawArg.length + 1;
+      }
     }
-    return el;
   }
+  return out;
 }
 
-export function applyClientQuickFix(view: EditorView, fix: ClientDiagQuickFix): void {
-  const doc = view.state.doc;
-  if (fix.edits?.length) {
-    const changes = fix.edits.map((ed) => {
-      const s = doc.line(Math.max(1, Math.min(doc.lines, ed.start_line)));
-      const e = doc.line(Math.max(1, Math.min(doc.lines, ed.end_line)));
-      const from = Math.min(doc.length, s.from + Math.max(0, (ed.start_col || 1) - 1));
-      const to = ed.end_line > doc.lines ? doc.length : Math.max(from, Math.min(doc.length, e.from + Math.max(0, (ed.end_col || 1) - 1)));
-      return { from, to, insert: ed.new_text };
-    });
-    view.dispatch({ changes, userEvent: 'input.quickfix' });
-    return;
-  }
-  const sLn = Math.max(1, Math.min(doc.lines, fix.line));
-  const endLn = doc.line(Math.max(sLn, Math.min(doc.lines, fix.endLine || sLn)));
-  view.dispatch({
-    changes: {
-      from: doc.line(sLn).from,
-      to: fix.deleteLine ? Math.min(doc.length, endLn.to + 1) : endLn.to,
-      insert: fix.deleteLine ? '' : (fix.replacement ?? ''),
-    },
-    userEvent: 'input.quickfix',
-  });
+export function computeInlayParameterHints(
+  docText: string,
+  lang: SemanticLangKind,
+  visibleRanges?: readonly { from: number; to: number }[],
+): InlayParamHintItem[] {
+  if (!docText || lang === 'csv' || lang === 'json' || lang === 'other') return [];
+  const model = buildSymbolModel(docText, lang);
+  return computeInlayParameterHintsWithModel(docText, lang, model, visibleRanges ?? [{ from: 0, to: docText.length }]);
 }
+
+import { applyClientQuickFix, CodeVisionWidget, InlayHintWidget } from './cm-ide-semantic-widgets.ts';
+export { applyClientQuickFix };
 
 const setLineQuickFixesEffect = StateEffect.define<Map<number, ClientDiagQuickFix[]>>();
 const setServerUnresolvedEffect = StateEffect.define<Set<string>>();
@@ -499,7 +531,7 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
         if (goImp && !lspOwnsDiags) clientDiags.push(...goImp.diagnostics);
         const unresolved = new Set<string>(jRes ? jRes.unresolvedIdents : []);
 
-        if (opts.root && (lang === 'java' || lang === 'go' || lang === 'python' || lang === 'shell' || lang === 'json')) {
+        if (!lspOwnsDiags && opts.root && (lang === 'java' || lang === 'go' || lang === 'python' || lang === 'shell' || lang === 'json')) {
           const ctrl = new AbortController();
           this.abort = ctrl;
           try {
@@ -519,7 +551,11 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
             );
             const liveAfter = hasLiveLspDiagnosticsForFile(opts.root, opts.filePath);
             for (const sd of resp.diagnostics ?? []) {
-              const isUnusedImp = sd.code === 'unused-import' || /unused import/i.test(sd.message);
+              const rw = lang === 'go' ? rewriteGoBuildTagDiagnostic(sd.message, sd.code, docText) : null;
+              const effectiveMsg = rw?.isBuildTagDiag ? rw.message : sd.message;
+              const effectiveCode = rw?.isBuildTagDiag ? 'otto_go_build_tag' : sd.code;
+              const effectiveSeverity = rw?.isBuildTagDiag ? 'warning' : sd.severity;
+              const isUnusedImp = effectiveCode === 'unused-import' || /unused import/i.test(effectiveMsg);
               if (isUnusedImp) {
                 if (prefs.unusedImports === false) continue;
                 if ((lspOwnsDiags || liveAfter) && !AUTHORITATIVE_LSP_SOURCES.has(sd.source ?? '')) continue;
@@ -528,30 +564,30 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
                   if (impEntry && (impEntry.used || !impEntry.certain)) continue;
                 }
               }
-              if (lang === 'java' && prefs.javaUnresolvedImports === false && (sd.code === 'unresolved-import' || /unresolved import|package .* does not exist/i.test(sd.message))) {
+              if (lang === 'java' && prefs.javaUnresolvedImports === false && (effectiveCode === 'unresolved-import' || /unresolved import|package .* does not exist/i.test(effectiveMsg))) {
                 continue;
               }
-              if (lang === 'java' && prefs.lombokSupport !== false && /package lombok\b.*does not exist|cannot find symbol.*\bvariable log\b/i.test(sd.message)) {
+              if (lang === 'java' && prefs.lombokSupport !== false && /package lombok\b.*does not exist|cannot find symbol.*\bvariable log\b/i.test(effectiveMsg)) {
                 continue;
               }
-              const duplicate = clientDiags.some((c) => c.line === sd.line && (c.message === sd.message || (Boolean(c.code) && c.code === sd.code)));
+              const duplicate = clientDiags.some((c) => c.line === sd.line && (c.message === effectiveMsg || (Boolean(c.code) && c.code === effectiveCode)));
               if (!duplicate) {
                 clientDiags.push({
                   line: sd.line,
                   column: sd.col ?? sd.column ?? 1,
                   endLine: sd.end_line ?? sd.line,
                   endColumn: sd.end_col ?? 200,
-                  severity: sd.severity === 'error' ? 'error' : sd.severity === 'warning' ? 'warning' : 'info',
-                  message: sd.message,
-                  source: sd.source ?? 'lsp',
-                  code: sd.code,
+                  severity: effectiveSeverity === 'error' ? 'error' : effectiveSeverity === 'warning' ? 'warning' : 'info',
+                  message: effectiveMsg,
+                  source: rw?.isBuildTagDiag && sd.source === 'go list' ? 'gopls (build tags)' : (sd.source ?? 'lsp'),
+                  code: effectiveCode,
                   quickFixes: (sd.quick_fixes ?? []).map((qf) => ({
                     title: qf.title, line: qf.line, endLine: qf.end_line ?? qf.line,
                     replacement: qf.replacement, deleteLine: qf.delete_line, edits: qf.edits,
                   })),
                 });
               }
-              if (sd.severity === 'error' && (lang !== 'java' || prefs.javaUnresolvedImports !== false) && sd.line >= 1 && sd.line <= startDoc.lines) {
+              if (effectiveSeverity === 'error' && (lang !== 'java' || prefs.javaUnresolvedImports !== false) && sd.line >= 1 && sd.line <= startDoc.lines) {
                 const mImp = /^\s*import\s+(?:static\s+)?[\w.$]*\.([A-Za-z_$][\w$]*)\s*;/.exec(startDoc.line(sd.line).text);
                 if (mImp) unresolved.add(mImp[1]);
               }
@@ -579,6 +615,22 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
           const clampedTo = Math.max(clampedFrom, Math.min(doc.length, rawTo));
           if (d.quickFixes.length) fixMap.set(d.line, [...(fixMap.get(d.line) ?? []), ...d.quickFixes]);
           const actions: LintAction[] = d.quickFixes.map((qf) => ({ name: qf.title, apply: (v) => applyClientQuickFix(v, qf) }));
+          if (d.code === 'otto_go_build_tag') {
+            const fileTags = extractGoBuildTagsFromSource(docText);
+            if (fileTags.length > 0) {
+              actions.unshift({
+                name: `Enable Go build tag "${fileTags.join(',')}"`,
+                apply: (v) => {
+                  v.dom.dispatchEvent(
+                    new CustomEvent('otto:ide-enable-go-build-tag', {
+                      bubbles: true,
+                      detail: { tags: fileTags, filePath: opts.filePath },
+                    }),
+                  );
+                },
+              });
+            }
+          }
           cmDiags.push({ from: clampedFrom, to: clampedTo, severity: d.severity, message: d.message, source: d.source, actions });
           ideDiags.push({
             path: opts.filePath, line: d.line, column: d.column, end_line: d.endLine, end_column: d.endColumn,
@@ -658,28 +710,9 @@ export function createIdeSemanticExtensions(opts: CreateIdeSemanticOptions): Ext
         }
 
         if ((prefs.inlayHints || prefs.codeVision) && docText.length <= 131072 && lang !== 'csv' && lang !== 'json') {
-          if (prefs.inlayHints && model.funcParams.size) {
-            let hintCount = 0;
-            for (const { from, to } of vis) {
-              const slice = docText.slice(from, to);
-              const callRe = /\b([A-Za-z_$][\w$]*)\s*\(([^()\n]{1,120})\)/g;
-              for (let m: RegExpExecArray | null; (m = callRe.exec(slice)) !== null && hintCount < 24; ) {
-                const pNames = model.funcParams.get(m[1]);
-                if (!pNames || model.declStarts.has(from + m.index)) continue;
-                const argsStart = from + m.index + m[0].indexOf('(') + 1;
-                let cursor = 0;
-                for (const [aIdx, rawArg] of m[2].split(',').entries()) {
-                  if (aIdx >= pNames.length) break;
-                  const trimmedArg = rawArg.trim();
-                  const pName = pNames[aIdx];
-                  if (trimmedArg && trimmedArg !== pName && !trimmedArg.startsWith(`${pName}:`) && !trimmedArg.startsWith(`${pName}=`)) {
-                    const pos = Math.max(0, Math.min(docLen, argsStart + cursor + (rawArg.length - rawArg.trimStart().length)));
-                    items.push(Decoration.widget({ widget: new InlayHintWidget(pName), side: -1 }).range(pos));
-                    hintCount++;
-                  }
-                  cursor += rawArg.length + 1;
-                }
-              }
+          if (prefs.inlayHints && (model.funcParams.size || model.methodDecls.length)) {
+            for (const h of computeInlayParameterHintsWithModel(docText, lang, model, vis, 24)) {
+              items.push(Decoration.widget({ widget: new InlayHintWidget(h.label), side: -1 }).range(h.pos));
             }
           }
           if (prefs.codeVision && identCounts) {

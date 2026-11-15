@@ -43,6 +43,7 @@ fn make_k8s_spec(id: &str, name: &str, ns: &str, kubectl: &str) -> IdeK8sSpec {
     IdeK8sSpec {
         cluster_id: Id::from(id),
         cluster_name: name.to_string(),
+        environment: None,
         namespace: ns.to_string(),
         allow_cross_namespace: false,
         kubectl_program: kubectl.to_string(),
@@ -89,6 +90,7 @@ async fn non_root_netbridge_cross_tenant_ssh_k8s_and_namespace_rbac() {
                 user: "bob".into(),
                 identity_file: None,
                 proxy_jump: None,
+                environment: None,
             },
         },
     );
@@ -406,4 +408,199 @@ async fn per_user_netbridge_pool_isolation_evict_user_and_drop_idle_ttl() {
         0,
         "NetBridgeLease::drop must schedule automatic idle eviction after idle_ttl"
     );
+}
+
+#[tokio::test]
+async fn prod_netbridge_confirmation_and_idle_host_mapping_listener_teardown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws-prod");
+    std::fs::create_dir_all(&ws).unwrap();
+    let ws_root = ws.to_string_lossy().into_owned();
+    let kubectl = write_mock_kubectl(tmp.path());
+
+    let (ctx, app_root) =
+        build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
+    let mut prod_spec = make_k8s_spec("k8s_prod", "PROD-EU", "cbo", &kubectl);
+    prod_spec.environment = Some("production".into());
+    ctx.k8s_clusters.lock().unwrap().insert(
+        "k8s_prod".into(),
+        TestK8sEntry {
+            owner_user_id: None,
+            allowed_namespaces: vec!["cbo".into()],
+            spec: prod_spec,
+        },
+    );
+
+    // 1. PUT /ide/environments enabling a prod K8s Network Bridge without confirm_prod_targets fails:
+    let (st_no_confirm, body_no_confirm) = send_json(
+        &app_root,
+        Method::PUT,
+        "/ide/environments",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_root },
+            "network_bridge": {
+                "enabled": true,
+                "k8s_cluster_id": "k8s_prod",
+                "k8s_namespace": "cbo",
+            },
+        })),
+    )
+    .await;
+    assert_eq!(st_no_confirm, StatusCode::BAD_REQUEST, "{body_no_confirm}");
+    assert!(
+        body_no_confirm
+            .to_string()
+            .contains("Production Network Bridge target requires confirm_prod_targets: true"),
+        "expected clear prod confirmation message, got: {body_no_confirm}"
+    );
+
+    // 2. PUT /ide/environments succeeds when confirm_prod_targets: true is supplied:
+    let (st_confirm, body_confirm) = send_json(
+        &app_root,
+        Method::PUT,
+        "/ide/environments",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_root },
+            "confirm_prod_targets": true,
+            "network_bridge": {
+                "enabled": true,
+                "k8s_cluster_id": "k8s_prod",
+                "k8s_namespace": "cbo",
+            },
+        })),
+    )
+    .await;
+    assert_eq!(st_confirm, StatusCode::OK, "{body_confirm}");
+
+    // 3. POST /ide/runs and POST /ide/debug/sessions require confirm_prod_targets: true:
+    let (st_run_unconfirmed, body_run_unconfirmed) = send_json(
+        &app_root,
+        Method::POST,
+        "/ide/runs",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_root },
+            "adhoc": {
+                "name": "Prod Echo",
+                "runner": "shell",
+                "command": "sh",
+                "args": ["-c", "echo ok"],
+            },
+        })),
+    )
+    .await;
+    assert_eq!(
+        st_run_unconfirmed,
+        StatusCode::BAD_REQUEST,
+        "{body_run_unconfirmed}"
+    );
+    assert!(body_run_unconfirmed
+        .to_string()
+        .contains("confirm_prod_targets: true"));
+
+    let script = ws.join("dbg.sh");
+    std::fs::write(&script, "#!/bin/bash\necho hi\n").unwrap();
+    let (st_dbg_unconfirmed, body_dbg_unconfirmed) = send_json(
+        &app_root,
+        Method::POST,
+        "/ide/debug/sessions",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_root },
+            "language": "shell",
+            "launch": { "program": script.to_string_lossy(), "cwd": ws_root },
+        })),
+    )
+    .await;
+    assert_eq!(
+        st_dbg_unconfirmed,
+        StatusCode::BAD_REQUEST,
+        "{body_dbg_unconfirmed}"
+    );
+    assert!(body_dbg_unconfirmed
+        .to_string()
+        .contains("confirm_prod_targets: true"));
+
+    let (st_run_confirmed, body_run_confirmed) = send_json(
+        &app_root,
+        Method::POST,
+        "/ide/runs",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_root },
+            "confirm_prod_targets": true,
+            "adhoc": {
+                "name": "Prod Echo",
+                "runner": "shell",
+                "command": "sh",
+                "args": ["-c", "echo ok"],
+            },
+        })),
+    )
+    .await;
+    assert_eq!(st_run_confirmed, StatusCode::OK, "{body_run_confirmed}");
+
+    // 4. Ephemeral localhost host_mapping TCP listener closes when active lease count hits 0
+    //    and re-binds cleanly on next acquire:
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let free_port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let alice = non_root_user("u_alice");
+    let map_cfg = IdeNetworkBridgeConfig {
+        enabled: true,
+        host_mappings: vec![IdeHostMapping {
+            from_host: "localhost".into(),
+            from_port: Some(free_port),
+            to_host: "127.0.0.1".into(),
+            to_port: Some(9),
+        }],
+        ..Default::default()
+    };
+    let lease1 = ctx
+        .ide
+        .netbridge
+        .acquire_for_launch(
+            &ctx,
+            &alice,
+            &IdeTargetSpec::local(ws_root.clone()),
+            &map_cfg,
+        )
+        .await
+        .unwrap()
+        .expect("lease1");
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", free_port))
+            .await
+            .is_ok(),
+        "localhost host_mapping listener must be bound while lease1 is active"
+    );
+
+    drop(lease1);
+    let close_deadline = Instant::now() + Duration::from_secs(2);
+    while tokio::net::TcpStream::connect(("127.0.0.1", free_port))
+        .await
+        .is_ok()
+        && Instant::now() < close_deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", free_port))
+            .await
+            .is_err(),
+        "localhost host_mapping listener must close once active NetBridgeLease count drops to 0"
+    );
+
+    let lease2 = ctx
+        .ide
+        .netbridge
+        .acquire_for_launch(&ctx, &alice, &IdeTargetSpec::local(ws_root), &map_cfg)
+        .await
+        .unwrap()
+        .expect("lease2");
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", free_port))
+            .await
+            .is_ok(),
+        "localhost host_mapping listener must re-bind when pooled bridge is re-acquired"
+    );
+    drop(lease2);
 }

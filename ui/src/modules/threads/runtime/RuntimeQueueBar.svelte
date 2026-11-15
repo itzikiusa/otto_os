@@ -10,6 +10,8 @@
   import { toastError } from '../../../lib/toastError';
   import { runtimeThreads } from './runtimeThreads.svelte';
 
+  import type { ComposerFile } from './runtimeComposer';
+
   interface Props {
     sessionId: string;
     /** Running background work (agentTasks.ts), oldest first. */
@@ -23,8 +25,8 @@
     dormant: boolean;
     reopening: boolean;
     onreopen: () => void;
-    /** Put a queued message back in the composer. */
-    onedit: (text: string) => void;
+    /** Put a queued message (and any attached screenshots/files) back in the composer. */
+    onedit: (text: string, attachments: ComposerFile[]) => void;
   }
   let { sessionId, background, onshowtasks, queued, running, canSteer, closed, dormant, reopening, onreopen, onedit }: Props = $props();
   const bgText = $derived(backgroundStripText(background));
@@ -39,8 +41,8 @@
   }
   async function edit(q: QueuedPrompt): Promise<void> {
     try {
-      await runtimeThreads.unqueue(sessionId, q.id);
-      onedit(q.text);
+      const popped = await runtimeThreads.unqueue(sessionId, q.id);
+      onedit(popped.text ?? q.text, popped.attachments);
     } catch (e) {
       toastError('Couldn’t edit the queued message', e);
     }

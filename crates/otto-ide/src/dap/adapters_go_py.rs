@@ -13,7 +13,9 @@ use super::adapters::{
 use super::adapters_env::canonical_target_roots;
 use super::DapStartContext;
 use crate::go_build_cache::{ensure_go_binary, GoBuildMode, GoBuildRequest};
-use crate::types::{IdeStartDebugReq, IdeTargetKind, IdeTargetSpec};
+use crate::types::{
+    IdeBreakpoint, IdeDebugOutputEntry, IdeStartDebugReq, IdeTargetKind, IdeTargetSpec,
+};
 
 pub(super) async fn resolve_go_adapter(
     data_dir: &Path,
@@ -95,7 +97,6 @@ pub(super) async fn resolve_go_adapter(
             flag_parts.push(tok.to_string());
         }
     }
-    let build_flags = flag_parts.join(" ");
     let init_args = json!({
         "adapterID": "dlv-dap",
         "linesStartAt1": true,
@@ -137,7 +138,29 @@ pub(super) async fn resolve_go_adapter(
         });
     }
 
-    let is_test = req.launch.test_name.is_some() || raw_prog.ends_with("_test.go");
+    let is_test = req.launch.test_name.is_some()
+        || raw_prog.ends_with("_test.go")
+        || raw_prog.ends_with("/...")
+        || ctx
+            .run_config
+            .as_ref()
+            .is_some_and(|rc| rc.runner == crate::types::IdeRunnerKind::GoTest)
+        || (req.target.kind == IdeTargetKind::Local && dir_contains_go_tests(&raw_prog));
+    let (resolved_test_pkg_dir, initial_output) = if is_test {
+        resolve_go_test_pkg_dir(&req.target, &raw_prog, &effective_cwd, &req.breakpoints)
+    } else {
+        (String::new(), Vec::new())
+    };
+    let merged_go_tags = collect_dap_go_build_tags(
+        &req.target,
+        ctx,
+        &raw_prog,
+        &effective_cwd,
+        is_test.then_some(resolved_test_pkg_dir.as_str()),
+        &req.breakpoints,
+    );
+    crate::lsp_service::merge_go_tags_into_args(&mut flag_parts, &merged_go_tags);
+    let build_flags = flag_parts.join(" ");
     if req.target.kind == IdeTargetKind::Local {
         let mut go_cands = Vec::new();
         if let Some(sdk) = resolve_debug_sdk_override(req, ctx, &effective_cwd) {
@@ -191,15 +214,7 @@ pub(super) async fn resolve_go_adapter(
 
         if let Some(go_bin) = locate_binary(&req.target, ctx, &env, &go_cands).await {
             if is_test {
-                let pkg_dir = if raw_prog.ends_with(".go") {
-                    Path::new(&raw_prog)
-                        .parent()
-                        .and_then(|p| p.to_str())
-                        .unwrap_or(&effective_cwd)
-                        .to_string()
-                } else {
-                    raw_prog.clone()
-                };
+                let pkg_dir = resolved_test_pkg_dir.clone();
                 let mut test_args = Vec::new();
                 if let Some(tname) = req.launch.test_name.as_deref().filter(|s| !s.is_empty()) {
                     let pattern = format_go_test_run_pattern(tname);
@@ -239,7 +254,7 @@ pub(super) async fn resolve_go_adapter(
                         "env": env,
                     }),
                     normalized_cwd: effective_cwd,
-                    initial_output: Vec::new(),
+                    initial_output,
                 });
             }
 
@@ -279,15 +294,7 @@ pub(super) async fn resolve_go_adapter(
     }
 
     let launch_args = if is_test {
-        let pkg_dir = if raw_prog.ends_with(".go") {
-            Path::new(&raw_prog)
-                .parent()
-                .and_then(|p| p.to_str())
-                .unwrap_or(&effective_cwd)
-                .to_string()
-        } else {
-            raw_prog
-        };
+        let pkg_dir = resolved_test_pkg_dir;
         let mut test_args = Vec::new();
         if let Some(tname) = req.launch.test_name.as_deref().filter(|s| !s.is_empty()) {
             let pattern = format_go_test_run_pattern(tname);
@@ -337,8 +344,203 @@ pub(super) async fn resolve_go_adapter(
         launch_command: "launch".into(),
         launch_args,
         normalized_cwd: effective_cwd,
-        initial_output: Vec::new(),
+        initial_output,
     })
+}
+
+#[allow(clippy::disallowed_methods)]
+fn dir_contains_go_tests(dir: &str) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    rd.flatten().any(|e| {
+        e.path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with("_test.go"))
+    })
+}
+
+#[allow(clippy::disallowed_methods)]
+fn resolve_go_test_pkg_dir(
+    target: &IdeTargetSpec,
+    raw_prog: &str,
+    effective_cwd: &str,
+    breakpoints: &[IdeBreakpoint],
+) -> (String, Vec<IdeDebugOutputEntry>) {
+    if raw_prog.ends_with(".go") {
+        let parent = Path::new(raw_prog)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or(effective_cwd)
+            .to_string();
+        return (parent, Vec::new());
+    }
+    let was_wildcard = raw_prog.ends_with("/...") || raw_prog == "./...";
+    if target.kind != IdeTargetKind::Local {
+        let stripped = raw_prog.trim_end_matches("/...").trim_end_matches('/');
+        let chosen = if stripped.is_empty() || stripped == "." {
+            effective_cwd.to_string()
+        } else {
+            stripped.to_string()
+        };
+        return (chosen, Vec::new());
+    }
+    if !was_wildcard && dir_contains_go_tests(raw_prog) {
+        return (raw_prog.to_string(), Vec::new());
+    }
+
+    let cwd_path = Path::new(effective_cwd);
+    let mut chosen: Option<String> = None;
+    for bp in breakpoints
+        .iter()
+        .filter(|b| b.enabled && b.path.ends_with(".go"))
+    {
+        let bp_path = if Path::new(&bp.path).is_absolute() {
+            PathBuf::from(&bp.path)
+        } else {
+            cwd_path.join(&bp.path)
+        };
+        if bp_path.starts_with(cwd_path) {
+            if let Some(parent_str) = bp_path.parent().and_then(|p| p.to_str()) {
+                if dir_contains_go_tests(parent_str) {
+                    chosen = Some(parent_str.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    if chosen.is_none() {
+        let tests_sub = cwd_path.join("tests");
+        if let Some(s) = tests_sub.to_str().filter(|s| dir_contains_go_tests(s)) {
+            chosen = Some(s.to_string());
+        } else if dir_contains_go_tests(effective_cwd) {
+            chosen = Some(effective_cwd.to_string());
+        } else if let Ok(rd) = std::fs::read_dir(cwd_path) {
+            let mut subdirs: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_dir()
+                        && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                            !n.starts_with('.')
+                                && !matches!(n, "vendor" | "node_modules" | "target" | "testdata")
+                        })
+                })
+                .take(32)
+                .collect();
+            subdirs.sort();
+            'outer: for sub in &subdirs {
+                if let Some(s) = sub.to_str().filter(|s| dir_contains_go_tests(s)) {
+                    chosen = Some(s.to_string());
+                    break;
+                }
+                if let Ok(inner_rd) = std::fs::read_dir(sub) {
+                    let mut nested: Vec<PathBuf> = inner_rd
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| p.is_dir())
+                        .take(16)
+                        .collect();
+                    nested.sort();
+                    for n_dir in nested {
+                        if let Some(ns) = n_dir.to_str().filter(|s| dir_contains_go_tests(s)) {
+                            chosen = Some(ns.to_string());
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let pkg_dir = chosen.unwrap_or_else(|| {
+        let stripped = raw_prog.trim_end_matches("/...").trim_end_matches('/');
+        if stripped.is_empty() || stripped == "." {
+            effective_cwd.to_string()
+        } else {
+            stripped.to_string()
+        }
+    });
+    let mut notes = Vec::new();
+    if was_wildcard {
+        notes.push(IdeDebugOutputEntry {
+            category: "console".into(),
+            text: format!("Delve Go test debugger attached to package: {pkg_dir}\n"),
+        });
+    }
+    (pkg_dir, notes)
+}
+
+#[allow(clippy::disallowed_methods)]
+fn collect_dap_go_build_tags(
+    target: &IdeTargetSpec,
+    ctx: &DapStartContext,
+    raw_prog: &str,
+    effective_cwd: &str,
+    test_pkg_dir: Option<&str>,
+    breakpoints: &[IdeBreakpoint],
+) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for t in ctx
+        .go_build_tags
+        .iter()
+        .chain(ctx.project_env.iter().flat_map(|p| p.go_build_tags.iter()))
+    {
+        if !t.is_empty() && !tags.contains(t) {
+            tags.push(t.clone());
+        }
+    }
+    if target.kind != IdeTargetKind::Local {
+        return tags;
+    }
+    let mut files_to_scan: Vec<PathBuf> = Vec::new();
+    if raw_prog.ends_with(".go") {
+        files_to_scan.push(PathBuf::from(raw_prog));
+    }
+    let cwd_path = Path::new(effective_cwd);
+    for bp in breakpoints
+        .iter()
+        .filter(|b| b.enabled && b.path.ends_with(".go"))
+    {
+        let bp_path = if Path::new(&bp.path).is_absolute() {
+            PathBuf::from(&bp.path)
+        } else {
+            cwd_path.join(&bp.path)
+        };
+        if bp_path.starts_with(cwd_path) {
+            if let Some(pkg) = test_pkg_dir {
+                if bp_path.parent() == Some(Path::new(pkg)) {
+                    files_to_scan.push(bp_path);
+                }
+            } else {
+                files_to_scan.push(bp_path);
+            }
+        }
+    }
+    if let Some(pkg) = test_pkg_dir {
+        if let Ok(rd) = std::fs::read_dir(pkg) {
+            for entry in rd.flatten().take(16) {
+                let p = entry.path();
+                if p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("_test.go"))
+                {
+                    files_to_scan.push(p);
+                }
+            }
+        }
+    }
+    for file in files_to_scan {
+        if let Ok(src) = std::fs::read_to_string(&file) {
+            for t in crate::lsp_service::extract_go_file_build_tags(&src) {
+                if !tags.contains(&t) {
+                    tags.push(t);
+                }
+            }
+        }
+    }
+    tags
 }
 
 fn find_go_mod_dir(
@@ -347,8 +549,9 @@ fn find_go_mod_dir(
     fallback_cwd: &str,
     allowed_roots: &[PathBuf],
 ) -> String {
-    if target.kind == IdeTargetKind::Local && !program.is_empty() {
-        let mut cur = Path::new(program);
+    let clean_prog = program.trim_end_matches("/...").trim_end_matches('/');
+    if target.kind == IdeTargetKind::Local && !clean_prog.is_empty() {
+        let mut cur = Path::new(clean_prog);
         if cur.is_file() {
             cur = cur.parent().unwrap_or(cur);
         }
@@ -462,4 +665,45 @@ fn inspect_go_package_dir(dir: &Path) -> (usize, bool) {
         }
     }
     (count, has_main)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_go_test_pkg_dir_and_extracts_build_tags_for_all_tests_debug() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        std::fs::write(repo.join("go.mod"), "module example.com/svc\n\ngo 1.24\n").unwrap();
+        let sub_a = repo.join("tests/feature_a");
+        let sub_b = repo.join("tests/feature_b");
+        std::fs::create_dir_all(&sub_a).unwrap();
+        std::fs::create_dir_all(&sub_b).unwrap();
+        std::fs::write(
+            sub_a.join("a_test.go"),
+            "//go:build integration\n\npackage feature_a\n",
+        )
+        .unwrap();
+        let bp_file = sub_b.join("b_component_test.go");
+        std::fs::write(&bp_file, "//go:build component\n\npackage feature_b\n").unwrap();
+
+        let target = IdeTargetSpec::local(repo.to_string_lossy().into_owned());
+        let cwd = repo.to_string_lossy().into_owned();
+        let bps = vec![IdeBreakpoint {
+            path: bp_file.to_string_lossy().into_owned(),
+            line: 5,
+            enabled: true,
+            ..Default::default()
+        }];
+        let raw_prog = format!("{cwd}/...");
+        let (pkg_dir, notes) = resolve_go_test_pkg_dir(&target, &raw_prog, &cwd, &bps);
+        assert_eq!(pkg_dir, sub_b.to_string_lossy());
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].text.contains("feature_b"));
+
+        let ctx = DapStartContext::new().with_go_build_tags(vec!["e2e".into()]);
+        let tags = collect_dap_go_build_tags(&target, &ctx, &raw_prog, &cwd, Some(&pkg_dir), &bps);
+        assert_eq!(tags, vec!["e2e".to_string(), "component".to_string()]);
+    }
 }

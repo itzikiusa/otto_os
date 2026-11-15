@@ -425,7 +425,7 @@ pub(super) async fn put_environments<S: IdeCtx>(
             if clean_nb.enabled {
                 ctx.ide()
                     .netbridge
-                    .authorize_config(&ctx, &user, clean_nb)
+                    .authorize_config_with_confirm(&ctx, &user, clean_nb, req.confirm_prod_targets)
                     .await?;
             } else {
                 let prev_k8s = prev_nb.as_ref().and_then(|p| p.k8s_cluster_id.as_ref());
@@ -463,11 +463,18 @@ pub(super) async fn put_environments<S: IdeCtx>(
         should_evict_nb = clean_nb_opt != prev_nb
             || (prev_nb.is_some() && clean_nb_opt.as_ref().is_none_or(|nb| !nb.enabled));
     }
+    let req_target = req.target.clone();
+    let go_tags_updated = req.go_build_tags.is_some() || req.module_go_build_tags.is_some();
     let env = ctx
         .ide()
         .environments
-        .update_environment(&ctx.pool(), ctx.secrets(), req)
+        .update_environment_for_user(&ctx.pool(), ctx.secrets(), req, user.is_root)
         .await?;
+    if go_tags_updated && req_target.kind == IdeTargetKind::Local {
+        ctx.ide()
+            .lsp_pool
+            .sync_project_go_build_tags(&req_target.root, &env);
+    }
     if should_evict_nb {
         ctx.ide().netbridge.evict_user(&user.id);
     }

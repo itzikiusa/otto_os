@@ -163,42 +163,42 @@ fn is_daemon_internal_secret_key(k: &str) -> bool {
 }
 
 #[cfg(unix)]
+#[allow(unsafe_code)]
+mod unix_sig {
+    extern "C" {
+        pub fn kill(pid: std::ffi::c_int, sig: std::ffi::c_int) -> std::ffi::c_int;
+    }
+    pub const SIGKILL: std::ffi::c_int = 9;
+    pub const SIGTERM: std::ffi::c_int = 15;
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
 pub(crate) fn kill_process_group_sync(pgid: u32) {
     if pgid <= 1 {
         return;
     }
-    let neg = format!("-{pgid}");
-    #[allow(clippy::disallowed_methods)]
-    let _ = std::process::Command::new("/bin/kill")
-        .args(["-KILL", "--", &neg])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    if let Ok(p) = std::ffi::c_int::try_from(pgid) {
+        // SAFETY: Sending SIGKILL to a negative process group ID (-p < -1) is OS-safe.
+        unsafe {
+            let _ = unix_sig::kill(-p, unix_sig::SIGKILL);
+        }
+    }
 }
 
 #[cfg(unix)]
+#[allow(unsafe_code)]
 pub(crate) fn terminate_process_group(pgid: u32) {
     if pgid <= 1 {
         return;
     }
-    std::thread::spawn(move || {
-        let neg = format!("-{pgid}");
-        #[allow(clippy::disallowed_methods)]
-        let _ = std::process::Command::new("/bin/kill")
-            .args(["-TERM", "--", &neg])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        #[allow(clippy::disallowed_methods)]
-        let _ = std::process::Command::new("/bin/kill")
-            .args(["-KILL", "--", &neg])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    });
+    if let Ok(p) = std::ffi::c_int::try_from(pgid) {
+        // SAFETY: Sending SIGTERM/SIGKILL to a negative process group ID (-p < -1) is OS-safe.
+        unsafe {
+            let _ = unix_sig::kill(-p, unix_sig::SIGTERM);
+            let _ = unix_sig::kill(-p, unix_sig::SIGKILL);
+        }
+    }
 }
 
 pub(crate) fn build_process_spawner(
@@ -331,7 +331,7 @@ fn rss_cache() -> &'static Mutex<Option<RssCache>> {
 
 /// Sample resident set size (in bytes) for `pids` (summing each server's Unix
 /// process group so wrapper scripts like `jdtls` -> `java` report full JVM RSS),
-/// cached for 1.5 seconds to keep status and attach calls sub-millisecond.
+/// cached for 5 seconds so status checks and periodic sweeps never hammer `ps`.
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn sample_pids_rss_bytes(pids: &[u32]) -> HashMap<u32, u64> {
     if pids.is_empty() {
@@ -340,7 +340,7 @@ pub(crate) fn sample_pids_rss_bytes(pids: &[u32]) -> HashMap<u32, u64> {
     let now = Instant::now();
     if let Ok(guard) = rss_cache().lock() {
         if let Some(cached) = guard.as_ref() {
-            if now.duration_since(cached.sampled_at) < Duration::from_millis(600)
+            if now.duration_since(cached.sampled_at) < Duration::from_secs(5)
                 && pids.iter().all(|p| cached.by_pgid.contains_key(p))
             {
                 return pids

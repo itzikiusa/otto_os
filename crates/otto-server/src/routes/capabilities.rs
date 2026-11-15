@@ -227,9 +227,11 @@ async fn cap_sessions(ctx: &ServerCtx) -> ModuleCapability {
     }
 }
 
-/// **LSP language servers** — sync PATH check only (no subprocess).
-fn cap_lsp() -> ModuleCapability {
-    let resolved = crate::lsp::servers::detect_all();
+/// **LSP language servers** — cached PATH check offloaded via `spawn_blocking`.
+async fn cap_lsp() -> ModuleCapability {
+    let resolved = tokio::task::spawn_blocking(crate::lsp::servers::detect_all)
+        .await
+        .unwrap_or_default();
     let mut reasons = Vec::new();
     let mut fixes = Vec::new();
     let mut deps: Vec<CapabilityDep> = Vec::new();
@@ -593,7 +595,7 @@ async fn build_capabilities(ctx: &ServerCtx) -> Vec<ModuleCapability> {
     // ctx across a `join!` macro boundary (ctx is &, not Arc inside the fut).
     // Sub-ms for config-presence checks; no live TCP probes.
     let sessions = cap_sessions(ctx).await;
-    let lsp = cap_lsp();
+    let lsp = cap_lsp().await;
     let mcp = cap_mcp(ctx).await;
     let channels = cap_channels(ctx).await;
     let git = cap_git(ctx).await;

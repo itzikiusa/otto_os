@@ -5,9 +5,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use otto_core::Result;
 use otto_state::DbPool;
 
-use super::db_store::{load_stored_project_env, StoredEnvVar};
+use super::db_store::{load_stored_project_env, push_unique, StoredEnvVar};
 use crate::types::{
     IdeProjectEnvironment, IdeRunConfig, IdeRunnerKind, IdeTargetKind, IdeTargetSpec,
 };
@@ -20,6 +21,90 @@ pub(crate) fn sanitize_module_sdks(raw: &BTreeMap<String, String>) -> BTreeMap<S
         if !clean_k.is_empty() && !clean_v.is_empty() {
             out.insert(clean_k.to_string(), clean_v.to_string());
         }
+    }
+    out
+}
+
+pub(crate) fn sanitize_module_go_build_tags(
+    raw: &BTreeMap<String, Vec<String>>,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let mut out = BTreeMap::new();
+    for (k, raw_tags) in raw {
+        let clean_k = k.trim().trim_end_matches('/');
+        if clean_k.is_empty() {
+            continue;
+        }
+        let validated = crate::lsp_service::validate_go_build_tags(raw_tags)?;
+        if !validated.is_empty() {
+            out.insert(clean_k.to_string(), validated);
+        }
+    }
+    Ok(out)
+}
+
+#[allow(clippy::disallowed_methods)] // fast O(1) stat canonicalization on 1..N module paths
+pub(crate) fn match_longest_module_go_build_tags(
+    module_tags: &BTreeMap<String, Vec<String>>,
+    candidate_paths: &[String],
+    local: bool,
+) -> Option<(String, Vec<String>)> {
+    if module_tags.is_empty() {
+        return None;
+    }
+    let mut best: Option<(usize, String, Vec<String>)> = None;
+    for raw_cand in candidate_paths {
+        let cand = raw_cand.trim().trim_end_matches('/');
+        if cand.is_empty() {
+            continue;
+        }
+        let cand_canon = if local {
+            std::fs::canonicalize(cand).ok().or_else(|| {
+                Path::new(cand)
+                    .parent()
+                    .and_then(|p| std::fs::canonicalize(p).ok())
+            })
+        } else {
+            None
+        };
+
+        for (mod_root, tags) in module_tags {
+            let mr = mod_root.trim().trim_end_matches('/');
+            if mr.is_empty() || tags.is_empty() {
+                continue;
+            }
+            let mut matched = cand == mr || cand.starts_with(&format!("{mr}/"));
+            if !matched && local {
+                if let (Some(cc), Ok(cmr)) = (&cand_canon, std::fs::canonicalize(mr)) {
+                    matched = cc == &cmr || cc.starts_with(&cmr);
+                }
+            }
+            if matched
+                && best
+                    .as_ref()
+                    .is_none_or(|(prev_len, _, _)| mr.len() > *prev_len)
+            {
+                best = Some((mr.len(), mr.to_string(), tags.clone()));
+            }
+        }
+    }
+    best.map(|(_, mr, tags)| (mr, tags))
+}
+
+pub(crate) fn effective_go_build_tags_for_paths(
+    proj: &IdeProjectEnvironment,
+    candidate_paths: &[String],
+    local: bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some((_, mod_tags)) =
+        match_longest_module_go_build_tags(&proj.module_go_build_tags, candidate_paths, local)
+    {
+        for t in mod_tags {
+            push_unique(&mut out, t);
+        }
+    }
+    for t in &proj.go_build_tags {
+        push_unique(&mut out, t.clone());
     }
     out
 }
@@ -338,6 +423,12 @@ pub(super) async fn layer_child_and_module_sdk_for_run(
                 if mod_proj.dotenv_path.is_some() {
                     proj.dotenv_path = mod_proj.dotenv_path;
                 }
+                for tag in mod_proj.go_build_tags {
+                    push_unique(&mut proj.go_build_tags, tag);
+                }
+                for (mk, mtags) in mod_proj.module_go_build_tags {
+                    proj.module_go_build_tags.entry(mk).or_insert(mtags);
+                }
                 stored_vars.extend(mod_vars);
             }
         }
@@ -353,6 +444,9 @@ pub(super) async fn layer_child_and_module_sdk_for_run(
     if candidates.is_empty() {
         candidates.push(target.root.clone());
     }
+    let eff_tags =
+        effective_go_build_tags_for_paths(proj, &candidates, target.kind == IdeTargetKind::Local);
+    proj.go_build_tags = eff_tags;
     if let Some((mod_root, sdk_val)) = match_longest_module_sdk(
         &proj.module_sdks,
         &candidates,

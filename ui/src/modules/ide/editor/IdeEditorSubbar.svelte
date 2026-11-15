@@ -3,13 +3,10 @@
   // compact Selection Agent bar, Inspection Pill, Color Scheme Quick Picker, and Prefix/Suffix bar.
   import { copyWithToast } from '../../../lib/clipboard';
   import Badge from '../../../lib/components/Badge.svelte';
-  import {
-    IDE_COLOR_SCHEME_OPTIONS,
-    readIdeEditorPreferences,
-    writeIdeEditorPreferences,
-  } from '../../../lib/components/cm-ide-theme';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { confirmer } from '../../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
+  import { extractGoBuildTagsFromSource } from '../../../lib/goBuildTags';
   import { plural } from '../../../lib/plural';
   import { toasts } from '../../../lib/toast.svelte';
   import { ide, type IdeOpenTab, type IdeSymbolNode } from '../ideStore.svelte';
@@ -51,6 +48,54 @@
   let linePrefix = $state('');
   let lineSuffix = $state('');
 
+  const isGoTab = $derived(activeTab.language === 'go' || activeTab.path.toLowerCase().endsWith('.go'));
+  const repoGoTags = $derived(isGoTab ? ide.getRepoGoBuildTags(activeTab.path) : []);
+  const fileGoTags = $derived(isGoTab ? extractGoBuildTagsFromSource(activeTab.content) : []);
+  const missingGoTags = $derived(fileGoTags.filter((t) => !repoGoTags.includes(t)));
+
+  async function enableMissingGoTags(): Promise<void> {
+    if (missingGoTags.length === 0) return;
+    await ide.setRepoGoBuildTags(activeTab.path, [...repoGoTags, ...missingGoTags]);
+  }
+
+  async function promptAddGoBuildTag(): Promise<void> {
+    const next = await confirmer.promptText('Go build tags for this repository (comma-separated, e.g. component, integration)', {
+      title: 'Go build tags',
+      confirmLabel: 'Apply tags',
+      initial: repoGoTags.join(', '),
+      placeholder: 'component, integration',
+    });
+    if (next === null) return;
+    await ide.setRepoGoBuildTags(activeTab.path, next);
+  }
+
+  function openGoBuildTagsMenu(e: MouseEvent): void {
+    const anchor = e.currentTarget as HTMLElement | null;
+    const allKnown = Array.from(new Set([...repoGoTags, ...fileGoTags]));
+    const items: MenuItem[] = allKnown.map((tag) => {
+      const enabled = repoGoTags.includes(tag);
+      return {
+        label: `Tag: ${tag}`,
+        icon: enabled ? 'check' : 'tag',
+        hint: enabled ? 'active' : 'in file',
+        action: () => {
+          const next = enabled ? repoGoTags.filter((t) => t !== tag) : [...repoGoTags, tag];
+          void ide.setRepoGoBuildTags(activeTab.path, next);
+        },
+      };
+    });
+    if (items.length > 0) items.push({ separator: true });
+    items.push({ label: 'Set Go build tags…', icon: 'plus', action: () => void promptAddGoBuildTag() });
+    if (repoGoTags.length > 0) {
+      items.push({
+        label: 'Clear Go build tags',
+        icon: 'x',
+        action: () => void ide.setRepoGoBuildTags(activeTab.path, []),
+      });
+    }
+    ctxMenu.showAt(anchor, items, { align: 'end' });
+  }
+
   function openSymbolBreadcrumbMenu(e: MouseEvent): void {
     const anchor = e.currentTarget as HTMLElement | null;
     if (!effectiveSymbols.length) { onopenstructure(); return; }
@@ -67,8 +112,13 @@
     ctxMenu.showAt(anchor, items, { align: 'start' });
   }
 
-  function openSchemePickerMenu(e: MouseEvent): void {
+  async function openSchemePickerMenu(e: MouseEvent): Promise<void> {
     const anchor = e.currentTarget as HTMLElement | null;
+    const {
+      IDE_COLOR_SCHEME_OPTIONS,
+      readIdeEditorPreferences,
+      writeIdeEditorPreferences,
+    } = await import('../../../lib/components/cm-ide-theme');
     const cur = readIdeEditorPreferences();
     const items: MenuItem[] = IDE_COLOR_SCHEME_OPTIONS.map((opt) => ({
       label: opt.label,
@@ -125,6 +175,31 @@
   </div>
 
   <div class="ide-subbar-tools">
+    {#if isGoTab && missingGoTags.length > 0}
+      <button
+        type="button"
+        class="btn small ide-go-tag-enable"
+        onclick={() => void enableMissingGoTags()}
+        title="Enable Go build tag in this repository so gopls, Run, and Debug include this file"
+        data-testid="ide-enable-go-build-tag-btn"
+      >
+        <Icon name="tag" size={12} />
+        <span>Enable tag: {missingGoTags.join(', ')}</span>
+      </button>
+    {/if}
+    {#if isGoTab}
+      <button
+        type="button"
+        class="btn small ghost ide-go-tags-pill"
+        class:has-tags={repoGoTags.length > 0}
+        onclick={openGoBuildTagsMenu}
+        title={repoGoTags.length > 0 ? `Active Go build tags: ${repoGoTags.join(', ')} — click to manage` : 'Configure Go build tags (-tags) for this repository'}
+        data-testid="ide-go-build-tags-btn"
+      >
+        <Icon name="tag" size={12} />
+        <span>{repoGoTags.length > 0 ? repoGoTags.join(', ') : 'Tags'}</span>
+      </button>
+    {/if}
     {#if activeDocKind === 'csv' || activeDocKind === 'jsonl'}
       <div class="segmented" role="group" aria-label="Editor view mode" data-testid="ide-csv-mode-toggle">
         <button type="button" aria-pressed={effectiveViewMode === 'table'} onclick={() => onsetviewmode('table')}>Table</button>
@@ -248,6 +323,17 @@
     block-size: 24px; background: var(--surface-2); border: 1px solid var(--accent-line); border-radius: var(--radius-s);
   }
   .ide-sel-accent { color: var(--accent-text); }
+  .ide-go-tag-enable {
+    border-color: var(--warning);
+    background: var(--warning-soft);
+    color: var(--warning);
+    font-weight: 600;
+  }
+  .ide-go-tags-pill.has-tags {
+    border-color: var(--accent-line);
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
   .ide-ps-bar {
     display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) 10px;
     background: var(--surface-2); border-block-end: 1px solid var(--border); flex-wrap: wrap; flex-shrink: 0;

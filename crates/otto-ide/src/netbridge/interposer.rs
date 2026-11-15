@@ -22,6 +22,9 @@ use tokio::sync::Mutex;
 
 static BUILD_LOCK: Mutex<()> = Mutex::const_new(());
 
+#[cfg(test)]
+pub(super) const INTERPOSER_C_SOURCE_FOR_TEST: &str = INTERPOSER_C_SRC;
+
 const INTERPOSER_C_SRC: &str = r#"
 #if !defined(__APPLE__)
 #define _GNU_SOURCE
@@ -137,6 +140,7 @@ static int otto_nb_should_intercept_ip(uint32_t ip_h, int *is_vip_out) {
     if ((ip_h & 0xFF000000u) == 0x0A000000u) return 1;
     if ((ip_h & 0xFFF00000u) == 0xAC100000u) return 1;
     if ((ip_h & 0xFFFF0000u) == 0xC0A80000u) return 1;
+    if ((ip_h & 0xFFC00000u) == 0x64400000u) return 1;
     return 0;
 }
 
@@ -227,6 +231,37 @@ __attribute__((visibility("default"))) int getaddrinfo(const char *node, const c
     return REAL_GETADDRINFO(node, service, hints, res);
 }
 
+static int otto_nb_connect_unix(int sockfd, const char *unix_path) {
+    if (!unix_path || !unix_path[0]) return -1;
+    struct sockaddr_un uaddr;
+    memset(&uaddr, 0, sizeof(uaddr));
+    uaddr.sun_family = AF_UNIX;
+    size_t plen = strlen(unix_path);
+    if (plen == 0 || plen >= sizeof(uaddr.sun_path)) return -1;
+    memcpy(uaddr.sun_path, unix_path, plen + 1);
+
+    int old_fl = fcntl(sockfd, F_GETFL, 0);
+    int old_fd = fcntl(sockfd, F_GETFD, 0);
+    int ufd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (ufd < 0) return -1;
+    if (REAL_CONNECT(ufd, (const struct sockaddr *)&uaddr, (socklen_t)sizeof(uaddr)) != 0) {
+        close(ufd);
+        return -1;
+    }
+    if (old_fl >= 0 && (old_fl & O_NONBLOCK) != 0) {
+        (void)fcntl(ufd, F_SETFL, old_fl);
+    }
+    if (dup2(ufd, sockfd) < 0) {
+        close(ufd);
+        return -1;
+    }
+    close(ufd);
+    if (old_fd >= 0 && (old_fd & FD_CLOEXEC) != 0) {
+        (void)fcntl(sockfd, F_SETFD, old_fd);
+    }
+    return 0;
+}
+
 #if defined(__APPLE__)
 static int otto_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 #else
@@ -254,7 +289,7 @@ __attribute__((visibility("default"))) int connect(int sockfd, const struct sock
             char ip_buf[INET_ADDRSTRLEN];
             if (inet_ntop(AF_INET, &sin.sin_addr, ip_buf, sizeof(ip_buf)) != NULL) {
                 char req[256];
-                char resp[128];
+                char resp[256];
                 int n = snprintf(req, sizeof(req), "CONNECT %s %s %u\n", token, ip_buf, (unsigned)port_h);
                 if (n > 0 && (size_t)n < sizeof(req) && otto_nb_query(sock_path, req, resp, sizeof(resp)) == 0) {
                     if (strncmp(resp, "PORT ", 5) == 0) {
@@ -264,6 +299,11 @@ __attribute__((visibility("default"))) int connect(int sockfd, const struct sock
                             sin.sin_port = htons((uint16_t)lport);
                             errno = saved_errno;
                             return REAL_CONNECT(sockfd, (const struct sockaddr *)&sin, (socklen_t)sizeof(sin));
+                        }
+                    } else if (strncmp(resp, "UNIX ", 5) == 0) {
+                        if (otto_nb_connect_unix(sockfd, resp + 5) == 0) {
+                            errno = saved_errno;
+                            return 0;
                         }
                     } else if (strcmp(resp, "PASSTHROUGH") == 0) {
                         errno = saved_errno;
@@ -296,7 +336,7 @@ __attribute__((visibility("default"))) int connect(int sockfd, const struct sock
                 char ip_buf[INET_ADDRSTRLEN];
                 if (inet_ntop(AF_INET, &v4, ip_buf, sizeof(ip_buf)) != NULL) {
                     char req[256];
-                    char resp[128];
+                    char resp[256];
                     int n = snprintf(req, sizeof(req), "CONNECT %s %s %u\n", token, ip_buf, (unsigned)port_h);
                     if (n > 0 && (size_t)n < sizeof(req) && otto_nb_query(sock_path, req, resp, sizeof(resp)) == 0) {
                         if (strncmp(resp, "PORT ", 5) == 0) {
@@ -309,6 +349,11 @@ __attribute__((visibility("default"))) int connect(int sockfd, const struct sock
                                 sin6.sin6_port = htons((uint16_t)lport);
                                 errno = saved_errno;
                                 return REAL_CONNECT(sockfd, (const struct sockaddr *)&sin6, (socklen_t)sizeof(sin6));
+                            }
+                        } else if (strncmp(resp, "UNIX ", 5) == 0) {
+                            if (otto_nb_connect_unix(sockfd, resp + 5) == 0) {
+                                errno = saved_errno;
+                                return 0;
                             }
                         } else if (strcmp(resp, "PASSTHROUGH") == 0) {
                             errno = saved_errno;

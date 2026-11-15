@@ -38,9 +38,12 @@
     performIdeDive,
     pushIdeNavLocation,
     putIdeLocalHistoryLabel,
+    resolveIdeGitBaseContent,
   } from './editor/ideEditorStoreBridge.svelte';
+  import type { ideGit as IdeGitSingleton } from './git/ideGitController.svelte';
   import type { IdeOutlineNode } from './editor/ideLangAnalyzer';
   let langAnalyzerMod = $state<typeof import('./editor/ideLangAnalyzer') | null>(null);
+  let liveGit = $state<typeof IdeGitSingleton | null>(null);
   function fastDocKind(filePath: string, language?: string): string {
     const clean = filePath.split('?')[0].toLowerCase();
     const base = clean.slice(clean.lastIndexOf('/') + 1);
@@ -77,6 +80,7 @@
     insertText?: (text: string) => void;
     evictPaths?: (paths: Iterable<string> | 'all') => void;
     notifyDidSave?: () => void;
+    reconnectLspClients?: (rootPath?: string) => void;
     disposeLspClients?: (rootPath?: string) => void;
     applyQuickFixEdits?: (edits: CmIdeMod.IdeConcreteTextEdit[]) => boolean;
     applyClientDiagFix?: (fix: CmIdeMod.ClientDiagQuickFix) => boolean;
@@ -104,15 +108,40 @@
   let manifestDepsByPath = $state<Record<string, CmIdeDepsMod.IdeDepItem[]>>({});
   let blameEnabledByPath = $state<Record<string, boolean>>({});
   let blameByPath = $state<Record<string, Record<number, string> | null>>({});
+  let gitBaseByPath = $state<Record<string, string | null>>({});
+  const lastGitBaseDigestByPath = new Map<string, string>();
+  const gitBaseCtlByPath = new Map<string, AbortController>();
   let splitRatio = $state(readSavedSplitRatio());
   let prefs = $state(readIdePreferences());
   let stagedPrimaryTab = $state<IdeOpenTab | null>(null);
   let stagedSplitTab = $state<IdeOpenTab | null>(null);
 
+  function refreshGitBaseForTab(tab: IdeOpenTab, force = false): void {
+    const filePath = tab.path;
+    if (!filePath || filePath.startsWith('untitled:') || filePath.startsWith('jdt://')) return;
+    const digest = liveGit ? liveGit.fileStatusDigest(filePath) : 'pending';
+    if (!force && lastGitBaseDigestByPath.get(filePath) === digest && filePath in gitBaseByPath) return;
+    gitBaseCtlByPath.get(filePath)?.abort();
+    const ctl = new AbortController();
+    gitBaseCtlByPath.set(filePath, ctl);
+    void resolveIdeGitBaseContent(filePath, tab.savedContent, ctl.signal)
+      .then((base) => {
+        if (ctl.signal.aborted) return;
+        lastGitBaseDigestByPath.set(filePath, digest);
+        if (gitBaseByPath[filePath] !== base || !(filePath in gitBaseByPath)) {
+          gitBaseByPath = { ...gitBaseByPath, [filePath]: base };
+        }
+      })
+      .catch(() => {
+        /* ignore aborted or non-git paths */
+      });
+  }
+
   $effect(() => {
     const cur = ide.activeTab;
     if (!cur) { stagedPrimaryTab = null; return; }
     if (!langAnalyzerMod) void import('./editor/ideLangAnalyzer').then((m) => { langAnalyzerMod = m; });
+    if (!liveGit) void import('./git/ideGitController.svelte').then((m) => { liveGit = m.ideGit; });
     if (!cur.loading && !cur.error && histReady) { stagedPrimaryTab = cur; everMountedEditor = true; }
     else if (stagedPrimaryTab && !ide.tabs.some((t) => t.path === stagedPrimaryTab?.path)) stagedPrimaryTab = null;
   });
@@ -120,8 +149,23 @@
   $effect(() => {
     const cur = ide.splitTab;
     if (!cur) { stagedSplitTab = null; return; }
+    if (!liveGit) void import('./git/ideGitController.svelte').then((m) => { liveGit = m.ideGit; });
     if (!cur.loading && !cur.error && histReady) { stagedSplitTab = cur; everMountedEditor = true; }
     else if (stagedSplitTab && !ide.tabs.some((t) => t.path === stagedSplitTab?.path)) stagedSplitTab = null;
+  });
+
+  $effect(() => {
+    const p = stagedPrimaryTab;
+    if (!p) return;
+    void (liveGit ? liveGit.fileStatusDigest(p.path) : 'pending');
+    untrack(() => refreshGitBaseForTab(p));
+  });
+
+  $effect(() => {
+    const s = stagedSplitTab;
+    if (!s) return;
+    void (liveGit ? liveGit.fileStatusDigest(s.path) : 'pending');
+    untrack(() => refreshGitBaseForTab(s));
   });
 
   $effect(() => {
@@ -137,15 +181,81 @@
       const det = (e as CustomEvent<{ path?: string; edits?: CmIdeMod.IdeConcreteTextEdit[] }>).detail;
       if (det?.edits?.length && (!det.path || det.path === stagedPrimaryTab?.path)) primaryEditorRef?.applyQuickFixEdits?.(det.edits);
     };
+    const onEnableGoTag = (e: Event) => {
+      const det = (e as CustomEvent<{ tags?: string[]; filePath?: string }>).detail;
+      const tags = det?.tags ?? [];
+      if (tags.length === 0) return;
+      const targetFile = det?.filePath || ide.activePath || ide.target.root;
+      const merged = [...ide.getRepoGoBuildTags(targetFile), ...tags];
+      void ide.setRepoGoBuildTags(targetFile, merged);
+    };
+    const onReconnectLsp = (e: Event) => {
+      const rootPath = (e as CustomEvent<{ rootPath?: string }>).detail?.rootPath;
+      primaryEditorRef?.reconnectLspClients?.(rootPath);
+      splitEditorRef?.reconnectLspClients?.(rootPath);
+    };
+    const onGitReloaded = (e: Event) => {
+      const reloadedPath = (e as CustomEvent<{ path?: string }>).detail?.path;
+      const tab = reloadedPath ? ide.tabs.find((t) => t.path === reloadedPath) : ide.activeTab;
+      if (tab) refreshGitBaseForTab(tab, true);
+    };
+    const onFindInFiles = (e: Event) => {
+      const scopePath = (e as CustomEvent<{ path?: string }>).detail?.path;
+      const dir = scopePath && scopePath.includes('/') ? scopePath.slice(0, scopePath.lastIndexOf('/')) : null;
+      ide.openFindInPath({ scopePath: dir });
+    };
+    const onRepoTestAction = (e: Event) => {
+      const det = (e as CustomEvent<{ path?: string; mode?: 'run' | 'coverage' | 'debug' }>).detail;
+      void ide.runRepoTests(det?.path ?? ide.activePath, det?.mode ?? 'run');
+    };
+    const onFileRefactor = (e: Event) => {
+      const det = (e as CustomEvent<{ op?: 'move' | 'copy' | 'safe-delete'; path?: string }>).detail;
+      const targetPath = det?.path || ide.activePath;
+      if (!targetPath || !det?.op) return;
+      void import('../../lib/confirm.svelte').then(async ({ confirmer }) => {
+        if (det.op === 'move' || det.op === 'copy') {
+          const isCopy = det.op === 'copy';
+          const initial = isCopy ? targetPath.replace(/(\.[^./]+)$/, '_copy$1') : targetPath;
+          const dest = await confirmer.promptText(
+            isCopy ? `Create a copy of ${ide.relativePath(targetPath)} at:` : `Move or rename ${ide.relativePath(targetPath)} to:`,
+            { title: isCopy ? 'Copy file' : 'Move file', confirmLabel: isCopy ? 'Copy' : 'Move', initial },
+          );
+          if (dest && dest !== targetPath) await ide.mutateFs(isCopy ? 'duplicate' : 'rename', targetPath, dest);
+        } else if (det.op === 'safe-delete') {
+          const baseSym = (targetPath.split('/').pop() ?? '').replace(/\.[^.]+$/, '');
+          if (baseSym && /^[A-Za-z_]\w*$/.test(baseSym)) {
+            await ide.findReferences(targetPath, 1, 1, baseSym);
+          }
+          const externalRefs = ide.usages.filter((u) => u.path !== targetPath).length;
+          const warn = externalRefs > 0
+            ? `Found ${externalRefs} workspace usage(s) referencing “${baseSym}”. Delete “${ide.relativePath(targetPath)}” anyway?`
+            : `No external symbol usages found. Delete “${ide.relativePath(targetPath)}”?`;
+          const ok = await confirmer.ask(warn, { title: 'Safe delete file', confirmLabel: 'Delete', danger: true });
+          if (ok) await ide.mutateFs('delete', targetPath);
+        }
+      });
+    };
     window.addEventListener(IDE_PREFS_EVENT, onPrefs);
     window.addEventListener('otto:ide-paste-history', onPasteHist);
     window.addEventListener('otto:ide-put-history-label', onPutLabel);
     window.addEventListener('otto:ide-apply-quickfix-edits', onApplyFixes);
+    window.addEventListener('otto:ide-enable-go-build-tag', onEnableGoTag);
+    window.addEventListener('otto:ide-reconnect-lsp', onReconnectLsp);
+    window.addEventListener('otto:ide-git-file-reloaded', onGitReloaded);
+    window.addEventListener('otto:ide-open-find-in-files', onFindInFiles);
+    window.addEventListener('otto:ide-repo-test-action', onRepoTestAction);
+    window.addEventListener('otto:ide-editor-file-refactor', onFileRefactor);
     return () => {
       window.removeEventListener(IDE_PREFS_EVENT, onPrefs);
       window.removeEventListener('otto:ide-paste-history', onPasteHist);
       window.removeEventListener('otto:ide-put-history-label', onPutLabel);
       window.removeEventListener('otto:ide-apply-quickfix-edits', onApplyFixes);
+      window.removeEventListener('otto:ide-enable-go-build-tag', onEnableGoTag);
+      window.removeEventListener('otto:ide-reconnect-lsp', onReconnectLsp);
+      window.removeEventListener('otto:ide-git-file-reloaded', onGitReloaded);
+      window.removeEventListener('otto:ide-open-find-in-files', onFindInFiles);
+      window.removeEventListener('otto:ide-repo-test-action', onRepoTestAction);
+      window.removeEventListener('otto:ide-editor-file-refactor', onFileRefactor);
     };
   });
 
@@ -170,17 +280,20 @@
       }).catch(() => {});
     }
     if (pathList === 'all') {
+      for (const ctl of gitBaseCtlByPath.values()) ctl.abort();
+      gitBaseCtlByPath.clear(); lastGitBaseDigestByPath.clear(); gitBaseByPath = {};
       blameEnabledByPath = {}; blameByPath = {}; tableModeByPath = {}; manifestModeByPath = {}; manifestDepsByPath = {};
       bpEditor = null; intentionState = null; disposeAllPooledLsp(); return;
     }
-    const nextBlame = { ...blameByPath }, nextBlameOn = { ...blameEnabledByPath };
+    const nextBlame = { ...blameByPath }, nextBlameOn = { ...blameEnabledByPath }, nextGitBase = { ...gitBaseByPath };
     const nextMode = { ...tableModeByPath }, nextManMode = { ...manifestModeByPath }, nextManDeps = { ...manifestDepsByPath };
     for (const p of pathList) {
+      gitBaseCtlByPath.get(p)?.abort(); gitBaseCtlByPath.delete(p); lastGitBaseDigestByPath.delete(p); delete nextGitBase[p];
       delete nextBlame[p]; delete nextBlameOn[p]; delete nextMode[p]; delete nextManMode[p]; delete nextManDeps[p];
       if (bpEditor?.path === p) bpEditor = null;
       if (intentionState?.path === p) intentionState = null;
     }
-    blameByPath = nextBlame; blameEnabledByPath = nextBlameOn;
+    blameByPath = nextBlame; blameEnabledByPath = nextBlameOn; gitBaseByPath = nextGitBase;
     tableModeByPath = nextMode; manifestModeByPath = nextManMode; manifestDepsByPath = nextManDeps;
     if (ide.tabs.length === 0) disposeAllPooledLsp();
   });
@@ -191,7 +304,14 @@
     if (savedPath === stagedSplitTab?.path) splitEditorRef?.notifyDidSave?.();
   });
 
-  onDestroy(() => { flushAutoLocalHistorySnapshot(); unsubEvict(); unsubSaved(); disposeAllPooledLsp(); });
+  onDestroy(() => {
+    for (const ctl of gitBaseCtlByPath.values()) ctl.abort();
+    gitBaseCtlByPath.clear();
+    flushAutoLocalHistorySnapshot();
+    unsubEvict();
+    unsubSaved();
+    disposeAllPooledLsp();
+  });
 
   const projectFolders = $derived(getIdeProjectFolders());
   const hasNonEmptySelection = $derived(ide.cursorInfo.selections.some((s) => s.anchor !== s.head));
@@ -433,7 +553,7 @@
           {@const pTab = stagedPrimaryTab}
           <CodeEditor
             bind:this={primaryEditorRef}
-            path={pTab.path} content={pTab.content} savedContent={pTab.savedContent}
+            path={pTab.path} content={pTab.content} savedContent={pTab.savedContent} gitBaseContent={gitBaseByPath[pTab.path]}
             blameByLine={blameEnabledByPath[pTab.path] ? (blameByPath[pTab.path] ?? null) : null}
             root={ide.target.root} {projectFolders} language={pTab.language}
             readOnly={pTab.readOnly || !ide.canEditCollab} keepStates={true} lsp={!ide.collabIsGuest} ideMode={true}
@@ -472,7 +592,7 @@
               manifestDepsByPath = { ...manifestDepsByPath, [pTab.path]: items };
             })}
             onQuickFix={(ctx) => openIntentionPopoverAt(pTab.path, ctx.line, ctx.column, { x: ctx.clientX, y: ctx.clientY, symbol: ctx.symbol })}
-            onRenameSymbol={(ctx) => void ide.openRenameModal(pTab.path, ctx.line, ctx.column, ctx.symbol)}
+            onRenameSymbol={(ctx) => void ide.openRenameModal(pTab.path, ctx.line, ctx.column, ctx.symbol, ctx.newName)}
             onFormat={() => void ide.formatActiveFile()}
             onDiagnostics={(diags) => ide.setDiagnostics(pTab.path, diags)}
             onAgentAction={(mode, sel) => {
@@ -518,7 +638,7 @@
               {@const sTab = stagedSplitTab}
               <CodeEditor
                 bind:this={splitEditorRef}
-                path={sTab.path} content={sTab.content} savedContent={sTab.savedContent}
+                path={sTab.path} content={sTab.content} savedContent={sTab.savedContent} gitBaseContent={gitBaseByPath[sTab.path]}
                 blameByLine={blameEnabledByPath[sTab.path] ? (blameByPath[sTab.path] ?? null) : null}
                 root={ide.target.root} {projectFolders} language={sTab.language}
                 readOnly={sTab.readOnly || !ide.canEditCollab} findOwner={false} keepStates={true} lsp={!ide.collabIsGuest} ideMode={true}
@@ -539,7 +659,7 @@
                 onNavigateBack={() => void navigateIdeBack()}
                 onNavigateForward={() => void navigateIdeForward()}
                 onQuickFix={(ctx) => openIntentionPopoverAt(sTab.path, ctx.line, ctx.column, { x: ctx.clientX, y: ctx.clientY, symbol: ctx.symbol })}
-                onRenameSymbol={(ctx) => void ide.openRenameModal(sTab.path, ctx.line, ctx.column, ctx.symbol)}
+                onRenameSymbol={(ctx) => void ide.openRenameModal(sTab.path, ctx.line, ctx.column, ctx.symbol, ctx.newName)}
                 onAgentAction={(mode, sel) => {
                   if (mode === 'inline') ideAgent.openInlineEdit({ path: sTab.path, ...sel });
                   else { ideAgent.markSelectionFromEditor({ openPanel: true, selection: { path: sTab.path, ...sel } }); focusAgentComposer(); }

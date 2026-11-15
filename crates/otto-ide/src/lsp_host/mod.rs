@@ -11,3 +11,4 @@ mod pool_spawn;
 mod pool_tests;
 pub mod servers;
 mod servers_root;
+pub mod ws_bridge;

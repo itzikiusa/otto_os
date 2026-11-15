@@ -317,9 +317,10 @@ mod tests {
         assert!(detected
             .iter()
             .all(|c| c.auto_detected && c.inherit_shell_env));
-        assert!(detected
-            .iter()
-            .any(|c| c.runner == IdeRunnerKind::GoRun && c.name.contains("admission")));
+        assert!(detected.iter().any(|c| c.runner == IdeRunnerKind::GoRun
+            && c.name.contains("[go_admission]")
+            && c.name.contains("admission")
+            && c.cwd.as_deref() == Some(go_root.to_string_lossy().as_ref())));
         assert!(detected
             .iter()
             .any(|c| c.runner == IdeRunnerKind::GoBuild && c.name.contains("admission")));
@@ -333,5 +334,49 @@ mod tests {
         assert!(detected
             .iter()
             .any(|c| c.runner == IdeRunnerKind::Shell && c.name.contains("scripts/smoke.sh")));
+    }
+
+    #[test]
+    fn discovers_per_repo_configs_for_umbrella_folder_with_child_git_repos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let umbrella = tmp.path().join("workspace_umbrella");
+        let svc_go = umbrella.join("svc_go");
+        std::fs::create_dir_all(svc_go.join(".git")).unwrap();
+        std::fs::write(
+            svc_go.join("go.mod"),
+            "module example.com/svc_go\n\ngo 1.24\n",
+        )
+        .unwrap();
+        std::fs::write(svc_go.join("svc_test.go"), "package svc\n").unwrap();
+
+        let svc_py = umbrella.join("svc_py");
+        std::fs::create_dir_all(svc_py.join(".git")).unwrap();
+        std::fs::create_dir_all(svc_py.join("tests")).unwrap();
+        std::fs::write(
+            svc_py.join("pyproject.toml"),
+            "[project]\nname = \"svc_py\"\n",
+        )
+        .unwrap();
+        std::fs::write(svc_py.join("tests/test_api.py"), "def test_ok(): pass\n").unwrap();
+
+        let target = IdeTargetSpec::local(umbrella.to_string_lossy().into_owned());
+        let detected = discover_run_configs(&target, &[]);
+        let go_test = detected
+            .iter()
+            .find(|c| c.runner == IdeRunnerKind::GoTest && c.name.contains("[svc_go]"))
+            .expect("expected per-repo [svc_go] Go Test config");
+        assert_eq!(
+            go_test.cwd.as_deref(),
+            Some(svc_go.to_string_lossy().as_ref())
+        );
+
+        let py_test = detected
+            .iter()
+            .find(|c| c.runner == IdeRunnerKind::Pytest && c.name.contains("[svc_py]"))
+            .expect("expected per-repo [svc_py] pytest config");
+        assert_eq!(
+            py_test.cwd.as_deref(),
+            Some(svc_py.to_string_lossy().as_ref())
+        );
     }
 }

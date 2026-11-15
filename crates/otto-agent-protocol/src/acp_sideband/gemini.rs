@@ -14,7 +14,10 @@ use otto_core::agent_runtime::TurnTokenUsage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::burst::{classify_tool, is_safe_session_id, now_ms, parse_rfc3339_ms, MirroredCounts};
+use super::burst::{
+    classify_tool, insert_bounded_map, insert_bounded_set, is_safe_session_id, now_ms,
+    parse_rfc3339_ms, MirroredCounts,
+};
 use super::SidebandAction;
 use crate::driver::SidebandSource;
 
@@ -35,6 +38,8 @@ pub(crate) struct GeminiState {
     #[serde(default)]
     pub seen_tokens: HashSet<String>,
     #[serde(default)]
+    pub prompted_msg_ids: HashSet<String>,
+    #[serde(default)]
     pub open_tools: usize,
     #[serde(default)]
     pub awaiting_since_ms: u64,
@@ -52,7 +57,13 @@ impl GeminiState {
             && now_ms().saturating_sub(self.awaiting_since_ms) < AWAITING_TOOL_MAX_MS
     }
 
-    pub fn source(&self, gemini_home: &str, cwd: &str, session_id: &str) -> Option<SidebandSource> {
+    pub fn source(
+        &self,
+        gemini_home: &str,
+        cwd: &str,
+        session_id: &str,
+        allow_scan: bool,
+    ) -> Option<SidebandSource> {
         if gemini_home.is_empty() || !is_safe_session_id(session_id) {
             return None;
         }
@@ -62,6 +73,7 @@ impl GeminiState {
             session_id: session_id.to_string(),
             resolved_path: self.resolved_path.clone(),
             last_stamp: self.last_stamp,
+            allow_scan,
         })
     }
 
@@ -69,16 +81,13 @@ impl GeminiState {
         &mut self,
         resolved_path: PathBuf,
         stamp: (u64, u64),
-        bytes: &[u8],
+        doc: &Value,
         expected_session_id: Option<&str>,
         idle_since_ms: u64,
         mirrored: &mut MirroredCounts,
     ) -> Vec<SidebandAction> {
         self.resolved_path = Some(resolved_path);
         self.last_stamp = stamp;
-        let Ok(doc) = serde_json::from_slice::<Value>(bytes) else {
-            return Vec::new();
-        };
         if let (Some(expected), Some(actual)) = (
             expected_session_id,
             doc.get("sessionId").and_then(Value::as_str),
@@ -94,9 +103,24 @@ impl GeminiState {
 
         let mut actions = Vec::new();
         let mut active_open_tools = 0usize;
+        let mut prompted_user_open = false;
 
         for (idx, msg) in messages.iter().enumerate() {
-            if msg.get("type").and_then(Value::as_str) != Some("gemini") {
+            let msg_type = msg.get("type").and_then(Value::as_str).unwrap_or("");
+            let ts_ms = msg
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(parse_rfc3339_ms);
+            if msg_type == "user" {
+                prompted_user_open = idle_since_ms > 0
+                    && ts_ms.is_none_or(|t| t <= idle_since_ms.saturating_add(250));
+                continue;
+            }
+            if msg_type != "gemini" {
+                if idle_since_ms > 0 && ts_ms.is_some_and(|t| t > idle_since_ms.saturating_add(250))
+                {
+                    prompted_user_open = false;
+                }
                 continue;
             }
             let msg_id = msg
@@ -104,18 +128,39 @@ impl GeminiState {
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("gem-msg-{idx}"));
-            let ts_ms = msg
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(parse_rfc3339_ms);
-            let baseline_only =
-                idle_since_ms > 0 && ts_ms.is_some_and(|t| t.saturating_add(50) < idle_since_ms);
+
+            let already_prompted = self.prompted_msg_ids.contains(&msg_id);
+            if prompted_user_open
+                && !already_prompted
+                && idle_since_ms > 0
+                && ts_ms.is_some_and(|t| t > idle_since_ms.saturating_add(1_000))
+            {
+                prompted_user_open = false;
+            }
+
+            let ts_baseline =
+                idle_since_ms > 0 && ts_ms.is_some_and(|t| t <= idle_since_ms.saturating_add(50));
+            let baseline_only = already_prompted || prompted_user_open || ts_baseline;
+            if baseline_only {
+                insert_bounded_set(&mut self.prompted_msg_ids, msg_id.clone());
+            }
 
             self.ingest_thoughts(msg, &msg_id, baseline_only, mirrored, &mut actions);
             active_open_tools +=
                 self.ingest_tools(msg, &msg_id, baseline_only, mirrored, &mut actions);
             self.ingest_content(msg, &msg_id, baseline_only, mirrored, &mut actions);
             self.ingest_tokens(msg, &msg_id, baseline_only, &mut actions);
+
+            let has_tool_calls = msg
+                .get("toolCalls")
+                .and_then(Value::as_array)
+                .is_some_and(|a| !a.is_empty());
+            if prompted_user_open
+                && !has_tool_calls
+                && !extract_gemini_message_text(msg.get("content")).is_empty()
+            {
+                prompted_user_open = false;
+            }
         }
 
         self.open_tools = active_open_tools;
@@ -140,8 +185,11 @@ impl GeminiState {
         if thoughts.len() <= prev {
             return;
         }
-        self.seen_thought_count
-            .insert(msg_id.to_string(), thoughts.len());
+        insert_bounded_map(
+            &mut self.seen_thought_count,
+            msg_id.to_string(),
+            thoughts.len(),
+        );
         if baseline_only {
             return;
         }
@@ -195,8 +243,11 @@ impl GeminiState {
             if prev.as_deref() == Some(raw_status) {
                 continue;
             }
-            self.seen_tool_status
-                .insert(id.clone(), raw_status.to_string());
+            insert_bounded_map(
+                &mut self.seen_tool_status,
+                id.clone(),
+                raw_status.to_string(),
+            );
             if baseline_only {
                 continue;
             }
@@ -210,6 +261,7 @@ impl GeminiState {
                     id: id.clone(),
                     title: desc.title.clone(),
                     kind: desc.kind,
+                    status: ToolCallStatus::InProgress,
                     raw_input: args.clone(),
                     file: desc.file.clone(),
                     diff: desc.diff.clone(),
@@ -248,7 +300,7 @@ impl GeminiState {
         if total <= prev {
             return;
         }
-        self.seen_msg_chars.insert(msg_id.to_string(), total);
+        insert_bounded_map(&mut self.seen_msg_chars, msg_id.to_string(), total);
         if baseline_only {
             return;
         }
@@ -278,7 +330,7 @@ impl GeminiState {
         let Some(tok) = msg.get("tokens").and_then(Value::as_object) else {
             return;
         };
-        if !self.seen_tokens.insert(msg_id.to_string()) || baseline_only {
+        if !insert_bounded_set(&mut self.seen_tokens, msg_id.to_string()) || baseline_only {
             return;
         }
         let n = |k: &str| tok.get(k).and_then(Value::as_u64).unwrap_or(0);

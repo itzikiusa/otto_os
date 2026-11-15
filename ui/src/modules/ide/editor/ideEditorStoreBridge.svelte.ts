@@ -147,3 +147,11 @@ export function performIdeDive(
 export function fetchIdeGitBlame(rootPath: string, filePath: string, signal?: AbortSignal): Promise<Record<number, string> | null> {
   return import('./ideEditorActionsLazy').then((m) => m.runFetchIdeGitBlame(rootPath, filePath, signal));
 }
+
+export function resolveIdeGitBaseContent(
+  filePath: string,
+  diskSavedContent: string | null,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  return import('./ideEditorActionsLazy').then((m) => m.runResolveIdeGitBaseContent(filePath, diskSavedContent, signal));
+}

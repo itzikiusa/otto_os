@@ -360,6 +360,7 @@ fn ssh_validation_and_piped_command_builder_reject_unsafe_inputs() {
         user: "ubuntu".into(),
         identity_file: None,
         proxy_jump: None,
+        environment: None,
     };
     let spec = IdeTargetSpec::ssh("c1".into(), "/srv/app");
     assert!(mgr.resolve_with_ssh(&spec, "u1", bad_ssh).is_err());
@@ -372,6 +373,7 @@ fn ssh_validation_and_piped_command_builder_reject_unsafe_inputs() {
         user: "ubuntu".into(),
         identity_file: Some("-oProxyCommand=evil".into()),
         proxy_jump: None,
+        environment: None,
     };
     assert!(mgr.resolve_with_ssh(&spec, "u1", bad_identity).is_err());
 
@@ -383,6 +385,7 @@ fn ssh_validation_and_piped_command_builder_reject_unsafe_inputs() {
         user: "ubuntu".into(),
         identity_file: Some("/Users/me/.ssh/id_ed25519".into()),
         proxy_jump: Some("bastion.internal:22".into()),
+        environment: None,
     };
     let resolved = mgr.resolve_with_ssh(&spec, "u1", good_ssh).unwrap();
     let mut env = BTreeMap::new();

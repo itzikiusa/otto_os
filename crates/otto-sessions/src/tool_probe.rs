@@ -47,13 +47,123 @@ pub fn executable_in_path_or_fs(program: &str) -> bool {
         .any(|cand| is_exec(&cand))
 }
 
+fn rc_content_defines_alias_or_fn(content: &str, program: &str) -> bool {
+    if program.is_empty() {
+        return false;
+    }
+    for raw_line in content.lines() {
+        let mut line = raw_line.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("alias ") {
+            let rest = rest.trim_start();
+            for prefix in [
+                format!("{program}="),
+                format!("'{program}'="),
+                format!("\"{program}\"="),
+            ] {
+                if rest.starts_with(&prefix) {
+                    return true;
+                }
+            }
+        }
+        if let Some(rest) = line.strip_prefix("function ") {
+            line = rest.trim_start();
+            if let Some(after) = line.strip_prefix(program) {
+                if after.is_empty()
+                    || after.starts_with(char::is_whitespace)
+                    || after.starts_with('(')
+                    || after.starts_with('{')
+                {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if let Some(after) = line.strip_prefix(program) {
+            let after = after.trim_start();
+            if after.starts_with("()") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Fast (<1 ms) scan of standard shell rc files for an `alias <program>=…` or
+/// `<program>()` shell function definition so custom providers like
+/// `claudework -> claude-work` resolve immediately during cold `/meta` probes
+/// without waiting on an interactive login shell boot.
+pub fn rc_defines_alias_or_fn(program: &str) -> bool {
+    if program.is_empty() || program.contains('/') {
+        return false;
+    }
+    let mut candidates = Vec::with_capacity(11);
+    if let Some(zdot) = std::env::var_os("ZDOTDIR").filter(|v| !v.is_empty()) {
+        let zdir = std::path::PathBuf::from(zdot);
+        for name in [".zshrc", ".zshenv", ".zprofile"] {
+            candidates.push(zdir.join(name));
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        let hdir = std::path::PathBuf::from(home);
+        for name in [
+            ".zshrc",
+            ".zshenv",
+            ".zprofile",
+            ".bashrc",
+            ".bash_profile",
+            ".bash_aliases",
+            ".aliases",
+            ".profile",
+        ] {
+            let p = hdir.join(name);
+            if !candidates.contains(&p) {
+                candidates.push(p);
+            }
+        }
+    }
+    for path in candidates {
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        use std::io::Read;
+        let mut buf = String::new();
+        if file.take(256 * 1024).read_to_string(&mut buf).is_ok()
+            && rc_content_defines_alias_or_fn(&buf, program)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn fast_tool_statuses(specs: &BTreeMap<String, String>) -> Vec<ToolStatus> {
     specs
         .iter()
-        .map(|(name, program)| ToolStatus {
-            name: name.clone(),
-            found: executable_in_path_or_fs(program),
-            version: None,
+        .filter_map(|(name, program)| {
+            let builtin_name = DETECTED_TOOLS.contains(&name.as_str()) && program == name;
+            if executable_in_path_or_fs(program)
+                || (!builtin_name && !program.contains('/') && rc_defines_alias_or_fn(program))
+            {
+                Some(ToolStatus {
+                    name: name.clone(),
+                    found: true,
+                    version: None,
+                })
+            } else if !builtin_name && !program.contains('/') {
+                // Bare custom command may be defined in a sourced shell plugin:
+                // omit from the provisional vector so pickers keep it enabled
+                // (`checked: false`) until `run_tool_probe` finishes.
+                None
+            } else {
+                Some(ToolStatus {
+                    name: name.clone(),
+                    found: false,
+                    version: None,
+                })
+            }
         })
         .collect()
 }
@@ -207,19 +317,7 @@ pub async fn probe_tools_cached(specs: BTreeMap<String, String>) -> Vec<ToolStat
             *slot = Some((std::time::Instant::now(), specs, tools.clone()));
             tools
         }
-        _ => {
-            let provisional = fast_tool_statuses(&specs);
-            if provisional
-                .iter()
-                .any(|t| t.found && t.name != "git" && t.name != "clickhouse")
-            {
-                let stale_at = std::time::Instant::now()
-                    .checked_sub(TOOLS_TTL + Duration::from_secs(1))
-                    .unwrap_or_else(std::time::Instant::now);
-                *slot = Some((stale_at, specs, provisional.clone()));
-            }
-            provisional
-        }
+        _ => fast_tool_statuses(&specs),
     }
 }
 
@@ -243,10 +341,14 @@ async fn detect_tool(name: &str, program: &str) -> ToolStatus {
     let found = executable_in_path_or_fs(program);
     // A configured command that isn't on PATH may be a shell alias/function
     // (`alias claude-work='CLAUDE_CONFIG_DIR=… claude'`); spawn runs those via
-    // the login shell (`otto_sessions::providers::shell_wrapped`), so ask that
-    // same shell before reporting it missing. Plain built-in names skip this.
+    // the login shell (`otto_sessions::providers::shell_wrapped`), so check
+    // standard rc files first (<1 ms) and fall back to that login shell before
+    // reporting it missing. Plain built-in names skip this.
     let builtin_name = DETECTED_TOOLS.contains(&name) && program == name;
-    let found = found || (!builtin_name && !program.contains('/') && shell_knows(program).await);
+    let found = found
+        || (!builtin_name
+            && !program.contains('/')
+            && (rc_defines_alias_or_fn(program) || shell_knows(program).await));
 
     let mut version = None;
     if found && DETECTED_TOOLS.contains(&name) {
@@ -278,8 +380,8 @@ async fn detect_tool(name: &str, program: &str) -> ToolStatus {
 
 /// Whether the user's interactive login shell resolves `program` (alias,
 /// function or executable). The name travels as `$1`, never spliced into the
-/// script. 5s cap: rc files can be slow, and the result is cached for
-/// [`TOOLS_TTL`].
+/// script. 15s cap: interactive rc plugins can take several seconds under
+/// post-deploy boot load, and the result is cached for [`TOOLS_TTL`].
 async fn shell_knows(program: &str) -> bool {
     let shell = std::env::var("SHELL")
         .ok()
@@ -295,7 +397,7 @@ async fn shell_knows(program: &str) -> bool {
     .stdin(std::process::Stdio::null())
     .kill_on_drop(true);
     matches!(
-        timeout(Duration::from_secs(5), cmd.output()).await,
+        timeout(Duration::from_secs(15), cmd.output()).await,
         Ok(Ok(out)) if out.status.success()
     )
 }
@@ -326,6 +428,53 @@ mod tests {
         );
         configure_provider_probe(&mut probes, "custom-agent", "/bin/sh".into());
         assert_eq!(probes["custom-agent"], "/bin/sh");
+    }
+
+    #[test]
+    fn rc_alias_and_function_definitions_are_detected_and_provisional_probe_never_disables_custom_bare_cmd(
+    ) {
+        let rc = r#"
+            # alias commented-out='claude'
+            alias claude-work='CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude'
+            alias "claude-alt"="claude --profile alt"
+            my-wrapper() {
+              claude "$@"
+            }
+            function other-wrapper {
+              codex "$@"
+            }
+        "#;
+        assert!(rc_content_defines_alias_or_fn(rc, "claude-work"));
+        assert!(rc_content_defines_alias_or_fn(rc, "claude-alt"));
+        assert!(rc_content_defines_alias_or_fn(rc, "my-wrapper"));
+        assert!(rc_content_defines_alias_or_fn(rc, "other-wrapper"));
+        assert!(!rc_content_defines_alias_or_fn(rc, "commented-out"));
+        assert!(!rc_content_defines_alias_or_fn(rc, "claude-work-extra"));
+
+        let specs = BTreeMap::from([
+            ("sh-ready".to_string(), "/bin/sh".to_string()),
+            (
+                "custom-sourced-alias".to_string(),
+                "otto-nonexistent-sourced-alias-xyz".to_string(),
+            ),
+            (
+                "missing-abs".to_string(),
+                "/nonexistent/otto-missing-bin".to_string(),
+            ),
+        ]);
+        let fast = fast_tool_statuses(&specs);
+        assert!(
+            fast.iter().any(|t| t.name == "sh-ready" && t.found),
+            "path executable reported ready"
+        );
+        assert!(
+            !fast.iter().any(|t| t.name == "custom-sourced-alias"),
+            "bare custom command omitted from provisional list instead of false-negative found:false"
+        );
+        assert!(
+            fast.iter().any(|t| t.name == "missing-abs" && !t.found),
+            "explicit path missing executable still reported false"
+        );
     }
 
     /// S8-04: 50 concurrent `/meta` probes run the tool detection ONCE per

@@ -442,4 +442,56 @@ impl TargetManager {
             }
         }
     }
+
+    /// Resolve and confine `raw_path` within an already-authorized [`ResolvedTarget`].
+    /// Existing files are canonicalized (enforcing symlink + secret-path confinement);
+    /// prospective (not-yet-saved) paths are validated via prospective canonicalization.
+    pub async fn resolve_path(
+        &self,
+        target: &ResolvedTarget,
+        raw_path: &str,
+        create_dirs: bool,
+    ) -> Result<String> {
+        match target {
+            ResolvedTarget::Local {
+                root,
+                additional_roots,
+                is_root_user,
+                ..
+            } => {
+                let root_c = root.clone();
+                let extra_c = additional_roots.clone();
+                let is_root = *is_root_user;
+                let raw_c = raw_path.to_string();
+                let existing = tokio::task::spawn_blocking(move || {
+                    resolve_local_existing_in_roots(&root_c, &extra_c, is_root, &raw_c)
+                })
+                .await
+                .map_err(|e| Error::Internal(format!("resolve_path join: {e}")))?;
+                match existing {
+                    Ok((p, _)) => Ok(p.to_string_lossy().into_owned()),
+                    Err(Error::NotFound(_)) => {
+                        let (p, _) = resolve_local_prospective_in_roots(
+                            root,
+                            additional_roots,
+                            *is_root_user,
+                            raw_path,
+                            create_dirs,
+                        )
+                        .await?;
+                        Ok(p.to_string_lossy().into_owned())
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            ResolvedTarget::Ssh {
+                root,
+                additional_roots,
+                ..
+            } => {
+                let (p, _) = resolve_remote_in_roots(root, additional_roots, raw_path)?;
+                Ok(p)
+            }
+        }
+    }
 }

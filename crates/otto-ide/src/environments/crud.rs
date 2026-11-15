@@ -10,12 +10,16 @@ use otto_core::{Error, Result};
 use otto_state::DbPool;
 
 use super::db_store::{
-    clean_opt, discover_local_dotenv_files, discover_local_python_venvs, is_valid_env_key,
+    clean_opt, discover_local_dotenv_files, discover_local_python_venvs,
+    is_dangerous_loader_env_key, is_reserved_internal_env_key, is_valid_env_key,
     load_stored_project_env, persist_project_roots, secret_key_ref, validate_attached_folder_path,
-    StoredEnvVar, RESERVED_MODULE_SDKS_KEY, RESERVED_NETBRIDGE_KEY,
+    StoredEnvVar, RESERVED_GO_BUILD_TAGS_KEY, RESERVED_MODULE_GO_BUILD_TAGS_KEY,
+    RESERVED_MODULE_SDKS_KEY, RESERVED_NETBRIDGE_KEY,
 };
 use super::discovery::discover_run_configs;
-use super::module_sdks::{layer_child_and_module_sdk_for_run, sanitize_module_sdks};
+use super::module_sdks::{
+    layer_child_and_module_sdk_for_run, sanitize_module_go_build_tags, sanitize_module_sdks,
+};
 use super::{EnvironmentManager, SecretAccess};
 use crate::netbridge::sanitize_network_bridge;
 use crate::projects::ProjectStore;
@@ -28,6 +32,7 @@ use crate::types::{
 fn redact_stored_vars(stored: &[StoredEnvVar]) -> Vec<IdeEnvVarEntry> {
     stored
         .iter()
+        .filter(|s| !is_reserved_internal_env_key(&s.key))
         .map(|s| IdeEnvVarEntry {
             key: s.key.clone(),
             value: if s.secret { None } else { s.value.clone() },
@@ -264,26 +269,90 @@ impl EnvironmentManager {
         secrets: &S,
         req: IdeUpdateEnvironmentReq,
     ) -> Result<IdeProjectEnvironment> {
+        self.update_environment_for_user(pool, secrets, req, true)
+            .await
+    }
+
+    pub async fn update_environment_for_user<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        req: IdeUpdateEnvironmentReq,
+        caller_is_root: bool,
+    ) -> Result<IdeProjectEnvironment> {
         req.target.validate()?;
         let project_key = req.target.project_key();
         let (prev_proj, prev_stored) = load_stored_project_env(pool, &project_key).await?;
+
+        if !caller_is_root {
+            for (field_name, req_val, prev_val) in [
+                (
+                    "java_home",
+                    clean_opt(&req.java_home),
+                    prev_proj.java_home.clone(),
+                ),
+                (
+                    "go_root",
+                    clean_opt(&req.go_root),
+                    prev_proj.go_root.clone(),
+                ),
+                (
+                    "rust_toolchain",
+                    clean_opt(&req.rust_toolchain),
+                    prev_proj.rust_toolchain.clone(),
+                ),
+                (
+                    "node_home",
+                    clean_opt(&req.node_home),
+                    prev_proj.node_home.clone(),
+                ),
+                (
+                    "python_interpreter",
+                    clean_opt(&req.python_interpreter),
+                    prev_proj.python_interpreter.clone(),
+                ),
+                (
+                    "extra_path",
+                    clean_opt(&req.extra_path),
+                    prev_proj.extra_path.clone(),
+                ),
+            ] {
+                if let Some(ref next_v) = req_val {
+                    if Some(next_v.as_str()) != prev_val.as_deref() {
+                        return Err(Error::Forbidden(format!(
+                            "non-root users cannot override '{field_name}'"
+                        )));
+                    }
+                }
+            }
+            if let Some(ref explicit_sdks) = req.module_sdks {
+                let sanitized = sanitize_module_sdks(explicit_sdks);
+                if !sanitized.is_empty() && sanitized != prev_proj.module_sdks {
+                    return Err(Error::Forbidden(
+                        "non-root users cannot override 'module_sdks'".into(),
+                    ));
+                }
+            }
+        }
+
         let prev_map: BTreeMap<String, StoredEnvVar> = prev_stored
             .into_iter()
             .map(|e| (e.key.clone(), e))
             .collect();
 
-        let mut next_stored = Vec::with_capacity(req.env_vars.len());
+        let mut next_stored = Vec::with_capacity(req.env_vars.len() + 4);
         let mut kept_refs = HashSet::new();
 
         for item in &req.env_vars {
             let key = item.key.trim().to_string();
-            if key.is_empty()
-                || key == RESERVED_MODULE_SDKS_KEY
-                || key == RESERVED_NETBRIDGE_KEY
-                || !is_valid_env_key(&key)
-            {
+            if key.is_empty() || is_reserved_internal_env_key(&key) || !is_valid_env_key(&key) {
                 return Err(Error::Invalid(format!(
                     "invalid environment variable name '{key}'"
+                )));
+            }
+            if !caller_is_root && is_dangerous_loader_env_key(&key) {
+                return Err(Error::Forbidden(format!(
+                    "non-root users cannot set loader environment variable '{key}'"
                 )));
             }
             if item.secret {
@@ -350,15 +419,49 @@ impl EnvironmentManager {
             None => prev_proj.additional_roots,
         };
 
-        let next_module_sdks = match &req.module_sdks {
-            Some(explicit_map) => sanitize_module_sdks(explicit_map),
-            None => prev_proj.module_sdks,
+        let next_module_sdks = if caller_is_root {
+            match &req.module_sdks {
+                Some(explicit_map) => sanitize_module_sdks(explicit_map),
+                None => prev_proj.module_sdks,
+            }
+        } else {
+            prev_proj.module_sdks
         };
         if !next_module_sdks.is_empty() {
             let encoded = serde_json::to_string(&next_module_sdks)
                 .map_err(|e| Error::Internal(format!("serialize module_sdks: {e}")))?;
             next_stored.push(StoredEnvVar {
                 key: RESERVED_MODULE_SDKS_KEY.into(),
+                value: Some(encoded),
+                secret: false,
+                secret_ref: None,
+            });
+        }
+
+        let next_go_build_tags = match &req.go_build_tags {
+            Some(raw_tags) => crate::lsp_service::validate_go_build_tags(raw_tags)?,
+            None => prev_proj.go_build_tags,
+        };
+        if !next_go_build_tags.is_empty() {
+            let encoded = serde_json::to_string(&next_go_build_tags)
+                .map_err(|e| Error::Internal(format!("serialize go_build_tags: {e}")))?;
+            next_stored.push(StoredEnvVar {
+                key: RESERVED_GO_BUILD_TAGS_KEY.into(),
+                value: Some(encoded),
+                secret: false,
+                secret_ref: None,
+            });
+        }
+
+        let next_module_go_build_tags = match &req.module_go_build_tags {
+            Some(raw_map) => sanitize_module_go_build_tags(raw_map)?,
+            None => prev_proj.module_go_build_tags,
+        };
+        if !next_module_go_build_tags.is_empty() {
+            let encoded = serde_json::to_string(&next_module_go_build_tags)
+                .map_err(|e| Error::Internal(format!("serialize module_go_build_tags: {e}")))?;
+            next_stored.push(StoredEnvVar {
+                key: RESERVED_MODULE_GO_BUILD_TAGS_KEY.into(),
                 value: Some(encoded),
                 secret: false,
                 secret_ref: None,
@@ -379,6 +482,37 @@ impl EnvironmentManager {
                 secret_ref: None,
             });
         }
+
+        let java_home_db = if caller_is_root {
+            clean_opt(&req.java_home)
+        } else {
+            prev_proj.java_home
+        };
+        let go_root_db = if caller_is_root {
+            clean_opt(&req.go_root)
+        } else {
+            prev_proj.go_root
+        };
+        let rust_toolchain_db = if caller_is_root {
+            clean_opt(&req.rust_toolchain)
+        } else {
+            prev_proj.rust_toolchain
+        };
+        let node_home_db = if caller_is_root {
+            clean_opt(&req.node_home)
+        } else {
+            prev_proj.node_home
+        };
+        let python_interpreter_db = if caller_is_root {
+            clean_opt(&req.python_interpreter)
+        } else {
+            prev_proj.python_interpreter
+        };
+        let extra_path_db = if caller_is_root {
+            clean_opt(&req.extra_path)
+        } else {
+            prev_proj.extra_path
+        };
 
         let env_vars_json = serde_json::to_string(&next_stored)
             .map_err(|e| Error::Internal(format!("serialize env_vars_json: {e}")))?;
@@ -413,13 +547,13 @@ impl EnvironmentManager {
         .bind(req.target.kind.as_str())
         .bind(&req.target.root)
         .bind(&req.target.connection_id)
-        .bind(clean_opt(&req.java_home))
-        .bind(clean_opt(&req.go_root))
-        .bind(clean_opt(&req.rust_toolchain))
-        .bind(clean_opt(&req.node_home))
-        .bind(clean_opt(&req.python_interpreter))
+        .bind(java_home_db)
+        .bind(go_root_db)
+        .bind(rust_toolchain_db)
+        .bind(node_home_db)
+        .bind(python_interpreter_db)
         .bind(clean_opt(&req.dotenv_path))
-        .bind(clean_opt(&req.extra_path))
+        .bind(extra_path_db)
         .bind(&env_vars_json)
         .bind(&roots_json)
         .bind(i32::from(inherit_shell_env))
@@ -506,9 +640,10 @@ impl EnvironmentManager {
         let project_key = target.project_key();
         let (mut proj, mut stored_vars) = load_stored_project_env(pool, &project_key).await?;
         self.record_snapshot(&project_key, &proj, &stored_vars);
-        let mut out_proj = proj.clone();
-        out_proj.env_vars = redact_stored_vars(&stored_vars);
+        let redacted_vars = redact_stored_vars(&stored_vars);
         layer_child_and_module_sdk_for_run(pool, target, cfg, &mut proj, &mut stored_vars).await;
+        let mut out_proj = proj.clone();
+        out_proj.env_vars = redacted_vars;
         let map = self
             .resolve_env_layers(
                 &proj,

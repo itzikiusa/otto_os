@@ -92,7 +92,10 @@ pub(super) async fn list_plugins<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(_user)): Extension<AuthUser>,
 ) -> ApiResult<Json<IdePluginsResp>> {
-    let (plugins, catalog) = ctx.ide().plugins.list();
+    let plugins_reg = ctx.ide().plugins.clone();
+    let (plugins, catalog) = tokio::task::spawn_blocking(move || plugins_reg.list())
+        .await
+        .map_err(|e| Error::Internal(format!("list plugins join failed: {e}")))?;
     Ok(Json(IdePluginsResp { plugins, catalog }))
 }
 
@@ -103,6 +106,7 @@ pub(super) async fn install_plugin<S: IdeCtx>(
 ) -> ApiResult<Json<IdePluginResp>> {
     super::require_root_user(&user)?;
     let plugin = ctx.ide().plugins.install(&req.source).await?;
+    crate::lsp_host::servers::invalidate_detect_cache();
     Ok(Json(IdePluginResp { plugin }))
 }
 
@@ -113,7 +117,12 @@ pub(super) async fn toggle_plugin<S: IdeCtx>(
     Json(req): Json<IdeTogglePluginReq>,
 ) -> ApiResult<Json<IdePluginResp>> {
     super::require_root_user(&user)?;
-    let plugin = ctx.ide().plugins.toggle(&slug, req.enabled)?;
+    let plugins_reg = ctx.ide().plugins.clone();
+    let enabled = req.enabled;
+    let plugin = tokio::task::spawn_blocking(move || plugins_reg.toggle(&slug, enabled))
+        .await
+        .map_err(|e| Error::Internal(format!("toggle plugin join failed: {e}")))??;
+    crate::lsp_host::servers::invalidate_detect_cache();
     Ok(Json(IdePluginResp { plugin }))
 }
 
@@ -123,7 +132,11 @@ pub(super) async fn uninstall_plugin<S: IdeCtx>(
     Path(slug): Path<String>,
 ) -> ApiResult<Json<IdeOkResp>> {
     super::require_root_user(&user)?;
-    ctx.ide().plugins.uninstall(&slug)?;
+    let plugins_reg = ctx.ide().plugins.clone();
+    tokio::task::spawn_blocking(move || plugins_reg.uninstall(&slug))
+        .await
+        .map_err(|e| Error::Internal(format!("uninstall plugin join failed: {e}")))??;
+    crate::lsp_host::servers::invalidate_detect_cache();
     Ok(Json(IdeOkResp { ok: true }))
 }
 

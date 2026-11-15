@@ -389,3 +389,57 @@ fn subscribe_run_for_user_streams_live_events_and_enforces_owner_rbac() {
     assert_eq!(ev2.status, IdeRunStatus::Passed);
     assert_eq!(ev2.exit_code, Some(0));
 }
+
+#[test]
+fn build_runner_command_merges_go_tags_and_coverage_flags() {
+    let tmp = tempfile::tempdir().unwrap();
+    let test_file = tmp.path().join("assign_component_test.go");
+    std::fs::write(
+        &test_file,
+        "//go:build component\n\npackage tests\n\nfunc TestAssign() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"name":"ui","devDependencies":{"vitest":"^1.0.0"}}"#,
+    )
+    .unwrap();
+
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    let go_cfg = IdeRunConfig {
+        id: "rc_go".into(),
+        name: "Go Test".into(),
+        runner: IdeRunnerKind::GoTest,
+        build_flags: vec!["-tags=integration".into()],
+        args: vec!["-tags=component".into(), "./...".into()],
+        target_path: Some("assign_component_test.go".into()),
+        coverage: true,
+        ..Default::default()
+    };
+    let (prog, args) = super::runner_cmd::build_runner_command(
+        &go_cfg,
+        IdeTargetKind::Local,
+        &cwd,
+        &BTreeMap::new(),
+    );
+    assert_eq!(prog, "go");
+    assert!(args.contains(&"-cover".to_string()), "args={args:?}");
+    let tag_flags: Vec<&String> = args.iter().filter(|a| a.starts_with("-tags=")).collect();
+    assert_eq!(tag_flags, vec![&"-tags=integration,component".to_string()]);
+
+    let npm_cfg = IdeRunConfig {
+        id: "rc_npm".into(),
+        name: "NPM Test".into(),
+        runner: IdeRunnerKind::Npm,
+        coverage: true,
+        ..Default::default()
+    };
+    let (npm_prog, npm_args) = super::runner_cmd::build_runner_command(
+        &npm_cfg,
+        IdeTargetKind::Local,
+        &cwd,
+        &BTreeMap::new(),
+    );
+    assert_eq!(npm_prog, "npm");
+    assert_eq!(npm_args, vec!["test", "--", "--coverage"]);
+}

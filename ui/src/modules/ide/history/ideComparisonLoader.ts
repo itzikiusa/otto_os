@@ -95,7 +95,7 @@ export async function writeCurrentAndSyncIde(
       target: { ...ide.targetPayload, root },
       path: clean,
       content: nextContent,
-      record_local_history: prefs.localHistoryEnabled,
+      local_history_enabled: prefs.localHistoryEnabled,
       local_history_retention_days: prefs.localHistoryRetentionDays,
     });
     const tab = ide.tabs.find((t) => t.path === clean);

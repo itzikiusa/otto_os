@@ -95,7 +95,7 @@ export async function attachCodeEditorLsp(opts: {
     const documentUri = absFile.includes('://') ? absFile : `file://${absFile}`;
     const mod = await opts.ensureIdeMod();
     if (!opts.isCurrent()) return;
-    if (!mod.hasWarmPooledLspClient(serverLang, resolvedRoot, opts.connId)) {
+    if (!mod.hasWarmPooledLspClient(serverLang, resolvedRoot, opts.connId, absFile)) {
       await new Promise<void>((resolve) => setTimeout(resolve, 160));
       if (!opts.isCurrent()) return;
     }

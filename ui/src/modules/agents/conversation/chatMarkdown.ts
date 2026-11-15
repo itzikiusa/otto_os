@@ -11,10 +11,11 @@
 // block and the rendering stays unit-testable in node (no DOM).
 import type { MarkedExtension, Tokens } from 'marked';
 import { renderNote, type RenderCtx } from '../../../lib/render/markdown.ts';
-import { decorateCodeBlocks } from './codeBlocks';
+import { decorateCodeBlocks } from './codeBlocks.ts';
 import { escapeHtml } from '../../../lib/html.ts';
 import { applyHtmlBlockDirections } from '../../../lib/textDirection.ts';
 import { looksLikeNonPath } from '../../../lib/pathLinks/resolve.ts';
+import { resolveEmojiShortcode } from '../../../lib/emojiShortcodes.ts';
 
 const esc = escapeHtml;
 const LOCAL_IMG_EXT = /\.(?:png|jpe?g|gif|webp|svg|avif|bmp)$/i;
@@ -128,6 +129,25 @@ export const chatMarkedExtension: MarkedExtension = {
       renderer(token) {
         const n = String((token as unknown as { n: string }).n);
         return `<a class="ref-chip issue" data-raw="${n}" title="Pull request or issue #${n}">#${n}</a>`;
+      },
+    },
+    {
+      name: 'chatEmojiShortcode',
+      level: 'inline',
+      start(src: string) {
+        const m = /(?<![/\w]):[+-]?[a-z0-9_+-]{1,32}:(?![/\w])/i.exec(src);
+        return m ? m.index : undefined;
+      },
+      tokenizer(src: string) {
+        const m = /^:([+-]?[a-z0-9_+-]{1,32}):(?![/\w])/i.exec(src);
+        if (!m) return undefined;
+        const emoji = resolveEmojiShortcode(m[1]);
+        if (!emoji) return undefined;
+        return { type: 'chatEmojiShortcode', raw: m[0], emoji, shortcode: m[1] };
+      },
+      renderer(token) {
+        const { emoji, shortcode } = token as unknown as { emoji: string; shortcode: string };
+        return `<span class="chat-emoji" title=":${esc(shortcode)}:">${emoji}</span>`;
       },
     },
   ],

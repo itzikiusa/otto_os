@@ -93,7 +93,7 @@ export interface IdeEditorCallbacks {
   onNavigateBack?: (() => void) | null;
   onNavigateForward?: (() => void) | null;
   onQuickFix?: ((ctx: { line: number; column: number; symbol?: string; clientX?: number; clientY?: number }) => void) | null;
-  onRenameSymbol?: ((ctx: { line: number; column: number; symbol: string }) => void) | null;
+  onRenameSymbol?: ((ctx: { line: number; column: number; symbol: string; newName?: string }) => void) | null;
   onFormat?: (() => void) | null;
   onToggleBlame?: (() => void) | null;
   onDiagnostics?: ((diags: IdeDiagnostic[]) => void) | null;

@@ -95,11 +95,17 @@ export function defaultAgentProvider(): string {
 export function providerSupportsModel(provider: string): boolean {
   const flags = auth.meta?.model_flags;
   if (flags && provider in flags) return flags[provider];
+  const p = provider.trim().toLowerCase();
   return (
-    provider === 'claude' ||
-    provider === 'codex' ||
-    provider === 'agy' ||
-    provider === 'opencode' ||
-    provider === 'pi'
+    p.startsWith('claude') ||
+    p.startsWith('codex') ||
+    p === 'antigravity' ||
+    p.startsWith('agy') ||
+    p.startsWith('antigravity') ||
+    p.startsWith('grok') ||
+    p.startsWith('opencode') ||
+    p === 'pi' ||
+    p.startsWith('pi-') ||
+    p.startsWith('pi_')
   );
 }

@@ -132,3 +132,50 @@ fn navigation_read_confinement_blocks_outside_workspace_and_secret_files() {
         "file outside authorized workspace roots must be blocked"
     );
 }
+
+#[test]
+fn go_sibling_package_var_resolves_first_and_ignores_unrelated_short_var_decls() {
+    let dir = tempfile::tempdir().unwrap();
+    let tests_pkg = dir.path().join("tests");
+    let other_pkg = dir.path().join("internal/providerconfig");
+    std::fs::create_dir_all(&tests_pkg).unwrap();
+    std::fs::create_dir_all(&other_pkg).unwrap();
+
+    let main_test = tests_pkg.join("main_test.go");
+    let comp_test = tests_pkg.join("assign_component_test.go");
+    let unrelated = other_pkg.join("service.go");
+
+    std::fs::write(
+        &main_test,
+        "//go:build component\npackage tests\n\nvar (\n\tclient *HttpClient\n)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &comp_test,
+        "//go:build component\npackage tests\n\nfunc TestAssign() {\n\t_ = client.Do()\n}\n",
+    )
+    .unwrap();
+    let unrelated_src = "package providerconfig\n\nfunc Load() {\n\tclient := newProviderClient()\n\t_ = client\n}\n";
+    std::fs::write(&unrelated, unrelated_src).unwrap();
+
+    let sib_hits =
+        go_mod_resolve::search_same_dir_go_siblings(&tests_pkg, &comp_test, "client", false);
+    assert_eq!(
+        sib_hits.len(),
+        1,
+        "expected sibling main_test.go var client"
+    );
+    assert!(sib_hits[0].path.ends_with("main_test.go"));
+    assert_eq!(sib_hits[0].line, 5);
+
+    let cross_pkg_hits = navigation_matchers::find_go_package_level_definitions(
+        "internal/providerconfig/service.go",
+        unrelated_src,
+        "client",
+        false,
+    );
+    assert!(
+        cross_pkg_hits.is_empty(),
+        "function-local `:=` in unrelated package must never match cross-file Go definitions: {cross_pkg_hits:?}"
+    );
+}

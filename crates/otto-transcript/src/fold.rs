@@ -36,6 +36,26 @@ pub const PAGE_BYTES_BUDGET: usize = 2 * 1024 * 1024;
 /// initial open and upward lazy-load pages stay fast on desktop and mobile.
 pub const PAGE_LINES_BUDGET: usize = 10_000;
 
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_json_len<T: serde::Serialize>(value: &T) -> Option<usize> {
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, value)
+        .ok()
+        .map(|()| counter.0)
+}
+
 fn count_str_lines(s: &str) -> usize {
     if s.is_empty() {
         0
@@ -122,7 +142,7 @@ impl Folded {
         let mut lines = 0usize;
         let mut kept = 0usize;
         for t in eligible[start..].iter().rev() {
-            bytes = bytes.saturating_add(serde_json::to_vec(&t.turn).map(|v| v.len()).unwrap_or(0));
+            bytes = bytes.saturating_add(serialized_json_len(&t.turn).unwrap_or(0));
             lines = lines.saturating_add(estimate_turn_lines(&t.turn));
             if kept > 0 && (bytes > PAGE_BYTES_BUDGET || lines > PAGE_LINES_BUDGET) {
                 break;
@@ -635,11 +655,7 @@ impl<'a> Fold<'a> {
                 let at = (r.block + 1).min(item.turn.blocks.len());
                 item.turn.blocks.insert(at, block);
             }
-            bytes = bytes.saturating_add(
-                serde_json::to_vec(&item.turn)
-                    .map(|v| v.len())
-                    .unwrap_or(usize::MAX),
-            );
+            bytes = bytes.saturating_add(serialized_json_len(&item.turn).unwrap_or(usize::MAX));
             lines = lines.saturating_add(estimate_turn_lines(&item.turn));
             if !turns.is_empty()
                 && (bytes > byte_limit || (enforce_lines && lines > PAGE_LINES_BUDGET))
@@ -684,15 +700,35 @@ impl<'a> Fold<'a> {
         limit: usize,
         subagents: Vec<SubagentMeta>,
     ) -> Transcript {
-        let window = self.window(record_count, before, limit, PAGE_BYTES_BUDGET);
-        let mut page = window.page(before, limit, subagents);
-        if let Some(first) = window.turns.first() {
-            page.has_earlier = self
-                .turns
-                .first()
-                .is_some_and(|oldest| oldest.first < first.first);
+        if self.turns.is_empty() {
+            return self
+                .clone()
+                .finish(record_count)
+                .page(before, limit, subagents);
         }
-        page
+        let window = self.window(record_count, before, limit, PAGE_BYTES_BUDGET);
+        let first_idx = window.turns.first().map(|t| t.first);
+        let has_earlier = first_idx.is_some_and(|first| {
+            self.turns
+                .first()
+                .is_some_and(|oldest| oldest.first < first)
+        });
+        let cursor = first_idx
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| before.map(|b| b.to_string()).unwrap_or_else(|| "0".into()));
+        Transcript {
+            session_id: window.session_id,
+            provider: window.provider,
+            title: window.title,
+            cwd: window.cwd,
+            model: window.model,
+            cursor,
+            has_earlier,
+            turns: window.turns.into_iter().map(|t| t.turn).collect(),
+            stats: window.stats,
+            subagents,
+            unavailable_reason: None,
+        }
     }
 
     /// A [`Folded`] view of the fold so far without consuming it (live tails
@@ -1079,5 +1115,37 @@ mod tests {
             vec!["t0", "t1"]
         );
         assert!(!older.has_earlier);
+    }
+
+    #[test]
+    fn single_pass_fold_page_matches_serialized_vec_and_finished_page() {
+        let mut f = Fold::new(Provider::Claude, FoldOpts::default());
+        for i in 0..6 {
+            let t = f.new_turn(format!("t{i}"), Role::Assistant, None, None, i * 3);
+            f.push_block(
+                t,
+                Block::Text {
+                    md: format!("hello-{i}-{}", "z".repeat(512)),
+                },
+                i * 3 + 1,
+            );
+        }
+        for ft in &f.turns {
+            assert_eq!(
+                serialized_json_len(&ft.turn),
+                Some(serde_json::to_vec(&ft.turn).unwrap().len())
+            );
+        }
+        let finished = f.clone().finish(18);
+        for (before, limit) in [(None, 3), (Some(9), 2), (Some(0), 5), (None, 20)] {
+            let direct = f.page(18, before, limit, vec![]);
+            let expected = finished.page(before, limit, vec![]);
+            assert_eq!(direct.cursor, expected.cursor);
+            assert_eq!(direct.has_earlier, expected.has_earlier);
+            assert_eq!(
+                direct.turns.iter().map(|t| &t.id).collect::<Vec<_>>(),
+                expected.turns.iter().map(|t| &t.id).collect::<Vec<_>>()
+            );
+        }
     }
 }

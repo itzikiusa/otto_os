@@ -74,7 +74,7 @@
 
   $effect(() => {
     if (sshConnections && sshConnections.length > 0) {
-      bridgeEnvCache.seedSshConns(sshConnections);
+      bridgeEnvCache.seedSshConns(sshConnections, ide.target.workspace_id);
     }
   });
 
@@ -210,6 +210,7 @@
 
   async function handleClusterChange(nextClusterId: string): Promise<void> {
     const prevClusterId = draft.k8s_cluster_id;
+    const prevNamespace = draft.k8s_namespace;
     const wasEnabled = draft.enabled;
     draft.k8s_cluster_id = nextClusterId;
     if (nextClusterId) {
@@ -222,8 +223,10 @@
       }
       if (isProdEnvironment(picked?.environment)) {
         const allowed = await setEnabledWithGuard(true);
-        if (!allowed && wasEnabled) {
+        if (!allowed) {
           draft.k8s_cluster_id = prevClusterId;
+          draft.k8s_namespace = prevNamespace;
+          draft.enabled = wasEnabled;
         }
         return;
       }
@@ -240,8 +243,9 @@
       const picked = effectiveSshConns.find((c) => c.id === nextConnId);
       if (isProdEnvironment(picked?.environment)) {
         const allowed = await setEnabledWithGuard(true);
-        if (!allowed && wasEnabled) {
+        if (!allowed) {
           draft.ssh_tunnel_connection_id = prevConnId;
+          draft.enabled = wasEnabled;
         }
         return;
       }

@@ -4,9 +4,10 @@
   // Personal Agents). Strips `<ide_context>` and file-context envelopes into
   // clickable badges so user bubbles stay clean in every surface.
   import type { Snippet } from 'svelte';
-  import type { ApprovalDecision, RuntimeRequest, TurnItem } from '../../../lib/api/types';
+  import type { ApprovalDecision, ProviderTurn, RuntimeRequest, TurnItem } from '../../../lib/api/types';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import { activatePathLink } from '../../../lib/pathLinks/open';
+  import { replaceEmojiShortcodes } from '../../../lib/emojiShortcodes';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { threadCall } from './agentRows';
   import { parseUserMessageItemWithBadges, type ParsedContextBadge } from './mentionMatcher';
@@ -76,9 +77,11 @@
   const EMPTY_APPROVALS = new Map<string, PendingApproval>();
   const EMPTY_PENDING_IDS = new Set<string>();
   const EMPTY_REQUESTS = new Map<string, RuntimeRequest>();
+  const EMPTY_TURNS = new Map<string, ProviderTurn>();
   const EMPTY_ACTIVITY: TurnItem[] = [];
 
   const turns = $derived(projection.turns);
+  const turnById = $derived(turns.length === 0 ? EMPTY_TURNS : new Map(turns.map((t) => [t.id, t] as const)));
   const outputMap = $derived(projection.output);
   const rawRequests = $derived(projection.requests);
   const rows = $derived(providedRows ?? timelineRows(projection.items, turns));
@@ -180,7 +183,7 @@
         </div>
       {/if}
       {#if parsed.prose || (parsed.badges.length === 0 && row.item.text)}
-        <div class="rt-bubble" dir="auto">{parsed.badges.length > 0 ? parsed.prose : row.item.text}</div>
+        <div class="rt-bubble" dir="auto">{replaceEmojiShortcodes(parsed.badges.length > 0 ? parsed.prose : row.item.text)}</div>
       {/if}
       {#if userClock && userIso}
         <time
@@ -199,7 +202,7 @@
     {@const assistantClock = formatMessageClock(activeIso)}
     {@const elapsedMs = !row.item.streaming && row.item.started_at && row.item.completed_at ? Date.parse(row.item.completed_at) - Date.parse(row.item.started_at) : 0}
     <div class="rt-assistant" class:streaming={row.item.streaming} dir="auto">
-      {#if mdText || !assistantFooter}<Markdown md={mdText} />{/if}
+      {#if mdText || !assistantFooter}<Markdown md={mdText} streaming={row.item.streaming} />{/if}
       {#if assistantFooter}{@render assistantFooter(row.item)}{/if}
       {#if assistantClock && activeIso}
         <time
@@ -213,7 +216,7 @@
   {:else if row.kind === 'work'}
     {@const flat = workRowEntries(row)}
     <div class="rt-work">
-      <RuntimeWorkFold id={row.id} entries={flat} fold={shouldFold(flat, turns, pendingIds)}>
+      <RuntimeWorkFold id={row.id} entries={flat} fold={shouldFold(flat, turns, pendingIds, turnById)}>
         {#each row.parts as part (part.kind === 'group' ? part.id : part.entry.item.id)}
           {#if part.kind === 'item'}
             {@render entryRow(part.entry)}

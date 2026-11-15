@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use crate::types::IdeReferenceLocation;
 
 use super::go_mod_nav::{escape_go_module_path, parse_go_mod_file, parse_go_mod_for_file};
-use super::navigation::find_definitions_in_content;
 
 /// Read the authoritative `package <name>` clause from the first non-test `.go` file in `dir`.
 #[allow(clippy::disallowed_methods)]
@@ -292,7 +291,8 @@ fn find_gomodcache_prefix_dir(cache: &Path, import_path: &str) -> Option<PathBuf
     None
 }
 
-/// Search Go `.go` files inside resolved package directories for `symbol` definitions.
+/// Search Go `.go` files inside resolved external/imported package directories
+/// for package-level `symbol` definitions (excluding `*_test.go` and function-local `:=`).
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn search_go_package_dirs(dirs: &[PathBuf], symbol: &str) -> Vec<IdeReferenceLocation> {
     let mut out = Vec::new();
@@ -325,10 +325,83 @@ pub(crate) fn search_go_package_dirs(dirs: &[PathBuf], symbol: &str) -> Vec<IdeR
                 continue;
             };
             let path_str = canon.to_string_lossy().into_owned();
-            out.extend(find_definitions_in_content(&path_str, "go", &text, symbol));
+            out.extend(
+                super::navigation_matchers::find_go_package_level_definitions(
+                    &path_str, &text, symbol, true,
+                ),
+            );
             if out.len() >= 32 {
                 return out;
             }
+        }
+    }
+    out
+}
+
+/// Search sibling `.go` files in the SAME Go package directory (`pkg_dir`) for
+/// package-level `var`, `const`, `type`, or `func` declarations.
+/// Includes sibling `*_test.go` files when `origin_file` is itself `*_test.go`.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn search_same_dir_go_siblings(
+    pkg_dir: &Path,
+    origin_file: &Path,
+    symbol: &str,
+    allow_receiver_methods: bool,
+) -> Vec<IdeReferenceLocation> {
+    let Ok(rd) = std::fs::read_dir(pkg_dir) else {
+        return Vec::new();
+    };
+    let origin_canon = origin_file
+        .canonicalize()
+        .unwrap_or_else(|_| origin_file.to_path_buf());
+    let is_test_origin = origin_file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with("_test.go"));
+
+    let mut files: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            if p.extension().and_then(|e| e.to_str()) != Some("go") {
+                return false;
+            }
+            let is_test = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("_test.go"));
+            is_test_origin || !is_test
+        })
+        .collect();
+    files.sort();
+
+    let mut out = Vec::new();
+    for file in files {
+        let Ok(canon) = file.canonicalize() else {
+            continue;
+        };
+        if canon == origin_canon {
+            continue;
+        }
+        if otto_core::secret_paths::is_denied_file(&canon)
+            || otto_core::secret_paths::is_denied_dir(&canon)
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&canon) else {
+            continue;
+        };
+        let path_str = canon.to_string_lossy().into_owned();
+        out.extend(
+            super::navigation_matchers::find_go_package_level_definitions(
+                &path_str,
+                &text,
+                symbol,
+                allow_receiver_methods,
+            ),
+        );
+        if out.len() >= 32 {
+            return out;
         }
     }
     out

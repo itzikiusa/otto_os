@@ -10,6 +10,11 @@ import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { canonicalizeLocalProjectPath } from '../shell/ideProjectHelpers';
 import {
+  mergeGoBuildTagsIntoFlags,
+  resolveRepoGoBuildTags,
+  resolveRepoRootForPath,
+} from './ideRepoTestAndBuildTags';
+import {
   collabGuestPost, defaultRunnerForLanguage, streamIdeSse, type IdeBottomTab,
   type IdeBreakpoint, type IdeCollabRoom, type IdeDebugSessionSnapshot, type IdeDetectedSdk,
   type IdeEnvVar, type IdeGutterItem, type IdeInstalledSdk, type IdeInstallJob,
@@ -266,14 +271,22 @@ export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
   finally { host.envLoading = false; }
 }
 
-export async function persistEnvironment(host: DebugAndEnvHost, patch: Partial<IdeProjectEnvironment> & { env_vars?: IdeEnvVar[] }): Promise<boolean> {
+export async function persistEnvironment(
+  host: DebugAndEnvHost,
+  patch: Partial<IdeProjectEnvironment> & { env_vars?: IdeEnvVar[]; confirm_prod_targets?: boolean },
+): Promise<boolean> {
   try {
+    const { confirm_prod_targets, ...envPatch } = patch;
     const merged: IdeProjectEnvironment = {
       inherit_shell_env: true,
       ...(host.projectEnv ?? { env_vars: [] }),
-      ...patch,
+      ...envPatch,
     };
-    const resp = await api.put<{ env: IdeProjectEnvironment }>('/ide/environments', { target: host.targetPayload, ...merged });
+    const resp = await api.put<{ env: IdeProjectEnvironment }>('/ide/environments', {
+      target: host.targetPayload,
+      ...merged,
+      ...(confirm_prod_targets ? { confirm_prod_targets: true } : {}),
+    });
     host.projectEnv = resp.env;
     toasts.success('Saved project environment');
     return true;
@@ -333,21 +346,38 @@ function resolveModuleSdkOverride(host: DebugAndEnvHost, candidatePath?: string 
 
 export async function launchIdeRun(
   host: DebugAndEnvHost,
-  opts: { configId?: string; adhoc?: Partial<IdeRunConfig>; keepTestcontainers?: boolean },
+  opts: {
+    configId?: string;
+    adhoc?: Partial<IdeRunConfig>;
+    keepTestcontainers?: boolean;
+    coverage?: boolean;
+    confirmProdTargets?: boolean;
+  },
   prevPoller: Poller | null,
   prevSseCtl: AbortController | null = null,
 ): Promise<{ poller: Poller | null; sseCtl: AbortController | null }> {
   if (!host.target.root) return { poller: prevPoller, sseCtl: prevSseCtl };
   const keepTc = Boolean(opts.keepTestcontainers || host.keepTestcontainersAlive);
+  const wantCoverage = Boolean(opts.coverage || opts.adhoc?.coverage);
   const rawId = opts.configId ?? (opts.adhoc ? undefined : host.selectedConfigId ?? undefined);
   const selectedCfg = rawId ? host.runConfigs.find((c) => c.id === rawId) : undefined;
   const isClientAuto = Boolean(rawId?.startsWith('auto:') || selectedCfg?.auto_detected);
-  const cfgId = isClientAuto || keepTc ? undefined : rawId;
-  const rawAdhoc = opts.adhoc ?? ((isClientAuto || keepTc) && selectedCfg ? selectedCfg : (!cfgId && host.activeTab ? {
+  const cfgId = isClientAuto || keepTc || wantCoverage ? undefined : rawId;
+  const rawAdhoc = opts.adhoc ?? ((isClientAuto || keepTc || wantCoverage) && selectedCfg ? selectedCfg : (!cfgId && host.activeTab ? {
     id: 'adhoc', name: `Run ${host.activeTab.name}`, runner: defaultRunnerForLanguage(host.activeTab.language),
     args: [], env_overrides: {}, inherit_shell_env: host.projectEnv?.inherit_shell_env ?? true, target_path: host.activeTab.path,
   } : undefined));
-  const modSdk = resolveModuleSdkOverride(host, rawAdhoc?.target_path || rawAdhoc?.cwd || host.activePath);
+  const candidatePath = rawAdhoc?.target_path || rawAdhoc?.cwd || selectedCfg?.cwd || host.activePath;
+  const modSdk = resolveModuleSdkOverride(host, candidatePath);
+  const effectiveRunner = rawAdhoc?.runner ?? selectedCfg?.runner ?? '';
+  const repoInfo = resolveRepoRootForPath(host.target.root, host.projectRoots, candidatePath);
+  const openSourceForGo =
+    effectiveRunner.startsWith('go_') && host.activeTab && (rawAdhoc?.target_path === host.activeTab.path || (!rawAdhoc?.target_path && !selectedCfg))
+      ? host.activeTab.content
+      : null;
+  const goTags = effectiveRunner.startsWith('go_')
+    ? resolveRepoGoBuildTags(host.projectEnv, host.target.root, repoInfo.path, openSourceForGo)
+    : [];
   const springEnv: Record<string, string> = host.activeSpringProfiles.length > 0
     ? { SPRING_PROFILES_ACTIVE: host.activeSpringProfiles.join(',') }
     : {};
@@ -355,6 +385,8 @@ export async function launchIdeRun(
   const adhoc = rawAdhoc
     ? {
         ...rawAdhoc,
+        build_flags: goTags.length > 0 ? mergeGoBuildTagsIntoFlags(rawAdhoc.build_flags, goTags) : rawAdhoc.build_flags,
+        coverage: wantCoverage || rawAdhoc.coverage,
         sdk_path: rawAdhoc.sdk_path ?? modSdk ?? null,
         env_overrides: { ...springEnv, ...tcEnv, ...(rawAdhoc.env_overrides ?? {}) },
       }
@@ -370,6 +402,8 @@ export async function launchIdeRun(
       spring_profiles: host.activeSpringProfiles,
       skip_tests: host.buildSkipTests,
       offline: host.buildOffline,
+      coverage: wantCoverage || undefined,
+      ...(opts.confirmProdTargets ? { confirm_prod_targets: true } : {}),
     });
     host.activeRun = resp.run;
     prevPoller?.stop();
@@ -429,17 +463,24 @@ export function launchGutterAction(
   item: IdeGutterItem,
   mode: 'run' | 'debug' | 'run_keep_tc',
   onRun: (adhoc: Partial<IdeRunConfig>, keepTestcontainers?: boolean) => void,
-  onDebug: (opts: { language: string; launch: { program: string; args: string[]; cwd: string; test_name?: string } }) => void,
+  onDebug: (opts: { language: string; launch: { program: string; args: string[]; build_flags?: string[]; cwd: string; test_name?: string } }) => void,
 ): void {
   const spec = item.run_spec ?? {};
   const filePath = spec.target_path || spec.program || host.activePath || '';
+  const lang = spec.language || item.language || host.activeTab?.language || 'go';
+  const repoInfo = resolveRepoRootForPath(host.target.root, host.projectRoots, filePath || spec.cwd);
+  const openDoc = host.activeTab && (!filePath || host.activeTab.path === filePath) ? host.activeTab.content : null;
+  const goFlags = lang === 'go'
+    ? mergeGoBuildTagsIntoFlags([], resolveRepoGoBuildTags(host.projectEnv, host.target.root, repoInfo.path, openDoc))
+    : [];
   if (mode === 'debug') {
     onDebug({
-      language: spec.language || item.language || host.activeTab?.language || 'go',
+      language: lang,
       launch: {
         program: spec.debug_program || filePath,
         args: spec.args ?? [],
-        cwd: spec.cwd || host.target.root,
+        ...(goFlags.length > 0 ? { build_flags: goFlags } : {}),
+        cwd: spec.cwd || repoInfo.path || host.target.root,
         test_name: spec.debug_test_name || spec.test_name || spec.test_filter || (item.kind === 'test' ? item.label : undefined),
       },
     });
@@ -449,7 +490,9 @@ export function launchGutterAction(
   onRun(
     {
       id: `gutter-${item.line}`, name: item.label, runner: spec.runner || defaultRunnerForLanguage(item.language),
-      command: spec.command ?? null, args: spec.args ?? [], cwd: spec.cwd ?? null,
+      command: spec.command ?? null, args: spec.args ?? [],
+      ...(goFlags.length > 0 ? { build_flags: goFlags } : {}),
+      cwd: spec.cwd ?? repoInfo.path ?? null,
       env_overrides: keepTc ? { TESTCONTAINERS_RYUK_DISABLED: 'true' } : {},
       inherit_shell_env: host.projectEnv?.inherit_shell_env ?? true,
       target_path: filePath || null, test_filter: spec.test_filter || spec.test_name || null,
@@ -460,7 +503,12 @@ export function launchGutterAction(
 
 export async function launchDebugSession(
   host: DebugAndEnvHost,
-  opts: { configId?: string; language?: string; launch?: { program: string; args?: string[]; build_flags?: string[]; cwd?: string; test_name?: string; attach_port?: number; env?: Record<string, string>; env_file?: string | null; inherit_shell_env?: boolean; sdk_path?: string | null } },
+  opts: {
+    configId?: string;
+    language?: string;
+    confirmProdTargets?: boolean;
+    launch?: { program: string; args?: string[]; build_flags?: string[]; cwd?: string; test_name?: string; attach_port?: number; env?: Record<string, string>; env_file?: string | null; inherit_shell_env?: boolean; sdk_path?: string | null };
+  },
   prevCtl: AbortController | null,
   onSnapshot: (snap: IdeDebugSessionSnapshot) => void,
 ): Promise<AbortController | null> {
@@ -475,6 +523,11 @@ export async function launchDebugSession(
   host.openBottomTab('debug');
   try {
     const modSdk = resolveModuleSdkOverride(host, program);
+    const repoInfo = resolveRepoRootForPath(host.target.root, host.projectRoots, opts.launch?.cwd || program);
+    const openDocForGo = language === 'go' && host.activeTab && host.activeTab.path === program ? host.activeTab.content : null;
+    const goTags = language === 'go'
+      ? resolveRepoGoBuildTags(host.projectEnv, host.target.root, repoInfo.path, openDocForGo)
+      : [];
     const springEnv: Record<string, string> = host.activeSpringProfiles.length > 0
       ? { SPRING_PROFILES_ACTIVE: host.activeSpringProfiles.join(',') }
       : {};
@@ -483,13 +536,16 @@ export async function launchDebugSession(
       program,
       args: cfg?.args ?? [],
       build_flags: cfg?.build_flags ?? [],
-      cwd: cfg?.cwd || host.target.root,
+      cwd: cfg?.cwd || repoInfo.path || host.target.root,
       test_name: cfg?.test_filter || undefined,
       env: cfg?.env_overrides ?? {},
       env_file: cfg?.env_file ?? null,
       inherit_shell_env: cfg?.inherit_shell_env ?? host.projectEnv?.inherit_shell_env ?? true,
       sdk_path: cfg?.sdk_path ?? modSdk ?? null,
     };
+    const mergedBuildFlags = goTags.length > 0
+      ? mergeGoBuildTagsIntoFlags(baseLaunch.build_flags, goTags)
+      : baseLaunch.build_flags;
     const resp = await api.post<{ session: IdeDebugSessionSnapshot }>('/ide/debug/sessions', {
       target: host.targetPayload,
       project_folders: host.projectRoots.map((r) => r.path),
@@ -497,6 +553,7 @@ export async function launchDebugSession(
       config_id: persistedConfigId,
       launch: {
         ...baseLaunch,
+        ...(mergedBuildFlags && mergedBuildFlags.length > 0 ? { build_flags: mergedBuildFlags } : {}),
         sdk_path: baseLaunch.sdk_path ?? modSdk ?? null,
         env: { ...springEnv, ...tcEnv, ...(baseLaunch.env ?? {}) },
       },
@@ -505,6 +562,7 @@ export async function launchDebugSession(
       skip_tests: host.buildSkipTests,
       offline: host.buildOffline,
       breakpoints: host.effectiveBreakpoints,
+      ...(opts.confirmProdTargets ? { confirm_prod_targets: true } : {}),
     });
     host.expandedVariables = {};
     onSnapshot(resp.session);

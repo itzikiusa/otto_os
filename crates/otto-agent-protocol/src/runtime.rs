@@ -167,6 +167,9 @@ pub(crate) struct Projection {
     thread: Option<ProviderThread>,
     turns: HashMap<Id, ProviderTurn>,
     items: HashMap<Id, TurnItem>,
+    /// O(1) index of item IDs currently in `is_streaming()` state for fast
+    /// holder checkpoints without scanning all `M` historical items.
+    pub(super) streaming_ids: std::collections::HashSet<Id>,
     requests: HashMap<Id, RuntimeRequest>,
     /// request id → its `approval_request` item id.
     request_items: HashMap<Id, Id>,
@@ -178,6 +181,15 @@ pub(crate) struct Projection {
 }
 
 impl Projection {
+    pub(super) fn upsert_item_entry(&mut self, item: TurnItem) {
+        if item.is_streaming() {
+            self.streaming_ids.insert(item.id.clone());
+        } else {
+            self.streaming_ids.remove(&item.id);
+        }
+        self.items.insert(item.id.clone(), item);
+    }
+
     fn load_raw(rows: Vec<RawRuntimeEntityRow>) -> Self {
         let mut p = Projection::default();
         for r in rows {
@@ -198,7 +210,7 @@ impl Projection {
                         if let TurnItemKind::ApprovalRequest { request_id, .. } = &i.kind {
                             p.request_items.insert(request_id.clone(), i.id.clone());
                         }
-                        p.items.insert(i.id.clone(), i);
+                        p.upsert_item_entry(i);
                     }
                 }
                 K_REQUEST => {
@@ -282,7 +294,7 @@ impl Projection {
                     self.request_items
                         .insert(request_id.clone(), turn_item.id.clone());
                 }
-                self.items.insert(turn_item.id.clone(), turn_item.clone());
+                self.upsert_item_entry(turn_item.clone());
                 // Streaming text is written once it settles (T3 Code persists
                 // every update; the settled item carries the whole text).
                 (!turn_item.is_streaming()).then(|| row(K_ITEM, &turn_item.id, json(turn_item)))
@@ -324,6 +336,10 @@ pub(super) enum ProcTransport {
         client: crate::holder::HolderClient,
         acked_seq: u64,
         claude_login: Option<Option<PathBuf>>,
+        last_checkpoint_at: Option<Instant>,
+        checkpoint_dirty: bool,
+        #[cfg(test)]
+        checkpoint_writes: usize,
     },
 }
 
@@ -418,6 +434,8 @@ pub(super) struct Live {
     state: Mutex<State>,
     /// External turn/request changes can arm a deadline while the child is silent.
     deadline_changed: tokio::sync::Notify,
+    /// Wakes `descendants::watch` immediately when `st.proc` ends or detaches.
+    pub(super) proc_ended: tokio::sync::Notify,
     persist: mpsc::UnboundedSender<PersistOp>,
     /// Set during `shutdown_for_restart` so `descendants::watch` does not kill
     /// Claude background processes when `st.proc` is detached.
@@ -430,7 +448,7 @@ impl Live {
     }
 }
 
-struct Inner {
+pub(super) struct Inner {
     /// This runtime, for work a sync path hands off (draining the queue).
     me: Weak<Inner>,
     repo: AgentRuntimeRepo,
@@ -628,6 +646,7 @@ impl AgentRuntime {
         let mut held_shutdowns = Vec::new();
         for live in &lives {
             if let Some(p) = live.lock().proc.take() {
+                live.proc_ended.notify_waiters();
                 match p.transport {
                     ProcTransport::Direct { stdin } => {
                         drop(stdin);
@@ -696,6 +715,9 @@ impl AgentRuntime {
             .model
             .map(|m| m.trim().to_string())
             .filter(|m| !m.is_empty());
+        if let Some(m) = &model {
+            crate::http::drafts::validate_model_name(m)?;
+        }
         let rec = self
             .inner
             .repo
@@ -1107,6 +1129,7 @@ impl AgentRuntime {
                 spawn_lock: tokio::sync::Mutex::new(()),
                 drain_lock: tokio::sync::Mutex::new(()),
                 deadline_changed: tokio::sync::Notify::new(),
+                proc_ended: tokio::sync::Notify::new(),
                 state: Mutex::new(State {
                     session: rec.session,
                     next_seq,
@@ -1262,16 +1285,23 @@ impl AgentRuntime {
                 ProviderSessionStatus::Starting,
                 None,
             );
-            apply_step(&self.inner, live, &mut st, step);
+            apply_step_opts(&self.inner, live, &mut st, step, true, true);
             (epoch, frx)
         };
         if claude_login.is_some() {
             // Claude Code moves some jobs out of its group (see the module).
-            descendants::watch(Arc::clone(live), epoch, cli_pid);
+            descendants::watch(
+                Arc::clone(&self.inner),
+                Arc::clone(live),
+                session.id.clone(),
+                epoch,
+                cli_pid,
+            );
         }
         tokio::spawn(pump(
             Arc::clone(&self.inner),
             Arc::clone(live),
+            session.id.clone(),
             epoch,
             child.messages,
             claude_login,
@@ -1305,6 +1335,14 @@ impl AgentRuntime {
         live: &Arc<Live>,
         req: &RuntimePromptReq,
     ) -> Result<RuntimePromptResp> {
+        if let Some(m) = req
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            crate::http::drafts::validate_model_name(m)?;
+        }
         if req.text.trim().is_empty() && req.images.is_empty() && req.files.is_empty() {
             return Err(Error::Invalid("prompt text is empty".into()));
         }
@@ -1319,6 +1357,15 @@ impl AgentRuntime {
                 "'{}' ({}) is not supported; only PDF files can be attached",
                 bad.name, bad.mime
             )));
+        }
+        for img in &req.images {
+            crate::http::drafts::validate_attachment_bytes(&img.mime, &img.data_base64)?;
+        }
+        for file in &req.files {
+            if file.name.len() > 1024 {
+                return Err(Error::Invalid("attachment filename is too long".into()));
+            }
+            crate::http::drafts::validate_attachment_bytes(&file.mime, &file.data_base64)?;
         }
         if req.fresh_context {
             return self.prompt_fresh(id, live, req).await;
@@ -1393,6 +1440,7 @@ impl AgentRuntime {
                 )
             };
             if let Some(p) = stale {
+                live.proc_ended.notify_waiters();
                 stop_child(p, self.inner.config.interrupt_grace);
             }
             if let Some(m) = &model {
@@ -1489,7 +1537,7 @@ impl AgentRuntime {
             None,
         );
         st.session.last_active_at = now;
-        apply_step(&self.inner, live, &mut st, step);
+        apply_step_opts(&self.inner, live, &mut st, step, true, true);
         let stop = std::mem::take(&mut st.stop_requested);
         drop(st);
         if stop {
@@ -1558,17 +1606,26 @@ impl AgentRuntime {
         })
     }
 
-    /// Drop a queued message (`false` when it is not queued any more).
-    pub async fn unqueue(&self, id: &Id, queued_id: &str) -> Result<bool> {
+    /// Drop a queued message and return its original prompt payload (`None`
+    /// when it is not queued any more).
+    pub async fn unqueue_prompt(
+        &self,
+        id: &Id,
+        queued_id: &str,
+    ) -> Result<Option<RuntimePromptReq>> {
         let live = self.live(id).await?;
         let mut st = live.lock();
-        let before = st.proj.queue.len();
-        st.proj.queue.retain(|q| q.id != queued_id);
-        if st.proj.queue.len() == before {
-            return Ok(false);
-        }
+        let Some(idx) = st.proj.queue.iter().position(|q| q.id == queued_id) else {
+            return Ok(None);
+        };
+        let rec = st.proj.queue.remove(idx);
         emit_queue(&self.inner, &live, &mut st);
-        Ok(true)
+        Ok(Some(rec.req))
+    }
+
+    /// Drop a queued message (`false` when it is not queued any more).
+    pub async fn unqueue(&self, id: &Id, queued_id: &str) -> Result<bool> {
+        Ok(self.unqueue_prompt(id, queued_id).await?.is_some())
     }
 
     /// Deliver a queued message now: steer it into the running turn, or
@@ -1705,14 +1762,18 @@ impl AgentRuntime {
 
     /// A stored attachment of `id`: its mime type and bytes.
     pub async fn attachment(&self, id: &Id, attachment_id: &str) -> Result<(String, Vec<u8>)> {
-        let live = self.live(id).await?;
-        let mime = live.lock().proj.items.values().find_map(|i| match &i.kind {
-            TurnItemKind::UserMessage { attachments, .. } => attachments
-                .iter()
-                .find(|a| a.id == attachment_id)
-                .map(|a| a.mime.clone()),
-            _ => None,
-        });
+        let mime = {
+            let live = self.live(id).await?;
+            let found = live.lock().proj.items.values().find_map(|i| match &i.kind {
+                TurnItemKind::UserMessage { attachments, .. } => attachments
+                    .iter()
+                    .find(|a| a.id == attachment_id)
+                    .map(|a| a.mime.clone()),
+                _ => None,
+            });
+            found
+        };
+        try_evict_dead(&self.inner, id);
         let mime = mime.ok_or_else(|| Error::NotFound("no such attachment".into()))?;
         let bytes = tokio::fs::read(self.attachments(id).join(attachment_id))
             .await
@@ -1779,7 +1840,7 @@ impl AgentRuntime {
             let next = settled_status(&st);
             set_session_status(&self.inner, &live, &mut st, next, None);
         }
-        apply_step(&self.inner, &live, &mut st, step);
+        apply_step_opts(&self.inner, &live, &mut st, step, true, true);
         Ok(())
     }
 
@@ -1829,7 +1890,7 @@ impl AgentRuntime {
             let next = settled_status(&st);
             set_session_status(&self.inner, &live, &mut st, next, None);
         }
-        apply_step(&self.inner, &live, &mut st, step);
+        apply_step_opts(&self.inner, &live, &mut st, step, true, true);
         Ok(())
     }
 
@@ -1873,17 +1934,21 @@ impl AgentRuntime {
             let next = settled_status(&st);
             set_session_status(&self.inner, &live, &mut st, next, None);
         }
-        apply_step(&self.inner, &live, &mut st, step);
+        apply_step_opts(&self.inner, &live, &mut st, step, true, true);
         Ok(())
     }
 
     /// Close the session: end any turn as interrupted, stop the child, refuse
     /// further prompts. Idempotent.
     pub async fn close(&self, id: &Id) -> Result<RuntimeSession> {
-        let live = self.live(id).await?;
-        let _prompt = live.prompt_lock.lock().await;
-        let mut st = live.lock();
-        Ok(close_locked(&self.inner, &live, &mut st))
+        let s = {
+            let live = self.live(id).await?;
+            let _prompt = live.prompt_lock.lock().await;
+            let mut st = live.lock();
+            close_locked(&self.inner, &live, &mut st)
+        };
+        evict_if_dead_after_flush(&self.inner, id).await;
+        Ok(s)
     }
 
     /// Revive a closed or dormant session: it takes prompts again and its agent is
@@ -1975,7 +2040,7 @@ impl AgentRuntime {
 
     /// Fetch a single full (uncompacted) `TurnItem` by ID for lazy row expansion.
     pub async fn get_item(&self, id: &Id, item_id: &Id) -> Result<TurnItem> {
-        otto_telemetry::context::measure_result("threads.get_item", async {
+        let res = otto_telemetry::context::measure_result("threads.get_item", async {
             let live = self.live(id).await?;
             let mut st = live.lock();
             flush_held(&self.inner, &live, &mut st);
@@ -1985,7 +2050,9 @@ impl AgentRuntime {
                 .cloned()
                 .ok_or_else(|| Error::NotFound(format!("turn item '{item_id}' not found")))
         })
-        .await
+        .await;
+        try_evict_dead(&self.inner, id);
+        res
     }
 
     /// Spawn the agent if it is not running, resuming the provider's own
@@ -2101,46 +2168,52 @@ impl AgentRuntime {
     /// The events after `after_sequence`, or a snapshot when the ring no
     /// longer holds them or they exceed T3 Code's replay limits.
     pub async fn replay(&self, id: &Id, after_sequence: u64) -> Result<RuntimeReplay> {
-        let live = self.live(id).await?;
-        otto_telemetry::context::measure("threads.sideband_poll", async {
-            for _ in 0..4 {
-                if !poll_driver_sideband(&self.inner, &live, None).await {
-                    break;
+        let out = {
+            let live = self.live(id).await?;
+            otto_telemetry::context::measure("threads.sideband_poll", async {
+                let _ = poll_driver_sideband(&self.inner, &live, None).await;
+            })
+            .await;
+            let fast = {
+                let mut st = live.lock();
+                flush_held(&self.inner, &live, &mut st);
+                let last_sequence = st.next_seq - 1;
+                if after_sequence >= last_sequence {
+                    Ok(Some(RuntimeReplay::Events {
+                        events: Vec::new(),
+                        last_sequence,
+                    }))
+                } else if let Some(events) =
+                    st.ring
+                        .replayable(after_sequence, MAX_REPLAY_EVENTS, MAX_REPLAY_BYTES)
+                {
+                    Ok(Some(RuntimeReplay::Events {
+                        events,
+                        last_sequence,
+                    }))
+                } else {
+                    Err(last_sequence)
+                }
+            };
+            match fast {
+                Ok(Some(r)) => r,
+                Ok(None) => unreachable!(),
+                Err(last_sequence) => {
+                    let snapshot =
+                        otto_telemetry::context::measure("threads.snapshot_slice", async {
+                            let st = live.lock();
+                            Box::new(st.proj.snapshot())
+                        })
+                        .await;
+                    RuntimeReplay::Snapshot {
+                        snapshot_sequence: last_sequence,
+                        snapshot,
+                    }
                 }
             }
-        })
-        .await;
-        let (last_sequence, snap) = {
-            let mut st = live.lock();
-            flush_held(&self.inner, &live, &mut st);
-            let last_sequence = st.next_seq - 1;
-            if after_sequence >= last_sequence {
-                return Ok(RuntimeReplay::Events {
-                    events: Vec::new(),
-                    last_sequence,
-                });
-            }
-            if let Some(events) =
-                st.ring
-                    .replayable(after_sequence, MAX_REPLAY_EVENTS, MAX_REPLAY_BYTES)
-            {
-                return Ok(RuntimeReplay::Events {
-                    events,
-                    last_sequence,
-                });
-            }
-            (last_sequence, None::<RuntimeSnapshot>)
         };
-        let _ = snap;
-        let snapshot = otto_telemetry::context::measure("threads.snapshot_slice", async {
-            let st = live.lock();
-            Box::new(st.proj.snapshot())
-        })
-        .await;
-        Ok(RuntimeReplay::Snapshot {
-            snapshot_sequence: last_sequence,
-            snapshot,
-        })
+        try_evict_dead(&self.inner, id);
+        Ok(out)
     }
 
     /// Wait until every queued DB write of `id` landed (tests, shutdown).
@@ -2213,6 +2286,7 @@ fn close_locked(inner: &Arc<Inner>, live: &Arc<Live>, st: &mut State) -> Runtime
         Some("the session was closed".into()),
     );
     if let Some(p) = st.proc.take() {
+        live.proc_ended.notify_waiters();
         stop_child(p, inner.config.close_grace);
     }
     settle_background(inner, live, st, TurnItemStatus::Interrupted);
@@ -2256,7 +2330,7 @@ fn interrupt_turn(inner: &Arc<Inner>, live: &Arc<Live>) -> bool {
     };
     let step = proc.driver.interrupt();
     let (epoch, pid) = (proc.epoch, proc.pid);
-    apply_step(inner, live, &mut st, step);
+    apply_step_opts(inner, live, &mut st, step, true, true);
     drop(st);
     let grace = inner.config.interrupt_grace;
     let live = Arc::clone(live);
@@ -2321,7 +2395,7 @@ fn steer_turn(
     upsert_item(inner, live, &mut st, user);
     let sequence = st.session.last_sequence;
     st.session.last_active_at = Utc::now();
-    apply_step(inner, live, &mut st, step);
+    apply_step_opts(inner, live, &mut st, step, true, true);
     Some(RuntimePromptResp {
         turn_id,
         sequence,
@@ -2910,8 +2984,36 @@ fn finish_turn(
     }
 }
 
+fn step_forces_checkpoint(step: &DriverStep) -> bool {
+    step.signal.is_some()
+        || step.events.iter().any(|ev| {
+            matches!(
+                ev,
+                DriverEvent::Ready { .. }
+                    | DriverEvent::TurnStarted { .. }
+                    | DriverEvent::Request { .. }
+                    | DriverEvent::Question { .. }
+                    | DriverEvent::RequestClosed { .. }
+                    | DriverEvent::Terminal { .. }
+                    | DriverEvent::Fatal(_)
+            )
+        })
+}
+
 /// Apply a driver step: events, then stdin writes, then the signal.
 fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
+    apply_step_opts(inner, live, st, step, false, true);
+}
+
+pub(super) fn apply_step_opts(
+    inner: &Inner,
+    live: &Live,
+    st: &mut State,
+    step: DriverStep,
+    force_checkpoint: bool,
+    sync_checkpoint: bool,
+) {
+    let force = force_checkpoint || step_forces_checkpoint(&step);
     for ev in step.events {
         match ev {
             DriverEvent::Ready {
@@ -3157,6 +3259,7 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     );
                 }
                 if let Some(p) = st.proc.take() {
+                    live.proc_ended.notify_waiters();
                     stop_child(p, inner.config.close_grace);
                 }
                 set_session_status(
@@ -3187,7 +3290,9 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
             p.interrupt_process_group();
         }
     }
-    held_proc::sync_holder_checkpoint(st);
+    if sync_checkpoint {
+        held_proc::sync_holder_checkpoint(st, force);
+    }
 }
 
 /// Poll the driver's off-lock sideband session log (`agy`, `grok`, `gemini`,
@@ -3223,15 +3328,102 @@ async fn poll_driver_sideband(inner: &Inner, live: &Live, expected_epoch: Option
     if !step.events.is_empty() || !step.writes.is_empty() || step.signal.is_some() {
         apply_step(inner, live, &mut st, step);
     } else {
-        held_proc::sync_holder_checkpoint(&st);
+        held_proc::sync_holder_checkpoint(&mut st, false);
     }
     has_more
+}
+
+pub(super) fn record_claude_stdout_line(claude_login: &Option<Option<PathBuf>>, line: &str) {
+    if let Some(dir) = claude_login {
+        otto_usage::limits::record_claude_line(dir.as_deref(), line, Utc::now());
+    }
+}
+
+pub(super) fn dispatch_child_stdout(
+    inner: &Inner,
+    live: &Live,
+    st: &mut State,
+    line_or_overlong: std::result::Result<&str, usize>,
+    sync_checkpoint: bool,
+) {
+    let step = match line_or_overlong {
+        Ok(line) => st
+            .proc
+            .as_mut()
+            .expect("checked by caller")
+            .driver
+            .on_line(line),
+        Err(n) => DriverStep {
+            events: vec![DriverEvent::Error(ProviderFailure {
+                class: "protocol_error".into(),
+                message: format!("dropped an agent output line of {n} bytes"),
+                code: None,
+                retryable: None,
+            })],
+            ..DriverStep::default()
+        },
+    };
+    apply_step_opts(inner, live, st, step, false, sync_checkpoint);
+}
+
+pub(super) fn is_evictable_dead(st: &State) -> bool {
+    if st.proc.is_some()
+        || st.turn.is_some()
+        || st.starting > 0
+        || !st.held.is_empty()
+        || has_pending(st)
+    {
+        return false;
+    }
+    if st.session.status == RuntimeSessionStatus::Closed {
+        return true;
+    }
+    st.proj.queue.is_empty()
+        && st.proj.session.as_ref().is_some_and(|p| {
+            p.status == ProviderSessionStatus::Error
+                || (p.status == ProviderSessionStatus::Stopped && p.last_error.is_some())
+        })
+}
+
+pub(super) fn try_evict_dead(inner: &Inner, id: &Id) {
+    inner.live.remove_if(id, |_, l| {
+        Arc::strong_count(l) == 1 && is_evictable_dead(&l.lock())
+    });
+}
+
+pub(super) async fn evict_if_dead_after_flush(inner: &Arc<Inner>, id: &Id) {
+    let maybe_persist = inner.live.get(id).and_then(|entry| {
+        let l = entry.value();
+        is_evictable_dead(&l.lock()).then(|| l.persist.clone())
+    });
+    let Some(persist) = maybe_persist else {
+        return;
+    };
+    let (tx, rx) = oneshot::channel();
+    if persist.send(PersistOp::Flush(tx)).is_ok() {
+        let _ = rx.await;
+    }
+    drop(persist);
+    try_evict_dead(inner, id);
 }
 
 /// Feed one child's messages to its driver until it exits.
 async fn pump(
     inner: Arc<Inner>,
     live: Arc<Live>,
+    sid: Id,
+    epoch: u64,
+    rx: mpsc::Receiver<ChildMsg>,
+    claude_login: Option<Option<PathBuf>>,
+) {
+    pump_inner(&inner, &live, epoch, rx, claude_login).await;
+    drop(live);
+    evict_if_dead_after_flush(&inner, &sid).await;
+}
+
+async fn pump_inner(
+    inner: &Arc<Inner>,
+    live: &Arc<Live>,
     epoch: u64,
     mut rx: mpsc::Receiver<ChildMsg>,
     claude_login: Option<Option<PathBuf>>,
@@ -3256,7 +3448,11 @@ async fn pump(
                 .map(|s| s.interval);
             match sideband_iv {
                 Some(iv) => {
-                    next_sideband.get_or_insert_with(|| Instant::now() + iv);
+                    let target = Instant::now() + iv;
+                    next_sideband = Some(match next_sideband {
+                        Some(prev) => prev.min(target),
+                        None => target,
+                    });
                 }
                 None => {
                     next_sideband = None;
@@ -3288,7 +3484,7 @@ async fn pump(
                 if need_poll {
                     next_sideband = None;
                     for _ in 0..8 {
-                        if !poll_driver_sideband(&inner, &live, Some(epoch)).await {
+                        if !poll_driver_sideband(inner, live, Some(epoch)).await {
                             break;
                         }
                     }
@@ -3297,13 +3493,13 @@ async fn pump(
                 if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
                     return; // closed or superseded
                 }
-                flush_held(&inner, &live, &mut st);
+                flush_held(inner, live, &mut st);
                 let settled = idle_settle_deadline(&st, &inner.config)
                     .is_some_and(|at| at <= Instant::now());
                 if settled {
                     if let Some(proc) = st.proc.as_mut() {
                         let step = proc.driver.on_idle_settle();
-                        apply_step(&inner, &live, &mut st, step);
+                        apply_step(inner, live, &mut st, step);
                     }
                     continue;
                 }
@@ -3315,7 +3511,7 @@ async fn pump(
                         t.stalled = true;
                     }
                     drop(st);
-                    interrupt_turn(&inner, &live);
+                    interrupt_turn(inner, live);
                 }
                 continue;
             }
@@ -3323,8 +3519,8 @@ async fn pump(
         let Some(msg) = msg else { break };
         // Claude's plan limits ride `rate_limit_event` frames: recorded
         // passively, outside the session lock (a substring test skips the rest).
-        if let (Some(dir), ChildMsg::Line(line)) = (&claude_login, &msg) {
-            otto_usage::limits::record_claude_line(dir.as_deref(), line, Utc::now());
+        if let ChildMsg::Line(line) = &msg {
+            record_claude_stdout_line(&claude_login, line);
         }
         let mut st = live.lock();
         if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
@@ -3332,29 +3528,14 @@ async fn pump(
         }
         match msg {
             ChildMsg::Line(line) => {
-                let step = st
-                    .proc
-                    .as_mut()
-                    .expect("checked above")
-                    .driver
-                    .on_line(&line);
-                apply_step(&inner, &live, &mut st, step);
+                dispatch_child_stdout(inner, live, &mut st, Ok(line.as_str()), true);
             }
             ChildMsg::Overlong(n) => {
-                let step = DriverStep {
-                    events: vec![DriverEvent::Error(ProviderFailure {
-                        class: "protocol_error".into(),
-                        message: format!("dropped an agent output line of {n} bytes"),
-                        code: None,
-                        retryable: None,
-                    })],
-                    ..DriverStep::default()
-                };
-                apply_step(&inner, &live, &mut st, step);
+                dispatch_child_stdout(inner, live, &mut st, Err(n), true);
             }
             ChildMsg::Exited { code, stderr_tail } => {
                 let proc = st.proc.take().expect("checked above");
-                held_proc::finalize_child_exit(&inner, &live, &mut st, proc, code, stderr_tail);
+                held_proc::finalize_child_exit(inner, live, &mut st, proc, code, stderr_tail);
                 return;
             }
         }

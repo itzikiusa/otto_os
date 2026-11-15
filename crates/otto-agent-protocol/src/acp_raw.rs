@@ -2,7 +2,9 @@
 //! [`super::AcpDriver`].
 
 use agent_client_protocol::v1::schema::{ToolCallContent, ToolCallStatus, ToolKind};
-use otto_core::agent_runtime::{PlanStep, PlanStepStatus, ThreadTokenUsage, TurnTerminalStatus};
+use otto_core::agent_runtime::{
+    PlanStep, PlanStepStatus, ThreadTokenUsage, TurnItemStatus, TurnTerminalStatus,
+};
 use serde_json::Value;
 
 use super::{AcpDriver, Phase, SegmentKind, Tool};
@@ -16,11 +18,11 @@ use crate::driver::{DriverEvent, DriverStep};
 
 impl AcpDriver {
     pub(super) fn note_stdout_activity(&mut self) {
-        if self.prompt_id.is_none() {
-            if self.sideband.has_mirrored() {
-                self.sideband.arm_burst_filter();
+        if self.state.prompt_id.is_none() {
+            if self.state.sideband.has_mirrored() {
+                self.state.sideband.arm_burst_filter();
             } else {
-                self.sideband.note_native_autonomous();
+                self.state.sideband.note_native_autonomous();
             }
         }
     }
@@ -31,15 +33,26 @@ impl AcpDriver {
         status: TurnTerminalStatus,
         reason: Option<String>,
     ) {
-        if !self.autonomous || self.prompt_id.is_some() || self.turn_id.is_none() {
+        if !self.state.autonomous || self.state.prompt_id.is_some() || self.state.turn_id.is_none()
+        {
             return;
         }
         self.close_segment(step);
-        self.turn_id = None;
-        self.autonomous = false;
-        self.closed_named.clear();
-        self.tools.clear();
-        self.sideband.on_turn_settled();
+        self.settle_foreground_subagents(
+            step,
+            match status {
+                TurnTerminalStatus::Completed => TurnItemStatus::Completed,
+                TurnTerminalStatus::Failed => TurnItemStatus::Failed,
+                TurnTerminalStatus::Interrupted | TurnTerminalStatus::Cancelled => {
+                    TurnItemStatus::Interrupted
+                }
+            },
+        );
+        self.state.turn_id = None;
+        self.state.autonomous = false;
+        self.state.closed_named.clear();
+        self.retire_tools();
+        self.state.sideband.on_turn_settled();
         step.push(DriverEvent::Terminal {
             status,
             failure: None,
@@ -50,8 +63,13 @@ impl AcpDriver {
     /// Fallback when `SessionNotification` fails strict v1 schema parsing (e.g.
     /// Grok `tool_call` omitting `kind`/`status`, Grok `turn_completed`, ACP v2
     /// `agent_message` / `agent_thought`, or experimental vendor updates).
-    pub(super) fn on_raw_update(&mut self, step: &mut DriverStep, params: &Value) {
-        if matches!(self.phase, Phase::Creating { loading: true }) {
+    pub(super) fn on_raw_update(
+        &mut self,
+        step: &mut DriverStep,
+        params: &Value,
+        parent_call_id: Option<&str>,
+    ) {
+        if matches!(self.state.phase, Phase::Creating { loading: true }) {
             return;
         }
         let Some(up) = params.get("update") else {
@@ -64,29 +82,45 @@ impl AcpDriver {
             "agent_message_chunk" | "agent_message" => {
                 if let Some(raw) = extract_update_text(up) {
                     self.note_stdout_activity();
-                    if let Some(text) = self.sideband.filter_message(&raw).filter(|s| !s.is_empty())
+                    if let Some(text) = self
+                        .state
+                        .sideband
+                        .filter_message(&raw)
+                        .filter(|s| !s.is_empty())
                     {
                         self.ensure_autonomous_turn(step);
                         let mid = up
                             .get("messageId")
                             .and_then(Value::as_str)
                             .map(str::to_string);
-                        self.append_text(step, SegmentKind::Message, &text, mid);
+                        if let Some(pid) = parent_call_id {
+                            self.append_child_text(step, pid, SegmentKind::Message, &text, mid);
+                        } else {
+                            self.append_text(step, SegmentKind::Message, &text, mid);
+                        }
                     }
                 }
             }
             "agent_thought_chunk" | "agent_thought" => {
                 if let Some(raw) = extract_update_text(up) {
                     self.note_stdout_activity();
-                    if let Some(text) = self.sideband.filter_thought(&raw).filter(|s| !s.is_empty())
+                    if let Some(text) = self
+                        .state
+                        .sideband
+                        .filter_thought(&raw)
+                        .filter(|s| !s.is_empty())
                     {
                         self.ensure_autonomous_turn(step);
-                        self.append_text(step, SegmentKind::Thought, &text, None);
+                        if let Some(pid) = parent_call_id {
+                            self.append_child_text(step, pid, SegmentKind::Thought, &text, None);
+                        } else {
+                            self.append_text(step, SegmentKind::Thought, &text, None);
+                        }
                     }
                 }
             }
-            "tool_call" => self.on_raw_tool_call(step, up),
-            "tool_call_update" => self.on_raw_tool_update(step, up),
+            "tool_call" => self.on_raw_tool_call(step, up, parent_call_id),
+            "tool_call_update" => self.on_raw_tool_update(step, up, parent_call_id),
             "plan" => self.on_raw_plan(step, up),
             "usage_update" => {
                 if let Some(used) = up.get("used").and_then(Value::as_u64) {
@@ -102,7 +136,7 @@ impl AcpDriver {
             }
             "turn_completed" => {
                 if let Some(usage) = parse_grok_usage(up.get("usage")) {
-                    if self.turn_id.is_some() {
+                    if self.state.turn_id.is_some() {
                         step.push(DriverEvent::Usage(usage));
                     }
                 }
@@ -128,16 +162,24 @@ impl AcpDriver {
         }
     }
 
-    fn on_raw_tool_call(&mut self, step: &mut DriverStep, up: &Value) {
+    fn on_raw_tool_call(
+        &mut self,
+        step: &mut DriverStep,
+        up: &Value,
+        parent_call_id: Option<&str>,
+    ) {
         let Some(id) = up.get("toolCallId").and_then(Value::as_str) else {
             return;
         };
+        self.state.retired_tool_ids.retain(|r| r != id);
         self.note_stdout_activity();
-        if self.sideband.filter_tool_call(id) {
+        if self.state.sideband.filter_tool_call(id) {
             return;
         }
         self.ensure_autonomous_turn(step);
-        self.close_segment(step);
+        if parent_call_id.is_none() {
+            self.close_segment(step);
+        }
         let raw_title = up.get("title").and_then(Value::as_str).unwrap_or("tool");
         let raw_input = up.get("rawInput").cloned();
         let classified = classify_tool(raw_title, raw_input.as_ref());
@@ -164,23 +206,70 @@ impl AcpDriver {
         };
         merge_raw_content(&mut t, up);
         Self::merge_raw_images(&mut t, up.get("rawOutput"));
-        step.push(DriverEvent::TurnItem(self.tool_item(id, &t)));
-        self.note_tool_background(step, id, &t);
-        self.tools.insert(id.to_string(), t);
+        self.emit_tool_or_subagent(
+            step,
+            id,
+            &t,
+            up.get("_meta"),
+            up.get("rawOutput"),
+            parent_call_id,
+        );
+        if parent_call_id.is_none() {
+            if !self
+                .state
+                .subagents
+                .get(id)
+                .is_some_and(|a| a.background && a.status.is_open())
+            {
+                t.compact_terminal();
+            }
+            self.state.tools.insert(id.to_string(), t);
+        }
     }
 
-    fn on_raw_tool_update(&mut self, step: &mut DriverStep, up: &Value) {
+    fn on_raw_tool_update(
+        &mut self,
+        step: &mut DriverStep,
+        up: &Value,
+        parent_call_id: Option<&str>,
+    ) {
         let Some(id) = up.get("toolCallId").and_then(Value::as_str) else {
             return;
         };
+        let known = self.state.tools.contains_key(id)
+            || self.state.subagents.contains_key(id)
+            || self.state.child_tools.contains_key(id);
+        if !known {
+            let has_title = up
+                .get("title")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty());
+            let is_retired = self.state.retired_tool_ids.iter().any(|r| r == id);
+            if is_retired || (self.state.prompt_id.is_none() && !has_title) {
+                return;
+            }
+        }
         self.note_stdout_activity();
-        let known = self.tools.contains_key(id);
-        if self.sideband.filter_tool_update(id, known) {
+        if self
+            .state
+            .sideband
+            .filter_tool_update(id, known, self.state.prompt_id.is_some())
+        {
             return;
         }
         self.ensure_autonomous_turn(step);
-        self.close_segment(step);
-        let mut t = self.tools.remove(id).unwrap_or_default();
+        if parent_call_id.is_none() {
+            self.close_segment(step);
+        }
+        let mut t = if parent_call_id.is_some() {
+            self.state
+                .child_tools
+                .get(id)
+                .map(|e| e.tool.clone())
+                .unwrap_or_default()
+        } else {
+            self.state.tools.remove(id).unwrap_or_default()
+        };
         if let Some(k) = up
             .get("kind")
             .and_then(|v| serde_json::from_value::<ToolKind>(v.clone()).ok())
@@ -201,12 +290,35 @@ impl AcpDriver {
         }
         if up.get("content").is_some() || up.get("rawOutput").is_some() {
             t.output.clear();
+            if up.get("content").is_none()
+                && up.get("rawOutput").is_some_and(|raw| {
+                    raw.get("attachments").is_some() || raw.get("content").is_some()
+                })
+            {
+                t.images.clear();
+            }
             merge_raw_content(&mut t, up);
         }
         Self::merge_raw_images(&mut t, up.get("rawOutput"));
-        step.push(DriverEvent::TurnItem(self.tool_item(id, &t)));
-        self.note_tool_background(step, id, &t);
-        self.tools.insert(id.to_string(), t);
+        self.emit_tool_or_subagent(
+            step,
+            id,
+            &t,
+            up.get("_meta"),
+            up.get("rawOutput"),
+            parent_call_id,
+        );
+        if parent_call_id.is_none() {
+            if !self
+                .state
+                .subagents
+                .get(id)
+                .is_some_and(|a| a.background && a.status.is_open())
+            {
+                t.compact_terminal();
+            }
+            self.state.tools.insert(id.to_string(), t);
+        }
     }
 
     fn on_raw_plan(&mut self, step: &mut DriverStep, up: &Value) {
@@ -248,6 +360,10 @@ impl AcpDriver {
                 SidebandAction::TurnStarted => {
                     self.ensure_autonomous_turn(step);
                 }
+                SidebandAction::SystemWakeup { sender, content } => {
+                    self.ensure_autonomous_turn_for_sideband_wakeup(step);
+                    self.settle_bg_on_system_wakeup(step, sender.as_deref(), &content);
+                }
                 SidebandAction::Thought { text, streaming } => {
                     self.ensure_autonomous_turn(step);
                     self.append_text(step, SegmentKind::Thought, &text, None);
@@ -270,28 +386,38 @@ impl AcpDriver {
                     id,
                     title,
                     kind,
+                    status,
                     raw_input,
                     file,
                     diff,
                 } => {
+                    self.state.retired_tool_ids.retain(|r| r != &id);
                     self.ensure_autonomous_turn(step);
                     self.close_segment(step);
                     let diffs = match (&file, &diff) {
                         (Some(f), Some((old, new))) => vec![(f.clone(), old.clone(), new.clone())],
                         _ => Vec::new(),
                     };
-                    let t = Tool {
+                    let mut t = Tool {
                         title,
                         kind,
-                        status: ToolCallStatus::InProgress,
+                        status,
                         raw_input,
                         file,
                         diff,
                         diffs,
                         ..Tool::default()
                     };
-                    step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
-                    self.tools.insert(id, t);
+                    self.emit_tool_or_subagent(step, &id, &t, None, None, None);
+                    if !self
+                        .state
+                        .subagents
+                        .get(&id)
+                        .is_some_and(|a| a.background && a.status.is_open())
+                    {
+                        t.compact_terminal();
+                    }
+                    self.state.tools.insert(id, t);
                 }
                 SidebandAction::ToolUpdate {
                     id,
@@ -305,7 +431,7 @@ impl AcpDriver {
                 } => {
                     self.ensure_autonomous_turn(step);
                     self.close_segment(step);
-                    let mut t = self.tools.remove(&id).unwrap_or_default();
+                    let mut t = self.state.tools.remove(&id).unwrap_or_default();
                     t.status = status;
                     if let Some(title) = title {
                         t.title = title;
@@ -329,9 +455,16 @@ impl AcpDriver {
                     if let Some(out) = output {
                         t.output = out;
                     }
-                    step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
-                    self.note_tool_background(step, &id, &t);
-                    self.tools.insert(id, t);
+                    self.emit_tool_or_subagent(step, &id, &t, None, None, None);
+                    if !self
+                        .state
+                        .subagents
+                        .get(&id)
+                        .is_some_and(|a| a.background && a.status.is_open())
+                    {
+                        t.compact_terminal();
+                    }
+                    self.state.tools.insert(id, t);
                 }
                 SidebandAction::Plan(steps) => {
                     self.ensure_autonomous_turn(step);

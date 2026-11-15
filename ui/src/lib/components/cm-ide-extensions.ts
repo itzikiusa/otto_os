@@ -9,7 +9,7 @@ import {
   type DecorationSet, type ViewUpdate,
 } from '@codemirror/view';
 import {
-  EditorState, Prec, RangeSet, StateEffect, StateField,
+  EditorState, RangeSet, StateEffect, StateField,
   type Extension, type Range,
 } from '@codemirror/state';
 import { addCursorAbove, addCursorBelow, moveLineDown, moveLineUp } from '@codemirror/commands';
@@ -17,14 +17,14 @@ import { selectNextOccurrence } from '@codemirror/search';
 import type {
   IdeBreakpoint, IdeCollabPeer, IdeDiagnostic, IdeGutterItem, IdeInlineValue, IdePeerCursor,
 } from '../api/types.ts';
-import { ctxMenu, type MenuItem } from '../contextmenu.svelte.ts';
+import { ctxMenu } from '../contextmenu.svelte.ts';
 import { isIconName } from './Icon.svelte';
 import { createIdeCsvExtension } from './cm-ide-csv.ts';
 import {
   createIdeGitAndAgentExtensions, selectionOrCurrentLine, setBlameLinesEffect, setSavedContentEffect,
   type IdeEditorSelectionRange,
 } from './cm-ide-git-and-agent.ts';
-import { buildIdeVcsContextRows, isBpTargetGutterElement } from './cm-ide-history.ts';
+import { isBpTargetGutterElement } from './cm-ide-history.ts';
 import { createIdeHoverExtension } from './cm-ide-hover.ts';
 import {
   applyLinePrefixSuffix, buildIdeKeymap as buildIdeKeymapCore, buildIdeKeymapSpecs,
@@ -45,6 +45,10 @@ import {
   applyClientQuickFix, createIdeSemanticExtensions, getIdeQuickFixesAtLine,
   type ClientDiagQuickFix,
 } from './cm-ide-semantic.ts';
+import {
+  createIdeRefactorExtensions, detectInlineRefactorHints, setDiskSavedContentEffect,
+  type IdeInlineRefactorHint,
+} from './cm-ide-refactor.ts';
 import { readIdeEditorPreferences } from './cm-ide-theme.ts';
 
 function isIdeManifestPath(p: string): boolean {
@@ -60,14 +64,16 @@ export {
   addCursorAbove, addCursorBelow, applyClientQuickFix, applyConcreteEditsToView,
   applyLinePrefixSuffix, buildIdeKeymapSpecs, buildPooledLspExtensions,
   computeDeterministicQuickFixes, createDirectLspExtension, crosshairCursor,
-  disposePooledLspClients, duplicateLineOrSelection, getIdeQuickFixesAtLine, hasWarmPooledLspClient,
+  detectInlineRefactorHints, disposePooledLspClients, duplicateLineOrSelection,
+  getIdeQuickFixesAtLine, hasWarmPooledLspClient,
   isBpTargetGutterElement, lspUriToPath, moveLineDown, moveLineUp, notifyLspDidSave,
   openReplaceInFile, previewConcreteEdits, rectangularSelection, requestIdeDiveAtPos,
   selectAllOccurrences, selectNextOccurrence, selectionOrCurrentLine,
-  setBlameLinesEffect, setSavedContentEffect, smartExpandSelection,
+  setBlameLinesEffect, setDiskSavedContentEffect, setSavedContentEffect, smartExpandSelection,
   splitSelectionIntoLines, startNewLineBelow, toggleLineComment, wordAtCursor,
   type AttachPooledLspOptions, type ClientDiagQuickFix, type DirectLspOptions,
-  type IdeConcreteTextEdit, type IdeEditorCallbacks, type IdeEditorSelectionRange, type IdeQuickFixAction,
+  type IdeConcreteTextEdit, type IdeEditorCallbacks, type IdeEditorSelectionRange,
+  type IdeInlineRefactorHint, type IdeQuickFixAction,
 };
 
 export interface IdeDebugStatePayload { pausedLine: number | null; inlineValues: IdeInlineValue[]; }
@@ -79,6 +85,20 @@ export const setGutterItemsEffect = StateEffect.define<IdeGutterItem[]>();
 export const setDebugDecorationsEffect = StateEffect.define<IdeDebugStatePayload>();
 export const setPeerCursorsEffect = StateEffect.define<PeerCursorInput[]>();
 const setHoverBpLineEffect = StateEffect.define<number | null>();
+
+const ideRunItemsField = StateField.define<Map<number, IdeGutterItem>>({
+  create() { return new Map(); },
+  update(m, tr) {
+    for (const ef of tr.effects) {
+      if (ef.is(setGutterItemsEffect)) {
+        const n = new Map<number, IdeGutterItem>();
+        for (const it of ef.value) n.set(it.line, it);
+        return n;
+      }
+    }
+    return m;
+  },
+});
 
 type BpVisualKind = 'enabled' | 'disabled' | 'muted' | 'conditional' | 'logpoint' | 'paused' | 'preview';
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -192,7 +212,7 @@ export interface CreateIdeExtensionsOptions {
   filePath?: string; language?: string; root?: string; connectionId?: string | null; projectFolders?: string[];
   breakpoints: IdeBreakpoint[]; breakpointsMuted?: boolean; gutterItems: IdeGutterItem[];
   pausedLine: number | null; inlineValues: IdeInlineValue[]; peerCursors: PeerCursorInput[];
-  savedContent?: string | null; blameByLine?: Record<number, string> | null;
+  diskSavedContent?: string | null; savedContent?: string | null; blameByLine?: Record<number, string> | null;
   keymapPreset: 'jetbrains' | 'standard'; getCallbacks: () => IdeEditorCallbacks;
 }
 
@@ -233,18 +253,10 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
     return ranges.length ? Decoration.set(ranges, true) : Decoration.none;
   }
 
-  const runField = StateField.define<Map<number, IdeGutterItem>>({
-    create() { const m = new Map<number, IdeGutterItem>(); for (const it of opts.gutterItems) m.set(it.line, it); return m; },
-    update(m, tr) {
-      for (const ef of tr.effects) {
-        if (ef.is(setGutterItemsEffect)) {
-          const n = new Map<number, IdeGutterItem>();
-          for (const it of ef.value) n.set(it.line, it);
-          return n;
-        }
-      }
-      return m;
-    },
+  const runFieldInit = ideRunItemsField.init(() => {
+    const m = new Map<number, IdeGutterItem>();
+    for (const it of opts.gutterItems) m.set(it.line, it);
+    return m;
   });
 
   const handleBpClick = (_v: EditorView, ln: number, me: MouseEvent): boolean => {
@@ -267,7 +279,7 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
     class: 'cm-ide-bp-gutter',
     markers(view) {
       const { map, muted, pausedLine, hoverLine } = view.state.field(bpField);
-      const runMap = view.state.field(runField);
+      const runMap = view.state.field(ideRunItemsField);
       const curLn = view.state.doc.lineAt(view.state.selection.main.head).number;
       const hasBulbOnCur =
         !view.state.readOnly &&
@@ -368,7 +380,7 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
     }
   });
 
-  return [bpField, runField, bpAndRunGutter, gutterHandlers];
+  return [bpField, runFieldInit, bpAndRunGutter, gutterHandlers];
 }
 
 class InlineGhostValuesWidget extends WidgetType {
@@ -532,42 +544,17 @@ export function createIdeExtensions(opts: CreateIdeExtensionsOptions): Extension
   const isShell = lower.endsWith('.sh') || lower.endsWith('.bash') || lower.endsWith('.zsh');
   const isManifest = isIdeManifestPath(fPath);
 
-  const fullContextMenu = isManifest ? [] : Prec.highest(EditorView.domEventHandlers({
-    contextmenu(event, view) {
-      if (event.target instanceof Element && event.target.closest('.cm-gutters')) return false;
-      const cbs = opts.getCallbacks();
-      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY }), main = view.state.selection.main;
-      if (pos != null && (main.empty || pos < main.from || pos > main.to)) view.dispatch({ selection: { anchor: pos, head: pos } });
-      const sym = wordAtCursor(view.state);
-      const showMain = () => {
-        const items: MenuItem[] = [];
-        if (cbs.onQuickFix) items.push({ label: 'Show Context Actions', icon: 'bulb', hint: '⌥⏎', action: () => cbs.onQuickFix?.({ line: sym.line, column: sym.column, symbol: sym.word || undefined, clientX: event.clientX, clientY: event.clientY }) });
-        if (cbs.onAgentAction) {
-          items.push(
-            { label: 'Add Selection to Agent', icon: 'assistant', hint: '⌘L', action: () => cbs.onAgentAction?.('chat', selectionOrCurrentLine(view.state)) },
-            { label: 'Inline Edit with Agent', icon: 'sparkle', hint: '⌘I', disabled: view.state.readOnly, action: () => cbs.onAgentAction?.('inline', selectionOrCurrentLine(view.state)) },
-          );
-        }
-        items.push({ separator: true });
-        if (cbs.onDefinitionJump) items.push({ label: 'Go to Definition', icon: 'arrow', hint: '⌘B', action: () => cbs.onDefinitionJump?.({ line: sym.line, column: sym.column, symbol: sym.word || undefined }) });
-        if (cbs.onImplementationJump) items.push({ label: 'Go to Implementation', icon: 'layers', hint: '⌥⌘B', action: () => cbs.onImplementationJump?.({ line: sym.line, column: sym.column, symbol: sym.word || undefined }) });
-        if (cbs.onFindUsages) items.push({ label: 'Find Usages', icon: 'search', hint: '⌥F7', action: () => cbs.onFindUsages?.({ line: sym.line, column: sym.column, symbol: sym.word || undefined }) });
-        if (cbs.onFileStructure) items.push({ label: 'File Structure…', icon: 'book', hint: '⌘F12', action: () => cbs.onFileStructure?.() });
-        if (cbs.onRenameSymbol && sym.word) items.push({ label: 'Rename Symbol…', icon: 'edit', hint: '⇧F6', disabled: view.state.readOnly, action: () => cbs.onRenameSymbol?.({ line: sym.line, column: sym.column, symbol: sym.word }) });
-        if (cbs.onFormat) items.push({ label: 'Reformat Code', icon: 'format', hint: '⌥⌘L', disabled: view.state.readOnly, action: () => cbs.onFormat?.() });
-        if (fPath) items.push(...buildIdeVcsContextRows(event, showMain, { filePath: fPath, readOnly: view.state.readOnly, onToggleBlame: cbs.onToggleBlame, onPasteFromHistory: cbs.onPasteFromHistory }));
-        if (!items.length) return;
-        const syn = new MouseEvent('contextmenu', { clientX: event.clientX, clientY: event.clientY, bubbles: true });
-        ctxMenu.show(syn, items);
-      };
-      event.preventDefault();
-      showMain();
-      return true;
-    },
-  }));
-
   return [
-    ideEditorTheme, debugField, peersField, fullContextMenu,
+    ideEditorTheme, debugField, peersField,
+    createIdeRefactorExtensions({
+      filePath: fPath,
+      language: opts.language,
+      diskSavedContent: opts.diskSavedContent,
+      savedContent: opts.savedContent,
+      isManifest,
+      getCallbacks: opts.getCallbacks,
+      getRunMap: (view) => view.state.field(ideRunItemsField, false),
+    }),
     createIdeSemanticExtensions({
       filePath: fPath, language: opts.language, root: opts.root, connectionId: opts.connectionId, projectFolders: opts.projectFolders,
       getPreferences: () => readIdeEditorPreferences(),

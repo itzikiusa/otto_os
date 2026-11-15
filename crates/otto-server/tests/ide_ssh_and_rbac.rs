@@ -3,8 +3,11 @@
 //! pre-upgrade and WebSocket upgrade guards.
 
 use chrono::Utc;
+use futures_util::StreamExt;
 use otto_core::access::{AccessActor, AccessRule, ResourceKind, RuleEffect, SubjectKind};
-use otto_core::domain::{Capability, ConnectionKind, Environment, Feature, User};
+use otto_core::domain::{
+    Capability, ConnectionKind, Environment, Feature, User, SCRATCH_WORKSPACE_ID,
+};
 use otto_core::Error;
 use otto_ide::types::IdeTargetSpec;
 use otto_ide::IdeCtx;
@@ -218,9 +221,11 @@ async fn ide_local_root_rbac_enforces_live_workspace_roles_and_revocation() {
     let ws1_root = tmp.path().join("ws1");
     let ws2_viewer_root = tmp.path().join("ws2-viewer");
     let ungranted_extra = tmp.path().join("outside-extra");
+    let scratch_root = tmp.path().join("scratch-ws");
     std::fs::create_dir_all(&ws1_root).unwrap();
     std::fs::create_dir_all(&ws2_viewer_root).unwrap();
     std::fs::create_dir_all(&ungranted_extra).unwrap();
+    std::fs::create_dir_all(&scratch_root).unwrap();
 
     let pool = otto_server::test_support::mem_pool().await;
     let _root = seed_user(&pool, "root", true).await;
@@ -229,6 +234,16 @@ async fn ide_local_root_rbac_enforces_live_workspace_roles_and_revocation() {
 
     seed_workspace(&pool, "ws1", &ws1_root).await;
     seed_workspace(&pool, "ws2", &ws2_viewer_root).await;
+    sqlx::query(
+        "INSERT OR REPLACE INTO workspaces (id, name, root_path, settings_json, archived, created_at)
+         VALUES (?, 'Scratch', ?, '{}', 0, ?)",
+    )
+    .bind(SCRATCH_WORKSPACE_ID)
+    .bind(scratch_root.to_string_lossy().into_owned())
+    .bind(Utc::now().to_rfc3339())
+    .execute(&pool)
+    .await
+    .expect("seed scratch workspace");
     add_member(&pool, "ws1", "viewer", "viewer").await;
     add_member(&pool, "ws1", "editor", "editor").await;
     // `editor` is only a Viewer on `ws2`.
@@ -259,6 +274,12 @@ async fn ide_local_root_rbac_enforces_live_workspace_roles_and_revocation() {
             .await
             .unwrap(),
         "saved project / additional_roots must not grant read access outside live workspaces"
+    );
+    assert!(
+        !ide_local_root_authorized(&ctx, &viewer, &scratch_root, false)
+            .await
+            .unwrap(),
+        "SCRATCH_WORKSPACE_ID must never grant implicit local root access to non-member non-root users"
     );
     let viewer_target = local_target_with_extras(&ws1_root, &[&ws1_root]);
     assert!(matches!(
@@ -572,10 +593,12 @@ async fn ws_lsp_remote_ssh_guards_and_upgrade_paths() {
     let editor = seed_user(&pool, "editor", false).await;
     let viewer = seed_user(&pool, "viewer", false).await;
     let outsider = seed_user(&pool, "outsider", false).await;
+    let no_agents = seed_user(&pool, "no_agents", false).await;
 
     seed_workspace(&pool, "ws1", &ws1_root).await;
     add_member(&pool, "ws1", "editor", "editor").await;
     add_member(&pool, "ws1", "viewer", "viewer").await;
+    add_member(&pool, "ws1", "no_agents", "editor").await;
 
     let grants = GrantsRepo::new(pool.clone());
     for u in [&editor.id, &viewer.id, &outsider.id] {
@@ -590,6 +613,10 @@ async fn ws_lsp_remote_ssh_guards_and_upgrade_paths() {
             .await
             .unwrap();
     }
+    grants
+        .set_grants(&no_agents.id, &[(Feature::Connections, Capability::Edit)])
+        .await
+        .unwrap();
 
     let conns = ConnectionsRepo::new(pool.clone());
     let ssh_conn = conns
@@ -646,7 +673,7 @@ async fn ws_lsp_remote_ssh_guards_and_upgrade_paths() {
         &pool,
         &root.id,
         &ssh_conn.id,
-        &[&editor.id, &viewer.id],
+        &[&editor.id, &viewer.id, &no_agents.id],
         &["discover", "shell"],
     )
     .await;
@@ -680,6 +707,11 @@ async fn ws_lsp_remote_ssh_guards_and_upgrade_paths() {
         .0;
     let outsider_tok = auth
         .issue_api_token(&outsider.id, Some("ui"))
+        .await
+        .unwrap()
+        .0;
+    let no_agents_tok = auth
+        .issue_api_token(&no_agents.id, Some("ui"))
         .await
         .unwrap()
         .0;
@@ -752,6 +784,10 @@ async fn ws_lsp_remote_ssh_guards_and_upgrade_paths() {
     let (st, _) = probe(&outsider_tok, "rust", "/srv/repo", &ssh_conn.id).await;
     assert!(matches!(st, 403 | 404), "outsider got {st}");
 
+    // Non-root user without `Feature::Agents` grant is blocked at `RootRoute::Lsp` → 403.
+    let (st, _) = probe(&no_agents_tok, "rust", "/srv/repo", &ssh_conn.id).await;
+    assert_eq!(st, 403);
+
     // Enforced Prod SSH connection without shell grant → 403.
     let (st, _) = probe(&editor_tok, "rust", "/srv/repo", &prod_ssh.id).await;
     assert_eq!(st, 403);
@@ -779,8 +815,18 @@ async fn ws_lsp_remote_ssh_guards_and_upgrade_paths() {
         "Sec-WebSocket-Protocol",
         format!("otto-bearer, {editor_tok}").parse().unwrap(),
     );
-    let (_ws_stream, resp) = tokio_tungstenite::connect_async(req)
+    let (mut ws_stream, resp) = tokio_tungstenite::connect_async(req)
         .await
         .expect("authorized SSH /ws/lsp request should upgrade to WebSocket");
     assert_eq!(resp.status().as_u16(), 101);
+
+    let first_msg = tokio::time::timeout(std::time::Duration::from_secs(3), ws_stream.next())
+        .await
+        .expect("receive initial WS LSP frame")
+        .expect("WS stream open")
+        .expect("WS text frame");
+    let attached_json: Value = serde_json::from_str(&first_msg.into_text().unwrap()).unwrap();
+    assert_eq!(attached_json["method"], "otto/lspAttached");
+    assert_eq!(attached_json["params"]["lang"], "rust");
+    assert_eq!(attached_json["params"]["root"], "/srv/repo");
 }

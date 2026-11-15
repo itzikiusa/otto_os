@@ -3084,10 +3084,15 @@ mod tests {
             "implement",
             "approve",
             "approve2",
-            // Antigravity (`agy`) JSONL transcript record `source` values (otto-transcript).
+            // Antigravity (`agy`) JSONL transcript record `source` values (otto-transcript, acp_sideband).
             "MODEL",
             "SYSTEM",
             "USER_EXPLICIT",
+            "CORTEX_STEP_SOURCE_MODEL",
+            "CORTEX_STEP_SOURCE_SYSTEM",
+            "CORTEX_STEP_SOURCE_USER_EXPLICIT",
+            // IDE plugin install `source` URL test fixture (otto-ide).
+            "https://example.com/plugin",
         ];
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

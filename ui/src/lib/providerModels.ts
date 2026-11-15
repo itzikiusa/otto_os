@@ -98,11 +98,46 @@ export const FALLBACK_PROVIDER_MODELS: Record<string, ProviderModelOption[]> = {
       supported_efforts: ['low', 'medium', 'high', 'xhigh'],
     },
     {
+      id: 'gemini-pro-orchestrator',
+      label: 'Orchestrator (Carbon)',
+      description: 'Multi-agent orchestrator on Gemini Carbon',
+      default_effort: null,
+      supported_efforts: [],
+    },
+    {
+      id: 'gemini-pro-orchestrator-argon',
+      label: 'Orchestrator (Argon)',
+      description: 'Multi-agent orchestrator on Gemini Argon',
+      default_effort: null,
+      supported_efforts: [],
+    },
+    {
+      id: 'gemini-3.8-flash',
+      label: 'Gemini 3.8 Flash',
+      description: 'Fast low-latency Gemini model',
+      default_effort: 'medium',
+      supported_efforts: ['low', 'medium', 'high'],
+    },
+    {
       id: 'claude-opus-5-5',
       label: 'Claude Opus 5.5',
       description: 'Anthropic Opus via Antigravity',
       default_effort: 'medium',
       supported_efforts: ['low', 'medium', 'high'],
+    },
+    {
+      id: 'claude-sonnet-5-5',
+      label: 'Claude Sonnet 5.5',
+      description: 'Anthropic Sonnet via Antigravity',
+      default_effort: 'medium',
+      supported_efforts: ['low', 'medium', 'high'],
+    },
+    {
+      id: 'gpt-oss-120b-medium',
+      label: 'GPT-OSS 120B',
+      description: 'Open-weights 120B model via Antigravity',
+      default_effort: 'medium',
+      supported_efforts: ['medium'],
     },
   ],
 };
@@ -113,8 +148,35 @@ const ID_TIER_RE = /^(.+)-(minimal|low|medium|high|xhigh|max|ultra)$/;
 const LABEL_TIER_RE = /^(.*?)\s*\((minimal|low|medium|high|xhigh|x-high|extra high|extra|max|ultra)\)\s*$/i;
 const unifiedCatalogMemo = new WeakMap<readonly ProviderModelOption[], Map<string, ProviderModelOption[]>>();
 
-export function providerFamily(provider: string): string {
-  return provider.trim().toLowerCase();
+export function providerFamily(
+  provider: string,
+  meta?: Pick<MetaResp, 'provider_models'> | null,
+): string {
+  const p = provider.trim().toLowerCase();
+  if (
+    p === 'claude' ||
+    p === 'codex' ||
+    p === 'agy' ||
+    p === 'gemini' ||
+    p === 'grok' ||
+    p === 'opencode' ||
+    p === 'pi' ||
+    p === 'shell'
+  ) {
+    return p;
+  }
+  if (p === 'antigravity' || p.startsWith('agy') || p.startsWith('antigravity')) return 'agy';
+  if (p.startsWith('claude')) return 'claude';
+  if (p.startsWith('codex')) return 'codex';
+  if (p.startsWith('gemini')) return 'gemini';
+  if (p.startsWith('grok')) return 'grok';
+  if (p.startsWith('opencode')) return 'opencode';
+  if (p === 'pi' || p.startsWith('pi-') || p.startsWith('pi_')) return 'pi';
+  const live = meta?.provider_models?.[provider];
+  if (live?.some((m) => m.id.startsWith('gemini-4-') || m.id.startsWith('gemini-pro-orchestrator'))) {
+    return 'agy';
+  }
+  return p;
 }
 
 function mapRawTier(raw: string): EffortLevel {
@@ -152,8 +214,9 @@ export function stripEmbeddedEffortTier(
 export function unifyModelCatalog(
   provider: string,
   list: readonly ProviderModelOption[],
+  meta?: Pick<MetaResp, 'provider_models'> | null,
 ): ProviderModelOption[] {
-  const fam = providerFamily(provider);
+  const fam = providerFamily(provider, meta);
   let byProvider = unifiedCatalogMemo.get(list);
   const cached = byProvider?.get(fam);
   if (cached) return cached;
@@ -227,32 +290,41 @@ export function unifyModelCatalog(
 
 export function supportsModelSelection(
   provider: string,
-  meta?: Pick<MetaResp, 'model_flags'> | null,
+  meta?: Pick<MetaResp, 'model_flags' | 'provider_models'> | null,
 ): boolean {
   if (!provider || provider === 'shell') return false;
   if (meta?.model_flags && provider in meta.model_flags) {
     return meta.model_flags[provider] === true;
   }
+  const fam = providerFamily(provider, meta);
   return (
-    provider === 'claude' ||
-    provider === 'codex' ||
-    provider === 'agy' ||
-    provider === 'opencode' ||
-    provider === 'pi'
+    fam === 'claude' ||
+    fam === 'codex' ||
+    fam === 'agy' ||
+    fam === 'opencode' ||
+    fam === 'pi'
   );
 }
 
-export function supportsEffortSelection(provider: string): boolean {
-  return (
-    provider === 'claude' ||
-    provider === 'codex' ||
-    provider === 'agy' ||
-    provider === 'pi'
+export function supportsEffortSelection(
+  provider: string,
+  meta?: Pick<MetaResp, 'provider_models'> | null,
+): boolean {
+  const fam = providerFamily(provider, meta);
+  if (fam === 'claude' || fam === 'codex' || fam === 'agy' || fam === 'pi') {
+    return true;
+  }
+  return Boolean(
+    meta?.provider_models?.[provider]?.some((m) => (m.supported_efforts?.length ?? 0) > 0),
   );
 }
 
-export function supportsInteractionMode(provider: string): boolean {
-  return provider === 'claude' || provider === 'codex' || provider === 'agy';
+export function supportsInteractionMode(
+  provider: string,
+  meta?: Pick<MetaResp, 'provider_models'> | null,
+): boolean {
+  const fam = providerFamily(provider, meta);
+  return fam === 'claude' || fam === 'codex' || fam === 'agy';
 }
 
 export function modelsForProvider(
@@ -260,8 +332,9 @@ export function modelsForProvider(
   meta?: Pick<MetaResp, 'provider_models'> | null,
 ): ProviderModelOption[] {
   const live = meta?.provider_models?.[provider];
-  if (live && live.length > 0) return unifyModelCatalog(provider, live);
-  return FALLBACK_PROVIDER_MODELS[provider] ?? [];
+  if (live && live.length > 0) return unifyModelCatalog(provider, live, meta);
+  const fam = providerFamily(provider, meta);
+  return FALLBACK_PROVIDER_MODELS[provider] ?? FALLBACK_PROVIDER_MODELS[fam] ?? [];
 }
 
 /** Resolve a saved or legacy `agy` tier-suffixed model ID (`gemini-4-carbon-high`)
@@ -275,7 +348,7 @@ export function canonicalModelId(
   if (!trimmed) return null;
   const catalog = modelsForProvider(provider, meta);
   if (catalog.some((m) => m.id === trimmed)) return trimmed;
-  if (providerFamily(provider) === 'agy') {
+  if (providerFamily(provider, meta) === 'agy') {
     const m = ID_TIER_RE.exec(trimmed);
     if (m && catalog.some((x) => x.id === m[1])) return m[1];
   }
@@ -292,7 +365,7 @@ export function canonicalizeModelSelection(
   if (!trimmed) return { model: null, effort };
   const resolved = canonicalModelId(provider, trimmed, meta) ?? trimmed;
   let nextEffort = effort;
-  if (!nextEffort && providerFamily(provider) === 'agy' && resolved !== trimmed) {
+  if (!nextEffort && providerFamily(provider, meta) === 'agy' && resolved !== trimmed) {
     const tier = ID_TIER_RE.exec(trimmed);
     if (tier) nextEffort = mapRawTier(tier[2]);
   }
@@ -318,7 +391,7 @@ export function effortsForModel(
   modelId: string | null | undefined,
   meta?: Pick<MetaResp, 'provider_models'> | null,
 ): EffortLevel[] {
-  if (!supportsEffortSelection(provider)) return [];
+  if (!supportsEffortSelection(provider, meta)) return [];
   const catalog = modelsForProvider(provider, meta);
   const resolved = canonicalModelId(provider, modelId, meta);
   const match = resolved ? catalog.find((m) => m.id === resolved) : catalog[0];

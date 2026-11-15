@@ -41,7 +41,7 @@ pub use interposer::wrap_shell_script_for_interposer;
 pub use k8s_routing::{is_valid_dns1123_label, sanitize_network_bridge};
 
 use crate::types::{
-    IdeNetBridgeStatusResp, IdeNetBridgeTestReq, IdeNetworkBridgeConfig, IdeSshSpec, IdeTargetKind,
+    IdeNetBridgeStatusResp, IdeNetBridgeTestReq, IdeNetworkBridgeConfig, IdeTargetKind,
     IdeTargetSpec,
 };
 use crate::IdeCtx;
@@ -54,6 +54,7 @@ const WARM_IDLE_TTL: Duration = Duration::from_secs(300);
 pub struct IdeK8sSpec {
     pub cluster_id: Id,
     pub cluster_name: String,
+    pub environment: Option<String>,
     pub namespace: String,
     pub allow_cross_namespace: bool,
     pub kubectl_program: String,
@@ -64,16 +65,14 @@ pub struct IdeK8sSpec {
     pub kubectl_env: Vec<(String, String)>,
 }
 
-fn ssh_spec_to_tunnel_cfg(spec: IdeSshSpec) -> SshTunnelConfig {
-    let port = spec.effective_port().unwrap_or(22);
-    SshTunnelConfig {
-        host: spec.host,
-        port,
-        user: spec.user,
-        identity_file: spec.identity_file,
-        proxy_jump: spec.proxy_jump,
+impl IdeK8sSpec {
+    pub fn is_production(&self) -> bool {
+        crate::types::is_production_label(self.environment.as_deref(), &self.cluster_name)
     }
 }
+
+pub const PROD_BRIDGE_CONFIRM_MSG: &str =
+    "Production Network Bridge target requires confirm_prod_targets: true";
 
 struct LeaseCounters {
     active_leases: usize,
@@ -142,6 +141,9 @@ impl Drop for NetBridgeLease {
         } else {
             false
         };
+        if became_idle {
+            self.instance.stop_idle_listeners();
+        }
         if became_idle && self.pool.strong_count() > 0 {
             let weak_pool = self.pool.clone();
             let key = self.pool_key.clone();
@@ -212,13 +214,33 @@ impl NetBridgeManager {
         user: &User,
         cfg: &IdeNetworkBridgeConfig,
     ) -> Result<()> {
+        self.authorize_config_with_confirm(ctx, user, cfg, !cfg.enabled)
+            .await
+    }
+
+    /// Authorize `cfg` against `user` and enforce `confirm_prod_targets` when
+    /// `cfg.enabled` targets a production Kubernetes cluster or SSH bastion.
+    pub async fn authorize_config_with_confirm<S: IdeCtx>(
+        &self,
+        ctx: &S,
+        user: &User,
+        cfg: &IdeNetworkBridgeConfig,
+        confirm_prod_targets: bool,
+    ) -> Result<()> {
+        let mut targets_prod = false;
         if let Some(cid) = &cfg.k8s_cluster_id {
-            let _ = ctx
+            let k8s = ctx
                 .resolve_k8s_cluster(user, cid, cfg.k8s_namespace.as_deref())
                 .await?;
+            targets_prod |= k8s.is_production();
         }
         if let Some(sid) = &cfg.ssh_tunnel_connection_id {
-            let _ = ctx.resolve_ssh_connection(user, sid).await?;
+            let ssh = ctx.resolve_ssh_connection(user, sid).await?;
+            let _ = ssh.to_ssh_tunnel_config()?;
+            targets_prod |= ssh.is_production();
+        }
+        if cfg.enabled && targets_prod && !confirm_prod_targets {
+            return Err(Error::Invalid(PROD_BRIDGE_CONFIRM_MSG.into()));
         }
         Ok(())
     }
@@ -231,6 +253,19 @@ impl NetBridgeManager {
         target: &IdeTargetSpec,
         raw_cfg: &IdeNetworkBridgeConfig,
     ) -> Result<Option<Arc<NetBridgeLease>>> {
+        self.acquire_for_launch_with_confirm(ctx, user, target, raw_cfg, false)
+            .await
+    }
+
+    /// Acquire (or reuse a warm) [`NetBridgeLease`] with explicit `confirm_prod_targets`.
+    pub async fn acquire_for_launch_with_confirm<S: IdeCtx>(
+        &self,
+        ctx: &S,
+        user: &User,
+        target: &IdeTargetSpec,
+        raw_cfg: &IdeNetworkBridgeConfig,
+        confirm_prod_targets: bool,
+    ) -> Result<Option<Arc<NetBridgeLease>>> {
         if target.kind != IdeTargetKind::Local || !raw_cfg.enabled {
             return Ok(None);
         }
@@ -239,21 +274,26 @@ impl NetBridgeManager {
         };
 
         // Re-authorize on every launch even when reusing a warm bridge.
+        let mut targets_prod = false;
         let k8s_spec = if let Some(cid) = &cfg.k8s_cluster_id {
-            Some(
-                ctx.resolve_k8s_cluster(user, cid, cfg.k8s_namespace.as_deref())
-                    .await?,
-            )
+            let spec = ctx
+                .resolve_k8s_cluster(user, cid, cfg.k8s_namespace.as_deref())
+                .await?;
+            targets_prod |= spec.is_production();
+            Some(spec)
         } else {
             None
         };
         let ssh_cfg = if let Some(sid) = &cfg.ssh_tunnel_connection_id {
-            Some(ssh_spec_to_tunnel_cfg(
-                ctx.resolve_ssh_connection(user, sid).await?,
-            ))
+            let ssh_spec = ctx.resolve_ssh_connection(user, sid).await?;
+            targets_prod |= ssh_spec.is_production();
+            Some(ssh_spec.to_ssh_tunnel_config()?)
         } else {
             None
         };
+        if targets_prod && !confirm_prod_targets {
+            return Err(Error::Invalid(PROD_BRIDGE_CONFIRM_MSG.into()));
+        }
 
         self.evict_expired_idle();
 
@@ -271,6 +311,7 @@ impl NetBridgeManager {
         let mut guard = slot.lock().await;
         if let Some(existing) = guard.as_ref() {
             if existing.instance.is_healthy() {
+                existing.instance.ensure_host_mapping_listeners().await;
                 if let Ok(mut c) = existing.counters.lock() {
                     c.active_leases += 1;
                 }
@@ -347,7 +388,7 @@ impl NetBridgeManager {
         let mut ssh_tunnel_ready = false;
         if let Some(sid) = &cfg.ssh_tunnel_connection_id {
             let ssh_spec = ctx.resolve_ssh_connection(user, sid).await?;
-            let tcfg = ssh_spec_to_tunnel_cfg(ssh_spec);
+            let tcfg = ssh_spec.to_ssh_tunnel_config()?;
             let tunnel = SshTunnel::open_socks(&tcfg).await?;
             ssh_tunnel_ready = tunnel.is_alive();
         }

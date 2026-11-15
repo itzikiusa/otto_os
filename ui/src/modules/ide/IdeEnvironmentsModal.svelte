@@ -49,6 +49,7 @@
   let inheritShellEnv = $state(true);
   let javaHome = $state('');
   let goRoot = $state('');
+  let goBuildTagsText = $state('');
   let rustToolchain = $state('');
   let nodeHome = $state('');
   let pythonInterpreter = $state('');
@@ -73,6 +74,7 @@
       inheritShellEnv,
       javaHome: javaHome.trim(),
       goRoot: goRoot.trim(),
+      goBuildTagsText: goBuildTagsText.trim(),
       rustToolchain: rustToolchain.trim(),
       nodeHome: nodeHome.trim(),
       pythonInterpreter: pythonInterpreter.trim(),
@@ -200,6 +202,7 @@
     inheritShellEnv = e.inherit_shell_env !== false;
     javaHome = e.java_home ?? '';
     goRoot = e.go_root ?? '';
+    goBuildTagsText = (e.go_build_tags ?? []).join(', ');
     rustToolchain = e.rust_toolchain ?? '';
     nodeHome = e.node_home ?? '';
     pythonInterpreter = e.python_interpreter ?? '';
@@ -306,6 +309,7 @@
       return false;
     }
 
+    let prodConfirmed = false;
     if (ide.target.kind === 'local' && serializedBridge.config.enabled) {
       const allowed = await confirmProdNetworkBridge(
         serializedBridge.config,
@@ -313,7 +317,13 @@
         ide.target.workspace_id,
       );
       if (!allowed) return false;
+      prodConfirmed = true;
     }
+
+    const parsedGoTags = goBuildTagsText
+      .split(/[,\s]+/)
+      .map((t) => t.trim())
+      .filter((t) => /^[A-Za-z0-9_.-]+$/.test(t));
 
     savingEnv = true;
     try {
@@ -321,6 +331,7 @@
         inherit_shell_env: inheritShellEnv,
         java_home: javaHome.trim() || null,
         go_root: goRoot.trim() || null,
+        go_build_tags: parsedGoTags,
         rust_toolchain: rustToolchain.trim() || null,
         node_home: nodeHome.trim() || null,
         python_interpreter: pythonInterpreter.trim() || null,
@@ -328,8 +339,12 @@
         extra_path: extraPath.trim() || null,
         network_bridge: ide.target.kind === 'local' ? serializedBridge.config : undefined,
         env_vars: cleaned,
+        ...(prodConfirmed ? { confirm_prod_targets: true } : {}),
       });
       if (ok) {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('otto:ide-reconnect-lsp', { detail: { rootPath: ide.target.root } }));
+        }
         hydratedSnapshot = '';
         await ide.loadEnvironments();
         baselineEnvSnap = computeEnvSnap();
@@ -482,6 +497,11 @@
                   <datalist id="env-go-datalist">
                     {#each sdkOptionsFor('go') as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
                   </datalist>
+                </div>
+
+                <div class="field">
+                  <label for="env-go-tags">Go build tags (-tags)</label>
+                  <input id="env-go-tags" class="input" type="text" dir="ltr" placeholder="component, integration" bind:value={goBuildTagsText} data-testid="ide-env-go-build-tags" />
                 </div>
 
                 <div class="field">

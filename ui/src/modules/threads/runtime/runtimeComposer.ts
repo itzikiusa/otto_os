@@ -7,8 +7,10 @@ import type {
   PlanArtifact,
   ProviderTurn,
   RuntimeDraftContent,
+  RuntimeSession,
   TurnItem,
 } from '../../../lib/api/types';
+import type { LinkedChildThreadSummary } from './agentTasks';
 import type { RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
 import type { ComposerSlashCommand, ParsedSlashIntent } from '../../../lib/slashActions';
 import { toastError } from '../../../lib/toastError';
@@ -209,6 +211,24 @@ export function mergeQueuedEdit(current: string, queued: string): string {
   return kept.trim() ? `${kept}\n${queued}` : queued;
 }
 
+/** Merge attachments popped from an edited queued message back into `draft.images`
+ *  without duplicating screenshots/files already sitting in the composer. */
+export function mergeQueuedAttachments(
+  current: readonly ComposerFile[],
+  restored: readonly ComposerFile[],
+): ComposerFile[] {
+  if (restored.length === 0) return [...current];
+  const seen = new Set(current.map((f) => `${f.mime}:${f.data_base64}`));
+  const extra: ComposerFile[] = [];
+  for (const item of restored) {
+    const key = `${item.mime}:${item.data_base64}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    extra.push({ ...item });
+  }
+  return extra.length > 0 ? [...current, ...extra] : [...current];
+}
+
 export function collectMessageIds(rows: readonly TimelineRow[], prev: string[]): string[] {
   const next: string[] = [];
   for (let i = 0; i < rows.length; i++) {
@@ -251,4 +271,40 @@ export function buildRuntimeBanners(opts: {
     ...(opts.queueShown ? [{ key: 'queue', label: opts.needsRevive ? 'revive' : 'queue' }] : []),
     ...(opts.freshContext ? [{ key: 'fresh', label: 'fresh context' }] : []),
   ];
+}
+
+export function mapChildThreadSummaries(
+  byId: Record<string, RuntimeSession>,
+  parentSessionId: string,
+): LinkedChildThreadSummary[] {
+  const out: LinkedChildThreadSummary[] = [];
+  for (const s of Object.values(byId)) {
+    if (s.parent_id !== parentSessionId) continue;
+    out.push({
+      id: s.id,
+      title: s.title,
+      provider: s.provider,
+      model: s.model ?? null,
+      status: s.status,
+      createdAt: s.created_at,
+      updatedAt: s.last_active_at,
+    });
+  }
+  return out;
+}
+
+export function composerPlaceholderText(
+  closed: boolean,
+  approvals: ReadonlyMap<string, { readonly kind?: string }>,
+  running: boolean,
+  agentChat?: string,
+): string {
+  if (closed) return 'Send a message to reopen this thread';
+  if (approvals.size > 0) {
+    return Array.from(approvals.values()).some((r) => r.kind === 'question')
+      ? 'Answer the question above'
+      : 'Waiting for your approval above';
+  }
+  if (running) return 'Queue a follow-up for when this turn ends';
+  return agentChat ? `Message ${agentChat}…` : 'Ask anything. @ files or agents, / commands';
 }

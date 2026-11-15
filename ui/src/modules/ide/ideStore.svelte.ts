@@ -25,6 +25,12 @@ import {
   normalizePathDiagnostics, performCloseTabBatch, resetTargetLifecycleState, syncAdditionalRootsFromEnvState,
   type IncomingIdeDiagnostic,
 } from './store/ideStateSlices.svelte';
+import {
+  resolveRepoGoBuildTags,
+  resolveRepoRootForPath,
+  type RepoTestExecutionMode,
+} from './store/ideRepoTestAndBuildTags';
+import type * as RepoActionsMod from './store/ideRepoActions';
 import type * as ProjMod from './shell/ideProjectsManager';
 import type * as LspSearchMod from './shell/ideLspAndSearchHelpers';
 import type * as CollabMod from './store/ideCollabController';
@@ -42,11 +48,13 @@ let projModP: Promise<typeof ProjMod> | null = null;
 let lspModP: Promise<typeof LspSearchMod> | null = null;
 let collabModP: Promise<typeof CollabMod> | null = null;
 let debugEnvModP: Promise<typeof DebugEnvMod> | null = null;
+let repoActionsModP: Promise<typeof RepoActionsMod> | null = null;
 let debugEnvSyncMod: typeof DebugEnvMod | null = null;
 const loadProjMod = () => (projModP ??= import('./shell/ideProjectsManager'));
 const loadLspMod = () => (lspModP ??= import('./shell/ideLspAndSearchHelpers'));
 const loadCollabMod = () => (collabModP ??= import('./store/ideCollabController'));
 const loadDebugEnvMod = () => (debugEnvModP ??= import('./store/ideDebugAndEnvController').then((m) => (debugEnvSyncMod = m)));
+const loadRepoActionsMod = () => (repoActionsModP ??= import('./store/ideRepoActions'));
 
 const DOCK_OPEN_KEY = 'otto.ide.dockOpen';
 const DOCK_TAB_KEY = 'otto.ide.dockTab';
@@ -536,11 +544,12 @@ class IdeStore {
   }
 
   findReferences(path: string, line: number, column: number, symbol?: string): Promise<void> { return loadLspMod().then((m) => m.runFindReferences(this, path, line, column, symbol)); }
-  async openRenameModal(path: string, line: number, column: number, symbol = ''): Promise<void> {
-    this.renameState = { open: true, path, line, column, symbol, newName: symbol, edits: [], loading: Boolean(symbol), error: null };
-    if (symbol) await this.previewRename(symbol);
+  async openRenameModal(path: string, line: number, column: number, symbol = '', initialNewName?: string): Promise<void> {
+    const startName = initialNewName ?? symbol;
+    this.renameState = { open: true, path, line, column, symbol, newName: startName, edits: [], loading: Boolean(startName), error: null };
+    if (startName) await this.previewRename(startName);
   }
-  previewRename(newName?: string): Promise<void> { return loadLspMod().then((m) => m.runPreviewRename(this, newName)); }
+  previewRename(newName?: string): Promise<void> { return loadLspMod().then((m) => m.runPreviewRename(this, newName, this.bufPerf)); }
   applyRename(): Promise<boolean> { return loadLspMod().then((m) => m.runApplyRename(this, this.bufPerf)); }
   formatActiveFile(): Promise<void> { return loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf)); }
   organizeImportsActiveFile(): Promise<void> { return loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf, { organizeImports: true })); }
@@ -562,16 +571,19 @@ class IdeStore {
   async loadShellEnv(reload = false): Promise<IdeShellEnvResp | null> { return this.collabIsGuest ? null : (await loadDebugEnvMod()).fetchShellEnv(this, reload); }
   reloadShellEnv(): Promise<IdeShellEnvResp | null> { return this.loadShellEnv(true); }
   async loadEnvironments(): Promise<void> { if (!this.collabIsGuest) await (await loadDebugEnvMod()).fetchEnvironments(this); }
-  saveEnvironment(patch: Partial<IdeProjectEnvironment> & { env_vars?: IdeEnvVar[] }): Promise<boolean> { return loadDebugEnvMod().then((m) => m.persistEnvironment(this, patch)); }
+  saveEnvironment(patch: Partial<IdeProjectEnvironment> & { env_vars?: IdeEnvVar[]; confirm_prod_targets?: boolean }): Promise<boolean> { return loadDebugEnvMod().then((m) => m.persistEnvironment(this, patch)); }
+  getRepoGoBuildTags(pathOrRoot?: string | null): string[] {
+    const repo = resolveRepoRootForPath(this.target.root, this.projectRoots, pathOrRoot ?? this._activePath);
+    return resolveRepoGoBuildTags(this.projectEnv, this.target.root, repo.path);
+  }
+  setRepoGoBuildTags(pathOrRoot: string, tags: readonly string[] | string): Promise<boolean> { return loadRepoActionsMod().then((m) => m.performSetRepoGoBuildTags(this, pathOrRoot, tags)); }
+  runRepoTests(pathOrRoot?: string | null, mode: RepoTestExecutionMode = 'run'): Promise<void> { return loadRepoActionsMod().then((m) => m.performRunRepoTests(this, pathOrRoot, mode)); }
   saveRunConfig(cfg: Partial<IdeRunConfig> & { name: string; runner: string }): Promise<IdeRunConfig | null> { return loadDebugEnvMod().then((m) => m.upsertRunConfig(this, cfg)); }
-  async startRun(opts: { configId?: string; adhoc?: Partial<IdeRunConfig>; keepTestcontainers?: boolean; skipProdConfirm?: boolean } = {}): Promise<void> {
-    if (this.target.kind === 'local' && this.projectEnv?.network_bridge?.enabled && !opts.skipProdConfirm) {
-      const { confirmProdNetworkBridge } = await import('./shell/networkBridgeGuard.svelte');
-      const allowed = await confirmProdNetworkBridge(this.projectEnv.network_bridge, 'launch', this.target.workspace_id);
-      if (!allowed) return;
-    }
+  async startRun(opts: { configId?: string; adhoc?: Partial<IdeRunConfig>; keepTestcontainers?: boolean; coverage?: boolean; skipProdConfirm?: boolean } = {}): Promise<void> {
+    const gate = await (await loadRepoActionsMod()).confirmIdeTargetProdLaunch(this.target, this.projectEnv, opts.skipProdConfirm);
+    if (!gate.allowed) return;
     if (idePreferences.current.autoSave) await this.flushAutoSave();
-    const { poller, sseCtl } = await (await loadDebugEnvMod()).launchIdeRun(this, opts, this.runPoller, this.runSseCtl);
+    const { poller, sseCtl } = await (await loadDebugEnvMod()).launchIdeRun(this, { ...opts, confirmProdTargets: gate.confirmProdTargets }, this.runPoller, this.runSseCtl);
     this.runPoller = poller;
     this.runSseCtl = sseCtl;
   }
@@ -642,14 +654,11 @@ class IdeStore {
       this.applyDebugSnapshot(resp.session);
     } catch { /* exited */ }
   }
-  async startDebug(opts: { configId?: string; language?: string; skipProdConfirm?: boolean; launch?: { program: string; args?: string[]; cwd?: string; test_name?: string; attach_port?: number; env?: Record<string, string> } } = {}): Promise<void> {
-    if (this.target.kind === 'local' && this.projectEnv?.network_bridge?.enabled && !opts.skipProdConfirm) {
-      const { confirmProdNetworkBridge } = await import('./shell/networkBridgeGuard.svelte');
-      const allowed = await confirmProdNetworkBridge(this.projectEnv.network_bridge, 'launch', this.target.workspace_id);
-      if (!allowed) return;
-    }
+  async startDebug(opts: { configId?: string; language?: string; skipProdConfirm?: boolean; launch?: { program: string; args?: string[]; build_flags?: string[]; cwd?: string; test_name?: string; attach_port?: number; env?: Record<string, string> } } = {}): Promise<void> {
+    const gate = await (await loadRepoActionsMod()).confirmIdeTargetProdLaunch(this.target, this.projectEnv, opts.skipProdConfirm);
+    if (!gate.allowed) return;
     if (idePreferences.current.autoSave) await this.flushAutoSave();
-    this.debugSseCtl = await (await loadDebugEnvMod()).launchDebugSession(this, opts, this.debugSseCtl, (s) => this.applyDebugSnapshot(s));
+    this.debugSseCtl = await (await loadDebugEnvMod()).launchDebugSession(this, { ...opts, confirmProdTargets: gate.confirmProdTargets }, this.debugSseCtl, (s) => this.applyDebugSnapshot(s));
   }
   applyDebugSnapshot(raw: IdeDebugSessionSnapshot): void {
     const apply = (m: typeof DebugEnvMod): void => {

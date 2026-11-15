@@ -137,8 +137,17 @@ export function resolveIdeLspModuleRoot(
       }
     }
   }
-  return best || normRoot;
+  if (best) return best;
+  if (normRoot !== '/' && absFile !== normRoot && !absFile.startsWith(`${normRoot}/`)) {
+    const slash = absFile.lastIndexOf('/');
+    return slash > 0 ? absFile.slice(0, slash) : '/';
+  }
+  return normRoot;
 }
+
+import { extractGoBuildTagsFromSource, GO_BUILD_TAG_DIAG_RE, rewriteGoBuildTagDiagnostic } from '../goBuildTags.ts';
+
+export { extractGoBuildTagsFromSource, rewriteGoBuildTagDiagnostic };
 
 export interface RawLspDiagnosticLike {
   range: LspRange;
@@ -180,19 +189,56 @@ export function dedupeLspDiagnostics<T extends RawLspDiagnosticLike>(diagnostics
   return out;
 }
 
-export function dedupeLspJsonRpcMessage<T>(message: T): T {
+export function dedupeLspJsonRpcMessage<T>(
+  message: T,
+  getDocTextForUri?: ((uri: string) => string | null | undefined) | null,
+): T {
   if (!message || typeof message !== 'object') return message;
   const msg = message as {
     method?: unknown;
-    params?: { diagnostics?: RawLspDiagnosticLike[] } | null;
+    params?: { uri?: string; diagnostics?: RawLspDiagnosticLike[] } | null;
   };
   if (msg.method !== 'textDocument/publishDiagnostics' || !Array.isArray(msg.params?.diagnostics)) {
     return message;
   }
   const raw = msg.params.diagnostics;
-  if (raw.length <= 1) return message;
-  const deduped = dedupeLspDiagnostics(raw);
-  if (deduped.length === raw.length) return message;
+  const uri = typeof msg.params.uri === 'string' ? msg.params.uri : '';
+  let docTextFetched = false;
+  let cachedDocText: string | null | undefined = undefined;
+  let rewrittenAny = false;
+
+  const rewritten = raw.map((d) => {
+    const rawMsg =
+      typeof d.message === 'string'
+        ? d.message
+        : d.message && typeof d.message === 'object' && 'value' in d.message
+          ? String(d.message.value ?? '')
+          : String(d.message ?? '');
+    const codeStr =
+      d.code != null && typeof d.code === 'object' && 'value' in d.code
+        ? String(d.code.value ?? '')
+        : d.code != null
+          ? String(d.code)
+          : '';
+    if (codeStr !== 'otto_go_build_tag' && !GO_BUILD_TAG_DIAG_RE.test(rawMsg)) return d;
+    if (!docTextFetched) {
+      docTextFetched = true;
+      cachedDocText = uri && getDocTextForUri ? getDocTextForUri(uri) : null;
+    }
+    const rw = rewriteGoBuildTagDiagnostic(rawMsg, d.code, cachedDocText);
+    if (!rw.isBuildTagDiag) return d;
+    rewrittenAny = true;
+    return {
+      ...d,
+      severity: d.severity === 1 ? 2 : (d.severity ?? 2),
+      code: 'otto_go_build_tag',
+      source: d.source === 'go list' ? 'gopls (build tags)' : (d.source ?? 'gopls'),
+      message: rw.message,
+    };
+  });
+
+  const deduped = dedupeLspDiagnostics(rewritten);
+  if (!rewrittenAny && deduped.length === raw.length) return message;
   return {
     ...(message as Record<string, unknown>),
     params: {
@@ -385,6 +431,14 @@ export function buildLspCompletionChangeSpec(
   };
 }
 
+function isDocPosInCommentOrString(doc: EditorState['doc'], pos: number): boolean {
+  const target = Math.max(0, Math.min(doc.length, pos));
+  if (target === 0) return false;
+  const windowStart = Math.max(0, target - 16_384);
+  const alignedStart = windowStart > 0 ? doc.lineAt(windowStart).from : 0;
+  return isPosInCommentOrString(doc.sliceString(alignedStart, target), target - alignedStart);
+}
+
 export function createIdeLspCompletionExtension(opts: {
   documentUri: string;
   languageId: string;
@@ -400,7 +454,7 @@ export function createIdeLspCompletionExtension(opts: {
     if (!opts.isReady()) return null;
     const trig = detectLspCompletionTrigger(ctx.state.doc, ctx.pos, ctx.explicit, opts.languageId);
     if (!trig) return null;
-    if (!ctx.explicit && isPosInCommentOrString(ctx.state.doc.toString(), ctx.pos)) return null;
+    if (!ctx.explicit && isDocPosInCommentOrString(ctx.state.doc, ctx.pos)) return null;
 
     try {
       const res = await opts.requestCompletion({
@@ -490,7 +544,7 @@ export function createIdeLspCompletionExtension(opts: {
     }
     if (!shouldOpen) return;
     const head = u.state.selection.main.head;
-    if (isPosInCommentOrString(u.state.doc.toString(), head)) return;
+    if (isDocPosInCommentOrString(u.state.doc, head)) return;
     const targetView = u.view;
     queueMicrotask(() => {
       if (targetView.dom.isConnected && targetView.hasFocus) startCompletion(targetView);

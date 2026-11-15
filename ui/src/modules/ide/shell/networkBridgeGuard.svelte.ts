@@ -13,7 +13,7 @@ class BridgeEnvironmentCache {
   clusters = $state<K8sCluster[]>([]);
   sshConns = $state<Connection[]>([]);
   private clustersLoaded = false;
-  private sshLoaded = false;
+  private loadedSshWorkspaces = new Set<string>();
   private inflight: Promise<void> | null = null;
 
   seedClusters(list: readonly K8sCluster[]): void {
@@ -21,7 +21,7 @@ class BridgeEnvironmentCache {
     this.clustersLoaded = true;
   }
 
-  seedSshConns(list: readonly Connection[]): void {
+  seedSshConns(list: readonly Connection[], workspaceId?: string | null): void {
     const byId = new Map<string, Connection>();
     for (let i = 0; i < this.sshConns.length; i++) {
       byId.set(this.sshConns[i].id, this.sshConns[i]);
@@ -30,12 +30,28 @@ class BridgeEnvironmentCache {
       if (list[i].kind === 'ssh') byId.set(list[i].id, list[i]);
     }
     this.sshConns = Array.from(byId.values());
-    this.sshLoaded = true;
+    if (workspaceId) this.loadedSshWorkspaces.add(workspaceId);
   }
 
   async ensureLoaded(workspaceId?: string | null): Promise<void> {
-    if (this.clustersLoaded && this.sshLoaded) return;
-    if (this.inflight) return this.inflight;
+    const scopes = Array.from(
+      new Set(
+        [
+          workspaceId,
+          ws.currentId,
+          ...ws.workspaces.map((w) => w.id),
+          ws.scratch?.id ?? SCRATCH_WORKSPACE_ID,
+        ].filter((id): id is string => Boolean(id)),
+      ),
+    );
+    if (scopes.length === 0) scopes.push(SCRATCH_WORKSPACE_ID);
+    const missingScopes = scopes.filter((id) => !this.loadedSshWorkspaces.has(id));
+    if (this.clustersLoaded && missingScopes.length === 0) return;
+    if (this.inflight) {
+      await this.inflight;
+      const stillMissing = scopes.filter((id) => !this.loadedSshWorkspaces.has(id));
+      if (this.clustersLoaded && stillMissing.length === 0) return;
+    }
     const p = (async () => {
       const tasks: Promise<void>[] = [];
       if (!this.clustersLoaded) {
@@ -49,37 +65,31 @@ class BridgeEnvironmentCache {
             .catch(() => {}),
         );
       }
-      if (!this.sshLoaded) {
-        const scopes = Array.from(
-          new Set(
-            [
-              workspaceId,
-              ws.currentId,
-              ...ws.workspaces.map((w) => w.id),
-              ws.scratch?.id ?? SCRATCH_WORKSPACE_ID,
-            ].filter((id): id is string => Boolean(id)),
-          ),
-        );
-        if (scopes.length === 0) scopes.push(SCRATCH_WORKSPACE_ID);
+      if (missingScopes.length > 0) {
         tasks.push(
           Promise.allSettled(
-            scopes.map((id) => api.get<Connection[]>(`/workspaces/${encodeURIComponent(id)}/connections`)),
+            missingScopes.map((id) =>
+              api.get<Connection[]>(`/workspaces/${encodeURIComponent(id)}/connections`).then((rows) => ({ id, rows })),
+            ),
           )
             .then((results) => {
               const seen = new Map<string, Connection>();
+              for (let i = 0; i < this.sshConns.length; i++) {
+                seen.set(this.sshConns[i].id, this.sshConns[i]);
+              }
               let anyFulfilled = false;
               for (let i = 0; i < results.length; i++) {
                 const r = results[i];
                 if (r.status !== 'fulfilled') continue;
                 anyFulfilled = true;
-                for (let j = 0; j < r.value.length; j++) {
-                  const c = r.value[j];
-                  if (c.kind === 'ssh' && !seen.has(c.id)) seen.set(c.id, c);
+                this.loadedSshWorkspaces.add(r.value.id);
+                for (let j = 0; j < r.value.rows.length; j++) {
+                  const c = r.value.rows[j];
+                  if (c.kind === 'ssh') seen.set(c.id, c);
                 }
               }
               if (anyFulfilled) {
                 this.sshConns = Array.from(seen.values());
-                this.sshLoaded = true;
               }
             })
             .catch(() => {}),
@@ -131,6 +141,24 @@ export async function confirmProdNetworkBridge(
     {
       title: mode === 'enable' ? 'Enable production network bridge?' : 'Save production network bridge?',
       confirmLabel: mode === 'enable' ? 'Enable production bridge' : 'Save production bridge',
+      danger: true,
+    },
+  );
+}
+
+export async function confirmProdSshTarget(
+  connectionId: string | null | undefined,
+  workspaceId?: string | null,
+): Promise<boolean> {
+  if (!connectionId) return true;
+  await bridgeEnvCache.ensureLoaded(workspaceId);
+  const info = bridgeEnvCache.inspect({ ssh_tunnel_connection_id: connectionId });
+  if (!info.isProd) return true;
+  return confirmer.ask(
+    `Execute directly on production host ${info.summary}? Commands and debuggers run live on the remote server.`,
+    {
+      title: 'Run on production SSH target?',
+      confirmLabel: 'Run on production',
       danger: true,
     },
   );

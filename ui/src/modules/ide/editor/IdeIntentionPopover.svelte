@@ -5,9 +5,11 @@
   import { tick } from 'svelte';
   import { placeAnchored, type AnchorPlacement } from '../../../lib/anchorPlace';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { extractGoBuildTagsFromSource } from '../../../lib/goBuildTags';
   import { detectManifestEcosystem, executeIdeDepAction, type IdeDepItem } from '../../../lib/components/cm-ide-deps';
   import { previewConcreteEdits, type IdeConcreteTextEdit, type IdeQuickFixAction } from '../../../lib/components/cm-ide-quickfix';
   import type { ClientDiagQuickFix } from '../../../lib/components/cm-ide-semantic';
+  import { ide } from '../ideStore.svelte';
   import type { IdeCodeAction } from '../store/ideTypes';
 
   interface Props {
@@ -99,6 +101,27 @@
 
   const rows = $derived.by((): IntentionRow[] => {
     const out: IntentionRow[] = [];
+    if (filePath.toLowerCase().endsWith('.go')) {
+      const fileTags = extractGoBuildTagsFromSource(docText);
+      const activeTags = ide.getRepoGoBuildTags(filePath);
+      const missingTags = fileTags.filter((t) => !activeTags.includes(t));
+      if (missingTags.length > 0) {
+        const nextTags = [...activeTags, ...missingTags];
+        out.push({
+          id: `go-enable-tags-${missingTags.join(',')}`,
+          label: `Enable Go build tag: ${missingTags.join(', ')}`,
+          hint: 'Quick Fix',
+          kind: 'fix',
+          previewMinus: [activeTags.length > 0 ? `-tags=${activeTags.join(',')}` : '# No Go build tags active'],
+          previewPlus: [`-tags=${nextTags.join(',')}`],
+          previewNote: 'Enables build tag for gopls diagnostics, navigation, Run, and Debug in this repository',
+          run: () => {
+            onclose();
+            void ide.setRepoGoBuildTags(filePath, nextTags);
+          },
+        });
+      }
+    }
     if (eco) {
       if (manifestDep) {
         const d = manifestDep;

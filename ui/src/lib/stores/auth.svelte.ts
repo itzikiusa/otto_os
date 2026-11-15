@@ -175,6 +175,32 @@ class AuthStore {
   }
   private capsRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private capsAttempt = 0;
+  private provisionalMetaTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private clearProvisionalMetaRefresh(): void {
+    if (this.provisionalMetaTimer) clearTimeout(this.provisionalMetaTimer);
+    this.provisionalMetaTimer = null;
+  }
+
+  /** Re-read `/meta` once after boot when the initial cold response arrived
+   *  before background shell-alias tool probes or model catalogs settled. */
+  private scheduleProvisionalMetaRefresh(): void {
+    this.clearProvisionalMetaRefresh();
+    const m = this.meta;
+    if (!m || !Array.isArray(m.providers) || m.providers.length === 0) return;
+    const toolNames = new Set((m.tools ?? []).map((t) => t.name));
+    const missingTool = m.providers.some((p) => p !== 'shell' && !toolNames.has(p));
+    const emptyModels = m.provider_models != null && Object.keys(m.provider_models).length === 0;
+    if (!missingTool && !emptyModels) return;
+    const token = getToken();
+    this.provisionalMetaTimer = setTimeout(() => {
+      this.provisionalMetaTimer = null;
+      if (this.phase === 'ready' && token === getToken()) {
+        void this.refreshMeta();
+      }
+    }, 3_500);
+    (this.provisionalMetaTimer as { unref?: () => void } | null)?.unref?.();
+  }
 
   /** True when the active bearer is an impersonation token. */
   get isImpersonating(): boolean {
@@ -211,6 +237,7 @@ class AuthStore {
 
   /** Re-fetch /meta without touching the boot phase (e.g. after provider changes). */
   async refreshMeta(): Promise<boolean> {
+    this.clearProvisionalMetaRefresh();
     try {
       this.meta = await api.get<MetaResp>('/meta');
       setAltLoopbackBase(this.meta.alt_loopback_base);
@@ -223,6 +250,7 @@ class AuthStore {
 
   /** Forget any capabilities failure + pending retry (identity change, sign-out). */
   private resetCapabilitiesRetry(): void {
+    this.clearProvisionalMetaRefresh();
     if (this.capsRetryTimer) clearTimeout(this.capsRetryTimer);
     this.capsRetryTimer = null;
     this.capsAttempt = 0;
@@ -398,6 +426,7 @@ class AuthStore {
         return;
       }
       this.phase = 'ready';
+      this.scheduleProvisionalMetaRefresh();
     } catch (e) {
       // Only a rejected token means "sign in again". A timeout / 5xx / dropped
       // connection on /auth/me (daemon restarting, sleep/wake) used to land on

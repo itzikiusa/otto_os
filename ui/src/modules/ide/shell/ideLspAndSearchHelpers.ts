@@ -97,19 +97,26 @@ export async function runFindReferences(
   }
 }
 
-export async function runPreviewRename(host: IdeLspSearchHost, newName?: string): Promise<void> {
+export async function runPreviewRename(
+  host: IdeLspSearchHost,
+  newName?: string,
+  bufPerf?: IdeBufferPerfController,
+): Promise<void> {
   const next = (newName ?? host.renameState.newName).trim();
   host.renameState.newName = next;
   if (!next) return;
   host.renameState.loading = true;
   host.renameState.error = null;
   try {
+    const content = bufPerf ? bufPerf.flush(host, host.renameState.path) : host.getBuffer(host.renameState.path);
     const resp = await api.post<{ symbol: string; new_name: string; edits: IdeRenameEdit[] }>('/ide/lsp/rename', {
       target: host.targetPayload,
       project_folders: host.targetPayload.project_folders,
       path: host.renameState.path,
       line: host.renameState.line,
       column: host.renameState.column,
+      symbol: host.renameState.symbol || undefined,
+      content: content || undefined,
       new_name: next,
       apply: false,
     });
@@ -132,15 +139,18 @@ export async function runApplyRename(
   host.renameState.error = null;
   try {
     const prefs = readIdePreferences();
+    const content = bufPerf.flush(host, host.renameState.path);
     const resp = await api.post<{ applied: boolean; edits: IdeRenameEdit[] }>('/ide/lsp/rename', {
       target: host.targetPayload,
       project_folders: host.targetPayload.project_folders,
       path: host.renameState.path,
       line: host.renameState.line,
       column: host.renameState.column,
+      symbol: host.renameState.symbol || undefined,
+      content: content || undefined,
       new_name: next,
       apply: true,
-      record_local_history: prefs.localHistoryEnabled,
+      local_history_enabled: prefs.localHistoryEnabled,
       local_history_retention_days: prefs.localHistoryRetentionDays,
     });
     const touched = new Set((resp.edits ?? []).map((e) => e.path));
@@ -400,7 +410,7 @@ export async function runApplyQuickFixEdits(
           content: nextDoc,
           expected_sha256: read.sha256 || undefined,
           create_dirs: false,
-          record_local_history: prefs.localHistoryEnabled,
+          local_history_enabled: prefs.localHistoryEnabled,
           local_history_retention_days: prefs.localHistoryRetentionDays,
         });
         const editedLines = new Set(fileEdits.map((e) => e.start_line));

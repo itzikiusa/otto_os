@@ -8,17 +8,17 @@ use std::time::Duration;
 
 use chrono::Utc;
 use otto_core::agent_runtime::{
-    ProviderFailure, ProviderSessionStatus, ProviderTurn, ProviderTurnStatus, RuntimeEventBody,
+    ProviderSessionStatus, ProviderTurn, ProviderTurnStatus, RuntimeEventBody,
 };
 use otto_core::{Id, Result};
 use tokio::sync::oneshot;
 
 use super::held_proc::{build_checkpoint, finalize_child_exit, pump_held, sync_holder_checkpoint};
 use super::{
-    apply_step, descendants, emit, flush_held, has_pending, set_session_status, ActiveTurn,
-    AgentRuntime, Live, PersistOp, Proc, ProcTransport, RequestIds,
+    descendants, dispatch_child_stdout, emit, evict_if_dead_after_flush, flush_held, has_pending,
+    record_claude_stdout_line, set_session_status, ActiveTurn, AgentRuntime, Live, PersistOp, Proc,
+    ProcTransport, RequestIds,
 };
-use crate::driver::{DriverEvent, DriverStep};
 use crate::holder::{adopt_socket, list_holder_sockets, LineStream};
 use crate::process::signal_group;
 
@@ -42,7 +42,11 @@ impl AgentRuntime {
                 let mut st = live.lock();
                 flush_held(&self.inner, live, &mut st);
                 let cp = build_checkpoint(&st);
-                st.proc.take().map(|p| (p, cp))
+                let taken = st.proc.take().map(|p| (p, cp));
+                if taken.is_some() {
+                    live.proc_ended.notify_waiters();
+                }
+                taken
             };
             if let Some((proc, cp)) = taken {
                 match proc.transport {
@@ -146,7 +150,7 @@ impl AgentRuntime {
                     .get(&item.id)
                     .is_none_or(|cur| cur.is_streaming())
                 {
-                    st.proj.items.insert(item.id.clone(), item);
+                    st.proj.upsert_item_entry(item);
                 }
             }
             if let Some(t_snap) = cp.active_turn {
@@ -193,6 +197,10 @@ impl AgentRuntime {
                     client,
                     acked_seq: cp.acked_seq,
                     claude_login: claude_login.clone(),
+                    last_checkpoint_at: None,
+                    checkpoint_dirty: false,
+                    #[cfg(test)]
+                    checkpoint_writes: 0,
                 },
                 driver,
             });
@@ -213,32 +221,6 @@ impl AgentRuntime {
             set_session_status(&self.inner, &live, &mut st, status, None);
 
             for entry in replay_lines {
-                if entry.stream == LineStream::Out {
-                    let step = if let Some(n) = entry.overlong_bytes {
-                        DriverStep {
-                            events: vec![DriverEvent::Error(ProviderFailure {
-                                class: "protocol_error".into(),
-                                message: format!("dropped an agent output line of {n} bytes"),
-                                code: None,
-                                retryable: None,
-                            })],
-                            ..DriverStep::default()
-                        }
-                    } else {
-                        if let Some(dir) = &claude_login {
-                            otto_usage::limits::record_claude_line(
-                                dir.as_deref(),
-                                &entry.line,
-                                Utc::now(),
-                            );
-                        }
-                        match st.proc.as_mut() {
-                            Some(p) => p.driver.on_line(&entry.line),
-                            None => break,
-                        }
-                    };
-                    apply_step(&self.inner, &live, &mut st, step);
-                }
                 if let Some(Proc {
                     transport: ProcTransport::Held { acked_seq, .. },
                     ..
@@ -246,7 +228,17 @@ impl AgentRuntime {
                 {
                     *acked_seq = entry.seq;
                 }
-                sync_holder_checkpoint(&st);
+                if entry.stream == LineStream::Out {
+                    if st.proc.is_none() {
+                        break;
+                    }
+                    if entry.overlong_bytes.is_none() {
+                        record_claude_stdout_line(&claude_login, &entry.line);
+                    }
+                    let line_or_overlong =
+                        entry.overlong_bytes.map_or(Ok(entry.line.as_str()), Err);
+                    dispatch_child_stdout(&self.inner, &live, &mut st, line_or_overlong, false);
+                }
             }
 
             if let Some(exit_status) = exited {
@@ -265,6 +257,7 @@ impl AgentRuntime {
                 }
                 (epoch, false, false)
             } else {
+                sync_holder_checkpoint(&mut st, true);
                 let alive = st.proc.is_some();
                 let kick = alive && st.turn.is_none() && !st.proj.queue.is_empty();
                 (epoch, alive, kick)
@@ -273,17 +266,28 @@ impl AgentRuntime {
 
         if still_alive {
             if claude_login.is_some() {
-                descendants::watch(Arc::clone(&live), epoch, child_pid);
+                descendants::watch(
+                    Arc::clone(&self.inner),
+                    Arc::clone(&live),
+                    sid.clone(),
+                    epoch,
+                    child_pid,
+                );
             }
             tokio::spawn(pump_held(
                 Arc::clone(&self.inner),
                 Arc::clone(&live),
+                sid.clone(),
                 epoch,
                 events,
                 claude_login,
             ));
         }
+        drop(live);
         self.flush(&sid).await;
+        if !still_alive {
+            evict_if_dead_after_flush(&self.inner, &sid).await;
+        }
         if kick {
             self.kick_queue(&sid);
         }

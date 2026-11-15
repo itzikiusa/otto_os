@@ -3,7 +3,7 @@
   // Clickable path + symbol hierarchy chain, Local History clock, and Editor Settings gear.
   import Icon from '../../../lib/components/Icon.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
-  import { IDE_PREFS_EVENT, readIdeEditorPreferences } from '../../../lib/components/cm-ide-theme';
+  import { IDE_PREFS_EVENT, readIdePreferences } from '../../../lib/components/cm-ide-prefs';
   import type { IdeSymbolNode } from '../ideStore.svelte';
   import { flushAutoLocalHistorySnapshot, revealInIdeProjectTree } from './ideEditorStoreBridge.svelte';
 
@@ -17,11 +17,11 @@
   }
 
   let { filePath, pathSegments, symbols, cursorLine, onjumpsymbol, onopenstructure }: Props = $props();
-  let visible = $state(readIdeEditorPreferences().showBreadcrumbs);
+  let visible = $state(readIdePreferences().showBreadcrumbs);
 
   $effect(() => {
     if (typeof window === 'undefined') return;
-    const onPrefs = () => { visible = readIdeEditorPreferences().showBreadcrumbs; };
+    const onPrefs = () => { visible = readIdePreferences().showBreadcrumbs; };
     window.addEventListener(IDE_PREFS_EVENT, onPrefs);
     return () => window.removeEventListener(IDE_PREFS_EVENT, onPrefs);
   });

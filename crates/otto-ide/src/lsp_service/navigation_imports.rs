@@ -68,10 +68,26 @@ pub(super) fn resolve_local_language_imports(
         }
         "go" => {
             let imports = parse_go_imports(content);
-            let matched_import = qualifier
-                .and_then(|q| imports.get(q))
-                .or_else(|| imports.get(symbol));
-            if let Some(import_path) = matched_import {
+            let (matched_import, expected_recv_type) = if let Some(q) = qualifier {
+                if let Some(imp) = imports.get(q) {
+                    (Some(imp.clone()), None)
+                } else if let Some((imp, recv_ty)) = resolve_go_field_or_var_import(
+                    content,
+                    origin_abs,
+                    q,
+                    &imports,
+                    project_roots,
+                    readonly_roots,
+                    is_root_user,
+                ) {
+                    (Some(imp), recv_ty)
+                } else {
+                    (None, None)
+                }
+            } else {
+                (imports.get(symbol).cloned(), None)
+            };
+            if let Some(ref import_path) = matched_import {
                 let mut pkg_dirs = resolve_go_package_dirs(
                     import_path,
                     origin_abs,
@@ -83,7 +99,13 @@ pub(super) fn resolve_local_language_imports(
                     is_confined_nav_path(d, project_roots, readonly_roots, is_root_user)
                 });
                 if qualifier.is_some() {
-                    for mut loc in search_go_package_dirs(&pkg_dirs, symbol) {
+                    let mut found = search_go_package_dirs(&pkg_dirs, symbol);
+                    if let Some(ref recv_ty) = expected_recv_type {
+                        found.sort_by_key(|loc| {
+                            !go_preview_has_receiver_type(&loc.preview, recv_ty)
+                        });
+                    }
+                    for mut loc in found {
                         if !is_confined_nav_path(
                             Path::new(&loc.path),
                             project_roots,
@@ -474,4 +496,95 @@ pub(super) fn push_unique_loc(out: &mut Vec<IdeReferenceLocation>, loc: IdeRefer
     if seen.insert((loc.path.as_str(), loc.line)) {
         out.push(loc);
     }
+}
+
+pub(super) fn go_preview_has_receiver_type(preview: &str, recv_type: &str) -> bool {
+    let Some(rest) = preview.trim_start().strip_prefix("func") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    let Some(inside) = rest.strip_prefix('(').and_then(|s| s.split(')').next()) else {
+        return false;
+    };
+    let ty_part = inside
+        .split_whitespace()
+        .last()
+        .unwrap_or("")
+        .trim_start_matches('*');
+    let ty_base = ty_part.split('[').next().unwrap_or(ty_part);
+    ty_base == recv_type
+}
+
+fn infer_go_var_or_field_pkg_in_source(
+    src: &str,
+    qualifier: &str,
+    imports: &BTreeMap<String, String>,
+) -> Option<(String, Option<String>)> {
+    let esc = regex::escape(qualifier);
+    if let Ok(decl_re) = regex::Regex::new(&format!(
+        r"\b{esc}\s+\*?([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b"
+    )) {
+        for line in src.lines() {
+            let code = line.split("//").next().unwrap_or("");
+            if let Some(cap) = decl_re.captures(code) {
+                if let Some(imp) = imports.get(&cap[1]) {
+                    return Some((imp.clone(), Some(cap[2].to_string())));
+                }
+            }
+        }
+    }
+    if let Ok(assign_re) = regex::Regex::new(&format!(
+        r"\b{esc}(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)?\s*:?=\s*&?([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b"
+    )) {
+        for line in src.lines() {
+            let code = line.split("//").next().unwrap_or("");
+            if let Some(cap) = assign_re.captures(code) {
+                if let Some(imp) = imports.get(&cap[1]) {
+                    let sym = &cap[2];
+                    let ty = (!sym.starts_with("New")).then(|| sym.to_string());
+                    return Some((imp.clone(), ty));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[allow(clippy::disallowed_methods)]
+fn resolve_go_field_or_var_import(
+    content: &str,
+    origin_abs: &Path,
+    qualifier: &str,
+    imports: &BTreeMap<String, String>,
+    project_roots: &[PathBuf],
+    readonly_roots: &[PathBuf],
+    is_root_user: bool,
+) -> Option<(String, Option<String>)> {
+    if let Some(hit) = infer_go_var_or_field_pkg_in_source(content, qualifier, imports) {
+        return Some(hit);
+    }
+    let dir = origin_abs.parent()?;
+    let rd = std::fs::read_dir(dir).ok()?;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p == origin_abs || p.extension().and_then(|e| e.to_str()) != Some("go") {
+            continue;
+        }
+        if p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with("_test.go"))
+        {
+            continue;
+        }
+        let Some((_, sib_text)) =
+            read_confined_nav_file(&p, project_roots, readonly_roots, is_root_user)
+        else {
+            continue;
+        };
+        let sib_imports = parse_go_imports(&sib_text);
+        if let Some(hit) = infer_go_var_or_field_pkg_in_source(&sib_text, qualifier, &sib_imports) {
+            return Some(hit);
+        }
+    }
+    None
 }

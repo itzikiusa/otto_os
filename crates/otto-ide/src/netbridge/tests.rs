@@ -322,6 +322,7 @@ exit 1
     let k8s_spec = IdeK8sSpec {
         cluster_id: Id::from("stg-m"),
         cluster_name: "STG-M".into(),
+        environment: None,
         namespace: "cbo".into(),
         allow_cross_namespace: false,
         kubectl_program: kubectl_script.to_string_lossy().into_owned(),
@@ -534,4 +535,151 @@ int main(void) {
 
     drop(inst);
     pod_task.abort();
+}
+
+#[tokio::test]
+async fn corr_p1_6_routing_cloud_managed_unmapped_vip_port_cgnat_and_idle_listener_cleanup() {
+    let (svcs, ings) = sample_cbo_k8s_json();
+    let loaded_snap = parse_k8s_discovery_json("cbo", &svcs, &ings);
+    assert!(loaded_snap.loaded);
+
+    let cfg = IdeNetworkBridgeConfig {
+        enabled: true,
+        k8s_cluster_id: Some(Id::from("stg-m")),
+        k8s_namespace: Some("cbo".into()),
+        ssh_tunnel_connection_id: Some(Id::from("ssh-bastion")),
+        ..Default::default()
+    };
+
+    // 1) Loaded snapshot + SSH tunnel must NOT blindly hijack unknown single-label hosts,
+    // `localhost`, or Bonjour machine `.local` hostnames to K8sService:
+    assert_eq!(
+        resolve_destination("unknown-single-host", 5432, &cfg, Some(&loaded_snap), true),
+        Some(BridgeDestination::SshHost {
+            host: "unknown-single-host".into(),
+            port: 5432,
+        })
+    );
+    assert_eq!(
+        resolve_destination("unknown-single-host", 5432, &cfg, Some(&loaded_snap), false),
+        None
+    );
+    let unloaded_snap = K8sDiscoverySnapshot {
+        namespace: "cbo".into(),
+        loaded: false,
+        ..Default::default()
+    };
+    assert_eq!(
+        resolve_destination("bootstrap-svc", 8080, &cfg, Some(&unloaded_snap), false),
+        Some(BridgeDestination::K8sService {
+            namespace: "cbo".into(),
+            service: "bootstrap-svc".into(),
+            port: 8080,
+        })
+    );
+    assert_eq!(
+        resolve_destination("localhost", 8080, &cfg, Some(&unloaded_snap), false),
+        None
+    );
+    assert_eq!(
+        resolve_destination("macbook-pro.local", 8080, &cfg, Some(&loaded_snap), true),
+        None
+    );
+
+    // 2) Cloud-managed DB/cache suffixes (`.cache.amazonaws.com`, `.rds.amazonaws.com`,
+    // `.azure.com`, `.googleapis.com`) must NOT collide with in-cluster `redis` service:
+    assert_eq!(
+        resolve_destination(
+            "redis.prod.use1.cache.amazonaws.com",
+            6379,
+            &cfg,
+            Some(&loaded_snap),
+            true
+        ),
+        Some(BridgeDestination::SshHost {
+            host: "redis.prod.use1.cache.amazonaws.com".into(),
+            port: 6379,
+        })
+    );
+    assert_eq!(
+        resolve_destination(
+            "redis.prod.use1.cache.amazonaws.com",
+            6379,
+            &cfg,
+            Some(&loaded_snap),
+            false
+        ),
+        None
+    );
+
+    // 3) CGNAT `100.64.0.0/10` is present in both Rust `is_ssh_routable_private_ip` and C interposer:
+    assert!(is_ssh_routable_private_ip(
+        "100.64.12.34".parse::<IpAddr>().unwrap()
+    ));
+    assert!(super::interposer::INTERPOSER_C_SOURCE_FOR_TEST
+        .contains("if ((ip_h & 0xFFC00000u) == 0x64400000u) return 1;"));
+    assert!(super::interposer::INTERPOSER_C_SOURCE_FOR_TEST.contains("otto_nb_connect_unix"));
+
+    // 4) Port-scoped HostMapping VIP connecting on an unmapped port connects directly
+    // via a `0600` Unix relay socket instead of failing `NotFound`, and idle cleanup
+    // releases `host_mappings` TCP listeners:
+    let direct_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let direct_port = direct_listener.local_addr().unwrap().port();
+    let direct_task = tokio::spawn(async move {
+        if let Ok((mut s, _)) = direct_listener.accept().await {
+            let _ = s.write_all(b"direct-unmapped-ok\n").await;
+            let _ = s.shutdown().await;
+        }
+    });
+
+    let probe_ephemeral = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let mapped_local_port = probe_ephemeral.local_addr().unwrap().port();
+    drop(probe_ephemeral);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bridge_cfg = IdeNetworkBridgeConfig {
+        enabled: true,
+        host_mappings: vec![IdeHostMapping {
+            from_host: "127.0.0.1".into(),
+            from_port: Some(mapped_local_port),
+            to_host: "127.0.0.1".into(),
+            to_port: Some(direct_port),
+        }],
+        ..Default::default()
+    };
+    let inst = NetBridgeInstance::start(
+        tmp.path(),
+        bridge_cfg,
+        None,
+        None,
+        Arc::new(DiscoveryCache::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(inst.active_host_mapping_listener_count(), 1);
+
+    let vip = inst.allocate_vip("127.0.0.1");
+    let target = inst
+        .resolve_connect_target(&vip.to_string(), direct_port)
+        .await
+        .expect("unmapped VIP port must not return NotFound");
+    match target {
+        Some(super::tunnel_forward::LocalForwardTarget::UnixSocket(upath)) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&upath).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600);
+            }
+            let mut us = tokio::net::UnixStream::connect(&upath).await.unwrap();
+            let mut out = String::new();
+            us.read_to_string(&mut out).await.unwrap();
+            assert_eq!(out.trim(), "direct-unmapped-ok");
+        }
+        _ => panic!("expected UnixSocket relay for unmapped VIP port"),
+    }
+
+    inst.stop_idle_listeners();
+    assert_eq!(inst.active_host_mapping_listener_count(), 0);
+    direct_task.abort();
 }

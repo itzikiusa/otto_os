@@ -118,7 +118,7 @@ pub struct IdeFileWriteReq {
     pub expected_sha256: Option<String>,
     #[serde(default)]
     pub create_dirs: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", alias = "record_local_history")]
     pub local_history_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_history_retention_days: Option<u32>,
@@ -148,7 +148,7 @@ pub struct IdeFsMutateReq {
     pub path: String,
     #[serde(default)]
     pub dest_path: Option<String>,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", alias = "record_local_history")]
     pub local_history_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_history_retention_days: Option<u32>,

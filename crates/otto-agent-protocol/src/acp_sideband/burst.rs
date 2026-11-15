@@ -2,12 +2,39 @@
 //! for all ACP sideband adapters (`agy`, `grok`, `gemini`, `opencode`, and
 //! custom ACP servers).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::v1::schema::ToolKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+pub(crate) const MAX_TRACKED_SIDEBAND_IDS: usize = 4096;
+
+pub(crate) fn insert_bounded_map<V>(map: &mut HashMap<String, V>, key: String, val: V) {
+    if !map.contains_key(&key) && map.len() >= MAX_TRACKED_SIDEBAND_IDS {
+        let drop_n = MAX_TRACKED_SIDEBAND_IDS / 4;
+        let victims: Vec<String> = map.keys().take(drop_n).cloned().collect();
+        for k in victims {
+            map.remove(&k);
+        }
+    }
+    map.insert(key, val);
+}
+
+pub(crate) fn insert_bounded_set(set: &mut HashSet<String>, key: String) -> bool {
+    if set.contains(&key) {
+        return false;
+    }
+    if set.len() >= MAX_TRACKED_SIDEBAND_IDS {
+        let drop_n = MAX_TRACKED_SIDEBAND_IDS / 4;
+        let victims: Vec<String> = set.iter().take(drop_n).cloned().collect();
+        for k in victims {
+            set.remove(&k);
+        }
+    }
+    set.insert(key)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct BurstFilter {
@@ -56,7 +83,7 @@ impl MirroredCounts {
     pub fn preseed_tool_id(&mut self, id: &str) {
         let trimmed = id.trim();
         if !trimmed.is_empty() {
-            self.tool_ids.insert(trimmed.to_string());
+            insert_bounded_set(&mut self.tool_ids, trimmed.to_string());
         }
     }
 
@@ -73,9 +100,9 @@ impl MirroredCounts {
         burst.remaining_tool_calls = burst
             .remaining_tool_calls
             .saturating_add(std::mem::take(&mut self.tool_calls));
-        burst
-            .preseeded_tool_ids
-            .extend(std::mem::take(&mut self.tool_ids));
+        for id in std::mem::take(&mut self.tool_ids) {
+            insert_bounded_set(&mut burst.preseeded_tool_ids, id);
+        }
     }
 }
 

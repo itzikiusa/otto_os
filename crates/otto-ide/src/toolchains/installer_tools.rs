@@ -115,7 +115,8 @@ pub(super) async fn install_local_lsp(
                 .into_owned())
         }
         EcosystemKind::Python => {
-            let uv_bin = ensure_local_uv(mgr, job_id, root, &uv_tarball_url(platform)).await?;
+            let uv_bin =
+                ensure_local_uv(mgr, job_id, root, &uv_tarball_url(platform), None).await?;
             let (tool_dir, bin_dir) = (root.join("python/tools"), root.join("python/bin"));
             tokio::fs::create_dir_all(&bin_dir)
                 .await
@@ -262,7 +263,8 @@ pub(super) async fn install_local_dap(
                 .into_owned())
         }
         EcosystemKind::Python => {
-            let uv_bin = ensure_local_uv(mgr, job_id, root, &uv_tarball_url(platform)).await?;
+            let uv_bin =
+                ensure_local_uv(mgr, job_id, root, &uv_tarball_url(platform), None).await?;
             let dap_venv = root.join("python/dap");
             run_local_cmd(
                 mgr,

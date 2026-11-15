@@ -54,6 +54,51 @@ fn path_to_file_uri(path: &Path) -> String {
 }
 
 impl LspPool {
+    pub(super) fn finish_evicted_entries(evicted: Vec<Entry>) {
+        for entry in evicted {
+            #[cfg(unix)]
+            if let Some(pid) = entry.child_pid {
+                kill_process_group_sync(pid);
+            }
+            let _ = entry.ctl.send(Ctl::Evict);
+        }
+    }
+
+    pub(super) fn evict_stale_go_servers(&self) {
+        let local_go_keys: Vec<PoolKey> = self
+            .lock()
+            .keys()
+            .filter(|k| k.lang == "go" && k.ssh.is_none())
+            .cloned()
+            .collect();
+        if local_go_keys.is_empty() {
+            return;
+        }
+        let desired: HashMap<PoolKey, Vec<String>> = local_go_keys
+            .into_iter()
+            .map(|k| {
+                let tags = self.go_build_tags(&k.root);
+                (k, tags)
+            })
+            .collect();
+
+        let mut evicted = Vec::new();
+        {
+            let mut entries = self.lock();
+            for (k, want_tags) in desired {
+                let changed = entries
+                    .get(&k)
+                    .is_some_and(|e| e.go_build_tags != want_tags);
+                if changed {
+                    if let Some(removed) = entries.remove(&k) {
+                        evicted.push(removed);
+                    }
+                }
+            }
+        }
+        Self::finish_evicted_entries(evicted);
+    }
+
     fn cached_attached_roots(&self, root: &str) -> Vec<String> {
         match &self.environments {
             Some(envs) => envs.cached_additional_roots(root),
@@ -225,21 +270,21 @@ impl LspPool {
         if victims.is_empty() {
             return;
         }
-        let mut entries = self.lock();
-        for victim in victims {
-            if entries
-                .get(&victim)
-                .is_some_and(|e| e.active_clients.load(Ordering::Acquire) == 0)
-            {
-                if let Some(removed) = entries.remove(&victim) {
-                    #[cfg(unix)]
-                    if let Some(pid) = removed.child_pid {
-                        kill_process_group_sync(pid);
+        let mut evicted = Vec::new();
+        {
+            let mut entries = self.lock();
+            for victim in victims {
+                if entries
+                    .get(&victim)
+                    .is_some_and(|e| e.active_clients.load(Ordering::Acquire) == 0)
+                {
+                    if let Some(removed) = entries.remove(&victim) {
+                        evicted.push(removed);
                     }
-                    let _ = removed.ctl.send(Ctl::Evict);
                 }
             }
         }
+        Self::finish_evicted_entries(evicted);
     }
 
     pub(super) fn pick_victim(
@@ -280,7 +325,8 @@ impl LspPool {
         owner: &str,
         protected_key: &PoolKey,
         reserve_slot: usize,
-    ) {
+    ) -> Vec<Entry> {
+        let mut out = Vec::new();
         let owner_cap = MAX_SERVERS_PER_OWNER.saturating_sub(reserve_slot);
         while entries
             .keys()
@@ -293,11 +339,7 @@ impl LspPool {
                 break;
             };
             if let Some(evicted) = entries.remove(&victim) {
-                #[cfg(unix)]
-                if let Some(pid) = evicted.child_pid {
-                    kill_process_group_sync(pid);
-                }
-                let _ = evicted.ctl.send(Ctl::Evict);
+                out.push(evicted);
             }
         }
         let global_cap = MAX_GLOBAL_SERVERS.saturating_sub(reserve_slot);
@@ -306,13 +348,10 @@ impl LspPool {
                 break;
             };
             if let Some(evicted) = entries.remove(&victim) {
-                #[cfg(unix)]
-                if let Some(pid) = evicted.child_pid {
-                    kill_process_group_sync(pid);
-                }
-                let _ = evicted.ctl.send(Ctl::Evict);
+                out.push(evicted);
             }
         }
+        out
     }
 
     /// Enforce [`LSP_RSS_BUDGET_BYTES`] (`1.2 GiB`), preferring `active_clients == 0`
@@ -331,23 +370,23 @@ impl LspPool {
         if total <= LSP_RSS_BUDGET_BYTES {
             return;
         }
-        let mut entries = self.lock();
-        while total > LSP_RSS_BUDGET_BYTES && entries.len() > 1 {
-            let victim = Self::pick_victim(&entries, protected_key, None, true)
-                .or_else(|| Self::pick_victim(&entries, protected_key, None, false));
-            let Some(vk) = victim else {
-                break;
-            };
-            if let Some(evicted) = entries.remove(&vk) {
-                total = total.saturating_sub(rss_map.get(&vk).copied().unwrap_or(0));
-                #[cfg(unix)]
-                if let Some(pid) = evicted.child_pid {
-                    kill_process_group_sync(pid);
+        let mut evicted_out = Vec::new();
+        {
+            let mut entries = self.lock();
+            while total > LSP_RSS_BUDGET_BYTES && entries.len() > 1 {
+                let victim = Self::pick_victim(&entries, protected_key, None, true)
+                    .or_else(|| Self::pick_victim(&entries, protected_key, None, false));
+                let Some(vk) = victim else {
+                    break;
+                };
+                if let Some(evicted) = entries.remove(&vk) {
+                    total = total.saturating_sub(rss_map.get(&vk).copied().unwrap_or(0));
+                    evicted_out.push(evicted);
+                } else {
+                    break;
                 }
-                let _ = evicted.ctl.send(Ctl::Evict);
-            } else {
-                break;
             }
         }
+        Self::finish_evicted_entries(evicted_out);
     }
 }

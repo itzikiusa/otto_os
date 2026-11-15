@@ -88,7 +88,7 @@
     {#if opened.kind === 'image'}
       <img class="ratt-full" src={openedSrc} alt={opened.name ?? ''} />
     {:else}
-      <iframe class="ratt-doc" src={openedSrc} title={opened.name ?? 'File'}></iframe>
+      <iframe class="ratt-doc" sandbox="" src={openedSrc} title={opened.name ?? 'File'}></iframe>
     {/if}
   </Modal>
 {/if}

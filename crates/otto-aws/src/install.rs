@@ -25,6 +25,8 @@ pub const TOOL: &str = "aws";
 /// Env override honoured by [`locate`] — absolute path to an `aws` binary.
 pub const BIN_ENV: &str = "OTTO_AWS_BIN";
 const PKG_URL: &str = "https://awscli.amazonaws.com/AWSCLIV2.pkg";
+/// Expected Apple Developer Team ID on Amazon's official AWS CLI v2 `.pkg`.
+const AMAZON_PKG_TEAM_ID: &str = "94KV3E626L";
 /// Keep the last N bytes of installer output for `/status`.
 const LOG_TAIL_CAP: usize = 4096;
 const STEP_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -389,18 +391,32 @@ impl Installer {
             None,
         )
         .await?;
+        if let Err(e) = self.verify_pkg_signature(&pkg).await {
+            let _ = std::fs::remove_file(&pkg);
+            return Err(e);
+        }
+        let installer_bin = if Path::new("/usr/sbin/installer").is_file() {
+            Path::new("/usr/sbin/installer")
+        } else {
+            Path::new("installer")
+        };
         self.append_log("$ installer -pkg AWSCLIV2.pkg -target CurrentUserHomeDirectory");
-        self.step(
-            Path::new("installer"),
-            &[
-                "-pkg",
-                &pkg.to_string_lossy(),
-                "-target",
-                "CurrentUserHomeDirectory",
-            ],
-            None,
-        )
-        .await?;
+        if let Err(e) = self
+            .step(
+                installer_bin,
+                &[
+                    "-pkg",
+                    &pkg.to_string_lossy(),
+                    "-target",
+                    "CurrentUserHomeDirectory",
+                ],
+                None,
+            )
+            .await
+        {
+            let _ = std::fs::remove_file(&pkg);
+            return Err(e);
+        }
         let _ = std::fs::remove_file(&pkg);
         let bin_dir = data_dir.join("bin");
         std::fs::create_dir_all(&bin_dir)
@@ -462,6 +478,67 @@ impl Installer {
             ))
         }
     }
+
+    async fn verify_pkg_signature(&'static self, pkg: &Path) -> std::result::Result<(), String> {
+        let pkgutil = if Path::new("/usr/sbin/pkgutil").is_file() {
+            Path::new("/usr/sbin/pkgutil")
+        } else {
+            Path::new("pkgutil")
+        };
+        self.append_log("$ pkgutil --check-signature AWSCLIV2.pkg");
+        let out = tokio::time::timeout(
+            Duration::from_secs(60),
+            Command::new(pkgutil)
+                .args(["--check-signature", &pkg.to_string_lossy()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| "pkgutil --check-signature timed out".to_string())?
+        .map_err(|e| format!("run {}: {e}", pkgutil.display()))?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if !text.trim().is_empty() {
+            self.append_log(text.trim_end());
+        }
+        verify_pkg_signature_output(out.status.success(), &text)
+    }
+}
+
+fn verify_pkg_signature_output(success: bool, output: &str) -> std::result::Result<(), String> {
+    if !success {
+        return Err("AWSCLIV2.pkg failed pkgutil --check-signature verification".into());
+    }
+    let Some(status_line) = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Status:"))
+        .map(str::trim)
+    else {
+        return Err("AWSCLIV2.pkg signature check produced no Status line".into());
+    };
+    let status_lower = status_line.to_ascii_lowercase();
+    if !status_lower.starts_with("signed by")
+        || status_lower.contains("no signature")
+        || status_lower.contains("untrusted")
+        || status_lower.contains("invalid")
+        || status_lower.contains("revoked")
+        || status_lower.contains("expired")
+    {
+        return Err("AWSCLIV2.pkg does not carry a trusted Apple installer signature".into());
+    }
+    let expected_team = format!("({AMAZON_PKG_TEAM_ID})");
+    if !output.contains("Developer ID Installer:") || !output.contains(&expected_team) {
+        return Err(format!(
+            "AWSCLIV2.pkg signer does not match Amazon Developer ID Team ID {AMAZON_PKG_TEAM_ID}"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -543,5 +620,35 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(cached_version(vk).await.as_deref(), Some("2.99.1"));
+    }
+
+    #[test]
+    fn pkg_signature_verifier_accepts_amazon_team_id_and_rejects_tampered_pkgs() {
+        let valid = r#"Package "AWSCLIV2.pkg":
+   Status: signed by a developer certificate issued by Apple for distribution
+   Notarization: trusted by the Apple notary service
+   Certificate Chain:
+    1. Developer ID Installer: AMZN Mobile LLC (94KV3E626L)
+       Expires: Thu, 01 Feb 2029 00:00:00 +0000
+"#;
+        assert!(verify_pkg_signature_output(true, valid).is_ok());
+        assert!(verify_pkg_signature_output(false, valid).is_err());
+
+        let unsigned = "Package \"AWSCLIV2.pkg\":\n   Status: no signature\n";
+        assert!(verify_pkg_signature_output(true, unsigned).is_err());
+
+        let expired = r#"Package "AWSCLIV2.pkg":
+   Status: signed by a certificate that has since expired
+   Certificate Chain:
+    1. Developer ID Installer: AMZN Mobile LLC (94KV3E626L)
+"#;
+        assert!(verify_pkg_signature_output(true, expired).is_err());
+
+        let wrong_team = r#"Package "AWSCLIV2.pkg":
+   Status: signed by a developer certificate issued by Apple for distribution
+   Certificate Chain:
+    1. Developer ID Installer: Evil Corp (DEADBEEF00)
+"#;
+        assert!(verify_pkg_signature_output(true, wrong_team).is_err());
     }
 }

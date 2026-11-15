@@ -90,6 +90,17 @@
     <button
       type="button"
       class="icon-btn"
+      aria-label="Run with coverage"
+      title="Run with coverage"
+      onclick={() => void ide.startRun({ coverage: true })}
+      data-testid="ide-run-coverage-btn"
+    >
+      <Icon name="shield" size={14} />
+    </button>
+
+    <button
+      type="button"
+      class="icon-btn"
       aria-label="Debug selected target (⌃D)"
       title="Debug selected target (⌃D)"
       onclick={() => void ide.startDebug()}
@@ -161,6 +172,18 @@
     type="button"
     class="icon-btn"
     data-overflow="3"
+    data-icon="shield"
+    aria-label="Run with coverage"
+    title="Run with coverage"
+    onclick={() => void ide.startRun({ coverage: true })}
+    data-testid="ide-run-coverage-btn"
+  >
+    <Icon name="shield" size={14} />
+  </button>
+  <button
+    type="button"
+    class="icon-btn"
+    data-overflow="4"
     data-icon="bug"
     aria-label="Debug"
     title="Debug"

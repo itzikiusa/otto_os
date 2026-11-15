@@ -1,10 +1,5 @@
 <script lang="ts">
-  // A Threads conversation on the structured agent runtime: the timeline
-  // (your messages, the agent's streaming answer, a quiet work log of
-  // reasoning / commands / edits / tools with approvals inline) over one
-  // composer whose send turns into Stop while a turn runs; a message sent
-  // meanwhile waits in the thread's durable queue (RuntimeQueueBar: steer it
-  // in, send now). Shared 100% between the Threads module and IDE Agent dock.
+  // Structured agent runtime thread view shared between Threads and IDE Agent dock.
   import { setContext, untrack, type Snippet } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import { ApiError } from '../../../lib/api/client';
@@ -56,9 +51,12 @@
     buildOptimisticUserMessage,
     buildRuntimeBanners,
     collectMessageIds,
+    composerPlaceholderText,
     deriveActivePlan,
     deriveSessionError,
     handleSlashMenuKey,
+    mapChildThreadSummaries,
+    mergeQueuedAttachments,
     mergeQueuedEdit,
     pasteDraftAttachments,
     resolveEffectiveDraftModel,
@@ -161,7 +159,14 @@
   const closed = $derived(session?.status === 'closed');
   const dormant = $derived(session?.status === 'dormant');
   const needsRevive = $derived(closed || dormant);
-  const tasks = $derived(agentTasks(p?.items ?? [], p?.session?.background_tasks ?? session?.background_tasks ?? []));
+  const childThreads = $derived(mapChildThreadSummaries(runtimeThreads.byId, sessionId));
+  const tasks = $derived(
+    agentTasks(
+      p?.items ?? [],
+      p?.session?.background_tasks ?? session?.background_tasks ?? [],
+      { output: p?.output ?? {}, childThreads },
+    ),
+  );
   const background = $derived(tasks.running.filter((t) => t.background));
   const sessionError = $derived(deriveSessionError(draft.startError, p));
   const plan = $derived(deriveActivePlan(p, turn));
@@ -237,23 +242,26 @@
         ? resolvePromptModelOverride(sent.model, sessionModel)
         : sent.model || undefined;
     try {
-      const resp = await runtimeThreads.prompt(ownerId, {
-        text: finalPrompt,
-        ...(modelOverride !== undefined ? { model: modelOverride } : {}),
-        ...(sent.effort ? { effort: sent.effort } : {}),
-        ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
-        ...(docs.length ? { files: docs } : {}),
-        ...(effectiveAccess ? { access_mode: effectiveAccess } : {}),
-        ...(sent.fresh_context ? { fresh_context: true } : {}),
-        ...(delivery ? { delivery } : {}),
-      });
+      const resp = await runtimeThreads.prompt(
+        ownerId,
+        {
+          text: finalPrompt,
+          ...(modelOverride !== undefined ? { model: modelOverride } : {}),
+          ...(sent.effort ? { effort: sent.effort } : {}),
+          ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
+          ...(docs.length ? { files: docs } : {}),
+          ...(effectiveAccess ? { access_mode: effectiveAccess } : {}),
+          ...(sent.fresh_context ? { fresh_context: true } : {}),
+          ...(delivery ? { delivery } : {}),
+        },
+        sent.images,
+      );
       draft.awaitSeq = resp.queued_id ? null : resp.sequence;
       if (resp.queued_id && typeof optimisticMessage !== 'undefined') optimisticMessage = null;
       if (!runtimeDrafts.owns(ownerId, draft)) return;
       acknowledgeComposer(draft, sent);
       if (usedExternal && typeof onExternalContextConsumed === 'function') onExternalContextConsumed();
       draft.flushSave();
-      if (running && delivery) draft.awaitSeq = null;
       draft.startError = null;
     } catch (e) {
       if (typeof optimisticMessage !== 'undefined') optimisticMessage = null;
@@ -466,8 +474,11 @@
             {dormant}
             reopening={draft.reopening}
             onreopen={() => void reopen()}
-            onedit={(t) => {
+            onedit={(t, restoredAtts) => {
               draft.text = mergeQueuedEdit(draft.text, t);
+              if (restoredAtts.length > 0) {
+                draft.images = mergeQueuedAttachments(draft.images, restoredAtts);
+              }
               focusComposer();
             }}
           />
@@ -513,15 +524,7 @@
         autocapitalize="off"
         autocomplete="off"
         disabled={draft.reopening}
-        placeholder={closed
-          ? 'Send a message to reopen this thread'
-          : approvals.size > 0
-            ? Array.from(approvals.values()).some((request) => request.kind === 'question')
-              ? 'Answer the question above'
-              : 'Waiting for your approval above'
-            : running
-              ? 'Queue a follow-up for when this turn ends'
-              : agentChat ? `Message ${agentChat}…` : 'Ask anything. @ files or agents, / commands'}
+        placeholder={composerPlaceholderText(closed, approvals, running, agentChat)}
         aria-label="Message"
         aria-autocomplete="list"
         aria-controls={suggestions.length > 0 ? `${popId}-list` : undefined}

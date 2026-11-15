@@ -489,3 +489,530 @@ fn drivers_preserve_block_and_item_start_timestamps_before_first_delta() {
     assert_eq!(pi_open.started_at, pi_closed.started_at);
     assert!(pi_closed.completed_at.unwrap() > pi_closed.started_at.unwrap());
 }
+
+#[test]
+fn projection_streaming_ids_tracks_streaming_and_settled_items_in_o1() {
+    let mut proj = super::Projection::default();
+    for idx in 0..500u32 {
+        let mut settled = item(
+            format!("settled-{idx}"),
+            TurnItemStatus::Completed,
+            None,
+            TurnItemKind::AssistantMessage {
+                message_id: format!("m-{idx}"),
+                text: "done".into(),
+                streaming: false,
+            },
+        );
+        settled.ordinal = idx + 1;
+        proj.apply(
+            &RuntimeEventBody::TurnItemUpdated { turn_item: settled },
+            u64::from(idx + 1),
+        );
+    }
+    assert!(proj.streaming_ids.is_empty());
+
+    let mut live_a = item(
+        "stream-a".into(),
+        TurnItemStatus::Running,
+        None,
+        TurnItemKind::AssistantMessage {
+            message_id: "ma".into(),
+            text: "part 1".into(),
+            streaming: true,
+        },
+    );
+    live_a.ordinal = 501;
+    let mut live_b = item(
+        "stream-b".into(),
+        TurnItemStatus::Running,
+        None,
+        TurnItemKind::Reasoning {
+            text: "thinking".into(),
+            streaming: true,
+        },
+    );
+    live_b.ordinal = 502;
+    proj.apply(
+        &RuntimeEventBody::TurnItemUpdated {
+            turn_item: live_a.clone(),
+        },
+        501,
+    );
+    proj.apply(
+        &RuntimeEventBody::TurnItemUpdated { turn_item: live_b },
+        502,
+    );
+    assert_eq!(proj.streaming_ids.len(), 2);
+    assert!(proj.streaming_ids.contains("stream-a"));
+    assert!(proj.streaming_ids.contains("stream-b"));
+
+    // Settling `stream-a` removes it in O(1) while leaving `stream-b`.
+    live_a.status = TurnItemStatus::Completed;
+    if let TurnItemKind::AssistantMessage { streaming, .. } = &mut live_a.kind {
+        *streaming = false;
+    }
+    proj.apply(
+        &RuntimeEventBody::TurnItemUpdated { turn_item: live_a },
+        503,
+    );
+    assert_eq!(proj.streaming_ids.len(), 1);
+    assert!(proj.streaming_ids.contains("stream-b"));
+}
+
+#[tokio::test]
+async fn holder_checkpoint_throttles_streaming_deltas_and_flushes_immediately_on_critical_events() {
+    use crate::holder::{HolderClient, HolderEvent, LineStream, SequencedLine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let pool = test_pool().await;
+    let host = Arc::new(LibTestHost {
+        root: cwd.clone(),
+        events: Mutex::new(Vec::new()),
+        notify: tokio::sync::Notify::new(),
+    });
+    let drivers: Arc<dyn DriverFactory> = Arc::new(|_| -> Option<Box<dyn StructuredDriver>> {
+        Some(Box::new(TimedShellDriver {
+            turn_id: Some("t-held".into()),
+            thought_text: String::new(),
+            msg_text: String::new(),
+        }))
+    });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            stream_coalesce: Duration::ZERO,
+            attachments_dir: dir.path().join("att"),
+            ..RuntimeConfig::default()
+        },
+    );
+    let sid: Id = "held-throttle-test".into();
+    rt.inner
+        .repo
+        .create(otto_state::NewRuntimeSession {
+            id: sid.clone(),
+            workspace_id: "w1".into(),
+            provider: RuntimeProvider::Claude,
+            title: "Held".into(),
+            cwd,
+            model: None,
+            access_mode: RuntimeAccessMode::FullAccess,
+            created_by: "u1".into(),
+            parent_id: None,
+            meta: None,
+        })
+        .await
+        .unwrap();
+
+    let live = rt.live(&sid).await.unwrap();
+    let (client, cp_rx) = HolderClient::for_test();
+    let (ev_tx, ev_rx) = tokio::sync::mpsc::channel(64);
+    let epoch = {
+        let mut st = live.lock();
+        st.epoch = 1;
+        st.turn = Some(super::ActiveTurn {
+            id: "t-held".into(),
+            origin: otto_core::agent_runtime::TurnOrigin::User,
+            interrupting: false,
+            stalled: false,
+        });
+        st.proc = Some(super::Proc {
+            epoch: 1,
+            request_ids: super::RequestIds::new(),
+            pid: 99_999,
+            transport: super::ProcTransport::Held {
+                client,
+                acked_seq: 0,
+                claude_login: None,
+                last_checkpoint_at: None,
+                checkpoint_dirty: false,
+                checkpoint_writes: 0,
+            },
+            driver: Box::new(TimedShellDriver {
+                turn_id: Some("t-held".into()),
+                thought_text: String::new(),
+                msg_text: String::new(),
+            }),
+        });
+        1
+    };
+    let pump_handle = tokio::spawn(super::held_proc::pump_held(
+        Arc::clone(&rt.inner),
+        Arc::clone(&live),
+        sid.clone(),
+        epoch,
+        ev_rx,
+        None,
+    ));
+
+    // Push 15 rapid streaming delta lines back-to-back (< 250ms window).
+    for seq in 1..=15u64 {
+        ev_tx
+            .send(HolderEvent::Line(SequencedLine {
+                seq,
+                stream: LineStream::Out,
+                line: format!("MSG:chunk-{seq} "),
+                overlong_bytes: None,
+            }))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    {
+        let st = live.lock();
+        assert_eq!(st.proj.streaming_ids.len(), 1);
+        let Some(super::Proc {
+            transport:
+                super::ProcTransport::Held {
+                    acked_seq,
+                    checkpoint_dirty,
+                    checkpoint_writes,
+                    ..
+                },
+            ..
+        }) = st.proc.as_ref()
+        else {
+            panic!("expected Held proc");
+        };
+        assert_eq!(*acked_seq, 15);
+        assert_eq!(
+            *checkpoint_writes, 1,
+            "first delta writes once; subsequent deltas within 250ms coalesce without duplicate writes"
+        );
+        assert!(*checkpoint_dirty, "trailing deltas mark checkpoint dirty");
+    }
+
+    // After the 250ms throttle window elapses, `pump_held`'s timer flushes the dirty checkpoint.
+    tokio::time::sleep(Duration::from_millis(260)).await;
+    let writes_after_timer = {
+        let st = live.lock();
+        let Some(super::Proc {
+            transport:
+                super::ProcTransport::Held {
+                    checkpoint_dirty,
+                    checkpoint_writes,
+                    ..
+                },
+            ..
+        }) = st.proc.as_ref()
+        else {
+            panic!("expected Held proc");
+        };
+        assert!(!*checkpoint_dirty, "timer flushed dirty checkpoint");
+        assert_eq!(*checkpoint_writes, 2);
+        assert_eq!(cp_rx.borrow().as_ref().unwrap().acked_seq, 15);
+        assert_eq!(cp_rx.borrow().as_ref().unwrap().streaming_items.len(), 1);
+        *checkpoint_writes
+    };
+
+    // Critical transition (`TURN_DONE` -> `DriverEvent::Terminal`) bypasses throttle immediately!
+    ev_tx
+        .send(HolderEvent::Line(SequencedLine {
+            seq: 16,
+            stream: LineStream::Out,
+            line: "MSG_DONE".into(),
+            overlong_bytes: None,
+        }))
+        .await
+        .unwrap();
+    ev_tx
+        .send(HolderEvent::Line(SequencedLine {
+            seq: 17,
+            stream: LineStream::Out,
+            line: "TURN_DONE".into(),
+            overlong_bytes: None,
+        }))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    {
+        let st = live.lock();
+        assert!(st.proj.streaming_ids.is_empty());
+        let Some(super::Proc {
+            transport:
+                super::ProcTransport::Held {
+                    checkpoint_dirty,
+                    checkpoint_writes,
+                    ..
+                },
+            ..
+        }) = st.proc.as_ref()
+        else {
+            panic!("expected Held proc");
+        };
+        assert!(
+            *checkpoint_writes > writes_after_timer,
+            "TurnTerminal flushes an immediate unthrottled checkpoint"
+        );
+        assert!(!*checkpoint_dirty);
+        assert_eq!(cp_rx.borrow().as_ref().unwrap().acked_seq, 17);
+        assert!(cp_rx.borrow().as_ref().unwrap().streaming_items.is_empty());
+    }
+
+    drop(ev_tx);
+    let _ = pump_handle.await;
+    rt.close(&sid).await.unwrap();
+}
+
+struct FailingExitDriver;
+
+impl StructuredDriver for FailingExitDriver {
+    fn provider(&self) -> RuntimeProvider {
+        RuntimeProvider::Codex
+    }
+
+    fn launch(&self, _ctx: &LaunchContext) -> LaunchSpec {
+        LaunchSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "echo READY; read -r _l; echo boom >&2; exit 3".into(),
+            ],
+            ..LaunchSpec::default()
+        }
+    }
+
+    fn start(&mut self, _ctx: &LaunchContext) -> DriverStep {
+        DriverStep::default()
+    }
+
+    fn prompt(
+        &mut self,
+        _turn_id: &str,
+        req: &RuntimePromptReq,
+    ) -> std::result::Result<DriverStep, DriverError> {
+        let mut step = DriverStep::default();
+        step.write(req.text.clone());
+        Ok(step)
+    }
+
+    fn interrupt(&mut self) -> DriverStep {
+        DriverStep::default()
+    }
+
+    fn respond(
+        &mut self,
+        request_id: &str,
+        _decision: otto_core::agent_runtime::ApprovalDecision,
+    ) -> std::result::Result<DriverStep, DriverError> {
+        Err(DriverError(format!("unknown request {request_id}")))
+    }
+
+    fn on_line(&mut self, line: &str) -> DriverStep {
+        let mut step = DriverStep::default();
+        if line == "READY" {
+            step.push(DriverEvent::Ready {
+                native_thread_id: Some("f-native".into()),
+                model: None,
+            });
+        }
+        step
+    }
+
+    fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
+        DriverStep::default()
+    }
+}
+
+#[tokio::test]
+async fn closed_and_failed_sessions_evict_from_live_map_after_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let pool = test_pool().await;
+    let host = Arc::new(LibTestHost {
+        root: cwd.clone(),
+        events: Mutex::new(Vec::new()),
+        notify: tokio::sync::Notify::new(),
+    });
+    let drivers: Arc<dyn DriverFactory> = Arc::new(|p| -> Option<Box<dyn StructuredDriver>> {
+        match p {
+            RuntimeProvider::Codex => Some(Box::new(FailingExitDriver)),
+            _ => Some(Box::new(TimedShellDriver {
+                turn_id: None,
+                thought_text: String::new(),
+                msg_text: String::new(),
+            })),
+        }
+    });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            close_grace: Duration::from_millis(20),
+            attachments_dir: dir.path().join("att"),
+            ..RuntimeConfig::default()
+        },
+    );
+
+    // 1. Closed session evicts from `rt.inner.live` and stays clean across history reads.
+    let s_closed = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Claude),
+                cwd: Some(cwd.clone()),
+                title: None,
+                model: None,
+                access_mode: Some(RuntimeAccessMode::FullAccess),
+                meta: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(rt.inner.live.contains_key(&s_closed.id));
+    rt.close(&s_closed.id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while rt.inner.live.contains_key(&s_closed.id) {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .expect("closed session must be evicted from AgentRuntime::live");
+
+    let _ = rt.replay(&s_closed.id, 0).await.unwrap();
+    assert!(
+        !rt.inner.live.contains_key(&s_closed.id),
+        "reading closed session history must not re-pin it in AgentRuntime::live"
+    );
+
+    // 2. Failed session whose child exits non-zero evicts once persisted and tasks exit.
+    let s_failed = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Codex),
+                cwd: Some(cwd),
+                title: None,
+                model: None,
+                access_mode: Some(RuntimeAccessMode::FullAccess),
+                meta: None,
+            },
+        )
+        .await
+        .unwrap();
+    rt.prompt(&s_failed.id, "crash-now").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while rt.inner.live.contains_key(&s_failed.id) {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .expect("failed session must be evicted from AgentRuntime::live after persistence");
+    assert_eq!(
+        rt.get(&s_failed.id).await.unwrap().status,
+        otto_core::agent_runtime::RuntimeSessionStatus::Dormant
+    );
+}
+
+#[tokio::test]
+async fn prompt_validates_attachment_magic_bytes_and_rejects_dash_prefixed_models() {
+    use otto_core::agent_runtime::{PromptFile, PromptImage};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let pool = test_pool().await;
+    let host = Arc::new(LibTestHost {
+        root: cwd.clone(),
+        events: Mutex::new(Vec::new()),
+        notify: tokio::sync::Notify::new(),
+    });
+    let drivers: Arc<dyn DriverFactory> = Arc::new(|_| -> Option<Box<dyn StructuredDriver>> {
+        Some(Box::new(TimedShellDriver {
+            turn_id: None,
+            thought_text: String::new(),
+            msg_text: String::new(),
+        }))
+    });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("att"),
+            ..RuntimeConfig::default()
+        },
+    );
+
+    // Dash-prefixed model rejected on session creation.
+    let bad_create = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Claude),
+                cwd: Some(cwd.clone()),
+                title: None,
+                model: Some("-oProxyCommand=evil".into()),
+                access_mode: Some(RuntimeAccessMode::FullAccess),
+                meta: None,
+            },
+        )
+        .await;
+    assert!(matches!(bad_create, Err(otto_core::Error::Invalid(_))));
+
+    let s = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Claude),
+                cwd: Some(cwd),
+                title: None,
+                model: None,
+                access_mode: Some(RuntimeAccessMode::FullAccess),
+                meta: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Dash-prefixed model rejected on prompt.
+    let mut dash_model = RuntimePromptReq::of("hello");
+    dash_model.model = Some("--evil-flag".into());
+    assert!(matches!(
+        rt.prompt_with(&s.id, &dash_model).await,
+        Err(otto_core::Error::Invalid(_))
+    ));
+
+    // SVG rejected on prompt (`UnsupportedMedia`).
+    let mut svg_req = RuntimePromptReq::of("svg");
+    svg_req.images.push(PromptImage {
+        mime: "image/svg+xml".into(),
+        data_base64: "PHN2Zz48L3N2Zz4=".into(),
+    });
+    assert!(matches!(
+        rt.prompt_with(&s.id, &svg_req).await,
+        Err(otto_core::Error::UnsupportedMedia(_))
+    ));
+
+    // Spoofed PNG bytes ("test") rejected by magic-byte check.
+    let mut spoof_png = RuntimePromptReq::of("png");
+    spoof_png.images.push(PromptImage {
+        mime: "image/png".into(),
+        data_base64: "dGVzdA==".into(),
+    });
+    assert!(matches!(
+        rt.prompt_with(&s.id, &spoof_png).await,
+        Err(otto_core::Error::Invalid(_))
+    ));
+
+    // Spoofed PDF bytes ("test") rejected by magic-byte check.
+    let mut spoof_pdf = RuntimePromptReq::of("pdf");
+    spoof_pdf.files.push(PromptFile {
+        name: "doc.pdf".into(),
+        mime: "application/pdf".into(),
+        data_base64: "dGVzdA==".into(),
+    });
+    assert!(matches!(
+        rt.prompt_with(&s.id, &spoof_pdf).await,
+        Err(otto_core::Error::Invalid(_))
+    ));
+
+    rt.close(&s.id).await.unwrap();
+}

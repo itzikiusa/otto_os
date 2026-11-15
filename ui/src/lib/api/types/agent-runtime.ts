@@ -294,15 +294,21 @@ export interface QueuedDeliverReq {
   delivery: PromptDelivery;
 }
 
+/** Response of DELETE /runtime-sessions/{id}/queue/{queued_id}. */
+export interface UnqueuePromptResp {
+  ok: boolean;
+  text?: string;
+  images?: PromptImage[];
+  files?: PromptFile[];
+}
+
 /** Response of GET /runtime-sessions/{id}/events?after_sequence=. */
 export type RuntimeReplay =
   | { kind: 'events'; events: RuntimeEvent[]; last_sequence: number }
   | { kind: 'snapshot'; snapshot_sequence: number; snapshot: RuntimeSnapshot };
 
-/** Response wrapper for hydrated single-item detail (`GET /runtime-sessions/{id}/items/{item_id}`). */
-export interface RuntimeTurnItemDetailResponse {
-  item: TurnItem;
-}
+/** Response for hydrated single-item detail (`GET /runtime-sessions/{id}/items/{item_id}`). */
+export type RuntimeTurnItemDetailResponse = TurnItem;
 
 /** POST /runtime-sessions/:id/reopen revives closed/dormant sessions without a prompt; live agents are preserved. */
 export type RuntimeSessionStatus =

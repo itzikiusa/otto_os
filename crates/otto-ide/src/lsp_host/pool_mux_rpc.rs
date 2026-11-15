@@ -1,13 +1,25 @@
-//! JSON-RPC initialize enrichment, configuration replies, and client/server
-//! message routing for [`super::Mux`].
+//! JSON-RPC initialize enrichment, configuration replies, Go build-tag
+//! diagnostic rewriting, and fast-path client/server routing for [`super::Mux`].
 
-use std::path::Path;
+use std::borrow::Cow;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
+use serde::de::IgnoredAny;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::servers;
 use super::{Init, Mux};
+
+#[derive(Deserialize)]
+struct RpcEnvelopeProbe<'a> {
+    #[serde(borrow)]
+    method: Option<Cow<'a, str>>,
+    #[serde(default)]
+    id: Option<IgnoredAny>,
+}
 
 fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     let mut cur = v;
@@ -17,9 +29,13 @@ fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     cur.as_str()
 }
 
-fn default_gopls_settings() -> Value {
+pub(crate) fn default_gopls_settings(go_build_tags: &[String]) -> Value {
+    let mut build_flags = vec![Value::String("-mod=mod".into())];
+    if !go_build_tags.is_empty() {
+        build_flags.push(Value::String(format!("-tags={}", go_build_tags.join(","))));
+    }
     json!({
-        "buildFlags": ["-mod=mod"],
+        "buildFlags": build_flags,
         "directoryFilters": [
             "-**/node_modules",
             "-**/target",
@@ -42,6 +58,126 @@ fn detect_local_python_path(root: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn decode_local_file_uri(uri: &str) -> Option<PathBuf> {
+    let raw = uri.strip_prefix("file://")?;
+    let mut bytes = Vec::with_capacity(raw.len());
+    let src = raw.as_bytes();
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] == b'%' && i + 2 < src.len() {
+            if let (Some(hi), Some(lo)) = (
+                (src[i + 1] as char).to_digit(16),
+                (src[i + 2] as char).to_digit(16),
+            ) {
+                bytes.push(((hi << 4) | lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        bytes.push(src[i]);
+        i += 1;
+    }
+    let decoded = String::from_utf8(bytes).ok()?;
+    let p = PathBuf::from(decoded);
+    p.is_absolute().then_some(p)
+}
+
+fn is_gopls_build_tag_exclusion_msg(message: &str) -> bool {
+    message.contains("No packages found for open file")
+        || message.contains("excluded due to its build tags")
+        || message.contains("build constraints exclude all Go files")
+}
+
+#[allow(clippy::disallowed_methods)]
+fn read_go_file_header(path: &Path) -> Option<String> {
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::with_capacity(4096);
+    f.by_ref().take(4096).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+fn maybe_rewrite_go_build_tag_diagnostics(
+    msg: &mut Value,
+    root: &str,
+    active_tags: &[String],
+) -> bool {
+    let Some(uri) = str_at(msg, &["params", "uri"]).map(str::to_owned) else {
+        return false;
+    };
+    let Some(diags_peek) = msg.pointer("/params/diagnostics").and_then(Value::as_array) else {
+        return false;
+    };
+    let has_exclusion = diags_peek.iter().any(|d| {
+        d.get("message")
+            .and_then(Value::as_str)
+            .is_some_and(is_gopls_build_tag_exclusion_msg)
+    });
+    if !has_exclusion {
+        return false;
+    }
+
+    let Some(file_path) = decode_local_file_uri(&uri) else {
+        return false;
+    };
+    if file_path.extension().and_then(|e| e.to_str()) != Some("go") {
+        return false;
+    }
+    let root_path = Path::new(root);
+    let in_root = file_path.starts_with(root_path) || {
+        #[allow(clippy::disallowed_methods)]
+        let ok = match (
+            std::fs::canonicalize(&file_path),
+            std::fs::canonicalize(root_path),
+        ) {
+            (Ok(cf), Ok(cr)) => cf.starts_with(&cr),
+            _ => false,
+        };
+        ok
+    };
+    if !in_root {
+        return false;
+    }
+
+    let Some(header) = read_go_file_header(&file_path) else {
+        return false;
+    };
+    let file_tags = crate::lsp_service::extract_go_file_build_tags(&header);
+    let missing: Vec<String> = file_tags
+        .into_iter()
+        .filter(|t| !active_tags.iter().any(|at| at == t))
+        .collect();
+    if missing.is_empty() {
+        return false;
+    }
+
+    let tags_csv = missing.join(",");
+    let rewritten_msg = format!(
+        "Excluded by //go:build {tags_csv} — enable Go build tag \"{tags_csv}\" in the editor bar (or click ▶ Run/Debug in the gutter) to index, run, and debug this file."
+    );
+
+    let Some(diags_mut) = msg
+        .pointer_mut("/params/diagnostics")
+        .and_then(Value::as_array_mut)
+    else {
+        return false;
+    };
+    let mut changed = false;
+    for diag in diags_mut {
+        let should_rewrite = diag
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(is_gopls_build_tag_exclusion_msg);
+        if should_rewrite {
+            if let Some(obj) = diag.as_object_mut() {
+                obj.insert("message".into(), Value::String(rewritten_msg.clone()));
+                obj.insert("code".into(), Value::String("otto_go_build_tag".into()));
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 impl Mux {
@@ -77,29 +213,21 @@ impl Mux {
 
         let norm_lang = servers::normalize_lsp_lang(&self.key.lang);
         if norm_lang == "go" {
-            let defaults = default_gopls_settings();
-            match params.get_mut("initializationOptions") {
-                Some(Value::Object(existing)) => {
-                    if let Value::Object(def_map) = defaults {
-                        for (k, v) in def_map {
-                            existing.entry(k).or_insert(v);
-                        }
-                    }
-                }
-                None | Some(Value::Null) => {
-                    params.insert("initializationOptions".into(), defaults);
-                }
-                _ => {}
-            }
+            params.insert(
+                "initializationOptions".into(),
+                default_gopls_settings(&self.go_build_tags),
+            );
         } else if norm_lang == "python" && self.key.ssh.is_none() {
             if let Some(py_path) = detect_local_python_path(&self.key.root) {
-                if params.get("initializationOptions").is_none() {
-                    params.insert(
-                        "initializationOptions".into(),
-                        json!({ "pythonPath": py_path }),
-                    );
-                }
+                params.insert(
+                    "initializationOptions".into(),
+                    json!({ "pythonPath": py_path }),
+                );
+            } else {
+                params.remove("initializationOptions");
             }
+        } else if !self.owner_is_root {
+            params.remove("initializationOptions");
         }
     }
 
@@ -120,7 +248,7 @@ impl Mux {
             .map(|it| {
                 let section = it.get("section").and_then(Value::as_str).unwrap_or("");
                 if section == "gopls" || (section.is_empty() && norm_lang == "go") {
-                    default_gopls_settings()
+                    default_gopls_settings(&self.go_build_tags)
                 } else if (section == "python" || section == "python.analysis") && py_path.is_some()
                 {
                     json!({ "pythonPath": py_path })
@@ -137,6 +265,22 @@ impl Mux {
             return;
         }
         self.touch();
+
+        // Fast-path high-frequency buffer notifications without constructing a Value DOM.
+        if let Ok(probe) = serde_json::from_str::<RpcEnvelopeProbe<'_>>(text) {
+            if probe.id.is_none()
+                && matches!(
+                    probe.method.as_deref(),
+                    Some(
+                        "textDocument/didChange" | "textDocument/didSave" | "textDocument/willSave"
+                    )
+                )
+            {
+                self.to_server_raw(text);
+                return;
+            }
+        }
+
         let Ok(mut msg) = serde_json::from_str::<Value>(text) else {
             return;
         };
@@ -164,6 +308,17 @@ impl Mux {
                 let reply = json!({"jsonrpc": "2.0", "id": id, "result": null});
                 self.send_client(client, reply.to_string());
             }
+            (Some("workspace/executeCommand"), Some(id)) if !self.owner_is_root => {
+                let reply = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32600,
+                        "message": "workspace/executeCommand requires root authority"
+                    }
+                });
+                self.send_client(client, reply.to_string());
+            }
             (Some(_), Some(id)) => {
                 let pool_id = self.alloc_id();
                 self.pending.insert(pool_id, (client, id));
@@ -177,6 +332,32 @@ impl Mux {
                 }
             }
             (Some("exit"), None) => {}
+            (Some("workspace/didChangeConfiguration"), None) => {
+                let norm_lang = servers::normalize_lsp_lang(&self.key.lang);
+                if norm_lang == "go" {
+                    self.to_server(&json!({
+                        "jsonrpc": "2.0",
+                        "method": "workspace/didChangeConfiguration",
+                        "params": {
+                            "settings": {
+                                "gopls": default_gopls_settings(&self.go_build_tags)
+                            }
+                        }
+                    }));
+                } else if norm_lang == "python" && self.key.ssh.is_none() {
+                    let settings = match detect_local_python_path(&self.key.root) {
+                        Some(py) => json!({ "python": { "pythonPath": py } }),
+                        None => json!({}),
+                    };
+                    self.to_server(&json!({
+                        "jsonrpc": "2.0",
+                        "method": "workspace/didChangeConfiguration",
+                        "params": { "settings": settings }
+                    }));
+                } else if self.owner_is_root {
+                    self.to_server_raw(text);
+                }
+            }
             (Some("textDocument/didOpen"), None) => {
                 let Some(uri) = str_at(&msg, &["params", "textDocument", "uri"]) else {
                     return;
@@ -247,6 +428,21 @@ impl Mux {
         let Ok(text) = std::str::from_utf8(body) else {
             return true;
         };
+
+        // Fast-path non-diagnostic server notifications without allocating a Value DOM.
+        if let Ok(probe) = serde_json::from_str::<RpcEnvelopeProbe<'_>>(text) {
+            if probe.id.is_none()
+                && probe.method.is_some()
+                && probe.method.as_deref() != Some("textDocument/publishDiagnostics")
+            {
+                let all: Vec<u64> = self.clients.keys().copied().collect();
+                for c in all {
+                    self.send_client(c, text.to_owned());
+                }
+                return true;
+            }
+        }
+
         let Ok(mut msg) = serde_json::from_str::<Value>(text) else {
             return true;
         };
@@ -278,17 +474,31 @@ impl Mux {
                 },
             },
             (Some("textDocument/publishDiagnostics"), None) => {
-                let Some(uri) = str_at(&msg, &["params", "uri"]) else {
+                let Some(uri) = str_at(&msg, &["params", "uri"]).map(str::to_owned) else {
                     return true;
                 };
                 let targets: Vec<u64> = self
                     .clients
                     .iter()
-                    .filter(|(_, c)| c.open.contains(uri))
+                    .filter(|(_, c)| c.open.contains(&uri))
                     .map(|(id, _)| *id)
                     .collect();
+                if targets.is_empty() {
+                    return true;
+                }
+                let out_payload = if self.key.ssh.is_none()
+                    && servers::normalize_lsp_lang(&self.key.lang) == "go"
+                    && maybe_rewrite_go_build_tag_diagnostics(
+                        &mut msg,
+                        &self.key.root,
+                        &self.go_build_tags,
+                    ) {
+                    msg.to_string()
+                } else {
+                    text.to_owned()
+                };
                 for c in targets {
-                    self.send_client(c, text.to_owned());
+                    self.send_client(c, out_payload.clone());
                 }
             }
             (Some(_), None) => {

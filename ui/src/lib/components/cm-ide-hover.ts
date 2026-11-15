@@ -118,10 +118,11 @@ export function sanitizeAndSplitHoverDoc(input: {
   }
 
   if (!sig && !summary) return null;
+  const inferredPkg = input.packageName ?? inferPackageNameFromSignature(sig, externalLinks);
   return {
     symbol: input.symbol,
     kind: input.kind || inferKindFromSignature(sig),
-    packageName: input.packageName ?? null,
+    packageName: inferredPkg,
     signature: sig || input.symbol,
     summary,
     moreParagraphs,
@@ -131,11 +132,96 @@ export function sanitizeAndSplitHoverDoc(input: {
 }
 
 function inferKindFromSignature(sig: string): string {
+  if (/^func\s*\(/.test(sig)) return 'method';
   if (/(?:^|\b)(?:func|fn|def|function)\b/.test(sig)) return 'function';
   if (/(?:^|\b)(?:type|struct|class|interface|enum|record|trait)\b/.test(sig)) return 'type';
   if (/^const\b|\bstatic\s+final\b/.test(sig)) return 'constant';
   if (/^(?:export\s+)?(?:var|let)\b/.test(sig)) return 'variable';
+  if (/^field\b/.test(sig)) return 'field';
   return 'symbol';
+}
+
+function inferPackageNameFromSignature(
+  sig: string,
+  externalLinks: ReadonlyArray<{ label: string; url: string }>,
+): string | null {
+  const mRecvPkg = /^func\s*\(\s*\*?([A-Za-z_]\w*)\.[A-Za-z_]\w*/.exec(sig);
+  if (mRecvPkg) return mRecvPkg[1];
+  const mQualSym = /^(?:func|type|var|const)\s+([A-Za-z_]\w*)\.[A-Za-z_]\w*/.exec(sig);
+  if (mQualSym) return mQualSym[1];
+  if (externalLinks.length > 0) {
+    const cleanPath = externalLinks[0].url.replace(/^https?:\/\/pkg\.go\.dev\//, '').split('#')[0] ?? '';
+    const segs = cleanPath.split('/').filter(Boolean);
+    const last = segs[segs.length - 1] ?? '';
+    const prev = segs[segs.length - 2] ?? '';
+    if (/^v\d+$/.test(last) && prev) return prev;
+    if (last && !last.includes('.')) return last;
+  }
+  return null;
+}
+
+export interface MemberAccessContext {
+  isSelector: boolean;
+  /** Full dotted/call chain immediately preceding `.Symbol` (e.g. `g.pool` for `g.pool.Submit`). */
+  qualifierChain: string | null;
+  enclosingReceiverIdent: string | null;
+  enclosingReceiverType: string | null;
+}
+
+export function inspectMemberAccessAtOffset(
+  docText: string,
+  identFrom: number,
+  lang: SemanticLangKind,
+): MemberAccessContext {
+  let p = identFrom - 1;
+  while (p >= 0 && (docText[p] === ' ' || docText[p] === '\t')) p--;
+  const isDot = p >= 0 && docText[p] === '.' && (p === 0 || docText[p - 1] !== '.');
+  let qualifierChain: string | null = null;
+  if (isDot) {
+    const chainEnd = p;
+    let q = p - 1;
+    while (q >= 0 && /[A-Za-z0-9_$.\]()]/.test(docText[q])) q--;
+    qualifierChain = docText.slice(q + 1, chainEnd).trim() || null;
+  }
+
+  let enclosingReceiverIdent: string | null = null;
+  let enclosingReceiverType: string | null = null;
+  if (lang === 'go') {
+    const prefix = docText.slice(0, Math.max(0, identFrom));
+    const prefixLines = prefix.split(/\r?\n/);
+    for (let i = prefixLines.length - 1; i >= 0; i--) {
+      const t = prefixLines[i].trim();
+      const mRecv = /^func\s*\(\s*(?:([A-Za-z_]\w*)\s+)?\*?([A-Za-z_]\w*)(?:\[[^\]]*\])?\s*\)/.exec(t);
+      if (mRecv) {
+        enclosingReceiverIdent = mRecv[1] ?? null;
+        enclosingReceiverType = mRecv[2] ?? null;
+        break;
+      }
+      if (/^func\s+[A-Za-z_]\w*\s*(?:\[[^\]]*\])?\s*\(/.test(t)) break;
+    }
+  }
+  return { isSelector: isDot, qualifierChain, enclosingReceiverIdent, enclosingReceiverType };
+}
+
+function canSelectorMatchSameFileDecl(
+  access: MemberAccessContext,
+  lang: SemanticLangKind,
+  candidateKind: string,
+  candidateGoRecvType: string | null,
+): boolean {
+  if (!access.isSelector) return true;
+  if (candidateKind !== 'method' && candidateKind !== 'field') return false;
+  const q = access.qualifierChain ?? '';
+  if (!q) return false;
+  if (lang === 'go') {
+    // Chained member call like `g.pool.Submit` NEVER resolves to a method on `g` (`GoRoutineConcurrencyHelper`).
+    if (q.includes('.') || q.includes('(') || q.includes('[')) return false;
+    if (access.enclosingReceiverIdent && q === access.enclosingReceiverIdent) {
+      return !candidateGoRecvType || !access.enclosingReceiverType || candidateGoRecvType === access.enclosingReceiverType;
+    }
+    return Boolean(candidateGoRecvType && q === candidateGoRecvType);
+  }
+  return q === 'this' || q === 'self' || q === 'super' || q === 'cls';
 }
 
 export function extractCleanSymbolHoverFromSource(
@@ -143,8 +229,12 @@ export function extractCleanSymbolHoverFromSource(
   symbol: string,
   lang: SemanticLangKind,
   compact = true,
+  identFrom?: number,
 ): ParsedQuickDoc | null {
   if (!docText || !symbol) return null;
+  const access: MemberAccessContext = identFrom != null
+    ? inspectMemberAccessAtOffset(docText, identFrom, lang)
+    : { isSelector: false, qualifierChain: null, enclosingReceiverIdent: null, enclosingReceiverType: null };
   const lines = docText.split(/\r?\n/);
   const esc = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   let pkgName: string | null = null;
@@ -167,7 +257,7 @@ export function extractCleanSymbolHoverFromSource(
       if (mGrp) { inGoGroup = mGrp[1] as 'var' | 'const'; continue; }
       if (inGoGroup && trimmed.startsWith(')')) { inGoGroup = null; continue; }
       if (inGoGroup) {
-        if (new RegExp(`^${esc}\\b`).test(trimmed)) {
+        if (!access.isSelector && new RegExp(`^${esc}\\b`).test(trimmed)) {
           declIdx = i;
           sig = `${inGoGroup} ${trimmed.replace(/\s*\/\/.*$/, '')}`;
           kind = inGoGroup === 'const' ? 'constant' : 'variable';
@@ -175,26 +265,42 @@ export function extractCleanSymbolHoverFromSource(
         }
         continue;
       }
-      const mFn = new RegExp(`^func\\s+(?:\\([^)]+\\)\\s*)?${esc}\\s*\\(`).exec(trimmed);
-      if (mFn) { declIdx = i; sig = trimmed.replace(/\s*\{\s*$/, ''); kind = 'function'; break; }
+      const mMeth = new RegExp(`^func\\s*\\(\\s*(?:[A-Za-z_]\\w*\\s+)?\\*?([A-Za-z_]\\w*)(?:\\[[^\\]]*\\])?\\s*\\)\\s*${esc}\\s*(?:\\[[^\\]]*\\])?\\s*\\(`).exec(trimmed);
+      if (mMeth) {
+        if (canSelectorMatchSameFileDecl(access, lang, 'method', mMeth[1])) {
+          declIdx = i;
+          sig = trimmed.replace(/\s*\{\s*$/, '');
+          kind = 'method';
+          break;
+        }
+        continue;
+      }
+      const mFn = new RegExp(`^func\\s+${esc}\\s*(?:\\[[^\\]]*\\])?\\s*\\(`).exec(trimmed);
+      if (mFn && !access.isSelector) { declIdx = i; sig = trimmed.replace(/\s*\{\s*$/, ''); kind = 'function'; break; }
       const mTop = new RegExp(`^(var|const|type)\\s+${esc}\\b`).exec(trimmed);
-      if (mTop) {
+      if (mTop && !access.isSelector) {
         declIdx = i;
         sig = trimmed.replace(/\s*\{\s*$/, '').replace(/\s*\/\/.*$/, '');
         kind = mTop[1] === 'type' ? 'type' : mTop[1] === 'const' ? 'constant' : 'variable';
         break;
       }
     } else if (lang === 'java') {
-      if (new RegExp(`\\b(?:class|interface|enum|record)\\s+${esc}\\b`).test(trimmed)) {
+      if (!access.isSelector && new RegExp(`\\b(?:class|interface|enum|record)\\s+${esc}\\b`).test(trimmed)) {
         declIdx = i; sig = trimmed.replace(/\s*\{\s*$/, ''); kind = 'type'; break;
       }
       if (new RegExp(`^(?:public|protected|private|static|final|synchronized|default|abstract|\\s)+(?:<[^>{};]+>\\s+)?(?:[\\w.$?[\\]]+(?:<[^>{};]+>)?(?:\\[\\])*)\\s+${esc}\\s*\\(`).test(trimmed)) {
-        declIdx = i; sig = trimmed.replace(/\s*\{\s*$/, ''); kind = 'method'; break;
+        if (canSelectorMatchSameFileDecl(access, lang, 'method', null)) {
+          declIdx = i; sig = trimmed.replace(/\s*\{\s*$/, ''); kind = 'method'; break;
+        }
+        continue;
       }
       if (new RegExp(`^(?:private|protected|public)\\s+(?:static\\s+|final\\s+)*(?:[\\w.$?[\\]]+(?:<[^>{};]+>)?(?:\\[\\])*)\\s+${esc}\\s*[;=]`).test(trimmed)) {
-        declIdx = i; sig = trimmed.replace(/;\s*$/, ''); kind = 'field'; break;
+        if (canSelectorMatchSameFileDecl(access, lang, 'field', null)) {
+          declIdx = i; sig = trimmed.replace(/;\s*$/, ''); kind = 'field'; break;
+        }
+        continue;
       }
-    } else {
+    } else if (!access.isSelector) {
       const mGen = new RegExp(
         `^(?:export\\s+)?(?:pub\\s+)?(?:async\\s+)?(?:function|fn|def|class|interface|type|struct|enum|trait|const|let)\\s+${esc}\\b`,
       ).exec(trimmed);
@@ -384,41 +490,73 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
   const tip = hoverTooltip(async (view, pos) => {
     if (isDepManifestPath(opts.filePath)) return null;
     const isCompact = (opts.getPreferences ? opts.getPreferences() : readIdeEditorPreferences()).compactHover !== false;
-    const { queryPooledLspHoverMarkdown, tokenSpanAtPos } = await import('./cm-ide-lsp.ts');
+    const { queryPooledLspHover, tokenSpanAtPos } = await import('./cm-ide-lsp.ts');
     const ln = view.state.doc.lineAt(pos), lineNo = ln.number, char0 = pos - ln.from, docText = view.state.doc.toString();
     const span = tokenSpanAtPos(view.state, pos);
     const word = span && !span.isStringPath && span.word && !/^\d+$/.test(span.word) ? span.word : '';
+    const access = span ? inspectMemberAccessAtOffset(docText, span.from, lang) : { isSelector: false, qualifierChain: null, enclosingReceiverIdent: null, enclosingReceiverType: null };
     const lineFixes = getIdeQuickFixesAtLine(view.state, lineNo);
     const detFixes = computeDeterministicQuickFixes(docText, opts.filePath, opts.language, lineNo, word || undefined);
     const primaryLineFix = lineFixes[0] ?? null;
     const primaryDetFix = detFixes[0] ?? null;
 
     let parsed: ParsedQuickDoc | null = null;
-    const hoverPayload = word
-      ? buildIdeHoverRequest({
-          root: opts.root,
-          filePath: opts.filePath,
-          content: docText,
-          line: lineNo,
-          character: char0,
-          connectionId: opts.connectionId,
-          projectFolders: opts.projectFolders,
-        })
-      : null;
-    if (hoverPayload) {
-      try {
-        const { api } = await import('../api/client.ts');
-        const resp = await api.post<{ found?: boolean; symbol?: string; kind?: string; package_name?: string | null; signature?: string; summary?: string; full_doc?: string | null; defined_in?: { path: string; line: number } | null }>('/ide/lsp/hover', hoverPayload);
-        if (resp?.found && (resp.signature || resp.summary || resp.full_doc)) {
-          parsed = sanitizeAndSplitHoverDoc({ symbol: resp.symbol || word, kind: resp.kind, packageName: resp.package_name, signature: resp.signature, rawDoc: resp.summary, fullDoc: resp.full_doc, definedIn: resp.defined_in, compact: isCompact });
-        }
-      } catch { /* fall through */ }
+    let authoritativeDef: { path: string; line: number } | null = null;
+    if (word) {
+      const pooled = await queryPooledLspHover(view, pos);
+      if (pooled?.definedIn) authoritativeDef = { path: pooled.definedIn.path, line: pooled.definedIn.line };
+      if (pooled?.markdown) {
+        parsed = sanitizeAndSplitHoverDoc({
+          symbol: word,
+          rawDoc: pooled.markdown,
+          definedIn: authoritativeDef,
+          compact: isCompact,
+        });
+      }
     }
     if (!parsed && word) {
-      const pooledMd = await queryPooledLspHoverMarkdown(view, pos);
-      if (pooledMd) parsed = sanitizeAndSplitHoverDoc({ symbol: word, rawDoc: pooledMd, compact: isCompact });
+      const hoverPayload = buildIdeHoverRequest({
+        root: opts.root,
+        filePath: opts.filePath,
+        content: docText,
+        line: lineNo,
+        character: char0,
+        connectionId: opts.connectionId,
+        projectFolders: opts.projectFolders,
+      });
+      if (hoverPayload) {
+        try {
+          const { api } = await import('../api/client.ts');
+          const sig = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(5000) : undefined;
+          const resp = await api.post<{ found?: boolean; symbol?: string; kind?: string; package_name?: string | null; signature?: string; summary?: string; full_doc?: string | null; defined_in?: { path: string; line: number } | null }>('/ide/lsp/hover', hoverPayload, sig);
+          if (resp?.found && (resp.signature || resp.summary || resp.full_doc)) {
+            const respSameFile = resp.defined_in?.path === opts.filePath;
+            const mGoRecv = resp.signature ? /^func\s*\(\s*(?:[A-Za-z_]\w*\s+)?\*?([A-Za-z_]\w*)/.exec(resp.signature.trim()) : null;
+            const mismatchedSameFile =
+              respSameFile &&
+              access.isSelector &&
+              !canSelectorMatchSameFileDecl(access, lang, resp.kind || (mGoRecv ? 'method' : 'symbol'), mGoRecv?.[1] ?? null);
+            const mismatchedAuthoritativeDef =
+              Boolean(authoritativeDef && resp.defined_in?.path && authoritativeDef.path !== resp.defined_in.path);
+            if (!mismatchedSameFile && !mismatchedAuthoritativeDef) {
+              parsed = sanitizeAndSplitHoverDoc({
+                symbol: resp.symbol || word,
+                kind: resp.kind,
+                packageName: resp.package_name,
+                signature: resp.signature,
+                rawDoc: resp.summary,
+                fullDoc: resp.full_doc,
+                definedIn: authoritativeDef ?? resp.defined_in,
+                compact: isCompact,
+              });
+            }
+          }
+        } catch { /* fall through */ }
+      }
     }
-    if (!parsed && word) parsed = extractCleanSymbolHoverFromSource(docText, word, lang, isCompact);
+    if (!parsed && word && (!authoritativeDef || authoritativeDef.path === opts.filePath)) {
+      parsed = extractCleanSymbolHoverFromSource(docText, word, lang, isCompact, span?.from);
+    }
     if (
       shouldShowInspectionHoverFallback({
         hasParsedDoc: Boolean(parsed),

@@ -191,6 +191,8 @@ export interface IdeProjectEnvironment {
   dotenv_path?: string | null; extra_path?: string | null;
   inherit_shell_env?: boolean; additional_roots?: string[];
   module_sdks?: Record<string, string>;
+  go_build_tags?: string[];
+  module_go_build_tags?: Record<string, string[]>;
   network_bridge?: IdeNetworkBridgeConfig | null;
   env_vars: IdeEnvVar[];
 }
@@ -237,7 +239,7 @@ export interface IdeRunConfig {
   env_file?: string | null; inherit_shell_env?: boolean; sdk_path?: string | null;
   toolchain_id?: string | null; compound_configs?: string[]; auto_detected?: boolean;
   before_launch?: string | null; target_path?: string | null; test_filter?: string | null;
-  maven_profiles?: string[]; spring_profiles?: string[]; skip_tests?: boolean; offline?: boolean;
+  maven_profiles?: string[]; spring_profiles?: string[]; skip_tests?: boolean; offline?: boolean; coverage?: boolean;
 }
 
 export interface IdeTestResult {
@@ -248,6 +250,7 @@ export interface IdeTestResult {
 export interface IdeRunState {
   id: string; title: string; runner: string; status: 'running' | 'passed' | 'failed' | 'stopped';
   exit_code?: number | null; started_at?: string; duration_ms?: number | null; output_seq?: number; output: string[]; tests: IdeTestResult[];
+  coverage_pct?: number | null; coverage_summary?: string | null;
 }
 
 export interface IdeBreakpoint {

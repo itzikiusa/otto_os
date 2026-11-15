@@ -9,8 +9,9 @@ use std::time::Duration;
 use otto_core::Result;
 
 use super::db_store::{
-    apply_run_config_sdk_override, discover_local_dotenv_files, is_valid_env_key, parse_dotenv,
-    push_unique, safe_join_allowed_roots, StoredEnvVar,
+    apply_run_config_sdk_override, discover_local_dotenv_files, is_dangerous_loader_env_key,
+    is_reserved_internal_env_key, is_valid_env_key, parse_dotenv, push_unique,
+    safe_join_allowed_roots, StoredEnvVar,
 };
 use super::{shell_env, EnvironmentManager, SecretAccess};
 use crate::target::TargetManager;
@@ -203,6 +204,11 @@ impl EnvironmentManager {
         }
 
         for item in stored_vars {
+            if is_reserved_internal_env_key(&item.key)
+                || (!caller_is_root && is_dangerous_loader_env_key(&item.key))
+            {
+                continue;
+            }
             if item.secret {
                 if let Some(sec_store) = secrets {
                     if let Some(sref) = &item.secret_ref {
@@ -236,6 +242,11 @@ impl EnvironmentManager {
 
         if let Some(c) = cfg {
             for (k, v) in &c.env_overrides {
+                if is_reserved_internal_env_key(k)
+                    || (!caller_is_root && is_dangerous_loader_env_key(k))
+                {
+                    continue;
+                }
                 if is_valid_env_key(k) {
                     map.insert(k.clone(), v.clone());
                 }

@@ -1,6 +1,7 @@
 //! Run Configurations CRUD and Active Run Session management for [`super::EnvironmentManager`].
 
 use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -11,7 +12,10 @@ use otto_state::DbPool;
 use sqlx::Row;
 use tokio::sync::{broadcast, watch};
 
-use super::db_store::{clean_opt, row_to_run_config};
+use super::db_store::{
+    clean_opt, is_dangerous_loader_env_key, is_reserved_internal_env_key, row_to_run_config,
+    RESERVED_RUN_COVERAGE_KEY,
+};
 use super::discovery::discover_run_configs;
 use super::runner::{evict_finished_runs, execute_run_task, ActiveRunHandle, RunStateInner};
 use super::{EnvironmentManager, SecretAccess};
@@ -145,7 +149,17 @@ impl EnvironmentManager {
         pool: &DbPool,
         req: IdeUpsertRunConfigReq,
     ) -> Result<IdeRunConfig> {
-        self.upsert_run_config_parts(pool, &req.target, req.config)
+        self.upsert_run_config_parts_for_user(pool, &req.target, req.config, true)
+            .await
+    }
+
+    pub async fn upsert_run_config_for_user(
+        &self,
+        pool: &DbPool,
+        req: IdeUpsertRunConfigReq,
+        caller_is_root: bool,
+    ) -> Result<IdeRunConfig> {
+        self.upsert_run_config_parts_for_user(pool, &req.target, req.config, caller_is_root)
             .await
     }
 
@@ -155,13 +169,34 @@ impl EnvironmentManager {
         &self,
         pool: &DbPool,
         target: &IdeTargetSpec,
+        cfg: IdeRunConfig,
+    ) -> Result<IdeRunConfig> {
+        self.upsert_run_config_parts_for_user(pool, target, cfg, true)
+            .await
+    }
+
+    pub async fn upsert_run_config_parts_for_user(
+        &self,
+        pool: &DbPool,
+        target: &IdeTargetSpec,
         mut cfg: IdeRunConfig,
+        caller_is_root: bool,
     ) -> Result<IdeRunConfig> {
         target.validate()?;
         if cfg.name.trim().is_empty() {
             return Err(Error::Invalid(
                 "run configuration name cannot be empty".into(),
             ));
+        }
+        for k in cfg.env_overrides.keys() {
+            if is_reserved_internal_env_key(k) {
+                return Err(Error::Invalid(format!(
+                    "reserved environment variable key '{k}'"
+                )));
+            }
+        }
+        if !caller_is_root {
+            validate_run_config_for_non_root(target, &cfg)?;
         }
         if cfg.id.trim().is_empty() || cfg.id.starts_with("auto:") {
             cfg.id = format!("rc_{}", new_id());
@@ -174,8 +209,12 @@ impl EnvironmentManager {
         let args_json = serde_json::to_string(&cfg.args).unwrap_or_else(|_| "[]".into());
         let build_flags_json =
             serde_json::to_string(&cfg.build_flags).unwrap_or_else(|_| "[]".into());
+        let mut persisted_env_overrides = cfg.env_overrides.clone();
+        if cfg.coverage {
+            persisted_env_overrides.insert(RESERVED_RUN_COVERAGE_KEY.into(), "1".into());
+        }
         let env_overrides_json =
-            serde_json::to_string(&cfg.env_overrides).unwrap_or_else(|_| "{}".into());
+            serde_json::to_string(&persisted_env_overrides).unwrap_or_else(|_| "{}".into());
         let compound_ids_json =
             serde_json::to_string(&cfg.compound_configs).unwrap_or_else(|_| "[]".into());
         let maven_profiles_json =
@@ -402,8 +441,14 @@ impl EnvironmentManager {
         if req.offline {
             cfg.offline = true;
         }
+        if req.coverage {
+            cfg.coverage = true;
+        }
 
         let caller_is_root = user.map(|u| u.is_root).unwrap_or(true);
+        if !caller_is_root {
+            validate_run_config_for_non_root(&req.target, &cfg)?;
+        }
         let mut steps: Vec<(IdeRunConfig, BTreeMap<String, String>)> = Vec::new();
         if cfg.runner == IdeRunnerKind::Compound && !cfg.compound_configs.is_empty() {
             for member_id in cfg.compound_configs.iter().take(12) {
@@ -416,6 +461,9 @@ impl EnvironmentManager {
                 if member_cfg.runner == IdeRunnerKind::Compound {
                     continue;
                 }
+                if !caller_is_root {
+                    validate_run_config_for_non_root(&req.target, &member_cfg)?;
+                }
                 if member_cfg.maven_profiles.is_empty() {
                     member_cfg.maven_profiles = cfg.maven_profiles.clone();
                 }
@@ -424,8 +472,9 @@ impl EnvironmentManager {
                 }
                 member_cfg.skip_tests |= cfg.skip_tests;
                 member_cfg.offline |= cfg.offline;
-                let member_env = self
-                    .build_effective_env_for_run_as(
+                member_cfg.coverage |= cfg.coverage;
+                let (member_proj, member_env) = self
+                    .build_effective_env_with_loaded(
                         pool,
                         secrets,
                         &req.target,
@@ -433,6 +482,7 @@ impl EnvironmentManager {
                         caller_is_root,
                     )
                     .await?;
+                apply_project_go_build_tags_to_cfg(&mut member_cfg, &member_proj.go_build_tags);
                 steps.push((member_cfg, member_env));
             }
             if steps.is_empty() {
@@ -441,8 +491,8 @@ impl EnvironmentManager {
                 ));
             }
         } else {
-            let env_map = self
-                .build_effective_env_for_run_as(
+            let (step_proj, env_map) = self
+                .build_effective_env_with_loaded(
                     pool,
                     secrets,
                     &req.target,
@@ -450,15 +500,19 @@ impl EnvironmentManager {
                     caller_is_root,
                 )
                 .await?;
+            apply_project_go_build_tags_to_cfg(&mut cfg, &step_proj.go_build_tags);
             steps.push((cfg.clone(), env_map));
         }
 
         let run_id = format!("run_{}", new_id());
-        let title = if cfg.name.trim().is_empty() {
+        let mut title = if cfg.name.trim().is_empty() {
             format!("{:?}", cfg.runner)
         } else {
             cfg.name.clone()
         };
+        if cfg.coverage && !title.contains("(Coverage)") {
+            title.push_str(" (Coverage)");
+        }
         let started_at = Utc::now().to_rfc3339();
         let seq = self.run_seq.fetch_add(1, Ordering::Relaxed);
         let (stop_tx, stop_rx) = watch::channel(false);
@@ -503,4 +557,159 @@ impl EnvironmentManager {
 
 fn can_access_run(handle: &ActiveRunHandle, user: &User) -> bool {
     user.is_root || (!handle.owner_user_id.is_empty() && handle.owner_user_id == user.id)
+}
+
+fn apply_project_go_build_tags_to_cfg(cfg: &mut IdeRunConfig, tags: &[String]) {
+    if !tags.is_empty()
+        && matches!(
+            cfg.runner,
+            IdeRunnerKind::GoTest | IdeRunnerKind::GoRun | IdeRunnerKind::GoBuild
+        )
+    {
+        crate::lsp_service::merge_go_tags_into_args(&mut cfg.build_flags, tags);
+    }
+}
+
+fn is_allowed_standard_runner_command(runner: IdeRunnerKind, cmd: &str) -> bool {
+    match runner {
+        IdeRunnerKind::GoTest | IdeRunnerKind::GoRun | IdeRunnerKind::GoBuild => cmd == "go",
+        IdeRunnerKind::CargoTest | IdeRunnerKind::CargoRun => cmd == "cargo",
+        IdeRunnerKind::Python => matches!(cmd, "python" | "python3"),
+        IdeRunnerKind::Pytest => matches!(cmd, "pytest" | "python" | "python3"),
+        IdeRunnerKind::Node => cmd == "node",
+        IdeRunnerKind::Npm => cmd == "npm",
+        IdeRunnerKind::Vitest => matches!(cmd, "npx" | "vitest"),
+        IdeRunnerKind::JavaMain => cmd == "java",
+        IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven => matches!(cmd, "mvn" | "./mvnw"),
+        IdeRunnerKind::Gradle => matches!(cmd, "gradle" | "./gradlew"),
+        IdeRunnerKind::Shell => matches!(cmd, "bash" | "sh" | "bats"),
+        IdeRunnerKind::Compound => true,
+        IdeRunnerKind::Custom => false,
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+fn validate_target_confined_subpath(
+    target: &IdeTargetSpec,
+    raw_subpath: &str,
+    field_name: &str,
+) -> Result<()> {
+    let trimmed = raw_subpath.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == "./..." || trimmed == "..." {
+        return Ok(());
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(Error::Invalid(format!(
+            "invalid control characters in '{field_name}'"
+        )));
+    }
+    let normalized = trimmed
+        .strip_suffix("/...")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    if normalized.is_empty() || normalized == "." {
+        return Ok(());
+    }
+    if Path::new(normalized)
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(Error::Forbidden(format!(
+            "'{field_name}' cannot traverse outside workspace roots"
+        )));
+    }
+
+    let mut allowed = vec![target.root.clone()];
+    for extra in target.merged_extra_roots() {
+        if !extra.trim().is_empty() && !allowed.contains(&extra) {
+            allowed.push(extra);
+        }
+    }
+
+    match target.kind {
+        IdeTargetKind::Local => {
+            let cand = if Path::new(normalized).is_absolute() {
+                PathBuf::from(normalized)
+            } else {
+                Path::new(&target.root).join(normalized)
+            };
+            let canon = std::fs::canonicalize(&cand)
+                .ok()
+                .or_else(|| otto_core::secret_paths::canonicalize_prospective(&cand))
+                .ok_or_else(|| {
+                    Error::Forbidden(format!("'{field_name}' could not be confined to workspace"))
+                })?;
+            let in_roots = allowed.iter().any(|r| {
+                let cr = std::fs::canonicalize(r).unwrap_or_else(|_| PathBuf::from(r));
+                canon.starts_with(&cr)
+            });
+            if !in_roots {
+                return Err(Error::Forbidden(format!(
+                    "'{field_name}' escapes authorized workspace roots"
+                )));
+            }
+            crate::target::enforce_non_root_path(&canon)?;
+            Ok(())
+        }
+        IdeTargetKind::Ssh => {
+            if normalized.starts_with('/') {
+                let in_roots = allowed.iter().any(|r| {
+                    let rt = r.trim().trim_end_matches('/');
+                    !rt.is_empty()
+                        && (normalized == rt || normalized.starts_with(&format!("{rt}/")))
+                });
+                if !in_roots {
+                    return Err(Error::Forbidden(format!(
+                        "'{field_name}' escapes remote workspace roots"
+                    )));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+pub(super) fn validate_run_config_for_non_root(
+    target: &IdeTargetSpec,
+    cfg: &IdeRunConfig,
+) -> Result<()> {
+    if clean_opt(&cfg.sdk_path).is_some() {
+        return Err(Error::Forbidden(
+            "non-root users cannot override 'sdk_path' on run configurations".into(),
+        ));
+    }
+    if clean_opt(&cfg.before_launch).is_some() {
+        return Err(Error::Forbidden(
+            "non-root users cannot configure 'before_launch' hooks".into(),
+        ));
+    }
+    if cfg.runner == IdeRunnerKind::Custom {
+        return Err(Error::Forbidden(
+            "non-root users cannot execute custom command runners".into(),
+        ));
+    }
+    if let Some(cmd) = clean_opt(&cfg.command) {
+        if !is_allowed_standard_runner_command(cfg.runner, &cmd) {
+            return Err(Error::Forbidden(format!(
+                "non-root users cannot override runner binary to '{cmd}'"
+            )));
+        }
+    }
+    for k in cfg.env_overrides.keys() {
+        if is_dangerous_loader_env_key(k) {
+            return Err(Error::Forbidden(format!(
+                "non-root users cannot set loader environment variable '{k}'"
+            )));
+        }
+    }
+    if let Some(cwd) = clean_opt(&cfg.cwd) {
+        validate_target_confined_subpath(target, &cwd, "cwd")?;
+    }
+    if let Some(tp) = clean_opt(&cfg.target_path) {
+        validate_target_confined_subpath(target, &tp, "target_path")?;
+    }
+    if let Some(ef) = clean_opt(&cfg.env_file) {
+        validate_target_confined_subpath(target, &ef, "env_file")?;
+    }
+    Ok(())
 }

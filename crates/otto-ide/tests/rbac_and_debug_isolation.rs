@@ -11,9 +11,66 @@ use axum::http::{Method, StatusCode};
 use axum::Router;
 use common::{
     build_test_app, non_root_user, public_router_for, router_as, router_as_with_write_roots,
-    send_json, send_raw, urlencode,
+    send_json, send_raw, urlencode, TestIdeCtx,
 };
+use otto_core::Error;
+use otto_ide::dap::DapStartContext;
+use otto_ide::types::{IdeBreakpoint, IdeDebugLaunchSpec, IdeStartDebugReq, IdeTargetSpec};
 use serde_json::{json, Value};
+use tokio::sync::broadcast::error::RecvError;
+
+async fn start_owned_debug_session(
+    ctx: &TestIdeCtx,
+    owner_id: &str,
+    root: &str,
+    script: &str,
+) -> String {
+    let target = IdeTargetSpec::local(root.to_string());
+    let req = IdeStartDebugReq {
+        target: target.clone(),
+        language: "shell".into(),
+        launch: IdeDebugLaunchSpec {
+            program: script.to_string(),
+            cwd: Some(root.to_string()),
+            ..Default::default()
+        },
+        breakpoints: vec![IdeBreakpoint {
+            path: script.to_string(),
+            line: 3,
+            enabled: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let start_ctx = DapStartContext::new()
+        .with_caller_is_root(false)
+        .with_owner_user_id(owner_id);
+    let (session, mut rx) = ctx
+        .ide
+        .dap
+        .start_session_async(req, start_ctx)
+        .expect("start seeded debug session");
+    let sid = session.id.clone();
+    let owner_owned = owner_id.to_string();
+    ctx.ide
+        .collab
+        .publish_debug_snapshot(Some(&target), Some(&owner_owned), &session);
+    let engine = ctx.ide.clone();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(snap) => {
+                    engine
+                        .collab
+                        .publish_debug_snapshot(Some(&target), Some(&owner_owned), &snap);
+                }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+    sid
+}
 
 async fn wait_debug_paused(app: &Router, sid: &str) -> Value {
     let deadline = Instant::now() + Duration::from_secs(8);
@@ -228,7 +285,8 @@ async fn non_root_debug_session_ownership_isolation_and_attach_confinement() {
     .await;
     assert_eq!(st_escape, StatusCode::FORBIDDEN);
 
-    let (st_start, start_body) = send_json(
+    // Sec-P1-2: non-root Local `POST /ide/debug/sessions` is forbidden even inside Alice's workspace:
+    let (st_local_dbg_forbid, _) = send_json(
         &app_alice,
         Method::POST,
         "/ide/debug/sessions",
@@ -240,8 +298,51 @@ async fn non_root_debug_session_ownership_isolation_and_attach_confinement() {
         })),
     )
     .await;
-    assert_eq!(st_start, StatusCode::OK, "alice debug start: {start_body}");
-    let sid = start_body["session"]["id"].as_str().unwrap().to_string();
+    assert_eq!(st_local_dbg_forbid, StatusCode::FORBIDDEN);
+
+    // Underlying DAP adapter guards also enforce non-root attach_port and workspace confinement:
+    let non_root_ctx = DapStartContext::new()
+        .with_caller_is_root(false)
+        .with_owner_user_id("u_alice");
+    assert!(matches!(
+        ctx.ide
+            .dap
+            .start_session(
+                IdeStartDebugReq {
+                    target: IdeTargetSpec::local(alice_root.clone()),
+                    language: "go".into(),
+                    launch: IdeDebugLaunchSpec {
+                        program: ".".into(),
+                        attach_port: Some(2345),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                non_root_ctx.clone(),
+            )
+            .await,
+        Err(Error::Forbidden(_))
+    ));
+    assert!(matches!(
+        ctx.ide
+            .dap
+            .start_session(
+                IdeStartDebugReq {
+                    target: IdeTargetSpec::local(alice_root.clone()),
+                    language: "shell".into(),
+                    launch: IdeDebugLaunchSpec {
+                        program: bob_script.clone(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                non_root_ctx,
+            )
+            .await,
+        Err(Error::Forbidden(_))
+    ));
+
+    let sid = start_owned_debug_session(&ctx, "u_alice", &alice_root, &alice_script).await;
     let _ = wait_debug_paused(&app_alice, &sid).await;
 
     let (_, list_a) = send_json(&app_alice, Method::GET, "/ide/debug/sessions", None).await;
@@ -328,19 +429,7 @@ async fn collab_room_debug_owner_binding_and_guest_co_debug_guards() {
     let app_bob = router_as(&ctx, non_root_user("u_bob"), vec![ws_shared.clone()]);
     let pub_app = public_router_for(&ctx);
 
-    let (_, start_a) = send_json(
-        &app_alice,
-        Method::POST,
-        "/ide/debug/sessions",
-        Some(json!({
-            "target": { "kind": "local", "root": shared_root },
-            "language": "shell",
-            "launch": { "program": script_a, "cwd": shared_root },
-            "breakpoints": [{ "path": script_a, "line": 3 }],
-        })),
-    )
-    .await;
-    let sid_alice = start_a["session"]["id"].as_str().unwrap().to_string();
+    let sid_alice = start_owned_debug_session(&ctx, "u_alice", &shared_root, &script_a).await;
     let _ = wait_debug_paused(&app_alice, &sid_alice).await;
 
     let (st_room, room_resp) = send_json(
@@ -359,19 +448,7 @@ async fn collab_room_debug_owner_binding_and_guest_co_debug_guards() {
     let token = room_resp["invite_token"].as_str().unwrap().to_string();
     assert_eq!(room_resp["room"]["active_debug_id"], sid_alice);
 
-    let (_, start_b) = send_json(
-        &app_bob,
-        Method::POST,
-        "/ide/debug/sessions",
-        Some(json!({
-            "target": { "kind": "local", "root": shared_root },
-            "language": "shell",
-            "launch": { "program": script_b, "cwd": shared_root },
-            "breakpoints": [{ "path": script_b, "line": 3 }],
-        })),
-    )
-    .await;
-    let sid_bob = start_b["session"]["id"].as_str().unwrap().to_string();
+    let sid_bob = start_owned_debug_session(&ctx, "u_bob", &shared_root, &script_b).await;
     let _ = wait_debug_paused(&app_bob, &sid_bob).await;
     let _ = send_json(
         &app_bob,

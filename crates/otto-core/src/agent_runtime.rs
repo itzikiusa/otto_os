@@ -1356,6 +1356,19 @@ pub struct QueuedDeliverReq {
     pub delivery: PromptDelivery,
 }
 
+/// `DELETE /runtime-sessions/{id}/queue/{queued_id}` — pop a queued message
+/// and return its original payload so "Edit" restores text and attachments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnqueuePromptResp {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<PromptImage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PromptFile>,
+}
+
 impl RuntimePromptReq {
     /// A text-only prompt.
     pub fn of(text: &str) -> Self {

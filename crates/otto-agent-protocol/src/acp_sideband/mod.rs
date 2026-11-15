@@ -25,17 +25,26 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use self::agy::{default_agy_brain_dir, AgyState};
-use self::burst::{consume_budget, now_ms, BurstFilter, MirroredCounts};
+use self::burst::{consume_budget, insert_bounded_set, now_ms, BurstFilter, MirroredCounts};
 use self::gemini::{default_gemini_home, GeminiState};
 use self::grok::{default_grok_home, GrokState};
 use self::opencode::{default_opencode_data_dir, OpencodeState};
 use crate::driver::{SidebandPayload, SidebandPoll, SidebandResumeSeed, SidebandSource};
 
-const POLL_INTERVAL: Duration = Duration::from_millis(400);
+const POLL_FAST_INTERVAL: Duration = Duration::from_millis(400);
+const POLL_WARM_INTERVAL: Duration = Duration::from_millis(1_500);
+const POLL_COLD_INTERVAL: Duration = Duration::from_millis(3_000);
+const WARM_IDLE_AFTER_MS: u64 = 10_000;
+const COLD_IDLE_AFTER_MS: u64 = 60_000;
+const UNRESOLVED_BACKOFF_MS: u64 = 3_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SidebandAction {
     TurnStarted,
+    SystemWakeup {
+        sender: Option<String>,
+        content: String,
+    },
     Thought {
         text: String,
         streaming: bool,
@@ -49,6 +58,7 @@ pub(crate) enum SidebandAction {
         id: String,
         title: String,
         kind: ToolKind,
+        status: ToolCallStatus,
         raw_input: Option<Value>,
         file: Option<String>,
         diff: Option<(Option<String>, String)>,
@@ -79,6 +89,10 @@ pub(crate) struct AcpSideband {
     #[serde(default)]
     idle_since_ms: u64,
     #[serde(default)]
+    last_active_ms: u64,
+    #[serde(default)]
+    unresolved_until_ms: u64,
+    #[serde(default)]
     native_autonomous_seen: bool,
     #[serde(default)]
     mirrored: MirroredCounts,
@@ -108,6 +122,10 @@ impl AcpSideband {
 
     pub fn set_root_dir(&mut self, dir: Option<String>) {
         self.root_dir = dir.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    }
+
+    pub fn root_dir(&self) -> Option<&str> {
+        self.root_dir.as_deref()
     }
 
     pub fn set_custom_file(&mut self, file: Option<String>) {
@@ -145,14 +163,37 @@ impl AcpSideband {
     pub fn ensure_restored(&mut self, provider: RuntimeProvider) {
         let mut empty = Vec::new();
         self.adopt_env(provider, &mut empty);
+        let now = now_ms();
         if self.idle_since_ms == 0 {
-            self.idle_since_ms = now_ms();
+            self.idle_since_ms = now;
+        }
+        if self.last_active_ms == 0 {
+            self.last_active_ms = self.idle_since_ms;
         }
     }
 
     pub fn ensure_idle_floor(&mut self) {
+        let now = now_ms();
         if self.idle_since_ms == 0 {
-            self.idle_since_ms = now_ms();
+            self.idle_since_ms = now;
+        }
+        if self.last_active_ms == 0 {
+            self.last_active_ms = now;
+        }
+    }
+
+    pub(crate) fn poll_interval_at(&self, now: u64) -> Duration {
+        let anchor = self.last_active_ms.max(self.idle_since_ms);
+        if anchor == 0 || self.is_awaiting_followup() {
+            return POLL_FAST_INTERVAL;
+        }
+        let idle_ms = now.saturating_sub(anchor);
+        if idle_ms >= COLD_IDLE_AFTER_MS {
+            POLL_COLD_INTERVAL
+        } else if idle_ms >= WARM_IDLE_AFTER_MS {
+            POLL_WARM_INTERVAL
+        } else {
+            POLL_FAST_INTERVAL
         }
     }
 
@@ -167,10 +208,24 @@ impl AcpSideband {
         if !ready || !idle_between_prompts || self.native_autonomous_seen {
             return None;
         }
-        let source = self.source_for(provider, cwd, session_id)?;
+        let now = now_ms();
+        let allow_dir_scan = now >= self.unresolved_until_ms;
+        let source = self.source_for(provider, cwd, session_id, allow_dir_scan)?;
+        let mut interval = self.poll_interval_at(now);
+        if !allow_dir_scan
+            && self.custom_file.is_none()
+            && ((provider == RuntimeProvider::Gemini && self.gemini.resolved_path.is_none())
+                || (provider == RuntimeProvider::Grok && self.grok.resolved_path.is_none()))
+        {
+            interval = interval.max(Duration::from_millis(
+                self.unresolved_until_ms.saturating_sub(now),
+            ));
+        }
         Some(SidebandPoll {
             source,
-            interval: POLL_INTERVAL,
+            interval,
+            active_tails: Vec::new(),
+            timer_expired: false,
         })
     }
 
@@ -180,7 +235,7 @@ impl AcpSideband {
         cwd: &str,
         resume_id: &str,
     ) -> Option<SidebandSource> {
-        self.source_for(provider, cwd, Some(resume_id))
+        self.source_for(provider, cwd, Some(resume_id), true)
     }
 
     fn source_for(
@@ -188,6 +243,7 @@ impl AcpSideband {
         provider: RuntimeProvider,
         cwd: &str,
         session_id: Option<&str>,
+        allow_dir_scan: bool,
     ) -> Option<SidebandSource> {
         if let Some(file) = self.custom_file.as_deref() {
             return self.grok.source_for_custom_file(file);
@@ -196,8 +252,8 @@ impl AcpSideband {
         let sid = session_id?;
         match provider {
             RuntimeProvider::Agy => self.agy.source(root, sid),
-            RuntimeProvider::Grok => self.grok.source_for_grok(root, cwd, sid),
-            RuntimeProvider::Gemini => self.gemini.source(root, cwd, sid),
+            RuntimeProvider::Grok => self.grok.source_for_grok(root, cwd, sid, allow_dir_scan),
+            RuntimeProvider::Gemini => self.gemini.source(root, cwd, sid, allow_dir_scan),
             RuntimeProvider::Opencode => self.opencode.source(root, sid, self.idle_since_ms),
             _ => None,
         }
@@ -205,6 +261,8 @@ impl AcpSideband {
 
     pub fn init_resume(&mut self, provider: RuntimeProvider, seed: SidebandResumeSeed) {
         self.reset_for_prompt();
+        self.unresolved_until_ms = 0;
+        let now = now_ms();
         match seed {
             SidebandResumeSeed::AppendOffset {
                 resolved_path,
@@ -218,10 +276,12 @@ impl AcpSideband {
                     self.agy.using_fallback = using_fallback;
                     self.agy.offset = offset;
                 }
-                self.idle_since_ms = now_ms();
+                self.idle_since_ms = now;
+                self.last_active_ms = now;
             }
             SidebandResumeSeed::IdleSinceMs(ms) => {
                 self.idle_since_ms = ms;
+                self.last_active_ms = ms.max(now);
             }
         }
     }
@@ -253,12 +313,17 @@ impl AcpSideband {
 
     pub fn arm_burst_filter(&mut self) {
         self.mirrored.transfer_into(&mut self.burst);
+        self.last_active_ms = now_ms();
+        self.unresolved_until_ms = 0;
         self.reset_for_prompt();
     }
 
     pub fn finish_prompted_turn(&mut self) {
         self.burst = BurstFilter::default();
-        self.idle_since_ms = now_ms();
+        let now = now_ms();
+        self.idle_since_ms = now;
+        self.last_active_ms = now;
+        self.unresolved_until_ms = 0;
         self.reset_for_prompt();
     }
 
@@ -286,34 +351,46 @@ impl AcpSideband {
         }
         if self.burst.preseeded_tool_ids.remove(tool_call_id) {
             self.burst.remaining_tool_calls = self.burst.remaining_tool_calls.saturating_sub(1);
-            self.burst
-                .suppressed_tool_ids
-                .insert(tool_call_id.to_string());
+            insert_bounded_set(
+                &mut self.burst.suppressed_tool_ids,
+                tool_call_id.to_string(),
+            );
             return true;
         }
         if self.burst.remaining_tool_calls > 0 {
             self.burst.remaining_tool_calls -= 1;
-            self.burst
-                .suppressed_tool_ids
-                .insert(tool_call_id.to_string());
+            insert_bounded_set(
+                &mut self.burst.suppressed_tool_ids,
+                tool_call_id.to_string(),
+            );
             return true;
         }
         false
     }
 
-    pub fn filter_tool_update(&mut self, tool_call_id: &str, known_in_turn: bool) -> bool {
+    pub fn filter_tool_update(
+        &mut self,
+        tool_call_id: &str,
+        known_in_turn: bool,
+        in_prompted_turn: bool,
+    ) -> bool {
         if self.burst.suppressed_tool_ids.contains(tool_call_id)
             || self.burst.preseeded_tool_ids.contains(tool_call_id)
         {
             return true;
         }
         // Suppress orphan `tool_call_update` frames replayed for tools started in
-        // a prior turn (e.g. `schedule` timers or background commands completing
-        // during the autonomous gap without a fresh `tool_call`).
-        if !known_in_turn && self.burst.armed_from_mirrored {
-            self.burst
-                .suppressed_tool_ids
-                .insert(tool_call_id.to_string());
+        // a prior turn while draining pre-prompt burst output (or outside a
+        // prompted turn), without dropping legitimate self-describing single-frame
+        // tool updates after the pre-prompt burst has drained.
+        if !known_in_turn
+            && self.burst.armed_from_mirrored
+            && (!in_prompted_turn || self.burst.is_draining_pre_prompt())
+        {
+            insert_bounded_set(
+                &mut self.burst.suppressed_tool_ids,
+                tool_call_id.to_string(),
+            );
             return true;
         }
         false
@@ -325,13 +402,21 @@ impl AcpSideband {
         session_id: Option<&str>,
         payload: SidebandPayload,
     ) -> Vec<SidebandAction> {
-        match payload {
+        let actions = match payload {
+            SidebandPayload::Unresolved => {
+                if provider == RuntimeProvider::Gemini {
+                    self.gemini.resolved_path = None;
+                }
+                self.unresolved_until_ms = now_ms().saturating_add(UNRESOLVED_BACKOFF_MS);
+                return Vec::new();
+            }
             SidebandPayload::AppendLines {
                 resolved_path,
                 using_fallback,
                 next_offset,
                 bytes,
             } => {
+                self.unresolved_until_ms = 0;
                 if self.custom_file.is_some() || provider == RuntimeProvider::Grok {
                     self.grok.parse_bytes(
                         resolved_path,
@@ -353,20 +438,32 @@ impl AcpSideband {
             SidebandPayload::GeminiJson {
                 resolved_path,
                 stamp,
-                bytes,
-            } => self.gemini.parse_snapshot(
-                resolved_path,
-                stamp,
-                &bytes,
-                session_id,
-                self.idle_since_ms,
-                &mut self.mirrored,
-            ),
+                doc,
+            } => {
+                self.unresolved_until_ms = 0;
+                self.gemini.parse_snapshot(
+                    resolved_path,
+                    stamp,
+                    &doc,
+                    session_id,
+                    self.idle_since_ms,
+                    &mut self.mirrored,
+                )
+            }
             SidebandPayload::OpencodeSqlite { stamp, rows_jsonl } => {
+                self.unresolved_until_ms = 0;
                 self.opencode
                     .parse_rows(stamp, &rows_jsonl, self.idle_since_ms, &mut self.mirrored)
             }
+            SidebandPayload::Batch { primary, .. } => match primary {
+                Some(inner) => return self.on_payload(provider, session_id, *inner),
+                None => Vec::new(),
+            },
+        };
+        if !actions.is_empty() {
+            self.last_active_ms = now_ms();
         }
+        actions
     }
 }
 

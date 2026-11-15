@@ -7,18 +7,72 @@
 //! [`OpencodeState::parse_rows`] so the driver itself remains 100% sans-IO.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use agent_client_protocol::v1::schema::ToolCallStatus;
 use otto_core::agent_runtime::TurnTokenUsage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
-use super::burst::{classify_tool, is_safe_session_id, now_ms, trim_ascii, MirroredCounts};
+use super::burst::{
+    classify_tool, insert_bounded_map, insert_bounded_set, is_safe_session_id, now_ms, trim_ascii,
+    MirroredCounts,
+};
 use super::SidebandAction;
 use crate::driver::SidebandSource;
 
 const AWAITING_STEP_MAX_MS: u64 = 90_000;
+const MAX_CACHED_POOLS: usize = 16;
+
+static OPENCODE_POOLS: tokio::sync::Mutex<Option<HashMap<PathBuf, SqlitePool>>> =
+    tokio::sync::Mutex::const_new(None);
+
+/// Return a cached read-only `SqlitePool` (`max_connections = 2`) for `db_path`,
+/// opening one lazily on first poll so sideband polling never churns file
+/// descriptors or SQLite handshakes every tick.
+pub(super) async fn readonly_opencode_pool(db_path: &Path) -> Option<SqlitePool> {
+    {
+        let guard = OPENCODE_POOLS.lock().await;
+        if let Some(pool) = guard.as_ref().and_then(|m| m.get(db_path)) {
+            if !pool.is_closed() {
+                return Some(pool.clone());
+            }
+        }
+    }
+    let opts = SqliteConnectOptions::new()
+        .filename(db_path)
+        .read_only(true)
+        .create_if_missing(false);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .idle_timeout(Duration::from_secs(120))
+        .connect_with(opts)
+        .await
+        .ok()?;
+    let mut guard = OPENCODE_POOLS.lock().await;
+    let map = guard.get_or_insert_with(HashMap::new);
+    if !map.contains_key(db_path) && map.len() >= MAX_CACHED_POOLS {
+        if let Some(k) = map.keys().next().cloned() {
+            if let Some(old) = map.remove(&k) {
+                tokio::spawn(async move { old.close().await });
+            }
+        }
+    }
+    map.insert(db_path.to_path_buf(), pool.clone());
+    Some(pool)
+}
+
+pub(super) async fn evict_opencode_pool(db_path: &Path) {
+    let removed = {
+        let mut guard = OPENCODE_POOLS.lock().await;
+        guard.as_mut().and_then(|m| m.remove(db_path))
+    };
+    if let Some(pool) = removed {
+        pool.close().await;
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OpencodeState {
@@ -105,10 +159,24 @@ impl OpencodeState {
             if role != "assistant" {
                 continue;
             }
-            let baseline_only = idle_since_ms > 0
+            let msg_time_created = row
+                .get("msg_time_created")
+                .and_then(Value::as_i64)
+                .filter(|t| *t > 0)
+                .or_else(|| {
+                    row.get("time_created")
+                        .and_then(Value::as_i64)
+                        .filter(|t| *t > 0)
+                });
+            let ts_baseline = idle_since_ms > 0
                 && u64::try_from(time_updated.max(0))
                     .ok()
-                    .is_some_and(|t| t.saturating_add(50) < idle_since_ms);
+                    .is_some_and(|t| t <= idle_since_ms.saturating_add(50));
+            let msg_baseline = idle_since_ms > 0
+                && msg_time_created
+                    .and_then(|mc| u64::try_from(mc).ok())
+                    .is_some_and(|mc| mc <= idle_since_ms.saturating_add(250));
+            let baseline_only = ts_baseline || msg_baseline;
 
             let data: Value = match row.get("data") {
                 Some(Value::String(s)) => match serde_json::from_str(s) {
@@ -158,7 +226,9 @@ impl OpencodeState {
                     self.ingest_tool_part(part_id, &data, baseline_only, mirrored, &mut actions);
                 }
                 "step-finish" => {
-                    if !self.seen_step_finish.insert(part_id.to_string()) || baseline_only {
+                    if !insert_bounded_set(&mut self.seen_step_finish, part_id.to_string())
+                        || baseline_only
+                    {
                         continue;
                     }
                     let reason = data.get("reason").and_then(Value::as_str).unwrap_or("");
@@ -204,8 +274,11 @@ impl OpencodeState {
         if prev.as_deref() == Some(raw_status) {
             return;
         }
-        self.seen_tool_status
-            .insert(call_id.to_string(), raw_status.to_string());
+        insert_bounded_map(
+            &mut self.seen_tool_status,
+            call_id.to_string(),
+            raw_status.to_string(),
+        );
         if baseline_only {
             return;
         }
@@ -228,6 +301,7 @@ impl OpencodeState {
                 id: call_id.to_string(),
                 title: desc.title,
                 kind: desc.kind,
+                status: ToolCallStatus::InProgress,
                 raw_input: input,
                 file: desc.file,
                 diff: desc.diff,
@@ -271,7 +345,7 @@ fn take_part_delta(
     if total <= prev {
         return None;
     }
-    seen.insert(part_id.to_string(), total);
+    insert_bounded_map(seen, part_id.to_string(), total);
     if baseline_only {
         return None;
     }

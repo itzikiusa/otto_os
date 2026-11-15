@@ -161,6 +161,13 @@
 
       <Badge tone={runBadge.tone} label={runBadge.label} dot={runBadge.dot} live={runBadge.live} status={shownRun.status} />
       <Badge tone="neutral" variant="outline" label={shownRun.runner} />
+      {#if shownRun.coverage_summary || shownRun.coverage_pct != null}
+        <Badge
+          tone="info"
+          variant="outline"
+          label={shownRun.coverage_summary || `Coverage ${shownRun.coverage_pct?.toFixed(1)}%`}
+        />
+      {/if}
 
       {#if tests.length > 0}
         <span class="run-counts">

@@ -201,7 +201,7 @@
   {/if}
   {#if thinking && item.type === 'reasoning'}
     <!-- Clamped to three lines until "More" (a long thought). -->
-    <div class="rw-think" class:all={open || !longThought}><Markdown md={thinkingMd} small /></div>
+    <div class="rw-think" class:all={open || !longThought}><Markdown md={thinkingMd} small streaming={running} /></div>
     {#if longThought}
       <button type="button" class="rw-more" aria-expanded={open} onclick={() => (open = !open)}>{open ? 'Less' : 'More'}</button>
     {/if}

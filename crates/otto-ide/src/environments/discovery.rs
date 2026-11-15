@@ -49,32 +49,80 @@ pub fn discover_run_configs(
     }
 
     let mut out = Vec::new();
-    let primary = PathBuf::from(&target.root);
-    if primary.is_dir() {
-        scan_project_folder(&primary, None, &mut out);
-    }
-
+    let mut extra_dirs: Vec<PathBuf> = Vec::new();
     for extra in additional_roots {
-        if out.len() >= MAX_DISCOVERED_CONFIGS {
-            break;
-        }
         let trimmed = extra.trim();
         if trimmed.is_empty() || trimmed == target.root {
             continue;
         }
         let path = PathBuf::from(trimmed);
-        if path.is_dir() {
-            let folder_label = folder_name(&path);
-            scan_project_folder(&path, Some(&folder_label), &mut out);
+        if path.is_dir() && !extra_dirs.contains(&path) {
+            extra_dirs.push(path);
         }
+    }
+
+    let primary = PathBuf::from(&target.root);
+    if primary.is_dir() {
+        let primary_has_manifest = has_project_manifest(&primary);
+        let child_repos: Vec<PathBuf> = list_subdirs_bounded(&primary)
+            .into_iter()
+            .filter(|sub| !extra_dirs.contains(sub))
+            .filter(|sub| {
+                sub.join(".git").exists() || (!primary_has_manifest && has_project_manifest(sub))
+            })
+            .collect();
+        let use_primary_badge = !extra_dirs.is_empty() || !child_repos.is_empty();
+        if primary_has_manifest || child_repos.is_empty() {
+            let primary_label = folder_name(&primary);
+            scan_project_folder(
+                &primary,
+                use_primary_badge.then_some(primary_label.as_str()),
+                &mut out,
+            );
+        }
+        for child in child_repos {
+            if out.len() >= MAX_DISCOVERED_CONFIGS {
+                break;
+            }
+            let child_label = folder_name(&child);
+            scan_project_folder(&child, Some(&child_label), &mut out);
+        }
+    }
+
+    for path in extra_dirs {
+        if out.len() >= MAX_DISCOVERED_CONFIGS {
+            break;
+        }
+        let folder_label = folder_name(&path);
+        scan_project_folder(&path, Some(&folder_label), &mut out);
     }
 
     out.truncate(MAX_DISCOVERED_CONFIGS);
     out
 }
 
+fn has_project_manifest(dir: &Path) -> bool {
+    const MANIFESTS: &[&str] = &[
+        "go.mod",
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "requirements.txt",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+    ];
+    if MANIFESTS.iter().any(|m| dir.join(m).is_file()) {
+        return true;
+    }
+    !list_files_with_suffix(dir, ".go").is_empty()
+        || !list_files_with_suffix(dir, ".py").is_empty()
+        || !list_files_with_suffix(dir, ".sh").is_empty()
+}
+
 fn scan_project_folder(root: &Path, root_badge: Option<&str>, out: &mut Vec<IdeRunConfig>) {
-    let cwd_override = root_badge.map(|_| root.to_string_lossy().into_owned());
+    let cwd_override = Some(root.to_string_lossy().into_owned());
     let proj_name = folder_name(root);
 
     discover_go(root, &proj_name, root_badge, &cwd_override, out);

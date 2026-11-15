@@ -146,6 +146,93 @@ pub(super) fn find_definitions_with_matcher(
     out
 }
 
+/// Find ONLY package-level Go declarations (`brace_depth == 0`: `var`, `const`,
+/// `type`, `func`, and grouped `var (...)` / `const (...)` / `type (...)`),
+/// NEVER matching function-local `:=` or local variables inside `{ ... }`.
+pub(crate) fn find_go_package_level_definitions(
+    path: &str,
+    content: &str,
+    symbol: &str,
+    allow_receiver_methods: bool,
+) -> Vec<IdeReferenceLocation> {
+    let escaped = regex::escape(symbol);
+    let fn_pat = if allow_receiver_methods {
+        format!(r"^func\s+(?:\([^)]+\)\s*)?{escaped}\s*(?:\[[^\]]*\])?\s*\(")
+    } else {
+        format!(r"^func\s+{escaped}\s*(?:\[[^\]]*\])?\s*\(")
+    };
+    let top_pat = format!(
+        r"{fn_pat}|^type\s+{escaped}\b|^(?:const|var)\s+(?:[A-Za-z_][A-Za-z0-9_]*\s*,\s*)*{escaped}\b"
+    );
+    let group_pat = format!(r"^(?:[A-Za-z_][A-Za-z0-9_]*\s*,\s*)*{escaped}(?:\s+|\s*=|$)");
+    let (Ok(top_re), Ok(group_re)) = (Regex::new(&top_pat), Regex::new(&group_pat)) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    let mut in_block = false;
+    let mut brace_depth: i32 = 0;
+    let mut in_decl_group = false;
+
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mask = code_mask_for_line("go", line, &mut in_block);
+        let masked_code: String = line
+            .char_indices()
+            .map(|(bi, ch)| {
+                if mask.get(bi).copied().unwrap_or(false) {
+                    ch
+                } else {
+                    ' '
+                }
+            })
+            .collect();
+        let code_head = masked_code.trim();
+        if code_head.is_empty() {
+            continue;
+        }
+
+        if brace_depth == 0 {
+            if (code_head.starts_with("const")
+                || code_head.starts_with("var")
+                || code_head.starts_with("type"))
+                && code_head.ends_with('(')
+            {
+                in_decl_group = true;
+            } else if in_decl_group && (code_head == ")" || code_head.starts_with(')')) {
+                in_decl_group = false;
+            } else if masked_code.contains(symbol) {
+                let matched = if in_decl_group {
+                    group_re.is_match(code_head)
+                } else {
+                    top_re.is_match(code_head)
+                };
+                if matched {
+                    let col = find_symbol_column(line, &mask, symbol).unwrap_or(1);
+                    out.push(IdeReferenceLocation {
+                        path: path.to_string(),
+                        line: (idx + 1) as u32,
+                        column: col,
+                        preview: trimmed.to_string(),
+                    });
+                }
+            }
+        }
+
+        for ch in masked_code.chars() {
+            if ch == '{' {
+                brace_depth += 1;
+            } else if ch == '}' {
+                brace_depth = (brace_depth - 1).max(0);
+            }
+        }
+    }
+    out
+}
+
 #[allow(dead_code)]
 pub(crate) fn is_definition_line(
     lang: &str,

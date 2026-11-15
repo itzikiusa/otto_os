@@ -119,6 +119,14 @@ fn main() {
                         windows::snapshot_all(app);
                         app.exit(0);
                     }
+                    "emoji-palette" => {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let _ = app.run_on_main_thread(|| {
+                                appkit_guard::order_front_character_palette();
+                            });
+                        }
+                    }
                     // Menu-bar item's right-click menu (tray.rs).
                     tray::MENU_OPEN => {
                         let _ = popout::open_in_otto(app.clone(), None);
@@ -451,6 +459,14 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
             // document. The SPA handles this id (see ui/src/lib/selectall.ts)
             // and selects against the real text model.
             &MenuItem::with_id(handle, "select-all", "Select All", true, Some("Cmd+A"))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(
+                handle,
+                "emoji-palette",
+                "Emoji & Symbols",
+                true,
+                Some("Cmd+Ctrl+Space"),
+            )?,
         ],
     )?;
 

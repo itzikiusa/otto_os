@@ -6,8 +6,10 @@
 //! `yaml`, `toml`, `xml`) use Otto's built-in fast static intelligence and
 //! never spawn external LSP subprocesses.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 
 pub use super::servers_root::{
     is_lightweight_non_lsp_lang, is_multi_repo_umbrella_dir, resolve_lsp_module_root,
@@ -406,21 +408,81 @@ fn resolve_plugin_spec(spec: &PluginLspServerSpec, extra_dirs: &[PathBuf]) -> Re
     }
 }
 
-/// Resolve all built-in entries against system + user developer `PATH`.
+const DETECT_CACHE_TTL: Duration = Duration::from_secs(60);
+const MAX_IDE_DETECT_CACHE_ENTRIES: usize = 16;
+
+type IdeDetectKey = (PathBuf, Option<SystemTime>, Vec<(String, String)>);
+
+struct DetectCaches {
+    plain: Option<(Instant, Vec<Resolved>)>,
+    with_ide: HashMap<IdeDetectKey, (Instant, Vec<Resolved>)>,
+}
+
+fn detect_caches() -> &'static Mutex<DetectCaches> {
+    static CACHES: OnceLock<Mutex<DetectCaches>> = OnceLock::new();
+    CACHES.get_or_init(|| {
+        Mutex::new(DetectCaches {
+            plain: None,
+            with_ide: HashMap::new(),
+        })
+    })
+}
+
+/// Clear cached LSP binary detection snapshots (called after toolchain or plugin mutations).
+pub fn invalidate_detect_cache() {
+    if let Ok(mut guard) = detect_caches().lock() {
+        guard.plain = None;
+        guard.with_ide.clear();
+    }
+}
+
+/// Resolve all built-in entries against system + user developer `PATH` (cached for 60 s).
 pub fn detect_all() -> Vec<Resolved> {
-    REGISTRY.iter().map(|def| resolve_def(def, &[])).collect()
+    let now = Instant::now();
+    if let Ok(guard) = detect_caches().lock() {
+        if let Some((born, cached)) = &guard.plain {
+            if now.duration_since(*born) < DETECT_CACHE_TTL {
+                return cached.clone();
+            }
+        }
+    }
+    let fresh: Vec<Resolved> = REGISTRY.iter().map(|def| resolve_def(def, &[])).collect();
+    if let Ok(mut guard) = detect_caches().lock() {
+        guard.plain = Some((now, fresh.clone()));
+    }
+    fresh
 }
 
 /// Resolve all built-in entries + active IDE plugin LSP servers against
-/// `<data_dir>/toolchains/**/bin` and system/developer `PATH`.
+/// `<data_dir>/toolchains/**/bin` and system/developer `PATH` (cached for 60 s).
+#[allow(clippy::disallowed_methods)]
 pub fn detect_all_with_ide(data_dir: &Path, plugins: &IdePluginRegistry) -> Vec<Resolved> {
+    let now = Instant::now();
+    let tc_mtime = std::fs::metadata(data_dir.join("toolchains"))
+        .and_then(|m| m.modified())
+        .ok();
+    let active_specs = plugins.active_lsp_servers();
+    let spec_fp: Vec<(String, String)> = active_specs
+        .iter()
+        .map(|s| (s.language.clone(), s.command.clone()))
+        .collect();
+    let cache_key: IdeDetectKey = (data_dir.to_path_buf(), tc_mtime, spec_fp);
+
+    if let Ok(guard) = detect_caches().lock() {
+        if let Some((born, cached)) = guard.with_ide.get(&cache_key) {
+            if now.duration_since(*born) < DETECT_CACHE_TTL {
+                return cached.clone();
+            }
+        }
+    }
+
     let extra = collect_toolchain_bin_dirs(data_dir);
     let mut out: Vec<Resolved> = REGISTRY
         .iter()
         .map(|def| resolve_def(def, &extra))
         .collect();
 
-    for spec in plugins.active_lsp_servers() {
+    for spec in active_specs {
         if is_lightweight_non_lsp_lang(&spec.language) {
             continue;
         }
@@ -432,6 +494,18 @@ pub fn detect_all_with_ide(data_dir: &Path, plugins: &IdePluginRegistry) -> Vec<
         } else {
             out.push(plugin_resolved);
         }
+    }
+
+    if let Ok(mut guard) = detect_caches().lock() {
+        if guard.with_ide.len() >= MAX_IDE_DETECT_CACHE_ENTRIES {
+            guard
+                .with_ide
+                .retain(|_, (born, _)| now.duration_since(*born) < DETECT_CACHE_TTL);
+            if guard.with_ide.len() >= MAX_IDE_DETECT_CACHE_ENTRIES {
+                guard.with_ide.clear();
+            }
+        }
+        guard.with_ide.insert(cache_key, (now, out.clone()));
     }
     out
 }

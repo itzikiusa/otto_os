@@ -3,14 +3,16 @@
 //! [`super::tunnel::NetBridgeInstance`].
 
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use otto_core::{Error, Result};
 use otto_ssh::SshTunnel;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpStream, UnixListener};
 use tokio::process::{Child, Command};
 
 use super::k8s_discover::{resolve_destination, BridgeDestination};
@@ -43,15 +45,22 @@ impl K8sPortForward {
     }
 }
 
+pub(super) enum LocalForwardTarget {
+    TcpPort(u16),
+    UnixSocket(PathBuf),
+}
+
 pub(super) struct SshLocalRelay {
-    local_port: u16,
+    sock_path: PathBuf,
     _weak_inst: Weak<NetBridgeInstance>,
     accept_abort: tokio::task::AbortHandle,
 }
 
 impl Drop for SshLocalRelay {
+    #[allow(clippy::disallowed_methods)]
     fn drop(&mut self) {
         self.accept_abort.abort();
+        let _ = std::fs::remove_file(&self.sock_path);
     }
 }
 
@@ -100,22 +109,24 @@ pub(super) fn ensure_not_metadata_target(host: &str) -> Result<()> {
 }
 
 impl NetBridgeInstance {
-    pub(super) async fn ensure_local_forward_port(
+    pub(super) async fn ensure_local_forward_target(
         self: &Arc<Self>,
         dest: BridgeDestination,
-    ) -> Result<u16> {
+    ) -> Result<LocalForwardTarget> {
         match dest {
             BridgeDestination::K8sService {
                 namespace,
                 service,
                 port,
-            } => {
-                self.ensure_k8s_port_forward(&namespace, &service, port)
-                    .await
-            }
+            } => self
+                .ensure_k8s_port_forward(&namespace, &service, port)
+                .await
+                .map(LocalForwardTarget::TcpPort),
             BridgeDestination::SshHost { host, port } => {
                 ensure_not_metadata_target(&host)?;
-                self.ensure_ssh_local_relay(&host, port).await
+                self.ensure_ssh_local_relay(&host, port)
+                    .await
+                    .map(LocalForwardTarget::UnixSocket)
             }
         }
     }
@@ -176,14 +187,15 @@ impl NetBridgeInstance {
         Ok(port)
     }
 
-    /// Multiplex a local loopback relay port through [`Self::ensure_ssh_socks_port`]
-    /// (`Weak<NetBridgeInstance>` -> `connect_via_socks5`), never spawning extra
-    /// `ssh` subprocesses per `host_mappings` entry.
+    /// Multiplex a local `0o600` Unix domain socket relay inside `sock_dir` through
+    /// [`Self::ensure_ssh_socks_port`] (`Weak<NetBridgeInstance>` -> `connect_via_socks5`),
+    /// never binding unauthenticated `127.0.0.1:0` TCP ports or spawning extra `ssh` children.
+    #[allow(clippy::disallowed_methods)]
     pub(super) async fn ensure_ssh_local_relay(
         self: &Arc<Self>,
         remote_host: &str,
         remote_port: u16,
-    ) -> Result<u16> {
+    ) -> Result<PathBuf> {
         ensure_not_metadata_target(remote_host)?;
         let _ = self.ensure_ssh_socks_port().await?;
         let key = (remote_host.to_string(), remote_port);
@@ -196,16 +208,21 @@ impl NetBridgeInstance {
 
         let mut guard = slot.lock().await;
         if let Some(existing) = guard.as_ref() {
-            return Ok(existing.local_port);
+            if existing.sock_path.exists() {
+                return Ok(existing.sock_path.clone());
+            }
         }
 
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .map_err(|e| Error::Internal(format!("bind SSH local relay: {e}")))?;
-        let local_port = listener
-            .local_addr()
-            .map_err(|e| Error::Internal(format!("SSH relay local_addr: {e}")))?
-            .port();
+        let seq = self.next_relay_seq.fetch_add(1, Ordering::Relaxed);
+        let sock_path = self.sock_dir.path().join(format!("s{seq}.sock"));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path)
+            .map_err(|e| Error::Internal(format!("bind SSH unix relay: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600));
+        }
         let rhost = remote_host.to_string();
         let weak_inst = Arc::downgrade(self);
         let weak_for_loop = weak_inst.clone();
@@ -215,7 +232,6 @@ impl NetBridgeInstance {
                 let Ok((mut inbound, _)) = listener.accept().await else {
                     break;
                 };
-                let _ = inbound.set_nodelay(true);
                 let Some(strong) = weak_for_loop.upgrade() else {
                     break;
                 };
@@ -233,11 +249,79 @@ impl NetBridgeInstance {
         });
 
         *guard = Some(SshLocalRelay {
-            local_port,
+            sock_path: sock_path.clone(),
             _weak_inst: weak_inst,
             accept_abort: join.abort_handle(),
         });
-        Ok(local_port)
+        Ok(sock_path)
+    }
+
+    /// Bind a `0o600` Unix domain socket relay inside `sock_dir` for VIP connections
+    /// on unmapped ports (e.g. when DNS interception was triggered by a port-scoped
+    /// `HostMapping` on a different port), connecting directly to `(host, port)`.
+    #[allow(clippy::disallowed_methods)]
+    pub(super) async fn ensure_direct_local_relay(
+        self: &Arc<Self>,
+        host: &str,
+        port: u16,
+    ) -> Result<PathBuf> {
+        ensure_not_metadata_target(host)?;
+        let key = (host.to_string(), port);
+        let slot = self
+            .direct_relays
+            .entry(key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+            .value()
+            .clone();
+
+        let mut guard = slot.lock().await;
+        if let Some(existing) = guard.as_ref() {
+            if existing.sock_path.exists() {
+                return Ok(existing.sock_path.clone());
+            }
+        }
+
+        let seq = self.next_relay_seq.fetch_add(1, Ordering::Relaxed);
+        let sock_path = self.sock_dir.path().join(format!("d{seq}.sock"));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path)
+            .map_err(|e| Error::Internal(format!("bind direct unix relay: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600));
+        }
+        let target_host = host.to_string();
+        let weak_inst = Arc::downgrade(self);
+        let weak_for_loop = weak_inst.clone();
+
+        let join = tokio::spawn(async move {
+            loop {
+                let Ok((mut inbound, _)) = listener.accept().await else {
+                    break;
+                };
+                if weak_for_loop.upgrade().is_none() {
+                    break;
+                }
+                let th = target_host.clone();
+                tokio::spawn(async move {
+                    if ensure_not_metadata_target(&th).is_err() {
+                        return;
+                    }
+                    if let Ok(mut up) = TcpStream::connect((th.as_str(), port)).await {
+                        let _ = up.set_nodelay(true);
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut up).await;
+                    }
+                });
+            }
+        });
+
+        *guard = Some(SshLocalRelay {
+            sock_path: sock_path.clone(),
+            _weak_inst: weak_inst,
+            accept_abort: join.abort_handle(),
+        });
+        Ok(sock_path)
     }
 
     pub async fn open_routed_stream(&self, raw_host: &str, port: u16) -> Result<TcpStream> {

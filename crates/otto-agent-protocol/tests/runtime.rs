@@ -2777,7 +2777,7 @@ async fn rejected_fresh_prompt_preserves_old_native_identity_without_a_boundary(
         files: vec![PromptFile {
             mime: "application/pdf".into(),
             name: "test.pdf".into(),
-            data_base64: "YQ==".into(),
+            data_base64: "JVBERi0=".into(),
         }],
         ..Default::default()
     };

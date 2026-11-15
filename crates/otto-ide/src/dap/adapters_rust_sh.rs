@@ -79,7 +79,11 @@ pub(super) async fn resolve_rust_adapter(
 ) -> Result<ResolvedDapAdapter> {
     let mut initial_output = Vec::new();
     let raw_prog = normalize_target_path(&req.target, &req.launch.program);
-    let want_test = req.launch.test_name.is_some();
+    let want_test = req.launch.test_name.is_some()
+        || ctx
+            .run_config
+            .as_ref()
+            .is_some_and(|rc| rc.runner == crate::types::IdeRunnerKind::CargoTest);
 
     let executable = if req.launch.attach_port.is_some()
         || (!raw_prog.is_empty()
@@ -378,13 +382,19 @@ async fn compile_rust_debug_artifact(
     if req.target.kind == IdeTargetKind::Local && !cargo_env.contains_key("CARGO_INCREMENTAL") {
         cargo_env.insert("CARGO_INCREMENTAL".into(), "1".into());
     }
+    let bp_target_hint = if want_test && req.launch.test_name.is_none() {
+        derive_breakpoint_integration_test_hint(&cargo_cwd, &req.breakpoints)
+    } else {
+        None
+    };
+    let cache_prog_key = bp_target_hint.as_deref().unwrap_or(raw_prog);
     let local_stamp = if req.target.kind == IdeTargetKind::Local {
         match super::rust_build_cache::lookup_cached_rust_artifact(
             &cargo_bin,
             &cargo_args,
             &cargo_cwd,
             &req.target.root,
-            raw_prog,
+            cache_prog_key,
             want_test,
             &cargo_env,
             &allowed_roots,
@@ -426,7 +436,8 @@ async fn compile_rust_debug_artifact(
     let hint = Path::new(raw_prog)
         .file_stem()
         .and_then(|s| s.to_str())
-        .filter(|s| *s != "lib" && *s != "main");
+        .filter(|s| *s != "lib" && *s != "main" && *s != "Cargo")
+        .or(bp_target_hint.as_deref());
     let exe = parse_cargo_artifact_executable(&stdout_txt, want_test, hint).ok_or_else(|| {
         Error::Upstream("cargo succeeded but produced no debuggable binary artifact".into())
     })?;
@@ -434,6 +445,32 @@ async fn compile_rust_debug_artifact(
         super::rust_build_cache::store_cached_rust_artifact(stamp, exe.clone());
     }
     Ok(exe)
+}
+
+fn derive_breakpoint_integration_test_hint(
+    cargo_cwd: &str,
+    breakpoints: &[crate::types::IdeBreakpoint],
+) -> Option<String> {
+    let cwd_norm = cargo_cwd.replace('\\', "/");
+    let tests_prefix = format!("{}/tests/", cwd_norm.trim_end_matches('/'));
+    for bp in breakpoints
+        .iter()
+        .filter(|b| b.enabled && b.path.ends_with(".rs"))
+    {
+        let p = bp.path.replace('\\', "/");
+        let rel = p
+            .strip_prefix(&tests_prefix)
+            .or_else(|| p.strip_prefix("tests/"))
+            .or_else(|| p.rsplit_once("/tests/").map(|(_, r)| r));
+        if let Some(rest) = rel {
+            let first_seg = rest.split('/').next().unwrap_or("");
+            let stem = first_seg.strip_suffix(".rs").unwrap_or(first_seg).trim();
+            if !stem.is_empty() && stem != "common" {
+                return Some(stem.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn find_cargo_dir(

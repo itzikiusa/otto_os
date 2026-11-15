@@ -422,12 +422,14 @@ pub struct RootCred {
     pub agent_session: bool,
     /// The agent session is confined read-only.
     pub read_only: bool,
+    /// Non-root caller lacks `Feature::Agents` (`Capability::View`) for `/ws/lsp`.
+    pub missing_agents_grant: bool,
 }
 
-/// Pure decision for a root-mounted route — the same three rules the
-/// `/api/v1` guard applies: share and MCP-restricted tokens reach none of
-/// these; an agent session never reaches host files (LSP); a read-only
-/// session never reaches a route that acts (send HTTP, drive a browser).
+/// Pure decision for a root-mounted route — the same rules the `/api/v1` guard
+/// applies: share and MCP-restricted tokens reach none of these; an agent
+/// session never reaches host files (LSP); `/ws/lsp` requires `Feature::Agents`
+/// view capability; and a read-only session never reaches a route that acts.
 pub fn root_route_decision(route: RootRoute, cred: RootCred) -> Result<(), &'static str> {
     if cred.scoped {
         return Err("a share-link token cannot use this endpoint");
@@ -437,6 +439,9 @@ pub fn root_route_decision(route: RootRoute, cred: RootCred) -> Result<(), &'sta
     }
     if cred.agent_session && route == RootRoute::Lsp {
         return Err("an agent session credential cannot open a language server");
+    }
+    if route == RootRoute::Lsp && cred.missing_agents_grant {
+        return Err("requires agents:view");
     }
     if cred.agent_session
         && cred.read_only
@@ -448,8 +453,8 @@ pub fn root_route_decision(route: RootRoute, cred: RootCred) -> Result<(), &'sta
 }
 
 /// [`root_route_decision`] for an authenticated context. `pool` resolves the
-/// calling session's read-only flag (an unreadable row fails closed); pass
-/// `None` only for a route no read-only rule covers.
+/// calling session's read-only flag and `/ws/lsp`'s `Feature::Agents` grant
+/// (an unreadable row or missing pool on `/ws/lsp` fails closed).
 pub async fn root_route_gate(
     route: RootRoute,
     auth: &AuthContext,
@@ -463,11 +468,25 @@ pub async fn root_route_gate(
         // No pool: only the rules that do not need the row apply.
         _ => false,
     };
+    let missing_agents_grant = if route == RootRoute::Lsp && !auth.effective_user.is_root {
+        match pool {
+            Some(pool) => !matches!(
+                GrantsRepo::new(pool.clone())
+                    .capability_of(&auth.effective_user, otto_core::domain::Feature::Agents)
+                    .await,
+                Ok(have) if have >= Capability::View
+            ),
+            None => true,
+        }
+    } else {
+        false
+    };
     let cred = RootCred {
         scoped: auth.is_scoped(),
         mcp_only: auth.mcp_only,
         agent_session: agent.is_some(),
         read_only,
+        missing_agents_grant,
     };
     root_route_decision(route, cred).map_err(|m| Error::Forbidden(m.into()))
 }
@@ -945,9 +964,23 @@ mod root_route_tests {
         for route in [RootRoute::Events, RootRoute::BrowserProxy] {
             assert!(root_route_decision(route, read_only).is_ok(), "{route:?}");
         }
-        // A person's own token is unaffected everywhere.
+        // A person's own token is unaffected everywhere when Agents grant is present.
         for route in ALL {
             assert!(root_route_decision(route, RootCred::default()).is_ok());
+        }
+        // Without Feature::Agents grant, /ws/lsp is refused while other root routes remain unaffected.
+        let ungranted = RootCred {
+            missing_agents_grant: true,
+            ..Default::default()
+        };
+        assert!(root_route_decision(RootRoute::Lsp, ungranted).is_err());
+        for route in [
+            RootRoute::Events,
+            RootRoute::ApiStream,
+            RootRoute::BrowserLive,
+            RootRoute::BrowserProxy,
+        ] {
+            assert!(root_route_decision(route, ungranted).is_ok(), "{route:?}");
         }
     }
 

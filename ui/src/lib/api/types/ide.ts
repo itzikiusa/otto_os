@@ -54,7 +54,7 @@ export interface IdeFileWriteReq {
   content: string;
   expected_sha256?: string | null;
   create_dirs?: boolean;
-  record_local_history?: boolean;
+  local_history_enabled?: boolean;
   local_history_retention_days?: number;
 }
 
@@ -71,7 +71,7 @@ export interface IdeFsMutateReq {
   op: IdeFsMutateOp;
   path: string;
   dest_path?: string | null;
-  record_local_history?: boolean;
+  local_history_enabled?: boolean;
   local_history_retention_days?: number;
 }
 
@@ -364,6 +364,8 @@ export interface IdeProjectEnvironment {
   inherit_shell_env?: boolean;
   additional_roots?: string[];
   module_sdks?: Record<string, string>;
+  go_build_tags?: string[];
+  module_go_build_tags?: Record<string, string[]>;
   network_bridge?: IdeNetworkBridgeConfig | null;
   env_vars: IdeEnvVar[];
 }
@@ -404,6 +406,7 @@ export interface IdeRunConfig {
   spring_profiles?: string[];
   skip_tests?: boolean;
   offline?: boolean;
+  coverage?: boolean;
 }
 
 export interface IdeEnvironmentsResp {
@@ -417,6 +420,7 @@ export interface IdeEnvironmentsResp {
 
 export interface IdeUpdateEnvironmentReq extends IdeProjectEnvironment {
   target: IdeTargetSpec;
+  confirm_prod_targets?: boolean;
 }
 
 export interface IdeEnvironmentResp {
@@ -454,6 +458,8 @@ export interface IdeRunState {
   output_seq?: number;
   output: string[];
   tests: IdeTestResult[];
+  coverage_pct?: number | null;
+  coverage_summary?: string | null;
 }
 
 export interface IdeStartRunReq {
@@ -465,6 +471,8 @@ export interface IdeStartRunReq {
   spring_profiles?: string[];
   skip_tests?: boolean;
   offline?: boolean;
+  coverage?: boolean;
+  confirm_prod_targets?: boolean;
 }
 
 export interface IdeRunResp {

@@ -12,8 +12,13 @@ const MAX_PARSED_TESTS: usize = 2_000;
 #[derive(Default)]
 pub(super) struct IncrementalTestTracker {
     pub(super) results: Vec<IdeTestCaseResult>,
+    pub(super) coverage_pct: Option<f64>,
+    pub(super) coverage_summary: Option<String>,
     go_index: HashMap<String, usize>,
     last_go_idx: Option<usize>,
+    go_cov_sum: f64,
+    go_cov_count: usize,
+    go_has_total: bool,
 }
 
 impl IncrementalTestTracker {
@@ -30,6 +35,7 @@ impl IncrementalTestTracker {
     }
 
     pub(super) fn ingest_line(&mut self, runner: IdeRunnerKind, line: &str) {
+        self.ingest_coverage_line(runner, line);
         match runner {
             IdeRunnerKind::GoTest => self.ingest_go_line(line),
             IdeRunnerKind::CargoTest => {
@@ -116,6 +122,101 @@ impl IncrementalTestTracker {
             }
         }
     }
+
+    fn ingest_coverage_line(&mut self, _runner: IdeRunnerKind, line: &str) {
+        let t = line.trim();
+        if t.is_empty() {
+            return;
+        }
+        // Go `go tool cover -func` / total summary: `total: (statements) 82.5%`
+        if t.starts_with("total:") && t.contains("(statements)") {
+            if let Some(pct) = parse_last_percent_token(t) {
+                let r = round_pct(pct);
+                self.go_has_total = true;
+                self.coverage_pct = Some(r);
+                self.coverage_summary = Some(format!("{}% statements", format_pct(r)));
+                return;
+            }
+        }
+        // Go `go test -cover`: `coverage: 82.5% of statements` or `ok pkg 0.1s coverage: 82.5% of statements`
+        if let Some((_, after)) = t.split_once("coverage:") {
+            let after = after.trim_start();
+            if let Some((num_s, tail)) = after.split_once('%') {
+                if tail.contains("of statements") {
+                    if let Ok(pct) = num_s.trim().parse::<f64>() {
+                        if !self.go_has_total {
+                            self.go_cov_sum += pct;
+                            self.go_cov_count += 1;
+                            let avg = round_pct(self.go_cov_sum / (self.go_cov_count as f64));
+                            self.coverage_pct = Some(avg);
+                            self.coverage_summary =
+                                Some(format!("{}% statements", format_pct(avg)));
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        // pytest-cov / cargo-llvm-cov: `TOTAL    120    18    85%` or `TOTAL ... 85.42%`
+        if t.starts_with("TOTAL ") || t.starts_with("TOTAL\t") {
+            if let Some(pct) = parse_last_percent_token(t) {
+                let r = round_pct(pct);
+                self.coverage_pct = Some(r);
+                self.coverage_summary = Some(format!("{}% total", format_pct(r)));
+                return;
+            }
+        }
+        // Jest / Vitest / c8 table: `All files |   85.2 | ...`
+        if t.starts_with("All files") && t.contains('|') {
+            let mut cols = t.split('|');
+            let _first = cols.next();
+            if let Some(stmt_col) = cols.next() {
+                let cleaned = stmt_col.trim().trim_end_matches('%').trim();
+                if let Ok(pct) = cleaned.parse::<f64>() {
+                    let r = round_pct(pct);
+                    self.coverage_pct = Some(r);
+                    self.coverage_summary = Some(format!("{}% statements", format_pct(r)));
+                }
+            }
+        }
+    }
+}
+
+fn round_pct(v: f64) -> f64 {
+    (v.clamp(0.0, 100.0) * 10.0).round() / 10.0
+}
+
+fn format_pct(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-6 {
+        format!("{:.1}", v)
+    } else {
+        format!("{v:.1}")
+    }
+}
+
+fn parse_last_percent_token(line: &str) -> Option<f64> {
+    for tok in line.split_whitespace().rev() {
+        let cleaned = tok.trim_matches(|c: char| c == '|' || c == ',' || c == ')');
+        if let Some(num) = cleaned.strip_suffix('%') {
+            if let Ok(v) = num.trim().parse::<f64>() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Parse coverage percentage and summary across runner output lines.
+#[cfg(test)]
+pub fn parse_coverage_output(
+    runner: IdeRunnerKind,
+    lines: &[String],
+) -> (Option<f64>, Option<String>) {
+    let mut tracker = IncrementalTestTracker::default();
+    for line in lines {
+        tracker.ingest_coverage_line(runner, line);
+    }
+    (tracker.coverage_pct, tracker.coverage_summary)
 }
 
 /// Parse raw runner output lines into structured per-test pass/fail/duration items.
@@ -357,5 +458,32 @@ mod tests {
         );
         assert_eq!(jvm_res.len(), 1);
         assert_eq!(jvm_res[0].status, IdeTestCaseStatus::Passed);
+    }
+
+    #[test]
+    fn parses_coverage_percentages_across_go_pytest_llvm_cov_and_vitest() {
+        let (go_pct, go_sum) = parse_coverage_output(
+            IdeRunnerKind::GoTest,
+            &[
+                "ok  \texample.com/pkg1\t0.12s\tcoverage: 80.0% of statements".into(),
+                "ok  \texample.com/pkg2\t0.09s\tcoverage: 85.0% of statements".into(),
+            ],
+        );
+        assert_eq!(go_pct, Some(82.5));
+        assert_eq!(go_sum.as_deref(), Some("82.5% statements"));
+
+        let (py_pct, py_sum) = parse_coverage_output(
+            IdeRunnerKind::Pytest,
+            &["TOTAL                                    140     21    85%".into()],
+        );
+        assert_eq!(py_pct, Some(85.0));
+        assert_eq!(py_sum.as_deref(), Some("85.0% total"));
+
+        let (vt_pct, vt_sum) = parse_coverage_output(
+            IdeRunnerKind::Vitest,
+            &["All files          |   85.2 |    78.4 |   90.0 |   85.2 |".into()],
+        );
+        assert_eq!(vt_pct, Some(85.2));
+        assert_eq!(vt_sum.as_deref(), Some("85.2% statements"));
     }
 }

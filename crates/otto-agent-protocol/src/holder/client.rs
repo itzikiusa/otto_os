@@ -73,6 +73,22 @@ impl HolderClient {
         self.cp_tx.send_replace(Some(checkpoint));
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test() -> (Self, watch::Receiver<Option<HolderCheckpoint>>) {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ClientCmd>();
+        let (cp_tx, cp_rx) = watch::channel::<Option<HolderCheckpoint>>(None);
+        let writer_task = tokio::spawn(async move { while cmd_rx.recv().await.is_some() {} });
+        (
+            Self {
+                cmd_tx,
+                cp_tx,
+                writer_task,
+                socket_path: PathBuf::from("/tmp/otto-holder-test.sock"),
+            },
+            cp_rx,
+        )
+    }
+
     /// Flush the final checkpoint + `DETACH` so the holder and child remain
     /// alive across `ottod` restart.
     pub async fn detach_with_checkpoint(self, checkpoint: HolderCheckpoint) {

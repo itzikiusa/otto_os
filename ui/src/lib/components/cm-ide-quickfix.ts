@@ -3,6 +3,7 @@
 
 import { EditorSelection, type ChangeSpec, type Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
+import { getCachedSemanticDoc } from './cm-ide-semantic-model.ts';
 import { analyzeGoImports, detectSemanticLang, inferGoImportPkgNames } from './cm-ide-semantic.ts';
 
 export interface IdeConcreteTextEdit {
@@ -438,7 +439,7 @@ export function hasDeterministicQuickFixAtLine(
   }
   if (lang === 'go') {
     if (/^\s*(?:[._]|[A-Za-z_]\w*\s+)?["`][^"`]+["`]\s*(?:\/\/.*)?$/.test(curLine) || /^\s*import\s+(?:[._]\s+|[A-Za-z_]\w*\s+)?["`][^"`]+["`]/.test(curLine)) {
-      if (isGoImportUnusedInDoc(doc.toString(), line)) return true;
+      if (isGoImportUnusedInDoc(getCachedSemanticDoc(doc, 'go', undefined, undefined, false, false).docText, line)) return true;
     }
     if (/\berr\s*:?=/.test(curLine) && !(line < doc.lines && /^\s*if\s+err\s*!=\s*nil/.test(doc.line(line + 1).text))) {
       return true;

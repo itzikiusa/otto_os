@@ -26,11 +26,14 @@ import type {
   RuntimeSession,
   RuntimeSessionStatus,
   Session,
+  UnqueuePromptResp,
 } from '../../../lib/api/types';
 import { isRuntimeProvider, RUNTIME_PROVIDERS } from '../../../lib/providers';
 import { threads } from '../threadsStore.svelte';
 
 export { isRuntimeProvider, RUNTIME_PROVIDERS };
+
+type QueuedAttachment = { name: string; mime: string; data_base64: string };
 
 /** `set_session_status` in otto-agent-protocol's runtime.rs. */
 const SESSION_STATUS: Record<ProviderSessionStatus, RuntimeSessionStatus> = {
@@ -107,6 +110,8 @@ class RuntimeThreads {
   unread = $state<Record<string, true>>({});
   /** Threads shown by an embed outside Threads (a turn ending there is seen). */
   private embedded = new Map<string, number>();
+  /** Original composer attachments keyed by `queued_id` so Edit preserves filenames even before server hydration. */
+  private queuedAttachments = new Map<string, { name: string; mime: string; data_base64: string }[]>();
   private seqListeners = new Set<(id: string, seq: number | null | undefined) => void>();
   private liveRefs = 0;
   private stopLive: (() => void) | null = null;
@@ -329,8 +334,27 @@ class RuntimeThreads {
     return children;
   }
 
-  async prompt(id: string, req: RuntimePromptReq): Promise<RuntimePromptResp> {
+  async prompt(id: string, req: RuntimePromptReq, localAttachments?: readonly QueuedAttachment[]): Promise<RuntimePromptResp> {
     const resp = await api.post<RuntimePromptResp>(`/runtime-sessions/${id}/prompt`, req);
+    if (resp.queued_id) {
+      const cached: QueuedAttachment[] = localAttachments?.length
+        ? localAttachments.map((a) => ({ ...a }))
+        : [
+            ...(req.images ?? []).map((img, i) => ({
+              name: (req.images?.length ?? 0) > 1 ? `Screenshot ${i + 1}` : 'Screenshot',
+              mime: img.mime,
+              data_base64: img.data_base64,
+            })),
+            ...(req.files ?? []).map((f) => ({ ...f })),
+          ];
+      if (cached.length > 0) {
+        if (this.queuedAttachments.size >= 64) {
+          const oldest = this.queuedAttachments.keys().next().value;
+          if (oldest) this.queuedAttachments.delete(oldest);
+        }
+        this.queuedAttachments.set(resp.queued_id, cached);
+      }
+    }
     this.emitSequence(id, resp.sequence);
     let row = this.byId[id];
     if (row) {
@@ -393,13 +417,36 @@ class RuntimeThreads {
     this.byId = next;
   }
 
-  /** Drop a queued message. */
-  async unqueue(id: string, queuedId: string): Promise<void> {
-    await api.del(`/runtime-sessions/${id}/queue/${queuedId}`);
+  /** Drop a queued message and return its text + attachments so Edit can restore them. */
+  async unqueue(
+    id: string,
+    queuedId: string,
+  ): Promise<{ text?: string; attachments: { name: string; mime: string; data_base64: string }[] }> {
+    const cached = this.queuedAttachments.get(queuedId);
+    this.queuedAttachments.delete(queuedId);
+    const resp = await api.del<UnqueuePromptResp | void>(`/runtime-sessions/${id}/queue/${queuedId}`);
+    if (cached && cached.length > 0) {
+      return { text: resp && typeof resp === 'object' ? resp.text : undefined, attachments: cached };
+    }
+    if (resp && typeof resp === 'object') {
+      const imgs = resp.images ?? [];
+      const docs = resp.files ?? [];
+      const reconstructed = [
+        ...imgs.map((img, idx) => ({
+          name: imgs.length > 1 ? `Screenshot ${idx + 1}` : 'Screenshot',
+          mime: img.mime,
+          data_base64: img.data_base64,
+        })),
+        ...docs.map((f) => ({ name: f.name || 'Attachment', mime: f.mime, data_base64: f.data_base64 })),
+      ];
+      return { text: resp.text, attachments: reconstructed };
+    }
+    return { attachments: [] };
   }
 
   /** Deliver a queued message now: steer it in, or stop the turn and send it. */
   async deliverQueued(id: string, queuedId: string, delivery: PromptDelivery): Promise<RuntimePromptResp> {
+    this.queuedAttachments.delete(queuedId);
     return api.post<RuntimePromptResp>(`/runtime-sessions/${id}/queue/${queuedId}`, { delivery });
   }
 }

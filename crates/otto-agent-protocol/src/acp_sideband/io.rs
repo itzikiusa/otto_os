@@ -8,16 +8,18 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use serde_json::{json, Value};
-use sqlx::sqlite::SqliteConnectOptions;
-use sqlx::{Connection, Row, SqliteConnection};
+use sqlx::Row;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use super::burst::now_ms;
 use crate::driver::{
-    SidebandPayload, SidebandPoll, SidebandResumeSeed, SidebandSource, StructuredDriver,
+    ActiveTailChunk, ActiveTailKind, ActiveTailSource, SidebandPayload, SidebandPoll,
+    SidebandResumeSeed, SidebandSource, StructuredDriver,
 };
 
 const SIDEBAND_READ_CAP: usize = 2 * 1024 * 1024;
+const ACTIVE_TAIL_READ_CAP: usize = 64 * 1024;
+const MAX_ACTIVE_TAILS: usize = 8;
 const GEMINI_SNAPSHOT_CAP: u64 = 8 * 1024 * 1024;
 
 pub(crate) async fn seed_resume(
@@ -30,6 +32,7 @@ pub(crate) async fn seed_resume(
         return;
     };
     match source {
+        SidebandSource::None => {}
         SidebandSource::AppendLines {
             path,
             fallback_path,
@@ -78,7 +81,37 @@ pub(crate) async fn seed_resume(
 
 /// Fetch pending sideband updates off the session lock. Returns `(payload, has_more)`.
 pub(crate) async fn fetch_sideband(poll: &SidebandPoll) -> (Option<SidebandPayload>, bool) {
-    match &poll.source {
+    let (primary, mut has_more) = fetch_primary_sideband(&poll.source).await;
+    if poll.active_tails.is_empty() && !poll.timer_expired {
+        return (primary, has_more);
+    }
+
+    let mut tails = Vec::new();
+    for tail in poll.active_tails.iter().take(MAX_ACTIVE_TAILS) {
+        let (chunk, more) = fetch_active_tail(tail).await;
+        if let Some(c) = chunk {
+            tails.push(c);
+        }
+        has_more |= more;
+    }
+
+    if primary.is_none() && tails.is_empty() && !poll.timer_expired {
+        return (None, false);
+    }
+
+    (
+        Some(SidebandPayload::Batch {
+            primary: primary.map(Box::new),
+            tails,
+            timer_tick: poll.timer_expired,
+        }),
+        has_more,
+    )
+}
+
+async fn fetch_primary_sideband(source: &SidebandSource) -> (Option<SidebandPayload>, bool) {
+    match source {
+        SidebandSource::None => (None, false),
         SidebandSource::AppendLines {
             path,
             fallback_path,
@@ -92,6 +125,7 @@ pub(crate) async fn fetch_sideband(poll: &SidebandPoll) -> (Option<SidebandPaylo
                 scan_sessions_dir.as_ref(),
                 *offset,
                 *using_fallback,
+                SIDEBAND_READ_CAP,
             )
             .await
         }
@@ -101,6 +135,7 @@ pub(crate) async fn fetch_sideband(poll: &SidebandPoll) -> (Option<SidebandPaylo
             session_id,
             resolved_path,
             last_stamp,
+            allow_scan,
         } => {
             let payload = fetch_gemini_json(
                 gemini_home,
@@ -108,6 +143,7 @@ pub(crate) async fn fetch_sideband(poll: &SidebandPoll) -> (Option<SidebandPaylo
                 session_id,
                 resolved_path.as_deref(),
                 *last_stamp,
+                *allow_scan,
             )
             .await;
             (payload, false)
@@ -125,12 +161,122 @@ pub(crate) async fn fetch_sideband(poll: &SidebandPoll) -> (Option<SidebandPaylo
     }
 }
 
+async fn fetch_active_tail(tail: &ActiveTailSource) -> (Option<ActiveTailChunk>, bool) {
+    match tail.kind {
+        ActiveTailKind::AgySubagentTranscript => {
+            let (payload, more) = fetch_append_lines(
+                &tail.path,
+                tail.fallback_path.as_deref(),
+                None,
+                tail.offset,
+                tail.using_fallback,
+                ACTIVE_TAIL_READ_CAP,
+            )
+            .await;
+            match payload {
+                Some(SidebandPayload::AppendLines {
+                    using_fallback,
+                    next_offset,
+                    bytes,
+                    ..
+                }) => (
+                    Some(ActiveTailChunk {
+                        task_id: tail.task_id.clone(),
+                        kind: tail.kind,
+                        using_fallback,
+                        next_offset,
+                        bytes,
+                    }),
+                    more,
+                ),
+                _ => (None, false),
+            }
+        }
+        ActiveTailKind::CommandLog => fetch_raw_log_chunk(tail).await,
+    }
+}
+
+async fn fetch_raw_log_chunk(tail: &ActiveTailSource) -> (Option<ActiveTailChunk>, bool) {
+    let Ok(mut file) = tokio::fs::File::open(&tail.path).await else {
+        return (None, false);
+    };
+    let Ok(meta) = file.metadata().await else {
+        return (None, false);
+    };
+    let len = meta.len();
+    let start_offset = if len < tail.offset { 0 } else { tail.offset };
+    if len == start_offset {
+        return (None, false);
+    }
+    if file
+        .seek(std::io::SeekFrom::Start(start_offset))
+        .await
+        .is_err()
+    {
+        return (None, false);
+    }
+    let to_read = ((len - start_offset) as usize).min(ACTIVE_TAIL_READ_CAP);
+    if to_read == 0 {
+        return (None, false);
+    }
+    let mut buf = vec![0u8; to_read];
+    let mut read_total = 0usize;
+    while read_total < to_read {
+        match file.read(&mut buf[read_total..]).await {
+            Ok(0) => break,
+            Ok(n) => read_total += n,
+            Err(_) => return (None, false),
+        }
+    }
+    if read_total == 0 {
+        return (None, false);
+    }
+    let more_after_read = start_offset + (read_total as u64) < len;
+    let safe_len = utf8_safe_prefix_len(&buf[..read_total], more_after_read);
+    if safe_len == 0 {
+        return (None, false);
+    }
+    buf.truncate(safe_len);
+    let next_offset = start_offset + safe_len as u64;
+    (
+        Some(ActiveTailChunk {
+            task_id: tail.task_id.clone(),
+            kind: ActiveTailKind::CommandLog,
+            using_fallback: false,
+            next_offset,
+            bytes: buf,
+        }),
+        next_offset < len,
+    )
+}
+
+fn utf8_safe_prefix_len(bytes: &[u8], has_more: bool) -> usize {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => bytes.len(),
+        Err(e) => {
+            if e.error_len().is_none() {
+                // Incomplete multi-byte sequence at end of buffer: hold those
+                // 1..3 trailing bytes for the next read unless nothing was valid.
+                if e.valid_up_to() > 0 || has_more {
+                    e.valid_up_to()
+                } else {
+                    bytes.len()
+                }
+            } else {
+                // Non-UTF-8 byte inside log output: decode lossily across full slice.
+                bytes.len()
+            }
+        }
+    }
+}
+
 async fn fetch_append_lines(
     path: &Path,
     fallback_path: Option<&Path>,
     scan_sessions_dir: Option<&(PathBuf, String)>,
     offset: u64,
     prev_using_fallback: bool,
+    read_cap: usize,
 ) -> (Option<SidebandPayload>, bool) {
     let mut resolved_override: Option<PathBuf> = None;
     let (using_fallback, file_res) = match tokio::fs::File::open(path).await {
@@ -140,7 +286,7 @@ async fn fetch_append_lines(
             None => match scan_sessions_dir {
                 Some((sessions_dir, sid)) => {
                     let Some(found) = scan_grok_session_file(sessions_dir, sid).await else {
-                        return (None, false);
+                        return (Some(SidebandPayload::Unresolved), false);
                     };
                     let open_res = tokio::fs::File::open(&found).await;
                     resolved_override = Some(found);
@@ -173,7 +319,7 @@ async fn fetch_append_lines(
     {
         return (None, false);
     }
-    let to_read = ((len - start_offset) as usize).min(SIDEBAND_READ_CAP);
+    let to_read = ((len - start_offset) as usize).min(read_cap);
     if to_read == 0 {
         return (None, false);
     }
@@ -200,9 +346,9 @@ async fn fetch_append_lines(
         );
     }
 
-    // If a single line exceeded SIDEBAND_READ_CAP (e.g. huge base64 tool blob),
+    // If a single line exceeded `read_cap` (e.g. huge base64 tool blob),
     // skip forward to its terminating '\n' so the tailer never wedges at start_offset.
-    if read_total == SIDEBAND_READ_CAP && start_offset + (read_total as u64) < len {
+    if read_total == read_cap && start_offset + (read_total as u64) < len {
         let mut skipped = start_offset + read_total as u64;
         let mut scratch = vec![0u8; 64 * 1024];
         while skipped < len {
@@ -250,10 +396,19 @@ async fn fetch_gemini_json(
     session_id: &str,
     resolved_path: Option<&Path>,
     last_stamp: (u64, u64),
+    allow_scan: bool,
 ) -> Option<SidebandPayload> {
     let target = match resolved_path {
         Some(p) if tokio::fs::metadata(p).await.is_ok_and(|m| m.is_file()) => p.to_path_buf(),
-        _ => resolve_gemini_chat_file(gemini_home, cwd, session_id).await?,
+        _ => {
+            if !allow_scan {
+                return None;
+            }
+            match resolve_gemini_chat_file(gemini_home, cwd, session_id).await {
+                Some(found) => found,
+                None => return Some(SidebandPayload::Unresolved),
+            }
+        }
     };
     let meta = tokio::fs::metadata(&target).await.ok()?;
     if !meta.is_file() || meta.len() > GEMINI_SNAPSHOT_CAP {
@@ -264,10 +419,11 @@ async fn fetch_gemini_json(
         return None;
     }
     let bytes = tokio::fs::read(&target).await.ok()?;
+    let doc = serde_json::from_slice::<Value>(&bytes).ok()?;
     Some(SidebandPayload::GeminiJson {
         resolved_path: target,
         stamp,
-        bytes,
+        doc,
     })
 }
 
@@ -352,14 +508,11 @@ async fn fetch_opencode_sqlite(
         return None;
     }
 
-    let opts = SqliteConnectOptions::new()
-        .filename(db_path)
-        .read_only(true)
-        .create_if_missing(false);
-    let mut conn = SqliteConnection::connect_with(&opts).await.ok()?;
-    let rows = sqlx::query(
+    let pool = super::opencode::readonly_opencode_pool(db_path).await?;
+    let rows_res = sqlx::query(
         "SELECT p.id, p.message_id, p.time_created, p.time_updated, p.data, \
-         COALESCE(json_extract(m.data, '$.role'), 'assistant') AS role \
+         COALESCE(json_extract(m.data, '$.role'), 'assistant') AS role, \
+         COALESCE(m.time_created, CAST(json_extract(m.data, '$.time.created') AS INTEGER), p.time_created, 0) AS msg_time_created \
          FROM part p \
          JOIN message m ON p.message_id = m.id \
          WHERE p.session_id = ?1 AND p.time_updated >= ?2 \
@@ -368,10 +521,35 @@ async fn fetch_opencode_sqlite(
     )
     .bind(session_id)
     .bind(min_time_ms)
-    .fetch_all(&mut conn)
-    .await
-    .ok()?;
-    let _ = conn.close().await;
+    .fetch_all(&pool)
+    .await;
+
+    let rows = match rows_res {
+        Ok(rows) => rows,
+        Err(_) => {
+            let fallback_res = sqlx::query(
+                "SELECT p.id, p.message_id, p.time_created, p.time_updated, p.data, \
+                 COALESCE(json_extract(m.data, '$.role'), 'assistant') AS role, \
+                 COALESCE(CAST(json_extract(m.data, '$.time.created') AS INTEGER), p.time_created, 0) AS msg_time_created \
+                 FROM part p \
+                 JOIN message m ON p.message_id = m.id \
+                 WHERE p.session_id = ?1 AND p.time_updated >= ?2 \
+                 ORDER BY p.time_created ASC, p.id ASC \
+                 LIMIT 256",
+            )
+            .bind(session_id)
+            .bind(min_time_ms)
+            .fetch_all(&pool)
+            .await;
+            match fallback_res {
+                Ok(rows) => rows,
+                Err(_) => {
+                    super::opencode::evict_opencode_pool(db_path).await;
+                    return None;
+                }
+            }
+        }
+    };
 
     let mut rows_jsonl = Vec::new();
     for r in rows {
@@ -382,6 +560,7 @@ async fn fetch_opencode_sqlite(
             "time_updated": r.try_get::<i64, _>(3).unwrap_or(0),
             "data": r.try_get::<String, _>(4).unwrap_or_default(),
             "role": r.try_get::<String, _>(5).unwrap_or_else(|_| "assistant".into()),
+            "msg_time_created": r.try_get::<i64, _>(6).unwrap_or(0),
         });
         rows_jsonl.extend_from_slice(rec.to_string().as_bytes());
         rows_jsonl.push(b'\n');

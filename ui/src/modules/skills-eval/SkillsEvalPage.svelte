@@ -21,6 +21,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StartEvalForm from './StartEvalForm.svelte';
   import RunDetail from './RunDetail.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import type MatrixView from './MatrixView.svelte';
 
@@ -516,8 +517,14 @@
   </div>
 </div>
 
-{#if defaultsOpen && EvalDefaultsSheetLazy.component}
-  <EvalDefaultsSheetLazy.component onclose={() => (defaultsOpen = false)} />
+{#if defaultsOpen}
+  <LazyMount
+    lazy={EvalDefaultsSheetLazy}
+    what="evaluator defaults"
+    quiet
+    props={{ onclose: () => (defaultsOpen = false) }}
+    onerror={() => (defaultsOpen = false)}
+  />
 {/if}
 
 <style>

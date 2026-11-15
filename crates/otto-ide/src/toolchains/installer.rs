@@ -367,7 +367,7 @@ pub(super) async fn install_local_sdk(
             Ok(dest.to_string_lossy().into_owned())
         }
         EcosystemKind::Python => {
-            let uv_bin = ensure_local_uv(mgr, job_id, root, &entry.url).await?;
+            let uv_bin = ensure_local_uv(mgr, job_id, root, &entry.url, exp_sha).await?;
             let interp_dir = root.join("python/interpreters");
             tokio::fs::create_dir_all(&interp_dir)
                 .await
@@ -411,11 +411,44 @@ pub(super) async fn install_local_sdk(
     }
 }
 
+pub(super) async fn fetch_companion_sha256(
+    mgr: &ToolchainManager,
+    archive_url: &str,
+) -> Option<String> {
+    let sha_url = format!("{archive_url}.sha256");
+    let client = if mgr.allows_test_loopback() && sha_url.starts_with("http://127.0.0.1:") {
+        reqwest::Client::builder()
+            .user_agent("otto-ide/0.2")
+            .timeout(Duration::from_secs(10))
+            .build()
+            .ok()?
+    } else if sha_url.starts_with("https://github.com/astral-sh/uv/") {
+        otto_netguard::check_url(&sha_url).await.ok()?;
+        otto_netguard::guarded_client_builder()
+            .https_only(true)
+            .user_agent("otto-ide/0.2")
+            .timeout(Duration::from_secs(10))
+            .build()
+            .ok()?
+    } else {
+        return None;
+    };
+    let resp = client.get(&sha_url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.text().await.ok()?;
+    let first_tok = body.split_whitespace().next()?.trim();
+    (first_tok.len() == 64 && first_tok.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| first_tok.to_ascii_lowercase())
+}
+
 pub(super) async fn ensure_local_uv(
     mgr: &ToolchainManager,
     job_id: &str,
     root: &Path,
     uv_url: &str,
+    expected_sha256: Option<&str>,
 ) -> std::result::Result<PathBuf, String> {
     let uv_bin = root.join("python/bin/uv");
     if is_executable_file(&uv_bin) {
@@ -429,8 +462,12 @@ pub(super) async fn ensure_local_uv(
     tokio::fs::create_dir_all(uv_bin.parent().unwrap())
         .await
         .map_err(|e| e.to_string())?;
+    let companion_sha = match expected_sha256.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => Some(s.to_string()),
+        None => fetch_companion_sha256(mgr, uv_url).await,
+    };
     let archive = root.join(".downloads/uv.tar.gz");
-    download_https_to_file(mgr, job_id, uv_url, &archive, None, 20).await?;
+    download_https_to_file(mgr, job_id, uv_url, &archive, companion_sha.as_deref(), 20).await?;
     let extract = root.join(".downloads/uv-extract");
     let _ = tokio::fs::remove_dir_all(&extract).await;
     tokio::fs::create_dir_all(&extract)

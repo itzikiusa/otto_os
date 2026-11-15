@@ -70,7 +70,7 @@ export interface IdeRenameReq {
   character: number;
   new_name: string;
   apply?: boolean;
-  record_local_history?: boolean;
+  local_history_enabled?: boolean;
   local_history_retention_days?: number;
 }
 

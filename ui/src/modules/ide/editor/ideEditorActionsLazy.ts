@@ -2,8 +2,12 @@
 // fetching for `IdeTabBar` and `ideEditorStoreBridge`.
 
 import { api } from '../../../lib/api/client';
+import type { DiffResp } from '../../../lib/api/types';
 import { copyWithToast } from '../../../lib/clipboard';
 import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
+import { git } from '../../../lib/stores/git.svelte';
+import { ideGit } from '../git/ideGitController.svelte';
+import { reconstructFileFromDiff } from '../history/ideCompareEngine';
 import { ide, ideBasename, type IdeOpenTab } from '../ideStore.svelte';
 import { ideAgent } from '../store/ideAgentController.svelte';
 import type { IdeReferenceLocation } from '../store/ideTypes';
@@ -170,18 +174,30 @@ interface BlameEntry { start_line?: number; end_line?: number; line?: number; au
 
 export async function runFetchIdeGitBlame(rootPath: string, filePath: string, signal?: AbortSignal): Promise<Record<number, string> | null> {
   try {
-    const repos = await api.bg.get<Array<{ id: string; path: string }>>('/repos');
-    const matches = (repos ?? [])
-      .map((r) => ({ id: r.id, root: r.path.replace(/\/+$/, '') }))
-      .filter((r) => filePath === r.root || filePath.startsWith(`${r.root}/`))
-      .sort((a, b) => b.root.length - a.root.length);
-    if (!matches.length && (!rootPath || !filePath.startsWith(rootPath))) return null;
-    if (!matches.length) return null;
-    const best = matches[0];
-    const relPath = filePath.slice(best.root.length).replace(/^\/+/, '');
+    let repoId = '';
+    let relPath = '';
+    const resolvedRepo = await ideGit.resolveRepoForPath(filePath);
+    if (resolvedRepo) {
+      const rel = ideGit.repoRelativePath(resolvedRepo, filePath);
+      if (rel) {
+        repoId = resolvedRepo.id;
+        relPath = rel;
+      }
+    }
+    if (!repoId || !relPath) {
+      const repos = await api.bg.get<Array<{ id: string; path: string }>>('/repos');
+      const matches = (repos ?? [])
+        .map((r) => ({ id: r.id, root: r.path.replace(/\/+$/, '') }))
+        .filter((r) => filePath === r.root || filePath.startsWith(`${r.root}/`))
+        .sort((a, b) => b.root.length - a.root.length);
+      if (!matches.length && (!rootPath || !filePath.startsWith(rootPath))) return null;
+      if (!matches.length) return null;
+      repoId = matches[0].id;
+      relPath = filePath.slice(matches[0].root.length).replace(/^\/+/, '');
+    }
     if (!relPath) return null;
     const resp = await api.bg.get<{ lines?: BlameEntry[]; hunks?: BlameEntry[] } | BlameEntry[]>(
-      `/repos/${encodeURIComponent(best.id)}/blame?path=${encodeURIComponent(relPath)}`,
+      `/repos/${encodeURIComponent(repoId)}/blame?path=${encodeURIComponent(relPath)}`,
       signal,
     );
     const list = Array.isArray(resp) ? resp : (resp.lines ?? resp.hunks ?? []);
@@ -197,5 +213,48 @@ export async function runFetchIdeGitBlame(rootPath: string, filePath: string, si
     return Object.keys(map).length > 0 ? map : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Resolve the Git `HEAD` baseline content for `filePath` so editor gutter change
+ * bars (`add` green / `mod` light-blue / `del` triangle) always compare the live
+ * buffer against Git `HEAD` rather than the last disk save (`savedContent`).
+ */
+export async function runResolveIdeGitBaseContent(
+  filePath: string,
+  diskSavedContent: string | null,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  if (
+    ide.target.kind !== 'local' ||
+    !filePath ||
+    diskSavedContent == null ||
+    filePath.startsWith('jdt://') ||
+    filePath.startsWith('jar:')
+  ) {
+    return diskSavedContent;
+  }
+  try {
+    const repo = await ideGit.resolveRepoForPath(filePath);
+    if (!repo) return diskSavedContent;
+    const relPath = ideGit.repoRelativePath(repo, filePath);
+    if (!relPath) return diskSavedContent;
+
+    const st = git.statusById[repo.id];
+    const change = st?.changes.find((c) => c.path.replace(/^\/+/, '') === relPath);
+    if (change && (change.kind === 'untracked' || (change.kind === 'added' && !change.orig_path))) {
+      return '';
+    }
+
+    const encRepo = encodeURIComponent(repo.id);
+    const encPath = encodeURIComponent(relPath);
+    const workingDiff = await api.bg.get<DiffResp>(
+      `/repos/${encRepo}/diff?target=working&path=${encPath}&full=true`,
+      signal,
+    );
+    return reconstructFileFromDiff(diskSavedContent, workingDiff, 'reverse');
+  } catch {
+    return diskSavedContent;
   }
 }
