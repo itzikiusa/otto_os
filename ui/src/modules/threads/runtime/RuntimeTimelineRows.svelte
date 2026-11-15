@@ -105,7 +105,7 @@
   {@const pending = item.type === 'approval_request' ? approvals.get(item.request_id) : undefined}
   {@const call = item.type === 'dynamic_tool' && !item.error && !approval ? threadCall(item) : null}
   {#if item.type === 'subagent'}
-    <RuntimeSubagentCard {item} activity={children.get(item.id) ?? EMPTY_ACTIVITY} output={outputMap} />
+    <RuntimeSubagentCard {sessionId} {item} activity={children.get(item.id) ?? EMPTY_ACTIVITY} output={outputMap} />
   {:else if call}
     <RuntimeThreadCallRow {item} {call} />
   {:else if pending}
@@ -114,6 +114,7 @@
     {@const ask = approval ?? (item.type === 'approval_request' ? item : undefined)}
     {@const gate = approval ? approvals.get(approval.request_id) : undefined}
     <RuntimeWorkRow
+      {sessionId}
       {item}
       output={outputMap[item.id]}
       pending={gate}

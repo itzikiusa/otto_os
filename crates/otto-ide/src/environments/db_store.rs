@@ -10,10 +10,11 @@ use otto_state::DbPool;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
+use crate::netbridge::sanitize_network_bridge;
 use crate::toolchains::read_subdirs;
 use crate::types::{
-    IdeProjectEnvironment, IdePythonVenvInfo, IdeRunConfig, IdeRunnerKind, IdeTargetKind,
-    IdeTargetSpec,
+    IdeNetworkBridgeConfig, IdeProjectEnvironment, IdePythonVenvInfo, IdeRunConfig, IdeRunnerKind,
+    IdeTargetKind, IdeTargetSpec,
 };
 
 use super::module_sdks::sanitize_module_sdks;
@@ -23,6 +24,7 @@ use super::module_sdks::sanitize_module_sdks;
 /// SQLite migrations (compatible with rollback binaries). Stripped on load and never
 /// exposed in `env_vars` or exported as an OS environment variable.
 pub(super) const RESERVED_MODULE_SDKS_KEY: &str = "__otto_module_sdks__";
+pub(super) const RESERVED_NETBRIDGE_KEY: &str = "__otto_network_bridge__";
 
 /// Internal SQLite representation inside `ide_project_environments.env_vars_json`.
 /// Never stores plaintext values when `secret == true`; stores `secret_ref` only.
@@ -283,12 +285,19 @@ fn decode_project_env_row(
     let raw_json: String = row.try_get("env_vars_json").unwrap_or_else(|_| "[]".into());
     let raw_stored: Vec<StoredEnvVar> = serde_json::from_str(&raw_json).unwrap_or_default();
     let mut module_sdks: BTreeMap<String, String> = BTreeMap::new();
+    let mut network_bridge: Option<IdeNetworkBridgeConfig> = None;
     let mut stored: Vec<StoredEnvVar> = Vec::with_capacity(raw_stored.len());
     for item in raw_stored {
         if item.key == RESERVED_MODULE_SDKS_KEY {
             if let Some(raw_map) = &item.value {
                 if let Ok(parsed) = serde_json::from_str::<BTreeMap<String, String>>(raw_map) {
                     module_sdks = sanitize_module_sdks(&parsed);
+                }
+            }
+        } else if item.key == RESERVED_NETBRIDGE_KEY {
+            if let Some(raw_nb) = &item.value {
+                if let Ok(parsed) = serde_json::from_str::<IdeNetworkBridgeConfig>(raw_nb) {
+                    network_bridge = sanitize_network_bridge(Some(parsed)).ok().flatten();
                 }
             }
         } else {
@@ -312,6 +321,7 @@ fn decode_project_env_row(
         inherit_shell_env,
         additional_roots,
         module_sdks,
+        network_bridge,
         env_vars: Vec::new(),
     };
     (env, stored)

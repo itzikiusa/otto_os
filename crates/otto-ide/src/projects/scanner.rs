@@ -309,7 +309,9 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
         Error::NotFound(format!("cannot read directory '{}': {e}", parent.display()))
     })?;
 
-    let mut repos = Vec::new();
+    let mut repos: Vec<IdeScannedRepo> = Vec::new();
+    let mut seen_by_path: std::collections::HashMap<String, (usize, bool)> =
+        std::collections::HashMap::new();
     for entry in rd.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') || matches!(name.as_str(), "node_modules" | "target" | "Library") {
@@ -317,7 +319,8 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
         }
         let path = entry.path();
         let Ok(ft) = entry.file_type() else { continue };
-        let is_dir = ft.is_dir() || (ft.is_symlink() && path.is_dir());
+        let is_symlink = ft.is_symlink();
+        let is_dir = ft.is_dir() || (is_symlink && path.is_dir());
         if !is_dir {
             continue;
         }
@@ -325,6 +328,15 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
         if !is_root_user && enforce_non_root_path(&canon).is_err() {
             continue;
         }
+        let canon_str = canon.to_string_lossy().into_owned();
+        if let Some(&(existing_idx, prev_was_symlink)) = seen_by_path.get(&canon_str) {
+            if prev_was_symlink && !is_symlink {
+                repos[existing_idx].name = name;
+                seen_by_path.insert(canon_str, (existing_idx, false));
+            }
+            continue;
+        }
+
         let has_go_mod = canon.join("go.mod").is_file() || canon.join("go.work").is_file();
         let has_pom_or_gradle = canon.join("pom.xml").is_file()
             || canon.join("build.gradle").is_file()
@@ -351,9 +363,11 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
             "folder"
         };
 
+        let idx = repos.len();
+        seen_by_path.insert(canon_str.clone(), (idx, is_symlink));
         repos.push(IdeScannedRepo {
             name,
-            path: canon.to_string_lossy().into_owned(),
+            path: canon_str,
             kind: kind.to_string(),
             has_go_mod,
             has_pom_or_gradle,
@@ -371,4 +385,33 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
         parent_path: parent.to_string_lossy().into_owned(),
         repos,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_parent_repos_deduplicates_symlink_to_sibling_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real_repo = tmp.path().join("supprt_agent");
+        fs::create_dir_all(&real_repo).expect("mkdir repo");
+        fs::write(real_repo.join("go.mod"), "module example.com/supprt\n").expect("write go.mod");
+        std::os::unix::fs::symlink(&real_repo, tmp.path().join("support_agent"))
+            .expect("create sibling symlink");
+
+        let other_repo = tmp.path().join("go_utilities");
+        fs::create_dir_all(&other_repo).expect("mkdir go_utilities");
+        fs::write(other_repo.join("go.mod"), "module example.com/utils\n").expect("write go.mod");
+
+        let scanned = scan_parent_repos(&tmp.path().to_string_lossy(), true).expect("scan ok");
+        assert_eq!(
+            scanned.repos.len(),
+            2,
+            "sibling symlink to same canonical directory must not produce duplicate path keys"
+        );
+        let names: Vec<&str> = scanned.repos.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["go_utilities", "supprt_agent"]);
+    }
 }

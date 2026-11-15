@@ -138,6 +138,7 @@ pub(super) async fn resolve_rust_adapter(
                     "program": executable,
                     "args": prog_args,
                     "cwd": cwd,
+                    "env": env,
                     "stopOnEntry": false
                 }),
             )
@@ -179,12 +180,14 @@ pub(super) async fn resolve_rust_adapter(
                 json!({ "gdb-remote-port": port, "cwd": cwd }),
             )
         } else {
+            let lldb_env: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
             (
                 "launch".to_string(),
                 json!({
                     "program": executable,
                     "args": prog_args,
                     "cwd": cwd,
+                    "env": lldb_env,
                     "stopOnEntry": false
                 }),
             )
@@ -371,13 +374,38 @@ async fn compile_rust_debug_artifact(
             cargo_args.insert(0, format!("+{tc}"));
         }
     }
+    let mut cargo_env = env.clone();
+    if req.target.kind == IdeTargetKind::Local && !cargo_env.contains_key("CARGO_INCREMENTAL") {
+        cargo_env.insert("CARGO_INCREMENTAL".into(), "1".into());
+    }
+    let local_stamp = if req.target.kind == IdeTargetKind::Local {
+        match super::rust_build_cache::lookup_cached_rust_artifact(
+            &cargo_bin,
+            &cargo_args,
+            &cargo_cwd,
+            &req.target.root,
+            raw_prog,
+            want_test,
+            &cargo_env,
+            &allowed_roots,
+        )
+        .await
+        {
+            Some((_, Some(cached_exe))) => return Ok(cached_exe),
+            Some((stamp, None)) => Some(stamp),
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let out = run_target_command(
         &req.target,
         ctx.ssh.as_ref(),
         &cargo_bin,
         &cargo_args,
         &cargo_cwd,
-        env,
+        &cargo_env,
         Duration::from_secs(120),
     )
     .await?;
@@ -399,9 +427,13 @@ async fn compile_rust_debug_artifact(
         .file_stem()
         .and_then(|s| s.to_str())
         .filter(|s| *s != "lib" && *s != "main");
-    parse_cargo_artifact_executable(&stdout_txt, want_test, hint).ok_or_else(|| {
+    let exe = parse_cargo_artifact_executable(&stdout_txt, want_test, hint).ok_or_else(|| {
         Error::Upstream("cargo succeeded but produced no debuggable binary artifact".into())
-    })
+    })?;
+    if let Some(stamp) = local_stamp {
+        super::rust_build_cache::store_cached_rust_artifact(stamp, exe.clone());
+    }
+    Ok(exe)
 }
 
 fn find_cargo_dir(

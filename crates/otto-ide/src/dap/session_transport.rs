@@ -166,6 +166,7 @@ async fn connect_adapter_transport(
                 .map_err(|e| {
                     Error::Upstream(format!("attach DAP {connect_host}:{connect_port}: {e}"))
                 })?;
+            let _ = tcp.set_nodelay(true);
             let (r, w) = tcp.into_split();
             Ok((Box::new(r), Box::new(w), guard))
         }
@@ -253,6 +254,7 @@ async fn spawn_tcp_listen_adapter(
     let tcp = TcpStream::connect((connect_host.as_str(), connect_port))
         .await
         .map_err(|e| Error::Upstream(format!("connect DAP {connect_host}:{connect_port}: {e}")))?;
+    let _ = tcp.set_nodelay(true);
     let (r, w) = tcp.into_split();
     Ok((Box::new(r), Box::new(w), guard))
 }

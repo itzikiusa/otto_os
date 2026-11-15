@@ -105,6 +105,7 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     spawn_data_retention(ctx);
     spawn_workflow_run_retention(ctx);
     spawn_memory_fts_warmup(ctx);
+    spawn_boot_warmups(ctx);
 
     // Gated by OTTO_SELF_IMPROVE (enabled by default; 0/false/off disables it).
     // Computed here so the channel manager can decide whether to wire the
@@ -154,6 +155,58 @@ fn spawn_memory_fts_warmup(ctx: &ServerCtx) {
             fts = ok,
             ms = t.elapsed().as_millis() as u64,
             "memory: FTS warmed"
+        );
+    });
+}
+
+/// Pre-hydrate recent structured runtime threads + cold CLI probes (`/meta`,
+/// `/usage/limits`) off the request path right after boot so the very first
+/// mobile/desktop navigation hits warm RAM instead of cold SQLite/CLI forks.
+fn spawn_boot_warmups(ctx: &ServerCtx) {
+    let runtime = ctx.agent_runtime.clone();
+    tokio::spawn(async move {
+        let t = std::time::Instant::now();
+        runtime.warm_recent(5).await;
+        tracing::debug!(
+            ms = t.elapsed().as_millis() as u64,
+            "agent-runtime: recent threads pre-warmed"
+        );
+    });
+
+    if std::env::var("OTTO_E2E_FAST_TIMERS").is_ok() {
+        return;
+    }
+    let manager = Arc::clone(&ctx.manager);
+    tokio::spawn(async move {
+        let providers = manager.providers().names();
+        let specs = otto_sessions::tool_probe::tool_specs(
+            providers
+                .iter()
+                .map(|name| (name.as_str(), manager.providers().program_for(name))),
+        );
+        let families = manager.providers().model_families();
+        let program_of = |family: &str| {
+            families
+                .iter()
+                .filter(|(_, f)| f == family)
+                .find_map(|(p, _)| {
+                    let prog = specs.get(p)?;
+                    otto_sessions::tool_probe::executable_in_path_or_fs(prog).then(|| prog.clone())
+                })
+        };
+        let probe = otto_sessions::provider_models::ModelProbe {
+            agy_program: program_of("agy"),
+            grok_program: program_of("grok"),
+            opencode_program: program_of("opencode"),
+            pi_program: program_of("pi"),
+            families,
+        };
+        let agy = manager.provider_program("agy");
+        let grok = manager.provider_program("grok");
+        let _ = tokio::join!(
+            otto_sessions::tool_probe::probe_tools_cached(specs),
+            otto_sessions::provider_models::probe_provider_models_cached(&probe),
+            otto_usage::limits::refresh_cli_limits(agy, grok),
         );
     });
 }
@@ -765,6 +818,7 @@ fn start_usage_tracking(ctx: &ServerCtx) {
     tokio::spawn(async move {
         if usage.wait_ready(Duration::from_secs(120)).await {
             tracing::info!("usage tracking started (embedded clickhouse)");
+            crate::routes::usage::warm_session_totals_engine(&usage).await;
         } else {
             tracing::info!(
                 "usage tracking idle (embedded clickhouse not available after 120 s — \

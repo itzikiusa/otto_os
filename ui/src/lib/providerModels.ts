@@ -77,30 +77,123 @@ export const FALLBACK_PROVIDER_MODELS: Record<string, ProviderModelOption[]> = {
   ],
   agy: [
     {
-      id: 'gemini-4-argon-high',
-      label: 'Gemini 4 Argon (High)',
-      description: 'High-reasoning Gemini model',
-      default_effort: 'high',
-      supported_efforts: [...STANDARD_EFFORTS],
-    },
-    {
-      id: 'gemini-4-argon-medium',
-      label: 'Gemini 4 Argon (Medium)',
-      description: 'Balanced Gemini model',
+      id: 'gemini-4-carbon',
+      label: 'Gemini 4 Carbon',
+      description: 'Balanced flagship Gemini model',
       default_effort: 'medium',
-      supported_efforts: [...STANDARD_EFFORTS],
+      supported_efforts: ['low', 'medium', 'high'],
     },
     {
-      id: 'claude-opus-5-5-high',
-      label: 'Claude Opus 5.5 (High)',
-      description: 'Anthropic Opus via Antigravity',
+      id: 'gemini-4-argon',
+      label: 'Gemini 4 Argon',
+      description: 'High-capability Gemini reasoning model',
+      default_effort: 'medium',
+      supported_efforts: ['low', 'medium', 'high'],
+    },
+    {
+      id: 'gemini-4-hydrogen',
+      label: 'Gemini 4 Hydrogen',
+      description: 'Deep-reasoning Gemini model',
       default_effort: 'high',
-      supported_efforts: [...STANDARD_EFFORTS],
+      supported_efforts: ['low', 'medium', 'high', 'xhigh'],
+    },
+    {
+      id: 'claude-opus-5-5',
+      label: 'Claude Opus 5.5',
+      description: 'Anthropic Opus via Antigravity',
+      default_effort: 'medium',
+      supported_efforts: ['low', 'medium', 'high'],
     },
   ],
 };
 
 const VALID_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+const EFFORT_ORDER: readonly EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const ID_TIER_RE = /^(.+)-(minimal|low|medium|high|xhigh|max|ultra)$/;
+const LABEL_TIER_RE = /^(.*?)\s*\((minimal|low|medium|high|xhigh|x-high|extra high|extra|max|ultra)\)\s*$/i;
+
+function mapRawTier(raw: string): EffortLevel {
+  const v = raw.trim().toLowerCase();
+  if (v === 'minimal') return 'low';
+  if (v === 'x-high' || v === 'extra high' || v === 'extra') return 'xhigh';
+  return (VALID_EFFORTS.has(v) ? v : 'medium') as EffortLevel;
+}
+
+function splitTieredEntry(
+  id: string,
+  label: string,
+): { baseId: string; cleanLabel: string; effort: EffortLevel } | null {
+  const idMatch = ID_TIER_RE.exec(id);
+  if (!idMatch) return null;
+  const baseId = idMatch[1];
+  const effort = mapRawTier(idMatch[2]);
+  if (label === id) {
+    return { baseId, cleanLabel: baseId, effort };
+  }
+  const labelMatch = LABEL_TIER_RE.exec(label);
+  if (!labelMatch) return null;
+  const cleanLabel = labelMatch[1].trim();
+  if (!cleanLabel) return null;
+  return { baseId, cleanLabel, effort };
+}
+
+/** Collapse tier-suffixed model rows (`gemini-4-carbon-{low,medium,high}`) into
+ *  one unified family row with exact `supported_efforts`, matching the daemon's
+ *  parser even when `/meta` holds an older cached list. */
+function unifyModelCatalog(list: readonly ProviderModelOption[]): ProviderModelOption[] {
+  type Group = {
+    kind: 'family';
+    baseId: string;
+    firstFullId: string;
+    label: string;
+    description: string;
+    firstEffort: EffortLevel;
+    efforts: EffortLevel[];
+  };
+  const out: Array<{ kind: 'plain'; opt: ProviderModelOption } | Group> = [];
+  for (const item of list) {
+    const split = splitTieredEntry(item.id, item.label);
+    if (!split) {
+      out.push({ kind: 'plain', opt: item });
+      continue;
+    }
+    const existing = out.find(
+      (g): g is Group => g.kind === 'family' && g.baseId === split.baseId,
+    );
+    if (existing) {
+      if (!existing.efforts.includes(split.effort)) existing.efforts.push(split.effort);
+    } else {
+      out.push({
+        kind: 'family',
+        baseId: split.baseId,
+        firstFullId: item.id,
+        label: split.cleanLabel,
+        description: item.description,
+        firstEffort: split.effort,
+        efforts: [split.effort],
+      });
+    }
+  }
+  return out.map((entry) => {
+    if (entry.kind === 'plain') return entry.opt;
+    const sorted = [...entry.efforts].sort(
+      (a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b),
+    );
+    const defaultEffort =
+      entry.firstEffort !== 'low'
+        ? entry.firstEffort
+        : sorted.includes('medium')
+          ? 'medium'
+          : entry.firstEffort;
+    return {
+      id: sorted.length >= 2 ? entry.baseId : entry.firstFullId,
+      label: entry.label,
+      description: entry.description,
+      default_effort: defaultEffort,
+      supported_efforts: sorted,
+    };
+  });
+}
 
 export function supportsModelSelection(
   provider: string,
@@ -137,8 +230,24 @@ export function modelsForProvider(
   meta?: Pick<MetaResp, 'provider_models'> | null,
 ): ProviderModelOption[] {
   const live = meta?.provider_models?.[provider];
-  if (live && live.length > 0) return live;
+  if (live && live.length > 0) return unifyModelCatalog(live);
   return FALLBACK_PROVIDER_MODELS[provider] ?? [];
+}
+
+/** Resolve a saved or legacy tier-suffixed model ID (`gemini-4-carbon-high`) to
+ *  its unified catalog entry ID (`gemini-4-carbon`) when that family exists. */
+export function canonicalModelId(
+  provider: string,
+  modelId: string | null | undefined,
+  meta?: Pick<MetaResp, 'provider_models'> | null,
+): string | null {
+  const trimmed = (modelId ?? '').trim();
+  if (!trimmed) return null;
+  const catalog = modelsForProvider(provider, meta);
+  if (catalog.some((m) => m.id === trimmed)) return trimmed;
+  const m = ID_TIER_RE.exec(trimmed);
+  if (m && catalog.some((x) => x.id === m[1])) return m[1];
+  return trimmed;
 }
 
 export function normalizeEffort(raw: unknown): EffortLevel | null {
@@ -162,11 +271,12 @@ export function effortsForModel(
 ): EffortLevel[] {
   if (!supportsEffortSelection(provider)) return [];
   const catalog = modelsForProvider(provider, meta);
-  const match = modelId ? catalog.find((m) => m.id === modelId) : catalog[0];
-  const supported = (match?.supported_efforts ?? [])
+  const resolved = canonicalModelId(provider, modelId, meta);
+  const match = resolved ? catalog.find((m) => m.id === resolved) : catalog[0];
+  if (!match) return [...STANDARD_EFFORTS];
+  return (match.supported_efforts ?? [])
     .map((e) => normalizeEffort(e))
     .filter((e): e is EffortLevel => e !== null);
-  return supported.length > 0 ? supported : [...STANDARD_EFFORTS];
 }
 
 export function defaultEffortForModel(
@@ -175,7 +285,8 @@ export function defaultEffortForModel(
   meta?: Pick<MetaResp, 'provider_models'> | null,
 ): EffortLevel {
   const catalog = modelsForProvider(provider, meta);
-  const match = modelId ? catalog.find((m) => m.id === modelId) : catalog[0];
+  const resolved = canonicalModelId(provider, modelId, meta);
+  const match = resolved ? catalog.find((m) => m.id === resolved) : catalog[0];
   return normalizeEffort(match?.default_effort) ?? 'medium';
 }
 
@@ -224,11 +335,14 @@ export function formatModelLabel(
 ): string {
   const trimmed = (modelId ?? '').trim();
   if (!trimmed) return 'Default model';
+  const resolved = canonicalModelId(provider, trimmed, meta) ?? trimmed;
   // The live catalog first, then the built-in aliases ("opus" → "Claude Opus").
   const found =
-    modelsForProvider(provider, meta).find((m) => m.id === trimmed) ??
-    FALLBACK_PROVIDER_MODELS[provider]?.find((m) => m.id === trimmed);
+    modelsForProvider(provider, meta).find((m) => m.id === resolved) ??
+    FALLBACK_PROVIDER_MODELS[provider]?.find((m) => m.id === resolved);
   if (found) return found.label;
+  const labelTier = LABEL_TIER_RE.exec(trimmed);
+  if (labelTier && labelTier[1].trim()) return labelTier[1].trim();
   return trimmed;
 }
 
@@ -250,7 +364,7 @@ export interface SessionThreadConfig {
 }
 
 export function resolveSessionThreadConfig(
-  session: Pick<Session, 'meta'> | null | undefined,
+  session: (Pick<Session, 'meta'> & { provider?: string }) | null | undefined,
   transcriptModel?: string | null,
 ): SessionThreadConfig {
   const m = session?.meta ?? {};
@@ -259,6 +373,12 @@ export function resolveSessionThreadConfig(
     typeof transcriptModel === 'string' && transcriptModel.trim() !== ''
       ? transcriptModel.trim()
       : null;
+  const effectiveModel = pinned ?? fallback;
+  let effort = normalizeEffort(m.effort);
+  if (!effort && session?.provider === 'agy' && pinned) {
+    const tier = ID_TIER_RE.exec(pinned);
+    if (tier) effort = mapRawTier(tier[2]);
+  }
   const rawMode =
     typeof m.interaction_mode === 'string'
       ? m.interaction_mode
@@ -267,8 +387,8 @@ export function resolveSessionThreadConfig(
         : 'full';
   return {
     pinnedModel: pinned,
-    effectiveModel: pinned ?? fallback,
-    effort: normalizeEffort(m.effort),
+    effectiveModel,
+    effort,
     interactionMode: normalizeInteractionMode(rawMode),
   };
 }

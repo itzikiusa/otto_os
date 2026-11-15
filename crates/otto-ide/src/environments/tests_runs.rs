@@ -236,6 +236,7 @@ async fn stopping_run_kills_entire_unix_process_group_leaving_zero_orphans() {
             target,
             None,
             vec![(cfg, BTreeMap::new())],
+            None,
             stop_rx,
         )
         .await;

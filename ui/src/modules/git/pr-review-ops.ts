@@ -20,6 +20,8 @@ export interface WithdrawDeps {
   patch: (pr: PrDetail) => void;
   reload: () => Promise<void>;
   isMe: (name: string) => boolean;
+  /** Called as soon as the DELETE succeeds on the forge, before reloading. */
+  onConfirmed?: () => void;
   /** Mark the header busy ('withdraw') / idle (''); false = the view went away. */
   setBusy: (b: string) => boolean;
 }
@@ -37,6 +39,7 @@ export async function withdrawMyReview(kind: Exclude<MyReview, null>, d: Withdra
   try {
     invalidatePr(d.repoId, d.number);
     await api.del(`/repos/${d.repoId}/prs/${d.number}/${approval ? 'approve' : 'request-changes'}`);
+    d.onConfirmed?.();
     toasts.success(approval ? 'Approval withdrawn' : 'Change request withdrawn', `PR #${d.number}`);
     const pr = d.get();
     if (pr) d.patch(withoutMyReview(pr, kind, d.isMe));

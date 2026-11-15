@@ -123,6 +123,32 @@ function upsert<T extends { id: string }>(list: T[], next: T): T[] {
   return out;
 }
 
+export function replaceHydratedItem(p: RuntimeProjection, item: TurnItem): RuntimeProjection {
+  return { ...p, items: upsertItem(p.items, item) };
+}
+
+function preserveHydratedItems(prevItems: readonly TurnItem[], nextItems: TurnItem[]): TurnItem[] {
+  if (prevItems.length === 0 || nextItems.length === 0) return nextItems;
+  let hydrated: Map<string, TurnItem> | null = null;
+  for (let i = 0; i < prevItems.length; i++) {
+    const it = prevItems[i];
+    if (!it.detail_omitted) {
+      hydrated ??= new Map();
+      hydrated.set(it.id, it);
+    }
+  }
+  if (!hydrated) return nextItems;
+  let changed = false;
+  const merged = nextItems.map((it) => {
+    if (!it.detail_omitted) return it;
+    const prev = hydrated!.get(it.id);
+    if (!prev || prev.updated_at !== it.updated_at) return it;
+    changed = true;
+    return prev;
+  });
+  return changed ? merged : nextItems;
+}
+
 function upsertItem(items: TurnItem[], item: TurnItem): TurnItem[] {
   // Streamed updates land on the newest items: search from the end.
   let i = items.length - 1;
@@ -187,7 +213,11 @@ export function applyEvents(
 export function applyReplay(p: RuntimeProjection, replay: RuntimeReplay): RuntimeProjection {
   if (replay.kind === 'snapshot') {
     if (replay.snapshot_sequence < p.lastSequence) return p;
-    const fresh = fromSnapshot(replay.snapshot, replay.snapshot_sequence);
+    const rawFresh = fromSnapshot(replay.snapshot, replay.snapshot_sequence);
+    const fresh =
+      p.items.length > 0
+        ? { ...rawFresh, items: preserveHydratedItems(p.items, rawFresh.items) }
+        : rawFresh;
     if (
       fresh.hasOlder &&
       fresh.oldestTurnOrdinal !== null &&

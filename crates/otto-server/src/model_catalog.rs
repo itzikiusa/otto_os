@@ -200,7 +200,7 @@ pub fn extract_gemini_ids(html: &str) -> Vec<String> {
 /// tolerate plain-space separation and skip banners ("Fetching …").
 pub fn parse_agy_models_output(stdout: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
-    for line in stdout.lines() {
+    for line in stdout.split(['\n', '\r']) {
         let line = line.trim();
         if line.is_empty() {
             continue;

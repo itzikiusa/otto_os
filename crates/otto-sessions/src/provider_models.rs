@@ -19,6 +19,9 @@ const MODELS_TTL: Duration = Duration::from_secs(60);
 /// models` is a process spawn; model lists change on CLI upgrades, not
 /// between two launches.
 const MODELS_MAX_STALE: Duration = Duration::from_secs(24 * 3600);
+/// Cold-cache inline wait budget on `/meta` before serving local disk/fallback
+/// catalogs and letting slow CLI subprocesses (`opencode models`) finish behind.
+const MODELS_COLD_BUDGET: Duration = Duration::from_millis(250);
 
 /// What discovery needs: each enabled provider's catalog family
 /// (`ProviderRegistry::model_families`) and the resolved programs of the CLIs
@@ -77,9 +80,72 @@ pub async fn probe_provider_models_cached(
             }
         }
     }
-    let out = discover_models(probe).await;
-    *slot = Some((Instant::now(), probe.clone(), out.clone()));
-    out
+    if REFRESHING.load(Ordering::Acquire) {
+        if let Some((_, cached, models)) = slot.as_ref() {
+            if cached == probe {
+                return models.clone();
+            }
+        }
+        return fast_models(probe).await;
+    }
+    let probe_bg = probe.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel::<HashMap<String, Vec<ProviderModelOption>>>();
+    REFRESHING.store(true, Ordering::Release);
+    tokio::spawn(async move {
+        struct Done;
+        impl Drop for Done {
+            fn drop(&mut self) {
+                REFRESHING.store(false, Ordering::Release);
+            }
+        }
+        let _done = Done;
+        let fresh = discover_models(&probe_bg).await;
+        let _ = tx.send(fresh.clone());
+        *CACHE.lock().await = Some((Instant::now(), probe_bg, fresh));
+    });
+    match timeout(MODELS_COLD_BUDGET, rx).await {
+        Ok(Ok(out)) => {
+            *slot = Some((Instant::now(), probe.clone(), out.clone()));
+            out
+        }
+        _ => {
+            let provisional = fast_models(probe).await;
+            let stale_at = Instant::now()
+                .checked_sub(MODELS_TTL + Duration::from_secs(1))
+                .unwrap_or_else(Instant::now);
+            *slot = Some((stale_at, probe.clone(), provisional.clone()));
+            provisional
+        }
+    }
+}
+
+async fn fast_models(probe: &ModelProbe) -> HashMap<String, Vec<ProviderModelOption>> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"));
+    let mut by_family: HashMap<&str, Vec<ProviderModelOption>> = HashMap::new();
+    for (_, family) in &probe.families {
+        if by_family.contains_key(family.as_str()) {
+            continue;
+        }
+        let models = match family.as_str() {
+            "claude" => discover_claude_models(&home).await,
+            "codex" => discover_codex_models(&codex_home).await,
+            _ => continue,
+        };
+        by_family.insert(family.as_str(), models);
+    }
+    probe
+        .families
+        .iter()
+        .filter_map(|(provider, family)| {
+            let models = by_family.get(family.as_str())?;
+            (!models.is_empty()).then(|| (provider.clone(), models.clone()))
+        })
+        .collect()
 }
 
 async fn discover_models(probe: &ModelProbe) -> HashMap<String, Vec<ProviderModelOption>> {
@@ -90,34 +156,46 @@ async fn discover_models(probe: &ModelProbe) -> HashMap<String, Vec<ProviderMode
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".codex"));
 
-    // One discovery per FAMILY, shared by every provider of it.
-    let mut by_family: HashMap<&str, Vec<ProviderModelOption>> = HashMap::new();
+    // One discovery per FAMILY, spawned concurrently and shared by every provider of it.
+    let mut seen_families = Vec::<String>::new();
     for (_, family) in &probe.families {
-        if by_family.contains_key(family.as_str()) {
-            continue;
+        if !seen_families.iter().any(|f| f == family) {
+            seen_families.push(family.clone());
         }
-        let models = match family.as_str() {
-            "claude" => discover_claude_models(&home).await,
-            "codex" => discover_codex_models(&codex_home).await,
-            "agy" => discover_agy_models(probe.agy_program.as_deref()).await,
-            "grok" => discover_grok_models(probe.grok_program.as_deref()).await,
-            "opencode" => {
-                // opencode 1.19 boots its whole server for this (~2 s warm).
-                let out = run_models(probe.opencode_program.as_deref(), &["models"], 10).await;
-                parse_opencode_models_output(&out)
-            }
-            "pi" => {
-                let out = run_models(
-                    probe.pi_program.as_deref(),
-                    &["--offline", "--list-models"],
-                    3,
-                )
-                .await;
-                parse_pi_models_output(&out)
-            }
-            _ => continue,
-        };
-        by_family.insert(family.as_str(), models);
+    }
+    let mut tasks = Vec::with_capacity(seen_families.len());
+    for family in seen_families {
+        let home = home.clone();
+        let codex_home = codex_home.clone();
+        let agy_program = probe.agy_program.clone();
+        let grok_program = probe.grok_program.clone();
+        let opencode_program = probe.opencode_program.clone();
+        let pi_program = probe.pi_program.clone();
+        tasks.push(tokio::spawn(async move {
+            let models = match family.as_str() {
+                "claude" => discover_claude_models(&home).await,
+                "codex" => discover_codex_models(&codex_home).await,
+                "agy" => discover_agy_models(agy_program.as_deref()).await,
+                "grok" => discover_grok_models(grok_program.as_deref()).await,
+                "opencode" => {
+                    let out = run_models(opencode_program.as_deref(), &["models"], 10).await;
+                    parse_opencode_models_output(&out)
+                }
+                "pi" => {
+                    let out =
+                        run_models(pi_program.as_deref(), &["--offline", "--list-models"], 3).await;
+                    parse_pi_models_output(&out)
+                }
+                _ => Vec::new(),
+            };
+            (family, models)
+        }));
+    }
+    let mut by_family: HashMap<String, Vec<ProviderModelOption>> = HashMap::new();
+    for task in tasks {
+        if let Ok((family, models)) = task.await {
+            by_family.insert(family, models);
+        }
     }
     probe
         .families
@@ -382,59 +460,219 @@ async fn discover_agy_models(program: Option<&str>) -> Vec<ProviderModelOption> 
     fallback_agy_models()
 }
 
-pub fn parse_agy_models_output(raw: &str) -> Vec<ProviderModelOption> {
-    let efforts = default_efforts();
-    let mut out = Vec::new();
-    for line in raw.lines() {
-        let Some((id, label)) = line.split_once('\t') else {
-            continue;
-        };
-        let id = id.trim();
-        let label = label.trim();
-        if id.is_empty() || label.is_empty() {
+fn strip_ansi_line(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
             continue;
         }
-        let default_effort = if id.ends_with("-high") {
-            Some("high".into())
-        } else if id.ends_with("-low") {
-            Some("low".into())
-        } else {
-            Some("medium".into())
-        };
-        out.push(ProviderModelOption {
-            id: id.to_string(),
-            label: label.to_string(),
-            description: String::new(),
-            default_effort,
-            supported_efforts: efforts.clone(),
-        });
+        out.push(c);
     }
     out
 }
 
+fn is_agy_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_'))
+}
+
+fn effort_rank(effort: &str) -> usize {
+    match effort {
+        "low" => 0,
+        "medium" => 1,
+        "high" => 2,
+        "xhigh" => 3,
+        "max" => 4,
+        "ultra" => 5,
+        _ => 6,
+    }
+}
+
+/// Split an `agy models` tier-suffixed entry (`gemini-4-carbon-medium` /
+/// `"Gemini 4 Carbon (Medium)"`) into `(base_id, clean_label, effort)`.
+/// Non-tier parentheticals like `"Orchestrator (Carbon)"` or
+/// `"Claude Sonnet 4.6 (Thinking)"` return `None` and stay untouched.
+fn split_agy_tier<'a>(id: &'a str, label: &'a str) -> Option<(&'a str, String, &'static str)> {
+    const ID_SUFFIXES: [(&str, &str); 7] = [
+        ("-minimal", "low"),
+        ("-low", "low"),
+        ("-medium", "medium"),
+        ("-high", "high"),
+        ("-xhigh", "xhigh"),
+        ("-max", "max"),
+        ("-ultra", "ultra"),
+    ];
+    let (base_id, effort) = ID_SUFFIXES.iter().find_map(|(suf, eff)| {
+        let base = id.strip_suffix(suf)?;
+        (!base.is_empty()).then_some((base, *eff))
+    })?;
+    if label == id {
+        return Some((base_id, base_id.to_string(), effort));
+    }
+    let trimmed = label.strip_suffix(')')?;
+    let (base_label, paren) = trimmed.rsplit_once('(')?;
+    let is_tier_label = matches!(
+        paren.trim().to_ascii_lowercase().as_str(),
+        "minimal"
+            | "low"
+            | "medium"
+            | "high"
+            | "xhigh"
+            | "x-high"
+            | "extra high"
+            | "extra"
+            | "max"
+            | "ultra"
+    );
+    if !is_tier_label {
+        return None;
+    }
+    let clean = base_label.trim();
+    (!clean.is_empty()).then(|| (base_id, clean.to_string(), effort))
+}
+
+pub fn parse_agy_models_output(raw: &str) -> Vec<ProviderModelOption> {
+    enum Entry {
+        Plain {
+            id: String,
+            label: String,
+        },
+        Family {
+            base_id: String,
+            first_full_id: String,
+            label: String,
+            first_effort: &'static str,
+            efforts: Vec<&'static str>,
+        },
+    }
+
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::<String>::new();
+    for seg in raw.split(['\n', '\r']) {
+        let cleaned = strip_ansi_line(seg);
+        let line = cleaned.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((id, label)) = line.split_once('\t').or_else(|| line.split_once("  ")) else {
+            continue;
+        };
+        let id = id.trim();
+        let label = label.trim();
+        if !is_agy_model_id(id) || label.is_empty() || !seen_ids.insert(id.to_string()) {
+            continue;
+        }
+        if let Some((base_id, clean_label, effort)) = split_agy_tier(id, label) {
+            if let Some(Entry::Family { efforts, .. }) = entries
+                .iter_mut()
+                .find(|e| matches!(e, Entry::Family { base_id: b, .. } if b == base_id))
+            {
+                if !efforts.contains(&effort) {
+                    efforts.push(effort);
+                }
+            } else {
+                entries.push(Entry::Family {
+                    base_id: base_id.to_string(),
+                    first_full_id: id.to_string(),
+                    label: clean_label,
+                    first_effort: effort,
+                    efforts: vec![effort],
+                });
+            }
+        } else {
+            entries.push(Entry::Plain {
+                id: id.to_string(),
+                label: label.to_string(),
+            });
+        }
+    }
+
+    entries
+        .into_iter()
+        .map(|entry| match entry {
+            Entry::Plain { id, label } => ProviderModelOption {
+                id,
+                label,
+                description: String::new(),
+                default_effort: None,
+                supported_efforts: Vec::new(),
+            },
+            Entry::Family {
+                base_id,
+                first_full_id,
+                label,
+                first_effort,
+                mut efforts,
+            } => {
+                efforts.sort_by_key(|e| effort_rank(e));
+                // Multi-tier families (`gemini-4-carbon`, `gemini-4-argon`,
+                // `gemini-4-hydrogen`, `claude-opus-5-5`, …) register their
+                // base slug in `agy` (`--model` and `session/set_model`); a
+                // single-tier model (`gpt-oss-120b-medium`) only registers its
+                // full ID while still displaying its clean family label.
+                let id = if efforts.len() >= 2 {
+                    base_id
+                } else {
+                    first_full_id
+                };
+                let default_effort = if first_effort != "low" {
+                    first_effort
+                } else if efforts.contains(&"medium") {
+                    "medium"
+                } else {
+                    first_effort
+                };
+                ProviderModelOption {
+                    id,
+                    label,
+                    description: String::new(),
+                    default_effort: Some(default_effort.to_string()),
+                    supported_efforts: efforts.into_iter().map(str::to_string).collect(),
+                }
+            }
+        })
+        .collect()
+}
+
 fn fallback_agy_models() -> Vec<ProviderModelOption> {
-    let efforts = default_efforts();
+    let std_efforts = vec!["low".into(), "medium".into(), "high".into()];
     vec![
         ProviderModelOption {
-            id: "gemini-4-argon-high".into(),
-            label: "Gemini 4 Argon (High)".into(),
-            description: "High-reasoning Gemini model".into(),
-            default_effort: Some("high".into()),
-            supported_efforts: efforts.clone(),
-        },
-        ProviderModelOption {
-            id: "gemini-4-argon-medium".into(),
-            label: "Gemini 4 Argon (Medium)".into(),
-            description: "Balanced Gemini model".into(),
+            id: "gemini-4-carbon".into(),
+            label: "Gemini 4 Carbon".into(),
+            description: "Balanced flagship Gemini model".into(),
             default_effort: Some("medium".into()),
-            supported_efforts: efforts.clone(),
+            supported_efforts: std_efforts.clone(),
         },
         ProviderModelOption {
-            id: "claude-opus-5-5-high".into(),
-            label: "Claude Opus 5.5 (High)".into(),
-            description: "Anthropic Opus via Antigravity".into(),
+            id: "gemini-4-argon".into(),
+            label: "Gemini 4 Argon".into(),
+            description: "High-capability Gemini reasoning model".into(),
+            default_effort: Some("medium".into()),
+            supported_efforts: std_efforts.clone(),
+        },
+        ProviderModelOption {
+            id: "gemini-4-hydrogen".into(),
+            label: "Gemini 4 Hydrogen".into(),
+            description: "Deep-reasoning Gemini model".into(),
             default_effort: Some("high".into()),
-            supported_efforts: efforts,
+            supported_efforts: vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
+        },
+        ProviderModelOption {
+            id: "claude-opus-5-5".into(),
+            label: "Claude Opus 5.5".into(),
+            description: "Anthropic Opus via Antigravity".into(),
+            default_effort: Some("medium".into()),
+            supported_efforts: std_efforts,
         },
     ]
 }
@@ -633,12 +871,39 @@ mod tests {
         assert_eq!(codex[0].supported_efforts, vec!["low", "high", "max"]);
 
         let agy = parse_agy_models_output(
-            "Fetching available models...\ngemini-4-argon-high\tGemini 4 Argon (High)\ngemini-4-argon-low\tGemini 4 Argon (Low)\n",
+            "\r⠋ Fetching available models...\rgemini-4-carbon-medium         Gemini 4 Carbon (Medium)\n\
+             gemini-4-carbon-high           Gemini 4 Carbon (High)\n\
+             gemini-4-carbon-low            Gemini 4 Carbon (Low)\n\
+             gemini-4-hydrogen-high         Gemini 4 Hydrogen (High)\n\
+             gemini-4-hydrogen-xhigh        Gemini 4 Hydrogen (XHigh)\n\
+             gemini-pro-orchestrator        Orchestrator (Carbon)\n\
+             claude-opus-5-5-low            Claude Opus 5.5 (Low)\n\
+             claude-opus-5-5-medium         Claude Opus 5.5 (Medium)\n\
+             claude-opus-5-5-high           Claude Opus 5.5 (High)\n\
+             gpt-oss-120b-medium            GPT-OSS 120B (Medium)\n",
         );
-        assert_eq!(agy.len(), 2);
-        assert_eq!(agy[0].id, "gemini-4-argon-high");
-        assert_eq!(agy[0].default_effort.as_deref(), Some("high"));
-        assert_eq!(agy[1].default_effort.as_deref(), Some("low"));
+        assert_eq!(
+            agy.iter()
+                .map(|m| (m.id.as_str(), m.label.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("gemini-4-carbon", "Gemini 4 Carbon"),
+                ("gemini-4-hydrogen", "Gemini 4 Hydrogen"),
+                ("gemini-pro-orchestrator", "Orchestrator (Carbon)"),
+                ("claude-opus-5-5", "Claude Opus 5.5"),
+                ("gpt-oss-120b-medium", "GPT-OSS 120B"),
+            ]
+        );
+        assert_eq!(agy[0].default_effort.as_deref(), Some("medium"));
+        assert_eq!(agy[0].supported_efforts, vec!["low", "medium", "high"]);
+        assert_eq!(agy[1].default_effort.as_deref(), Some("high"));
+        assert_eq!(agy[1].supported_efforts, vec!["high", "xhigh"]);
+        assert_eq!(agy[2].default_effort, None);
+        assert!(agy[2].supported_efforts.is_empty());
+        assert_eq!(agy[3].default_effort.as_deref(), Some("medium"));
+        assert_eq!(agy[3].supported_efforts, vec!["low", "medium", "high"]);
+        assert_eq!(agy[4].default_effort.as_deref(), Some("medium"));
+        assert_eq!(agy[4].supported_efforts, vec!["medium"]);
 
         let grok = parse_grok_models_output(
             "You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n\nAvailable models:\n  * grok-4.6 (default)\n",

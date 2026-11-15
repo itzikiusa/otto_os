@@ -139,8 +139,25 @@
   </div>
 
   <div class="ws-scroll">
-    {#if filteredNamedProjects.length > 0}
-      <div class="ws-sec-label">Named Multi-Repo Projects ({filteredNamedProjects.length})</div>
+    <div class="ws-sec-head">
+      <span class="ws-sec-label">Multi-Repo Projects ({filteredNamedProjects.length})</span>
+      <button
+        type="button"
+        class="btn small ghost"
+        onclick={() => { onclose(); ide.bulkRepoPickerMode = 'create'; }}
+        data-testid="ide-popover-top-new-project"
+      >
+        <Icon name="plus" size={12} />
+        New project…
+      </button>
+    </div>
+    {#if filteredNamedProjects.length === 0}
+      <div class="ws-empty">
+        {query.trim()
+          ? 'No multi-repo projects match this filter.'
+          : 'Group multiple repositories (e.g. Go or Java services) into one switchable project.'}
+      </div>
+    {:else}
       {#each filteredNamedProjects as proj (proj.id)}
         {@const active = ide.activeProjectId === proj.id}
         <div class="ws-attached-row" class:is-active={active}>
@@ -261,6 +278,7 @@
   .ws-search-bar:focus-within { border-color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }
   .ws-search-in { flex: 1; min-inline-size: 0; border: 0; background: transparent; color: var(--text); font-size: var(--fs-s); outline: none; }
   .ws-scroll { flex: 1; min-block-size: 0; overflow-y: auto; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+  .ws-sec-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-inline-end: 4px; }
   .ws-sec-label { padding-block: 6px 2px; padding-inline: 8px; font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); }
   .ws-empty { padding: 12px 8px; font-size: var(--fs-s); color: var(--text-dim); }
   .ws-item, .ws-attached-row {

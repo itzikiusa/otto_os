@@ -1542,6 +1542,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/ide/toolchains/install"
                     | "/ide/toolchains/local"
                     | "/ide/toolchains/python-venv"
+                    | "/ide/environments/bridge-test"
                     | "/ide/environments/python-venv"
                     | "/ide/deps/action"
                     | "/ide/runs"

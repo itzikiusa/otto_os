@@ -45,14 +45,27 @@
   import { agentTasks } from './agentTasks';
   import { askFromComposer, askTargets } from './askTargets.svelte';
   import { attachmentSupport, takesFile } from './attachmentSupport';
-  import type { BannerBlock } from './banners';
   import { providerSupportsSteer } from './capabilities';
   import { addComposerContext, assembleComposerMessage } from './composerContext';
   import { availableSlash } from './hostCommands';
   import RuntimeAccessChip from './RuntimeAccessChip.svelte';
   import RuntimeAskAgent from './RuntimeAskAgent.svelte';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
-  import { mergeQueuedEdit, readAttachments, runViewSlash } from './runtimeComposer';
+  import {
+    appendDraftAttachments,
+    buildOptimisticUserMessage,
+    buildRuntimeBanners,
+    collectMessageIds,
+    deriveActivePlan,
+    deriveSessionError,
+    handleSlashMenuKey,
+    mergeQueuedEdit,
+    pasteDraftAttachments,
+    restoreOptimisticDraft,
+    runViewSlash,
+    withOptimisticItem,
+    type OptimisticMessageState,
+  } from './runtimeComposer';
   import RuntimeComposerImages from './RuntimeComposerImages.svelte';
   import RuntimeContextChips from './RuntimeContextChips.svelte';
   import RuntimeDraftStatus from './RuntimeDraftStatus.svelte';
@@ -67,7 +80,7 @@
   import RuntimeUiControl from './RuntimeUiControl.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import { formatLiveElapsed } from './liveStatus';
-import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnOutcome } from './timeline';
+  import { isRunning, latestTurn, pendingApprovals, timelineRows, turnOutcome } from './timeline';
 
   const RuntimeQuestions = lazyComponent(() => import('./RuntimeQuestions.svelte'));
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
@@ -134,20 +147,13 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
   const loadError = $derived(runtimeViews.loadError[sessionId] ?? null);
   const staleError = $derived(runtimeViews.staleError[sessionId] ?? null);
   const loadingOlder = $derived(!!runtimeViews.loadingOlder[sessionId]);
-  const rows = $derived(p ? timelineRows(p.items, p.turns) : []);
-  let rowCap = $state(80);
+  let optimisticMessage = $state<OptimisticMessageState | null>(null);
+  const effectiveItems = $derived(p ? withOptimisticItem(p.items, optimisticMessage) : optimisticMessage ? [optimisticMessage.item] : []);
+  const rows = $derived(p || optimisticMessage ? timelineRows(effectiveItems, p?.turns ?? []) : []);
+  let rowCap = $state(200);
   const visibleRows = $derived(rows.length > rowCap ? rows.slice(rows.length - rowCap) : rows);
   let prevMsgIds: string[] = [];
-  const messageIds = $derived.by(() => {
-    const next: string[] = [];
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i];
-      if (r.kind === 'message') next.push(r.item.id);
-    }
-    if (next.length === prevMsgIds.length && next.every((id, i) => id === prevMsgIds[i])) return prevMsgIds;
-    prevMsgIds = next;
-    return next;
-  });
+  const messageIds = $derived.by(() => (prevMsgIds = collectMessageIds(rows, prevMsgIds)));
   const approvals = $derived(new Map((p ? pendingApprovals(p) : []).map((a) => [a.requestId, a] as const)));
   const turn = $derived(p ? latestTurn(p) : null);
   const closed = $derived(session?.status === 'closed');
@@ -155,31 +161,19 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
   const needsRevive = $derived(closed || dormant);
   const tasks = $derived(agentTasks(p?.items ?? [], p?.session?.background_tasks ?? session?.background_tasks ?? []));
   const background = $derived(tasks.running.filter((t) => t.background));
-
-  const sessionError = $derived.by(() => {
-    const e = draft.startError ?? (p?.session && (p.session.status === 'stopped' || p.session.status === 'error') ? p.session.last_error : null);
-    const last = p?.items.findLast((i) => !i.parent_item_id);
-    const said = last?.type === 'error' ? last.failure.message.trim() : '';
-    if (!e || /no conversation found/i.test(e)) return null;
-    return said && (e.includes(said) || said.includes(e.trim())) ? null : errorText(e);
-  });
-
-  const plan = $derived.by(() => {
-    if (!p || !turn) return null;
-    const pl = p.plans.findLast((x) => x.turn_id === turn.id);
-    return pl && pl.steps.some((s) => s.status !== 'completed') ? pl : null;
-  });
-
+  const sessionError = $derived(deriveSessionError(draft.startError, p));
+  const plan = $derived(deriveActivePlan(p, turn));
   const uiAsk = $derived(!!session && !closed && !auth.isImpersonating && session.created_by === auth.me?.id && !!uiControl.promptFor(sessionId));
   const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || needsRevive);
-  const banners = $derived.by((): BannerBlock[] => [
-    ...(sessionError ? [{ key: 'error', label: 'error', urgent: true }] : []),
-    ...(uiAsk ? [{ key: 'ui', label: 'UI control request', urgent: true }] : []),
-    ...(p?.requests.some((r) => r.kind === 'question') ? [{ key: 'questions', label: 'questions', urgent: true }] : []),
-    ...(plan ? [{ key: 'plan', label: 'plan' }] : []),
-    ...(queueShown ? [{ key: 'queue', label: needsRevive ? 'revive' : 'queue' }] : []),
-    ...(draft.freshContext ? [{ key: 'fresh', label: 'fresh context' }] : []),
-  ]);
+  const banners = $derived(buildRuntimeBanners({
+    sessionError,
+    uiAsk,
+    hasQuestions: Boolean(p?.requests.some((r) => r.kind === 'question')),
+    hasPlan: Boolean(plan),
+    queueShown,
+    needsRevive,
+    freshContext: draft.freshContext,
+  }));
 
   let scroller = $state<HTMLDivElement | null>(null);
   let streamEl = $state<HTMLDivElement | null>(null);
@@ -215,23 +209,16 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
   const takes = (f: File): boolean => takesFile(provider, f);
   let fileEl = $state<HTMLInputElement | null>(null);
 
-  async function addImages(files: Iterable<File>): Promise<void> {
-    const read = await readAttachments(files, takes);
-    if (read.length && runtimeDrafts.owns(ownerId, draft)) draft.images = [...draft.images, ...read];
-  }
-
-  function onPaste(e: ClipboardEvent): void {
-    const files = [...(e.clipboardData?.files ?? [])].filter(takes);
-    if (!canImages || files.length === 0) return;
-    e.preventDefault();
-    void addImages(files);
-  }
+  $effect(() => {
+    if (optimisticMessage && p && effectiveItems === p.items) optimisticMessage = null;
+  });
 
   async function send(
     t: string,
     delivery?: PromptDelivery,
     sent: RuntimeDraftContent = snapshotDraft(draft),
     usedExternal = false,
+    optimistic = false,
   ): Promise<void> {
     if (!runtimeDrafts.owns(ownerId, draft) || draft.recovered === false) return;
     draft.sending = true;
@@ -262,7 +249,9 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
       if (delivery) draft.awaitSeq = null;
       draft.startError = null;
     } catch (e) {
+      if (typeof optimisticMessage !== 'undefined') optimisticMessage = null;
       if (!runtimeDrafts.owns(ownerId, draft)) return;
+      if (optimistic && typeof restoreOptimisticDraft === 'function') restoreOptimisticDraft(draft, sent);
       if (e instanceof ApiError && (e.status === 400 || e.status === 409)) draft.startError = e.message;
       else toastError('Couldn’t send message', e);
     } finally {
@@ -304,10 +293,27 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
       return void askFromComposer(ownerId, draft, payload, effectiveAccess);
     }
     const submitted = snapshotDraft(draft);
-    if (needsRevive && !submitted.fresh_context) {
-      void reopen().then((ok) => (ok ? send(t, undefined, submitted, extCtx) : undefined));
+    const delivery: PromptDelivery | undefined = running && !submitted.fresh_context ? 'queue' : undefined;
+    acknowledgeComposer(draft, submitted);
+    if (typeof composerEl !== 'undefined' && composerEl) composerEl.style.height = '';
+    if (!delivery && typeof buildOptimisticUserMessage === 'function') {
+      const assembled = assembleComposerMessage(t, submitted.context);
+      const finalPrompt =
+        typeof transformOutgoingText === 'function' ? transformOutgoingText(assembled) : assembled;
+      const lastOrd = typeof p !== 'undefined' && p && p.items.length > 0 ? p.items[p.items.length - 1].ordinal : 0;
+      optimisticMessage = buildOptimisticUserMessage(finalPrompt, lastOrd);
+    }
+    const mustReopenFirst = (typeof closed === 'boolean' ? closed : needsRevive) && !submitted.fresh_context;
+    if (mustReopenFirst) {
+      void reopen().then((ok) => {
+        if (ok) return send(t, undefined, submitted, extCtx, true);
+        if (typeof optimisticMessage !== 'undefined') optimisticMessage = null;
+        if (typeof restoreOptimisticDraft === 'function' && runtimeDrafts.owns(ownerId, draft)) {
+          restoreOptimisticDraft(draft, submitted);
+        }
+      });
     } else {
-      void send(t, running && !submitted.fresh_context ? 'queue' : undefined, submitted, extCtx);
+      void send(t, delivery, submitted, extCtx, true);
     }
   }
 
@@ -368,23 +374,7 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
   let askEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   function onKeydown(e: KeyboardEvent): void {
     if (e.isComposing || askEl?.onKey(e)) return;
-    if (suggestions.length > 0) {
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        cmdIdx = (cmdIdx + (e.key === 'ArrowDown' ? 1 : suggestions.length - 1)) % suggestions.length;
-        return;
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        cmdDismissed = true;
-        return;
-      }
-      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
-        e.preventDefault();
-        acceptCmd(suggestions[cmdIdx]);
-        return;
-      }
-    }
+    if (handleSlashMenuKey(e, suggestions, cmdIdx, (i) => (cmdIdx = i), () => (cmdDismissed = true), acceptCmd)) return;
     if (enterSends(e)) {
       e.preventDefault();
       submit();
@@ -531,7 +521,7 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
         aria-activedescendant={suggestions.length > 0 ? `${popId}-opt-${cmdIdx}` : undefined}
         data-testid={testIds?.composer ?? 'runtime-composer'}
         onkeydown={onKeydown}
-        onpaste={onPaste}
+        onpaste={(e) => pasteDraftAttachments(e, canImages, ownerId, draft, takes)}
       ></textarea>
       {#if draft.images.length > 0}
         <RuntimeComposerImages images={draft.images} onremove={(i) => (draft.images = draft.images.filter((_, j) => j !== i))} />
@@ -558,7 +548,7 @@ import { errorText, isRunning, latestTurn, pendingApprovals, timelineRows, turnO
             multiple
             hidden
             onchange={(e) => {
-              void addImages(e.currentTarget.files ?? []);
+              void appendDraftAttachments(ownerId, draft, e.currentTarget.files ?? [], takes);
               e.currentTarget.value = '';
             }}
           />

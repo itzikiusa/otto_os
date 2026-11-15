@@ -21,6 +21,7 @@ pub(crate) mod java_bridge;
 pub(crate) mod lldb_bridge;
 pub(crate) mod node_bridge;
 pub(crate) mod py_bridge;
+pub(crate) mod rust_build_cache;
 pub mod session;
 pub(crate) mod session_entry;
 pub(crate) mod session_inline;

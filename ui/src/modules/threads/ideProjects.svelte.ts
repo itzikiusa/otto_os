@@ -8,6 +8,8 @@ import type { Session } from '../../lib/api/types';
 import {
   fetchNamedIdeProjectsFromServer,
   loadNamedIdeProjectsLocal,
+  LS_IDE_PROJECTS,
+  normalizeNamedIdeProjects,
   normalizeProjectPath,
   type NamedIdeProject,
 } from '../../lib/ideProjectsModel';
@@ -37,21 +39,37 @@ class IdeProjectsBridge {
   private serverRootsByPrimary: Record<string, string[]> = {};
   private hydratedPrimaries = new Set<string>();
 
+  private forceNextFetch = false;
+
   constructor() {
     if (typeof window !== 'undefined') {
-      const bump = (): void => {
-        this.serverProjects = null;
-        this.hydratedProjects = false;
+      const onProjectsChanged = (ev: Event): void => {
+        const detail = (ev as CustomEvent<{ projects?: unknown }>).detail;
+        if (Array.isArray(detail?.projects)) {
+          this.serverProjects = normalizeNamedIdeProjects(
+            detail.projects as ReadonlyArray<NamedIdeProject | Record<string, unknown>>,
+          );
+          this.hydratedProjects = true;
+        }
         this.rev = untrack(() => this.rev) + 1;
       };
-      window.addEventListener(IDE_PROJECTS_CHANGED_EVENT, bump);
-      window.addEventListener('storage', bump);
+      const onStorage = (ev: StorageEvent): void => {
+        if (ev.key && !ev.key.startsWith('otto.ide.')) return;
+        if (!ev.key || ev.key === LS_IDE_PROJECTS) {
+          this.serverProjects = loadNamedIdeProjectsLocal();
+          this.hydratedProjects = true;
+        }
+        this.rev = untrack(() => this.rev) + 1;
+      };
+      window.addEventListener(IDE_PROJECTS_CHANGED_EVENT, onProjectsChanged);
+      window.addEventListener('storage', onStorage);
     }
   }
 
   refresh(): void {
     this.hydratedPrimaries.clear();
     this.hydratedProjects = false;
+    this.forceNextFetch = true;
     this.serverProjects = null;
     this.rev = untrack(() => this.rev) + 1;
   }
@@ -59,11 +77,16 @@ class IdeProjectsBridge {
   private ensureBackendProjects(): void {
     if (this.hydratedProjects || lsGet('otto_mock') === '1') return;
     this.hydratedProjects = true;
-    void fetchNamedIdeProjectsFromServer()
+    const force = this.forceNextFetch;
+    this.forceNextFetch = false;
+    void fetchNamedIdeProjectsFromServer({ force })
       .then((list) => {
         if (list) {
+          const prevJson = this.serverProjects ? JSON.stringify(this.serverProjects) : null;
           this.serverProjects = list;
-          this.rev = untrack(() => this.rev) + 1;
+          if (prevJson !== JSON.stringify(list)) {
+            this.rev = untrack(() => this.rev) + 1;
+          }
         }
       })
       .catch(() => {

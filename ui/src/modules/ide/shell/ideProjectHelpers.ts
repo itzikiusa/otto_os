@@ -557,12 +557,19 @@ export function saveLastIdeRoot(root: string): void {
 }
 export function loadActiveProjectIdLocal(): string | null { return lsGet(ACTIVE_PROJECT_KEY) || null; }
 export function saveActiveProjectIdLocal(id: string | null, projects?: IdeNamedProject[], root?: string): void {
-  lsSet(ACTIVE_PROJECT_KEY, id ?? '');
-  emitIdeProjectsChanged(projects, id, root);
+  const next = id ?? '';
+  const prev = lsGet(ACTIVE_PROJECT_KEY) ?? '';
+  lsSet(ACTIVE_PROJECT_KEY, next);
+  if (prev !== next || root) {
+    emitIdeProjectsChanged(projects, id, root);
+  }
 }
-export function saveNamedProjectsLocal(projects: IdeNamedProject[], activeProjectId?: string | null): void {
-  saveNamedIdeProjectsLocal(projects.map(fromIdeNamedProject));
-  if (activeProjectId !== undefined) emitIdeProjectsChanged(projects, activeProjectId);
+export function saveNamedProjectsLocal(
+  projects: IdeNamedProject[],
+  _activeProjectId?: string | null,
+  opts?: { source?: 'local' | 'server' },
+): void {
+  saveNamedIdeProjectsLocal(projects.map(fromIdeNamedProject), opts);
 }
 
 export function loadNamedProjectsLocal(): IdeNamedProject[] {

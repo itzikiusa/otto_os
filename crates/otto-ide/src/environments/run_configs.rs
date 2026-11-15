@@ -347,8 +347,24 @@ impl EnvironmentManager {
         targets: &TargetManager,
         projects: Option<&ProjectStore>,
         user: Option<&User>,
+        req: IdeStartRunReq,
+        ssh: Option<IdeSshSpec>,
+    ) -> Result<IdeRunState> {
+        self.start_run_with_netbridge(pool, secrets, targets, projects, user, req, ssh, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_run_with_netbridge<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        targets: &TargetManager,
+        projects: Option<&ProjectStore>,
+        user: Option<&User>,
         mut req: IdeStartRunReq,
         ssh: Option<IdeSshSpec>,
+        netbridge: Option<Arc<crate::netbridge::NetBridgeLease>>,
     ) -> Result<IdeRunState> {
         req.target.validate()?;
         for pf in &req.project_folders {
@@ -475,6 +491,7 @@ impl EnvironmentManager {
                 target_spec,
                 ssh,
                 steps,
+                netbridge,
                 stop_rx,
             )
             .await;

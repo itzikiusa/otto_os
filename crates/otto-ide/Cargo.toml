@@ -11,6 +11,7 @@ otto-state = { workspace = true }
 otto-ssh = { workspace = true }
 otto-netguard = { workspace = true }
 otto-git-cmd = { workspace = true }
+otto-telemetry = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }

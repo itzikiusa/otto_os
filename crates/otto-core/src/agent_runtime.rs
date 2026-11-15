@@ -411,6 +411,11 @@ pub struct TurnItem {
     /// The `subagent` item this item belongs to (its activity), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_item_id: Option<Id>,
+    /// True when heavy tool/diff/output fields were omitted from a compact
+    /// snapshot (`GET /runtime-sessions/{id}/events?compact=1`); fetch the
+    /// full item on demand via `GET /runtime-sessions/{id}/items/{item_id}`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detail_omitted: bool,
     #[serde(flatten)]
     pub kind: TurnItemKind,
 }
@@ -442,6 +447,155 @@ impl TurnItem {
                 }
             )
     }
+
+    /// Return a lightweight snapshot clone omitting large tool payloads,
+    /// command outputs, and file patches on settled items (`detail_omitted = true`).
+    /// `UserMessage`, `AssistantMessage`, and all open/streaming items are
+    /// returned intact so conversation text and live rows render immediately.
+    pub fn compact_for_snapshot(&self) -> Self {
+        if self.status.is_open() || self.is_streaming() {
+            return self.clone();
+        }
+        let mut out = self.clone();
+        match &mut out.kind {
+            TurnItemKind::FileChange {
+                diff_str,
+                old_str,
+                new_str,
+                ..
+            } => {
+                if diff_str.is_some() || old_str.is_some() || new_str.is_some() {
+                    *diff_str = None;
+                    *old_str = None;
+                    *new_str = None;
+                    out.detail_omitted = true;
+                }
+            }
+            TurnItemKind::CommandExecution { input, output, .. } => {
+                let long_input = input.len() > 240;
+                if long_input {
+                    *input = truncate_compact_str(input, 240);
+                }
+                if output.is_some() || long_input {
+                    *output = None;
+                    out.detail_omitted = true;
+                }
+            }
+            TurnItemKind::DynamicTool {
+                tool_name,
+                input,
+                output,
+                images,
+            } => {
+                if !is_thread_link_tool(tool_name)
+                    && (output.is_some() || !images.is_empty() || json_value_exceeds(input, 256))
+                {
+                    *input = Value::Null;
+                    *output = None;
+                    images.clear();
+                    out.detail_omitted = true;
+                }
+            }
+            TurnItemKind::Reasoning { text, .. } => {
+                if text.len() > 600 {
+                    *text = truncate_compact_markdown(text, 560);
+                    out.detail_omitted = true;
+                }
+            }
+            TurnItemKind::Subagent { prompt, output, .. } => {
+                let first_line = output
+                    .as_deref()
+                    .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
+                    .map(|l| truncate_compact_str(l.trim(), 200));
+                let had_large_output = output
+                    .as_deref()
+                    .is_some_and(|s| first_line.as_deref() != Some(s.trim()));
+                if prompt.is_some() || had_large_output {
+                    *prompt = None;
+                    *output = first_line;
+                    out.detail_omitted = true;
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
+fn is_thread_link_tool(name: &str) -> bool {
+    let bare = name.rsplit(['.', '_']).next().unwrap_or(name);
+    let tail = name
+        .rsplit_once("otto_")
+        .or_else(|| name.rsplit_once("otto."))
+        .map(|(_, t)| t)
+        .unwrap_or(bare);
+    matches!(
+        tail,
+        "thread_open" | "open_session" | "thread_message" | "thread_read"
+    )
+}
+
+fn json_value_exceeds(v: &Value, max_bytes: usize) -> bool {
+    fn walk(v: &Value, acc: &mut usize, max_bytes: usize) -> bool {
+        if *acc > max_bytes {
+            return true;
+        }
+        match v {
+            Value::Null | Value::Bool(_) => *acc += 5,
+            Value::Number(n) => *acc += n.to_string().len(),
+            Value::String(s) => *acc += s.len() + 2,
+            Value::Array(items) => {
+                *acc += 2;
+                for item in items {
+                    if walk(item, acc, max_bytes) {
+                        return true;
+                    }
+                }
+            }
+            Value::Object(map) => {
+                *acc += 2;
+                for (k, val) in map {
+                    *acc += k.len() + 3;
+                    if walk(val, acc, max_bytes) {
+                        return true;
+                    }
+                }
+            }
+        }
+        *acc > max_bytes
+    }
+    let mut acc = 0usize;
+    walk(v, &mut acc, max_bytes)
+}
+
+fn truncate_compact_str(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+fn truncate_compact_markdown(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut slice = s[..end].to_string();
+    let fences = slice
+        .lines()
+        .filter(|l| l.starts_with("```") || l.starts_with("~~~"))
+        .count();
+    if fences % 2 == 1 {
+        slice.push_str("\n```");
+    }
+    slice
 }
 
 /// `OrchestrationV2RuntimeRequest.status`.
@@ -1314,6 +1468,7 @@ mod tests {
             updated_at: ts(),
             error: None,
             parent_item_id: None,
+            detail_omitted: false,
             kind: TurnItemKind::AssistantMessage {
                 message_id: "m1".into(),
                 text: "Hel".into(),
@@ -1468,6 +1623,7 @@ mod tests {
             updated_at: ts(),
             error: None,
             parent_item_id: None,
+            detail_omitted: false,
             kind: TurnItemKind::Subagent {
                 tool_name: "Agent".into(),
                 description: Some("PR sweep".into()),

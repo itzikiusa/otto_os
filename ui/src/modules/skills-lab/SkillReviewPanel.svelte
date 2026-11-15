@@ -17,6 +17,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { skillsLabState } from '../../lib/stores/skillsLabState.svelte';
+  import { untrack } from 'svelte';
   import SkillReviewAgents from './SkillReviewAgents.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -47,28 +49,29 @@
   // valid `skill_source` values the review engine resolves.
   type SkillOpt = { name: string; source: string; label: string };
 
-  let reviews = $state<SkillReview[]>([]);
+  const initialReviewState = untrack(() => skillsLabState.reviewFor(wsId));
+  let reviews = $state<SkillReview[]>(initialReviewState.reviews);
   // Inline list-load failure + Retry (instead of a toast over "No skill reviews yet").
   let listError = $state<string | null>(null);
   // First list load: don't flash "No skill reviews yet" before it lands.
-  let listLoading = $state(true);
-  let selected = $state<SkillReview | null>(null);
+  let listLoading = $state(!initialReviewState.loaded);
+  let selected = $state<SkillReview | null>(initialReviewState.selected);
   let skillOpts = $state<SkillOpt[]>([]);
 
   // New-review form.
-  let fSkill = $state('');
-  let fMode = $state<'static' | 'agents'>('agents');
+  let fSkill = $state(initialReviewState.fSkill);
+  let fMode = $state<'static' | 'agents'>(initialReviewState.fMode);
   // Reviewer providers from the live registry (built-ins + custom, e.g. grok).
   // Selection is a set of provider names; default to the first agent provider.
-  let fProviders = $state<Set<string>>(new Set([defaultAgentProvider()]));
+  let fProviders = $state<Set<string>>(new Set(initialReviewState.fProviders ?? [defaultAgentProvider()]));
   function toggleReviewer(p: string): void {
     const next = new Set(fProviders);
     if (next.has(p)) next.delete(p);
     else next.add(p);
     fProviders = next;
   }
-  let fInstructions = $state('');
-  let starting = $state(false);
+  let fInstructions = $state(initialReviewState.fInstructions);
+  const starting = $derived(skillsLabState.startingReview);
   let phoneListOpen = $state(false);
   const showPhoneList = $derived(
     viewport.isPhone && (phoneListOpen || ((listLoading || !!listError) && reviews.length === 0)),
@@ -196,24 +199,17 @@
     }
     const workspace = wsId;
     const generation = detailGeneration;
-    starting = true;
-    try {
-      const rev = await skillReviewApi.start(workspace, {
-        skill_name: opt.name,
-        skill_source: opt.source,
-        providers,
-        agent_mode: fMode,
-        instructions: fInstructions.trim(),
-      });
-      if (disposed || workspace !== wsId || generation !== detailGeneration) return;
-      selected = rev;
-      phoneListOpen = false;
-      await loadList();
-    } catch (e) {
-      toastError('Couldn’t start the review', e);
-    } finally {
-      starting = false;
-    }
+    const rev = await skillsLabState.startReview(workspace, {
+      skill_name: opt.name,
+      skill_source: opt.source,
+      providers,
+      agent_mode: fMode,
+      instructions: fInstructions.trim(),
+    });
+    if (!rev || disposed || workspace !== wsId || generation !== detailGeneration) return;
+    selected = rev;
+    phoneListOpen = false;
+    await loadList();
   }
 
   async function applyFixes(): Promise<void> {
@@ -312,21 +308,42 @@
   });
   onDestroy(() => { detailGeneration++; if (poll) poll.stop(); });
 
-  // Load on workspace change.
-  let loadedWs = '';
+  // Load on workspace change (restoring cached state on remount within the same workspace).
+  let loadedWs = initialReviewState.loaded ? untrack(() => wsId) : '';
+  if (loadedWs) void loadSkills();
   $effect(() => {
     if (wsId && wsId !== loadedWs) {
-      // The open review belongs to the previous workspace.
       detailGeneration++;
-      if (loadedWs) selected = null;
+      const cached = untrack(() => skillsLabState.reviewFor(wsId));
       loadedWs = wsId;
       void loadSkills();
-      // Open on the newest review rather than a blank form — unless the form
-      // is already in use (a "Review this skill" hand-off pre-fills fSkill).
+      if (cached.loaded) {
+        reviews = cached.reviews;
+        selected = cached.selected;
+        fSkill = cached.fSkill;
+        fMode = cached.fMode;
+        if (cached.fProviders) fProviders = new Set(cached.fProviders);
+        fInstructions = cached.fInstructions;
+        listLoading = false;
+        return;
+      }
+      selected = null;
       void loadList().then(() => {
         if (!selected && !fSkill && reviews.length > 0) void openReview(reviews[0].id);
       });
     }
+  });
+  $effect(() => {
+    if (!wsId || loadedWs !== wsId) return;
+    skillsLabState.syncReview(wsId, {
+      reviews,
+      loaded: !listLoading && !listError,
+      selected,
+      fSkill,
+      fMode,
+      fProviders: new Set(fProviders),
+      fInstructions,
+    });
   });
 
   // Consume a cross-tab "review this skill" intent by pre-filling the form.

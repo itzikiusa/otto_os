@@ -6,6 +6,7 @@
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { viewport } from '../../../lib/stores/viewport.svelte';
   import { ide, type IdeRunConfig } from '../ideStore.svelte';
+  import { formatBridgeToolbarLabel } from './networkBridgeModel';
 
   const IdeRunConfigPopoverLazy = lazyComponent(() => import('./IdeRunConfigPopover.svelte'));
 
@@ -22,10 +23,25 @@
   const selectorLabel = $derived(
     selectedConfig?.name || (ide.activeTab ? `Current file (${ide.activeTab.name})` : 'Current file'),
   );
+  const bridgeLabel = $derived(
+    ide.target.kind === 'local' ? formatBridgeToolbarLabel(ide.projectEnv?.network_bridge) : null,
+  );
 </script>
 
 {#if !viewport.isPhone}
   <div class="run-cluster" data-keep role="group" aria-label="Launch controls">
+    {#if bridgeLabel}
+      <button
+        type="button"
+        class="run-bridge-btn"
+        title="Active cluster / SSH network bridge — click to configure"
+        onclick={() => ide.openEnvironmentsModal('env')}
+        data-testid="ide-netbridge-toolbar-pill"
+      >
+        <Icon name="helm" size={12} />
+        <span class="run-cfg-label" dir="ltr">{bridgeLabel}</span>
+      </button>
+    {/if}
     <button
       bind:this={triggerEl}
       type="button"
@@ -147,6 +163,13 @@
     font-size: var(--fs-xs); font-weight: 500; cursor: pointer;
   }
   .run-cfg-btn:hover { border-color: var(--border-strong); background: var(--hover); }
+  .run-bridge-btn {
+    display: inline-flex; align-items: center; gap: 4px; max-inline-size: 136px;
+    min-inline-size: 0; block-size: 26px; padding-inline: 8px; background: var(--accent-soft);
+    color: var(--accent-text); border: 1px solid var(--accent-line); border-radius: var(--radius-s);
+    font-size: var(--fs-xs); font-weight: 500; cursor: pointer;
+  }
+  .run-bridge-btn:hover { background: var(--hover); }
   .run-cfg-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
   @media (max-width: 1024px) { .run-cfg-btn { max-inline-size: 150px; } }
 </style>

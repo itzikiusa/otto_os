@@ -272,7 +272,7 @@ pub async fn ensure_go_binary(req: GoBuildRequest<'_>) -> Result<GoCachedArtifac
     }
     let prune_dir = cache_dir.clone();
     let prune_key = cache_key.clone();
-    let _ = tokio::task::spawn_blocking(move || prune_go_cache_dir(&prune_dir, &prune_key)).await;
+    tokio::task::spawn_blocking(move || prune_go_cache_dir(&prune_dir, &prune_key));
 
     Ok(GoCachedArtifact {
         binary_path: bin_path,

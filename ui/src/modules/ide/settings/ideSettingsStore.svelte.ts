@@ -17,6 +17,7 @@ import {
   ideBasename,
   type IdeEnvVar,
   type IdeKeymapPreset,
+  type IdeNetworkBridgeConfig,
   type IdeProjectEnvironment,
 } from '../ideStore.svelte';
 
@@ -214,6 +215,7 @@ export interface EnvDraftState {
   python_interpreter: string;
   inherit_shell_env: boolean;
   dotenv_path: string;
+  network_bridge?: IdeNetworkBridgeConfig | null;
   env_vars: IdeEnvVar[];
 }
 
@@ -226,6 +228,7 @@ function emptyEnvDraft(env: IdeProjectEnvironment | null): EnvDraftState {
     python_interpreter: env?.python_interpreter ?? '',
     inherit_shell_env: env?.inherit_shell_env ?? true,
     dotenv_path: env?.dotenv_path ?? '',
+    network_bridge: env?.network_bridge ?? undefined,
     env_vars: (env?.env_vars ?? []).map((v) => ({ ...v })),
   };
 }
@@ -298,6 +301,7 @@ class IdeSettingsController {
         inherit_shell_env: this.envDraft.inherit_shell_env,
         dotenv_path: this.envDraft.dotenv_path || null,
         module_sdks: snap.moduleSdkMap,
+        network_bridge: this.envDraft.network_bridge ?? ide.projectEnv?.network_bridge ?? undefined,
         env_vars: this.envDraft.env_vars.filter((v) => v.key.trim().length > 0),
       });
       if (envOk) this.envDirty = false;

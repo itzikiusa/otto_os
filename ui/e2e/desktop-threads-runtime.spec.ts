@@ -122,14 +122,13 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect(thread.getByTestId('runtime-queued')).toHaveCount(0);
 
   // Slash commands: the popup lists the view's commands; /btw opens a side
-  // chat about this thread without interrupting it.
+  // chat about this thread without interrupting it ("Ask about <title> … Starting…"
+  // while spawning, then "About <title>" once the side session is live).
   await composer.fill('/');
   await expect(thread.locator('[data-slash-pop]')).toContainText('/btw');
   await composer.fill('/btw what changed so far?');
   await composer.press('Enter');
-  // (The side chat itself is a PTY thread — its agent never starts against
-  // the e2e stand-in CLI, so this checks that it is asked about this thread.)
-  await expect(page.getByTestId('threads-side-chat')).toContainText('Ask about hello runtime', { timeout: 15_000 });
+  await expect(page.getByTestId('threads-side-chat')).toContainText(/about hello runtime/i, { timeout: 15_000 });
   await expect(composer).toHaveValue('');
 
   await expectNoHorizontalOverflow(page);

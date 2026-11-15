@@ -231,7 +231,7 @@ jobs:
           if [ "$EVENT" = pull_request ]; then
             echo "MAC_SCOPE=-p otto-keychain -p otto-pty -p otto-sandbox -p otto-sessions -p otto-ssh --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency" >> "$GITHUB_ENV"
           else
-            echo "MAC_SCOPE=-p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod --features otto-server/test-util --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login --test snips --test profile_lock" >> "$GITHUB_ENV"
+            echo "MAC_SCOPE=-p otto-apiclient -p otto-automation -p otto-brokers -p otto-browser -p otto-ide -p otto-keychain -p otto-pty -p otto-rooms -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry-collector -p ottod --features otto-server/test-util --lib --bins --test holder --test ring_allocation --test seatbelt_exec --test agent_messaging --test broadcast_e2e --test folder_trust_overcome --test isolation --test persist_restart --test terminal_latency --test lightpanda --test lightpanda_login --test snips --test profile_lock" >> "$GITHUB_ENV"
           fi
 
       # otto-server links otto-brokers → rdkafka-sys, which builds librdkafka

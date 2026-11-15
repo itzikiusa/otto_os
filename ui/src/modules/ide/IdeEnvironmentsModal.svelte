@@ -14,8 +14,14 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ide, type IdeEnvVar, type IdePythonVenv, type IdeRunConfig } from './ideStore.svelte';
+  import IdeNetworkBridgeCard from './shell/IdeNetworkBridgeCard.svelte';
   import IdeRunConfigEditor, { type ConfigDraft, emptyConfigDraft } from './shell/IdeRunConfigEditor.svelte';
   import IdeShellEnvCard from './shell/IdeShellEnvCard.svelte';
+  import {
+    emptyNetworkBridgeDraft,
+    serializeNetworkBridgeDraft,
+    type IdeNetworkBridgeDraft,
+  } from './shell/networkBridgeModel';
 
   interface Props {
     open?: boolean;
@@ -47,6 +53,7 @@
   let dotenvPath = $state('');
   let extraPath = $state('');
   let envRows = $state<EditableEnvRow[]>([]);
+  let bridgeDraft = $state<IdeNetworkBridgeDraft>(emptyNetworkBridgeDraft(null));
   let envValidationError = $state('');
   let savingEnv = $state(false);
   let creatingVenv = $state(false);
@@ -119,6 +126,7 @@
     pythonInterpreter = e.python_interpreter ?? '';
     dotenvPath = e.dotenv_path ?? '';
     extraPath = e.extra_path ?? '';
+    bridgeDraft = emptyNetworkBridgeDraft(e.network_bridge);
     envRows = (e.env_vars ?? []).map((v, idx) => ({
       rowId: `ev-${idx}-${v.key}`,
       key: v.key,
@@ -206,6 +214,12 @@
       }
     }
 
+    const serializedBridge = serializeNetworkBridgeDraft(bridgeDraft);
+    if (serializedBridge.error) {
+      envValidationError = serializedBridge.error;
+      return;
+    }
+
     savingEnv = true;
     try {
       const ok = await ide.saveEnvironment({
@@ -217,6 +231,7 @@
         python_interpreter: pythonInterpreter.trim() || null,
         dotenv_path: dotenvPath.trim() || null,
         extra_path: extraPath.trim() || null,
+        network_bridge: ide.target.kind === 'local' ? serializedBridge.config : undefined,
         env_vars: cleaned,
       });
       if (ok) { hydratedSnapshot = ''; await ide.loadEnvironments(); }
@@ -327,6 +342,9 @@
           {#if activeTab === 'env'}
             <div class="env-pane" role="tabpanel" id="ide-env-panel-env" aria-labelledby="ide-env-tab-env">
               <IdeShellEnvCard {inheritShellEnv} onchangeInherit={(next) => (inheritShellEnv = next)} onpasteVars={importPastedEnvRows} />
+              {#if ide.target.kind === 'local'}
+                <IdeNetworkBridgeCard bind:draft={bridgeDraft} idPrefix="ide-env-nb" />
+              {/if}
 
               <div class="env-sec-bar">
                 <span class="env-sec-title">SDKs &amp; language runtimes</span>

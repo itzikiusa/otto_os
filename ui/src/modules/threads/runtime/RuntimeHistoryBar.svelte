@@ -6,8 +6,9 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { runtimeViews } from './runtimeView.svelte';
 
-  const INITIAL_ROW_CAP = 80;
-  const ROW_STEP = 80;
+  const INITIAL_ROW_CAP = 200;
+  const ROW_STEP = 200;
+  const AUTO_LOAD_TOP_PX = 240;
 
   interface Props {
     sessionId: string;
@@ -77,6 +78,35 @@
       busy = false;
     }
   }
+
+  $effect(() => {
+    const el = scroller;
+    void sessionId;
+    if (!el) return;
+    let prevTop = el.scrollTop;
+    let prevHeight = el.scrollHeight;
+    const maybeAutoLoad = (forceUpward: boolean) => {
+      const top = el.scrollTop;
+      const height = el.scrollHeight;
+      const scrolledUp = forceUpward || (top < prevTop && height >= prevHeight - 2);
+      prevTop = top;
+      prevHeight = height;
+      const unpinned = el.dataset.atBottom === '0';
+      if ((scrolledUp || unpinned) && top <= AUTO_LOAD_TOP_PX && (hiddenLocalRows > 0 || hasOlder) && !busy && !loadingOlder) {
+        void loadMore();
+      }
+    };
+    const onScroll = () => maybeAutoLoad(false);
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0 && el.scrollTop <= AUTO_LOAD_TOP_PX) maybeAutoLoad(true);
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    el.addEventListener('wheel', onWheel, { passive: true });
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      el.removeEventListener('wheel', onWheel);
+    };
+  });
 </script>
 
 {#if hiddenLocalRows > 0 || hasOlder}

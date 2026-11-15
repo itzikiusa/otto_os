@@ -137,7 +137,20 @@ export function loadNamedIdeProjectsLocal(): NamedIdeProject[] {
   return [];
 }
 
-export function saveNamedIdeProjectsLocal(projects: NamedIdeProject[]): void {
+let inFlightProjectsFetch: Promise<NamedIdeProject[] | null> | null = null;
+let cachedServerProjects: NamedIdeProject[] | null = null;
+let cachedServerProjectsAt = 0;
+const PROJECTS_FETCH_TTL_MS = 15_000;
+
+export function resetIdeProjectsFetchCacheForTests(): void {
+  inFlightProjectsFetch = null;
+  cachedServerProjects = null;
+  cachedServerProjectsAt = 0;
+}
+
+export function normalizeNamedIdeProjects(
+  projects: ReadonlyArray<NamedIdeProject | Record<string, unknown>>,
+): NamedIdeProject[] {
   const normalized: NamedIdeProject[] = [];
   const seenIds = new Set<string>();
   for (let i = 0; i < projects.length; i++) {
@@ -146,13 +159,32 @@ export function saveNamedIdeProjectsLocal(projects: NamedIdeProject[]): void {
     seenIds.add(proj.id);
     normalized.push(proj);
   }
-  lsSet(LS_IDE_PROJECTS, JSON.stringify(normalized));
-  lsRemove(LS_IDE_PROJECTS_LEGACY);
+  return normalized;
+}
+
+export function saveNamedIdeProjectsLocal(
+  projects: NamedIdeProject[],
+  opts?: { source?: 'local' | 'server' },
+): boolean {
+  const normalized = normalizeNamedIdeProjects(projects);
+  const serialized = JSON.stringify(normalized);
+  const prevRaw = lsGet(LS_IDE_PROJECTS);
+  const hadLegacy = lsGet(LS_IDE_PROJECTS_LEGACY) !== null;
+  if (hadLegacy) lsRemove(LS_IDE_PROJECTS_LEGACY);
+  cachedServerProjects = normalized;
+  cachedServerProjectsAt = Date.now();
+  if (prevRaw === serialized && !hadLegacy) {
+    return false;
+  }
+  lsSet(LS_IDE_PROJECTS, serialized);
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
-      new CustomEvent(IDE_PROJECTS_CHANGED_EVENT, { detail: { projects: normalized } }),
+      new CustomEvent(IDE_PROJECTS_CHANGED_EVENT, {
+        detail: { projects: normalized, source: opts?.source ?? 'local' },
+      }),
     );
   }
+  return true;
 }
 
 export function mergeBackendIdeProjects(
@@ -191,17 +223,42 @@ export function mergeBackendIdeProjects(
   return [...byId.values()];
 }
 
-export async function fetchNamedIdeProjectsFromServer(): Promise<NamedIdeProject[] | null> {
+export async function fetchNamedIdeProjectsFromServer(opts?: {
+  force?: boolean;
+}): Promise<NamedIdeProject[] | null> {
   if (lsGet('otto_mock') === '1') return null;
-  try {
-    const { api } = await import('./api/client.ts');
-    const body = await api.bg.get<{ projects?: ReadonlyArray<Record<string, unknown>> }>('/ide/projects');
-    const remote = Array.isArray(body?.projects) ? body.projects : [];
-    const local = loadNamedIdeProjectsLocal();
-    const merged = mergeBackendIdeProjects(local, remote, true);
-    saveNamedIdeProjectsLocal(merged);
-    return merged;
-  } catch {
-    return null;
+  const force = Boolean(opts?.force);
+  if (
+    !force &&
+    cachedServerProjects !== null &&
+    Date.now() - cachedServerProjectsAt < PROJECTS_FETCH_TTL_MS
+  ) {
+    return cachedServerProjects;
   }
+  if (!force && inFlightProjectsFetch) {
+    return inFlightProjectsFetch;
+  }
+  let run: Promise<NamedIdeProject[] | null> | null = null;
+  const started = (async (): Promise<NamedIdeProject[] | null> => {
+    try {
+      const { api } = await import('./api/client.ts');
+      const body = await api.bg.get<{ projects?: ReadonlyArray<Record<string, unknown>> }>(
+        '/ide/projects',
+      );
+      const remote = Array.isArray(body?.projects) ? body.projects : [];
+      const local = loadNamedIdeProjectsLocal();
+      const merged = mergeBackendIdeProjects(local, remote, true);
+      saveNamedIdeProjectsLocal(merged, { source: 'server' });
+      return merged;
+    } catch {
+      return null;
+    } finally {
+      if (run && inFlightProjectsFetch === run) {
+        inFlightProjectsFetch = null;
+      }
+    }
+  })();
+  run = started;
+  inFlightProjectsFetch = started;
+  return started;
 }

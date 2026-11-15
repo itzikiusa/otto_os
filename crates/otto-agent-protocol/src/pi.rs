@@ -285,14 +285,23 @@ impl PiDriver {
                 output,
                 exit_code: None,
             },
-            "edit" | "write" => TurnItemKind::FileChange {
-                file_name: s("path").or_else(|| s("file_path")).unwrap_or_default(),
-                diff_str: None,
-                old_str: s("oldText").or_else(|| s("old_string")),
-                new_str: s("newText")
-                    .or_else(|| s("content"))
-                    .or_else(|| s("new_string")),
-            },
+            "edit" | "write" => {
+                let file_name = s("path").or_else(|| s("file_path")).unwrap_or_default();
+                let (diff_str, old_str, new_str) = crate::diff_compact::compact_file_change_fields(
+                    &file_name,
+                    None,
+                    s("oldText").or_else(|| s("old_string")),
+                    s("newText")
+                        .or_else(|| s("content"))
+                        .or_else(|| s("new_string")),
+                );
+                TurnItemKind::FileChange {
+                    file_name,
+                    diff_str,
+                    old_str,
+                    new_str,
+                }
+            }
             _ => TurnItemKind::DynamicTool {
                 tool_name: name.to_string(),
                 input: args.clone(),

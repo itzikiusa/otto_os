@@ -8,7 +8,10 @@ import {
   writeIdeUndoDraftImmediate,
 } from '../../../lib/components/cm-ide-drafts';
 import { readIdePreferences } from '../../../lib/components/cm-ide-prefs';
-import { mergeBackendIdeProjects, parseNamedIdeProject } from '../../../lib/ideProjectsModel';
+import {
+  fetchNamedIdeProjectsFromServer,
+  parseNamedIdeProject,
+} from '../../../lib/ideProjectsModel';
 import { lsGet, lsRemove, lsSet } from '../../../lib/storage';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
@@ -27,7 +30,6 @@ import {
   detectBuildToolFromState,
   emitIdeProjectsChanged,
   findContainingRoot,
-  fromIdeNamedProject,
   isPathExternal,
   loadActiveProjectIdLocal,
   loadAttachedRootEntries,
@@ -107,19 +109,16 @@ export function readProjectTabsSnapshot(projectId: string): SavedProjectTabs | n
 
 export async function syncNamedProjectsFromBackend(host: NamedProjectsHost): Promise<void> {
   try {
-    const resp = await api.bg.get<{ projects?: ReadonlyArray<Record<string, unknown>> }>('/ide/projects');
-    const remote = Array.isArray(resp?.projects) ? resp.projects : [];
-    const merged = mergeBackendIdeProjects(
-      host.namedProjects.map(fromIdeNamedProject),
-      remote,
-      true,
-    ).map(toIdeNamedProject);
-    host.namedProjects = merged;
+    const serverList = await fetchNamedIdeProjectsFromServer();
+    if (!serverList) return;
+    const merged = serverList.map(toIdeNamedProject);
+    if (JSON.stringify(host.namedProjects) !== JSON.stringify(merged)) {
+      host.namedProjects = merged;
+    }
     if (host.activeProjectId && !merged.some((p) => p.id === host.activeProjectId)) {
       host.activeProjectId = null;
       saveActiveProjectIdLocal(null, merged, host.target.root);
     }
-    saveNamedProjectsLocal(merged, host.activeProjectId);
   } catch {
     /* Optional endpoint; local persistence remains authoritative when unreachable */
   }

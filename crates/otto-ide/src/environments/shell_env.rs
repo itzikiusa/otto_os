@@ -9,10 +9,11 @@
 //! Each `IdeEngine` / `EnvironmentManager` owns its own `Arc<ShellEnvResolver>`
 //! so isolated engines and tests never share process-global state.
 
+mod cache;
 mod shell_env_probe;
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -63,6 +64,7 @@ pub struct ShellEnvResolver {
     state: RwLock<ShellEnvState>,
     warming: AtomicBool,
     notify: Notify,
+    cache_path: Option<PathBuf>,
 }
 
 impl Default for ShellEnvResolver {
@@ -73,24 +75,66 @@ impl Default for ShellEnvResolver {
 
 impl ShellEnvResolver {
     pub fn new() -> Self {
+        Self::new_inner(None)
+    }
+
+    /// Construct a resolver backed by `<data_dir>/ide-shell-env-cache.json` so
+    /// daemon restarts and deploys resume in `<0.5ms` when dotfiles are unchanged.
+    pub fn with_cache_dir(data_dir: &Path) -> Self {
+        Self::new_inner(Some(data_dir.join(cache::SHELL_ENV_CACHE_FILENAME)))
+    }
+
+    fn new_inner(cache_path: Option<PathBuf>) -> Self {
         let shell = detect_user_shell();
-        let base_vars = collect_process_base_env();
-        let status = if otto_core::e2e::isolated() {
-            "ready"
-        } else {
-            "cold"
-        };
+        let mut vars = collect_process_base_env();
+        if otto_core::e2e::isolated() {
+            return Self {
+                state: RwLock::new(ShellEnvState {
+                    status: "ready".to_string(),
+                    shell,
+                    vars,
+                    loaded_at: None,
+                    duration_ms: None,
+                    error: None,
+                }),
+                warming: AtomicBool::new(false),
+                notify: Notify::new(),
+                cache_path: None,
+            };
+        }
+
+        if let Some(ref path) = cache_path {
+            let fp = cache::compute_shell_rc_fingerprint(&shell);
+            if let Some(disk) = cache::load_cached_shell_env(path, &fp) {
+                vars.extend(disk.vars);
+                return Self {
+                    state: RwLock::new(ShellEnvState {
+                        status: "ready".to_string(),
+                        shell: disk.shell,
+                        vars,
+                        loaded_at: Some(disk.loaded_at),
+                        duration_ms: Some(disk.duration_ms),
+                        error: None,
+                    }),
+                    warming: AtomicBool::new(false),
+                    notify: Notify::new(),
+                    cache_path,
+                };
+            }
+        }
+
         Self {
             state: RwLock::new(ShellEnvState {
-                status: status.to_string(),
+                status: "cold".to_string(),
                 shell,
-                vars: base_vars,
+                vars,
                 loaded_at: None,
                 duration_ms: None,
                 error: None,
             }),
             warming: AtomicBool::new(false),
             notify: Notify::new(),
+            cache_path,
         }
     }
 
@@ -107,7 +151,14 @@ impl ShellEnvResolver {
             }),
             warming: AtomicBool::new(false),
             notify: Notify::new(),
+            cache_path: None,
         })
+    }
+
+    /// Returns `true` when the initial `$SHELL -lic` probe has not yet completed.
+    pub fn is_cold_or_warming(&self) -> bool {
+        let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+        guard.status == "cold" || guard.status == "warming"
     }
 
     /// Kick off background warming on the active Tokio runtime if still cold.
@@ -233,14 +284,28 @@ impl ShellEnvResolver {
         let outcome = capture_shell_env_with_shell(&shell, INTERACTIVE_SHELL_TIMEOUT).await;
         let duration_ms = started.elapsed().as_millis() as u64;
         let now = Utc::now().to_rfc3339();
+        let mut persist_job: Option<(PathBuf, cache::CachedShellEnvDisk)> = None;
 
         {
             let mut guard = self.state.write().unwrap_or_else(|e| e.into_inner());
-            guard.shell = shell;
-            guard.loaded_at = Some(now);
+            guard.shell = shell.clone();
+            guard.loaded_at = Some(now.clone());
             guard.duration_ms = Some(duration_ms);
             match outcome {
                 Ok(mut parsed) => {
+                    if let Some(ref path) = self.cache_path {
+                        persist_job = Some((
+                            path.clone(),
+                            cache::CachedShellEnvDisk {
+                                version: 1,
+                                fingerprint: cache::compute_shell_rc_fingerprint(&shell),
+                                shell,
+                                loaded_at: now,
+                                duration_ms,
+                                vars: parsed.clone(),
+                            },
+                        ));
+                    }
                     let mut merged = collect_process_base_env();
                     merged.append(&mut parsed);
                     guard.status = "ready".to_string();
@@ -256,6 +321,12 @@ impl ShellEnvResolver {
         }
         self.warming.store(false, Ordering::Release);
         self.notify.notify_waiters();
+        if let Some((path, disk)) = persist_job {
+            let _ = tokio::task::spawn_blocking(move || {
+                cache::save_cached_shell_env(&path, &disk);
+            })
+            .await;
+        }
     }
 }
 

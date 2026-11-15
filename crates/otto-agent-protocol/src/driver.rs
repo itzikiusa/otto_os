@@ -179,6 +179,7 @@ pub fn item(
         updated_at: now,
         error: None,
         parent_item_id: None,
+        detail_omitted: false,
         kind,
     }
 }

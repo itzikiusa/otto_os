@@ -117,8 +117,9 @@ pub(super) async fn run_before_launch(
 ) -> std::result::Result<(), String> {
     match target.kind {
         IdeTargetKind::Local => {
+            let wrapped = crate::netbridge::wrap_shell_script_for_interposer(script, env_map);
             let mut cmd = Command::new("sh");
-            cmd.args(["-c", script])
+            cmd.args(["-c", &wrapped])
                 .current_dir(cwd)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -168,8 +169,22 @@ pub(super) fn spawn_run_child(
     match target.kind {
         IdeTargetKind::Local => {
             let resolved_prog = resolve_program_in_env(program, env_map);
+            let owned_args: Vec<String>;
+            let effective_args: &[String] = if matches!(program, "sh" | "/bin/sh")
+                && args.len() == 2
+                && args[0] == "-c"
+                && env_map.contains_key("OTTO_NETBRIDGE_DYLIB")
+            {
+                owned_args = vec![
+                    "-c".to_string(),
+                    crate::netbridge::wrap_shell_script_for_interposer(&args[1], env_map),
+                ];
+                &owned_args
+            } else {
+                args
+            };
             let mut cmd = Command::new(resolved_prog);
-            cmd.args(args)
+            cmd.args(effective_args)
                 .current_dir(cwd)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())

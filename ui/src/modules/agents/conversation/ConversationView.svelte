@@ -83,6 +83,13 @@
     runApprovedPlanImplementation,
     UNAVAILABLE_TRANSCRIPT_COPY,
   } from './conversationMenu';
+  import {
+    bindPanelPointerResize,
+    captureFirstTurnAnchor,
+    findAdjacentUserTurn,
+    flashUserTurnBubble,
+    restoreFirstTurnAnchor,
+  } from './conversationScrollHelpers';
 
   let {
     sessionId,
@@ -265,26 +272,7 @@
   const panelBeside = $derived(convW >= 760);
   const panelPx = $derived(Math.round(Math.min(Math.max(panelW || convW * 0.46, 300), convW - 360)));
   function startResize(e: PointerEvent): void {
-    const el = e.currentTarget as HTMLElement;
-    el.setPointerCapture(e.pointerId);
-    const x0 = e.clientX;
-    const w0 = panelPx;
-    const rtl = getComputedStyle(el).direction === 'rtl';
-    const move = (ev: PointerEvent): void => {
-      const dx = (ev.clientX - x0) * (rtl ? -1 : 1);
-      panelW = Math.max(300, Math.min(convW - 360, w0 - dx));
-    };
-    const up = (): void => {
-      el.removeEventListener('pointermove', move);
-      el.removeEventListener('pointerup', up);
-      try {
-        localStorage.setItem(PANEL_KEY, String(Math.round(panelW)));
-      } catch {
-        /* storage unavailable: the width lasts this session */
-      }
-    };
-    el.addEventListener('pointermove', move);
-    el.addEventListener('pointerup', up);
+    bindPanelPointerResize(e, panelPx, () => convW, (w) => (panelW = w), PANEL_KEY);
   }
   function resizeKey(e: KeyboardEvent): void {
     const step = e.shiftKey ? 64 : 16;
@@ -546,24 +534,13 @@
   /** Scroll to the previous (-1) / next (+1) of YOUR messages relative to the
    *  one nearest the top of the viewport. */
   function jumpPrompt(dir: -1 | 1): void {
-    const list = listEl;
-    if (!list) return;
-    const mine = Array.from(list.querySelectorAll<HTMLElement>('.turn[data-role="user"]'));
-    if (!mine.length) return;
-    const top = list.getBoundingClientRect().top + 8;
-    let target: HTMLElement | undefined;
-    if (dir < 0) target = [...mine].reverse().find((el) => el.getBoundingClientRect().top < top - 4);
-    else target = mine.find((el) => el.getBoundingClientRect().top > top + 4);
+    const target = findAdjacentUserTurn(listEl, dir);
     if (!target) {
       if (dir < 0 && t?.has_earlier) void loadEarlier();
       return;
     }
-    target.scrollIntoView({ block: 'start' });
+    flashUserTurnBubble(target);
     atBottom = false;
-    (target.querySelector('.bubble') as HTMLElement | null)?.animate?.(
-      [{ boxShadow: '0 0 0 3px var(--accent-soft)' }, { boxShadow: '0 0 0 0 transparent' }],
-      { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 900 },
-    );
   }
   // ⌘F over the whole loaded chat (lib/findProviders.ts). Only MAX_MOUNTED
   // turns are in the DOM, so a long chat's older turns were invisible to
@@ -701,9 +678,12 @@
       unseen = 0;
       if (!hasLater) conv.followLive();
     }
-    // Infinite "Load earlier" when the reader reaches the top (not while the
-    // first mount is still only the newest few turns).
-    if (mountAll && el.scrollTop < 40 && t?.has_earlier && !conv.loadingEarlier) void loadEarlier();
+    // Infinite "Load earlier" when the reader scrolls up near the top (not
+    // while the first mount is still only the newest few turns).
+    if (mountAll && !atBottom && el.scrollTop < 220) {
+      if (winStart > 0) void stepEarlierWindow();
+      else if (t?.has_earlier && !conv.loadingEarlier) void loadEarlier();
+    }
   }
   function scrollToBottom(): void {
     const el = listEl;
@@ -741,16 +721,34 @@
     ro.observe(col);
     return () => ro.disconnect();
   });
+  let steppingWindow = false;
+  async function stepEarlierWindow(): Promise<void> {
+    if (steppingWindow || winStart <= 0) return;
+    steppingWindow = true;
+    const el = listEl;
+    const beforeH = el?.scrollHeight ?? 0;
+    const beforeTop = el?.scrollTop ?? 0;
+    const anchor = captureFirstTurnAnchor(el);
+    try {
+      followTail = false;
+      manualStart = Math.max(0, winStart - STEP);
+      await tick();
+      restoreFirstTurnAnchor(el, anchor, beforeH, beforeTop);
+    } finally {
+      steppingWindow = false;
+    }
+  }
   async function loadEarlier(): Promise<void> {
     const el = listEl;
     const beforeH = el?.scrollHeight ?? 0;
     const beforeTop = el?.scrollTop ?? 0;
+    const anchor = captureFirstTurnAnchor(el);
     await conv.loadEarlier();
     // Pin the window to the oldest loaded turns so the new page is what shows.
     followTail = false;
     manualStart = 0;
     await tick();
-    if (el) el.scrollTop = el.scrollHeight - beforeH + beforeTop; // anchor
+    restoreFirstTurnAnchor(el, anchor, beforeH, beforeTop);
   }
   function scrollToBottomAll(): void {
     conv.followLive();

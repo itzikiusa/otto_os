@@ -219,6 +219,58 @@ impl otto_ide::IdeCtx for ServerCtx {
             })
         })
     }
+
+    fn resolve_k8s_cluster<'a>(
+        &'a self,
+        user: &'a otto_core::domain::User,
+        cluster_id: &'a otto_core::Id,
+        namespace: Option<&'a str>,
+    ) -> otto_core::auth::BoxFuture<'a, Result<otto_ide::netbridge::IdeK8sSpec>> {
+        Box::pin(async move {
+            let cluster = otto_k8s::clusters::Clusters::new(self)
+                .get(cluster_id)
+                .await?;
+            let ns = namespace
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    cluster
+                        .default_namespace
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                })
+                .unwrap_or("default")
+                .to_ascii_lowercase();
+            otto_k8s::access::check(&self.pool, user, cluster_id, "exec", Some(&ns)).await?;
+            let policy = otto_state::resource_access::ResourceAccessRepo::new(self.pool.clone())
+                .get_policy(otto_core::access::ResourceKind::K8sCluster, cluster_id)
+                .await?;
+            if policy.mode == otto_core::access::AccessMode::Legacy
+                && otto_state::GrantsRepo::new(self.pool.clone())
+                    .capability_of(user, otto_core::domain::Feature::Kubernetes)
+                    .await?
+                    < otto_core::domain::Capability::Edit
+            {
+                return Err(otto_core::Error::Forbidden(
+                    "Kubernetes Edit grant required to open cluster network bridge".into(),
+                ));
+            }
+            let allow_cross_namespace =
+                otto_k8s::access::allowed(&self.pool, user, cluster_id, "exec", None).await?;
+            let k = otto_k8s::clusters::kubectl_for(self, &cluster).await?;
+            Ok(otto_ide::netbridge::IdeK8sSpec {
+                cluster_id: cluster.id,
+                cluster_name: cluster.name,
+                namespace: ns,
+                allow_cross_namespace,
+                kubectl_program: k.program,
+                kubectl_query_args: k.base,
+                kubectl_base_args: k.base_stream,
+                kubectl_env: k.env,
+            })
+        })
+    }
 }
 
 fn map_dbviewer_engine(e: otto_dbviewer::Engine) -> otto_ide::db_watch::IdeDbEngine {

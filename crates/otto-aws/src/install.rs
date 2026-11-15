@@ -157,6 +157,12 @@ pub fn parse_version(text: &str) -> Option<String> {
 /// path) and so re-probes.
 type VersionKey = (PathBuf, Option<std::time::SystemTime>);
 static VERSION_CACHE: Mutex<Option<(VersionKey, String)>> = Mutex::new(None);
+const COLD_VERSION_INLINE_BUDGET: Duration = Duration::from_millis(150);
+
+fn version_flight() -> &'static tokio::sync::Mutex<()> {
+    static FLIGHT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &FLIGHT
+}
 
 async fn cached_version(bin: &Path) -> Option<String> {
     let key: VersionKey = (
@@ -170,11 +176,34 @@ async fn cached_version(bin: &Path) -> Option<String> {
             }
         }
     }
-    let v = version(bin).await?;
-    if let Ok(mut g) = VERSION_CACHE.lock() {
-        *g = Some((key, v.clone()));
+    let bin_owned = bin.to_path_buf();
+    let key_owned = key.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _guard = version_flight().lock().await;
+        if let Ok(g) = VERSION_CACHE.lock() {
+            if let Some((k, v)) = g.as_ref() {
+                if *k == key_owned && key_owned.1.is_some() {
+                    let _ = tx.send(Some(v.clone()));
+                    return;
+                }
+            }
+        }
+        let v = version(&bin_owned).await;
+        if let Some(ref ver) = v {
+            if let Ok(mut g) = VERSION_CACHE.lock() {
+                *g = Some((key_owned, ver.clone()));
+            }
+        }
+        let _ = tx.send(v);
+    });
+    match tokio::time::timeout(COLD_VERSION_INLINE_BUDGET, rx).await {
+        Ok(Ok(v)) => v,
+        _ => VERSION_CACHE
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|(_, v)| v.clone())),
     }
-    Some(v)
 }
 
 /// Presence + version + install-job snapshot.

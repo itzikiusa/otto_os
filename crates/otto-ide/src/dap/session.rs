@@ -14,7 +14,9 @@ use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
 
-use super::adapters::{normalize_target_path, resolve_dap_adapter_with_manager};
+use super::adapters::{
+    normalize_target_path, preflight_debug_request, resolve_dap_adapter_with_manager,
+};
 pub(super) use super::session_entry::{
     ActiveConnection, BoxRead, BoxWrite, DapWireClient, SessionEntry,
 };
@@ -30,7 +32,7 @@ use crate::environments::EnvironmentManager;
 use crate::types::{
     IdeDebugAction, IdeDebugCommandReq, IdeDebugOutputEntry, IdeDebugSessionSnapshot,
     IdeProjectEnvironment, IdeRunConfig, IdeSetBreakpointsReq, IdeSshSpec, IdeStartDebugReq,
-    IdeTargetSpec, PluginDapAdapterSpec,
+    IdeTargetKind, IdeTargetSpec, PluginDapAdapterSpec,
 };
 
 pub(crate) const MAX_DEBUG_OUTPUT: usize = 400;
@@ -46,6 +48,7 @@ pub struct DapStartContext {
     pub project_env: Option<IdeProjectEnvironment>,
     pub run_config: Option<IdeRunConfig>,
     pub plugin_adapters: Vec<PluginDapAdapterSpec>,
+    pub netbridge: Option<Arc<crate::netbridge::NetBridgeLease>>,
     pub caller_is_root: bool,
     pub owner_user_id: String,
 }
@@ -82,6 +85,14 @@ impl DapStartContext {
 
     pub fn with_plugin_adapters(mut self, adapters: Vec<PluginDapAdapterSpec>) -> Self {
         self.plugin_adapters = adapters;
+        self
+    }
+
+    pub fn with_netbridge(
+        mut self,
+        netbridge: Option<Arc<crate::netbridge::NetBridgeLease>>,
+    ) -> Self {
+        self.netbridge = netbridge;
         self
     }
 
@@ -261,13 +272,7 @@ impl DapManager {
         entry
     }
 
-    /// Resolve the language adapter, launch/attach the target, configure breakpoints,
-    /// and return the live session snapshot.
-    pub async fn start_session(
-        &self,
-        mut req: IdeStartDebugReq,
-        mut ctx: DapStartContext,
-    ) -> Result<IdeDebugSessionSnapshot> {
+    fn prepare_start_inputs(req: &mut IdeStartDebugReq, ctx: &mut DapStartContext) {
         if ctx.caller_is_root {
             for folder in &req.project_folders {
                 let trimmed = folder.trim();
@@ -291,9 +296,21 @@ impl DapManager {
                 .entry("SPRING_PROFILES_ACTIVE".into())
                 .or_insert(joined);
         }
-        let resolved =
-            resolve_dap_adapter_with_manager(&self.data_dir, &req, &ctx, Some(&self.environments))
-                .await?;
+    }
+
+    /// Resolve the language adapter, launch/attach the target, configure breakpoints,
+    /// and return the live session snapshot.
+    pub async fn start_session(
+        &self,
+        mut req: IdeStartDebugReq,
+        mut ctx: DapStartContext,
+    ) -> Result<IdeDebugSessionSnapshot> {
+        Self::prepare_start_inputs(&mut req, &mut ctx);
+        let resolved = otto_telemetry::context::measure_result(
+            "ide.dap.resolve_adapter",
+            resolve_dap_adapter_with_manager(&self.data_dir, &req, &ctx, Some(&self.environments)),
+        )
+        .await?;
         let entry = self.register_entry(
             &mut req,
             ctx.clone(),
@@ -301,13 +318,103 @@ impl DapManager {
             resolved.adapter_name.clone(),
             resolved.initial_output.clone(),
         );
-        if let Err(err) =
-            boot_session_connection(&self.sessions, &entry, resolved, &req, &ctx).await
+        if let Err(err) = otto_telemetry::context::measure_result(
+            "ide.dap.handshake",
+            boot_session_connection(&self.sessions, &entry, resolved, &req, &ctx),
+        )
+        .await
         {
             entry.fail_and_evict(&self.sessions, err.to_string());
             return Err(err);
         }
         Ok(entry.read_snapshot())
+    }
+
+    /// Non-blocking HTTP start path: runs synchronous RBAC/target/language
+    /// validation immediately (`400`/`403`), registers the session in `Starting`
+    /// state, and offloads target compilation (`go build`/`cargo build`/`javac`)
+    /// plus adapter boot onto a background task streaming state via `events_tx`.
+    pub fn start_session_async(
+        &self,
+        mut req: IdeStartDebugReq,
+        mut ctx: DapStartContext,
+    ) -> Result<(
+        IdeDebugSessionSnapshot,
+        broadcast::Receiver<IdeDebugSessionSnapshot>,
+    )> {
+        Self::prepare_start_inputs(&mut req, &mut ctx);
+        let (language, provisional_adapter) =
+            preflight_debug_request(&self.data_dir, &req, &ctx, Some(&self.environments))?;
+        let entry = self.register_entry(
+            &mut req,
+            ctx.clone(),
+            language,
+            provisional_adapter,
+            Vec::new(),
+        );
+        let rx = entry.events_tx.subscribe();
+        let initial_snap = entry.read_snapshot();
+
+        let data_dir = self.data_dir.clone();
+        let environments = self.environments.clone();
+        let sessions = Arc::clone(&self.sessions);
+        tokio::spawn(async move {
+            let inherit_shell = ctx
+                .project_env
+                .as_ref()
+                .map(|p| p.inherit_shell_env)
+                .unwrap_or(true)
+                && ctx
+                    .run_config
+                    .as_ref()
+                    .map(|c| c.inherit_shell_env)
+                    .unwrap_or(true)
+                && req.launch.inherit_shell_env.unwrap_or(true);
+            if ctx.caller_is_root
+                && req.target.kind == IdeTargetKind::Local
+                && inherit_shell
+                && environments.shell_env_resolver().is_cold_or_warming()
+            {
+                let shell_vars = environments.shell_env_resolver().vars_or_load().await;
+                EnvironmentManager::merge_late_shell_vars(&mut ctx.effective_env, shell_vars);
+            }
+            let resolved = match otto_telemetry::context::measure_result(
+                "ide.dap.resolve_adapter",
+                resolve_dap_adapter_with_manager(&data_dir, &req, &ctx, Some(&environments)),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(err) => {
+                    if !entry.is_terminal() {
+                        entry.fail_and_evict(&sessions, err.to_string());
+                    }
+                    return;
+                }
+            };
+            if entry.is_terminal() {
+                return;
+            }
+            for item in &resolved.initial_output {
+                entry.append_output(&item.category, item.text.clone());
+            }
+            entry.mutate_and_broadcast(|snap| {
+                snap.language = resolved.language.clone();
+                snap.adapter = resolved.adapter_name.clone();
+            });
+            if let Err(err) = otto_telemetry::context::measure_result(
+                "ide.dap.handshake",
+                boot_session_connection(&sessions, &entry, resolved, &req, &ctx),
+            )
+            .await
+            {
+                if !entry.is_terminal() {
+                    entry.fail_and_evict(&sessions, err.to_string());
+                }
+            }
+        });
+
+        Ok((initial_snap, rx))
     }
 
     /// Start a debug session over a pre-connected async stream.

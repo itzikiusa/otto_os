@@ -14,11 +14,28 @@ import { inLane } from '../../../lib/api/lane';
 import { appLive, onLive } from '../../../lib/live';
 import { loadErrorText } from '../../../lib/loadError';
 import { pollWhileVisible } from '../../../lib/poll';
-import type { RuntimeEvent, RuntimeReplay } from '../../../lib/api/types';
-import { applyEvents, applyReplay, emptyProjection, mergeHistoryPage, type RuntimeProjection } from './projection';
+import { startMeasurement, type Measurement } from '../../../lib/telemetry';
+import type { RuntimeEvent, RuntimeReplay, TurnItem } from '../../../lib/api/types';
+import {
+  applyEvents,
+  applyReplay,
+  emptyProjection,
+  mergeHistoryPage,
+  replaceHydratedItem,
+  type RuntimeProjection,
+} from './projection';
 import { runtimeThreads } from './runtimeThreads.svelte';
 
-export const TAIL_TURNS = 20;
+export const TAIL_TURNS = 40;
+export const MOBILE_TAIL_TURNS = 12;
+export const TAIL_MAX_LINES = 10_000;
+
+function defaultTailTurns(): number {
+  if (typeof window !== 'undefined' && typeof window.innerWidth === 'number' && window.innerWidth > 0 && window.innerWidth < 768) {
+    return MOBILE_TAIL_TURNS;
+  }
+  return TAIL_TURNS;
+}
 
 const RETRY_STEPS_MS = [1_500, 3_000, 6_000, 15_000] as const;
 const ACTIVE_LIVENESS_MS = 4_000;
@@ -55,6 +72,7 @@ interface View {
   /** Consecutive failed replay count for bounded backoff. */
   failures: number;
   retryTimer: ReturnType<typeof setTimeout> | null;
+  openSpan: Measurement | null;
 }
 
 export class RuntimeViews {
@@ -67,8 +85,11 @@ export class RuntimeViews {
   staleError = $state<Record<string, string>>({});
   /** In-flight older-history pagination requests, by session id. */
   loadingOlder = $state<Record<string, boolean>>({});
+  /** In-flight single-item detail hydration (`${sessionId}:${itemId}`). */
+  loadingItem = $state<Record<string, boolean>>({});
 
   private views = new Map<string, View>();
+  private inFlightItems = new Map<string, Promise<TurnItem | null>>();
   private stopLive: (() => void) | null = null;
   private activeProbe: ((id: string) => boolean) | null = null;
 
@@ -108,12 +129,17 @@ export class RuntimeViews {
         liveFlushTimer: null,
         failures: 0,
         retryTimer: null,
+        openSpan: startMeasurement('ui.thread.open', 'threads'),
       });
       void this.replay(id, false);
     }
     return () => {
       const v = this.views.get(id);
       if (!v || --v.refs > 0) return;
+      if (v.openSpan) {
+        v.openSpan.finish('cancelled');
+        v.openSpan = null;
+      }
       if (v.retryTimer) clearTimeout(v.retryTimer);
       if (v.liveFlushTimer) clearTimeout(v.liveFlushTimer);
       v.pendingLive.length = 0;
@@ -131,6 +157,17 @@ export class RuntimeViews {
       if (this.loadingOlder[id]) {
         const { [id]: _old, ...older } = this.loadingOlder;
         this.loadingOlder = older;
+      }
+      const prefix = `${id}:`;
+      for (const k of this.inFlightItems.keys()) {
+        if (k.startsWith(prefix)) this.inFlightItems.delete(k);
+      }
+      if (Object.keys(this.loadingItem).some((k) => k.startsWith(prefix))) {
+        const next: Record<string, boolean> = {};
+        for (const [k, val] of Object.entries(this.loadingItem)) {
+          if (!k.startsWith(prefix)) next[k] = val;
+        }
+        this.loadingItem = next;
       }
       if (this.views.size === 0) {
         this.stopLive?.();
@@ -296,7 +333,7 @@ export class RuntimeViews {
     view.held = [];
     view.dirty = false;
     const after = this.projections[id]?.lastSequence ?? 0;
-    const path = `/runtime-sessions/${id}/events?after_sequence=${after}&tail_turns=${TAIL_TURNS}`;
+    const path = `/runtime-sessions/${id}/events?after_sequence=${after}&tail_turns=${defaultTailTurns()}&max_lines=${TAIL_MAX_LINES}&compact=true`;
     try {
       const replay = await (bg ? inLane('bg', () => api.get<RuntimeReplay>(path)) : api.get<RuntimeReplay>(path));
       if (this.views.get(id) !== view) return;
@@ -304,6 +341,12 @@ export class RuntimeViews {
       const base = applyReplay(prev ?? emptyProjection(), replay);
       const { projection, gap } = applyEvents(base, view.held);
       if (!prev || projection !== prev) this.projections[id] = projection;
+      if (view.openSpan) {
+        const span = view.openSpan;
+        view.openSpan = null;
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => span.finish('ok'));
+        else span.finish('ok');
+      }
       if (projection.lastSequence > view.knownSequence) view.knownSequence = projection.lastSequence;
       view.lastLiveAt = Date.now();
       view.failures = 0;
@@ -329,6 +372,10 @@ export class RuntimeViews {
         if (!folded.gap) this.projections[id] = folded.projection;
       }
       view.failures += 1;
+      if (view.openSpan) {
+        view.openSpan.finish('error');
+        view.openSpan = null;
+      }
       if (!this.projections[id]) this.loadError = { ...this.loadError, [id]: loadErrorText(e) };
       else this.staleError = { ...this.staleError, [id]: loadErrorText(e) };
       this.scheduleRetry(id, view);
@@ -336,13 +383,13 @@ export class RuntimeViews {
   }
 
   /** Fetch and prepend the next page of older turns before `oldestTurnOrdinal`. */
-  async loadOlder(id: string, limitTurns = TAIL_TURNS): Promise<boolean> {
+  async loadOlder(id: string, limitTurns = defaultTailTurns()): Promise<boolean> {
     const view = this.views.get(id);
     if (view) this.flushPendingLive(id, view);
     const cur = this.projections[id];
     if (!cur || !cur.hasOlder || cur.oldestTurnOrdinal == null || this.loadingOlder[id]) return false;
     this.loadingOlder = { ...this.loadingOlder, [id]: true };
-    const path = `/runtime-sessions/${id}/events?before_turn_ordinal=${cur.oldestTurnOrdinal}&limit_turns=${limitTurns}`;
+    const path = `/runtime-sessions/${id}/events?before_turn_ordinal=${cur.oldestTurnOrdinal}&limit_turns=${limitTurns}&max_lines=${TAIL_MAX_LINES}&compact=true`;
     try {
       const replay = await api.get<RuntimeReplay>(path);
       if (!this.views.has(id) || replay.kind !== 'snapshot') return false;
@@ -358,6 +405,35 @@ export class RuntimeViews {
         this.loadingOlder = rest;
       }
     }
+  }
+
+  /** Lazily fetch full output/diff/input for a compacted historical `TurnItem`. */
+  ensureItemDetail(id: string, itemId: string): Promise<TurnItem | null> {
+    const cur = this.projections[id]?.items.find((it) => it.id === itemId);
+    if (cur && !cur.detail_omitted) return Promise.resolve(cur);
+    const key = `${id}:${itemId}`;
+    const existing = this.inFlightItems.get(key);
+    if (existing) return existing;
+    this.loadingItem = { ...this.loadingItem, [key]: true };
+    const req = api
+      .get<TurnItem>(`/runtime-sessions/${id}/items/${encodeURIComponent(itemId)}`)
+      .then((item) => {
+        const latest = this.projections[id];
+        if (this.views.has(id) && latest) {
+          this.projections[id] = replaceHydratedItem(latest, item);
+        }
+        return item;
+      })
+      .catch(() => null)
+      .finally(() => {
+        this.inFlightItems.delete(key);
+        if (this.loadingItem[key]) {
+          const { [key]: _done, ...rest } = this.loadingItem;
+          this.loadingItem = rest;
+        }
+      });
+    this.inFlightItems.set(key, req);
+    return req;
   }
 
   /** Reload a thread whose first load (or a later resync) failed. */

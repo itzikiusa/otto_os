@@ -170,12 +170,55 @@ export interface IdeShellEnvResp {
 
 export interface IdeEnvVar { key: string; value?: string; secret: boolean; has_secret?: boolean }
 
+export interface IdeHostMapping {
+  from_host: string;
+  from_port?: number | null;
+  to_host: string;
+  to_port?: number | null;
+}
+
+export interface IdeNetworkBridgeConfig {
+  enabled: boolean;
+  k8s_cluster_id?: string | null;
+  k8s_namespace?: string | null;
+  ssh_tunnel_connection_id?: string | null;
+  inject_k8s_service_env: boolean;
+  containerized: boolean;
+  host_mappings?: IdeHostMapping[];
+}
+
+export interface IdeBridgedServiceSummary {
+  name: string;
+  namespace: string;
+  cluster_ip?: string | null;
+  ports: number[];
+  hosts?: string[];
+}
+
+export interface IdeNetBridgeTestReq {
+  target: IdeTargetSpec;
+  bridge: IdeNetworkBridgeConfig;
+}
+
+export interface IdeNetBridgeStatusResp {
+  ok: boolean;
+  cluster_name?: string | null;
+  namespace?: string | null;
+  ssh_tunnel_ready: boolean;
+  interposer_ready: boolean;
+  services: IdeBridgedServiceSummary[];
+  ingress_hosts: string[];
+  latency_ms: number;
+  message: string;
+}
+
 export interface IdeProjectEnvironment {
   java_home?: string | null; go_root?: string | null; rust_toolchain?: string | null;
   node_home?: string | null; python_interpreter?: string | null;
   dotenv_path?: string | null; extra_path?: string | null;
   inherit_shell_env?: boolean; additional_roots?: string[];
   module_sdks?: Record<string, string>;
+  network_bridge?: IdeNetworkBridgeConfig | null;
   env_vars: IdeEnvVar[];
 }
 

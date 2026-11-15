@@ -49,7 +49,11 @@ function makeRuntimeHarness(extraGlobals: Record<string, unknown> = {}) {
       docListeners.get(type)?.delete(fn);
     },
   };
-  const winState = {
+  const winState: {
+    innerWidth?: number;
+    addEventListener(type: string, fn: () => void): void;
+    removeEventListener(type: string, fn: () => void): void;
+  } = {
     addEventListener(type: string, fn: () => void) {
       if (!winListeners.has(type)) winListeners.set(type, new Set());
       winListeners.get(type)!.add(fn);
@@ -89,6 +93,7 @@ function makeRuntimeHarness(extraGlobals: Record<string, unknown> = {}) {
       },
       '../../../lib/api/lane': laneStub,
       'lib/api/lane': laneStub,
+      '../../../lib/telemetry': { startMeasurement: () => null },
       '../../../lib/live': {
         onLive(_types: string[], fn: (ev: { event: RuntimeEvent }) => void) {
           liveListener = fn;
@@ -165,8 +170,10 @@ function makeRuntimeHarness(extraGlobals: Record<string, unknown> = {}) {
       loadError: Record<string, string>;
       staleError: Record<string, string>;
       loadingOlder: Record<string, boolean>;
+      loadingItem: Record<string, boolean>;
       open(id: string): () => void;
       loadOlder(id: string, limitTurns?: number): Promise<boolean>;
+      ensureItemDetail(id: string, itemId: string): Promise<TurnItem | null>;
       retry(id: string): void;
       noteSessionSequence(id: string, seq: number | null | undefined): void;
       setSessionActiveProbe(fn: (id: string) => boolean): void;
@@ -174,6 +181,7 @@ function makeRuntimeHarness(extraGlobals: Record<string, unknown> = {}) {
     gets,
     timers,
     docState,
+    winState,
     emitLive: (ev: RuntimeEvent) => liveListener?.({ event: ev }),
     emitResync: () => resyncListener?.(),
     emitConnection: (up: boolean) => connListener?.(up),
@@ -187,7 +195,7 @@ test('RuntimeViews dirty-replay loop catches events missed during in-flight GET 
   const close = h.views.open('s-1');
 
   assert.equal(h.gets.length, 1);
-  assert.equal(h.gets[0].path, '/runtime-sessions/s-1/events?after_sequence=0&tail_turns=20');
+  assert.equal(h.gets[0].path, '/runtime-sessions/s-1/events?after_sequence=0&tail_turns=40&max_lines=10000&compact=true');
   assert.equal(h.gets[0].lane, 'fg');
 
   // While the first GET is in flight, WS reconnects (or initial onConnection fires):
@@ -208,7 +216,7 @@ test('RuntimeViews dirty-replay loop catches events missed during in-flight GET 
 
   // Immediately fires follow-up bg replay from sequence 3!
   assert.equal(h.gets.length, 2);
-  assert.equal(h.gets[1].path, '/runtime-sessions/s-1/events?after_sequence=3&tail_turns=20');
+  assert.equal(h.gets[1].path, '/runtime-sessions/s-1/events?after_sequence=3&tail_turns=40&max_lines=10000&compact=true');
   assert.equal(h.gets[1].lane, 'bg');
 
   h.gets[1].gate.resolve({
@@ -259,7 +267,7 @@ test('RuntimeViews catches initial WS race, noteSessionSequence lag, and auto-re
   h.emitConnection(true);
   await flush();
   assert.equal(h.gets.length, 3);
-  assert.equal(h.gets[2].path, '/runtime-sessions/s-2/events?after_sequence=1&tail_turns=20');
+  assert.equal(h.gets[2].path, '/runtime-sessions/s-2/events?after_sequence=1&tail_turns=40&max_lines=10000&compact=true');
   h.gets[2].gate.reject(new Error('transient disconnect'));
   await flush();
   assert.match(h.views.staleError['s-2'] ?? '', /transient disconnect/);
@@ -284,7 +292,7 @@ test('RuntimeViews catches initial WS race, noteSessionSequence lag, and auto-re
   liveness.fn();
   await flush();
   assert.equal(h.gets.length, 5);
-  assert.equal(h.gets[4].path, '/runtime-sessions/s-2/events?after_sequence=3&tail_turns=20');
+  assert.equal(h.gets[4].path, '/runtime-sessions/s-2/events?after_sequence=3&tail_turns=40&max_lines=10000&compact=true');
   h.gets[4].gate.resolve({ kind: 'events', events: [], last_sequence: 3 });
   await flush();
 
@@ -485,7 +493,7 @@ test('providers, askAgents, and personaProviders support opencode & pi and stric
 test('RuntimeViews tail_turns snapshot, loadOlder pagination, and reconnect snapshot preserve loaded older history', async () => {
   const h = makeRuntimeHarness();
   const close = h.views.open('s-paged');
-  assert.equal(h.gets[0].path, '/runtime-sessions/s-paged/events?after_sequence=0&tail_turns=20');
+  assert.equal(h.gets[0].path, '/runtime-sessions/s-paged/events?after_sequence=0&tail_turns=40&max_lines=10000&compact=true');
 
   const mkTurn = (ord: number): ProviderTurn => ({
     id: `t-${ord}`,
@@ -533,10 +541,10 @@ test('RuntimeViews tail_turns snapshot, loadOlder pagination, and reconnect snap
   assert.equal(h.views.projections['s-paged']?.oldestTurnOrdinal, 3);
   assert.equal(h.views.projections['s-paged']?.olderTurns, 2);
 
-  // User triggers loadOlder -> requests before_turn_ordinal=3&limit_turns=20 and prepends turns 1..2!
+  // User triggers loadOlder -> requests before_turn_ordinal=3&limit_turns=40&max_lines=10000 and prepends turns 1..2!
   const pLoad = h.views.loadOlder('s-paged');
   assert.equal(h.views.loadingOlder['s-paged'], true);
-  assert.equal(h.gets[1].path, '/runtime-sessions/s-paged/events?before_turn_ordinal=3&limit_turns=20');
+  assert.equal(h.gets[1].path, '/runtime-sessions/s-paged/events?before_turn_ordinal=3&limit_turns=40&max_lines=10000&compact=true');
   h.gets[1].gate.resolve({
     kind: 'snapshot',
     snapshot_sequence: 10,
@@ -770,4 +778,108 @@ test('RuntimeViews skips keydown replays, suppresses 4s liveness GET during acti
 
   close();
   assert.equal(h.timers.size, 0);
+});
+
+test('RuntimeViews mobile viewport requests tail_turns=12&max_lines=10000&compact=true and lazily hydrates + preserves expanded item details', async () => {
+  const h = makeRuntimeHarness();
+  h.winState.innerWidth = 390;
+  const close = h.views.open('s-mobile');
+  assert.equal(h.gets[0].path, '/runtime-sessions/s-mobile/events?after_sequence=0&tail_turns=12&max_lines=10000&compact=true');
+
+  const compactEdit: TurnItem = {
+    id: 'fc-1',
+    turn_id: 't-1',
+    ordinal: 1,
+    status: 'completed',
+    title: 'src/main.rs',
+    started_at: '2026-11-15T10:00:00Z',
+    completed_at: '2026-11-15T10:00:01Z',
+    updated_at: '2026-11-15T10:00:01Z',
+    detail_omitted: true,
+    type: 'file_change',
+    file_name: 'src/main.rs',
+  };
+  h.gets[0].gate.resolve({
+    kind: 'snapshot',
+    snapshot_sequence: 5,
+    snapshot: {
+      provider_session: null,
+      provider_thread: null,
+      turns: [
+        {
+          id: 't-1',
+          ordinal: 1,
+          status: 'completed',
+          started_at: '2026-11-15T10:00:00Z',
+          completed_at: '2026-11-15T10:00:02Z',
+          origin: 'user',
+        },
+      ],
+      turn_items: [compactEdit],
+      runtime_requests: [],
+      plans: [],
+      queued_prompts: [],
+      has_older: false,
+      oldest_turn_ordinal: 1,
+      older_turns: 0,
+    },
+  });
+  await flush();
+  assert.equal(h.views.projections['s-mobile']?.items[0]?.detail_omitted, true);
+
+  // Concurrent calls coalesce into one GET /runtime-sessions/s-mobile/items/fc-1.
+  const p1 = h.views.ensureItemDetail('s-mobile', 'fc-1');
+  const p2 = h.views.ensureItemDetail('s-mobile', 'fc-1');
+  assert.equal(h.gets.length, 2);
+  assert.equal(h.gets[1].path, '/runtime-sessions/s-mobile/items/fc-1');
+  assert.equal(h.views.loadingItem['s-mobile:fc-1'], true);
+
+  const hydratedEdit: TurnItem = {
+    ...compactEdit,
+    detail_omitted: undefined,
+    diff_str: '--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new',
+  };
+  (h.gets[1].gate as unknown as { resolve(v: TurnItem): void }).resolve(hydratedEdit);
+  const [r1, r2] = await Promise.all([p1, p2]);
+  assert.equal(r1?.id, 'fc-1');
+  assert.equal(r2?.id, 'fc-1');
+  assert.equal(h.views.loadingItem['s-mobile:fc-1'], undefined);
+  const afterHydrate = h.views.projections['s-mobile']?.items[0] as Extract<TurnItem, { type: 'file_change' }>;
+  assert.equal(afterHydrate.detail_omitted, undefined);
+  assert.match(afterHydrate.diff_str ?? '', /\+new/);
+
+  // Reconnect snapshot with unchanged updated_at preserves already-hydrated diff_str!
+  h.emitResync();
+  await flush();
+  h.gets[2].gate.resolve({
+    kind: 'snapshot',
+    snapshot_sequence: 6,
+    snapshot: {
+      provider_session: null,
+      provider_thread: null,
+      turns: [
+        {
+          id: 't-1',
+          ordinal: 1,
+          status: 'completed',
+          started_at: '2026-11-15T10:00:00Z',
+          completed_at: '2026-11-15T10:00:02Z',
+          origin: 'user',
+        },
+      ],
+      turn_items: [compactEdit],
+      runtime_requests: [],
+      plans: [],
+      queued_prompts: [],
+      has_older: false,
+      oldest_turn_ordinal: 1,
+      older_turns: 0,
+    },
+  });
+  await flush();
+  const afterResync = h.views.projections['s-mobile']?.items[0] as Extract<TurnItem, { type: 'file_change' }>;
+  assert.equal(afterResync.detail_omitted, undefined);
+  assert.match(afterResync.diff_str ?? '', /\+new/);
+
+  close();
 });

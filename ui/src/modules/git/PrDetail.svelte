@@ -16,16 +16,7 @@
   import { onDestroy, untrack } from 'svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { api, isAbortError } from '../../lib/api/client';
-  import type {
-    DiffResp,
-    MergeStrategy,
-    NewPrCommentReq,
-    PrChecksResp,
-    PrComment,
-    PrCommit,
-    PrDetail,
-    PrSummary,
-  } from '../../lib/api/types';
+  import type { DiffResp, MergeStrategy, NewPrCommentReq, PrChecksResp, PrComment, PrCommit, PrDetail, PrSummary } from '../../lib/api/types';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
@@ -44,7 +35,7 @@
   import { prCommitViewedKey, prFilesBridge, prFilesKey } from './prFilesBridge.svelte';
   import PrReviewButtons from './PrReviewButtons.svelte';
   import { myGitHandles } from './myGitHandles.svelte';
-  import { myReview, withMyReview } from './pr-review-state';
+  import { createReviewReconciler, myReview, withMyReview } from './pr-review-state';
   import { prAgentBridge, type PrAgentKind } from './pr-agent-bridge.svelte';
   import { openReviewDoneSlack } from './pr-slack';
   import { fileStat } from './diff-model';
@@ -147,10 +138,13 @@
   const generalComments = $derived.by(() => (pr?.comments ?? []).filter((c) => c.path === null));
 
   // ── Loading ──────────────────────────────────────────────────────────────
+  const reviewReconciler = createReviewReconciler();
+  onDestroy(() => reviewReconciler.clear());
   $effect(() => {
     const rid = repoId;
     const num = number;
     untrack(() => {
+      reviewReconciler.resetFor(rid, num);
       const hit = prDetailCache.get(prKey(rid, num));
       if (hit) pr = hit.value;
       const ch = prCommitsCache.get(prKey(rid, num));
@@ -161,10 +155,13 @@
     });
   });
 
-  async function load(rid: string, num: number, quiet = false): Promise<void> {
+  async function load(rid: string, num: number, quiet = false, fresh = false): Promise<void> {
     if (!quiet) loading = true;
     try {
-      const next = await api.get<PrDetail>(`/repos/${rid}/prs/${num}`);
+      const raw = await api.get<PrDetail>(`/repos/${rid}/prs/${num}${fresh ? '?fresh=true' : ''}`);
+      const next = reviewReconciler.reconcile(rid, num, raw, isMe, myName, () => {
+        if (!disposed && rid === repoId && num === number) { invalidatePr(rid, num); void load(rid, num, true, true); }
+      });
       prDetailCache.set(prKey(rid, num), next);
       if (disposed || rid !== repoId || num !== number) return;
       pr = next;
@@ -250,8 +247,9 @@
     const poller = pollWhileVisible(async (signal) => {
       if (disposed || !pr) return;
       prDetailCache.delete(prKey(rid, num));
-      const next = await api.get<PrDetail>(`/repos/${rid}/prs/${num}`, signal);
+      const raw = await api.get<PrDetail>(`/repos/${rid}/prs/${num}`, signal);
       if (disposed || rid !== repoId || num !== number || !pr) return;
+      const next = reviewReconciler.reconcile(rid, num, raw, isMe, myName);
       prDetailCache.set(prKey(rid, num), next);
       onloaded?.(next);
       // A push: the files and diff follow the new head (the reader is told).
@@ -266,7 +264,7 @@
     headNote = null;
     invalidatePr(repoId, number);
     commits = null;
-    void load(repoId, number); // a moved head re-reads the diff (load)
+    void load(repoId, number, false, true); // a moved head or manual refresh bypasses short-TTL cache
     return loadCommits(repoId, number);
   }
   async function followHead(rid: string, num: number): Promise<void> {
@@ -411,13 +409,13 @@
   const prWhere = (): string => `${repoLabel} on ${providerName} · PR #${number}${pr ? ` “${pr.title}”` : ''}`;
   const withdraw = (kind: 'approved' | 'changes'): Promise<void> => withdrawMyReview(kind, {
     repoId, number, where: prWhere(), author: pr?.author ?? null, get: () => pr, patch: patchNow, isMe,
-    reload: () => load(repoId, number, true),
+    onConfirmed: () => reviewReconciler.note(repoId, number, null), reload: () => load(repoId, number, true, true),
     setBusy: (b) => { if (disposed || (b !== '' && busy !== '')) return false; busy = b; return true; },
   });
   // Edit / delete / react on comments, for every CommentThread below (pr-comment-ctx).
   providePrCommentActions(createCommentOps({
     repoId: () => repoId, number: () => number, get: () => pr, set: patchNow, where: prWhere,
-    reload: () => load(repoId, number, true), alive: (rid, num) => !disposed && rid === repoId && num === number,
+    reload: () => load(repoId, number, true, true), alive: (rid, num) => !disposed && rid === repoId && num === number,
   }));
 
   async function action(kind: 'approve' | 'decline'): Promise<void> {
@@ -435,11 +433,11 @@
     try {
       invalidatePr(repoId, number);
       await api.post(`/repos/${repoId}/prs/${number}/${kind}`);
-      if (approve) rememberReviewedHead(repoId, number, diffHead);
+      if (approve) { rememberReviewedHead(repoId, number, diffHead); reviewReconciler.note(repoId, number, 'approved'); }
       if (disposed) return;
       toasts.success(`PR ${approve ? 'approved' : 'declined'}`, `#${number}`);
       if (pr) patchNow(approve ? withMyReview(pr, 'approved', isMe, myName) : { ...pr, state: 'declined' });
-      await load(repoId, number, true);
+      await load(repoId, number, true, true);
     } catch (e) {
       toastError(approve ? 'Couldn’t approve the PR' : 'Couldn’t decline the PR', e);
     } finally {
@@ -462,13 +460,13 @@
     try {
       invalidatePr(repoId, number);
       await api.post(`/repos/${repoId}/prs/${number}/request-changes`, { body: requestChangesBody.trim() || null });
-      rememberReviewedHead(repoId, number, diffHead);
+      rememberReviewedHead(repoId, number, diffHead); reviewReconciler.note(repoId, number, 'changes');
       if (disposed) return;
       toasts.success('Changes requested', `PR #${number}`);
       showRequestChanges = false;
       requestChangesBody = '';
       if (pr) patchNow(withMyReview(pr, 'changes', isMe, myName));
-      await load(repoId, number, true);
+      await load(repoId, number, true, true);
     } catch (e) {
       toastError('Couldn’t request changes', e);
       if (!disposed) showRequestChanges = true;

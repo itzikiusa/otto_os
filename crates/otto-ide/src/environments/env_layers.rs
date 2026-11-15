@@ -245,6 +245,61 @@ impl EnvironmentManager {
         Ok(map)
     }
 
+    /// Merge late-resolved login-shell variables into an already-layered local
+    /// environment without clobbering higher-precedence SDK, `.env`, project, or
+    /// launch overrides.
+    pub fn merge_late_shell_vars(
+        map: &mut BTreeMap<String, String>,
+        mut shell_vars: BTreeMap<String, String>,
+    ) {
+        let shell_path = shell_vars.remove("PATH");
+        for (k, v) in shell_vars {
+            if is_valid_env_key(&k) {
+                map.entry(k).or_insert(v);
+            }
+        }
+
+        let sys_dirs: Vec<String> = system_search_dirs()
+            .into_iter()
+            .map(|d| d.to_string_lossy().into_owned())
+            .collect();
+        let mut head_dirs: Vec<String> = Vec::new();
+        let mut tail_sys_dirs: Vec<String> = Vec::new();
+        if let Some(existing) = map.get("PATH") {
+            for seg in existing.split(':').filter(|s| !s.is_empty()) {
+                if sys_dirs.iter().any(|sd| sd == seg) {
+                    push_unique(&mut tail_sys_dirs, seg.to_string());
+                } else {
+                    push_unique(&mut head_dirs, seg.to_string());
+                }
+            }
+        }
+        if let Some(gopath) = map.get("GOPATH").filter(|s| !s.trim().is_empty()) {
+            for seg in std::env::split_paths(gopath) {
+                push_unique(
+                    &mut head_dirs,
+                    seg.join("bin").to_string_lossy().into_owned(),
+                );
+            }
+        }
+        if let Some(sp) = shell_path {
+            for seg in sp.split(':').filter(|s| !s.is_empty()) {
+                if !tail_sys_dirs.iter().any(|sd| sd == seg) {
+                    push_unique(&mut head_dirs, seg.to_string());
+                }
+            }
+        }
+        for sd in tail_sys_dirs {
+            push_unique(&mut head_dirs, sd);
+        }
+        for sd in sys_dirs {
+            push_unique(&mut head_dirs, sd);
+        }
+        if !head_dirs.is_empty() {
+            map.insert("PATH".into(), head_dirs.join(":"));
+        }
+    }
+
     pub async fn discover_dotenv_files(
         &self,
         targets: &TargetManager,

@@ -2,6 +2,7 @@
   // Workspace Target & Remote SSH Development modal for the Otto Full IDE.
   // Switches seamlessly between Local Workspaces and saved SSH hosts from Connections,
   // with live remote directory browsing via `/ide/fs/tree?kind=ssh&connection_id=...`.
+  import { untrack } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -17,7 +18,13 @@
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
-  import { ide, type IdeFsEntry, type IdeFsTreeResp } from './ideStore.svelte';
+  import { ide, type IdeFsEntry, type IdeFsTreeResp, type IdeNetworkBridgeConfig } from './ideStore.svelte';
+  import IdeNetworkBridgeCard from './shell/IdeNetworkBridgeCard.svelte';
+  import {
+    emptyNetworkBridgeDraft,
+    serializeNetworkBridgeDraft,
+    type IdeNetworkBridgeDraft,
+  } from './shell/networkBridgeModel';
 
   interface Props {
     open?: boolean;
@@ -47,6 +54,9 @@
   let remoteError = $state<string | null>(null);
   let switching = $state(false);
   let validationError = $state('');
+  let bridgeDraft = $state<IdeNetworkBridgeDraft>(emptyNetworkBridgeDraft(null));
+  let bridgeDirty = $state(false);
+  let savingBridge = $state(false);
 
   function close(): void {
     ide.sshOpen = false;
@@ -56,6 +66,7 @@
   $effect(() => {
     if (!isOpen) return;
     validationError = '';
+    bridgeDirty = false;
     mode = ide.target.kind;
     localRoot =
       ide.target.kind === 'local'
@@ -66,8 +77,40 @@
       selectedConnId = ide.target.connection_id;
       remotePath = ide.target.root || '';
     }
-    void loadSshConnections();
+    untrack(() => {
+      void loadSshConnections();
+      if (ide.target.kind === 'local' && ide.target.root && !ide.projectEnv && !ide.envLoading) {
+        void ide.loadEnvironments();
+      }
+    });
   });
+
+  $effect(() => {
+    if (!isOpen || bridgeDirty) return;
+    bridgeDraft = emptyNetworkBridgeDraft(ide.projectEnv?.network_bridge ?? null);
+  });
+
+  const canSaveBridgeDirectly = $derived(
+    ide.target.kind === 'local' &&
+      localRoot.trim().length > 0 &&
+      localRoot.trim() === ide.target.root.trim(),
+  );
+
+  async function saveLocalBridgeNow(): Promise<void> {
+    validationError = '';
+    const ser = serializeNetworkBridgeDraft(bridgeDraft);
+    if (ser.error) {
+      validationError = ser.error;
+      return;
+    }
+    savingBridge = true;
+    try {
+      const ok = await ide.saveEnvironment({ network_bridge: ser.config });
+      if (ok) bridgeDirty = false;
+    } finally {
+      savingBridge = false;
+    }
+  }
 
   const selectedConn = $derived<Connection | null>(
     sshConns.find((c) => c.id === selectedConnId) ?? sshConns[0] ?? null,
@@ -205,9 +248,22 @@
         validationError = 'Select or enter a local folder path.';
         return;
       }
+      let pendingBridge: IdeNetworkBridgeConfig | null = null;
+      if (bridgeDirty) {
+        const ser = serializeNetworkBridgeDraft(bridgeDraft);
+        if (ser.error) {
+          validationError = ser.error;
+          return;
+        }
+        pendingBridge = ser.config;
+      }
       switching = true;
       try {
         await ide.setLocalTarget(root, localWsId);
+        if (pendingBridge) {
+          await ide.saveEnvironment({ network_bridge: pendingBridge });
+          bridgeDirty = false;
+        }
         toasts.success('Switched to local workspace', root);
         close();
       } finally {
@@ -253,8 +309,8 @@
 {#if isOpen}
   <Modal
     title="Workspace target & remote SSH"
-    width={740}
-    dismissable={!switching}
+    width={820}
+    dismissable={!switching && !savingBridge}
     onclose={close}
   >
     <div class="ssh-shell">
@@ -386,6 +442,15 @@
                 </div>
               {/if}
             </section>
+
+            <IdeNetworkBridgeCard
+              bind:draft={bridgeDraft}
+              sshConnections={sshConns}
+              idPrefix="ide-ssh-nb"
+              saving={savingBridge}
+              onSave={canSaveBridgeDirectly ? saveLocalBridgeNow : undefined}
+              onDirty={() => (bridgeDirty = true)}
+            />
           {:else if selectedConn}
             <section class="ssh-pane" aria-labelledby="ssh-remote-heading">
               <div class="ssh-remote-head">

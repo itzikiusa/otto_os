@@ -172,38 +172,9 @@ struct Tool {
     diffs: Vec<(String, Option<String>, String)>,
 }
 
-/// A whole-file unified patch over `diffs`, one `diff --git` section each.
+/// A bounded contextual unified patch over `diffs`, one `diff --git` section each.
 fn multi_file_patch(diffs: &[(String, Option<String>, String)]) -> String {
-    let mut out = String::new();
-    for (path, old, new) in diffs {
-        let p = path.trim_start_matches('/');
-        out.push_str(&format!("diff --git a/{p} b/{p}\n"));
-        let old_lines: Vec<&str> = old
-            .as_deref()
-            .map(|o| o.lines().collect())
-            .unwrap_or_default();
-        let new_lines: Vec<&str> = new.lines().collect();
-        if old.is_none() {
-            out.push_str("--- /dev/null\n");
-        } else {
-            out.push_str(&format!("--- a/{p}\n"));
-        }
-        out.push_str(&format!("+++ b/{p}\n"));
-        out.push_str(&format!(
-            "@@ -{},{} +{},{} @@\n",
-            usize::from(!old_lines.is_empty()),
-            old_lines.len(),
-            usize::from(!new_lines.is_empty()),
-            new_lines.len()
-        ));
-        for l in old_lines {
-            out.push_str(&format!("-{l}\n"));
-        }
-        for l in new_lines {
-            out.push_str(&format!("+{l}\n"));
-        }
-    }
-    out
+    crate::diff_compact::multi_file_unified_patch(diffs)
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -231,6 +202,8 @@ struct AcpDriverState {
     images: bool,
     embedded: bool,
     modes: Vec<String>,
+    #[serde(default)]
+    available_models: Vec<String>,
     effort_options: Vec<String>,
     access: RuntimeAccessMode,
     mode_req: Option<u64>,
@@ -283,6 +256,8 @@ pub struct AcpDriver {
     embedded: bool,
     /// `modes.availableModes[].id` from `session/new|load`.
     modes: Vec<String>,
+    /// `models.availableModels[].modelId` from `session/new|load`, when advertised.
+    available_models: Vec<String>,
     /// Offered `thought_level` values from `configOptions`, when advertised.
     effort_options: Vec<String>,
     access: RuntimeAccessMode,
@@ -347,6 +322,7 @@ impl AcpDriver {
             images: false,
             embedded: false,
             modes: Vec::new(),
+            available_models: Vec::new(),
             effort_options: Vec::new(),
             access: RuntimeAccessMode::default(),
             mode_req: None,
@@ -624,7 +600,31 @@ impl AcpDriver {
         }
     }
 
+    fn efforts_for_model(&self, model: &str) -> Option<Vec<String>> {
+        if self.available_models.is_empty() {
+            return None;
+        }
+        const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+        let base = LEVELS
+            .iter()
+            .find_map(|lvl| model.strip_suffix(&format!("-{lvl}")))
+            .unwrap_or(model);
+        let opts: Vec<String> = LEVELS
+            .iter()
+            .filter(|lvl| {
+                let candidate = format!("{base}-{lvl}");
+                self.available_models.iter().any(|m| m == &candidate)
+            })
+            .map(|lvl| (*lvl).to_string())
+            .collect();
+        (!opts.is_empty()).then_some(opts)
+    }
+
     fn resolve_effort(&self, raw: &str) -> Result<String, DriverError> {
+        self.resolve_effort_with(&self.effort_options, raw)
+    }
+
+    fn resolve_effort_with(&self, options: &[String], raw: &str) -> Result<String, DriverError> {
         let name = self.provider.as_str();
         if self.flavor.effort_config_id.is_none() {
             return Err(DriverError(format!(
@@ -645,15 +645,15 @@ impl AcpDriver {
         };
         const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
         let wanted = LEVELS[rank];
-        if self.effort_options.is_empty() || self.effort_options.iter().any(|o| o == wanted) {
+        if options.is_empty() || options.iter().any(|o| o == wanted) {
             return Ok(wanted.to_string());
         }
         for candidate in LEVELS[..=rank].iter().rev() {
-            if self.effort_options.iter().any(|o| o == candidate) {
+            if options.iter().any(|o| o == candidate) {
                 return Ok((*candidate).to_string());
             }
         }
-        Ok(self.effort_options[0].clone())
+        Ok(options[0].clone())
     }
 
     fn send_prompt(&mut self, step: &mut DriverStep, turn_id: String, req: &RuntimePromptReq) {
@@ -663,6 +663,9 @@ impl AcpDriver {
             .is_some_and(|m| self.model.as_ref() != Some(m));
         if let Some(m) = req.model.as_ref().filter(|_| model_changed) {
             self.model = Some(m.clone());
+            if let Some(opts) = self.efforts_for_model(m) {
+                self.effort_options = opts;
+            }
         }
         if std::mem::take(&mut self.config_retry) || model_changed {
             self.write_model_config(step);
@@ -864,12 +867,29 @@ impl AcpDriver {
                 output,
                 exit_code: None,
             },
-            ToolKind::Edit | ToolKind::Delete | ToolKind::Move => TurnItemKind::FileChange {
-                file_name: t.file.clone().unwrap_or_else(|| t.title.clone()),
-                diff_str: (t.diffs.len() > 1).then(|| multi_file_patch(&t.diffs)),
-                old_str: t.diff.as_ref().and_then(|d| d.0.clone()),
-                new_str: t.diff.as_ref().map(|d| d.1.clone()),
-            },
+            ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
+                let file_name = t.file.clone().unwrap_or_else(|| t.title.clone());
+                let raw_diff = (t.diffs.len() > 1).then(|| multi_file_patch(&t.diffs));
+                let raw_old = if t.diffs.len() > 1 {
+                    None
+                } else {
+                    t.diff.as_ref().and_then(|d| d.0.clone())
+                };
+                let raw_new = if t.diffs.len() > 1 {
+                    None
+                } else {
+                    t.diff.as_ref().map(|d| d.1.clone())
+                };
+                let (diff_str, old_str, new_str) = crate::diff_compact::compact_file_change_fields(
+                    &file_name, raw_diff, raw_old, raw_new,
+                );
+                TurnItemKind::FileChange {
+                    file_name,
+                    diff_str,
+                    old_str,
+                    new_str,
+                }
+            }
             _ => TurnItemKind::DynamicTool {
                 tool_name: t.title.clone(),
                 input: t.raw_input.clone().unwrap_or(Value::Null),
@@ -1240,6 +1260,23 @@ impl AcpDriver {
             if let Some(r) = &result {
                 self.update_effort_options(r);
             }
+            self.available_models = result
+                .as_ref()
+                .and_then(|r| r.pointer("/models/availableModels"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| Some(m.get("modelId")?.as_str()?.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(opts) = self
+                .model
+                .as_deref()
+                .and_then(|m| self.efforts_for_model(m))
+            {
+                self.effort_options = opts;
+            }
             self.modes = result
                 .as_ref()
                 .and_then(|r| r.pointer("/modes/availableModes"))
@@ -1515,7 +1552,9 @@ impl StructuredDriver for AcpDriver {
         }
         let name = self.provider.as_str();
         if let Some(raw) = req.effort.as_deref().filter(|e| !e.trim().is_empty()) {
-            self.resolve_effort(raw)?;
+            let next_opts = req.model.as_deref().and_then(|m| self.efforts_for_model(m));
+            let opts = next_opts.as_deref().unwrap_or(&self.effort_options);
+            self.resolve_effort_with(opts, raw)?;
         }
         let ready = self.phase == Phase::Ready;
         if ready && !req.images.is_empty() && !self.images {
@@ -1844,6 +1883,7 @@ impl StructuredDriver for AcpDriver {
             images: self.images,
             embedded: self.embedded,
             modes: self.modes.clone(),
+            available_models: self.available_models.clone(),
             effort_options: self.effort_options.clone(),
             access: self.access,
             mode_req: self.mode_req,
@@ -1890,6 +1930,7 @@ impl StructuredDriver for AcpDriver {
         self.images = s.images;
         self.embedded = s.embedded;
         self.modes = s.modes;
+        self.available_models = s.available_models;
         self.effort_options = s.effort_options;
         self.access = s.access;
         self.mode_req = s.mode_req;
@@ -2807,6 +2848,51 @@ mod tests {
         assert_eq!(sent(&s, 1)["params"]["configId"], "thought_level");
         assert_eq!(sent(&s, 1)["params"]["value"], "high");
         assert_eq!(sent(&s, 2)["method"], "session/prompt");
+
+        // Switching to a unified family (`gemini-4-hydrogen`) that advertises
+        // `xhigh` in `models.availableModels` updates `effort_options` before
+        // resolving `thought_level`, so `xhigh` is preserved without clamping
+        // to the previous family's `high` ceiling.
+        let mut d2 = AcpDriver::agy("agy");
+        d2.start(&ctx(Some("gemini-4-carbon")));
+        d2.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d2.on_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "sessionId": "s2",
+                    "models": {"availableModels": [
+                        {"modelId": "gemini-4-carbon-low"},
+                        {"modelId": "gemini-4-carbon-medium"},
+                        {"modelId": "gemini-4-carbon-high"},
+                        {"modelId": "gemini-4-hydrogen-low"},
+                        {"modelId": "gemini-4-hydrogen-medium"},
+                        {"modelId": "gemini-4-hydrogen-high"},
+                        {"modelId": "gemini-4-hydrogen-xhigh"}
+                    ]},
+                    "configOptions": [{
+                        "id": "thought_level",
+                        "options": [{"value": "low"}, {"value": "medium"}, {"value": "high"}]
+                    }]
+                }
+            })
+            .to_string(),
+        );
+        let s2 = d2
+            .prompt(
+                "t2",
+                &RuntimePromptReq {
+                    model: Some("gemini-4-hydrogen".into()),
+                    effort: Some("xhigh".into()),
+                    ..RuntimePromptReq::of("deep")
+                },
+            )
+            .unwrap();
+        assert_eq!(sent(&s2, 0)["method"], "session/set_model");
+        assert_eq!(sent(&s2, 0)["params"]["modelId"], "gemini-4-hydrogen");
+        assert_eq!(sent(&s2, 1)["method"], "session/set_config_option");
+        assert_eq!(sent(&s2, 1)["params"]["value"], "xhigh");
     }
 
     #[test]

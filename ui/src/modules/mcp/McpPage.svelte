@@ -15,6 +15,7 @@
   import { mcpCpApi } from '../../lib/api/mcp';
   import { liveQuery } from '../../lib/live';
   import { loadErrorText } from '../../lib/loadError';
+  import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import type { McpServerDetail } from '../../lib/api/types';
   import ServersTab from './ServersTab.svelte';
   import ApprovalsTab from './ApprovalsTab.svelte';
@@ -82,13 +83,19 @@
       if (selectedServerId && !servers.some((server) => server.id === selectedServerId)) {
         selectedServerId = null;
       }
-      if (!selectedServerId && servers.length > 0) selectedServerId = servers[0].id;
+      if (!selectedServerId && servers.length > 0) {
+        selectedServerId = initialSelection('mcp-servers', servers, (s) => s.id);
+      }
     } catch (e) {
       if (generation === loadGeneration) loadError = loadErrorText(e);
     } finally {
       if (generation === loadGeneration) loading = false;
     }
   }
+
+  $effect(() => {
+    if (selectedServerId) rememberSelection('mcp-servers', selectedServerId);
+  });
 
   async function loadPending(): Promise<void> {
     try {

@@ -143,6 +143,58 @@ pub async fn resolve_dap_adapter(
     resolve_dap_adapter_with_manager(data_dir, req, ctx, None).await
 }
 
+/// Synchronous `< 0.1 ms` preflight validation for `start_session_async`:
+/// enforces target validity, non-root RBAC/path confinement (`403`), and
+/// language/plugin support (`400`) before spawning heavy target builds.
+pub(crate) fn preflight_debug_request(
+    data_dir: &Path,
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    env_mgr: Option<&EnvironmentManager>,
+) -> Result<(String, String)> {
+    req.target.validate()?;
+    let env = build_effective_env_with_manager(data_dir, req, ctx, env_mgr);
+    let raw_cwd = req
+        .launch
+        .cwd
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            ctx.run_config
+                .as_ref()
+                .and_then(|c| c.cwd.as_deref())
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or(&req.target.root);
+    let cwd = normalize_target_path(&req.target, raw_cwd);
+    validate_non_root_debug_request(req, ctx, &cwd, &env)?;
+
+    let lang = req.language.trim().to_ascii_lowercase();
+    let pair = match lang.as_str() {
+        "go" | "golang" => ("go".to_string(), "dlv".to_string()),
+        "python" | "py" => ("python".to_string(), "python-dap".to_string()),
+        "rust" | "rs" => ("rust".to_string(), "lldb".to_string()),
+        "javascript" | "js" => ("javascript".to_string(), "node-inspector".to_string()),
+        "typescript" | "ts" | "node" => ("typescript".to_string(), "node-inspector".to_string()),
+        "java" => ("java".to_string(), "java-jdwp".to_string()),
+        "shell" | "bash" | "sh" | "zsh" => ("shell".to_string(), "shell-debug".to_string()),
+        other => {
+            if let Some(plugin_spec) = ctx
+                .plugin_adapters
+                .iter()
+                .find(|p| p.language.eq_ignore_ascii_case(other))
+            {
+                (other.to_string(), plugin_spec.adapter_name.clone())
+            } else {
+                return Err(Error::Invalid(format!(
+                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, javascript, typescript, java, or shell"
+                )));
+            }
+        }
+    };
+    Ok(pair)
+}
+
 pub(crate) async fn resolve_dap_adapter_with_manager(
     data_dir: &Path,
     req: &IdeStartDebugReq,

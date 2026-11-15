@@ -230,6 +230,104 @@ pub struct IdeEnvVarEntry {
     pub has_secret: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeHostMapping {
+    pub from_host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_port: Option<u16>,
+    pub to_host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeNetworkBridgeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k8s_cluster_id: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k8s_namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_tunnel_connection_id: Option<Id>,
+    #[serde(default = "default_true")]
+    pub inject_k8s_service_env: bool,
+    #[serde(default)]
+    pub containerized: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_mappings: Vec<IdeHostMapping>,
+}
+
+impl Default for IdeNetworkBridgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            k8s_cluster_id: None,
+            k8s_namespace: None,
+            ssh_tunnel_connection_id: None,
+            inject_k8s_service_env: true,
+            containerized: false,
+            host_mappings: Vec::new(),
+        }
+    }
+}
+
+impl IdeNetworkBridgeConfig {
+    pub fn has_any_content(&self) -> bool {
+        self.enabled
+            || self
+                .k8s_cluster_id
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || self
+                .k8s_namespace
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || self
+                .ssh_tunnel_connection_id
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || !self.host_mappings.is_empty()
+            || self.containerized
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeBridgedServiceSummary {
+    pub name: String,
+    pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_ip: Option<String>,
+    pub ports: Vec<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeNetBridgeTestReq {
+    pub target: IdeTargetSpec,
+    pub bridge: IdeNetworkBridgeConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeNetBridgeStatusResp {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub ssh_tunnel_ready: bool,
+    #[serde(default)]
+    pub interposer_ready: bool,
+    #[serde(default)]
+    pub services: Vec<IdeBridgedServiceSummary>,
+    #[serde(default)]
+    pub ingress_hosts: Vec<String>,
+    pub latency_ms: u64,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeProjectEnvironment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -252,6 +350,8 @@ pub struct IdeProjectEnvironment {
     pub additional_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub module_sdks: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_bridge: Option<IdeNetworkBridgeConfig>,
     #[serde(default, alias = "vars")]
     pub env_vars: Vec<IdeEnvVarEntry>,
 }
@@ -269,6 +369,7 @@ impl Default for IdeProjectEnvironment {
             inherit_shell_env: true,
             additional_roots: Vec::new(),
             module_sdks: BTreeMap::new(),
+            network_bridge: None,
             env_vars: Vec::new(),
         }
     }
@@ -297,6 +398,8 @@ pub struct IdeUpdateEnvironmentReq {
     pub additional_roots: Option<Vec<String>>,
     #[serde(default)]
     pub module_sdks: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub network_bridge: Option<IdeNetworkBridgeConfig>,
     #[serde(default, alias = "vars")]
     pub env_vars: Vec<IdeEnvVarEntry>,
 }

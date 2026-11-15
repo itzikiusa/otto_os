@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { snapshotDraft, acknowledgeComposer } from '../src/lib/stores/runtimeDraftPersistence.ts';
 import { componentFunctions } from './componentFunctions.ts';
+import { loadSource } from './sourceHarness.ts';
 
 // No agents picked as chips: submit sends to the thread's own agent.
 const sendHelpers = { snapshotDraft, acknowledgeComposer, assembleComposerMessage: (text: string) => text, askTargets: { for: () => [] }, askFromComposer: async () => {} };
@@ -176,4 +177,82 @@ test('failed send preserves an intentional clear while the request was pending',
   const draft={flushSave:()=>{},freshContext:false,context:[],text:'submitted',images:[],model:null,effort:null,pickedMode:null,sending:false};
   const state=componentFunctions(component,['send'],{...sendHelpers,ownerId:'A',draft,runtimeDrafts:{owns:()=>true},runtimeThreads:{prompt:()=>new Promise((_r,reject)=>fail=reject)},ApiError:class extends Error{},toastError:()=>{}});
   const sending=state.send('submitted'); draft.text=''; fail(Error('offline')); await sending; assert.equal(draft.text,'');
+});
+
+test('submit clears composer in 0ms, skips /reopen on dormant threads, and restores draft if prompt fails', async () => {
+  const { buildOptimisticUserMessage, restoreOptimisticDraft, withOptimisticItem } = loadSource(
+    new URL('../src/modules/threads/runtime/runtimeComposer.ts', import.meta.url),
+    {
+      '../../../lib/toastError': { toastError: () => {} },
+      '../../../lib/telemetry': { startMeasurement: () => null },
+      './hostCommands': { runHostSlash: () => false },
+      './timeline': { errorText: (s: string) => s },
+      '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: {} },
+    },
+  ) as typeof import('../src/modules/threads/runtime/runtimeComposer.ts');
+  let failPrompt!: (e: Error) => void;
+  let reopenCalls = 0;
+  const promptCalls: unknown[] = [];
+  const draft = {
+    flushSave: () => {},
+    freshContext: false,
+    context: [],
+    text: 'fast mobile reply',
+    images: [],
+    model: null,
+    effort: null,
+    pickedMode: null,
+    reopening: false,
+    sending: false,
+  };
+  const state = componentFunctions(component, ['submit', 'send', 'reopen'], {
+    ...sendHelpers,
+    buildOptimisticUserMessage,
+    restoreOptimisticDraft,
+    sessionId: 'A',
+    ownerId: 'A',
+    draft,
+    closed: false,
+    needsRevive: true, // dormant: `closed === false`, `needsRevive === true`
+    running: false,
+    optimisticMessage: null,
+    p: { items: [] },
+    parseInteractiveSlashInput: () => null,
+    runtimeDrafts: { owns: () => true },
+    runtimeThreads: {
+      reopen: async () => {
+        reopenCalls += 1;
+      },
+      prompt: (_id: string, body: unknown) => {
+        promptCalls.push(body);
+        return new Promise((_r, reject) => {
+          failPrompt = reject;
+        });
+      },
+    },
+    toastError: () => {},
+    ApiError: class extends Error {},
+  });
+
+  state.submit();
+  // Cleared synchronously before any promise settles, and `/reopen` was skipped!
+  assert.equal(draft.text, '');
+  assert.equal(reopenCalls, 0);
+  assert.equal(promptCalls.length, 1);
+  assert.ok(state.optimisticMessage, 'optimistic user bubble created immediately');
+  assert.equal(withOptimisticItem([], state.optimisticMessage).length, 1);
+
+  // Deduplicates as soon as the server user_message item arrives.
+  const serverMsg = {
+    ...state.optimisticMessage.item,
+    id: 'srv-u-1',
+    ordinal: 1,
+  };
+  assert.equal(withOptimisticItem([serverMsg], state.optimisticMessage).length, 1);
+
+  // On network error with empty composer, restores the user's text and clears optimistic bubble.
+  failPrompt(new Error('network down'));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(draft.text, 'fast mobile reply');
+  assert.equal(state.optimisticMessage, null);
 });

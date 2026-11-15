@@ -50,7 +50,11 @@ pub(super) async fn lsp_symbols<S: IdeCtx>(
             .await?;
     }
     Ok(Json(
-        crate::lsp_service::document_symbols(&ctx, &user, req).await?,
+        otto_telemetry::context::measure_result(
+            "ide.lsp.request",
+            crate::lsp_service::document_symbols(&ctx, &user, req),
+        )
+        .await?,
     ))
 }
 
@@ -61,7 +65,11 @@ pub(super) async fn lsp_definition<S: IdeCtx>(
 ) -> ApiResult<Json<IdeReferencesResp>> {
     req.target.absorb_project_folders(&req.project_folders);
     Ok(Json(
-        crate::lsp_service::goto_definition(&ctx, &user, req).await?,
+        otto_telemetry::context::measure_result(
+            "ide.lsp.request",
+            crate::lsp_service::goto_definition(&ctx, &user, req),
+        )
+        .await?,
     ))
 }
 
@@ -72,7 +80,11 @@ pub(super) async fn lsp_implementation<S: IdeCtx>(
 ) -> ApiResult<Json<IdeReferencesResp>> {
     req.target.absorb_project_folders(&req.project_folders);
     Ok(Json(
-        crate::lsp_service::goto_implementation(&ctx, &user, req).await?,
+        otto_telemetry::context::measure_result(
+            "ide.lsp.request",
+            crate::lsp_service::goto_implementation(&ctx, &user, req),
+        )
+        .await?,
     ))
 }
 
@@ -83,7 +95,11 @@ pub(super) async fn lsp_references<S: IdeCtx>(
 ) -> ApiResult<Json<IdeReferencesResp>> {
     req.target.absorb_project_folders(&req.project_folders);
     Ok(Json(
-        crate::lsp_service::find_references(&ctx, &user, req).await?,
+        otto_telemetry::context::measure_result(
+            "ide.lsp.request",
+            crate::lsp_service::find_references(&ctx, &user, req),
+        )
+        .await?,
     ))
 }
 

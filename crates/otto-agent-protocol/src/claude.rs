@@ -459,14 +459,23 @@ impl ClaudeDriver {
                 output: t.output.clone(),
                 exit_code: None,
             },
-            ToolType::FileChange => TurnItemKind::FileChange {
-                file_name: s("file_path")
+            ToolType::FileChange => {
+                let file_name = s("file_path")
                     .or_else(|| s("notebook_path"))
-                    .unwrap_or_else(|| t.name.clone()),
-                diff_str: None,
-                old_str: s("old_string"),
-                new_str: s("new_string").or_else(|| s("content")),
-            },
+                    .unwrap_or_else(|| t.name.clone());
+                let (diff_str, old_str, new_str) = crate::diff_compact::compact_file_change_fields(
+                    &file_name,
+                    None,
+                    s("old_string"),
+                    s("new_string").or_else(|| s("content")),
+                );
+                TurnItemKind::FileChange {
+                    file_name,
+                    diff_str,
+                    old_str,
+                    new_str,
+                }
+            }
             ToolType::WebSearch => TurnItemKind::WebSearch {
                 patterns: s("query").or_else(|| s("url")).into_iter().collect(),
             },

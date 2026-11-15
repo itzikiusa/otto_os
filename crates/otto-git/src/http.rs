@@ -2732,6 +2732,9 @@ struct PrListQuery {
     per_page: Option<u32>,
     /// `me`: only open PRs that ask the caller's forge account for a review.
     review: Option<String>,
+    /// Bypass the 15 s provider GET cache (explicit manual Refresh).
+    #[serde(default)]
+    fresh: bool,
 }
 
 async fn pr_list<S: GitCtx>(
@@ -2753,6 +2756,9 @@ async fn pr_list<S: GitCtx>(
     let page = q.page.unwrap_or(1).clamp(1, 10_000);
     let per_page = q.per_page.unwrap_or(50).clamp(1, 100);
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
+    if q.fresh {
+        provider.invalidate_repo_reads(&remote);
+    }
     let p = match q.review.as_deref() {
         None | Some("") => provider.list_prs(&remote, state, page, per_page).await?,
         Some("me") => {
@@ -2796,13 +2802,25 @@ pub async fn create_pr_for_repo<S: GitCtx>(
     provider.create_pr(&remote, req).await
 }
 
+#[derive(Deserialize, Default)]
+struct PrDetailQuery {
+    /// Bypass the 15 s provider GET cache (explicit manual Refresh or
+    /// eventual-consistency retry right after a write).
+    #[serde(default)]
+    fresh: bool,
+}
+
 async fn pr_detail<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path((id, number)): Path<(Id, u64)>,
+    Query(q): Query<PrDetailQuery>,
 ) -> ApiResult<Json<PrDetail>> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
+    if q.fresh {
+        provider.invalidate_repo_reads(&remote);
+    }
     Ok(Json(provider.get_pr(&remote, number).await?))
 }
 

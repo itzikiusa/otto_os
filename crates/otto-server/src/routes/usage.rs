@@ -845,25 +845,90 @@ pub struct WorkspaceSessionsUsage {
 /// a ClickHouse query over the whole window, and the sidebar asks per
 /// workspace switch / minute; a minute of staleness is invisible there.
 const SESSIONS_USAGE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const SESSIONS_USAGE_MAX_STALE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
-type SessionsUsageCache =
-    std::sync::Mutex<Option<(std::time::Instant, u32, std::sync::Arc<Vec<SessionTotals>>)>>;
+type SessionsUsageCacheKey = (usize, u32);
+type SessionsUsageCacheMap = std::collections::HashMap<
+    SessionsUsageCacheKey,
+    (std::time::Instant, std::sync::Arc<Vec<SessionTotals>>),
+>;
 
-static SESSIONS_USAGE_CACHE: SessionsUsageCache = std::sync::Mutex::new(None);
+fn sessions_usage_cache() -> &'static std::sync::Mutex<SessionsUsageCacheMap> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<SessionsUsageCacheMap>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn sessions_usage_refreshing(
+) -> &'static std::sync::Mutex<std::collections::HashSet<SessionsUsageCacheKey>> {
+    static IN_FLIGHT: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<SessionsUsageCacheKey>>,
+    > = std::sync::OnceLock::new();
+    IN_FLIGHT.get_or_init(Default::default)
+}
+
+fn store_session_totals_cache(
+    key: SessionsUsageCacheKey,
+    rows: std::sync::Arc<Vec<SessionTotals>>,
+) {
+    let mut map = sessions_usage_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if map.len() >= 16 && !map.contains_key(&key) {
+        map.clear();
+    }
+    map.insert(key, (std::time::Instant::now(), rows));
+}
+
+/// Pre-warm the default 30-day session usage rollup once ClickHouse comes up so
+/// the first sidebar query returns from memory instead of blocking on ClickHouse.
+pub(crate) async fn warm_session_totals_engine(usage: &std::sync::Arc<otto_usage::UsageEngine>) {
+    if !usage.available() {
+        return;
+    }
+    let key = (std::sync::Arc::as_ptr(usage) as usize, 30);
+    if let Ok(rows) = usage.session_totals(30, false).await {
+        store_session_totals_cache(key, std::sync::Arc::new(rows));
+    }
+}
 
 /// The daemon-wide `session_totals(days)` rollup, cached for
-/// [`SESSIONS_USAGE_TTL`] per window. Errors are not cached.
+/// [`SESSIONS_USAGE_TTL`] per window and served stale-while-revalidate up to
+/// [`SESSIONS_USAGE_MAX_STALE`] while a background task refreshes ClickHouse.
+/// Errors are not cached.
 async fn cached_session_totals(
     ctx: &ServerCtx,
     days: u32,
 ) -> Result<std::sync::Arc<Vec<SessionTotals>>, ApiError> {
-    if let Some((at, d, rows)) = SESSIONS_USAGE_CACHE
+    let key: SessionsUsageCacheKey = (std::sync::Arc::as_ptr(&ctx.usage) as usize, days);
+    let cached = sessions_usage_cache()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .as_ref()
-    {
-        if *d == days && at.elapsed() < SESSIONS_USAGE_TTL {
-            return Ok(std::sync::Arc::clone(rows));
+        .get(&key)
+        .map(|(at, rows)| (at.elapsed(), std::sync::Arc::clone(rows)));
+    if let Some((age, rows)) = cached {
+        if age < SESSIONS_USAGE_TTL {
+            return Ok(rows);
+        }
+        if age < SESSIONS_USAGE_MAX_STALE {
+            let should_spawn = sessions_usage_refreshing()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(key);
+            if should_spawn {
+                let usage = std::sync::Arc::clone(&ctx.usage);
+                tokio::spawn(async move {
+                    let res = usage.session_totals(days, false).await;
+                    if let Ok(fresh) = res {
+                        store_session_totals_cache(key, std::sync::Arc::new(fresh));
+                    }
+                    sessions_usage_refreshing()
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&key);
+                });
+            }
+            return Ok(rows);
         }
     }
     let rows = std::sync::Arc::new(
@@ -872,13 +937,7 @@ async fn cached_session_totals(
             .await
             .map_err(ApiError)?,
     );
-    *SESSIONS_USAGE_CACHE
-        .lock()
-        .unwrap_or_else(|p| p.into_inner()) = Some((
-        std::time::Instant::now(),
-        days,
-        std::sync::Arc::clone(&rows),
-    ));
+    store_session_totals_cache(key, std::sync::Arc::clone(&rows));
     Ok(rows)
 }
 

@@ -15,9 +15,10 @@ use crate::dap::DapStartContext;
 use crate::types::{
     IdeCreatePythonVenvReq, IdeCreatePythonVenvResp, IdeDebugCommandReq, IdeDebugEvaluateReq,
     IdeDebugEvaluateResp, IdeDebugSessionResp, IdeDebugSessionsResp, IdeDebugVariablesReq,
-    IdeDebugVariablesResp, IdeEnvironmentResp, IdeEnvironmentsResp, IdeOkResp, IdeRunConfigResp,
-    IdeRunResp, IdeSetBreakpointsReq, IdeStartDebugReq, IdeStartRunReq, IdeTargetKind,
-    IdeTargetQuery, IdeTargetSpec, IdeUpdateEnvironmentReq, IdeUpsertRunConfigReq,
+    IdeDebugVariablesResp, IdeEnvironmentResp, IdeEnvironmentsResp, IdeNetBridgeStatusResp,
+    IdeNetBridgeTestReq, IdeOkResp, IdeRunConfigResp, IdeRunResp, IdeSetBreakpointsReq,
+    IdeStartDebugReq, IdeStartRunReq, IdeTargetKind, IdeTargetQuery, IdeTargetSpec,
+    IdeUpdateEnvironmentReq, IdeUpsertRunConfigReq,
 };
 use crate::IdeCtx;
 
@@ -77,6 +78,14 @@ pub(super) async fn put_environments<S: IdeCtx>(
             }
         }
     }
+    if let Some(ref raw_nb) = req.network_bridge {
+        if let Some(clean_nb) = crate::netbridge::sanitize_network_bridge(Some(raw_nb.clone()))? {
+            ctx.ide()
+                .netbridge
+                .authorize_config(&ctx, &user, &clean_nb)
+                .await?;
+        }
+    }
     let env = ctx
         .ide()
         .environments
@@ -84,6 +93,20 @@ pub(super) async fn put_environments<S: IdeCtx>(
         .await?;
     ctx.ide().targets.invalidate_local_resolve_cache();
     Ok(Json(IdeEnvironmentResp { env }))
+}
+
+pub(super) async fn test_network_bridge<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(req): Json<IdeNetBridgeTestReq>,
+) -> ApiResult<Json<IdeNetBridgeStatusResp>> {
+    let _ = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?;
+    let resp = ctx.ide().netbridge.probe_status(&ctx, &user, &req).await?;
+    Ok(Json(resp))
 }
 
 pub(super) async fn execute_create_python_venv<S: IdeCtx>(
@@ -205,19 +228,38 @@ pub(super) async fn start_run<S: IdeCtx>(
         .resolve_write(&ctx, &user, &req.target)
         .await?
         .into_ssh_spec();
-    let run = ctx
+    let proj_nb = ctx
         .ide()
         .environments
-        .start_run_for_user(
-            &ctx.pool(),
-            ctx.secrets(),
-            &ctx.ide().targets,
-            Some(&ctx.ide().projects),
-            Some(&user),
-            req,
-            ssh,
-        )
-        .await?;
+        .get_project_env(&ctx.pool(), &req.target)
+        .await
+        .ok()
+        .and_then(|p| p.network_bridge);
+    let netbridge = match proj_nb.as_ref().filter(|nb| nb.enabled) {
+        Some(nb) => {
+            ctx.ide()
+                .netbridge
+                .acquire_for_launch(&ctx, &user, &req.target, nb)
+                .await?
+        }
+        None => None,
+    };
+    let run = otto_telemetry::context::measure_result("ide.run.launch", async {
+        ctx.ide()
+            .environments
+            .start_run_with_netbridge(
+                &ctx.pool(),
+                ctx.secrets(),
+                &ctx.ide().targets,
+                Some(&ctx.ide().projects),
+                Some(&user),
+                req,
+                ssh,
+                netbridge,
+            )
+            .await
+    })
+    .await?;
     Ok(Json(IdeRunResp { run }))
 }
 
@@ -335,23 +377,28 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
     } else {
         None
     };
-    let effective_env = ctx
+    let (loaded_proj, effective_env) = ctx
         .ide()
         .environments
-        .build_effective_env_for_run_as(
+        .build_effective_env_with_loaded_opts(
             &ctx.pool(),
             ctx.secrets(),
             &req.target,
             run_config.as_ref().or(adhoc_cfg.as_ref()),
+            false,
             user.is_root,
         )
         .await?;
-    let project_env = Some(
-        ctx.ide()
-            .environments
-            .get_project_env(&ctx.pool(), &req.target)
-            .await?,
-    );
+    let netbridge = match loaded_proj.network_bridge.as_ref().filter(|nb| nb.enabled) {
+        Some(nb) => {
+            ctx.ide()
+                .netbridge
+                .acquire_for_launch(&ctx, &user, &req.target, nb)
+                .await?
+        }
+        None => None,
+    };
+    let project_env = Some(loaded_proj);
     let plugin_adapters = ctx.ide().plugins.active_dap_adapters();
     let start_ctx = DapStartContext::new()
         .with_ssh(ssh)
@@ -359,36 +406,36 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
         .with_project_env(project_env)
         .with_run_config(run_config)
         .with_plugin_adapters(plugin_adapters)
+        .with_netbridge(netbridge)
         .with_caller_is_root(user.is_root)
         .with_owner_user_id(&user.id);
 
     let target_for_collab = req.target.clone();
     let owner_id = user.id.clone();
-    let session = ctx.ide().dap.start_session(req, start_ctx).await?;
+    let (session, mut rx) = otto_telemetry::context::measure_result("ide.dap.launch", async {
+        ctx.ide().dap.start_session_async(req, start_ctx)
+    })
+    .await?;
     ctx.ide()
         .collab
         .publish_debug_snapshot(Some(&target_for_collab), Some(&owner_id), &session);
 
-    if let Ok(mut rx) = ctx.ide().dap.subscribe_events(&session.id) {
-        let engine = ctx.ide().clone();
-        let target_clone = target_for_collab;
-        let owner_clone = owner_id;
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(snap) => {
-                        engine.collab.publish_debug_snapshot(
-                            Some(&target_clone),
-                            Some(&owner_clone),
-                            &snap,
-                        );
-                    }
-                    Err(RecvError::Lagged(_)) => continue,
-                    Err(RecvError::Closed) => break,
+    let engine = ctx.ide().clone();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(snap) => {
+                    engine.collab.publish_debug_snapshot(
+                        Some(&target_for_collab),
+                        Some(&owner_id),
+                        &snap,
+                    );
                 }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
             }
-        });
-    }
+        }
+    });
 
     Ok(Json(IdeDebugSessionResp { session }))
 }
@@ -417,8 +464,8 @@ pub(super) async fn stream_debug_events<S: IdeCtx>(
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
     ctx.ide().authorize_debug_session(&user, &id)?;
-    let initial = ctx.ide().dap.get_session(&id)?;
     let rx = ctx.ide().dap.subscribe_events(&id)?;
+    let initial = ctx.ide().dap.get_session(&id)?;
     Ok(build_debug_sse_response(initial, rx))
 }
 

@@ -26,8 +26,10 @@
   import { now } from '../../../lib/stores/now.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { threads } from '../threadsStore.svelte';
+  import { runtimeViews } from './runtimeView.svelte';
 
   interface Props {
+    sessionId?: string;
     item: TurnItem;
     /** Live `command_output.delta` text (command items). */
     output?: string;
@@ -41,7 +43,7 @@
     /** The thread's folder: paths and `cd <it> &&` drop out of the label. */
     cwd?: string | null;
   }
-  let { item, output = '', pending, note = null, onrespond, agentId = null, cwd = null }: Props = $props();
+  let { sessionId = '', item, output = '', pending, note = null, onrespond, agentId = null, cwd = null }: Props = $props();
   const runNotice = $derived(item.type === 'system_notice' ? runNoticeOf(item.message) : null);
   /** Threads opened from this one: their live cards / "finished" line. */
   const childNotice = $derived(item.type === 'system_notice' ? threadNoticeOf(item.message) : null);
@@ -108,7 +110,9 @@
 
   /** Thinking reads inline (T3): its text under a quiet line, clamped until opened. */
   const thinking = $derived(item.type === 'reasoning' && !!item.text);
-  const longThought = $derived(item.type === 'reasoning' && (item.text.length > 240 || hasAtLeastNewlines(item.text, 3)));
+  const longThought = $derived(
+    item.type === 'reasoning' && (Boolean(item.detail_omitted) || item.text.length > 240 || hasAtLeastNewlines(item.text, 3)),
+  );
   const thinkingMd = $derived(
     item.type !== 'reasoning' ? '' : open || !longThought ? item.text : previewReasoningText(item.text),
   );
@@ -125,8 +129,9 @@
   });
   const commandOut = $derived(item.type === 'command_execution' ? (item.output ?? output) : '');
   const tail = $derived(running && commandOut ? lastLine(commandOut) : '');
+  const detailLoading = $derived(Boolean(item.detail_omitted && sessionId && runtimeViews.loadingItem[`${sessionId}:${item.id}`]));
   const hasFilePatch = $derived(
-    item.type === 'file_change' && Boolean(item.diff_str || item.old_str != null || item.new_str != null),
+    item.type === 'file_change' && Boolean(item.detail_omitted || item.diff_str || item.old_str != null || item.new_str != null),
   );
   const patch = $derived.by(() => {
     if (!open || item.type !== 'file_change') return null;
@@ -152,6 +157,12 @@
               ? !!item.reason
               : false,
   );
+
+  $effect(() => {
+    if (open && item.detail_omitted && sessionId) {
+      void runtimeViews.ensureItemDetail(sessionId, item.id);
+    }
+  });
 
   // Pin the output to its bottom while the reader follows it.
   $effect(() => {
@@ -228,7 +239,9 @@
       {#if error}
         <pre class="rw-pre rw-failure" data-testid="runtime-item-error">{error}</pre>
       {/if}
-      {#if item.type === 'command_execution'}
+      {#if item.detail_omitted}
+        <p class="rw-tail" data-testid="runtime-item-loading">{detailLoading ? 'Loading details…' : 'Details unavailable.'}</p>
+      {:else if item.type === 'command_execution'}
         <pre class="rw-pre" bind:this={outEl} onscroll={onOutScroll}><span class="rw-cmd">$ {item.input}</span>
 {commandOut || (running ? '' : 'No output.')}</pre>
         {#if item.exit_code != null && item.exit_code !== 0}

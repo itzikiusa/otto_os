@@ -5,6 +5,7 @@
   import { confirmer } from '../confirm.svelte';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
   import {
+    canonicalModelId,
     effortsForModel,
     formatEffortLabel,
     formatEffortShort,
@@ -75,7 +76,7 @@
         title: 'Custom model',
         confirmLabel: 'Use model',
         initial: pinnedModel ?? '',
-        placeholder: provider === 'codex' ? 'e.g. gpt-5.4' : provider === 'agy' ? 'e.g. gemini-4-argon-high' : 'e.g. claude-opus-5-5',
+        placeholder: provider === 'codex' ? 'e.g. gpt-5.4' : provider === 'agy' ? 'e.g. gemini-4-carbon' : 'e.g. claude-opus-5-5',
         validate: (v) => (v.trim() ? null : 'Model ID is required'),
       },
     );
@@ -100,8 +101,15 @@
           label: m.label,
           hint: m.id !== m.label ? m.id : (m.default_effort ? `${m.default_effort} default` : undefined),
           title: m.description || m.id,
-          checked: pinnedModel === m.id || (pinnedModel === null && effectiveModel === m.id),
-          action: () => onmodelchange(m.id),
+          checked:
+            canonicalModelId(provider, pinnedModel, meta) === m.id ||
+            (pinnedModel === null && canonicalModelId(provider, effectiveModel, meta) === m.id),
+          action: () => {
+            onmodelchange(m.id);
+            if (effort !== null && !effortsForModel(provider, m.id, meta).includes(effort)) {
+              oneffortchange(null);
+            }
+          },
         }),
       ),
       { separator: true, pinned: true },

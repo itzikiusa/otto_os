@@ -142,7 +142,10 @@ impl Drop for ShellProbeGuard {
 }
 
 async fn terminate_shell_process_group(child: &mut tokio::process::Child, pid: Option<u32>) {
-    if tokio::time::timeout(Duration::from_millis(40), child.wait())
+    if let Ok(Some(_)) = child.try_wait() {
+        return;
+    }
+    if tokio::time::timeout(Duration::from_millis(10), child.wait())
         .await
         .is_ok()
     {

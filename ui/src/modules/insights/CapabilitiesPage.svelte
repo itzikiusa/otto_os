@@ -3,76 +3,36 @@
   // right now, what's degraded, and how do I fix it?". Root-only: backed by
   // GET /capabilities (5 s cached on the server) and GET /support-bundle.
   import { capabilitiesApi, depKindLabel, featureLabel, settingsRoute, statusLabel } from './capabilities';
-  import type { ModuleCapability } from './capabilities';
   import { router } from '../../lib/router.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { loadErrorText } from '../../lib/loadError';
   import type { CapabilityStatus } from './capabilities';
+  import { capabilitiesStore as s } from './insightsStore.svelte';
 
   /** Capability status → the shared status tone (green / amber / neutral). */
-  function tone(s: CapabilityStatus): 'success' | 'warning' | 'neutral' {
-    return s === 'ready' ? 'success' : s === 'degraded' ? 'warning' : 'neutral';
+  function tone(st: CapabilityStatus): 'success' | 'warning' | 'neutral' {
+    return st === 'ready' ? 'success' : st === 'degraded' ? 'warning' : 'neutral';
   }
-
-  // ---------------------------------------------------------------------------
-  // State
-  // ---------------------------------------------------------------------------
-
-  let caps: ModuleCapability[] = $state([]);
-  let loading = $state(true);
-  /** Last load failure — shown inline (with Retry) instead of a toast plus a
-   *  generic "no capability data" page that hid the actual reason. */
-  let loadErr = $state('');
-  /** Which feature is expanded (showing dep breakdown). */
-  let expanded = $state<Set<string>>(new Set());
-
-  // ---------------------------------------------------------------------------
-  // Load on mount
-  // ---------------------------------------------------------------------------
 
   let loaded = false;
   $effect(() => {
     if (loaded) return;
     loaded = true;
-    void load();
+    void s.load(false);
   });
-
-  async function load(): Promise<void> {
-    loading = true;
-    loadErr = '';
-    try {
-      caps = await capabilitiesApi.list();
-    } catch (e) {
-      loadErr = loadErrorText(e);
-    } finally {
-      loading = false;
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // UI helpers
-  // ---------------------------------------------------------------------------
-
-  function toggle(feature: string): void {
-    const next = new Set(expanded);
-    if (next.has(feature)) next.delete(feature);
-    else next.add(feature);
-    expanded = next;
-  }
 
   /** Count of ready / degraded / missing_setup modules. */
   const summary = $derived({
-    ready: caps.filter((c) => c.status === 'ready').length,
-    degraded: caps.filter((c) => c.status === 'degraded').length,
-    missing: caps.filter((c) => c.status === 'missing_setup').length,
+    ready: s.caps.filter((c) => c.status === 'ready').length,
+    degraded: s.caps.filter((c) => c.status === 'degraded').length,
+    missing: s.caps.filter((c) => c.status === 'missing_setup').length,
   });
 
   /** Sort: degraded first, then missing_setup, then ready. */
   const sorted = $derived(
-    [...caps].sort((a, b) => {
+    [...s.caps].sort((a, b) => {
       const order = { degraded: 0, missing_setup: 1, ready: 2 };
       return (order[a.status] ?? 99) - (order[b.status] ?? 99);
     }),
@@ -83,7 +43,7 @@
      action) lives in InsightsPage. -->
 <div class="caps">
 
-  {#if !loading && caps.length > 0}
+  {#if !s.loading && s.caps.length > 0}
     <!-- Summary: counts by state, worst first. Rendered with the loaded list
          (not a live region: inserted with its text it would be silent). -->
     <div class="summary-row">
@@ -99,7 +59,7 @@
     </div>
   {/if}
 
-  <LoadState what="capabilities" variant="page" {loading} error={loadErr || null} empty={caps.length === 0} onretry={load} rows={5}>
+  <LoadState what="capabilities" variant="page" loading={s.loading} error={s.loadErr || null} empty={s.caps.length === 0} onretry={() => void s.load(true)} rows={5}>
     {#snippet emptyView()}
       <EmptyState
         icon="gauge"
@@ -110,10 +70,10 @@
     {/snippet}
     <div class="cap-list">
       {#each sorted as cap (cap.feature)}
-        {@const open = expanded.has(cap.feature)}
+        {@const open = s.expanded.has(cap.feature)}
         <div class="cap-card" class:has-issues={cap.status === 'degraded'}>
           <div class="cap-head">
-            <button class="cap-toggle" aria-expanded={open} aria-controls="deps-{cap.feature}" onclick={() => toggle(cap.feature)}>
+            <button class="cap-toggle" aria-expanded={open} aria-controls="deps-{cap.feature}" onclick={() => s.toggle(cap.feature)}>
               <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
               <span class="feature-label" title={featureLabel(cap.feature)}>{featureLabel(cap.feature)}</span>
               <StatusBadge tone={tone(cap.status)} label={statusLabel(cap.status)} />

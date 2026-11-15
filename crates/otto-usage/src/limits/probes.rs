@@ -29,6 +29,9 @@ use super::{unknown_row, AccountLimits, LimitStatus, WindowLimit, STALE_AFTER_SE
 pub const PROBE_TTL: Duration = Duration::from_secs(5 * 60);
 /// The hard limit on one CLI exchange.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum inline wait on a cold probe before returning immediately while the
+/// spawned task finishes in the background.
+const COLD_INLINE_BUDGET: Duration = Duration::from_millis(200);
 
 /// One CLI's newest answer: its raw JSON, or why there is none.
 #[derive(Debug, Clone)]
@@ -59,11 +62,12 @@ pub(crate) fn readings() -> Readings {
     cache().lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// Make sure each installed CLI (`Some(program)`) has an answer: the first
-/// time waits for it, an expired one refreshes in the background.
+/// Make sure each installed CLI (`Some(program)`) has an answer: a cold probe
+/// waits briefly (`COLD_INLINE_BUDGET`) and otherwise finishes in the
+/// background; an expired one refreshes in the background immediately.
 pub async fn refresh(agy: Option<String>, grok: Option<String>) {
     let now = Utc::now();
-    let mut waits = Vec::new();
+    let mut handles = Vec::new();
     for (provider, program) in [("agy", agy), ("grok", grok)] {
         let Some(program) = program else { continue };
         let held = readings().get(provider).map(|r| r.taken_at);
@@ -74,10 +78,20 @@ pub async fn refresh(agy: Option<String>, grok: Option<String>) {
                     tokio::spawn(probe(provider, program));
                 }
             }
-            None => waits.push(probe(provider, program)),
+            None => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    probe(provider, program).await;
+                    let _ = tx.send(());
+                });
+                handles.push(rx);
+            }
         }
     }
-    futures_util::future::join_all(waits).await;
+    if !handles.is_empty() {
+        let _ =
+            tokio::time::timeout(COLD_INLINE_BUDGET, futures_util::future::join_all(handles)).await;
+    }
 }
 
 async fn probe(provider: &'static str, program: String) {

@@ -91,6 +91,7 @@ async fn sqlite_crud_redacts_secrets_preserves_multiroot_and_layers_intellij_env
                 inherit_shell_env: None,
                 additional_roots: None,
                 module_sdks: None,
+                network_bridge: None,
                 env_vars: vec![
                     IdeEnvVarEntry {
                         key: "APP_ENV".into(),
@@ -344,4 +345,112 @@ async fn create_python_venv_rejects_out_of_root_sensitive_and_traversal_paths() 
             "expected Invalid/Forbidden for python_version '{bad_py}', got: {err_py:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn network_bridge_persists_preserves_when_omitted_and_clears_when_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::open(&tmp.path().join("nb_env.db"))
+        .await
+        .unwrap();
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+    let mgr = EnvironmentManager::new(tmp.path().join("data"));
+    let target = IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned());
+
+    let bridge = crate::types::IdeNetworkBridgeConfig {
+        enabled: true,
+        k8s_cluster_id: Some("01M3PSPFMHKRJ5RGDNKBC90ECH".into()),
+        k8s_namespace: Some("cbo".into()),
+        ssh_tunnel_connection_id: Some("conn_bastion".into()),
+        inject_k8s_service_env: true,
+        containerized: true,
+        host_mappings: vec![crate::types::IdeHostMapping {
+            from_host: "localhost".into(),
+            from_port: Some(9090),
+            to_host: "confsrv".into(),
+            to_port: Some(9090),
+        }],
+    };
+
+    let saved = mgr
+        .update_environment(
+            &pool,
+            &secrets,
+            IdeUpdateEnvironmentReq {
+                target: target.clone(),
+                java_home: None,
+                go_root: None,
+                rust_toolchain: None,
+                node_home: None,
+                python_interpreter: None,
+                dotenv_path: None,
+                extra_path: None,
+                inherit_shell_env: Some(true),
+                additional_roots: None,
+                module_sdks: None,
+                network_bridge: Some(bridge.clone()),
+                env_vars: vec![IdeEnvVarEntry {
+                    key: "APP_MODE".into(),
+                    value: Some("dev".into()),
+                    secret: false,
+                    has_secret: false,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(saved.network_bridge, Some(bridge.clone()));
+    assert_eq!(saved.env_vars.len(), 1);
+    assert_eq!(saved.env_vars[0].key, "APP_MODE");
+
+    // Omitting `network_bridge` (`None`) preserves the persisted bridge:
+    let preserved = mgr
+        .update_environment(
+            &pool,
+            &secrets,
+            IdeUpdateEnvironmentReq {
+                target: target.clone(),
+                java_home: Some("/opt/jdk-21".into()),
+                go_root: None,
+                rust_toolchain: None,
+                node_home: None,
+                python_interpreter: None,
+                dotenv_path: None,
+                extra_path: None,
+                inherit_shell_env: None,
+                additional_roots: None,
+                module_sdks: None,
+                network_bridge: None,
+                env_vars: saved.env_vars.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(preserved.network_bridge, Some(bridge));
+
+    // Sending an empty disabled `network_bridge` clears it cleanly:
+    let cleared = mgr
+        .update_environment(
+            &pool,
+            &secrets,
+            IdeUpdateEnvironmentReq {
+                target: target.clone(),
+                java_home: Some("/opt/jdk-21".into()),
+                go_root: None,
+                rust_toolchain: None,
+                node_home: None,
+                python_interpreter: None,
+                dotenv_path: None,
+                extra_path: None,
+                inherit_shell_env: None,
+                additional_roots: None,
+                module_sdks: None,
+                network_bridge: Some(crate::types::IdeNetworkBridgeConfig::default()),
+                env_vars: saved.env_vars,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared.network_bridge, None);
 }

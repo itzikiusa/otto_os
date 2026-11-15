@@ -203,11 +203,15 @@ pub(super) async fn execute_run_task(
     target: IdeTargetSpec,
     ssh: Option<IdeSshSpec>,
     steps: Vec<(IdeRunConfig, BTreeMap<String, String>)>,
+    netbridge: Option<Arc<crate::netbridge::NetBridgeLease>>,
     mut stop_rx: watch::Receiver<bool>,
 ) {
     let started = Instant::now();
     let multi_step = steps.len() > 1;
     let mut last_exit = Some(0);
+    if let Some(ref nb) = netbridge {
+        append_run_line(&handle, nb.summary_banner().await);
+    }
 
     for (idx, (cfg, mut env_map)) in steps.into_iter().enumerate() {
         if *stop_rx.borrow() {
@@ -235,6 +239,9 @@ pub(super) async fn execute_run_task(
 
         let cwd = resolve_run_cwd(&target, cfg.cwd.as_deref());
         apply_runtime_profile_and_module_venv(&cfg, &target, &cwd, &mut env_map);
+        if let Some(ref nb) = netbridge {
+            nb.apply_to_env(&mut env_map);
+        }
 
         if let Some(pre) = cfg
             .before_launch

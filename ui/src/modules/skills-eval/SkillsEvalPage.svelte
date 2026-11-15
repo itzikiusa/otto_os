@@ -6,6 +6,7 @@
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { skillsLabState } from '../../lib/stores/skillsLabState.svelte';
   import { router } from '../../lib/router.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { registry } from '../../lib/commands.svelte';
@@ -45,8 +46,8 @@
     onphonedetail?: (open: boolean) => void;
   }
   let { initialSkill = null, onconsumed, initialRun = null, onrunconsumed, listCollapsed = false, onlistable, onphonedetail }: Props = $props();
-  // The skill the start form should pre-select (kept until the form is left).
-  let formSkill = $state<{ name: string; source: string } | null>(null);
+  const initialEval = skillsLabState.evalFor(ws.currentId);
+  let formSkill = $state<{ name: string; source: string } | null>(initialEval.formSkill);
   let phoneListOpen = $state(false);
   let matrixPhoneDetail = $state(false);
   let matrixView = $state<ReturnType<typeof MatrixView> | null>(null);
@@ -73,20 +74,20 @@
 
   // List rows are SUMMARIES (one paged query, no iterations); the detail pane
   // and Compare fetch full runs by id. Only ever reassigned → raw.
-  let runs: SkillEvalSummary[] = $state.raw([]);
+  let runs: SkillEvalSummary[] = $state.raw(initialEval.runs);
   const PAGE = 200;
-  let nextCursor = $state<string | null>(null);
+  let nextCursor = $state<string | null>(initialEval.nextCursor);
   let loadingMore = $state(false);
   function toSummary(e: SkillEval): SkillEvalSummary {
     const { iterations, config: _config, promoted_at: _pa, promoted_by: _pb, ...rest } = e;
     return { ...rest, iteration_count: iterations.length };
   }
-  let loading = $state(true);
+  let loading = $state(!initialEval.loaded);
   // Inline load failure (with Retry) instead of a toast over an empty list.
   let loadError: string | null = $state(null);
-  let mode: Mode = $state('form');
-  let selectedId: string | null = $state(null);
-  let starting = $state(false);
+  let mode: Mode = $state(initialEval.mode);
+  let selectedId: string | null = $state(initialEval.selectedId);
+  const starting = $derived(skillsLabState.startingEval);
   const listHidden = $derived(listCollapsed);
   // The view is part of the route (`#/skills-eval/evaluator[/golden|/matrix]`)
   // so back/forward and deep links land on it.
@@ -127,10 +128,10 @@
   );
 
   // Compare mode: pick 2+ runs from the list to view side by side.
-  let compareMode = $state(false);
-  let compareSel = $state<Set<string>>(new Set());
+  let compareMode = $state(initialEval.compareMode);
+  let compareSel = $state<Set<string>>(new Set(initialEval.compareSel));
   // Compare reads iterations: full runs are fetched for the selected ids only.
-  let compareFull = $state.raw<Record<string, SkillEval>>({});
+  let compareFull = $state.raw<Record<string, SkillEval>>(initialEval.compareFull);
   let compareErrors = $state.raw<Record<string, string>>({});
   let compareLoading = $state.raw<Record<string, boolean>>({});
   function loadCompareRun(id: string): void {
@@ -217,27 +218,54 @@
     compareSel = next;
   }
 
+  let loadedWs = $state<string | null>(ws.currentId && initialEval.loaded ? ws.currentId : null);
   $effect(() => {
     const wsId = ws.currentId;
-    // A workspace switch must not keep the previous workspace's run open
-    // (RunDetail would fetch an id that isn't in this list) or its compare
-    // selection.
+    if (!wsId) {
+      loadedWs = null;
+      loading = false;
+      runs = [];
+      return;
+    }
+    if (wsId === loadedWs) return;
+    const cached = untrack(() => skillsLabState.evalFor(wsId));
+    loadedWs = wsId;
+    compareErrors = {};
+    compareLoading = {};
+    phoneListOpen = false;
+    if (cached.loaded) {
+      runs = cached.runs;
+      nextCursor = cached.nextCursor;
+      mode = cached.mode;
+      selectedId = cached.selectedId;
+      formSkill = cached.formSkill;
+      compareMode = cached.compareMode;
+      compareSel = new Set(cached.compareSel);
+      compareFull = cached.compareFull;
+      loading = false;
+      return;
+    }
     selectedId = null;
     mode = 'form';
     compareMode = false;
     compareSel = new Set();
     compareFull = {};
-    compareErrors = {};
-    compareLoading = {};
-    phoneListOpen = false;
-    if (wsId) {
-      void loadList(wsId);
-    } else {
-      // No workspace yet (still booting, or none selected): don't hang on a
-      // perpetual "Loading…".
-      loading = false;
-      runs = [];
-    }
+    void loadList(wsId);
+  });
+  $effect(() => {
+    const wsId = ws.currentId;
+    if (!wsId || loadedWs !== wsId) return;
+    skillsLabState.syncEval(wsId, {
+      runs,
+      nextCursor,
+      loaded: !loading && !loadError,
+      mode,
+      selectedId,
+      formSkill,
+      compareMode,
+      compareSel: new Set(compareSel),
+      compareFull,
+    });
   });
 
   let listGeneration = 0;
@@ -296,21 +324,13 @@
   async function start(req: StartSkillEvalReq): Promise<void> {
     const wsId = ws.currentId;
     if (!wsId || starting) return;
-    starting = true;
-    try {
-      const created = await skillsEvalApi.start(wsId, req);
-      if (ws.currentId !== wsId) return;
-      runs = [toSummary(created), ...runs];
-      formSkill = null;
-      selectedId = created.id;
-      mode = 'detail';
-      phoneListOpen = false;
-      toasts.success('Evaluation started', 'Watch progress in the report.');
-    } catch (e) {
-      toastError("Couldn’t start the evaluation", e);
-    } finally {
-      starting = false;
-    }
+    const created = await skillsLabState.startEval(wsId, req);
+    if (!created || ws.currentId !== wsId) return;
+    runs = [toSummary(created), ...runs.filter((r) => r.id !== created.id)];
+    formSkill = null;
+    selectedId = created.id;
+    mode = 'detail';
+    phoneListOpen = false;
   }
 
   // Keep the list entry in sync with the live detail (status, score).

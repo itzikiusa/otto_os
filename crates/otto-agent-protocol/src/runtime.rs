@@ -42,7 +42,7 @@ use otto_core::agent_runtime::{
     TurnTerminalStatus,
 };
 use otto_core::{new_id, Error, Id, Result};
-use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RuntimeEntityRow};
+use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RawRuntimeEntityRow, RuntimeEntityRow};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::driver::{
@@ -178,21 +178,22 @@ pub(crate) struct Projection {
 }
 
 impl Projection {
-    fn load(rows: Vec<RuntimeEntityRow>) -> Self {
+    fn load_raw(rows: Vec<RawRuntimeEntityRow>) -> Self {
         let mut p = Projection::default();
         for r in rows {
-            let v = r.payload;
+            let s = r.payload_json.as_str();
             match r.kind.as_str() {
-                K_SESSION => p.session = serde_json::from_value(v).ok(),
-                K_THREAD => p.thread = serde_json::from_value(v).ok(),
+                K_SESSION => p.session = serde_json::from_str(s).ok(),
+                K_THREAD => p.thread = serde_json::from_str(s).ok(),
                 K_TURN => {
-                    if let Ok(t) = serde_json::from_value::<ProviderTurn>(v) {
+                    if let Ok(t) = serde_json::from_str::<ProviderTurn>(s) {
                         p.next_turn_ordinal = p.next_turn_ordinal.max(t.ordinal);
                         p.turns.insert(t.id.clone(), t);
                     }
                 }
                 K_ITEM => {
-                    if let Ok(i) = serde_json::from_value::<TurnItem>(v) {
+                    if let Ok(mut i) = serde_json::from_str::<TurnItem>(s) {
+                        crate::diff_compact::bound_item_in_place(&mut i);
                         p.next_item_ordinal = p.next_item_ordinal.max(i.ordinal);
                         if let TurnItemKind::ApprovalRequest { request_id, .. } = &i.kind {
                             p.request_items.insert(request_id.clone(), i.id.clone());
@@ -201,17 +202,17 @@ impl Projection {
                     }
                 }
                 K_REQUEST => {
-                    if let Ok(q) = serde_json::from_value::<RuntimeRequest>(v) {
+                    if let Ok(q) = serde_json::from_str::<RuntimeRequest>(s) {
                         p.requests.insert(q.id.clone(), q);
                     }
                 }
                 K_PLAN => {
-                    if let Ok(pl) = serde_json::from_value::<PlanArtifact>(v) {
+                    if let Ok(pl) = serde_json::from_str::<PlanArtifact>(s) {
                         p.plans.insert(pl.id.clone(), pl);
                     }
                 }
                 K_QUEUE => {
-                    p.queue = serde_json::from_value(v).unwrap_or_default();
+                    p.queue = serde_json::from_str(s).unwrap_or_default();
                 }
                 _ => {}
             }
@@ -220,9 +221,20 @@ impl Projection {
     }
 
     fn snapshot(&self) -> RuntimeSnapshot {
+        self.snapshot_compact(false)
+    }
+
+    fn snapshot_compact(&self, compact: bool) -> RuntimeSnapshot {
         let mut turns: Vec<ProviderTurn> = self.turns.values().cloned().collect();
         turns.sort_by_key(|t| t.ordinal);
-        let mut turn_items: Vec<TurnItem> = self.items.values().cloned().collect();
+        let mut turn_items: Vec<TurnItem> = if compact {
+            self.items
+                .values()
+                .map(TurnItem::compact_for_snapshot)
+                .collect()
+        } else {
+            self.items.values().cloned().collect()
+        };
         turn_items.sort_by_key(|i| i.ordinal);
         let mut runtime_requests: Vec<RuntimeRequest> = self.requests.values().cloned().collect();
         runtime_requests.sort_by_key(|r| r.created_at);
@@ -426,6 +438,7 @@ struct Inner {
     drivers: Arc<dyn DriverFactory>,
     config: RuntimeConfig,
     live: DashMap<Id, Arc<Live>>,
+    loading: DashMap<Id, Arc<tokio::sync::Mutex<()>>>,
 }
 
 /// Cheap to clone.
@@ -449,7 +462,27 @@ impl AgentRuntime {
                 drivers,
                 config,
                 live: DashMap::new(),
+                loading: DashMap::new(),
             }),
+        }
+    }
+
+    /// Pre-hydrate the `limit` most recently active open sessions in the
+    /// background at daemon boot so opening an active thread on phone/desktop
+    /// never blocks on a cold SQLite projection load.
+    pub async fn warm_recent(&self, limit: usize) {
+        if limit == 0 {
+            return;
+        }
+        let Ok(records) = self.inner.repo.list_all(None).await else {
+            return;
+        };
+        for rec in records
+            .into_iter()
+            .filter(|r| r.session.status != RuntimeSessionStatus::Closed)
+            .take(limit)
+        {
+            let _ = self.live(&rec.session.id).await;
         }
     }
 
@@ -1039,39 +1072,70 @@ impl AgentRuntime {
         if let Some(l) = self.inner.live.get(id) {
             return Ok(Arc::clone(l.value()));
         }
-        let rec = self.inner.repo.get(id).await?;
-        let proj = Projection::load(self.inner.repo.entities(id).await?);
-        let (tx, rx) = mpsc::unbounded_channel();
-        let next_seq = rec.seq_reserved.max(rec.session.last_sequence) + 1;
-        let live = Arc::new(Live {
-            prompt_lock: tokio::sync::Mutex::new(()),
-            spawn_lock: tokio::sync::Mutex::new(()),
-            drain_lock: tokio::sync::Mutex::new(()),
-            deadline_changed: tokio::sync::Notify::new(),
-            state: Mutex::new(State {
-                session: rec.session,
-                next_seq,
-                reserved: rec.seq_reserved,
-                epoch: 0,
-                fresh_starting: false,
-                ring: EventRing::new(self.inner.config.ring),
-                proj,
-                turn: None,
-                proc: None,
-                held: Vec::new(),
-                stream_emitted: HashMap::new(),
-                last_activity: Instant::now(),
-                starting: 0,
-                stop_requested: false,
-            }),
-            persist: tx,
-            detaching_for_restart: std::sync::atomic::AtomicBool::new(false),
-        });
-        let entry = self.inner.live.entry(id.clone()).or_insert_with(|| {
-            tokio::spawn(persister(self.inner.repo.clone(), id.clone(), rx));
-            Arc::clone(&live)
-        });
-        Ok(Arc::clone(entry.value()))
+        let load_gate = self
+            .inner
+            .loading
+            .entry(id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = load_gate.lock().await;
+        if let Some(l) = self.inner.live.get(id) {
+            return Ok(Arc::clone(l.value()));
+        }
+        otto_telemetry::context::measure_result("threads.hydrate_db", async {
+            let rec = match self.inner.repo.get(id).await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.inner.loading.remove(id);
+                    return Err(e);
+                }
+            };
+            let raw_rows = match self.inner.repo.raw_entities(id).await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.inner.loading.remove(id);
+                    return Err(e);
+                }
+            };
+            let proj = tokio::task::spawn_blocking(move || Projection::load_raw(raw_rows))
+                .await
+                .map_err(|e| Error::Internal(format!("projection load join error: {e}")))?;
+            let (tx, rx) = mpsc::unbounded_channel();
+            let next_seq = rec.seq_reserved.max(rec.session.last_sequence) + 1;
+            let live = Arc::new(Live {
+                prompt_lock: tokio::sync::Mutex::new(()),
+                spawn_lock: tokio::sync::Mutex::new(()),
+                drain_lock: tokio::sync::Mutex::new(()),
+                deadline_changed: tokio::sync::Notify::new(),
+                state: Mutex::new(State {
+                    session: rec.session,
+                    next_seq,
+                    reserved: rec.seq_reserved,
+                    epoch: 0,
+                    fresh_starting: false,
+                    ring: EventRing::new(self.inner.config.ring),
+                    proj,
+                    turn: None,
+                    proc: None,
+                    held: Vec::new(),
+                    stream_emitted: HashMap::new(),
+                    last_activity: Instant::now(),
+                    starting: 0,
+                    stop_requested: false,
+                }),
+                persist: tx,
+                detaching_for_restart: std::sync::atomic::AtomicBool::new(false),
+            });
+            let entry = self.inner.live.entry(id.clone()).or_insert_with(|| {
+                tokio::spawn(persister(self.inner.repo.clone(), id.clone(), rx));
+                Arc::clone(&live)
+            });
+            let out = Arc::clone(entry.value());
+            drop(entry);
+            self.inner.loading.remove(id);
+            Ok(out)
+        })
+        .await
     }
 
     async fn ensure_process(&self, live: &Arc<Live>) -> Result<()> {
@@ -1086,6 +1150,14 @@ impl AgentRuntime {
             }
             st.session.clone()
         };
+        otto_telemetry::context::measure_result(
+            "threads.spawn_driver",
+            self.spawn_driver_inner(live, session),
+        )
+        .await
+    }
+
+    async fn spawn_driver_inner(&self, live: &Arc<Live>, session: RuntimeSession) -> Result<()> {
         let mut driver = self.inner.drivers.create(session.provider).ok_or_else(|| {
             Error::Invalid(format!(
                 "no structured driver for provider '{}'",
@@ -1220,7 +1292,11 @@ impl AgentRuntime {
     pub async fn prompt_with(&self, id: &Id, req: &RuntimePromptReq) -> Result<RuntimePromptResp> {
         let live = self.live(id).await?;
         let _prompt = live.prompt_lock.lock().await;
-        self.prompt_locked(id, &live, req).await
+        otto_telemetry::context::measure_result(
+            "threads.prompt",
+            self.prompt_locked(id, &live, req),
+        )
+        .await
     }
 
     async fn prompt_locked(
@@ -1844,6 +1920,74 @@ impl AgentRuntime {
         Ok(s)
     }
 
+    /// Low-latency HTTP reopen: validates & spawns the CLI process immediately
+    /// (`< 30 ms`), returning the revived [`RuntimeSession`] without blocking
+    /// the HTTP caller for up to `start_wait` (20 s) on MCP/CLI boot. A
+    /// background task finishes the readiness check, fresh-thread fallback on
+    /// refused resume, and queued reply delivery.
+    pub async fn reopen_fast(&self, id: &Id) -> Result<RuntimeSession> {
+        let live = self.live(id).await?;
+        let (s, resume_key, need_bg_watch) = {
+            let _prompt = live.prompt_lock.lock().await;
+            {
+                let mut st = live.lock();
+                if st.session.status == RuntimeSessionStatus::Closed {
+                    st.session.status = RuntimeSessionStatus::Dormant;
+                    let _ = live.persist.send(PersistOp::Opened);
+                } else if st.proc.is_some() {
+                    return Ok(st.session.clone());
+                }
+            }
+            self.flush(id).await;
+            self.ensure_process(&live).await?;
+            let st = live.lock();
+            let resume_key = st.session.native_thread_id.clone();
+            let need_bg = resume_key.is_some() || !st.proj.queue.is_empty();
+            (st.session.clone(), resume_key, need_bg)
+        };
+        if need_bg_watch {
+            let rt = self.clone();
+            let sid = id.clone();
+            let live_bg = Arc::clone(&live);
+            tokio::spawn(async move {
+                let started = resume_key.is_none() || rt.wait_started(&live_bg).await;
+                if !started {
+                    let _prompt = live_bg.prompt_lock.lock().await;
+                    let idle = {
+                        let st = live_bg.lock();
+                        st.proc.is_none() && st.turn.is_none() && st.starting == 0
+                    };
+                    if idle {
+                        let _ = rt.spawn_resuming(&sid, &live_bg).await;
+                    }
+                }
+                let queued = {
+                    let st = live_bg.lock();
+                    !st.proj.queue.is_empty() && st.turn.is_none()
+                };
+                if queued {
+                    rt.kick_queue(&sid);
+                }
+            });
+        }
+        Ok(s)
+    }
+
+    /// Fetch a single full (uncompacted) `TurnItem` by ID for lazy row expansion.
+    pub async fn get_item(&self, id: &Id, item_id: &Id) -> Result<TurnItem> {
+        otto_telemetry::context::measure_result("threads.get_item", async {
+            let live = self.live(id).await?;
+            let mut st = live.lock();
+            flush_held(&self.inner, &live, &mut st);
+            st.proj
+                .items
+                .get(item_id)
+                .cloned()
+                .ok_or_else(|| Error::NotFound(format!("turn item '{item_id}' not found")))
+        })
+        .await
+    }
+
     /// Spawn the agent if it is not running, resuming the provider's own
     /// thread. A provider that refuses the resume (its process dies before
     /// it is ready — e.g. Claude's "No conversation found" for a thread that
@@ -1958,32 +2102,44 @@ impl AgentRuntime {
     /// longer holds them or they exceed T3 Code's replay limits.
     pub async fn replay(&self, id: &Id, after_sequence: u64) -> Result<RuntimeReplay> {
         let live = self.live(id).await?;
-        for _ in 0..4 {
-            if !poll_driver_sideband(&self.inner, &live, None).await {
-                break;
+        otto_telemetry::context::measure("threads.sideband_poll", async {
+            for _ in 0..4 {
+                if !poll_driver_sideband(&self.inner, &live, None).await {
+                    break;
+                }
             }
-        }
-        let mut st = live.lock();
-        flush_held(&self.inner, &live, &mut st);
-        let last_sequence = st.next_seq - 1;
-        if after_sequence >= last_sequence {
-            return Ok(RuntimeReplay::Events {
-                events: Vec::new(),
-                last_sequence,
-            });
-        }
-        if let Some(events) =
-            st.ring
-                .replayable(after_sequence, MAX_REPLAY_EVENTS, MAX_REPLAY_BYTES)
-        {
-            return Ok(RuntimeReplay::Events {
-                events,
-                last_sequence,
-            });
-        }
+        })
+        .await;
+        let (last_sequence, snap) = {
+            let mut st = live.lock();
+            flush_held(&self.inner, &live, &mut st);
+            let last_sequence = st.next_seq - 1;
+            if after_sequence >= last_sequence {
+                return Ok(RuntimeReplay::Events {
+                    events: Vec::new(),
+                    last_sequence,
+                });
+            }
+            if let Some(events) =
+                st.ring
+                    .replayable(after_sequence, MAX_REPLAY_EVENTS, MAX_REPLAY_BYTES)
+            {
+                return Ok(RuntimeReplay::Events {
+                    events,
+                    last_sequence,
+                });
+            }
+            (last_sequence, None::<RuntimeSnapshot>)
+        };
+        let _ = snap;
+        let snapshot = otto_telemetry::context::measure("threads.snapshot_slice", async {
+            let st = live.lock();
+            Box::new(st.proj.snapshot())
+        })
+        .await;
         Ok(RuntimeReplay::Snapshot {
             snapshot_sequence: last_sequence,
-            snapshot: Box::new(st.proj.snapshot()),
+            snapshot,
         })
     }
 
@@ -2710,6 +2866,7 @@ fn finish_turn(
                 updated_at: now,
                 error: None,
                 parent_item_id: None,
+                detail_omitted: false,
                 kind: TurnItemKind::Error { failure: f.clone() },
             },
         );

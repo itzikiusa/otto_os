@@ -1646,6 +1646,13 @@ mod cached_reads {
             2,
             "the approve cleared the cached list — no 15 s of stale state"
         );
+        gh.invalidate_repo_reads(&rr());
+        gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(
+            list_gets(&server).await,
+            3,
+            "explicit fresh=true invalidation bypasses the 15 s GET cache"
+        );
     }
 
     #[tokio::test]

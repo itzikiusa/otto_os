@@ -506,5 +506,8 @@ pub(crate) fn build_effective_env_with_manager(
         }
     }
     env.extend(req.launch.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    if let Some(nb) = &ctx.netbridge {
+        nb.apply_to_env(&mut env);
+    }
     env
 }

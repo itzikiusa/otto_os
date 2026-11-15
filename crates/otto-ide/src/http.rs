@@ -48,7 +48,7 @@ use self::runtime_debug::{
     create_python_venv, debug_command, debug_evaluate, debug_variables, delete_run_config,
     get_debug_session, get_environments, get_run, list_debug_sessions, put_environments,
     set_debug_breakpoints, start_debug_session, start_run, stop_run, stream_debug_events,
-    stream_run_events, upsert_run_config,
+    stream_run_events, test_network_bridge, upsert_run_config,
 };
 use self::toolchains_env::{
     add_project_folder, delete_local_sdk, get_shell_env, get_toolchain_job, install_toolchain,
@@ -174,6 +174,10 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             "/ide/environments/python-venv",
             post(create_python_venv::<S>),
         )
+        .route(
+            "/ide/environments/bridge-test",
+            post(test_network_bridge::<S>),
+        )
         .route("/ide/run-configs", post(upsert_run_config::<S>))
         .route("/ide/run-configs/{id}", delete(delete_run_config::<S>))
         .route("/ide/runs", post(start_run::<S>))
@@ -260,21 +264,24 @@ async fn fs_tree<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeFsTreeQuery>,
 ) -> ApiResult<Json<IdeFsTreeResp>> {
-    let spec = q.target_spec()?;
-    let resolved = ctx.ide().targets.resolve(&ctx, &user, &spec).await?;
-    let mut resp = ctx
-        .ide()
-        .targets
-        .list_tree(&resolved, q.path.as_deref(), q.show_hidden)
-        .await?;
-    for entry in &mut resp.entries {
-        if entry.kind == IdeFsEntryKind::File && entry.language.is_none() {
-            if let Some(plugin_lang) = ctx.ide().plugins.detect_language_for_path(&entry.path) {
-                entry.language = Some(plugin_lang.id);
+    otto_telemetry::context::measure_result("ide.fs.tree", async {
+        let spec = q.target_spec()?;
+        let resolved = ctx.ide().targets.resolve(&ctx, &user, &spec).await?;
+        let mut resp = ctx
+            .ide()
+            .targets
+            .list_tree(&resolved, q.path.as_deref(), q.show_hidden)
+            .await?;
+        for entry in &mut resp.entries {
+            if entry.kind == IdeFsEntryKind::File && entry.language.is_none() {
+                if let Some(plugin_lang) = ctx.ide().plugins.detect_language_for_path(&entry.path) {
+                    entry.language = Some(plugin_lang.id);
+                }
             }
         }
-    }
-    Ok(Json(resp))
+        Ok(Json(resp))
+    })
+    .await
 }
 
 async fn fs_read_file<S: IdeCtx>(
@@ -353,9 +360,12 @@ async fn search_workspace<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeSearchReq>,
 ) -> ApiResult<Json<IdeSearchResp>> {
-    let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
-    let resp = ctx.ide().targets.search(&resolved, &req).await?;
-    Ok(Json(resp))
+    otto_telemetry::context::measure_result("ide.search", async {
+        let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+        let resp = ctx.ide().targets.search(&resolved, &req).await?;
+        Ok(Json(resp))
+    })
+    .await
 }
 
 async fn replace_workspace<S: IdeCtx>(

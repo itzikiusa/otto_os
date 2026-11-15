@@ -120,16 +120,17 @@ pub async fn meta(
             .iter()
             .map(|name| (name.as_str(), ctx.manager.providers().program_for(name))),
     );
-    let tools = otto_sessions::tool_probe::probe_tools_cached(tool_specs.clone()).await;
-    // A family's `models` subcommand runs through the first INSTALLED
-    // provider of that family (a custom `grok` provider is the grok CLI).
+    // Resolve installed family programs via fast in-process PATH/fs checks so
+    // tool version probing and model-catalog discovery run concurrently.
     let families = ctx.manager.providers().model_families();
     let program_of = |family: &str| {
         families
             .iter()
             .filter(|(_, f)| f == family)
-            .find(|(p, _)| tools.iter().any(|t| &t.name == p && t.found))
-            .and_then(|(p, _)| tool_specs.get(p).cloned())
+            .find_map(|(p, _)| {
+                let prog = tool_specs.get(p)?;
+                otto_sessions::tool_probe::executable_in_path_or_fs(prog).then(|| prog.clone())
+            })
     };
     let probe = otto_sessions::provider_models::ModelProbe {
         agy_program: program_of("agy"),
@@ -138,8 +139,10 @@ pub async fn meta(
         pi_program: program_of("pi"),
         families,
     };
-    let provider_models =
-        otto_sessions::provider_models::probe_provider_models_cached(&probe).await;
+    let (tools, provider_models) = tokio::join!(
+        otto_sessions::tool_probe::probe_tools_cached(tool_specs),
+        otto_sessions::provider_models::probe_provider_models_cached(&probe),
+    );
 
     Ok(Json(MetaResp {
         version: ctx.version.clone(),

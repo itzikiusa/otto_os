@@ -21,6 +21,7 @@ pub mod jsonrpc_framing;
 pub mod local_history;
 pub mod lsp_host;
 pub mod lsp_service;
+pub mod netbridge;
 pub mod plugins;
 pub mod projects;
 pub mod target;
@@ -77,6 +78,18 @@ pub trait IdeCtx: Clone + Send + Sync + 'static {
             ))
         })
     }
+    fn resolve_k8s_cluster<'a>(
+        &'a self,
+        _user: &'a User,
+        _cluster_id: &'a Id,
+        _namespace: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<netbridge::IdeK8sSpec>> {
+        Box::pin(async {
+            Err(otto_core::Error::Invalid(
+                "Kubernetes cluster resolver is not wired in this context".into(),
+            ))
+        })
+    }
 }
 
 /// Shared stateful IDE engine mounted on `ServerCtx`.
@@ -92,11 +105,12 @@ pub struct IdeEngine {
     pub projects: projects::ProjectStore,
     pub lsp_pool: Arc<lsp_host::pool::LspPool>,
     pub db_watch: db_watch::DbWatchRegistry,
+    pub netbridge: netbridge::NetBridgeManager,
 }
 
 impl IdeEngine {
     pub fn new(data_dir: PathBuf) -> Self {
-        let shell_env = Arc::new(environments::ShellEnvResolver::new());
+        let shell_env = Arc::new(environments::ShellEnvResolver::with_cache_dir(&data_dir));
         shell_env.ensure_warming_in_background();
         let history = local_history::LocalHistoryStore::new(data_dir.clone());
         let projects = projects::ProjectStore::new(data_dir.clone());
@@ -128,6 +142,7 @@ impl IdeEngine {
             projects,
             lsp_pool,
             db_watch: db_watch::DbWatchRegistry::new(),
+            netbridge: netbridge::NetBridgeManager::new(data_dir.clone()),
             data_dir,
         }
     }

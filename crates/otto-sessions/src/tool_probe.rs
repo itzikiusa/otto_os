@@ -10,6 +10,53 @@ use otto_core::api::ToolStatus;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+/// Cold-cache inline wait budget on `/meta` before serving fast filesystem
+/// presence and letting the spawned version probe finish in the background.
+const COLD_INLINE_BUDGET: Duration = Duration::from_millis(300);
+
+/// Fast in-process executable check (`is_file` + execute bit on Unix) across
+/// explicit paths or `$PATH`, avoiding a `which` subprocess per tool.
+pub fn executable_in_path_or_fs(program: &str) -> bool {
+    fn is_exec(p: &std::path::Path) -> bool {
+        let Ok(meta) = std::fs::metadata(p) else {
+            return false;
+        };
+        if !meta.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    }
+
+    let p = std::path::Path::new(program);
+    if program.contains('/') {
+        return is_exec(p);
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .any(|cand| is_exec(&cand))
+}
+
+fn fast_tool_statuses(specs: &BTreeMap<String, String>) -> Vec<ToolStatus> {
+    specs
+        .iter()
+        .map(|(name, program)| ToolStatus {
+            name: name.clone(),
+            found: executable_in_path_or_fs(program),
+            version: None,
+        })
+        .collect()
+}
 /// Tools probed by name on every `/meta`.
 pub const DETECTED_TOOLS: [&str; 5] = ["claude", "codex", "agy", "git", "clickhouse"];
 
@@ -133,9 +180,47 @@ pub async fn probe_tools_cached(specs: BTreeMap<String, String>) -> Vec<ToolStat
             }
         }
     }
-    let tools = run_tool_probe(&specs).await;
-    *slot = Some((std::time::Instant::now(), specs, tools.clone()));
-    tools
+    if TOOLS_REFRESHING.load(Ordering::Acquire) {
+        return slot
+            .as_ref()
+            .filter(|(_, s, _)| *s == specs)
+            .map(|(_, _, t)| t.clone())
+            .unwrap_or_else(|| fast_tool_statuses(&specs));
+    }
+    let specs_bg = specs.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Vec<ToolStatus>>();
+    TOOLS_REFRESHING.store(true, Ordering::Release);
+    tokio::spawn(async move {
+        struct Done;
+        impl Drop for Done {
+            fn drop(&mut self) {
+                TOOLS_REFRESHING.store(false, Ordering::Release);
+            }
+        }
+        let _done = Done;
+        let tools = run_tool_probe(&specs_bg).await;
+        let _ = tx.send(tools.clone());
+        *TOOLS_CACHE.lock().await = Some((std::time::Instant::now(), specs_bg, tools));
+    });
+    match timeout(COLD_INLINE_BUDGET, rx).await {
+        Ok(Ok(tools)) => {
+            *slot = Some((std::time::Instant::now(), specs, tools.clone()));
+            tools
+        }
+        _ => {
+            let provisional = fast_tool_statuses(&specs);
+            if provisional
+                .iter()
+                .any(|t| t.found && t.name != "git" && t.name != "clickhouse")
+            {
+                let stale_at = std::time::Instant::now()
+                    .checked_sub(TOOLS_TTL + Duration::from_secs(1))
+                    .unwrap_or_else(std::time::Instant::now);
+                *slot = Some((stale_at, specs, provisional.clone()));
+            }
+            provisional
+        }
+    }
 }
 
 /// Count of real probe passes run (test hook for the single-flight cache).
@@ -155,18 +240,7 @@ fn configure_provider_probe(tools: &mut BTreeMap<String, String>, name: &str, pr
 /// Probe one external tool: `which <name>` for presence, then
 /// `<name> --version` (2s timeout) for the version string.
 async fn detect_tool(name: &str, program: &str) -> ToolStatus {
-    let found = match timeout(
-        Duration::from_secs(2),
-        Command::new("which")
-            .arg(program)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    {
-        Ok(Ok(out)) => out.status.success(),
-        _ => false,
-    };
+    let found = executable_in_path_or_fs(program);
     // A configured command that isn't on PATH may be a shell alias/function
     // (`alias claude-work='CLAUDE_CONFIG_DIR=… claude'`); spawn runs those via
     // the login shell (`otto_sessions::providers::shell_wrapped`), so ask that

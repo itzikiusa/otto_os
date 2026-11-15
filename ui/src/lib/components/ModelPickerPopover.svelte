@@ -8,6 +8,7 @@
   import { placeAnchored } from '../anchorPlace';
   import { confirmer } from '../confirm.svelte';
   import {
+    canonicalModelId,
     effortsForModel,
     formatEffortLabel,
     INTERACTION_MODES,
@@ -87,17 +88,26 @@
 
   const meta = $derived(auth.meta);
   const current = $derived(model ?? effectiveModel);
+  const currentId = $derived(canonicalModelId(provider, current, meta));
   const rows = $derived.by(() => {
     const q = query.trim().toLowerCase();
     const list =
       view === '★'
-        ? favs.flatMap((key) => {
-            const i = key.indexOf(':');
-            const p = key.slice(0, i);
-            if (!providers.includes(p)) return [];
-            const m = modelsForProvider(p, meta).find((x) => x.id === key.slice(i + 1));
-            return m ? [{ p, m }] : [];
-          })
+        ? (() => {
+            const seen = new Set<string>();
+            return favs.flatMap((key) => {
+              const i = key.indexOf(':');
+              const p = key.slice(0, i);
+              if (!providers.includes(p)) return [];
+              const resolved = canonicalModelId(p, key.slice(i + 1), meta);
+              const m = resolved
+                ? modelsForProvider(p, meta).find((x) => x.id === resolved)
+                : undefined;
+              if (!m || seen.has(`${p}:${m.id}`)) return [];
+              seen.add(`${p}:${m.id}`);
+              return [{ p, m }];
+            });
+          })()
         : modelsForProvider(view, meta).map((m) => ({ p: view, m }));
     return q ? list.filter(({ m }) => `${m.label} ${m.id}`.toLowerCase().includes(q)) : list;
   });
@@ -114,6 +124,19 @@
       onprovider?.(p);
     }
     onmodel(id);
+    if (effort !== null && oneffort) {
+      const nextEfforts = supportsEffortSelection(p) ? effortsForModel(p, id, meta) : [];
+      if (!nextEfforts.includes(effort)) {
+        oneffort(null);
+      }
+    }
+  }
+
+  function pickEffort(lvl: EffortLevel | null): void {
+    if (model !== null && currentId !== null && model !== currentId) {
+      onmodel(currentId);
+    }
+    oneffort?.(lvl);
   }
 
   function place(): void {
@@ -245,7 +268,7 @@
         {/if}
         {#each shown as r, i (`${r.p}:${r.m.id}`)}
           {@const key = `${r.p}:${r.m.id}`}
-          {@const isCur = r.p === provider && current === r.m.id}
+          {@const isCur = r.p === provider && currentId === r.m.id}
           <div class="mp-rowwrap">
             <button
               type="button"
@@ -288,12 +311,12 @@
       {#if efforts.length > 0}
         <section class="mp-effort" aria-label="Reasoning" data-testid="picker-effort">
           <h3 class="mp-head">Reasoning</h3>
-          <button type="button" class="mp-row" class:cur={effort === null} onclick={() => oneffort?.(null)}>
+          <button type="button" class="mp-row" class:cur={effort === null} onclick={() => pickEffort(null)}>
             <span class="mp-check">{#if effort === null}<Icon name="check" size={12} />{/if}</span>
             <span class="mp-name">Default</span>
           </button>
           {#each efforts as lvl (lvl)}
-            <button type="button" class="mp-row" class:cur={effort === lvl} onclick={() => oneffort?.(lvl)}>
+            <button type="button" class="mp-row" class:cur={effort === lvl} onclick={() => pickEffort(lvl)}>
               <span class="mp-check">{#if effort === lvl}<Icon name="check" size={12} />{/if}</span>
               <span class="mp-name">{formatEffortLabel(lvl)}</span>
             </button>

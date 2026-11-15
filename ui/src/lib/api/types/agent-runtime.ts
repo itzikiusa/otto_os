@@ -162,6 +162,8 @@ export type TurnItem = {
   updated_at: string;
   /** The `subagent` item this item is the activity of. */
   parent_item_id?: Id;
+  /** True when heavy settled tool/diff/output fields were omitted in a compact snapshot. */
+  detail_omitted?: boolean;
 } & TurnItemKind;
 
 /** Why a request was cancelled: `agent` = the provider withdrew it (Claude

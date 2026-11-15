@@ -335,7 +335,8 @@ pub struct EnvironmentManager {
 
 impl EnvironmentManager {
     pub fn new(data_dir: PathBuf) -> Self {
-        Self::with_shell_env(data_dir, Arc::new(ShellEnvResolver::new()))
+        let shell_env = Arc::new(ShellEnvResolver::with_cache_dir(&data_dir));
+        Self::with_shell_env(data_dir, shell_env)
     }
 
     pub fn with_shell_env(data_dir: PathBuf, shell_env: Arc<ShellEnvResolver>) -> Self {

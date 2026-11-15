@@ -12,11 +12,12 @@ use otto_state::DbPool;
 use super::db_store::{
     clean_opt, discover_local_dotenv_files, discover_local_python_venvs, is_valid_env_key,
     load_stored_project_env, persist_project_roots, secret_key_ref, validate_attached_folder_path,
-    StoredEnvVar, RESERVED_MODULE_SDKS_KEY,
+    StoredEnvVar, RESERVED_MODULE_SDKS_KEY, RESERVED_NETBRIDGE_KEY,
 };
 use super::discovery::discover_run_configs;
 use super::module_sdks::{layer_child_and_module_sdk_for_run, sanitize_module_sdks};
 use super::{EnvironmentManager, SecretAccess};
+use crate::netbridge::sanitize_network_bridge;
 use crate::projects::ProjectStore;
 use crate::target::TargetManager;
 use crate::types::{
@@ -276,7 +277,11 @@ impl EnvironmentManager {
 
         for item in &req.env_vars {
             let key = item.key.trim().to_string();
-            if key.is_empty() || key == RESERVED_MODULE_SDKS_KEY || !is_valid_env_key(&key) {
+            if key.is_empty()
+                || key == RESERVED_MODULE_SDKS_KEY
+                || key == RESERVED_NETBRIDGE_KEY
+                || !is_valid_env_key(&key)
+            {
                 return Err(Error::Invalid(format!(
                     "invalid environment variable name '{key}'"
                 )));
@@ -354,6 +359,21 @@ impl EnvironmentManager {
                 .map_err(|e| Error::Internal(format!("serialize module_sdks: {e}")))?;
             next_stored.push(StoredEnvVar {
                 key: RESERVED_MODULE_SDKS_KEY.into(),
+                value: Some(encoded),
+                secret: false,
+                secret_ref: None,
+            });
+        }
+
+        let next_network_bridge = match req.network_bridge {
+            Some(explicit_nb) => sanitize_network_bridge(Some(explicit_nb))?,
+            None => prev_proj.network_bridge,
+        };
+        if let Some(ref nb) = next_network_bridge {
+            let encoded = serde_json::to_string(nb)
+                .map_err(|e| Error::Internal(format!("serialize network_bridge: {e}")))?;
+            next_stored.push(StoredEnvVar {
+                key: RESERVED_NETBRIDGE_KEY.into(),
                 value: Some(encoded),
                 secret: false,
                 secret_ref: None,
@@ -466,6 +486,22 @@ impl EnvironmentManager {
         cfg: Option<&IdeRunConfig>,
         caller_is_root: bool,
     ) -> Result<(IdeProjectEnvironment, BTreeMap<String, String>)> {
+        self.build_effective_env_with_loaded_opts(pool, secrets, target, cfg, true, caller_is_root)
+            .await
+    }
+
+    /// Single-pass project + effective environment loader with configurable
+    /// login-shell awaiting (`await_shell = false` avoids blocking HTTP start
+    /// endpoints when `start_session_async` awaits a cold shell in the background).
+    pub async fn build_effective_env_with_loaded_opts<S: SecretAccess + ?Sized>(
+        &self,
+        pool: &DbPool,
+        secrets: &S,
+        target: &IdeTargetSpec,
+        cfg: Option<&IdeRunConfig>,
+        await_shell: bool,
+        caller_is_root: bool,
+    ) -> Result<(IdeProjectEnvironment, BTreeMap<String, String>)> {
         target.validate()?;
         let project_key = target.project_key();
         let (mut proj, mut stored_vars) = load_stored_project_env(pool, &project_key).await?;
@@ -480,7 +516,7 @@ impl EnvironmentManager {
                 Some(secrets),
                 target,
                 cfg,
-                true,
+                await_shell,
                 caller_is_root,
             )
             .await?;

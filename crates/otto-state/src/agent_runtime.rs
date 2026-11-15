@@ -55,6 +55,17 @@ pub struct RuntimeEntityRow {
     pub payload: serde_json::Value,
 }
 
+/// Unparsed entity row fetched directly from SQLite so callers can deserialize
+/// directly into typed structs on a blocking worker without an intermediate
+/// `serde_json::Value` allocation tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawRuntimeEntityRow {
+    pub kind: String,
+    pub entity_id: String,
+    pub sequence: u64,
+    pub payload_json: String,
+}
+
 /// Column list (a macro so the queries stay `&'static str`, as sqlx requires).
 macro_rules! session_cols {
     () => {
@@ -437,6 +448,27 @@ impl AgentRuntimeRepo {
         .map_err(dberr("upsert entities"))?;
         tx.commit().await.map_err(dberr("upsert entities"))?;
         Ok(())
+    }
+
+    /// Every entity of a session as raw JSON text, oldest update first.
+    pub async fn raw_entities(&self, session_id: &Id) -> Result<Vec<RawRuntimeEntityRow>> {
+        let rows = sqlx::query(
+            "SELECT kind, entity_id, sequence, payload_json FROM agent_runtime_entities \
+             WHERE session_id = ? ORDER BY sequence ASC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list runtime entities"))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| RawRuntimeEntityRow {
+                kind: r.get("kind"),
+                entity_id: r.get("entity_id"),
+                sequence: u(r.get("sequence")),
+                payload_json: r.get("payload_json"),
+            })
+            .collect())
     }
 
     /// Every entity of a session, oldest update first.

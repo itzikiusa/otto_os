@@ -36,7 +36,9 @@ test('only the reader lets go of the end; reaching it again re-arms following', 
 
 const { mergeQueuedEdit } = loadSource(new URL('../src/modules/threads/runtime/runtimeComposer.ts', import.meta.url), {
   '../../../lib/toastError': { toastError: () => {} },
+  '../../../lib/telemetry': { startMeasurement: () => null },
   './hostCommands': { runHostSlash: () => false },
+  './timeline': { errorText: (s: string) => s },
   '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: {} },
 });
 

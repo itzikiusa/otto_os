@@ -15,6 +15,7 @@
   import { toasts } from '../../../lib/toast.svelte';
   import type { IdeScanReposResp } from '../../../lib/api/types/ide-intelligence';
   import { ide, ideBasename, type IdeFsEntry, type IdeFsTreeResp } from '../ideStore.svelte';
+  import { buildDedupedBulkRepos, dedupeFsDirEntries, type RepoTech } from './bulkRepoModel';
 
   const FolderPickerLazy = lazyComponent(() => import('../../../lib/components/FolderPicker.svelte'));
 
@@ -29,8 +30,6 @@
     ide.bulkRepoPickerMode = null;
     onclose();
   }
-
-  type RepoTech = 'go' | 'java' | 'rust' | 'node' | 'python';
 
   function initialParentDir(): string {
     if (ide.target.kind === 'local' && ide.target.root) {
@@ -112,20 +111,9 @@
         resolvedParent = scan.parent_path || dir;
         parentInput = resolvedParent;
         parentOfParent = computeParentDir(resolvedParent);
-        const repos = [...(scan.repos ?? [])].sort((a, b) => a.name.localeCompare(b.name));
-        const nextTechs: Record<string, RepoTech[]> = {};
-        childDirs = repos.map((r) => {
-          const detected: RepoTech[] = [];
-          const k = (r.kind || '').toLowerCase();
-          if (r.has_go_mod || k === 'go') detected.push('go');
-          if (r.has_pom_or_gradle || k === 'java' || k === 'maven' || k === 'gradle') detected.push('java');
-          if (k === 'rust') detected.push('rust');
-          if (k === 'node' || k === 'ts' || k === 'javascript' || k === 'typescript') detected.push('node');
-          if (k === 'python') detected.push('python');
-          if (detected.length > 0) nextTechs[r.path] = detected;
-          return { name: r.name, path: r.path, kind: 'dir' as const };
-        });
-        techByPath = nextTechs;
+        const built = buildDedupedBulkRepos(scan.repos ?? []);
+        childDirs = built.entries;
+        techByPath = built.techByPath;
         return;
       } catch (scanErr) {
         const status = (scanErr as { status?: number } | null)?.status;
@@ -138,9 +126,7 @@
       resolvedParent = resp.root || dir;
       parentInput = resolvedParent;
       parentOfParent = resp.parent ?? computeParentDir(resolvedParent);
-      const dirs = (resp.entries ?? [])
-        .filter((e) => e.kind === 'dir' && !e.name.startsWith('.'))
-        .sort((a, b) => a.name.localeCompare(b.name));
+      const dirs = dedupeFsDirEntries(resp.entries ?? []);
       techByPath = {};
       childDirs = dirs;
       void detectChildRepoTechs(dirs.slice(0, 80), ctl.signal);
@@ -357,56 +343,57 @@
       </div>
     </div>
 
-    <div class="bulk-list" role="group" aria-label="Child repository folders">
-      {#if loading || loadErr || filteredDirs.length === 0}
-        <LoadState
-          what="repositories"
-          variant="compact"
-          {loading}
-          error={loadErr}
-          empty={!loading && !loadErr && filteredDirs.length === 0}
-          onretry={() => void loadDirectory(parentInput)}
-        >
-          {#snippet emptyView()}
-            <div class="bulk-summary">No subfolders match.</div>
-          {/snippet}
-        </LoadState>
-      {:else}
-        {#each filteredDirs as entry (entry.path)}
-          {@const checked = Boolean(selectedMap[entry.path])}
-          {@const techs = techByPath[entry.path] ?? []}
-          {@const isPrimary = mode === 'create' && checked && (primaryRoot === entry.path || (!selectedMap[primaryRoot] && selectedPaths[0] === entry.path))}
-          <div class="bulk-row" class:is-checked={checked} data-testid="ide-bulk-repo-row">
-            <label class="bulk-check-lbl">
-              <input
-                type="checkbox"
-                {checked}
-                onchange={(e) => toggleRepo(entry.path, (e.currentTarget as HTMLInputElement).checked)}
-              />
-              <Icon name="folder" size={14} />
-              <span class="bulk-repo-name" dir="ltr">{entry.name}</span>
-            </label>
-            <div class="bulk-badges">
-              {#if techs.includes('go')}<Badge tone="info" variant="outline" label="Go" />{/if}
-              {#if techs.includes('java')}<Badge tone="warn" variant="outline" label="Maven/Gradle" />{/if}
-              {#if techs.includes('rust')}<Badge tone="neutral" variant="outline" label="Rust" />{/if}
-              {#if techs.includes('node')}<Badge tone="neutral" variant="outline" label="Node/TS" />{/if}
-              {#if techs.includes('python')}<Badge tone="neutral" variant="outline" label="Python" />{/if}
-              {#if mode === 'create' && checked}
-                <button
-                  type="button"
-                  class="btn small ghost"
-                  aria-pressed={isPrimary}
-                  onclick={() => (primaryRoot = entry.path)}
-                  title="Use as primary project root"
-                >
-                  {isPrimary ? 'Primary' : 'Set primary'}
-                </button>
-              {/if}
+    <div class="bulk-list" role="group" aria-label="Child repository folders" data-testid="ide-bulk-repo-list">
+      <LoadState
+        what="repositories"
+        variant="compact"
+        {loading}
+        error={loadErr}
+        empty={childDirs.length === 0}
+        onretry={() => void loadDirectory(parentInput)}
+      >
+        {#snippet emptyView()}
+          <div class="bulk-empty-msg">No repository folders found in this directory.</div>
+        {/snippet}
+        {#if filteredDirs.length === 0}
+          <div class="bulk-empty-msg">No subfolders match “{filter.trim()}”.</div>
+        {:else}
+          {#each filteredDirs as entry (entry.path)}
+            {@const checked = Boolean(selectedMap[entry.path])}
+            {@const techs = techByPath[entry.path] ?? []}
+            {@const isPrimary = mode === 'create' && checked && (primaryRoot === entry.path || (!selectedMap[primaryRoot] && selectedPaths[0] === entry.path))}
+            <div class="bulk-row" class:is-checked={checked} data-testid="ide-bulk-repo-row">
+              <label class="bulk-check-lbl">
+                <input
+                  type="checkbox"
+                  {checked}
+                  onchange={(e) => toggleRepo(entry.path, (e.currentTarget as HTMLInputElement).checked)}
+                />
+                <Icon name="folder" size={14} />
+                <span class="bulk-repo-name" dir="ltr">{entry.name}</span>
+              </label>
+              <div class="bulk-badges">
+                {#if techs.includes('go')}<Badge tone="info" variant="outline" label="Go" />{/if}
+                {#if techs.includes('java')}<Badge tone="warn" variant="outline" label="Maven/Gradle" />{/if}
+                {#if techs.includes('rust')}<Badge tone="neutral" variant="outline" label="Rust" />{/if}
+                {#if techs.includes('node')}<Badge tone="neutral" variant="outline" label="Node/TS" />{/if}
+                {#if techs.includes('python')}<Badge tone="neutral" variant="outline" label="Python" />{/if}
+                {#if mode === 'create' && checked}
+                  <button
+                    type="button"
+                    class="btn small ghost"
+                    aria-pressed={isPrimary}
+                    onclick={() => (primaryRoot = entry.path)}
+                    title="Use as primary project root"
+                  >
+                    {isPrimary ? 'Primary' : 'Set primary'}
+                  </button>
+                {/if}
+              </div>
             </div>
-          </div>
-        {/each}
-      {/if}
+          {/each}
+        {/if}
+      </LoadState>
     </div>
   </div>
 
@@ -465,11 +452,14 @@
   .bulk-search-in { flex: 1; min-inline-size: 0; border: 0; background: transparent; color: var(--text); font-size: var(--fs-s); outline: none; }
   .bulk-quick-btns { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .bulk-list {
-    flex: 1; min-block-size: 180px; overflow-y: auto; border: 1px solid var(--border);
-    border-radius: var(--radius-s); background: var(--surface); padding: 4px; display: flex; flex-direction: column; gap: 2px;
+    flex: 1 1 240px; min-block-size: 220px; max-block-size: min(340px, calc(100vh - 320px));
+    overflow-y: auto; border: 1px solid var(--border);
+    border-radius: var(--radius-s); background: var(--surface); padding: 4px;
   }
+  .bulk-empty-msg { padding: 14px 10px; font-size: var(--fs-xs); color: var(--text-dim); }
   .bulk-row {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    min-block-size: 34px; margin-block-end: 2px;
     padding-block: 6px; padding-inline: 8px; border-radius: var(--radius-s); border: 1px solid transparent;
   }
   .bulk-row:hover { background: var(--hover); }

@@ -3,8 +3,8 @@
 // changes lands — so the header and reviewer list change at once.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { myReview, myReviewer, withMyReview, withoutMyReview } from '../src/modules/git/pr-review-state.ts';
-import type { PrDetail, PrReviewer } from '../src/lib/api/types';
+import { createReviewReconciler, myReview, myReviewer, reconcileConfirmedReview, reviewSummaryFrom, withMyReview, withoutMyReview } from '../src/modules/git/pr-review-state.ts';
+import type { PrDetail, PrMergeCheck, PrReviewer } from '../src/lib/api/types';
 
 const me = (n: string) => n.toLowerCase() === 'itzik';
 const rv = (name: string, approved = false, changes_requested = false): PrReviewer => ({ name, approved, changes_requested, avatar_url: null, reviewed_at: null });
@@ -94,4 +94,74 @@ test('withdrawing a change request clears it; approve → withdraw → approve r
   // Withdrawing what isn't yours to withdraw changes nothing.
   const untouched = withoutMyReview(pr([flagged('Ann Lee', false, true)], ['Ann Lee']), 'approved', bbMe);
   assert.deepEqual(untouched.approved_by, ['Ann Lee']);
+});
+
+test('optimistic review updates PrSummary.review and Bitbucket merge_checks immediately', () => {
+  const checks: PrMergeCheck[] = [
+    { key: 'approvals', label: 'At least 1 approval', passed: false, detail: '0 of 1' },
+    { key: 'no_changes_requested', label: 'No changes requested', passed: true, detail: null },
+  ];
+  const initial = {
+    reviewers: [flagged('Ann Lee', false)],
+    approved_by: [],
+    review: reviewSummaryFrom([flagged('Ann Lee', false)], []),
+    merge_checks: checks,
+    updated_at: '2026-11-15T08:00:00Z',
+  } as unknown as PrDetail;
+
+  const approved = withMyReview(initial, 'approved', bbMe, 'Itzik');
+  assert.deepEqual(approved.review, { status: 'approved', approvals: 1 });
+  assert.deepEqual(approved.merge_checks, [
+    { key: 'approvals', label: 'At least 1 approval', passed: true, detail: '1 of 1' },
+    { key: 'no_changes_requested', label: 'No changes requested', passed: true, detail: null },
+  ]);
+
+  const changes = withMyReview(approved, 'changes', bbMe, 'Itzik');
+  assert.deepEqual(changes.review, { status: 'changes_requested', approvals: 0 });
+  assert.deepEqual(changes.merge_checks, [
+    { key: 'approvals', label: 'At least 1 approval', passed: false, detail: '0 of 1' },
+    { key: 'no_changes_requested', label: 'No changes requested', passed: false, detail: '1 reviewer requested changes' },
+  ]);
+
+  const withdrawn = withoutMyReview(changes, 'changes', bbMe);
+  assert.deepEqual(withdrawn.review, { status: 'waiting', approvals: 0 });
+  assert.deepEqual(withdrawn.merge_checks, [
+    { key: 'approvals', label: 'At least 1 approval', passed: false, detail: '0 of 1' },
+    { key: 'no_changes_requested', label: 'No changes requested', passed: true, detail: null },
+  ]);
+});
+
+test('reconcileConfirmedReview shields UI from lagging read replicas after approve/withdraw', () => {
+  // Bitbucket read replica still says Itzik hasn't approved yet right after POST /approve.
+  const staleReplica = pr([flagged('Ann Lee', false), flagged('Itzik Cohen', true, false, false)], []);
+  const rec1 = reconcileConfirmedReview(staleReplica, 'approved', bbMe, 'Itzik');
+  assert.equal(rec1.caughtUp, false);
+  assert.equal(myReview(rec1.detail, bbMe), 'approved');
+  assert.deepEqual(rec1.detail.review, { status: 'approved', approvals: 1 });
+
+  // Replica catches up on the retry.
+  const caughtUpReplica = pr([flagged('Ann Lee', false), flagged('Itzik Cohen', true, true, false)], ['Itzik Cohen']);
+  const rec2 = reconcileConfirmedReview(caughtUpReplica, 'approved', bbMe, 'Itzik');
+  assert.equal(rec2.caughtUp, true);
+  assert.equal(rec2.detail, caughtUpReplica);
+
+  // Lagging replica still says approved right after DELETE /approve.
+  const rec3 = reconcileConfirmedReview(caughtUpReplica, null, bbMe, 'Itzik');
+  assert.equal(rec3.caughtUp, false);
+  assert.equal(myReview(rec3.detail, bbMe), null);
+  assert.deepEqual(rec3.detail.review, { status: 'waiting', approvals: 0 });
+});
+
+test('createReviewReconciler schedules retry when replica lags and clears once caught up', () => {
+  const rec = createReviewReconciler();
+  rec.note('repo-1', 101, 'approved');
+  const stale = pr([flagged('Itzik Cohen', true, false, false)], []);
+  let scheduled = false;
+  const out = rec.reconcile('repo-1', 101, stale, bbMe, 'Itzik', () => { scheduled = true; });
+  assert.equal(myReview(out, bbMe), 'approved');
+  assert.equal(scheduled, false); // timer pending, not fired synchronously
+  const caughtUp = pr([flagged('Itzik Cohen', true, true, false)], ['Itzik Cohen']);
+  const out2 = rec.reconcile('repo-1', 101, caughtUp, bbMe, 'Itzik');
+  assert.equal(out2, caughtUp);
+  rec.clear();
 });

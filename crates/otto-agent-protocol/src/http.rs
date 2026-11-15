@@ -23,7 +23,7 @@ use otto_core::agent_runtime::{
     AskChildReq, AskChildResp, CouncilResp, CreateCouncilReq, CreateRuntimeSessionBody,
     OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, QueuedDeliverReq, RuntimePromptReq,
     RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq, RuntimeSession,
-    SynthesizeCouncilReq, UpdateRuntimeSessionReq,
+    SynthesizeCouncilReq, TurnItem, UpdateRuntimeSessionReq,
 };
 use otto_core::api::Problem;
 use otto_core::auth::{AuthContext, AuthUser};
@@ -117,6 +117,7 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             post(deliver_queued::<S>).delete(unqueue::<S>),
         )
         .route("/runtime-sessions/{id}/events", get(events::<S>))
+        .route("/runtime-sessions/{id}/items/{item_id}", get(get_item::<S>))
         .route(
             "/runtime-sessions/{id}/attachments/{attachment_id}",
             get(attachment::<S>),
@@ -524,7 +525,7 @@ async fn close<S: RuntimeCtx>(
 }
 
 /// POST /runtime-sessions/{id}/reopen — a closed thread takes prompts again
-/// (its agent respawns, resuming the provider's thread).
+/// (its agent respawns immediately; MCP/resume readiness completes asynchronously).
 async fn reopen<S: RuntimeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -533,7 +534,7 @@ async fn reopen<S: RuntimeCtx>(
 ) -> ApiResult<Json<RuntimeSession>> {
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
-    Ok(Json(ctx.agent_runtime().reopen(&id).await?))
+    Ok(Json(ctx.agent_runtime().reopen_fast(&id).await?))
 }
 
 /// DELETE /runtime-sessions/{id} — stop its agent and remove it with its history.
@@ -614,6 +615,10 @@ struct EventsQuery {
     before_turn_ordinal: Option<u32>,
     #[serde(default)]
     limit_turns: Option<usize>,
+    #[serde(default)]
+    max_lines: Option<usize>,
+    #[serde(default)]
+    compact: Option<String>,
 }
 
 /// GET /runtime-sessions/{id}/events?after_sequence= — events, tail snapshot, or older turn page.
@@ -624,15 +629,31 @@ async fn events<S: RuntimeCtx>(
     Query(q): Query<EventsQuery>,
 ) -> ApiResult<Json<RuntimeReplay>> {
     authorized(&ctx, &user, &id).await?;
+    let compact = q
+        .compact
+        .as_deref()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
     Ok(Json(
         ctx.agent_runtime()
-            .replay_paged(
+            .replay_paged_opts(
                 &id,
                 q.after_sequence,
                 q.tail_turns,
                 q.before_turn_ordinal,
                 q.limit_turns,
+                compact,
+                q.max_lines,
             )
             .await?,
     ))
+}
+
+/// GET /runtime-sessions/{id}/items/{item_id} — one full (uncompacted) TurnItem on demand.
+async fn get_item<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, item_id)): Path<(Id, Id)>,
+) -> ApiResult<Json<TurnItem>> {
+    authorized(&ctx, &user, &id).await?;
+    Ok(Json(ctx.agent_runtime().get_item(&id, &item_id).await?))
 }

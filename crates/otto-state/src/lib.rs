@@ -73,7 +73,8 @@ pub mod workspaces;
 
 pub use activity::{normalize_title, ActivityRepo, NewTask, NewTrail, PendingNudge};
 pub use agent_runtime::{
-    AgentRuntimeRepo, NewRuntimeSession, RuntimeEntityRow, RuntimeSessionRecord,
+    AgentRuntimeRepo, NewRuntimeSession, RawRuntimeEntityRow, RuntimeEntityRow,
+    RuntimeSessionRecord,
 };
 pub use api_client::{
     ApiClientRepo, NewApiAutomation, NewApiCollection, NewApiEnvironment, NewApiHistory,

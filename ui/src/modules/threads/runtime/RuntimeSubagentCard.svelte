@@ -11,18 +11,25 @@
   import { now } from '../../../lib/stores/now.svelte';
   import RuntimeAgentRow from './RuntimeAgentRow.svelte';
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
+  import { runtimeViews } from './runtimeView.svelte';
 
   type SubagentItem = Extract<TurnItem, { type: 'subagent' }>;
   interface Props {
+    sessionId?: string;
     item: SubagentItem;
     /** Its own activity, in order. */
     activity: TurnItem[];
     /** Live `command_output.delta` text by item id. */
     output?: Record<string, string>;
   }
-  let { item, activity, output = {} }: Props = $props();
+  let { sessionId = '', item, activity, output = {} }: Props = $props();
 
   let open = $state(false);
+  $effect(() => {
+    if (open && item.detail_omitted && sessionId) {
+      void runtimeViews.ensureItemDetail(sessionId, item.id);
+    }
+  });
   const running = $derived(item.status === 'running' || item.status === 'pending' || item.status === 'waiting');
   const statusText = $derived(
     running ? 'Running' : item.status === 'completed' ? 'Done' : item.status === 'failed' ? 'Failed' : 'Stopped',
@@ -65,7 +72,7 @@
             {#if a.type === 'assistant_message'}
               <div class="sa-text" dir="auto"><Markdown md={a.text} /></div>
             {:else}
-              <RuntimeWorkRow item={a} output={output[a.id]} />
+              <RuntimeWorkRow {sessionId} item={a} output={output[a.id]} />
             {/if}
           {/each}
         </div>

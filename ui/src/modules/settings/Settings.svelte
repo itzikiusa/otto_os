@@ -31,11 +31,11 @@
   } from './sections';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { daemonStatus } from './daemonStatus.svelte';
+  import { settingsUi } from './settingsUiState.svelte';
 
   // As a sheet over another page (Threads' footer ⚙), Settings keeps its own
   // section instead of routing, and ✕ closes the sheet.
   let { sheet = null }: { sheet?: { onclose: () => void } | null } = $props();
-  let sheetPage = $state('appearance');
 
   // Phone (≤640 px): two levels, like iOS Settings — the grouped list (with
   // the filter) first, then one section with a back control. A deep link
@@ -51,12 +51,12 @@
     else router.go('agents');
   }
   function goPage(id: string): void {
-    if (sheet) sheetPage = id;
+    if (sheet) settingsUi.sheetPage = id;
     else router.go(`settings/${id}`);
   }
   /** Phone: back from a section to the list. */
   function backToList(): void {
-    if (sheet) sheetPage = '';
+    if (sheet) settingsUi.sheetPage = '';
     else router.go('settings');
   }
 
@@ -104,7 +104,7 @@
     sessions: lazyComponent(() => import('./AdminSessions.svelte')),
   };
 
-  const routedId = $derived(sheet ? sheetPage : (router.parts[1] ?? ''));
+  const routedId = $derived(sheet ? settingsUi.sheetPage : (router.parts[1] ?? ''));
   const pageId = $derived(routedId || 'appearance');
   const atList = $derived(phone && !routedId);
   const section = $derived(findSection(pageId));
@@ -126,10 +126,9 @@
   // Typing narrows the nav to a flat, ranked result list (label matches
   // first, group as dim detail); Enter opens the first result, ↓ walks into
   // the results, Esc clears.
-  let query = $state('');
   let filterEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
-  const results = $derived(query.trim() ? filterSections(sections, query) : null);
+  const results = $derived(settingsUi.query.trim() ? filterSections(sections, settingsUi.query) : null);
 
   function open(s: SettingsSection): void {
     goPage(s.id);
@@ -150,7 +149,7 @@
       // Esc clears first; a second Esc leaves the field.
       e.preventDefault();
       e.stopPropagation();
-      if (query) query = '';
+      if (settingsUi.query) settingsUi.query = '';
       else filterEl?.blur();
     } else if (e.key === 'ArrowDown') {
       const first = navItems()[0];
@@ -174,14 +173,14 @@
       e.preventDefault();
       if (i === 0) filterEl?.focus();
       else items[i - 1]?.focus();
-    } else if (e.key === 'Escape' && query) {
+    } else if (e.key === 'Escape' && settingsUi.query) {
       e.preventDefault();
       e.stopPropagation();
-      query = '';
+      settingsUi.query = '';
       filterEl?.focus();
     } else if (e.key.length === 1 && e.key !== ' ' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
-      query += e.key;
+      settingsUi.query += e.key;
       filterEl?.focus();
     }
   }
@@ -233,7 +232,7 @@
 </script>
 
 {#snippet navRow(s: SettingsSection, detail?: string)}
-  {@const match = query.trim() ? matchedSetting(s, query) : null}
+  {@const match = settingsUi.query.trim() ? matchedSetting(s, settingsUi.query) : null}
   {@const current = !atList && pageId === s.id}
   <!-- The scope tag and warning dot are aria-hidden so the row's name stays
        its label; both are in the title (the row's description). -->
@@ -284,7 +283,7 @@
       <Icon name="search" size={12} />
       <input dir="ltr"
         bind:this={filterEl}
-        bind:value={query}
+        bind:value={settingsUi.query}
         class="settings-filter-input"
         type="search"
         placeholder={sheet ? 'Search settings  /' : 'Filter settings…'}
@@ -303,7 +302,7 @@
           {#each results as s (s.id)}
             {@render navRow(s, groupLabel(s.group))}
           {:else}
-            <p class="settings-nav-empty">No sections match “{query.trim()}”</p>
+            <p class="settings-nav-empty">No sections match “{settingsUi.query.trim()}”</p>
           {/each}
         </div>
       {:else}

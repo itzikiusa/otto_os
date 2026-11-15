@@ -8,7 +8,7 @@
 // an identity the daemon couldn't look up, or you aren't a reviewer yet — do we
 // fall back to matching names against your account handles, which misses on
 // Bitbucket (a reviewer is a display name, the username an email).
-import type { PrDetail, PrReviewer } from '../../lib/api/types';
+import type { PrDetail, PrMergeCheck, PrReviewSummary, PrReviewer } from '../../lib/api/types';
 
 export type MyReview = 'approved' | 'changes' | null;
 
@@ -27,6 +27,55 @@ export function myReview(pr: Pick<PrDetail, 'reviewers' | 'approved_by'>, isMe: 
   return null;
 }
 
+/** Mirror `PrReviewSummary::from_counts` so optimistic patches update list chips immediately. */
+export function reviewSummaryFrom(reviewers: readonly PrReviewer[], approved_by: readonly string[]): PrReviewSummary | null {
+  const approvals = Math.max(reviewers.filter((r) => r.approved).length, approved_by.length);
+  if (reviewers.some((r) => r.changes_requested)) return { status: 'changes_requested', approvals };
+  if (approvals > 0) return { status: 'approved', approvals };
+  if (reviewers.length > 0) return { status: 'waiting', approvals: 0 };
+  return null;
+}
+
+function patchMergeChecks(
+  checks: readonly PrMergeCheck[],
+  reviewers: readonly PrReviewer[],
+  approvals: number,
+): PrMergeCheck[] {
+  const changesAsked = reviewers.filter((r) => r.changes_requested).length;
+  return checks.map((c) => {
+    if (c.key === 'approvals') {
+      const m = c.detail?.match(/of\s+(\d+)/) ?? c.label.match(/(\d+)/);
+      if (m) {
+        const req = Number(m[1]);
+        if (Number.isFinite(req) && req > 0) {
+          return { ...c, passed: approvals >= req, detail: `${approvals} of ${req}` };
+        }
+      }
+    }
+    if (c.key === 'no_changes_requested') {
+      return {
+        ...c,
+        passed: changesAsked === 0,
+        detail: changesAsked > 0 ? `${changesAsked} ${changesAsked === 1 ? 'reviewer' : 'reviewers'} requested changes` : null,
+      };
+    }
+    return c;
+  });
+}
+
+function applyDerivedReviewState(pr: PrDetail, reviewers: PrReviewer[], approved_by: string[], now: string): PrDetail {
+  const review = reviewSummaryFrom(reviewers, approved_by);
+  const approvals = review?.approvals ?? 0;
+  return {
+    ...pr,
+    reviewers,
+    approved_by,
+    review,
+    ...(pr.updated_at !== undefined ? { updated_at: now } : {}),
+    ...(pr.merge_checks != null ? { merge_checks: patchMergeChecks(pr.merge_checks, reviewers, approvals) } : {}),
+  };
+}
+
 /** `pr` with your review set to `kind`. Your reviewer row is patched in place;
  *  when the list doesn't have you yet you are added under `fallbackName`,
  *  marked `is_me` so the next read of this object still finds you. */
@@ -39,17 +88,98 @@ export function withMyReview(pr: PrDetail, kind: Exclude<MyReview, null>, isMe: 
     : [...pr.reviewers, mark({ name: fallbackName, approved: false, changes_requested: false, avatar_url: null, reviewed_at: null })];
   const me = hit?.name ?? fallbackName;
   const others = pr.approved_by.filter((n) => n !== me && !isMe(n));
-  return { ...pr, reviewers, approved_by: kind === 'approved' ? [...others, me] : others };
+  const approved_by = kind === 'approved' ? [...others, me] : others;
+  return applyDerivedReviewState(pr, reviewers, approved_by, now);
 }
 
 /** `pr` with your `kind` review withdrawn: your reviewer row stays (you are
  *  still a reviewer) but no longer approves / requests changes, and you leave
  *  `approved_by`. No-op when that isn't your current review. */
 export function withoutMyReview(pr: PrDetail, kind: Exclude<MyReview, null>, isMe: (name: string) => boolean): PrDetail {
+  const now = new Date().toISOString();
   const hit = myReviewer(pr.reviewers, isMe);
   const reviewers = hit
     ? pr.reviewers.map((r) => (r === hit ? { ...r, approved: kind === 'approved' ? false : r.approved, changes_requested: kind === 'changes' ? false : r.changes_requested } : r))
     : pr.reviewers;
   const approved_by = kind === 'approved' ? pr.approved_by.filter((n) => n !== hit?.name && !isMe(n)) : pr.approved_by;
-  return { ...pr, reviewers, approved_by };
+  if (reviewers === pr.reviewers && approved_by === pr.approved_by) return pr;
+  return applyDerivedReviewState(pr, reviewers, approved_by, now);
+}
+
+/** Guard against eventually-consistent forge read replicas (e.g. Bitbucket Cloud
+ *  answering `approved: false` for 0.5–2 s right after `POST …/approve` returned
+ *  204): keeps the confirmed write verdict applied until the replica catches up. */
+export function reconcileConfirmedReview(
+  fetched: PrDetail,
+  expected: MyReview,
+  isMe: (name: string) => boolean,
+  fallbackName: string,
+): { detail: PrDetail; caughtUp: boolean } {
+  if (myReview(fetched, isMe) === expected) return { detail: fetched, caughtUp: true };
+  if (expected === 'approved' || expected === 'changes') {
+    return { detail: withMyReview(fetched, expected, isMe, fallbackName), caughtUp: false };
+  }
+  return {
+    detail: withoutMyReview(withoutMyReview(fetched, 'approved', isMe), 'changes', isMe),
+    caughtUp: false,
+  };
+}
+
+const REVIEW_RECONCILE_WINDOW_MS = 12_000;
+
+export interface ReviewReconciler {
+  note(rid: string, num: number, kind: MyReview): void;
+  resetFor(rid: string, num: number): void;
+  clear(): void;
+  reconcile(
+    rid: string,
+    num: number,
+    fetched: PrDetail,
+    isMe: (name: string) => boolean,
+    fallbackName: string,
+    onRetry?: () => void,
+  ): PrDetail;
+}
+
+/** Per-PR write-verdict reconciler with bounded background retry timers (1.5s, 3s, 4.5s). */
+export function createReviewReconciler(): ReviewReconciler {
+  let state: { rid: string; num: number; kind: MyReview; at: number; retries: number } | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const clear = (): void => {
+    state = null;
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+  return {
+    clear,
+    note(rid, num, kind) {
+      clear();
+      state = { rid, num, kind, at: Date.now(), retries: 0 };
+    },
+    resetFor(rid, num) {
+      if (state && (state.rid !== rid || state.num !== num)) clear();
+    },
+    reconcile(rid, num, fetched, isMe, fallbackName, onRetry) {
+      if (!state || state.rid !== rid || state.num !== num) return fetched;
+      if (Date.now() - state.at > REVIEW_RECONCILE_WINDOW_MS) {
+        clear();
+        return fetched;
+      }
+      const rec = reconcileConfirmedReview(fetched, state.kind, isMe, fallbackName);
+      if (rec.caughtUp) {
+        clear();
+        return fetched;
+      }
+      if (onRetry && state.retries < 3 && timer === null) {
+        state.retries += 1;
+        timer = setTimeout(() => {
+          timer = null;
+          onRetry();
+        }, 1500 * state.retries);
+      }
+      return rec.detail;
+    },
+  };
 }

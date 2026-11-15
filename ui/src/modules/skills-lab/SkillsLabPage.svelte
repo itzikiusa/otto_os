@@ -11,6 +11,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
+  import { skillsLabState } from '../../lib/stores/skillsLabState.svelte';
   import SkillsBrowser from './SkillsBrowser.svelte';
   import SkillReviewPanel from './SkillReviewPanel.svelte';
   import SkillsEvalPage from '../skills-eval/SkillsEvalPage.svelte';
@@ -99,7 +100,7 @@
   let skillsPhoneDetail = $state(false);
   let reviewPhoneDetail = $state(false);
   let evalPhoneDetail = $state(false);
-  let listCollapsed = $state(false);
+  const listCollapsed = $derived(skillsLabState.listCollapsed);
   // The Evaluator has a collapsible list on Runs and Matrix views.
   let evalListable = $state(true);
 
@@ -131,7 +132,7 @@
       {#if (tab === 'skills' || tab === 'review' || (tab === 'evaluator' && evalListable)) && !viewport.isPhone}
         {@const what = tab === 'skills' ? 'skills' : tab === 'review' ? 'reviews' : evalView === 'matrix' ? 'matrices' : 'evaluations'}
         {@const targetId = tab === 'skills' ? 'skills-list-pane' : tab === 'review' ? 'reviews-list' : evalView === 'matrix' ? 'matrices-list' : 'evaluations-list'}
-        <button class="icon-btn" onclick={() => (listCollapsed = !listCollapsed)} aria-label={listCollapsed ? `Show ${what} list` : `Hide ${what} list`} title={listCollapsed ? `Show ${what} list` : `Hide ${what} list`} aria-expanded={!listCollapsed} aria-controls={targetId}><Icon name="sidebar" size={16} /></button>
+        <button class="icon-btn" onclick={() => (skillsLabState.listCollapsed = !skillsLabState.listCollapsed)} aria-label={listCollapsed ? `Show ${what} list` : `Hide ${what} list`} title={listCollapsed ? `Show ${what} list` : `Hide ${what} list`} aria-expanded={!listCollapsed} aria-controls={targetId}><Icon name="sidebar" size={16} /></button>
       {/if}
       {#if showPhoneBack}
         <button class="icon-btn" onclick={onPhoneBack} aria-label={phoneBackLabel} title={phoneBackLabel}><Icon name="chevronLeft" size={16} /></button>

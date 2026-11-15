@@ -21,6 +21,7 @@ pub mod acp;
 pub(crate) mod acp_sideband;
 pub mod claude;
 pub mod codex;
+pub(crate) mod diff_compact;
 pub mod driver;
 pub mod holder;
 pub mod host;
