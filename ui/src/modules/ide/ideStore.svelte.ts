@@ -564,7 +564,12 @@ class IdeStore {
   async loadEnvironments(): Promise<void> { if (!this.collabIsGuest) await (await loadDebugEnvMod()).fetchEnvironments(this); }
   saveEnvironment(patch: Partial<IdeProjectEnvironment> & { env_vars?: IdeEnvVar[] }): Promise<boolean> { return loadDebugEnvMod().then((m) => m.persistEnvironment(this, patch)); }
   saveRunConfig(cfg: Partial<IdeRunConfig> & { name: string; runner: string }): Promise<IdeRunConfig | null> { return loadDebugEnvMod().then((m) => m.upsertRunConfig(this, cfg)); }
-  async startRun(opts: { configId?: string; adhoc?: Partial<IdeRunConfig>; keepTestcontainers?: boolean } = {}): Promise<void> {
+  async startRun(opts: { configId?: string; adhoc?: Partial<IdeRunConfig>; keepTestcontainers?: boolean; skipProdConfirm?: boolean } = {}): Promise<void> {
+    if (this.target.kind === 'local' && this.projectEnv?.network_bridge?.enabled && !opts.skipProdConfirm) {
+      const { confirmProdNetworkBridge } = await import('./shell/networkBridgeGuard.svelte');
+      const allowed = await confirmProdNetworkBridge(this.projectEnv.network_bridge, 'launch', this.target.workspace_id);
+      if (!allowed) return;
+    }
     if (idePreferences.current.autoSave) await this.flushAutoSave();
     const { poller, sseCtl } = await (await loadDebugEnvMod()).launchIdeRun(this, opts, this.runPoller, this.runSseCtl);
     this.runPoller = poller;
@@ -637,7 +642,12 @@ class IdeStore {
       this.applyDebugSnapshot(resp.session);
     } catch { /* exited */ }
   }
-  async startDebug(opts: { configId?: string; language?: string; launch?: { program: string; args?: string[]; cwd?: string; test_name?: string; attach_port?: number; env?: Record<string, string> } } = {}): Promise<void> {
+  async startDebug(opts: { configId?: string; language?: string; skipProdConfirm?: boolean; launch?: { program: string; args?: string[]; cwd?: string; test_name?: string; attach_port?: number; env?: Record<string, string> } } = {}): Promise<void> {
+    if (this.target.kind === 'local' && this.projectEnv?.network_bridge?.enabled && !opts.skipProdConfirm) {
+      const { confirmProdNetworkBridge } = await import('./shell/networkBridgeGuard.svelte');
+      const allowed = await confirmProdNetworkBridge(this.projectEnv.network_bridge, 'launch', this.target.workspace_id);
+      if (!allowed) return;
+    }
     if (idePreferences.current.autoSave) await this.flushAutoSave();
     this.debugSseCtl = await (await loadDebugEnvMod()).launchDebugSession(this, opts, this.debugSseCtl, (s) => this.applyDebugSnapshot(s));
   }

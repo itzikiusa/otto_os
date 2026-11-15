@@ -284,7 +284,7 @@ test('pairing lands on the requested thread, signed in, with no password', async
   await phone.close();
 });
 
-test('a 60-turn conversation opens via tail_turns=8&compact=true on phone, lazily hydrates work details, and sends optimistically', async ({ page }) => {
+test('a 60-turn conversation opens via tail_turns=12&compact=true on phone, lazily hydrates work details, and sends optimistically', async ({ page }) => {
   await mockPhone(page, true);
   const TOTAL = 60;
   const requestedUrls: string[] = [];
@@ -409,20 +409,22 @@ test('a 60-turn conversation opens via tail_turns=8&compact=true on phone, lazil
     itemFetchUrls.push(u.pathname);
     const itemId = u.pathname.split('/').pop()!;
     return {
-      id: itemId,
-      turn_id: 'turn-60',
-      ordinal: 238,
-      status: 'completed',
-      title: 'rg turn_60',
-      error: null,
-      started_at: '2026-11-15T00:00:00Z',
-      completed_at: '2026-11-15T00:00:01Z',
-      updated_at: '2026-11-15T00:00:01Z',
-      detail_omitted: false,
-      type: 'command_execution',
-      input: 'rg turn_60',
-      exit_code: 0,
-      output: 'HYDRATED_LAZY_OUTPUT_FOR_TURN_60',
+      item: {
+        id: itemId,
+        turn_id: 'turn-60',
+        ordinal: 238,
+        status: 'completed',
+        title: 'rg turn_60',
+        error: null,
+        started_at: '2026-11-15T00:00:00Z',
+        completed_at: '2026-11-15T00:00:01Z',
+        updated_at: '2026-11-15T00:00:01Z',
+        detail_omitted: false,
+        type: 'command_execution',
+        input: 'rg turn_60',
+        exit_code: 0,
+        output: 'HYDRATED_LAZY_OUTPUT_FOR_TURN_60',
+      },
     };
   });
 
@@ -448,19 +450,17 @@ test('a 60-turn conversation opens via tail_turns=8&compact=true on phone, lazil
   await expect(thread.getByText('HYDRATED_LAZY_OUTPUT_FOR_TURN_60')).toBeVisible({ timeout: 5_000 });
   expect(itemFetchUrls).toContain(`/api/v1/runtime-sessions/${threadId}/items/c1-60`);
 
-  // Scroll upward near the top (outside auto-load threshold first so we can measure turn 50's Y,
-  // then into top 240px): scrolling up MUST automatically lazy-load turns 37..48 with 0px jump!
-  await thread.locator('.rt-scroll').evaluate((el) => {
-    const q50 = Array.from(el.querySelectorAll('*')).find((n) => n.textContent?.trim() === 'Question number 50') as HTMLElement | undefined;
-    if (q50) el.scrollTop = Math.max(280, q50.offsetTop - 40);
-    else el.scrollTop = 300;
-  });
-  await expect(thread.getByText('Question number 50')).toBeVisible({ timeout: 5_000 });
-  const beforeTop50 = await thread.getByText('Question number 50').evaluate((el) => el.getBoundingClientRect().top);
-  expect(Number.isFinite(beforeTop50)).toBe(true);
-  await thread.locator('.rt-scroll').evaluate((el) => {
+  // Scroll into the top 240px auto-load threshold and capture `'Question number 49'`'s exact Y synchronously
+  // right as `scrollTop = 40` is applied (before the async `before_turn_ordinal=49` fetch resolves), then verify
+  // prepending turns 37..48 anchors the visible message within <= 4px with zero jump!
+  const beforeTop49 = await thread.locator('.rt-scroll').evaluate((el) => {
     el.scrollTop = 40;
+    const q49 = Array.from(el.querySelectorAll('*')).find(
+      (n) => n.childElementCount === 0 && n.textContent?.trim() === 'Question number 49',
+    );
+    return q49 ? q49.getBoundingClientRect().top : NaN;
   });
+  expect(Number.isFinite(beforeTop49)).toBe(true);
   await expect(thread.getByText('Answer for turn 45:', { exact: false })).toBeAttached({ timeout: 5_000 });
   expect(
     requestedUrls.some((u) => u.includes('before_turn_ordinal=49&limit_turns=12&max_lines=10000&compact=true')),
@@ -469,9 +469,8 @@ test('a 60-turn conversation opens via tail_turns=8&compact=true on phone, lazil
   await expect(loadOlderBtn).toContainText('Load earlier (36 turns)');
   const scrolledDelta = await thread.locator('.rt-scroll').evaluate((el) => el.scrollTop);
   expect(scrolledDelta, 'scrollTop anchored downward when prepending 12 older turns').toBeGreaterThan(240);
-  const afterTop50 = await thread.getByText('Question number 50').evaluate((el) => el.getBoundingClientRect().top);
-  // Accounting for the intentional scrollTop move from ~280->40 (-240px), verify no unanchored jump occurred!
-  expect(afterTop50).toBeGreaterThan(-2000);
+  const afterTop49 = await thread.getByText('Question number 49', { exact: true }).evaluate((el) => el.getBoundingClientRect().top);
+  expect(Math.abs(afterTop49 - beforeTop49), 'visible message anchor Y preserved within 4px across loadOlder prepend').toBeLessThanOrEqual(4);
 
   // Optimistic send: even when POST /prompt takes 700ms over cellular, composer clears and bubble renders immediately!
   await page.route(`**/api/v1/runtime-sessions/${threadId}/prompt`, async (route) => {

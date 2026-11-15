@@ -234,6 +234,10 @@ impl SessionEntry {
         if self.restarting.load(Ordering::SeqCst) {
             return;
         }
+        self.orig_ctx
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .netbridge = None;
         if let Some(conn) = self.conn.write().unwrap_or_else(|e| e.into_inner()).take() {
             conn.wire.retire();
             conn.wire.abort_pending();
@@ -245,6 +249,10 @@ impl SessionEntry {
         if self.restarting.load(Ordering::SeqCst) {
             return;
         }
+        self.orig_ctx
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .netbridge = None;
         self.mutate_and_broadcast(|snap| {
             snap.state = IdeDebugState::Terminated;
             snap.stopped_reason = None;

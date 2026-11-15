@@ -30,10 +30,16 @@ fn is_build_manifest_name(name: &str) -> bool {
             | "go.sum"
             | "go.work"
             | "Cargo.toml"
+            | "Cargo.lock"
             | "package.json"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
             | "tsconfig.json"
             | "jsconfig.json"
             | "pyproject.toml"
+            | "uv.lock"
+            | "poetry.lock"
             | "requirements.txt"
     )
 }

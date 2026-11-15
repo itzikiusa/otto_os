@@ -31,10 +31,11 @@ use self::grok::{default_grok_home, GrokState};
 use self::opencode::{default_opencode_data_dir, OpencodeState};
 use crate::driver::{SidebandPayload, SidebandPoll, SidebandResumeSeed, SidebandSource};
 
-const POLL_INTERVAL: Duration = Duration::from_millis(650);
+const POLL_INTERVAL: Duration = Duration::from_millis(400);
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SidebandAction {
+    TurnStarted,
     Thought {
         text: String,
         streaming: bool,
@@ -203,7 +204,7 @@ impl AcpSideband {
     }
 
     pub fn init_resume(&mut self, provider: RuntimeProvider, seed: SidebandResumeSeed) {
-        self.reset_turn_flags();
+        self.reset_for_prompt();
         match seed {
             SidebandResumeSeed::AppendOffset {
                 resolved_path,
@@ -240,26 +241,32 @@ impl AcpSideband {
             || self.opencode.is_awaiting()
     }
 
+    /// Settle one autonomous (`auto-N`) turn while remaining in the between-prompt
+    /// idle gap. Must NOT wipe `in_autonomous_gap` or cross-wakeup state when a
+    /// subsequent wakeup (`auto-(N+1)`) has already landed in the sideband log.
     pub fn on_turn_settled(&mut self) {
-        self.reset_turn_flags();
+        self.agy.on_turn_settled();
+        self.grok.on_turn_settled();
+        self.gemini.on_turn_settled();
+        self.opencode.on_turn_settled();
     }
 
     pub fn arm_burst_filter(&mut self) {
         self.mirrored.transfer_into(&mut self.burst);
-        self.reset_turn_flags();
+        self.reset_for_prompt();
     }
 
     pub fn finish_prompted_turn(&mut self) {
         self.burst = BurstFilter::default();
         self.idle_since_ms = now_ms();
-        self.reset_turn_flags();
+        self.reset_for_prompt();
     }
 
-    fn reset_turn_flags(&mut self) {
-        self.agy.reset_turn_flags();
-        self.grok.reset_turn_flags();
-        self.gemini.reset_turn_flags();
-        self.opencode.reset_turn_flags();
+    fn reset_for_prompt(&mut self) {
+        self.agy.reset_for_prompt();
+        self.grok.reset_for_prompt();
+        self.gemini.reset_for_prompt();
+        self.opencode.reset_for_prompt();
     }
 
     pub fn filter_thought(&mut self, text: &str) -> Option<String> {
@@ -277,6 +284,13 @@ impl AcpSideband {
         if self.burst.suppressed_tool_ids.contains(tool_call_id) {
             return true;
         }
+        if self.burst.preseeded_tool_ids.remove(tool_call_id) {
+            self.burst.remaining_tool_calls = self.burst.remaining_tool_calls.saturating_sub(1);
+            self.burst
+                .suppressed_tool_ids
+                .insert(tool_call_id.to_string());
+            return true;
+        }
         if self.burst.remaining_tool_calls > 0 {
             self.burst.remaining_tool_calls -= 1;
             self.burst
@@ -287,8 +301,22 @@ impl AcpSideband {
         false
     }
 
-    pub fn filter_tool_update(&self, tool_call_id: &str) -> bool {
-        self.burst.suppressed_tool_ids.contains(tool_call_id)
+    pub fn filter_tool_update(&mut self, tool_call_id: &str, known_in_turn: bool) -> bool {
+        if self.burst.suppressed_tool_ids.contains(tool_call_id)
+            || self.burst.preseeded_tool_ids.contains(tool_call_id)
+        {
+            return true;
+        }
+        // Suppress orphan `tool_call_update` frames replayed for tools started in
+        // a prior turn (e.g. `schedule` timers or background commands completing
+        // during the autonomous gap without a fresh `tool_call`).
+        if !known_in_turn && self.burst.armed_from_mirrored {
+            self.burst
+                .suppressed_tool_ids
+                .insert(tool_call_id.to_string());
+            return true;
+        }
+        false
     }
 
     pub fn on_payload(

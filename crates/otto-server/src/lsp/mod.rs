@@ -190,6 +190,9 @@ struct LspWsState {
 struct LspWsQuery {
     lang: Option<String>,
     root: Option<String>,
+    /// Optional open file path so multi-repo workspaces attach to the file's own module root.
+    #[serde(default)]
+    file: Option<String>,
     /// Optional SSH connection ID when editing a Remote SSH workspace.
     #[serde(default)]
     connection_id: Option<String>,
@@ -203,7 +206,7 @@ fn ws_problem(status: StatusCode, code: &str, message: &str) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// `GET /ws/lsp?lang=<lang>&root=<path>[&connection_id=<ssh_conn_id>]`
+/// `GET /ws/lsp?lang=<lang>&root=<path>[&file=<path>][&connection_id=<ssh_conn_id>]`
 /// (bearer in `Sec-WebSocket-Protocol`)
 async fn lsp_ws(
     ws: WebSocketUpgrade,
@@ -212,17 +215,11 @@ async fn lsp_ws(
     headers: axum::http::HeaderMap,
 ) -> Response {
     let ws = ws.protocols([crate::ws_events::BEARER_SUBPROTOCOL]);
-    let token = match crate::ws_events::token_from_subprotocol(&headers) {
-        Some(t) => t,
-        None => {
-            return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "missing token");
-        }
+    let Some(token) = crate::ws_events::token_from_subprotocol(&headers) else {
+        return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "missing token");
     };
-    let auth = match st.auth.authenticate(&token).await {
-        Ok(a) => a,
-        Err(_) => {
-            return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "invalid token");
-        }
+    let Ok(auth) = st.auth.authenticate(&token).await else {
+        return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "invalid token");
     };
     if crate::feature_guard::root_route_gate(
         crate::feature_guard::RootRoute::Lsp,
@@ -239,33 +236,43 @@ async fn lsp_ws(
         );
     }
     let user = auth.effective_user.clone();
+    st.pool.record_owner_privilege(&user.id, user.is_root);
 
-    let lang = match q.lang {
-        Some(l) if !l.is_empty() => l,
-        _ => {
-            return ws_problem(
-                StatusCode::BAD_REQUEST,
-                "bad_request",
-                "missing ?lang= parameter",
-            );
-        }
+    let Some(lang) = q.lang.filter(|l| !l.is_empty()) else {
+        return ws_problem(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "missing ?lang= parameter",
+        );
     };
-
-    let root = match q.root {
-        Some(r) if !r.is_empty() => r,
-        _ => {
-            return ws_problem(
-                StatusCode::BAD_REQUEST,
-                "bad_request",
-                "missing ?root= parameter",
-            );
-        }
+    let Some(root) = q.root.filter(|r| !r.is_empty()) else {
+        return ws_problem(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "missing ?root= parameter",
+        );
     };
     if root.chars().any(char::is_control) {
         return ws_problem(
             StatusCode::BAD_REQUEST,
             "bad_request",
             "root contains invalid control characters",
+        );
+    }
+    let file_hint = q
+        .file
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(str::to_owned);
+    if file_hint
+        .as_deref()
+        .is_some_and(|f| f.chars().any(char::is_control))
+    {
+        return ws_problem(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "file contains invalid control characters",
         );
     }
 
@@ -285,45 +292,33 @@ async fn lsp_ws(
                 "remote SSH root must be an absolute path",
             );
         }
-        let ssh_spec =
-            match otto_ide::IdeCtx::resolve_ssh_connection(&st.ctx, &user, &conn_id).await {
-                Ok(spec) => spec,
-                Err(Error::NotFound(m)) => {
-                    return ws_problem(StatusCode::NOT_FOUND, "not_found", &m);
-                }
-                Err(Error::Forbidden(m)) => {
-                    return ws_problem(StatusCode::FORBIDDEN, "forbidden", &m);
-                }
-                Err(Error::Invalid(m)) => {
-                    return ws_problem(StatusCode::BAD_REQUEST, "bad_request", &m);
-                }
-                Err(e) => {
-                    tracing::warn!(connection_id = %conn_id, "lsp ssh lookup failed: {e}");
-                    return ws_problem(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal",
-                        "SSH connection lookup failed",
-                    );
-                }
-            };
-        let remote = match servers::resolve_remote_lang(&lang, &st.ctx.ide.plugins) {
-            Some(r) => r,
-            None => {
+        let ssh_spec = match otto_ide::IdeCtx::resolve_ssh_connection(&st.ctx, &user, &conn_id)
+            .await
+        {
+            Ok(spec) => spec,
+            Err(Error::NotFound(m)) => return ws_problem(StatusCode::NOT_FOUND, "not_found", &m),
+            Err(Error::Forbidden(m)) => return ws_problem(StatusCode::FORBIDDEN, "forbidden", &m),
+            Err(Error::Invalid(m)) => {
+                return ws_problem(StatusCode::BAD_REQUEST, "bad_request", &m)
+            }
+            Err(e) => {
+                tracing::warn!(connection_id = %conn_id, "lsp ssh lookup failed: {e}");
                 return ws_problem(
-                    StatusCode::BAD_REQUEST,
-                    "bad_request",
-                    &format!("unknown language: '{lang}'"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "SSH connection lookup failed",
                 );
             }
         };
-        let norm_root = {
-            let trimmed = root.trim_end_matches('/');
-            if trimmed.is_empty() {
-                "/".to_string()
-            } else {
-                trimmed.to_string()
-            }
+        let Some(remote) = servers::resolve_remote_lang(&lang, &st.ctx.ide.plugins) else {
+            return ws_problem(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                &format!("unknown language: '{lang}'"),
+            );
         };
+        let trimmed = root.trim_end_matches('/');
+        let norm_root = if trimmed.is_empty() { "/" } else { trimmed }.to_string();
         let key = pool::PoolKey {
             owner: user.id.to_string(),
             lang: remote.lang,
@@ -346,11 +341,18 @@ async fn lsp_ws(
                 &format!("root does not exist or is not a directory: {root}"),
             );
         }
-        let root = std::fs::canonicalize(root_path)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or(root);
+        let root = match servers::resolve_lsp_module_root(&lang, &root, file_hint.as_deref(), &[]) {
+            Ok(r) => r,
+            Err(e) => return ws_problem(StatusCode::BAD_REQUEST, "bad_request", &e.to_string()),
+        };
 
         if !user.is_root {
+            if let Some(ref fh) = file_hint {
+                let fp = canonical_or_ancestor(std::path::Path::new(fh));
+                if let Some(why) = secret_root_denial(&fp) {
+                    return ws_problem(StatusCode::FORBIDDEN, "forbidden", &why);
+                }
+            }
             let root_ref = std::path::Path::new(&root);
             let visible =
                 if crate::routes::session_files::lsp_root_in_own_session(&st.ctx, &user, root_ref)
@@ -382,17 +384,15 @@ async fn lsp_ws(
             }
         }
 
-        let resolved =
-            match servers::resolve_lang_with_ide(&lang, &st.ctx.data_dir, &st.ctx.ide.plugins) {
-                Some(r) => r,
-                None => {
-                    return ws_problem(
-                        StatusCode::BAD_REQUEST,
-                        "bad_request",
-                        &format!("unknown language: '{lang}'"),
-                    );
-                }
-            };
+        let Some(resolved) =
+            servers::resolve_lang_with_ide(&lang, &st.ctx.data_dir, &st.ctx.ide.plugins)
+        else {
+            return ws_problem(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                &format!("unknown language: '{lang}'"),
+            );
+        };
         if !resolved.available {
             return ws_problem(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -415,7 +415,7 @@ async fn lsp_ws(
 
     let pool = Arc::clone(&st.pool);
     ws.on_upgrade(move |socket| async move {
-        serve_lsp(socket, pool, key, launch).await;
+        serve_lsp(socket, pool, key, launch, file_hint).await;
     })
 }
 
@@ -547,12 +547,16 @@ async fn serve_lsp(
     pool: Arc<pool::LspPool>,
     key: pool::PoolKey,
     launch: pool::SpawnLaunch,
+    file_hint: Option<String>,
 ) {
     let attach_res = {
         let pool = Arc::clone(&pool);
         let key_cl = key.clone();
         let launch_cl = launch.clone();
-        tokio::task::spawn_blocking(move || pool.attach_launch(key_cl, &launch_cl)).await
+        tokio::task::spawn_blocking(move || {
+            pool.attach_launch_with_file(key_cl, &launch_cl, file_hint.as_deref())
+        })
+        .await
     };
     let mut attached = match attach_res {
         Ok(Ok(a)) => a,

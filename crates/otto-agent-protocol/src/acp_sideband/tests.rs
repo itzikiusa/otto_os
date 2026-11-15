@@ -560,3 +560,203 @@ fn custom_acp_server_adopts_otto_acp_sideband_file_env() {
         other => panic!("unexpected source: {other:?}"),
     }
 }
+
+#[test]
+fn agy_sideband_survives_mid_settle_wakeup_and_suppresses_orphan_burst_updates() {
+    let mut d = AcpDriver::agy("agy");
+    d.set_sideband_root_dir("/tmp/test-agy-brain");
+    let sid = "eaf6440b-3dbd-4661-9f38-63372630db72";
+    handshake_and_finish_turn1(&mut d, "/workspace", sid);
+
+    // Whole-second RFC3339 (`...Z`) in the SAME wall-clock second right after
+    // `finish_prompted_turn()` must NOT be dropped (`parse_rfc3339_end_ms`).
+    let same_sec = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let wake1 = format!(
+        "{}\n{}\n{}\n",
+        json!({
+            "step_index": 10,
+            "type": "SYSTEM_MESSAGE",
+            "source": "SYSTEM",
+            "created_at": same_sec,
+            "content": "Subagent finished"
+        }),
+        json!({
+            "step_index": 11,
+            "type": "PLANNER_RESPONSE",
+            "source": "MODEL",
+            "created_at": same_sec,
+            "thinking": "Wakeup 1 thought",
+            "tool_calls": [{
+                "id": "call_wake_1",
+                "name": "default_api:run_command",
+                "args": {"CommandLine": "\"echo one\"", "toolSummary": "\"Echo one\""}
+            }]
+        }),
+        json!({
+            "step_index": 12,
+            "type": "GENERIC",
+            "source": "MODEL",
+            "status": "DONE",
+            "created_at": same_sec,
+            "id": "call_wake_1",
+            "content": "one"
+        }),
+    );
+    let s1 = d.on_sideband(SidebandPayload::AppendLines {
+        resolved_path: None,
+        using_fallback: false,
+        next_offset: 1024,
+        bytes: wake1.into_bytes(),
+    });
+    assert!(s1
+        .events
+        .iter()
+        .any(|e| matches!(e, DriverEvent::TurnStarted { turn_id } if turn_id == "auto-1")));
+
+    // Finish auto-1's planner response, then immediately land auto-2's
+    // `<SYSTEM_MESSAGE>` BEFORE `on_idle_settle()` fires (and also exercise
+    // `on_turn_settled` between wakeups).
+    let finish1 = format!(
+        "{}\n",
+        json!({
+            "step_index": 13,
+            "type": "PLANNER_RESPONSE",
+            "source": "MODEL",
+            "created_at": same_sec,
+            "content": "Wakeup 1 summary"
+        })
+    );
+    let _ = d.on_sideband(SidebandPayload::AppendLines {
+        resolved_path: None,
+        using_fallback: false,
+        next_offset: 1536,
+        bytes: finish1.into_bytes(),
+    });
+    assert!(d.needs_idle_turn_settle());
+    let _ = d.on_idle_settle();
+
+    // Wakeup 2 starts with `<SYSTEM_MESSAGE>`: must emit `TurnStarted(auto-2)`
+    // immediately and hold `needs_idle_turn_settle() == false` while thinking!
+    let wake2_header = format!(
+        "{}\n",
+        json!({
+            "step_index": 14,
+            "type": "SYSTEM_MESSAGE",
+            "source": "SYSTEM",
+            "created_at": same_sec,
+            "content": "Timer fired"
+        })
+    );
+    let s2_open = d.on_sideband(SidebandPayload::AppendLines {
+        resolved_path: None,
+        using_fallback: false,
+        next_offset: 2048,
+        bytes: wake2_header.into_bytes(),
+    });
+    assert!(s2_open
+        .events
+        .iter()
+        .any(|e| matches!(e, DriverEvent::TurnStarted { turn_id } if turn_id == "auto-2")));
+    assert!(
+        !d.needs_idle_turn_settle(),
+        "auto-2 must stay open while awaiting planner response"
+    );
+
+    // Even if an errored planner + stream retry happens during auto-2,
+    // `in_autonomous_gap` survives and emits the recovered wakeup live.
+    let wake2_body = format!(
+        "{}\n{}\n{}\n",
+        json!({
+            "step_index": 15,
+            "type": "PLANNER_RESPONSE",
+            "source": "MODEL",
+            "status": "ERROR",
+            "created_at": same_sec,
+            "thinking": "Partial retry thought"
+        }),
+        json!({
+            "step_index": 16,
+            "type": "ERROR_MESSAGE",
+            "source": "SYSTEM",
+            "created_at": same_sec,
+            "content": "Stream interrupted, retrying..."
+        }),
+        json!({
+            "step_index": 17,
+            "type": "PLANNER_RESPONSE",
+            "source": "MODEL",
+            "created_at": same_sec,
+            "thinking": "Wakeup 2 thought",
+            "content": "Wakeup 2 complete"
+        }),
+    );
+    let s2_body = d.on_sideband(SidebandPayload::AppendLines {
+        resolved_path: None,
+        using_fallback: false,
+        next_offset: 3072,
+        bytes: wake2_body.into_bytes(),
+    });
+    assert!(s2_body.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: false, .. }
+                if text == "Wakeup 2 complete")
+    )));
+    assert!(d.needs_idle_turn_settle());
+    let _ = d.on_idle_settle();
+
+    // User sends prompt `t2`. `agy` replays:
+    //  1) An orphan `tool_call_update` for a `schedule` timer started in `t1`
+    //  2) All thoughts, tool calls, warning banner, and messages from auto-1 & auto-2
+    let _ = d
+        .prompt("t2", &RuntimePromptReq::of("where do we stand?"))
+        .unwrap();
+    for replay in [
+        json!({"sessionUpdate":"tool_call_update","toolCallId":"call_orphan_schedule_from_t1","status":"completed","title":"Run schedule"}),
+        json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Wakeup 1 thought"}}),
+        json!({"sessionUpdate":"tool_call","toolCallId":"call_wake_1","title":"Echo one","kind":"execute","status":"in_progress"}),
+        json!({"sessionUpdate":"tool_call_update","toolCallId":"call_wake_1","status":"completed"}),
+        json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Wakeup 1 summary"}}),
+        json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Partial retry thought"}}),
+        json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"⚠ Stream interrupted, retrying..."}}),
+        json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Wakeup 2 thought"}}),
+        json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Wakeup 2 complete"}}),
+    ] {
+        let ev = d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":replay}})
+                .to_string(),
+        );
+        assert!(
+            ev.events.is_empty(),
+            "replayed burst frame leaked into t2: {replay:?} -> {:?}",
+            ev.events
+        );
+    }
+
+    // Real `t2` tool call, update, and answer pass through intact!
+    let real_call = d.on_line(
+        &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{
+            "sessionUpdate":"tool_call","toolCallId":"call_t2_real","title":"Check status","kind":"execute","status":"in_progress"
+        }}})
+        .to_string(),
+    );
+    assert_eq!(real_call.events.len(), 1);
+    let real_up = d.on_line(
+        &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{
+            "sessionUpdate":"tool_call_update","toolCallId":"call_t2_real","status":"completed"
+        }}})
+        .to_string(),
+    );
+    assert!(!real_up.events.is_empty());
+    let real_msg = d.on_line(
+        &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{
+            "sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"All green and deployed."}
+        }}})
+        .to_string(),
+    );
+    assert!(real_msg.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::TurnItem(i)
+            if matches!(&i.kind, TurnItemKind::AssistantMessage { text, .. } if text == "All green and deployed.")
+    )));
+}

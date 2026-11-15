@@ -657,3 +657,183 @@ async fn get_item<S: RuntimeCtx>(
     authorized(&ctx, &user, &id).await?;
     Ok(Json(ctx.agent_runtime().get_item(&id, &item_id).await?))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{
+        AgentRuntime, DriverFactory, LaunchSpec, McpDelivery, McpServerDef, RuntimeConfig,
+        RuntimeHost,
+    };
+    use chrono::Utc;
+    use otto_core::agent_runtime::{RuntimeAccessMode, RuntimeEvent, RuntimeProvider};
+    use otto_core::auth::{BoxFuture, RoleChecker};
+    use otto_core::domain::Workspace;
+    use otto_state::{AgentRuntimeRepo, DbPool, NewRuntimeSession, UsersRepo, WorkspacesRepo};
+
+    struct MemberNotAdminRoles;
+    impl RoleChecker for MemberNotAdminRoles {
+        fn check<'a>(
+            &'a self,
+            _user: &'a User,
+            _ws: &'a Id,
+            min_role: WorkspaceRole,
+        ) -> BoxFuture<'a, otto_core::Result<()>> {
+            Box::pin(async move {
+                if min_role == WorkspaceRole::Admin {
+                    Err(Error::Forbidden("not a workspace admin".into()))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    struct DummyHost(String);
+    #[async_trait::async_trait]
+    impl RuntimeHost for DummyHost {
+        async fn workspace(&self, id: &Id) -> otto_core::Result<Workspace> {
+            Ok(Workspace {
+                id: id.clone(),
+                name: "W".into(),
+                root_path: self.0.clone(),
+                settings: serde_json::json!({}),
+                archived: false,
+                created_at: Utc::now(),
+            })
+        }
+        async fn sandboxed(&self, _s: &RuntimeSession) -> bool {
+            false
+        }
+        async fn prepare_spawn(
+            &self,
+            _ws: &Workspace,
+            _s: &RuntimeSession,
+            _spec: &mut LaunchSpec,
+            _mcp: McpDelivery,
+        ) -> otto_core::Result<Vec<McpServerDef>> {
+            Ok(Vec::new())
+        }
+        fn publish(&self, _s: &RuntimeSession, _event: Arc<RuntimeEvent>) {}
+    }
+
+    #[derive(Clone)]
+    struct TestRuntimeCtx {
+        rt: AgentRuntime,
+        roles: Arc<dyn RoleChecker>,
+    }
+
+    impl RuntimeCtx for TestRuntimeCtx {
+        fn agent_runtime(&self) -> &AgentRuntime {
+            &self.rt
+        }
+        fn roles(&self) -> &Arc<dyn RoleChecker> {
+            &self.roles
+        }
+        fn is_human(&self, _auth: &AuthContext) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn get_item_and_events_enforce_session_owner_or_admin() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap().to_string();
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let raw_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&raw_pool)
+            .await
+            .unwrap();
+        let pool: DbPool = raw_pool.into();
+        let users = UsersRepo::new(pool.clone());
+        let owner = users.create("owner", "Owner", "h", false).await.unwrap();
+        let other = users.create("other", "Other", "h", false).await.unwrap();
+        let ws = WorkspacesRepo::new(pool.clone())
+            .create("ws", &cwd, &owner.id)
+            .await
+            .unwrap();
+        let drivers: Arc<dyn DriverFactory> = Arc::new(|_| None);
+        let rt = AgentRuntime::new(
+            AgentRuntimeRepo::new(pool),
+            Arc::new(DummyHost(cwd.clone())),
+            drivers,
+            RuntimeConfig {
+                attachments_dir: dir.path().join("att"),
+                ..RuntimeConfig::default()
+            },
+        );
+        let s = rt
+            .repo()
+            .create(NewRuntimeSession {
+                id: otto_core::new_id(),
+                workspace_id: ws.id,
+                provider: RuntimeProvider::Claude,
+                title: "t".into(),
+                cwd,
+                model: None,
+                access_mode: RuntimeAccessMode::FullAccess,
+                created_by: owner.id.clone(),
+                parent_id: None,
+                meta: None,
+            })
+            .await
+            .unwrap()
+            .session;
+        let ctx = TestRuntimeCtx {
+            rt,
+            roles: Arc::new(MemberNotAdminRoles),
+        };
+
+        // Non-owner workspace member is rejected with 403 Forbidden before item lookup.
+        let err = match get_item(
+            State(ctx.clone()),
+            Extension(AuthUser(other.clone())),
+            Path((s.id.clone(), "any-item".into())),
+        )
+        .await
+        {
+            Ok(_) => panic!("expected Forbidden for non-owner"),
+            Err(e) => e,
+        };
+        assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+
+        let ev_err = match events(
+            State(ctx.clone()),
+            Extension(AuthUser(other)),
+            Path(s.id.clone()),
+            Query(EventsQuery {
+                compact: Some("1".into()),
+                max_lines: Some(10_000),
+                ..EventsQuery::default()
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("expected Forbidden for non-owner events"),
+            Err(e) => e,
+        };
+        assert_eq!(ev_err.into_response().status(), StatusCode::FORBIDDEN);
+
+        // Owner passes authz and receives 404 NotFound for an unknown item ID.
+        let miss = match get_item(
+            State(ctx),
+            Extension(AuthUser(owner)),
+            Path((s.id, "missing-item".into())),
+        )
+        .await
+        {
+            Ok(_) => panic!("expected NotFound for missing item"),
+            Err(e) => e,
+        };
+        assert_eq!(miss.into_response().status(), StatusCode::NOT_FOUND);
+    }
+}

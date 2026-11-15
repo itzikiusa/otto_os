@@ -21,10 +21,13 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StartEvalForm from './StartEvalForm.svelte';
   import RunDetail from './RunDetail.svelte';
-  import CompareView from './CompareView.svelte';
-  import GoldenTasksView from './GoldenTasksView.svelte';
-  import MatrixView from './MatrixView.svelte';
-  import EvalDefaultsSheet from './EvalDefaultsSheet.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import type MatrixView from './MatrixView.svelte';
+
+  const CompareViewLazy = lazyComponent(() => import('./CompareView.svelte'));
+  const GoldenTasksViewLazy = lazyComponent(() => import('./GoldenTasksView.svelte'));
+  const MatrixViewLazy = lazyComponent(() => import('./MatrixView.svelte'));
+  const EvalDefaultsSheetLazy = lazyComponent(() => import('./EvalDefaultsSheet.svelte'));
 
   type Mode = 'form' | 'detail';
   type Tab = 'runs' | 'golden' | 'matrix';
@@ -218,7 +221,41 @@
     compareSel = next;
   }
 
-  let loadedWs = $state<string | null>(ws.currentId && initialEval.loaded ? ws.currentId : null);
+  const initialLoadedWs = ws.currentId && initialEval.loaded ? ws.currentId : null;
+  let loadedWs = $state<string | null>(initialLoadedWs);
+  let listGeneration = 0;
+  async function loadList(wsId: string, background = false): Promise<void> {
+    const generation = ++listGeneration;
+    if (!background) {
+      loading = true;
+      loadError = null;
+    }
+    try {
+      const page = await skillsEvalApi.listSummaries(wsId, { limit: PAGE });
+      if (generation !== listGeneration || ws.currentId !== wsId) return;
+      loadError = null;
+      if (background && runs.length > page.items.length) {
+        const freshIds = new Set(page.items.map((r) => r.id));
+        runs = [...page.items, ...runs.filter((r) => !freshIds.has(r.id))];
+      } else {
+        runs = page.items;
+        nextCursor = page.next_cursor;
+      }
+      // Default to the newest run's detail if one exists; else the start form.
+      if (runs.length > 0 && selectedId === null && !formSkill) {
+        selectedId = runs[0].id;
+        mode = 'detail';
+      }
+    } catch (e) {
+      if (generation === listGeneration && ws.currentId === wsId && (!background || runs.length === 0)) {
+        loadError = loadErrorText(e);
+      }
+    } finally {
+      if (!background && generation === listGeneration && ws.currentId === wsId) loading = false;
+    }
+  }
+
+  if (initialLoadedWs) void loadList(initialLoadedWs, true);
   $effect(() => {
     const wsId = ws.currentId;
     if (!wsId) {
@@ -243,6 +280,7 @@
       compareSel = new Set(cached.compareSel);
       compareFull = cached.compareFull;
       loading = false;
+      void loadList(wsId, true);
       return;
     }
     selectedId = null;
@@ -267,28 +305,6 @@
       compareFull,
     });
   });
-
-  let listGeneration = 0;
-  async function loadList(wsId: string): Promise<void> {
-    const generation = ++listGeneration;
-    loading = true;
-    loadError = null;
-    try {
-      const page = await skillsEvalApi.listSummaries(wsId, { limit: PAGE });
-      if (generation !== listGeneration || ws.currentId !== wsId) return;
-      runs = page.items;
-      nextCursor = page.next_cursor;
-      // Default to the newest run's detail if one exists; else the start form.
-      if (runs.length > 0 && selectedId === null && !formSkill) {
-        selectedId = runs[0].id;
-        mode = 'detail';
-      }
-    } catch (e) {
-      if (generation === listGeneration && ws.currentId === wsId) loadError = loadErrorText(e);
-    } finally {
-      if (generation === listGeneration && ws.currentId === wsId) loading = false;
-    }
-  }
 
   async function loadMore(): Promise<void> {
     const wsId = ws.currentId;
@@ -366,9 +382,17 @@
        header's tab row (SkillsLabPage) — no second strip here. -->
   <div class="se-content" id="eval-panel" role="tabpanel" aria-label={TABS.find((t) => t.id === tab)?.label}>
     {#if tab === 'golden'}
-      <GoldenTasksView onopenrun={openRun} />
+      {#if GoldenTasksViewLazy.component}
+        <GoldenTasksViewLazy.component onopenrun={openRun} />
+      {:else}
+        <LoadState what="golden tasks" variant="page" loading={!GoldenTasksViewLazy.error} error={GoldenTasksViewLazy.error} empty onretry={() => GoldenTasksViewLazy.retry()} />
+      {/if}
     {:else if tab === 'matrix'}
-      <MatrixView bind:this={matrixView} {listCollapsed} onopenrun={openRunById} onphonedetail={(o) => (matrixPhoneDetail = o)} />
+      {#if MatrixViewLazy.component}
+        <MatrixViewLazy.component bind:this={matrixView} {listCollapsed} onopenrun={openRunById} onphonedetail={(o) => (matrixPhoneDetail = o)} />
+      {:else}
+        <LoadState what="matrix evaluations" variant="page" loading={!MatrixViewLazy.error} error={MatrixViewLazy.error} empty onretry={() => MatrixViewLazy.retry()} />
+      {/if}
     {:else}
 <div class="se-page" class:list-hidden={listHidden && !viewport.isPhone}>
   <aside class="se-side" class:hide-phone={viewport.isPhone && !showRunsPhoneList} id="evaluations-list" style={viewport.isPhone ? undefined : `width:${sideW}px`}>
@@ -462,7 +486,11 @@
           />
         {/if}
         {#if compareRuns.length >= 2}
-          <CompareView runs={compareRuns} />
+          {#if CompareViewLazy.component}
+            <CompareViewLazy.component runs={compareRuns} />
+          {:else}
+            <LoadState what="comparison runs" variant="page" loading={!CompareViewLazy.error} error={CompareViewLazy.error} empty onretry={() => CompareViewLazy.retry()} />
+          {/if}
         {:else if comparePending}
           <LoadState what="comparison runs" variant="page" loading empty />
         {/if}
@@ -488,8 +516,8 @@
   </div>
 </div>
 
-{#if defaultsOpen}
-  <EvalDefaultsSheet onclose={() => (defaultsOpen = false)} />
+{#if defaultsOpen && EvalDefaultsSheetLazy.component}
+  <EvalDefaultsSheetLazy.component onclose={() => (defaultsOpen = false)} />
 {/if}
 
 <style>

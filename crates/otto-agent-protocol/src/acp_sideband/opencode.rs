@@ -39,7 +39,11 @@ pub(crate) struct OpencodeState {
 }
 
 impl OpencodeState {
-    pub fn reset_turn_flags(&mut self) {
+    pub fn reset_for_prompt(&mut self) {
+        self.awaiting_step_finish = false;
+    }
+
+    pub fn on_turn_settled(&mut self) {
         self.awaiting_step_finish = false;
     }
 
@@ -217,6 +221,7 @@ impl OpencodeState {
 
         if prev.is_none() {
             mirrored.tool_calls = mirrored.tool_calls.saturating_add(1);
+            mirrored.preseed_tool_id(call_id);
             self.awaiting_step_finish = true;
             self.awaiting_since_ms = now_ms();
             actions.push(SidebandAction::ToolStart {

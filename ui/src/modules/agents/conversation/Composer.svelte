@@ -114,16 +114,26 @@
   let ta = $state<HTMLTextAreaElement | null>(null);
   let footerRef = $state<ReturnType<typeof ComposerFooter> | null>(null);
   let customReplyHint = $state(false);
-  let configBusy = $state(false);
+  let cfgPending = $state(0);
+  const configBusy = $derived(cfgPending > 0);
+  let cfgQueue: Promise<void> = Promise.resolve();
   let showStatusCard = $state(false);
 
   const sessionObj = $derived(ws.getSession(sessionId));
   const threadCfg = $derived(resolveSessionThreadConfig(sessionObj, model));
 
-  async function runCfg(fn: () => Promise<void>): Promise<void> {
-    if (configBusy) return;
-    configBusy = true;
-    try { await fn(); } finally { configBusy = false; restoreComposerFocus(); }
+  function runCfg(fn: () => Promise<void>): Promise<void> {
+    cfgPending += 1;
+    const run = async (): Promise<void> => {
+      try {
+        await fn();
+      } finally {
+        cfgPending = Math.max(0, cfgPending - 1);
+        if (cfgPending === 0) restoreComposerFocus();
+      }
+    };
+    cfgQueue = cfgQueue.then(run, run);
+    return cfgQueue;
   }
   const applyModelChange = (m: string | null) => runCfg(() => patchComposerModel(ownerId, provider, m));
   const applyEffortChange = (eff: EffortLevel | null) => runCfg(() => patchComposerEffort(ownerId, eff));

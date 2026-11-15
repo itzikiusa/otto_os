@@ -17,12 +17,15 @@ import {
   createIdeLspCompletionExtension,
   createLspSemanticTokensExtension,
   decodeLspSemanticTokens,
+  dedupeLspDiagnostics,
+  dedupeLspJsonRpcMessage,
   DEFAULT_LSP_TOKEN_MODIFIERS,
   DEFAULT_LSP_TOKEN_TYPES,
   detectLspCompletionTrigger,
   IDLE_CLOSE_MS,
   isPosInCommentOrString,
   LSP_CODE_LANGUAGES,
+  lspDiagnosticDedupeKey,
   MAX_POOLED_LSP_CLIENTS,
   normalizeIdeLspLanguage,
   posToLsp,
@@ -32,6 +35,7 @@ import {
   type LspPos,
   type LspRange,
   type RawLspCompletionItem,
+  type RawLspDiagnosticLike,
   type RawLspTextEdit,
 } from './cm-ide-lsp-completion.ts';
 import {
@@ -57,6 +61,8 @@ export {
   clearLiveLspDiagnostics,
   createCmdHoverDiveExtension,
   decodeLspSemanticTokens,
+  dedupeLspDiagnostics,
+  dedupeLspJsonRpcMessage,
   DEFAULT_LSP_TOKEN_MODIFIERS,
   DEFAULT_LSP_TOKEN_TYPES,
   detectLspCompletionTrigger,
@@ -64,6 +70,7 @@ export {
   IDLE_CLOSE_MS,
   isPosInCommentOrString,
   LSP_CODE_LANGUAGES,
+  lspDiagnosticDedupeKey,
   lspUriToPath,
   markLiveLspDiagnostics,
   MAX_POOLED_LSP_CLIENTS,
@@ -78,6 +85,7 @@ export {
   type LspPos,
   type LspRange,
   type RawLspCompletionItem,
+  type RawLspDiagnosticLike,
   type RawLspTextEdit,
 };
 
@@ -231,6 +239,9 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
   const rootUri = `file://${resolvedRoot}`;
   const langProbeKey = `${serverLang}::${opts.connId ?? 'local'}`;
   const transport = new mod.WebSocketTransport(opts.wsUri, opts.protocols);
+  const origOnMessage = transport.onMessage.bind(transport);
+  transport.onMessage = (handler) =>
+    origOnMessage((msg) => handler(dedupeLspJsonRpcMessage(msg)));
   const diagListeners = new Map<string, Set<(diags: IdeDiagnostic[]) => void>>();
 
   let onHandshakeAborted: (() => void) | null = null;

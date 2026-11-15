@@ -284,8 +284,17 @@ impl LspPool {
 
     pub fn attach_launch(
         self: &Arc<Self>,
+        key: PoolKey,
+        launch: &SpawnLaunch,
+    ) -> std::io::Result<Attached> {
+        self.attach_launch_with_file(key, launch, None)
+    }
+
+    pub fn attach_launch_with_file(
+        self: &Arc<Self>,
         mut key: PoolKey,
         launch: &SpawnLaunch,
+        file_hint: Option<&str>,
     ) -> std::io::Result<Attached> {
         if servers::is_lightweight_non_lsp_lang(&key.lang) {
             return Err(std::io::Error::new(
@@ -298,7 +307,7 @@ impl LspPool {
         }
         key.lang = servers::normalize_lsp_lang(&key.lang).to_string();
         if key.ssh.is_none() {
-            key.root = servers::resolve_lsp_module_root(&key.lang, &key.root, None, &[])?;
+            key.root = servers::resolve_lsp_module_root(&key.lang, &key.root, file_hint, &[])?;
         }
 
         let client = self.next_client.fetch_add(1, Ordering::Relaxed);

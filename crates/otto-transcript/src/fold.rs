@@ -1041,4 +1041,43 @@ mod tests {
         let out = f.finish(3);
         assert_eq!(out.turns[0].turn.system.len(), 2);
     }
+
+    #[test]
+    fn page_enforces_ten_k_line_budget_and_walks_cursor_cleanly() {
+        let mut f = Fold::new(Provider::Claude, FoldOpts::default());
+        // 5 turns × ~3,000 newlines each (~15k lines total, well below the 2 MiB byte cap).
+        for i in 0..5 {
+            let t = f.new_turn(format!("t{i}"), Role::Assistant, None, None, i * 10);
+            f.push_block(
+                t,
+                Block::Text {
+                    md: "line\n".repeat(3_000),
+                },
+                i * 10 + 1,
+            );
+        }
+        let out = f.finish(50);
+
+        // Initial page caps at PAGE_LINES_BUDGET (10_000): 3 turns (~9,378 lines) fit; 4th (~12,504) breaks.
+        let tail = out.page(None, 50, vec![]);
+        assert_eq!(tail.turns.len(), 3);
+        assert_eq!(
+            tail.turns.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["t2", "t3", "t4"]
+        );
+        assert!(tail.has_earlier);
+        assert_eq!(tail.cursor, "20");
+
+        // Next page before cursor=20 returns the remaining 2 older turns without gaps or duplicates.
+        let older = out.page(Some(tail.cursor.parse().unwrap()), 50, vec![]);
+        assert_eq!(
+            older
+                .turns
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t0", "t1"]
+        );
+        assert!(!older.has_earlier);
+    }
 }

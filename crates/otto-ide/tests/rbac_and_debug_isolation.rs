@@ -2,6 +2,7 @@
 //! isolation, and collaborative room debug-owner binding tests.
 
 mod common;
+mod rbac_netbridge;
 
 use std::path::Path;
 use std::time::{Duration, Instant};

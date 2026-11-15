@@ -14,6 +14,9 @@ pub(crate) const COMPACT_FILE_CHANGE_THRESHOLD_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_DIFF_PATCH_BYTES: usize = 48 * 1024;
 const CONTEXT_LINES: usize = 3;
 const LOOKAHEAD_LINES: usize = 64;
+const FAST_LOOKAHEAD_LINES: usize = 4;
+const FULL_RESYNC_BUDGET_LINES: usize = 4_000;
+const FAST_RESYNC_BUDGET_LINES: usize = 24_000;
 
 fn truncate_utf8_lines(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
@@ -41,7 +44,15 @@ enum DiffOp<'a> {
 }
 
 fn diff_slice<'a>(old_mid: &[&'a str], new_mid: &[&'a str]) -> Vec<DiffOp<'a>> {
-    let mut ops = Vec::with_capacity(old_mid.len() + new_mid.len());
+    let total_mid = old_mid.len() + new_mid.len();
+    let lookahead = if total_mid <= FULL_RESYNC_BUDGET_LINES {
+        LOOKAHEAD_LINES
+    } else if total_mid <= FAST_RESYNC_BUDGET_LINES {
+        FAST_LOOKAHEAD_LINES
+    } else {
+        0
+    };
+    let mut ops = Vec::with_capacity(total_mid);
     let mut i = 0;
     let mut j = 0;
     while i < old_mid.len() && j < new_mid.len() {
@@ -51,12 +62,19 @@ fn diff_slice<'a>(old_mid: &[&'a str], new_mid: &[&'a str]) -> Vec<DiffOp<'a>> {
             j += 1;
             continue;
         }
-        // Greedy windowed resync: look ahead up to `LOOKAHEAD_LINES` for a
+        if lookahead == 0 {
+            ops.push(DiffOp::Delete(old_mid[i]));
+            ops.push(DiffOp::Insert(new_mid[j]));
+            i += 1;
+            j += 1;
+            continue;
+        }
+        // Greedy windowed resync: look ahead up to `lookahead` for a
         // 2-line anchor match (or 1-line at slice end) to split separate hunks.
-        let max_o = (i + LOOKAHEAD_LINES).min(old_mid.len());
-        let max_n = (j + LOOKAHEAD_LINES).min(new_mid.len());
+        let max_o = (i + lookahead).min(old_mid.len());
+        let max_n = (j + lookahead).min(new_mid.len());
         let mut best: Option<(usize, usize)> = None;
-        'search: for dist in 1..=(LOOKAHEAD_LINES * 2) {
+        'search: for dist in 1..=(lookahead * 2) {
             for doff in 0..=dist {
                 let noff = dist - doff;
                 let oi = i + doff;
@@ -121,7 +139,47 @@ pub(crate) fn unified_file_patch(
         prefix += 1;
     }
     if prefix == old_lines.len() && prefix == new_lines.len() {
-        return String::new();
+        if let Some(o) = old {
+            if o == new || old_lines.is_empty() {
+                return String::new();
+            }
+            // Line text matched via `.lines()` while CRLF or final trailing
+            // newline changed; emit a valid unified diff hunk on the final line.
+            let last_idx = old_lines.len() - 1;
+            let ctx_start = last_idx.saturating_sub(CONTEXT_LINES);
+            let count = last_idx - ctx_start + 1;
+            let hdr_start = ctx_start + 1;
+            let mut out = format!(
+                "diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -{hdr_start},{count} +{hdr_start},{count} @@\n"
+            );
+            for line in &old_lines[ctx_start..last_idx] {
+                out.push(' ');
+                out.push_str(line);
+                out.push('\n');
+            }
+            out.push('-');
+            out.push_str(old_lines[last_idx]);
+            out.push('\n');
+            if !o.ends_with('\n') {
+                out.push_str("\\ No newline at end of file\n");
+            }
+            out.push('+');
+            out.push_str(new_lines[last_idx]);
+            out.push('\n');
+            if !new.ends_with('\n') {
+                out.push_str("\\ No newline at end of file\n");
+            }
+            return if out.len() > max_bytes {
+                truncate_utf8_lines(&out, max_bytes)
+            } else {
+                out
+            };
+        } else {
+            // Newly created empty file (`old == None`, `new == ""`).
+            return format!(
+                "diff --git a/{p} b/{p}\nnew file mode 100644\n--- /dev/null\n+++ b/{p}\n"
+            );
+        }
     }
 
     let mut old_end = old_lines.len();
@@ -387,5 +445,79 @@ mod tests {
         assert!(diff_str.is_none());
         assert_eq!(out_old.as_deref(), Some("const a = 1;"));
         assert_eq!(out_new.as_deref(), Some("const a = 2;"));
+    }
+
+    #[test]
+    fn boundary_utf8_trailing_newline_and_hydration_compaction_stay_valid() {
+        // Exact 8192-byte boundary preserves old/new; 8193 compacts to diff.
+        let exact_old = "a".repeat(4_096);
+        let exact_new = "b".repeat(4_096);
+        let (d_eq, o_eq, n_eq) = compact_file_change_fields(
+            "src/eq.txt",
+            None,
+            Some(exact_old.clone()),
+            Some(exact_new),
+        );
+        assert!(d_eq.is_none());
+        assert!(o_eq.is_some() && n_eq.is_some());
+
+        // Trailing-newline-only edit above 8 KB still emits a non-empty hunk instead of dropping everything.
+        let base_no_nl = (0..600)
+            .map(|i| format!("line-{i:04}-payload"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let with_nl = format!("{base_no_nl}\n");
+        let (d_nl, o_nl, n_nl) =
+            compact_file_change_fields("src/nl.txt", None, Some(base_no_nl), Some(with_nl));
+        assert!(o_nl.is_none() && n_nl.is_none());
+        assert!(d_nl.as_deref().is_some_and(|p| p.contains("@@ -")));
+
+        // Multibyte UTF-8 truncation past MAX_DIFF_PATCH_BYTES never panics or exceeds cap.
+        let old_utf8 = String::new();
+        let new_utf8: String = (0..4_000)
+            .map(|i| format!("שלום עולם 🚀 line {i} — café naïve\n"))
+            .collect();
+        let (d_u8, _, _) =
+            compact_file_change_fields("src/i18n.txt", None, Some(old_utf8), Some(new_utf8));
+        let patch = d_u8.expect("utf8 patch");
+        assert!(patch.len() <= MAX_DIFF_PATCH_BYTES);
+
+        // Large 10k-line rewrite completes quickly and `bound_item_in_place` shrinks hydrated items.
+        let huge_old: String = (0..10_000).map(|i| format!("old_row_{i}\n")).collect();
+        let huge_new: String = (0..10_000).map(|i| format!("new_row_{i}\n")).collect();
+        let mut item = TurnItem {
+            id: "fc-1".into(),
+            turn_id: Some("t-1".into()),
+            ordinal: 1,
+            status: otto_core::agent_runtime::TurnItemStatus::Completed,
+            title: None,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            updated_at: chrono::Utc::now(),
+            parent_item_id: None,
+            detail_omitted: false,
+            kind: TurnItemKind::FileChange {
+                file_name: "src/huge.rs".into(),
+                diff_str: None,
+                old_str: Some(huge_old),
+                new_str: Some(huge_new),
+            },
+        };
+        bound_item_in_place(&mut item);
+        match &item.kind {
+            TurnItemKind::FileChange {
+                diff_str,
+                old_str,
+                new_str,
+                ..
+            } => {
+                assert!(old_str.is_none() && new_str.is_none());
+                assert!(diff_str
+                    .as_deref()
+                    .is_some_and(|d| !d.is_empty() && d.len() <= MAX_DIFF_PATCH_BYTES));
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
     }
 }

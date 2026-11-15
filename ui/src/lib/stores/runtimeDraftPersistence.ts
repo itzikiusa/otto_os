@@ -30,13 +30,30 @@ export function acknowledgeComposer(d: ComposerContent, sent: RuntimeDraftConten
 }
 
 export function emptyDraft(): RuntimeDraftContent {
-  return { text: '', images: [], model: null, effort: null, access_mode: null, fresh_context: false, context: [] };
+  return { text: '', images: [], model: undefined, effort: null, access_mode: null, fresh_context: false, context: [] };
 }
 function isEmptyDraftContent(d: RuntimeDraftContent | null | undefined): boolean {
   return !d || (!d.text && d.images.length === 0 && d.context.length === 0 && !d.fresh_context);
 }
-const copy = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
-const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+const DRAFT_KEYS: readonly (keyof RuntimeDraftContent)[] = [
+  'text',
+  'images',
+  'model',
+  'effort',
+  'access_mode',
+  'fresh_context',
+  'context',
+];
+const copy = <T>(v: T): T => {
+  if (v === undefined) return undefined as T;
+  const cloned = JSON.parse(JSON.stringify(v)) as T;
+  if (v && typeof v === 'object' && 'model' in (v as Record<string, unknown>) && (v as Record<string, unknown>).model === undefined) {
+    (cloned as Record<string, unknown>).model = undefined;
+  }
+  return cloned;
+};
+const equal = (a: unknown, b: unknown): boolean =>
+  a === b || (a !== undefined && b !== undefined && JSON.stringify(a) === JSON.stringify(b));
 
 /** Only acknowledged content is removed; edits made during the request survive. */
 export function acknowledgeDraft(current: RuntimeDraftContent, sent: RuntimeDraftContent): void {
@@ -87,8 +104,12 @@ export class DraftPersistence {
       if (record.draft) {
         const addedContext = this.current.context;
         const addedImages = this.current.images;
-        for (const key of Object.keys(before) as (keyof RuntimeDraftContent)[]) {
-          if (equal(this.current[key], before[key])) Object.assign(this.current, { [key]: record.draft[key] });
+        for (const key of DRAFT_KEYS) {
+          if (!equal(this.current[key], before[key])) continue;
+          if (key === 'model' && before.model === undefined && record.draft.model === null && !isEmptyDraftContent(record.draft)) {
+            continue;
+          }
+          Object.assign(this.current, { [key]: record.draft[key] });
         }
         if (!equal(addedContext, before.context)) {
           this.current.context = [...record.draft.context.filter(x => !addedContext.some(c => c.id === x.id)), ...addedContext];
@@ -98,7 +119,7 @@ export class DraftPersistence {
         }
       }
       this.loaded = true;
-      this.saved = JSON.stringify(record.draft ?? emptyDraft());
+      this.saved = JSON.stringify(this.current);
       this.status('saved');
     }).catch(e => { if (this.owns()) this.status('error', String(e)); }).finally(() => { this.loading = null; });
     return this.loading;
@@ -125,10 +146,13 @@ export class DraftPersistence {
         const remoteJson = JSON.stringify(remoteDraft);
         if (JSON.stringify(this.current) === this.saved) {
           this.revision = record.revision;
-          for (const key of Object.keys(remoteDraft) as (keyof RuntimeDraftContent)[]) {
+          for (const key of DRAFT_KEYS) {
+            if (key === 'model' && this.current.model === undefined && remoteDraft.model === null && !isEmptyDraftContent(record.draft)) {
+              continue;
+            }
             Object.assign(this.current, { [key]: copy(remoteDraft[key]) });
           }
-          this.saved = remoteJson;
+          this.saved = JSON.stringify(this.current);
           this.status('saved');
         } else if (isEmptyDraftContent(record.draft)) {
           this.revision = record.revision;

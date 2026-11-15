@@ -3,7 +3,7 @@
 // and `IdeRunToolbar`). Kept separate from Svelte components so both lazy modals
 // share one implementation and `ui/unit/` can test every branch directly.
 
-import type { K8sCluster, K8sNamespace } from '../../../lib/api/types';
+import type { Connection, K8sCluster, K8sNamespace } from '../../../lib/api/types';
 import type { IdeHostMapping, IdeNetworkBridgeConfig } from '../store/ideTypes';
 
 export interface EditableHostMappingRow {
@@ -155,4 +155,72 @@ export function formatBridgeToolbarLabel(cfg?: IdeNetworkBridgeConfig | null): s
   if (hasK8s) return `K8s · ${ns}`;
   if (hasSsh) return 'SSH tunnel';
   return 'Net bridge';
+}
+
+export function isProdEnvironment(env?: string | null): boolean {
+  return Boolean(env?.trim().toLowerCase().startsWith('prod'));
+}
+
+export function normalizeBridgeDraftSnapshot(draft: IdeNetworkBridgeDraft): {
+  enabled: boolean;
+  k8s_cluster_id: string;
+  k8s_namespace: string;
+  ssh_tunnel_connection_id: string;
+  inject_k8s_service_env: boolean;
+  containerized: boolean;
+  mappings: Array<{ from_host: string; from_port: string; to_host: string; to_port: string }>;
+} {
+  return {
+    enabled: Boolean(draft.enabled),
+    k8s_cluster_id: draft.k8s_cluster_id.trim(),
+    k8s_namespace: draft.k8s_namespace.trim(),
+    ssh_tunnel_connection_id: draft.ssh_tunnel_connection_id.trim(),
+    inject_k8s_service_env: Boolean(draft.inject_k8s_service_env),
+    containerized: Boolean(draft.containerized),
+    mappings: draft.mappings
+      .map((m) => ({
+        from_host: m.from_host.trim(),
+        from_port: m.from_port.trim(),
+        to_host: m.to_host.trim(),
+        to_port: m.to_port.trim(),
+      }))
+      .filter((m) => Boolean(m.from_host || m.from_port || m.to_host || m.to_port)),
+  };
+}
+
+export interface ProdBridgeTargetInfo {
+  isProd: boolean;
+  clusterProd: K8sCluster | null;
+  sshProd: Connection | null;
+  summary: string;
+}
+
+export function describeProdBridgeTarget(
+  cfg: Pick<IdeNetworkBridgeConfig, 'k8s_cluster_id' | 'k8s_namespace' | 'ssh_tunnel_connection_id'> | null | undefined,
+  clusters: readonly K8sCluster[],
+  sshConns: readonly Connection[],
+): ProdBridgeTargetInfo {
+  if (!cfg) {
+    return { isProd: false, clusterProd: null, sshProd: null, summary: '' };
+  }
+  const cid = cfg.k8s_cluster_id?.trim() || '';
+  const sid = cfg.ssh_tunnel_connection_id?.trim() || '';
+  const cluster = cid ? (clusters.find((c) => c.id === cid) ?? null) : null;
+  const ssh = sid ? (sshConns.find((c) => c.id === sid) ?? null) : null;
+  const clusterProd = cluster && isProdEnvironment(cluster.environment) ? cluster : null;
+  const sshProd = ssh && isProdEnvironment(ssh.environment) ? ssh : null;
+  const parts: string[] = [];
+  if (clusterProd) {
+    const ns = cfg.k8s_namespace?.trim() || clusterProd.default_namespace?.trim() || 'default';
+    parts.push(`Kubernetes cluster "${clusterProd.name}" (${ns})`);
+  }
+  if (sshProd) {
+    parts.push(`SSH bastion "${sshProd.name}"`);
+  }
+  return {
+    isProd: Boolean(clusterProd || sshProd),
+    clusterProd,
+    sshProd,
+    summary: parts.join(' and '),
+  };
 }

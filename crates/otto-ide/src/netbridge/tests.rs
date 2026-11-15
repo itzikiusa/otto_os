@@ -1,19 +1,23 @@
 use std::collections::BTreeMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use otto_core::Id;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 
-use super::interposer::wrap_shell_script_for_interposer;
+use super::interposer::{ensure_interposer_lib, wrap_shell_script_for_interposer};
 use super::k8s_discover::{
     parse_k8s_discovery_json, resolve_destination, BridgeDestination, DiscoveryCache,
+    K8sDiscoverySnapshot,
 };
-use super::socks5::connect_via_socks5;
-use super::tunnel::NetBridgeInstance;
+use super::socks5::{connect_via_socks5, connect_via_socks5_with_auth};
+use super::tunnel::{vip_for_seq, NetBridgeInstance, MAX_VIP_ENTRIES};
+use super::tunnel_forward::is_ssh_routable_private_ip;
 use super::{sanitize_network_bridge, IdeK8sSpec};
 use crate::types::{IdeHostMapping, IdeNetworkBridgeConfig};
 
@@ -77,7 +81,6 @@ fn discovery_routes_cbo_config_server_service_dns_and_cluster_ip() {
         ..Default::default()
     };
 
-    // 1) Ingress host (`confsrv.stgco.local` on default HTTP 80 -> service port 9090).
     assert_eq!(
         resolve_destination("confsrv.stgco.local", 80, &cfg, Some(&snap), false),
         Some(BridgeDestination::K8sService {
@@ -86,8 +89,6 @@ fn discovery_routes_cbo_config_server_service_dns_and_cluster_ip() {
             port: 9090,
         })
     );
-
-    // 2) Smart `.local` first-label match (`discovery.stgco.local:8080` -> `service/discovery:8080`).
     assert_eq!(
         resolve_destination("discovery.stgco.local", 8080, &cfg, Some(&snap), false),
         Some(BridgeDestination::K8sService {
@@ -96,8 +97,6 @@ fn discovery_routes_cbo_config_server_service_dns_and_cluster_ip() {
             port: 8080,
         })
     );
-
-    // 3) Short service name & full FQDN.
     assert_eq!(
         resolve_destination("discovery", 8080, &cfg, Some(&snap), false),
         Some(BridgeDestination::K8sService {
@@ -120,8 +119,6 @@ fn discovery_routes_cbo_config_server_service_dns_and_cluster_ip() {
             port: 6379,
         })
     );
-
-    // 4) ClusterIP direct lookup.
     assert_eq!(
         resolve_destination("10.96.42.10", 9090, &cfg, Some(&snap), false),
         Some(BridgeDestination::K8sService {
@@ -131,7 +128,6 @@ fn discovery_routes_cbo_config_server_service_dns_and_cluster_ip() {
         })
     );
 
-    // 5) Cross-namespace blocked when `allow_cross_namespace` is false, allowed when true.
     assert_eq!(
         resolve_destination(
             "kafka.infra.svc.cluster.local",
@@ -186,13 +182,51 @@ fn sanitize_validates_namespace_and_mappings() {
     assert_eq!(clean.host_mappings[0].from_host, "localhost");
 }
 
-#[tokio::test]
-async fn netbridge_interposes_cbo_config_and_socks5_end_to_end() {
-    if !cfg!(any(target_os = "macos", target_os = "linux")) {
-        return;
+#[test]
+fn vip_base254_math_never_emits_zero_or_broadcast_and_classifies_ssh_private_ips() {
+    assert_eq!(vip_for_seq(1), Ipv4Addr::new(127, 88, 1, 1));
+    assert_eq!(vip_for_seq(254), Ipv4Addr::new(127, 88, 1, 254));
+    assert_eq!(vip_for_seq(255), Ipv4Addr::new(127, 88, 2, 1));
+    assert_eq!(vip_for_seq(256), Ipv4Addr::new(127, 88, 2, 2));
+    assert_eq!(vip_for_seq(64516), Ipv4Addr::new(127, 88, 254, 254));
+    assert_eq!(vip_for_seq(64517), Ipv4Addr::new(127, 88, 1, 1));
+
+    for seq in [1u32, 254, 255, 256, 64516, 64517]
+        .into_iter()
+        .chain(1..=2048)
+    {
+        let oct = vip_for_seq(seq).octets();
+        assert_eq!((oct[0], oct[1]), (127, 88));
+        assert!(
+            (1..=254).contains(&oct[2]) && (1..=254).contains(&oct[3]),
+            "seq={seq} produced invalid octet in {oct:?}"
+        );
     }
 
-    // 1. Start a local mock "Cluster Pod" TCP responder representing `confsrv:9090`.
+    for priv_ip in ["10.20.30.40", "172.16.5.9", "192.168.1.10", "fd00::1234"] {
+        assert!(
+            is_ssh_routable_private_ip(priv_ip.parse::<IpAddr>().unwrap()),
+            "expected {priv_ip} to route via SSH tunnel"
+        );
+    }
+    for non_ssh_ip in [
+        "127.0.0.1",
+        "127.88.1.1",
+        "::1",
+        "169.254.169.254",
+        "100.100.100.200",
+        "8.8.8.8",
+    ] {
+        assert!(
+            !is_ssh_routable_private_ip(non_ssh_ip.parse::<IpAddr>().unwrap()),
+            "expected {non_ssh_ip} NOT to match SSH private IP router"
+        );
+    }
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn netbridge_interposes_cbo_config_and_enforces_socks5_auth_and_ssrf_guard() {
     let pod_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let pod_port = pod_listener.local_addr().unwrap().port();
     let pod_task = tokio::spawn(async move {
@@ -209,9 +243,15 @@ async fn netbridge_interposes_cbo_config_and_socks5_end_to_end() {
         }
     });
 
-    // 2. Create a mock `kubectl` script serving `get services`, `get ingresses`,
-    //    and `port-forward service/confsrv 0:9090` (forwarding to `pod_port`).
     let tmp = tempfile::tempdir().unwrap();
+    let compiled = ensure_interposer_lib(tmp.path())
+        .await
+        .expect("compile C interposer");
+    assert!(
+        compiled.is_some(),
+        "C interposer library must compile on macOS/Linux"
+    );
+
     let kubectl_script = tmp.path().join("mock-kubectl.sh");
     let script_body = format!(
         r#"#!/bin/sh
@@ -230,7 +270,7 @@ EOF
     ;;
   *"port-forward service/confsrv 0:9090"*)
     exec python3 -u -c '
-import socket, sys, threading
+import socket, threading
 pod_port = {pod_port}
 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv.bind(("127.0.0.1", 0))
@@ -293,15 +333,23 @@ exit 1
     let inst = NetBridgeInstance::start(
         tmp.path(),
         cfg,
-        Some(k8s_spec),
+        Some(k8s_spec.clone()),
         None,
         Arc::new(DiscoveryCache::default()),
     )
     .await
     .unwrap();
 
+    // Verify 4096 VIP table bound.
+    for i in 0..(MAX_VIP_ENTRIES + 128) {
+        let _ = inst.allocate_vip(&format!("ephemeral-{i}.cbo.local"));
+    }
+    assert_eq!(inst.vip_count(), MAX_VIP_ENTRIES);
+
     let mut child_env = BTreeMap::new();
     inst.apply_to_env(&mut child_env);
+    assert!(!child_env.contains_key("JAVA_TOOL_OPTIONS"));
+    assert!(child_env.contains_key("OTTO_NETBRIDGE_DYLIB"));
     assert_eq!(
         child_env.get("OTTO_K8S_NAMESPACE").map(String::as_str),
         Some("cbo")
@@ -318,12 +366,72 @@ exit 1
         Some("9090")
     );
 
-    // 3. Verify JVM SOCKS5 proxy path (`confsrv.stgco.local:9090` -> mock pod).
-    let socks_addr = child_env.get("OTTO_NETBRIDGE_SOCKS5").unwrap();
-    let socks_port: u16 = socks_addr.rsplit(':').next().unwrap().parse().unwrap();
-    let mut socks_stream = connect_via_socks5(socks_port, "confsrv.stgco.local", 9090)
+    // Parse `socks5h://otto:{token}@127.0.0.1:{port}` and verify RFC 1929 auth.
+    let socks_uri = child_env.get("OTTO_NETBRIDGE_SOCKS5").unwrap();
+    let rest = socks_uri
+        .strip_prefix("socks5h://otto:")
+        .expect("socks5h://otto: scheme");
+    let (tok_part, addr_part) = rest.split_once('@').expect("@ separator");
+    assert_eq!(tok_part, inst.auth_token());
+    let socks_port: u16 = addr_part.rsplit(':').next().unwrap().parse().unwrap();
+
+    // 1) Unauthenticated greeting must be rejected with 0xFF.
+    {
+        let mut raw = TcpStream::connect(("127.0.0.1", socks_port)).await.unwrap();
+        raw.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut rep = [0u8; 2];
+        raw.read_exact(&mut rep).await.unwrap();
+        assert_eq!(rep, [0x05, 0xFF]);
+    }
+    assert!(connect_via_socks5(socks_port, "confsrv.stgco.local", 9090)
         .await
-        .unwrap();
+        .is_err());
+
+    // 2) Wrong password & wrong username must be rejected.
+    assert!(connect_via_socks5_with_auth(
+        socks_port,
+        "confsrv.stgco.local",
+        9090,
+        Some(("otto", "wrong-token")),
+    )
+    .await
+    .is_err());
+    assert!(connect_via_socks5_with_auth(
+        socks_port,
+        "confsrv.stgco.local",
+        9090,
+        Some(("other", tok_part)),
+    )
+    .await
+    .is_err());
+
+    // 3) Loopback & cloud-metadata direct fallback via SOCKS5 must be blocked by netguard.
+    assert!(connect_via_socks5_with_auth(
+        socks_port,
+        "127.0.0.1",
+        pod_port,
+        Some(("otto", tok_part)),
+    )
+    .await
+    .is_err());
+    assert!(connect_via_socks5_with_auth(
+        socks_port,
+        "169.254.169.254",
+        80,
+        Some(("otto", tok_part)),
+    )
+    .await
+    .is_err());
+
+    // 4) Valid `otto:{token}` connects to bridged K8s service `confsrv.stgco.local:9090`.
+    let mut socks_stream = connect_via_socks5_with_auth(
+        socks_port,
+        "confsrv.stgco.local",
+        9090,
+        Some(("otto", tok_part)),
+    )
+    .await
+    .unwrap();
     socks_stream
         .write_all(b"GET / HTTP/1.0\r\n\r\n")
         .await
@@ -332,14 +440,12 @@ exit 1
     socks_stream.read_to_string(&mut reply).await.unwrap();
     assert_eq!(reply.trim(), "bridged-cbo-config-ok");
 
-    // 4. Verify native POSIX C interposer (`DYLD_INSERT_LIBRARIES` / `LD_PRELOAD`)
-    //    spawned through `/bin/sh -c` (`wrap_shell_script_for_interposer`).
-    if child_env.contains_key("OTTO_NETBRIDGE_DYLIB") {
-        let probe_c = tmp.path().join("probe_client.c");
-        let probe_bin = tmp.path().join("probe_client");
-        tokio::fs::write(
-            &probe_c,
-            r#"
+    // 5) Verify native POSIX C interposer (`DYLD_INSERT_LIBRARIES` / `LD_PRELOAD`).
+    let probe_c = tmp.path().join("probe_client.c");
+    let probe_bin = tmp.path().join("probe_client");
+    tokio::fs::write(
+        &probe_c,
+        r#"
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -351,9 +457,7 @@ int main(void) {
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof(hints));
     hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo("confsrv.stgco.local", "9090", &hints, &res) != 0 || !res) {
-        return 2;
-    }
+    if (getaddrinfo("confsrv.stgco.local", "9090", &hints, &res) != 0 || !res) return 2;
     int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) return 3;
     if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) return 4;
@@ -368,40 +472,64 @@ int main(void) {
     return 0;
 }
 "#,
-        )
+    )
+    .await
+    .unwrap();
+
+    let cc_ok = Command::new("cc")
+        .arg("-O2")
+        .arg(&probe_c)
+        .arg("-o")
+        .arg(&probe_bin)
+        .status()
+        .await
+        .is_ok_and(|s| s.success());
+    assert!(cc_ok, "cc must compile probe_client.c");
+
+    let wrapped =
+        wrap_shell_script_for_interposer(&format!("'{}'", probe_bin.display()), &child_env);
+    let out = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&wrapped)
+        .envs(&child_env)
+        .stdin(Stdio::null())
+        .output()
         .await
         .unwrap();
+    assert!(
+        out.status.success(),
+        "probe_client failed (code {:?}): stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "bridged-cbo-config-ok"
+    );
 
-        let cc_ok = Command::new("cc")
-            .arg("-O2")
-            .arg(&probe_c)
-            .arg("-o")
-            .arg(&probe_bin)
-            .status()
-            .await
-            .is_ok_and(|s| s.success());
-        if cc_ok {
-            let wrapped =
-                wrap_shell_script_for_interposer(&format!("'{}'", probe_bin.display()), &child_env);
-            let out = Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&wrapped)
-                .envs(&child_env)
-                .stdin(Stdio::null())
-                .output()
-                .await
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "probe_client failed (code {:?}): stderr={}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            assert_eq!(
-                String::from_utf8_lossy(&out.stdout).trim(),
-                "bridged-cbo-config-ok"
-            );
+    // 6) Verify SWR DiscoveryCache serves stale snapshot immediately and refreshes in background.
+    let swr_cache = DiscoveryCache::default();
+    swr_cache.insert_with_age_for_test(
+        &k8s_spec,
+        K8sDiscoverySnapshot {
+            namespace: "cbo".into(),
+            ..Default::default()
+        },
+        Duration::from_secs(60),
+    );
+    let stale_snap = swr_cache.get_or_fetch(&k8s_spec, false).await.unwrap();
+    assert!(stale_snap.services.is_empty());
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let cur = swr_cache.get_or_fetch(&k8s_spec, false).await.unwrap();
+        if cur.services.contains_key("confsrv") {
+            break;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "SWR background refresh did not populate confsrv"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
     drop(inst);

@@ -244,9 +244,8 @@
 </script>
 
 <Modal
-  title={mode === 'create' ? 'New Multi-Repo IDE Project' : 'Bulk Attach Repositories to Project'}
+  title={mode === 'create' ? 'New multi-repo IDE project' : 'Add repositories to project'}
   width={680}
-  height={580}
   onclose={closeModal}
   dismissable={!saving}
 >
@@ -320,27 +319,35 @@
         />
       </div>
       <div class="bulk-quick-btns">
-        <button
-          type="button"
-          class="btn small ghost"
-          onclick={() => selectByTech('go')}
-          data-testid="ide-bulk-select-go"
-        >
-          Select all Go repos{goCount > 0 ? ` (${goCount})` : ''}
-        </button>
-        <button
-          type="button"
-          class="btn small ghost"
-          onclick={() => selectByTech('java')}
-          data-testid="ide-bulk-select-java"
-        >
-          Select all Maven/Gradle{javaCount > 0 ? ` (${javaCount})` : ''}
-        </button>
+        {#if goCount > 0}
+          <button
+            type="button"
+            class="btn small ghost"
+            onclick={() => selectByTech('go')}
+            data-testid="ide-bulk-select-go"
+          >
+            Select all Go repos ({goCount})
+          </button>
+        {/if}
+        {#if javaCount > 0}
+          <button
+            type="button"
+            class="btn small ghost"
+            onclick={() => selectByTech('java')}
+            data-testid="ide-bulk-select-java"
+          >
+            Select all Maven/Gradle ({javaCount})
+          </button>
+        {/if}
         <button type="button" class="btn small ghost" onclick={selectVisible} data-testid="ide-bulk-select-visible">
           Select visible
         </button>
         <button type="button" class="btn small ghost" onclick={clearSelection}>Clear</button>
       </div>
+    </div>
+
+    <div class="sr-only" aria-live="polite">
+      {loading ? '' : `${plural(filteredDirs.length, 'repository', 'repositories')} shown`}
     </div>
 
     <div class="bulk-list" role="group" aria-label="Child repository folders" data-testid="ide-bulk-repo-list">
@@ -373,8 +380,8 @@
                 <span class="bulk-repo-name" dir="ltr">{entry.name}</span>
               </label>
               <div class="bulk-badges">
-                {#if techs.includes('go')}<Badge tone="info" variant="outline" label="Go" />{/if}
-                {#if techs.includes('java')}<Badge tone="warn" variant="outline" label="Maven/Gradle" />{/if}
+                {#if techs.includes('go')}<Badge tone="neutral" variant="outline" label="Go" />{/if}
+                {#if techs.includes('java')}<Badge tone="neutral" variant="outline" label="Maven/Gradle" />{/if}
                 {#if techs.includes('rust')}<Badge tone="neutral" variant="outline" label="Rust" />{/if}
                 {#if techs.includes('node')}<Badge tone="neutral" variant="outline" label="Node/TS" />{/if}
                 {#if techs.includes('python')}<Badge tone="neutral" variant="outline" label="Python" />{/if}
@@ -434,7 +441,7 @@
 {/if}
 
 <style>
-  .bulk-body { display: flex; flex-direction: column; gap: 12px; min-block-size: 0; block-size: 100%; }
+  .bulk-body { display: flex; flex-direction: column; gap: 12px; min-block-size: 0; }
   .bulk-meta-grid { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
   .bulk-field { flex: 1; min-inline-size: 220px; display: flex; flex-direction: column; gap: 4px; }
   .bulk-label { font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); }
@@ -452,9 +459,13 @@
   .bulk-search-in { flex: 1; min-inline-size: 0; border: 0; background: transparent; color: var(--text); font-size: var(--fs-s); outline: none; }
   .bulk-quick-btns { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .bulk-list {
-    flex: 1 1 240px; min-block-size: 220px; max-block-size: min(340px, calc(100vh - 320px));
+    flex: 1 1 240px; min-block-size: 220px; max-block-size: min(460px, 55dvh);
     overflow-y: auto; border: 1px solid var(--border);
     border-radius: var(--radius-s); background: var(--surface); padding: 4px;
+  }
+  .sr-only {
+    position: absolute; inline-size: 1px; block-size: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
   }
   .bulk-empty-msg { padding: 14px 10px; font-size: var(--fs-xs); color: var(--text-dim); }
   .bulk-row {

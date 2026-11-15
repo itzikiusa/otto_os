@@ -3,6 +3,17 @@
 
 import { getToken, laneFetch } from '../../../lib/api/client';
 import type {
+  IdeBridgedServiceSummary,
+  IdeEnvironmentResp,
+  IdeHostMapping,
+  IdeNetBridgeStatusResp,
+  IdeNetBridgeTestReq,
+  IdeNetworkBridgeConfig,
+  IdeNetworkBridgeHostMapping,
+  IdeShellEnvResp,
+  IdeUpdateEnvironmentReq,
+} from '../../../lib/api/types/ide';
+import type {
   IdePluginCatalogEntry,
   IdePluginContributions,
   IdePluginDapAdapter,
@@ -15,6 +26,13 @@ import type {
 } from '../../../lib/api/types/ide-intelligence';
 
 export type {
+  IdeBridgedServiceSummary,
+  IdeEnvironmentResp,
+  IdeHostMapping,
+  IdeNetBridgeStatusResp,
+  IdeNetBridgeTestReq,
+  IdeNetworkBridgeConfig,
+  IdeNetworkBridgeHostMapping,
   IdePluginCatalogEntry,
   IdePluginContributions,
   IdePluginDapAdapter,
@@ -24,6 +42,8 @@ export type {
   IdePluginLanguage,
   IdePluginLspServer,
   IdeQuickFix,
+  IdeShellEnvResp,
+  IdeUpdateEnvironmentReq,
 };
 export type * from '../../../lib/api/types/ide-db-watch';
 
@@ -163,54 +183,7 @@ export interface IdeInstallJob {
   progress_pct: number; log_lines: string[]; installed_path?: string | null; error?: string | null;
 }
 
-export interface IdeShellEnvResp {
-  status?: string; shell: string; vars: Record<string, string>; env?: Record<string, string>;
-  var_count?: number; count?: number; loaded_at?: string; duration_ms?: number; error?: string | null;
-}
-
 export interface IdeEnvVar { key: string; value?: string; secret: boolean; has_secret?: boolean }
-
-export interface IdeHostMapping {
-  from_host: string;
-  from_port?: number | null;
-  to_host: string;
-  to_port?: number | null;
-}
-
-export interface IdeNetworkBridgeConfig {
-  enabled: boolean;
-  k8s_cluster_id?: string | null;
-  k8s_namespace?: string | null;
-  ssh_tunnel_connection_id?: string | null;
-  inject_k8s_service_env: boolean;
-  containerized: boolean;
-  host_mappings?: IdeHostMapping[];
-}
-
-export interface IdeBridgedServiceSummary {
-  name: string;
-  namespace: string;
-  cluster_ip?: string | null;
-  ports: number[];
-  hosts?: string[];
-}
-
-export interface IdeNetBridgeTestReq {
-  target: IdeTargetSpec;
-  bridge: IdeNetworkBridgeConfig;
-}
-
-export interface IdeNetBridgeStatusResp {
-  ok: boolean;
-  cluster_name?: string | null;
-  namespace?: string | null;
-  ssh_tunnel_ready: boolean;
-  interposer_ready: boolean;
-  services: IdeBridgedServiceSummary[];
-  ingress_hosts: string[];
-  latency_ms: number;
-  message: string;
-}
 
 export interface IdeProjectEnvironment {
   java_home?: string | null; go_root?: string | null; rust_toolchain?: string | null;

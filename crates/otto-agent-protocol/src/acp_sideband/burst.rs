@@ -18,7 +18,11 @@ pub(crate) struct BurstFilter {
     #[serde(default)]
     pub remaining_tool_calls: usize,
     #[serde(default)]
+    pub preseeded_tool_ids: HashSet<String>,
+    #[serde(default)]
     pub suppressed_tool_ids: HashSet<String>,
+    #[serde(default)]
+    pub armed_from_mirrored: bool,
 }
 
 impl BurstFilter {
@@ -37,14 +41,29 @@ pub(crate) struct MirroredCounts {
     pub msg_chars: usize,
     #[serde(default)]
     pub tool_calls: usize,
+    #[serde(default)]
+    pub tool_ids: HashSet<String>,
 }
 
 impl MirroredCounts {
     pub fn has_any(&self) -> bool {
-        self.thought_chars > 0 || self.msg_chars > 0 || self.tool_calls > 0
+        self.thought_chars > 0
+            || self.msg_chars > 0
+            || self.tool_calls > 0
+            || !self.tool_ids.is_empty()
+    }
+
+    pub fn preseed_tool_id(&mut self, id: &str) {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() {
+            self.tool_ids.insert(trimmed.to_string());
+        }
     }
 
     pub fn transfer_into(&mut self, burst: &mut BurstFilter) {
+        if self.has_any() {
+            burst.armed_from_mirrored = true;
+        }
         burst.remaining_thought_chars = burst
             .remaining_thought_chars
             .saturating_add(std::mem::take(&mut self.thought_chars));
@@ -54,6 +73,9 @@ impl MirroredCounts {
         burst.remaining_tool_calls = burst
             .remaining_tool_calls
             .saturating_add(std::mem::take(&mut self.tool_calls));
+        burst
+            .preseeded_tool_ids
+            .extend(std::mem::take(&mut self.tool_ids));
     }
 }
 
@@ -94,6 +116,22 @@ pub(crate) fn parse_rfc3339_ms(raw: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(raw.trim())
         .ok()
         .and_then(|dt| u64::try_from(dt.timestamp_millis()).ok())
+}
+
+/// Upper-bound millisecond timestamp for RFC3339 strings that omit fractional
+/// seconds (e.g. `agy` writes `2026-11-15T11:08:48Z` for events up to `.999Z`).
+pub(crate) fn parse_rfc3339_end_ms(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    let base = parse_rfc3339_ms(trimmed)?;
+    let has_subsec = trimmed
+        .split_once('T')
+        .or_else(|| trimmed.split_once('t'))
+        .is_some_and(|(_, time_part)| time_part.contains('.'));
+    Some(if has_subsec {
+        base
+    } else {
+        base.saturating_add(999)
+    })
 }
 
 pub(crate) fn trim_ascii(mut b: &[u8]) -> &[u8] {

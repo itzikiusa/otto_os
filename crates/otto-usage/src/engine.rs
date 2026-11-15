@@ -190,7 +190,15 @@ pub struct UsageEngine {
     /// Reported by the transcript tailer ([`Self::set_tailer_status`]) and
     /// surfaced on [`UsageStatus::tailer`].
     tailer_status: std::sync::Mutex<Option<crate::types::TailerStatus>>,
+    /// Per-`days` 60 s TTL + 24 h SWR memo backing `/workspaces/{wid}/sessions/usage`
+    /// on this `UsageEngine` instance (avoids global `Arc::as_ptr` address reuse).
+    sidebar_totals_cache: std::sync::Mutex<SidebarTotalsMemo>,
+    sidebar_totals_refreshing: std::sync::Mutex<std::collections::HashSet<u32>>,
 }
+
+type SidebarTotalsMemo = HashMap<u32, (std::time::Instant, Arc<Vec<SessionTotals>>)>;
+const SIDEBAR_TOTALS_TTL: Duration = Duration::from_secs(60);
+const SIDEBAR_TOTALS_MAX_STALE: Duration = Duration::from_secs(24 * 3600);
 
 /// `(days, otto_only)` → the last rollup that key produced (see `last_totals`).
 type TotalsMemo = HashMap<(u32, bool), LastTotals>;
@@ -358,6 +366,8 @@ impl UsageEngine {
             ingestion: tokio::sync::OnceCell::new(),
             ingestion_delivery: tokio::sync::Mutex::new(()),
             tailer_status: std::sync::Mutex::new(None),
+            sidebar_totals_cache: std::sync::Mutex::new(HashMap::new()),
+            sidebar_totals_refreshing: std::sync::Mutex::new(std::collections::HashSet::new()),
         });
         let bg = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -559,6 +569,7 @@ impl UsageEngine {
             bin_path,
             start_error,
         };
+        self.clear_sidebar_totals_cache();
 
         // One-time compaction + retention enforcement of a pre-existing bloated
         // dataset (e.g. the 25k-part, 1.4 GB dir from the old per-query model).
@@ -598,6 +609,7 @@ impl UsageEngine {
         if let Some(ch) = self.stop_writer().await {
             ch.shutdown().await;
         }
+        self.clear_sidebar_totals_cache();
     }
 
     /// Detach the live handle and end its writer: dropping the sender makes
@@ -1192,6 +1204,83 @@ impl UsageEngine {
     /// by-kind rollup (see [`Self::feature_usage`]).
     pub async fn session_totals(&self, days: u32, otto_only: bool) -> Result<Vec<SessionTotals>> {
         Ok(self.session_totals_shared(days, otto_only).await?.to_vec())
+    }
+
+    fn clear_sidebar_totals_cache(&self) {
+        self.sidebar_totals_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        self.sidebar_totals_refreshing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+    }
+
+    fn store_sidebar_totals(&self, days: u32, rows: Arc<Vec<SessionTotals>>) {
+        let mut map = self
+            .sidebar_totals_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if map.len() >= LAST_TOTAL_WINDOWS && !map.contains_key(&days) {
+            map.clear();
+        }
+        map.insert(days, (std::time::Instant::now(), rows));
+    }
+
+    /// Pre-warm the default 30-day sidebar rollup once ClickHouse comes up so
+    /// the first Agents sidebar query returns from memory.
+    pub async fn warm_sidebar_session_totals(self: &Arc<Self>) {
+        if !self.available() {
+            return;
+        }
+        if let Ok(rows) = self.session_totals_shared(30, false).await {
+            self.store_sidebar_totals(30, rows);
+        }
+    }
+
+    /// Daemon-wide `session_totals(days, false)` rollup owned by this engine,
+    /// cached for 60 s and served stale-while-revalidate up to 24 h while one
+    /// background task refreshes ClickHouse. Errors are not cached.
+    pub async fn sidebar_session_totals(
+        self: &Arc<Self>,
+        days: u32,
+    ) -> Result<Arc<Vec<SessionTotals>>> {
+        let cached = self
+            .sidebar_totals_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&days)
+            .map(|(at, rows)| (at.elapsed(), Arc::clone(rows)));
+        if let Some((age, rows)) = cached {
+            if age < SIDEBAR_TOTALS_TTL {
+                return Ok(rows);
+            }
+            if age < SIDEBAR_TOTALS_MAX_STALE {
+                let should_spawn = self
+                    .sidebar_totals_refreshing
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(days);
+                if should_spawn {
+                    let engine = Arc::clone(self);
+                    tokio::spawn(async move {
+                        if let Ok(fresh) = engine.session_totals_shared(days, false).await {
+                            engine.store_sidebar_totals(days, fresh);
+                        }
+                        engine
+                            .sidebar_totals_refreshing
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .remove(&days);
+                    });
+                }
+                return Ok(rows);
+            }
+        }
+        let rows = self.session_totals_shared(days, false).await?;
+        self.store_sidebar_totals(days, Arc::clone(&rows));
+        Ok(rows)
     }
 
     /// [`Self::session_totals`] without the copy: memoised for

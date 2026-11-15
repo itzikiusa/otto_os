@@ -61,6 +61,8 @@
     handleSlashMenuKey,
     mergeQueuedEdit,
     pasteDraftAttachments,
+    resolveEffectiveDraftModel,
+    resolvePromptModelOverride,
     restoreOptimisticDraft,
     runViewSlash,
     withOptimisticItem,
@@ -197,9 +199,9 @@
   let agentEl = $state<HTMLButtonElement | null>(null);
   const provider = $derived(session?.provider ?? '');
   const agentName = $derived(harnessLabel(provider).replace(/ Code$/, ''));
+  const chosenModel = $derived(resolveEffectiveDraftModel(draft.model, session?.model));
   const agentLabel = $derived.by(() => {
-    const m = draft.model ?? session?.model ?? null;
-    const label = m ? formatModelLabel(provider, m, auth.meta) : harnessLabel(provider);
+    const label = chosenModel ? formatModelLabel(provider, chosenModel, auth.meta) : harnessLabel(provider);
     return draft.effort ? `${label} · ${formatEffortShort(draft.effort)}` : label;
   });
 
@@ -229,24 +231,29 @@
       typeof transformOutgoingText === 'function' ? transformOutgoingText(assembled) : assembled;
     const effectiveAccess =
       (typeof accessModeOverride !== 'undefined' && accessModeOverride) || sent.access_mode;
+    const sessionModel = typeof session !== 'undefined' ? session?.model : null;
+    const modelOverride =
+      typeof resolvePromptModelOverride === 'function'
+        ? resolvePromptModelOverride(sent.model, sessionModel)
+        : sent.model || undefined;
     try {
-      draft.awaitSeq = (
-        await runtimeThreads.prompt(ownerId, {
-          text: finalPrompt,
-          ...(sent.model ? { model: sent.model } : {}),
-          ...(sent.effort ? { effort: sent.effort } : {}),
-          ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
-          ...(docs.length ? { files: docs } : {}),
-          ...(effectiveAccess ? { access_mode: effectiveAccess } : {}),
-          ...(sent.fresh_context ? { fresh_context: true } : {}),
-          ...(delivery ? { delivery } : {}),
-        })
-      ).sequence;
+      const resp = await runtimeThreads.prompt(ownerId, {
+        text: finalPrompt,
+        ...(modelOverride !== undefined ? { model: modelOverride } : {}),
+        ...(sent.effort ? { effort: sent.effort } : {}),
+        ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
+        ...(docs.length ? { files: docs } : {}),
+        ...(effectiveAccess ? { access_mode: effectiveAccess } : {}),
+        ...(sent.fresh_context ? { fresh_context: true } : {}),
+        ...(delivery ? { delivery } : {}),
+      });
+      draft.awaitSeq = resp.queued_id ? null : resp.sequence;
+      if (resp.queued_id && typeof optimisticMessage !== 'undefined') optimisticMessage = null;
       if (!runtimeDrafts.owns(ownerId, draft)) return;
       acknowledgeComposer(draft, sent);
       if (usedExternal && typeof onExternalContextConsumed === 'function') onExternalContextConsumed();
       draft.flushSave();
-      if (delivery) draft.awaitSeq = null;
+      if (running && delivery) draft.awaitSeq = null;
       draft.startError = null;
     } catch (e) {
       if (typeof optimisticMessage !== 'undefined') optimisticMessage = null;
@@ -293,20 +300,20 @@
       return void askFromComposer(ownerId, draft, payload, effectiveAccess);
     }
     const submitted = snapshotDraft(draft);
-    const delivery: PromptDelivery | undefined = running && !submitted.fresh_context ? 'queue' : undefined;
+    const delivery: PromptDelivery | undefined = !submitted.fresh_context ? 'queue' : undefined;
     acknowledgeComposer(draft, submitted);
     if (typeof composerEl !== 'undefined' && composerEl) composerEl.style.height = '';
-    if (!delivery && typeof buildOptimisticUserMessage === 'function') {
+    if (!running && !submitted.fresh_context && typeof buildOptimisticUserMessage === 'function') {
       const assembled = assembleComposerMessage(t, submitted.context);
       const finalPrompt =
         typeof transformOutgoingText === 'function' ? transformOutgoingText(assembled) : assembled;
       const lastOrd = typeof p !== 'undefined' && p && p.items.length > 0 ? p.items[p.items.length - 1].ordinal : 0;
-      optimisticMessage = buildOptimisticUserMessage(finalPrompt, lastOrd);
+      optimisticMessage = buildOptimisticUserMessage(finalPrompt, lastOrd, submitted.images);
     }
     const mustReopenFirst = (typeof closed === 'boolean' ? closed : needsRevive) && !submitted.fresh_context;
     if (mustReopenFirst) {
       void reopen().then((ok) => {
-        if (ok) return send(t, undefined, submitted, extCtx, true);
+        if (ok) return send(t, delivery, submitted, extCtx, true);
         if (typeof optimisticMessage !== 'undefined') optimisticMessage = null;
         if (typeof restoreOptimisticDraft === 'function' && runtimeDrafts.owns(ownerId, draft)) {
           restoreOptimisticDraft(draft, submitted);
@@ -620,7 +627,8 @@
     providers={[provider]}
     {provider}
     lockProvider
-    model={draft.model ?? session?.model ?? null}
+    model={chosenModel}
+    effectiveModel={session?.model ?? null}
     effort={draft.effort}
     mode="full"
     onmodel={(m) => (draft.model = m)}

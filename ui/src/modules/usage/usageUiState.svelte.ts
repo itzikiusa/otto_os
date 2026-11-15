@@ -6,6 +6,7 @@ class UsageUiState {
   configOpen = $state(false);
   budgetsOpen = $state(false);
   telemetryDirty = $state(false);
+  telemetryHours = $state(24);
   onDiscardTelemetry: (() => void) | null = null;
 
   discardTelemetry(): void {
@@ -19,6 +20,8 @@ class UsageUiState {
     this.configOpen = false;
     this.budgetsOpen = false;
     this.telemetryDirty = false;
+    this.telemetryHours = 24;
+    this.onDiscardTelemetry = null;
   }
 }
 

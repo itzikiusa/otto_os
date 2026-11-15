@@ -9,6 +9,7 @@ import {
   buildLspInitializationOptions,
   createIdeLspCompletionExtension,
   createLspSemanticTokensExtension,
+  dedupeLspDiagnostics,
   DEFAULT_LSP_TOKEN_MODIFIERS,
   DEFAULT_LSP_TOKEN_TYPES,
   lspToPos,
@@ -165,7 +166,7 @@ export function createDirectLspExtension(
           };
           if (params?.uri && params.uri !== opts.documentUri) return;
           markLiveLspDiagnostics(rootPath, opts.filePath);
-          const raw = params?.diagnostics ?? [];
+          const raw = dedupeLspDiagnostics(params?.diagnostics ?? []);
           const doc = liveView.state.doc;
           const cmDiags: Diagnostic[] = raw.map((d) => {
             const from = Math.max(0, Math.min(doc.length, lspToPos(doc, d.range.start)));

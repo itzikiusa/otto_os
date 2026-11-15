@@ -37,6 +37,30 @@ pub struct ModelProbe {
     pub pi_program: Option<String>,
 }
 
+impl ModelProbe {
+    /// Build a deterministic cache key from `model_families` and configured
+    /// `tool_specs` without running synchronous PATH/filesystem `stat`s on
+    /// `/meta` cache hits. Executable checks happen off-thread on refresh.
+    pub fn from_tool_specs(
+        families: Vec<(String, String)>,
+        specs: &std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        let program_of = |family: &str| {
+            families
+                .iter()
+                .filter(|(_, f)| f == family)
+                .find_map(|(p, _)| specs.get(p).cloned())
+        };
+        Self {
+            agy_program: program_of("agy"),
+            grok_program: program_of("grok"),
+            opencode_program: program_of("opencode"),
+            pi_program: program_of("pi"),
+            families,
+        }
+    }
+}
+
 type ModelsCache = Option<(
     Instant,
     ModelProbe,
@@ -175,15 +199,22 @@ async fn discover_models(probe: &ModelProbe) -> HashMap<String, Vec<ProviderMode
             let models = match family.as_str() {
                 "claude" => discover_claude_models(&home).await,
                 "codex" => discover_codex_models(&codex_home).await,
-                "agy" => discover_agy_models(agy_program.as_deref()).await,
-                "grok" => discover_grok_models(grok_program.as_deref()).await,
+                "agy" => {
+                    let prog = resolve_cli_program(agy_program).await;
+                    discover_agy_models(prog.as_deref()).await
+                }
+                "grok" => {
+                    let prog = resolve_cli_program(grok_program).await;
+                    discover_grok_models(prog.as_deref()).await
+                }
                 "opencode" => {
-                    let out = run_models(opencode_program.as_deref(), &["models"], 10).await;
+                    let prog = resolve_cli_program(opencode_program).await;
+                    let out = run_models(prog.as_deref(), &["models"], 10).await;
                     parse_opencode_models_output(&out)
                 }
                 "pi" => {
-                    let out =
-                        run_models(pi_program.as_deref(), &["--offline", "--list-models"], 3).await;
+                    let prog = resolve_cli_program(pi_program).await;
+                    let out = run_models(prog.as_deref(), &["--offline", "--list-models"], 3).await;
                     parse_pi_models_output(&out)
                 }
                 _ => Vec::new(),
@@ -215,6 +246,16 @@ fn default_efforts() -> Vec<String> {
         "xhigh".into(),
         "max".into(),
     ]
+}
+
+async fn resolve_cli_program(program: Option<String>) -> Option<String> {
+    let prog = program?;
+    tokio::task::spawn_blocking(move || {
+        crate::tool_probe::executable_in_path_or_fs(&prog).then_some(prog)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 async fn discover_claude_models(home: &Path) -> Vec<ProviderModelOption> {
@@ -563,11 +604,10 @@ pub fn parse_agy_models_output(raw: &str) -> Vec<ProviderModelOption> {
         if line.is_empty() {
             continue;
         }
-        let Some((id, label)) = line.split_once('\t').or_else(|| line.split_once("  ")) else {
-            continue;
+        let (id, label) = match line.split_once('\t').or_else(|| line.split_once("  ")) {
+            Some((i, l)) => (i.trim(), l.trim()),
+            None => (line, line),
         };
-        let id = id.trim();
-        let label = label.trim();
         if !is_agy_model_id(id) || label.is_empty() || !seen_ids.insert(id.to_string()) {
             continue;
         }
@@ -821,10 +861,13 @@ pub fn parse_grok_models_output(raw: &str) -> Vec<ProviderModelOption> {
 mod tests {
     use super::*;
 
+    static TEST_CACHE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// `/meta` answers from a stale catalog at once; one background refresh
     /// replaces it (no provider here, so the refresh is an empty map).
     #[tokio::test]
     async fn stale_catalog_is_served_then_refreshed_in_the_background() {
+        let _serial = TEST_CACHE_LOCK.lock().await;
         use std::sync::atomic::Ordering;
         let marker = HashMap::from([("stale".to_string(), Vec::new())]);
         let aged = Instant::now()
@@ -842,6 +885,78 @@ mod tests {
         assert!(probe_provider_models_cached(&ModelProbe::default())
             .await
             .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cold_discovery_returns_within_cold_budget_then_populates_slow_cli() {
+        let _serial = TEST_CACHE_LOCK.lock().await;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("slow-opencode");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nsleep 0.45\nprintf 'openai/gpt-slow-test\\n'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        *CACHE.lock().await = None;
+        let probe = ModelProbe {
+            families: vec![
+                ("claude".into(), "claude".into()),
+                ("opencode".into(), "opencode".into()),
+            ],
+            opencode_program: Some(script.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        let t0 = Instant::now();
+        let provisional = probe_provider_models_cached(&probe).await;
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(420),
+            "cold /meta exceeded inline budget: {elapsed:?}"
+        );
+        assert!(
+            provisional.get("claude").is_some_and(|m| !m.is_empty()),
+            "provisional catalog serves local/fallback claude models immediately"
+        );
+        assert!(
+            !provisional.contains_key("opencode"),
+            "slow CLI has not finished yet"
+        );
+
+        for _ in 0..100 {
+            if !REFRESHING.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let refreshed = probe_provider_models_cached(&probe).await;
+        assert_eq!(
+            refreshed
+                .get("opencode")
+                .map(|v| v.iter().map(|m| m.id.as_str()).collect::<Vec<_>>()),
+            Some(vec!["openai/gpt-slow-test"])
+        );
+    }
+
+    #[test]
+    fn agy_parser_strips_ansi_csi_spinners_and_colors() {
+        let raw = "\x1b[?25l\x1b[2K\r\x1b[36m⠋ Fetching models...\x1b[0m\r\x1b[2K\
+                   \x1b[32mgemini-4-carbon-low\x1b[0m\tGemini 4 Carbon (Low)\n\
+                   \x1b[32mgemini-4-carbon-high\x1b[0m\tGemini 4 Carbon (High)\n\
+                   \x1b[?25h";
+        let got = parse_agy_models_output(raw);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "gemini-4-carbon");
+        assert_eq!(got[0].label, "Gemini 4 Carbon");
+        assert_eq!(got[0].supported_efforts, vec!["low", "high"]);
     }
 
     #[test]

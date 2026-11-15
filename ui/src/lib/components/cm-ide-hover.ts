@@ -3,7 +3,8 @@
 // strips fenced backticks / `---` / domainless `pkg.go.dev` links / sibling block comments,
 // syntax-colors signatures, caps summary <= 240 chars, and wires Definition (⌘B) & Usages (⌥F7).
 
-import type { Extension } from '@codemirror/state';
+import { forEachDiagnostic } from '@codemirror/lint';
+import type { EditorState, Extension } from '@codemirror/state';
 import { EditorView, hoverTooltip } from '@codemirror/view';
 import { applyConcreteEditsToView, computeDeterministicQuickFixes } from './cm-ide-quickfix.ts';
 import { isSecretIdePath } from './cm-ide-drafts.ts';
@@ -362,6 +363,22 @@ export function buildIdeHoverRequest(params: {
   };
 }
 
+export function hasLintDiagnosticAtPos(state: EditorState, pos: number): boolean {
+  let covered = false;
+  forEachDiagnostic(state, (_d, from, to) => {
+    if (!covered && pos >= from && pos <= to) covered = true;
+  });
+  return covered;
+}
+
+export function shouldShowInspectionHoverFallback(params: {
+  hasParsedDoc: boolean;
+  hasPrimaryLineFix: boolean;
+  hasLintAtPos: boolean;
+}): boolean {
+  return !params.hasParsedDoc && params.hasPrimaryLineFix && !params.hasLintAtPos;
+}
+
 export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension {
   const lang = detectSemanticLang(opts.filePath, opts.language);
   const tip = hoverTooltip(async (view, pos) => {
@@ -402,8 +419,15 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
       if (pooledMd) parsed = sanitizeAndSplitHoverDoc({ symbol: word, rawDoc: pooledMd, compact: isCompact });
     }
     if (!parsed && word) parsed = extractCleanSymbolHoverFromSource(docText, word, lang, isCompact);
-    if (!parsed && (primaryLineFix || primaryDetFix)) {
-      parsed = { symbol: word || `Line ${lineNo}`, kind: 'inspection', packageName: null, signature: ln.text.trim(), summary: `Quick Fix available: ${(primaryLineFix ?? primaryDetFix)!.title}`, moreParagraphs: [], externalLinks: [], definedIn: null };
+    if (
+      shouldShowInspectionHoverFallback({
+        hasParsedDoc: Boolean(parsed),
+        hasPrimaryLineFix: Boolean(primaryLineFix),
+        hasLintAtPos: hasLintDiagnosticAtPos(view.state, pos),
+      }) &&
+      primaryLineFix
+    ) {
+      parsed = { symbol: word || `Line ${lineNo}`, kind: 'inspection', packageName: null, signature: ln.text.trim(), summary: `Quick Fix available: ${primaryLineFix.title}`, moreParagraphs: [], externalLinks: [], definedIn: null };
     }
     if (!parsed) return null;
 

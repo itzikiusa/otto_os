@@ -168,3 +168,57 @@ async fn go_mod_update_one_surfaces_go_get_non_zero_exit_and_scrubs_daemon_env()
         resp.output
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn go_mod_tidy_passes_ssh_auth_sock_only_for_root_actor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let bin_dir = root.join("fake-bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_go = bin_dir.join("go");
+    fs::write(
+        &fake_go,
+        "#!/bin/sh\necho \"SOCK=${SSH_AUTH_SOCK:-none}\"\nexit 0\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&fake_go).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fake_go, perms).unwrap();
+
+    let go_mod_path = root.join("go.mod");
+    fs::write(&go_mod_path, "module example.com/app\n\ngo 1.22\n").unwrap();
+    let history = LocalHistoryStore::new(root.join(".history"));
+    let mut env_map = BTreeMap::new();
+    env_map.insert(
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin_dir.display()),
+    );
+    let req = IdeDepsActionReq {
+        target: None,
+        path: go_mod_path.to_string_lossy().into_owned(),
+        action: "tidy".into(),
+        module: None,
+        version: None,
+    };
+
+    let non_root_resp =
+        super::run_deps_action_as(&root, &go_mod_path, &req, &env_map, &history, false)
+            .await
+            .unwrap();
+    assert!(non_root_resp.ok);
+    assert_eq!(non_root_resp.output.trim(), "SOCK=none");
+
+    if let Ok(daemon_sock) = std::env::var("SSH_AUTH_SOCK") {
+        if !daemon_sock.is_empty() {
+            let root_resp =
+                super::run_deps_action_as(&root, &go_mod_path, &req, &env_map, &history, true)
+                    .await
+                    .unwrap();
+            assert!(root_resp.ok);
+            assert_eq!(root_resp.output.trim(), format!("SOCK={daemon_sock}"));
+        }
+    }
+}

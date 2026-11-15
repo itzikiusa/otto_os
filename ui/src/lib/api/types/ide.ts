@@ -295,7 +295,6 @@ export interface IdeShellEnvResp {
   vars: Record<string, string>;
   env?: Record<string, string>;
   var_count?: number;
-  count?: number;
   loaded_at?: string;
   duration_ms?: number;
   error?: string | null;
@@ -316,6 +315,8 @@ export interface IdeHostMapping {
   to_host: string;
   to_port?: number | null;
 }
+
+export type IdeNetworkBridgeHostMapping = IdeHostMapping;
 
 export interface IdeNetworkBridgeConfig {
   enabled: boolean;
@@ -412,6 +413,14 @@ export interface IdeEnvironmentsResp {
   configs: IdeRunConfig[];
   detected_configs?: IdeRunConfig[];
   effective_env?: Record<string, string>;
+}
+
+export interface IdeUpdateEnvironmentReq extends IdeProjectEnvironment {
+  target: IdeTargetSpec;
+}
+
+export interface IdeEnvironmentResp {
+  env: IdeProjectEnvironment;
 }
 
 export interface IdePythonVenvResp {

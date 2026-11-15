@@ -65,7 +65,7 @@ test('runtime drafts retain attachments and choices only for their owning thread
   a.images.push({ name: 'a.png', mime: 'image/png', data_base64: 'AA==' });
   assert.equal(b.text, '');
   assert.equal(b.pickedMode, null);
-  assert.equal(b.model, null);
+  assert.equal(b.model, undefined);
   assert.equal(b.images.length, 0);
   assert.equal(store.for('A'), a);
   assert.equal(store.for('A').text, 'draft for A');
@@ -255,4 +255,137 @@ test('submit clears composer in 0ms, skips /reopen on dormant threads, and resto
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(draft.text, 'fast mobile reply');
   assert.equal(state.optimisticMessage, null);
+});
+
+test('RuntimeThread and runtimeComposer distinguish inherited undefined vs explicit null Default model', async () => {
+  const { resolveEffectiveDraftModel, resolvePromptModelOverride } = loadSource(
+    new URL('../src/modules/threads/runtime/runtimeComposer.ts', import.meta.url),
+    {
+      '../../../lib/toastError': { toastError: () => {} },
+      '../../../lib/telemetry': { startMeasurement: () => null },
+      './hostCommands': { runHostSlash: () => false },
+      './timeline': { errorText: (s: string) => s },
+      '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: {} },
+    },
+  ) as typeof import('../src/modules/threads/runtime/runtimeComposer.ts');
+
+  // `undefined` inherits `session.model` and omits `model` on prompt payload.
+  assert.equal(resolveEffectiveDraftModel(undefined, 'claude-opus-4-6'), 'claude-opus-4-6');
+  assert.equal(resolvePromptModelOverride(undefined, 'claude-opus-4-6'), undefined);
+
+  // Explicit `null` ("Default model") displays Default (`null`) and sends `""` to clear a pinned `session.model`.
+  assert.equal(resolveEffectiveDraftModel(null, 'claude-opus-4-6'), null);
+  assert.equal(resolvePromptModelOverride(null, 'claude-opus-4-6'), '');
+  assert.equal(resolvePromptModelOverride(null, null), undefined);
+
+  // Explicit model string pins that model.
+  assert.equal(resolveEffectiveDraftModel('sonnet', 'claude-opus-4-6'), 'sonnet');
+  assert.equal(resolvePromptModelOverride('sonnet', 'claude-opus-4-6'), 'sonnet');
+
+  const promptPayloads: any[] = [];
+  const draft = {
+    flushSave: () => {},
+    freshContext: false,
+    context: [],
+    text: 'clear pinned model',
+    images: [],
+    model: null,
+    effort: null,
+    pickedMode: null,
+    sending: false,
+    awaitSeq: null,
+    startError: null,
+  };
+  const state = componentFunctions(component, ['send'], {
+    ...sendHelpers,
+    resolvePromptModelOverride,
+    session: { model: 'claude-opus-4-6' },
+    sessionId: 'A',
+    ownerId: 'A',
+    draft,
+    runtimeThreads: {
+      prompt: async (_id: string, body: unknown) => {
+        promptPayloads.push(body);
+        return { sequence: 2 };
+      },
+    },
+    runtimeDrafts: { owns: () => true },
+    ApiError: class extends Error {},
+    toastError: () => {},
+  });
+  await state.send('clear pinned model');
+  assert.equal(promptPayloads.length, 1);
+  assert.equal(promptPayloads[0].model, '');
+});
+
+test('image-only optimistic send populates immediate preview_url attachments instead of an empty bubble', async () => {
+  const { buildOptimisticUserMessage, restoreOptimisticDraft } = loadSource(
+    new URL('../src/modules/threads/runtime/runtimeComposer.ts', import.meta.url),
+    {
+      '../../../lib/toastError': { toastError: () => {} },
+      '../../../lib/telemetry': { startMeasurement: () => null },
+      './hostCommands': { runHostSlash: () => false },
+      './timeline': { errorText: (s: string) => s },
+      '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: {} },
+    },
+  ) as typeof import('../src/modules/threads/runtime/runtimeComposer.ts');
+
+  const direct = buildOptimisticUserMessage('', 4, [
+    { name: 'shot.png', mime: 'image/png', data_base64: 'QUJD' },
+    { name: 'spec.pdf', mime: 'application/pdf', data_base64: 'REVG' },
+  ]);
+  assert.equal(direct.item.type, 'user_message');
+  if (direct.item.type === 'user_message') {
+    assert.equal(direct.item.text, '');
+    assert.equal(direct.item.attachments?.length, 2);
+    assert.equal(direct.item.attachments?.[0]?.kind, 'image');
+    assert.equal(direct.item.attachments?.[0]?.name, 'shot.png');
+    assert.equal(direct.item.attachments?.[0]?.media_type, 'image/png');
+    assert.equal(direct.item.attachments?.[0]?.preview_url, 'data:image/png;base64,QUJD');
+    assert.equal(direct.item.attachments?.[1]?.kind, 'file');
+    assert.equal(direct.item.attachments?.[1]?.preview_url, undefined);
+  }
+
+  let resolvePrompt!: (v: { sequence: number }) => void;
+  const draft = {
+    flushSave: () => {},
+    freshContext: false,
+    context: [],
+    text: '',
+    images: [{ name: 'shot.png', mime: 'image/png', data_base64: 'QUJD' }],
+    model: undefined,
+    effort: null,
+    pickedMode: null,
+    reopening: false,
+    sending: false,
+  };
+  const state = componentFunctions(component, ['submit', 'send', 'reopen'], {
+    ...sendHelpers,
+    buildOptimisticUserMessage,
+    restoreOptimisticDraft,
+    sessionId: 'A',
+    ownerId: 'A',
+    draft,
+    closed: false,
+    needsRevive: false,
+    running: false,
+    optimisticMessage: null,
+    p: { items: [] },
+    parseInteractiveSlashInput: () => null,
+    runtimeDrafts: { owns: () => true },
+    runtimeThreads: {
+      prompt: () =>
+        new Promise((r) => {
+          resolvePrompt = r;
+        }),
+    },
+    toastError: () => {},
+    ApiError: class extends Error {},
+  });
+
+  state.submit();
+  assert.equal(draft.images.length, 0);
+  assert.equal(state.optimisticMessage?.item?.attachments?.[0]?.preview_url, 'data:image/png;base64,QUJD');
+  resolvePrompt({ sequence: 3 });
+  await new Promise((r) => setTimeout(r, 0));
 });

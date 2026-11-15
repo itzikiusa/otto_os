@@ -4334,3 +4334,73 @@ async fn replay_paged_returns_tail_and_older_pages_across_restarts() {
 
     rt.close(&s.id).await.unwrap();
 }
+
+#[tokio::test]
+async fn get_item_returns_uncompacted_detail_and_reopen_fast_skips_live_and_revives_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Codex).await;
+    host.wait(is_ready).await;
+
+    rt.prompt(&s.id, "fail").await.unwrap();
+    host.wait(is_terminal).await;
+
+    let snap = match rt
+        .replay_paged_opts(&s.id, 0, Some(20), None, None, true, Some(10_000))
+        .await
+        .unwrap()
+    {
+        RuntimeReplay::Snapshot { snapshot, .. } => *snapshot,
+        other => panic!("expected compact snapshot, got {other:?}"),
+    };
+    let compact_cmd = snap
+        .turn_items
+        .iter()
+        .find(|i| matches!(i.kind, TurnItemKind::CommandExecution { .. }))
+        .expect("settled command execution item");
+    assert!(
+        compact_cmd.detail_omitted,
+        "compact snapshot omits settled command output"
+    );
+    if let TurnItemKind::CommandExecution { output, .. } = &compact_cmd.kind {
+        assert!(output.is_none());
+    }
+
+    let full_cmd = rt.get_item(&s.id, &compact_cmd.id).await.unwrap();
+    assert!(!full_cmd.detail_omitted);
+    match &full_cmd.kind {
+        TurnItemKind::CommandExecution { output, .. } => {
+            assert_eq!(output.as_deref(), Some("boom\n"));
+        }
+        other => panic!("expected CommandExecution, got {other:?}"),
+    }
+
+    assert!(matches!(
+        rt.get_item(&s.id, &"missing-item-id".into()).await,
+        Err(Error::NotFound(_))
+    ));
+
+    // Live process: reopen_fast is an instant no-op (no duplicate spawn).
+    assert_eq!(host.prepared.lock().unwrap().len(), 1);
+    let live_reopened = rt.reopen_fast(&s.id).await.unwrap();
+    assert_ne!(live_reopened.status, RuntimeSessionStatus::Closed);
+    assert_eq!(host.prepared.lock().unwrap().len(), 1);
+
+    // Closed session: reopen_fast transitions out of Closed and spawns a runner.
+    rt.close(&s.id).await.unwrap();
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().status,
+        RuntimeSessionStatus::Closed
+    );
+    let reopened = rt.reopen_fast(&s.id).await.unwrap();
+    assert_ne!(reopened.status, RuntimeSessionStatus::Closed);
+    assert!(host.prepared.lock().unwrap().len() >= 2);
+    rt.prompt(&s.id, "after reopen").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(last_assistant_text(&host), "echo: after reopen");
+
+    rt.close(&s.id).await.unwrap();
+}

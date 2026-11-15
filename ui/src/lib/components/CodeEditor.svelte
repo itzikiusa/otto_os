@@ -284,13 +284,19 @@
     else onDefinitionJump?.({ path: targetPath, line, column });
   }
 
+  let attachedLspRoot = '', attachedLspPath = '', lspAttachSeq = 0;
+
   async function attachLsp(editorView: EditorView, filePath: string, rootPath: string, connId?: string | null): Promise<void> {
     if (!rootPath && !connId) return;
+    const seq = ++lspAttachSeq;
     const m = await import('./cm-editor-ondemand');
-    if (view !== editorView || livePath !== filePath) return;
+    if (view !== editorView || livePath !== filePath || seq !== lspAttachSeq) return;
+    const curFolders = projectFolders;
+    attachedLspPath = filePath;
+    attachedLspRoot = m.resolveIdeLspModuleRoot(rootPath, filePath, curFolders);
     return m.attachCodeEditorLsp({
-      editorView, filePath, rootPath, connId, projectFolders, ideMode, language, lspCompartment,
-      isCurrent: () => view === editorView && livePath === filePath,
+      editorView, filePath, rootPath, connId, projectFolders: curFolders, ideMode, language, lspCompartment,
+      isCurrent: () => view === editorView && livePath === filePath && seq === lspAttachSeq,
       ensureIdeMod, onLocationJump: handleLspJump, onDiagnostics,
     });
   }
@@ -299,6 +305,7 @@
     changes.cancel(); plainWatcher.cancel();
     detachScrollTracker?.(); detachScrollTracker = null;
     ideMounted = false; appliedIdePath = ''; appliedManifestDepsPath = '';
+    attachedLspRoot = ''; attachedLspPath = ''; ++lspAttachSeq;
     try { view?.destroy(); } catch { /* ignore */ }
     view = null;
     if (keyContext.openFind === openEditorSearch) keyContext.openFind = null;
@@ -547,6 +554,7 @@
     const prevScrollTop = view.scrollDOM.scrollTop, prevSel = view.state.selection.main, outgoingSaved = liveSavedContent;
     stateCache.saveLightMeta(fromPath, prevScrollTop, prevSel.anchor, prevSel.head);
     coreSmartMod?.saveIdeViewPosition(root, fromPath, { anchor: prevSel.anchor, head: prevSel.head, scrollTop: prevScrollTop }, { immediate: true });
+    attachedLspRoot = ''; attachedLspPath = ''; ++lspAttachSeq;
     view.dispatch({ effects: [lspCompartment.reconfigure([]), ideDepsCompartment.reconfigure([])] });
 
     parkHistory(fromPath, view.state, prevScrollTop, outgoingSaved);
@@ -679,6 +687,18 @@
     if (!view || !ideMod || !ideMounted || preset === appliedKeymapPreset) return;
     appliedKeymapPreset = preset;
     untrack(() => { if (view) view.dispatch({ effects: ideCompartment.reconfigure(buildIdeExtIfLoaded()) }); });
+  });
+  $effect(() => {
+    const folders = projectFolders, curRoot = root, curPath = path, curConn = connectionId ?? null;
+    if (!view || !lsp || completionSource || !folders.length || (!curRoot && !curConn)) return;
+    const target = view;
+    void import('./cm-editor-ondemand').then((m) => {
+      if (view !== target || livePath !== curPath) return;
+      if (attachedLspPath === curPath && m.resolveIdeLspModuleRoot(curRoot, curPath, folders) !== attachedLspRoot) {
+        if (ideMod && ideMounted && isIdeActive()) target.dispatch({ effects: ideCompartment.reconfigure(buildIdeExtIfLoaded(curPath)) });
+        void attachLsp(target, curPath, curRoot, curConn);
+      }
+    });
   });
   let prevCompletion: CompletionSource | null = null;
   $effect(() => {

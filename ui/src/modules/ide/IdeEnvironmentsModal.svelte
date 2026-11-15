@@ -17,8 +17,10 @@
   import IdeNetworkBridgeCard from './shell/IdeNetworkBridgeCard.svelte';
   import IdeRunConfigEditor, { type ConfigDraft, emptyConfigDraft } from './shell/IdeRunConfigEditor.svelte';
   import IdeShellEnvCard from './shell/IdeShellEnvCard.svelte';
+  import { confirmProdNetworkBridge } from './shell/networkBridgeGuard.svelte';
   import {
     emptyNetworkBridgeDraft,
+    normalizeBridgeDraftSnapshot,
     serializeNetworkBridgeDraft,
     type IdeNetworkBridgeDraft,
   } from './shell/networkBridgeModel';
@@ -63,6 +65,62 @@
   let cfgValidationError = $state('');
   let savingCfg = $state(false);
   let hydratedSnapshot = '';
+  let baselineEnvSnap = $state('');
+  let baselineCfgSnap = $state('');
+
+  function computeEnvSnap(): string {
+    return JSON.stringify({
+      inheritShellEnv,
+      javaHome: javaHome.trim(),
+      goRoot: goRoot.trim(),
+      rustToolchain: rustToolchain.trim(),
+      nodeHome: nodeHome.trim(),
+      pythonInterpreter: pythonInterpreter.trim(),
+      dotenvPath: dotenvPath.trim(),
+      extraPath: extraPath.trim(),
+      bridge: ide.target.kind === 'local' ? normalizeBridgeDraftSnapshot(bridgeDraft) : null,
+      envRows: envRows
+        .map((r) => ({
+          key: r.key.trim(),
+          value: r.value,
+          secret: r.secret,
+          has_secret: r.has_secret,
+          replaceSecret: r.replaceSecret,
+        }))
+        .filter((r) => Boolean(r.key || r.value.trim() || r.has_secret)),
+    });
+  }
+
+  function computeCfgSnap(draft: ConfigDraft = cfgDraft, newDraft: boolean = isNewDraft): string {
+    return JSON.stringify({
+      isNewDraft: newDraft,
+      id: draft.id,
+      name: draft.name.trim(),
+      runner: draft.runner,
+      target_path: draft.target_path.trim(),
+      command: draft.command.trim(),
+      test_filter: draft.test_filter.trim(),
+      buildFlagsText: draft.buildFlagsText.trim(),
+      argsText: draft.argsText.trim(),
+      cwd: draft.cwd.trim(),
+      env_file: draft.env_file.trim(),
+      sdk_path: draft.sdk_path.trim(),
+      inherit_shell_env: draft.inherit_shell_env,
+      before_launch: draft.before_launch.trim(),
+      maven_profiles: draft.maven_profiles,
+      spring_profiles: draft.spring_profiles,
+      skip_tests: draft.skip_tests,
+      offline: draft.offline,
+      overrides: draft.overrides
+        .map((o) => ({ key: o.key.trim(), value: o.value }))
+        .filter((o) => Boolean(o.key || o.value.trim())),
+    });
+  }
+
+  const currentEnvSnap = $derived(computeEnvSnap());
+  const currentCfgSnap = $derived(computeCfgSnap());
+  const envDirty = $derived(Boolean(baselineEnvSnap) && currentEnvSnap !== baselineEnvSnap);
+  const cfgDirty = $derived(Boolean(baselineCfgSnap) && currentCfgSnap !== baselineCfgSnap);
 
   function configToDraft(cfg: IdeRunConfig): ConfigDraft {
     return {
@@ -90,9 +148,25 @@
     };
   }
 
-  function close(): void {
+  function closeForce(): void {
     ide.environmentsOpen = false;
     onclose();
+  }
+
+  async function requestClose(): Promise<void> {
+    if (savingEnv || savingCfg) return;
+    if (envDirty || cfgDirty) {
+      const discard = await confirmer.ask(
+        'You have unsaved changes in project environment or run configurations. Discard them?',
+        {
+          title: 'Discard unsaved changes?',
+          confirmLabel: 'Discard changes',
+          danger: true,
+        },
+      );
+      if (!discard) return;
+    }
+    closeForce();
   }
 
   function openToolchainsManager(): void {
@@ -100,7 +174,12 @@
   }
 
   $effect(() => {
-    if (!isOpen) { hydratedSnapshot = ''; return; }
+    if (!isOpen) {
+      hydratedSnapshot = '';
+      baselineEnvSnap = '';
+      baselineCfgSnap = '';
+      return;
+    }
     activeTab = initialTab;
     untrack(() => {
       if (ide.hasTarget) {
@@ -143,11 +222,18 @@
       isNewDraft = true;
       cfgDraft = emptyConfigDraft();
     }
+    baselineEnvSnap = computeEnvSnap();
+    baselineCfgSnap = computeCfgSnap(cfgDraft, isNewDraft);
   });
 
   const modalTabs = $derived<readonly TabItem<EnvTab>[]>([
-    { id: 'env', label: 'Project environment' },
-    { id: 'configs', label: 'Run / debug configurations', count: ide.runConfigs.length > 0 ? ide.runConfigs.length : undefined },
+    { id: 'env', label: 'Project environment', dirty: envDirty },
+    {
+      id: 'configs',
+      label: 'Run / debug configurations',
+      count: ide.runConfigs.length > 0 ? ide.runConfigs.length : undefined,
+      dirty: cfgDirty,
+    },
   ]);
 
   function sdkOptionsFor(eco: string): { label: string; value: string }[] {
@@ -195,7 +281,7 @@
     } finally { creatingVenv = false; }
   }
 
-  async function handleSaveEnvironment(): Promise<void> {
+  async function handleSaveEnvironment(): Promise<boolean> {
     envValidationError = '';
     const cleaned: IdeEnvVar[] = [];
     for (let i = 0; i < envRows.length; i++) {
@@ -204,7 +290,7 @@
       if (!key && !row.value.trim() && !row.has_secret) continue;
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
         envValidationError = `Invalid variable name "${key || '(empty)'}" — use letters, digits, and underscores.`;
-        return;
+        return false;
       }
       if (row.secret) {
         if (row.has_secret && !row.replaceSecret && !row.value) cleaned.push({ key, secret: true, has_secret: true });
@@ -217,7 +303,16 @@
     const serializedBridge = serializeNetworkBridgeDraft(bridgeDraft);
     if (serializedBridge.error) {
       envValidationError = serializedBridge.error;
-      return;
+      return false;
+    }
+
+    if (ide.target.kind === 'local' && serializedBridge.config.enabled) {
+      const allowed = await confirmProdNetworkBridge(
+        serializedBridge.config,
+        'save',
+        ide.target.workspace_id,
+      );
+      if (!allowed) return false;
     }
 
     savingEnv = true;
@@ -234,8 +329,15 @@
         network_bridge: ide.target.kind === 'local' ? serializedBridge.config : undefined,
         env_vars: cleaned,
       });
-      if (ok) { hydratedSnapshot = ''; await ide.loadEnvironments(); }
-    } finally { savingEnv = false; }
+      if (ok) {
+        hydratedSnapshot = '';
+        await ide.loadEnvironments();
+        baselineEnvSnap = computeEnvSnap();
+      }
+      return ok;
+    } finally {
+      savingEnv = false;
+    }
   }
 
   function selectConfig(cfg: IdeRunConfig): void {
@@ -243,12 +345,14 @@
     ide.selectedConfigId = cfg.id;
     isNewDraft = Boolean(cfg.auto_detected);
     cfgDraft = configToDraft(cfg);
+    baselineCfgSnap = computeCfgSnap(cfgDraft, isNewDraft);
   }
 
   function startNewConfig(): void {
     cfgValidationError = '';
     isNewDraft = true;
     cfgDraft = emptyConfigDraft();
+    baselineCfgSnap = computeCfgSnap(cfgDraft, isNewDraft);
   }
 
   function duplicateConfig(): void {
@@ -262,17 +366,26 @@
     return tokens.map((t) => t.replace(/^['"]|['"]$/g, ''));
   }
 
-  async function saveCurrentConfig(afterAction: 'none' | 'run' | 'debug' = 'none'): Promise<void> {
+  async function saveCurrentConfig(afterAction: 'none' | 'run' | 'debug' = 'none'): Promise<boolean> {
     cfgValidationError = '';
     const name = cfgDraft.name.trim();
-    if (!name) { cfgValidationError = 'Enter a configuration name before saving.'; return; }
+    if (!name) { cfgValidationError = 'Enter a configuration name before saving.'; return false; }
     const overrides: Record<string, string> = {};
     for (let i = 0; i < cfgDraft.overrides.length; i++) {
       const row = cfgDraft.overrides[i];
       const k = row.key.trim();
       if (!k && !row.value.trim()) continue;
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) { cfgValidationError = `Invalid override variable "${k || '(empty)'}".`; return; }
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) { cfgValidationError = `Invalid override variable "${k || '(empty)'}".`; return false; }
       overrides[k] = row.value;
+    }
+
+    const hadEnvChanges = envDirty;
+    if (hadEnvChanges) {
+      const envOk = await handleSaveEnvironment();
+      if (!envOk) {
+        if (envValidationError) activeTab = 'env';
+        return false;
+      }
     }
 
     savingCfg = true;
@@ -297,14 +410,22 @@
         offline: cfgDraft.offline,
         env_overrides: overrides,
       });
-      if (saved) {
-        isNewDraft = false;
-        cfgDraft = configToDraft(saved);
-        toasts.success('Saved run configuration', saved.name);
-        if (afterAction === 'run') { await ide.startRun({ configId: saved.id }); close(); }
-        else if (afterAction === 'debug') { await ide.startDebug({ configId: saved.id }); close(); }
+      if (!saved) return false;
+      isNewDraft = false;
+      cfgDraft = configToDraft(saved);
+      baselineCfgSnap = computeCfgSnap(cfgDraft, isNewDraft);
+      toasts.success('Saved run configuration', saved.name);
+      if (afterAction === 'run') {
+        await ide.startRun({ configId: saved.id, skipProdConfirm: hadEnvChanges });
+        closeForce();
+      } else if (afterAction === 'debug') {
+        await ide.startDebug({ configId: saved.id, skipProdConfirm: hadEnvChanges });
+        closeForce();
       }
-    } finally { savingCfg = false; }
+      return true;
+    } finally {
+      savingCfg = false;
+    }
   }
 
   async function confirmDeleteConfig(): Promise<void> {
@@ -324,7 +445,7 @@
 </script>
 
 {#if isOpen}
-  <Modal title="Environments & run configurations" width={820} dismissable={!savingEnv && !savingCfg} onclose={close}>
+  <Modal title="Environments & run configurations" width={820} dismissable={!savingEnv && !savingCfg} onclose={() => void requestClose()}>
     <div class="env-shell">
       {#if !ide.hasTarget}
         <EmptyState
@@ -333,7 +454,7 @@
           body="Select a local folder or SSH target before configuring SDK paths, shell env, Keychain secrets, and run configurations."
           actionLabel="Choose target…"
           actionKind="secondary"
-          onaction={() => { close(); ide.sshOpen = true; }}
+          onaction={() => { closeForce(); ide.sshOpen = true; }}
         />
       {:else}
         <Tabs label="Environment and configuration tabs" tabs={modalTabs} value={activeTab} onchange={(id) => (activeTab = id)} idBase="ide-env" />
@@ -518,24 +639,24 @@
             {/if}
           </div>
           <div class="env-footer-end">
-            <button type="button" class="btn ghost" disabled={savingCfg} onclick={close}>Cancel</button>
-            <button type="button" class="btn" disabled={savingCfg} onclick={() => saveCurrentConfig('debug')} data-testid="ide-cfg-save-debug">
+            <button type="button" class="btn ghost" disabled={savingCfg} onclick={() => void requestClose()}>Cancel</button>
+            <button type="button" class="btn" disabled={savingCfg || savingEnv} onclick={() => void saveCurrentConfig('debug')} data-testid="ide-cfg-save-debug">
               <Icon name="bug" size={12} />
               Save &amp; debug
             </button>
-            <button type="button" class="btn" disabled={savingCfg} onclick={() => saveCurrentConfig('run')}>
+            <button type="button" class="btn" disabled={savingCfg || savingEnv} onclick={() => void saveCurrentConfig('run')}>
               <Icon name="play" size={12} />
               Save &amp; run
             </button>
-            <button type="button" class="btn primary" disabled={savingCfg} onclick={() => saveCurrentConfig('none')}>
-              {savingCfg ? 'Saving…' : 'Save configuration'}
+            <button type="button" class="btn primary" disabled={savingCfg || savingEnv} onclick={() => void saveCurrentConfig('none')}>
+              {savingCfg || savingEnv ? 'Saving…' : 'Save configuration'}
             </button>
           </div>
         </div>
       {:else}
-        <button type="button" class="btn ghost" disabled={savingEnv} onclick={close}>Cancel</button>
+        <button type="button" class="btn ghost" disabled={savingEnv} onclick={() => void requestClose()}>Cancel</button>
         {#if ide.hasTarget}
-          <button type="button" class="btn primary" disabled={savingEnv} onclick={handleSaveEnvironment}>
+          <button type="button" class="btn primary" disabled={savingEnv} onclick={() => void handleSaveEnvironment()}>
             {savingEnv ? 'Saving…' : 'Save environment'}
           </button>
         {/if}

@@ -1,4 +1,4 @@
-//! Environments, Run Configurations, Process Runner & DAP Debugger HTTP Handlers.
+//! Run Configurations, Process Runner & DAP Debugger HTTP Handlers.
 
 use axum::extract::{Path, Query, State};
 use axum::response::Response;
@@ -15,99 +15,11 @@ use crate::dap::DapStartContext;
 use crate::types::{
     IdeCreatePythonVenvReq, IdeCreatePythonVenvResp, IdeDebugCommandReq, IdeDebugEvaluateReq,
     IdeDebugEvaluateResp, IdeDebugSessionResp, IdeDebugSessionsResp, IdeDebugVariablesReq,
-    IdeDebugVariablesResp, IdeEnvironmentResp, IdeEnvironmentsResp, IdeNetBridgeStatusResp,
-    IdeNetBridgeTestReq, IdeOkResp, IdeRunConfigResp, IdeRunResp, IdeSetBreakpointsReq,
+    IdeDebugVariablesResp, IdeOkResp, IdeRunConfigResp, IdeRunResp, IdeSetBreakpointsReq,
     IdeStartDebugReq, IdeStartRunReq, IdeTargetKind, IdeTargetQuery, IdeTargetSpec,
-    IdeUpdateEnvironmentReq, IdeUpsertRunConfigReq,
+    IdeUpsertRunConfigReq,
 };
 use crate::IdeCtx;
-
-pub(super) async fn get_environments<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Query(q): Query<IdeTargetQuery>,
-) -> ApiResult<Json<IdeEnvironmentsResp>> {
-    let mut target = q.into_target_spec()?;
-    ctx.ide()
-        .environments
-        .enrich_target_roots(
-            &ctx.pool(),
-            Some(&ctx.ide().projects),
-            Some(&user),
-            &mut target,
-        )
-        .await;
-    let ssh = ctx
-        .ide()
-        .targets
-        .resolve(&ctx, &user, &target)
-        .await?
-        .into_ssh_spec();
-    let resp = ctx
-        .ide()
-        .environments
-        .get_environments_for_user(
-            &ctx.pool(),
-            ctx.secrets(),
-            &ctx.ide().targets,
-            &target,
-            ssh.as_ref(),
-            user.is_root,
-        )
-        .await?;
-    Ok(Json(resp))
-}
-
-pub(super) async fn put_environments<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeUpdateEnvironmentReq>,
-) -> ApiResult<Json<IdeEnvironmentResp>> {
-    let _ = ctx
-        .ide()
-        .targets
-        .resolve_write(&ctx, &user, &req.target)
-        .await?;
-    if let Some(ref extra_roots) = req.additional_roots {
-        if req.target.kind == IdeTargetKind::Local && !user.is_root {
-            for r in extra_roots {
-                if !r.trim().is_empty() {
-                    ctx.authorize_local_target(&user, &IdeTargetSpec::local(r.clone()), true)
-                        .await?;
-                }
-            }
-        }
-    }
-    if let Some(ref raw_nb) = req.network_bridge {
-        if let Some(clean_nb) = crate::netbridge::sanitize_network_bridge(Some(raw_nb.clone()))? {
-            ctx.ide()
-                .netbridge
-                .authorize_config(&ctx, &user, &clean_nb)
-                .await?;
-        }
-    }
-    let env = ctx
-        .ide()
-        .environments
-        .update_environment(&ctx.pool(), ctx.secrets(), req)
-        .await?;
-    ctx.ide().targets.invalidate_local_resolve_cache();
-    Ok(Json(IdeEnvironmentResp { env }))
-}
-
-pub(super) async fn test_network_bridge<S: IdeCtx>(
-    State(ctx): State<S>,
-    Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(req): Json<IdeNetBridgeTestReq>,
-) -> ApiResult<Json<IdeNetBridgeStatusResp>> {
-    let _ = ctx
-        .ide()
-        .targets
-        .resolve_write(&ctx, &user, &req.target)
-        .await?;
-    let resp = ctx.ide().netbridge.probe_status(&ctx, &user, &req).await?;
-    Ok(Json(resp))
-}
 
 pub(super) async fn execute_create_python_venv<S: IdeCtx>(
     ctx: &S,

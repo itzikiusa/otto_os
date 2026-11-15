@@ -103,6 +103,28 @@ pub fn is_multi_repo_umbrella_dir(dir: &Path) -> bool {
     false
 }
 
+#[allow(clippy::disallowed_methods)]
+fn canonical_or_existing_ancestor(path: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(path) {
+        return c;
+    }
+    let mut cur = path;
+    let mut tail = Vec::new();
+    while let Some(parent) = cur.parent() {
+        if let Some(name) = cur.file_name() {
+            tail.push(name.to_os_string());
+        }
+        if let Ok(mut base) = std::fs::canonicalize(parent) {
+            for seg in tail.into_iter().rev() {
+                base.push(seg);
+            }
+            return base;
+        }
+        cur = parent;
+    }
+    path.to_path_buf()
+}
+
 /// Scope an LSP root strictly to the nearest module manifest directory for `lang`
 /// and refuse spawning on a multi-repository umbrella folder.
 #[allow(clippy::disallowed_methods)]
@@ -132,14 +154,14 @@ pub fn resolve_lsp_module_root(
         } else {
             canon_root.join(hp)
         };
-        let resolved = std::fs::canonicalize(&full).unwrap_or(full);
-        if resolved.is_file() {
+        let resolved = canonical_or_existing_ancestor(&full);
+        if resolved.is_dir() {
+            resolved
+        } else {
             resolved
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| canon_root.clone())
-        } else {
-            resolved
         }
     } else if canon_root.is_file() {
         canon_root
@@ -287,5 +309,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(PathBuf::from(scoped), repo_a);
+    }
+
+    #[test]
+    fn file_hint_outside_primary_root_resolves_sibling_go_module() {
+        let tmp = tempfile::tempdir().unwrap();
+        let umbrella = std::fs::canonicalize(tmp.path()).unwrap();
+        let evoplay = umbrella.join("koala-evoplay-go");
+        let rebeltech = umbrella.join("koala-rebeltech-go");
+        std::fs::create_dir_all(evoplay.join("app")).unwrap();
+        std::fs::write(evoplay.join("go.mod"), "module example.com/evoplay\n").unwrap();
+        std::fs::create_dir_all(rebeltech.join("app")).unwrap();
+        std::fs::write(rebeltech.join("go.mod"), "module example.com/rebeltech\n").unwrap();
+        let rebel_file = rebeltech.join("app/rebeltech_controller.go");
+        std::fs::write(&rebel_file, "package app\n").unwrap();
+
+        // Opening a file in sibling `koala-rebeltech-go` while `raw_root` points to
+        // `koala-evoplay-go` (or the umbrella dir) walks up from `file_hint` to
+        // `koala-rebeltech-go` rather than attaching to `koala-evoplay-go`'s gopls.
+        let resolved_from_sibling = resolve_lsp_module_root(
+            "go",
+            &evoplay.to_string_lossy(),
+            Some(&rebel_file.to_string_lossy()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(PathBuf::from(resolved_from_sibling), rebeltech);
+
+        let resolved_from_umbrella = resolve_lsp_module_root(
+            "go",
+            &umbrella.to_string_lossy(),
+            Some(&rebel_file.to_string_lossy()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(PathBuf::from(resolved_from_umbrella), rebeltech);
+
+        // Even an unsaved file path inside `koala-rebeltech-go/app` resolves to `koala-rebeltech-go`.
+        let unsaved = rebeltech.join("app/unsaved_handler.go");
+        let resolved_unsaved = resolve_lsp_module_root(
+            "go",
+            &evoplay.to_string_lossy(),
+            Some(&unsaved.to_string_lossy()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(PathBuf::from(resolved_unsaved), rebeltech);
     }
 }

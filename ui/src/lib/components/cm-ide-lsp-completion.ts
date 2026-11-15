@@ -140,10 +140,73 @@ export function resolveIdeLspModuleRoot(
   return best || normRoot;
 }
 
+export interface RawLspDiagnosticLike {
+  range: LspRange;
+  severity?: number;
+  code?: string | number | { value?: string | number } | null;
+  source?: string | null;
+  message: string | { value?: string };
+}
+
+export function lspDiagnosticDedupeKey(d: RawLspDiagnosticLike): string {
+  const codeVal =
+    d.code != null && typeof d.code === 'object' && 'value' in d.code
+      ? String(d.code.value ?? '')
+      : String(d.code ?? '');
+  const msgText =
+    typeof d.message === 'string'
+      ? d.message
+      : d.message && typeof d.message === 'object' && 'value' in d.message
+        ? String(d.message.value ?? '')
+        : String(d.message ?? '');
+  return `${d.range.start.line}:${d.range.start.character}-${d.range.end.line}:${d.range.end.character}|${d.severity ?? ''}|${codeVal}|${d.source ?? ''}|${msgText}`;
+}
+
+export function dedupeLspDiagnostics<T extends RawLspDiagnosticLike>(diagnostics: readonly T[] | undefined | null): T[] {
+  if (!diagnostics || diagnostics.length <= 1) return diagnostics ? [...diagnostics] : [];
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (let i = 0; i < diagnostics.length; i++) {
+    const d = diagnostics[i];
+    if (!d?.range?.start || !d.range.end) {
+      out.push(d);
+      continue;
+    }
+    const key = lspDiagnosticDedupeKey(d);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(d);
+  }
+  return out;
+}
+
+export function dedupeLspJsonRpcMessage<T>(message: T): T {
+  if (!message || typeof message !== 'object') return message;
+  const msg = message as {
+    method?: unknown;
+    params?: { diagnostics?: RawLspDiagnosticLike[] } | null;
+  };
+  if (msg.method !== 'textDocument/publishDiagnostics' || !Array.isArray(msg.params?.diagnostics)) {
+    return message;
+  }
+  const raw = msg.params.diagnostics;
+  if (raw.length <= 1) return message;
+  const deduped = dedupeLspDiagnostics(raw);
+  if (deduped.length === raw.length) return message;
+  return {
+    ...(message as Record<string, unknown>),
+    params: {
+      ...(msg.params as Record<string, unknown>),
+      diagnostics: deduped,
+    },
+  } as unknown as T;
+}
+
 export function buildLspInitializationOptions(languageId: string): Record<string, unknown> | undefined {
   const lang = normalizeIdeLspLanguage(languageId) ?? languageId.toLowerCase();
   if (lang === 'go') {
     return {
+      buildFlags: ['-mod=mod'],
       completeUnimported: true,
       usePlaceholders: false,
       deepCompletion: true,

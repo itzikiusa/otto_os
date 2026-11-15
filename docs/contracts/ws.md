@@ -431,7 +431,7 @@ a client that never acks gets one frame and then nothing.
   `take_over` first). The first input while `controller == "none"` makes this
   viewer's user the driver.
 
-## 1c. LSP WebSocket bridge — `WS /ws/lsp?lang=&root=&connection_id=`
+## 1c. LSP WebSocket bridge — `WS /ws/lsp?lang=&root=&connection_id=&file=`
 
 Auth: `Sec-WebSocket-Protocol: otto-bearer, <token>` (echoed as `otto-bearer`;
 `?token=` → 401). Scoped share tokens, MCP-only tokens and agent-session
@@ -440,7 +440,11 @@ credentials are refused with 403 (`RootRoute::Lsp`).
 - **Local target (`connection_id` omitted or empty):** `root` must be an
   existing directory inside a workspace or repository the caller can access (or
   an authorized agent worktree under `AGENT_DATA_SUBDIRS`), never Otto's data
-  dir or a secret directory (`~/.ssh`, key files). Binary discovery checks
+  dir or a secret directory (`~/.ssh`, key files). When optional `file` is
+  supplied inside an authorized directory, the bridge walks up from `file` to
+  the nearest module manifest (`go.mod`, `Cargo.toml`, `pom.xml`, `build.gradle*`,
+  `package.json`, `pyproject.toml`) so multi-repo workspaces always bind to the
+  active file's module root. Binary discovery checks
   `<data_dir>/toolchains/**/bin` first (prepend to `PATH`, plus managed JDK
   `JAVA_HOME`), then standard developer bin directories (`~/.cargo/bin`,
   `~/go/bin`, `~/.local/bin`, Homebrew, …), and includes both the built-in
@@ -450,10 +454,11 @@ credentials are refused with 403 (`RootRoute::Lsp`).
   `vscode-html-language-server`, `marksman`) and any enabled runtime IDE plugin
   language servers (`IdePluginRegistry`, e.g. `kotlin-language-server` or
   `clangd`). Local spawns inherit the cached user
-  login+interactive shell environment (`$SHELL -lic`, e.g. `GOPRIVATE`) merged
+  login+interactive shell environment (`$SHELL -lic`, e.g. `GOPRIVATE`, plus
+  cold-start process `SSH_AUTH_SOCK`/`GOPRIVATE`/`GONOSUMDB`/`GOPATH`/`GOMODCACHE`) merged
   with the project's SDK environment and enforce explicit child memory caps
-  (`gopls` `GOMEMLIMIT=256MiB`/`GOGC=50`, `jdtls` `-Xmx256m`, `rust-analyzer`
-  `RA_LRU_CAP=64`, Node-based LSPs `--max-old-space-size=192`) in a dedicated
+  (`gopls` `GOMEMLIMIT=512MiB`/`GOGC=75` + `-mod=mod`, `jdtls` `-Xms128m -Xmx768m` + G1 periodic heap return + persistent `-data` cache, `rust-analyzer`
+  `RA_LRU_CAP=128`, Node-based LSPs `--max-old-space-size=384`) in a dedicated
   Unix process group (`process_group(0)`). Missing binary → HTTP 503
   `server_unavailable`.
 - **Remote SSH target (`connection_id` set):** Resolves the saved SSH

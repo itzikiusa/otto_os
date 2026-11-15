@@ -2,7 +2,13 @@
 // RuntimeThread.svelte): the slash commands that act on the view (through
 // the host's commands, hostCommands.ts), merging an edited queued message
 // into the draft, and reading pasted / attached files into attachments.
-import type { PlanArtifact, ProviderTurn, RuntimeDraftContent, TurnItem } from '../../../lib/api/types';
+import type {
+  MessageAttachment,
+  PlanArtifact,
+  ProviderTurn,
+  RuntimeDraftContent,
+  TurnItem,
+} from '../../../lib/api/types';
 import type { RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
 import type { ComposerSlashCommand, ParsedSlashIntent } from '../../../lib/slashActions';
 import { toastError } from '../../../lib/toastError';
@@ -94,17 +100,55 @@ export function handleSlashMenuKey(
   return false;
 }
 
-export function buildOptimisticUserMessage(text: string, afterOrdinal: number): OptimisticMessageState {
+/** Resolve the composer's display/selected model: `undefined` inherits the
+ *  session's pinned model, whereas `null` is an explicit "Default model" choice. */
+export function resolveEffectiveDraftModel(
+  draftModel: string | null | undefined,
+  sessionModel: string | null | undefined,
+): string | null {
+  return draftModel === undefined ? (sessionModel ?? null) : draftModel;
+}
+
+/** Resolve the `model` field sent on `POST /runtime-sessions/{id}/prompt`:
+ *  - non-empty string → pin that model
+ *  - `null` when `sessionModel` is currently set → `""` to clear the pinned model
+ *  - `undefined` (or `null` when already unpinned) → `undefined` (omit from wire) */
+export function resolvePromptModelOverride(
+  draftModel: string | null | undefined,
+  sessionModel: string | null | undefined,
+): string | undefined {
+  if (typeof draftModel === 'string' && draftModel.trim() !== '') return draftModel.trim();
+  if (draftModel === null && typeof sessionModel === 'string' && sessionModel.trim() !== '') return '';
+  return undefined;
+}
+
+export function buildOptimisticUserMessage(
+  text: string,
+  afterOrdinal: number,
+  images: readonly ComposerFile[] = [],
+): OptimisticMessageState {
   const span = startMeasurement('ui.thread.send', 'threads');
   if (span) {
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => span.finish('ok'));
     else queueMicrotask(() => span.finish('ok'));
   }
   const nowIso = new Date().toISOString();
+  const idSeq = ++optimisticSeq;
+  const attachments: MessageAttachment[] = images.map((f, idx) => {
+    const isImg = f.mime.startsWith('image/');
+    return {
+      id: `optimistic-att-${idSeq}-${idx}`,
+      kind: isImg ? 'image' : 'file',
+      mime: f.mime,
+      media_type: f.mime,
+      name: f.name,
+      ...(isImg ? { preview_url: `data:${f.mime};base64,${f.data_base64}` } : {}),
+    };
+  });
   return {
     afterOrdinal,
     item: {
-      id: `optimistic-user-${++optimisticSeq}`,
+      id: `optimistic-user-${idSeq}`,
       turn_id: null,
       ordinal: afterOrdinal + 0.5,
       status: 'completed',
@@ -114,7 +158,7 @@ export function buildOptimisticUserMessage(text: string, afterOrdinal: number): 
       updated_at: nowIso,
       type: 'user_message',
       text,
-      attachments: [],
+      attachments,
     },
   };
 }

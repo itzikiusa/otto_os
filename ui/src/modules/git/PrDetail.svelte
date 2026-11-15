@@ -249,11 +249,11 @@
       prDetailCache.delete(prKey(rid, num));
       const raw = await api.get<PrDetail>(`/repos/${rid}/prs/${num}`, signal);
       if (disposed || rid !== repoId || num !== number || !pr) return;
-      const next = reviewReconciler.reconcile(rid, num, raw, isMe, myName);
+      const { detail: next, ownReviewSettled } = reviewReconciler.reconcileWithMeta(rid, num, raw, isMe, myName);
       prDetailCache.set(prKey(rid, num), next);
       onloaded?.(next);
-      // A push: the files and diff follow the new head (the reader is told).
       if (headMoved(pr.head_sha, next.head_sha)) return void followHead(rid, num);
+      if (ownReviewSettled && next.state === pr.state && next.comments.length === pr.comments.length) { pr = next; pending = null; return; }
       const moved = next.updated_at !== pr.updated_at || next.state !== pr.state || next.comments.length !== pr.comments.length;
       pending = moved ? next : null;
     }, { ms: POLL_MS });

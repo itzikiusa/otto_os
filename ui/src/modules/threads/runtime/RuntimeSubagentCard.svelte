@@ -7,6 +7,8 @@
   // A background subagent keeps running after its turn ended; the card says
   // so until its task finishes.
   import type { TurnItem } from '../../../lib/api/types';
+  import LoadState from '../../../lib/components/LoadState.svelte';
+  import { plural } from '../../../lib/plural';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { now } from '../../../lib/stores/now.svelte';
   import RuntimeAgentRow from './RuntimeAgentRow.svelte';
@@ -46,7 +48,9 @@
     const last = activity.findLast((i) => i.type !== 'assistant_message');
     return item.last_tool ?? last?.title ?? null;
   });
-  const steps = $derived(item.tool_uses > 0 ? `${item.tool_uses} ${item.tool_uses === 1 ? 'step' : 'steps'}` : null);
+  const steps = $derived(item.tool_uses > 0 ? plural(item.tool_uses, 'step') : null);
+  const detailLoading = $derived(Boolean(item.detail_omitted && sessionId && runtimeViews.loadingItem[`${sessionId}:${item.id}`]));
+  const itemDetailError = $derived(sessionId ? (runtimeViews.itemError[`${sessionId}:${item.id}`] ?? null) : null);
   const tone = $derived<'live' | 'done' | 'failed' | 'off'>(running ? 'live' : item.status === 'completed' ? 'done' : item.status === 'failed' ? 'failed' : 'off');
   const sub = $derived([item.subagent_type && item.subagent_type !== name ? item.subagent_type : null, item.background ? 'Background' : null].filter(Boolean).join(' · ') || null);
   /** One line: the live step, else the error or the answer's first line. */
@@ -61,6 +65,17 @@
   <RuntimeAgentRow {name} {sub} {tone} status={statusText} {elapsed} {result} expanded={open} ontoggle={() => (open = !open)} />
   {#if open}
     <div class="sa-body">
+      {#if item.detail_omitted && (detailLoading || (itemDetailError && sessionId))}
+        <LoadState
+          variant="compact"
+          what="subagent details"
+          loading={detailLoading}
+          error={itemDetailError}
+          empty
+          rows={1}
+          onretry={sessionId ? () => void runtimeViews.ensureItemDetail(sessionId, item.id) : undefined}
+        />
+      {/if}
       {#if item.prompt}
         <p class="sa-label">Task</p>
         <p class="sa-prompt" dir="auto">{item.prompt}</p>

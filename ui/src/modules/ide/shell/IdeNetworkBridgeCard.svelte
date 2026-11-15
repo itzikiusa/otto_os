@@ -7,15 +7,20 @@
   import { untrack } from 'svelte';
   import { api } from '../../../lib/api/client';
   import type { Connection, K8sCluster, K8sNamespace } from '../../../lib/api/types';
-  import { announceShown } from '../../../lib/announce.svelte';
+  import { announce, announceShown } from '../../../lib/announce.svelte';
   import Badge from '../../../lib/components/Badge.svelte';
+  import EnvBadge from '../../../lib/components/EnvBadge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import Switch from '../../../lib/components/Switch.svelte';
   import { loadErrorText } from '../../../lib/loadError';
   import { plural } from '../../../lib/plural';
+  import { router } from '../../../lib/router.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, type IdeBridgedServiceSummary, type IdeNetBridgeStatusResp } from '../ideStore.svelte';
+  import { bridgeEnvCache, confirmProdNetworkBridge } from './networkBridgeGuard.svelte';
   import {
+    isProdEnvironment,
     mergeClusterNamespaceSuggestions,
     serializeNetworkBridgeDraft,
     type IdeNetworkBridgeDraft,
@@ -41,8 +46,12 @@
 
   let clusters = $state<K8sCluster[]>([]);
   let clustersLoading = $state(false);
+  let clustersError = $state<string | null>(null);
   let loadedSshConns = $state<Connection[]>([]);
+  let sshLoading = $state(false);
+  let sshError = $state<string | null>(null);
   let liveNamespaces = $state<K8sNamespace[]>([]);
+  let namespacesError = $state<string | null>(null);
   let nsLoadedForCluster = $state('');
   let mappingsOpen = $state(false);
   let testing = $state(false);
@@ -53,9 +62,21 @@
   const selectedCluster = $derived(
     clusters.find((c) => c.id === draft.k8s_cluster_id) ?? null,
   );
+  const selectedSsh = $derived(
+    effectiveSshConns.find((c) => c.id === draft.ssh_tunnel_connection_id) ?? null,
+  );
+  const isProdSelected = $derived(
+    isProdEnvironment(selectedCluster?.environment) || isProdEnvironment(selectedSsh?.environment),
+  );
   const namespaceChips = $derived(
     mergeClusterNamespaceSuggestions(selectedCluster, liveNamespaces).slice(0, 8),
   );
+
+  $effect(() => {
+    if (sshConnections && sshConnections.length > 0) {
+      bridgeEnvCache.seedSshConns(sshConnections);
+    }
+  });
 
   function markDirty(): void {
     probeError = '';
@@ -78,6 +99,7 @@
     const cid = draft.k8s_cluster_id.trim();
     if (!cid) {
       liveNamespaces = [];
+      namespacesError = null;
       nsLoadedForCluster = '';
       return;
     }
@@ -90,16 +112,21 @@
 
   async function loadClusters(): Promise<void> {
     clustersLoading = true;
+    clustersError = null;
     try {
       clusters = await api.get<K8sCluster[]>('/k8s/clusters');
-    } catch {
+      bridgeEnvCache.seedClusters(clusters);
+    } catch (e) {
       clusters = [];
+      clustersError = loadErrorText(e);
     } finally {
       clustersLoading = false;
     }
   }
 
   async function loadClusterNamespaces(clusterId: string): Promise<void> {
+    if (!clusterId) return;
+    namespacesError = null;
     try {
       const resp = await api.get<{ namespaces: K8sNamespace[] }>(
         `/k8s/clusters/${encodeURIComponent(clusterId)}/namespaces`,
@@ -107,14 +134,17 @@
       if (nsLoadedForCluster === clusterId) {
         liveNamespaces = resp.namespaces ?? [];
       }
-    } catch {
+    } catch (e) {
       if (nsLoadedForCluster === clusterId) {
         liveNamespaces = [];
+        namespacesError = loadErrorText(e);
       }
     }
   }
 
   async function loadWorkspaceSshConns(): Promise<void> {
+    sshLoading = true;
+    sshError = null;
     try {
       const scopes = Array.from(
         new Set(
@@ -131,19 +161,56 @@
         scopes.map((id) => api.get<Connection[]>(`/workspaces/${encodeURIComponent(id)}/connections`)),
       );
       const seen = new Map<string, Connection>();
+      let anyOk = false;
+      let firstErr: unknown = null;
       for (const r of results) {
-        if (r.status !== 'fulfilled') continue;
-        for (const c of r.value) {
-          if (c.kind === 'ssh' && !seen.has(c.id)) seen.set(c.id, c);
+        if (r.status === 'fulfilled') {
+          anyOk = true;
+          for (const c of r.value) {
+            if (c.kind === 'ssh' && !seen.has(c.id)) seen.set(c.id, c);
+          }
+        } else if (!firstErr) {
+          firstErr = r.reason;
         }
       }
+      if (!anyOk && firstErr) {
+        sshError = loadErrorText(firstErr);
+      }
       loadedSshConns = Array.from(seen.values());
-    } catch {
+      if (anyOk) bridgeEnvCache.seedSshConns(loadedSshConns);
+    } catch (e) {
       loadedSshConns = [];
+      sshError = loadErrorText(e);
+    } finally {
+      sshLoading = false;
     }
   }
 
-  function handleClusterChange(nextClusterId: string): void {
+  async function setEnabledWithGuard(next: boolean): Promise<boolean> {
+    if (!next) {
+      draft.enabled = false;
+      markDirty();
+      return true;
+    }
+    const candidate = {
+      enabled: true,
+      k8s_cluster_id: draft.k8s_cluster_id.trim() || null,
+      k8s_namespace: draft.k8s_namespace.trim() || null,
+      ssh_tunnel_connection_id: draft.ssh_tunnel_connection_id.trim() || null,
+    };
+    const allowed = await confirmProdNetworkBridge(candidate, 'enable', ide.target.workspace_id);
+    if (!allowed) {
+      draft.enabled = false;
+      return false;
+    }
+    draft.enabled = true;
+    markDirty();
+    return true;
+  }
+
+  async function handleClusterChange(nextClusterId: string): Promise<void> {
+    const prevClusterId = draft.k8s_cluster_id;
+    const wasEnabled = draft.enabled;
     draft.k8s_cluster_id = nextClusterId;
     if (nextClusterId) {
       const picked = clusters.find((c) => c.id === nextClusterId);
@@ -153,14 +220,33 @@
           picked?.known_namespaces?.[0]?.trim() ||
           'default';
       }
+      if (isProdEnvironment(picked?.environment)) {
+        const allowed = await setEnabledWithGuard(true);
+        if (!allowed && wasEnabled) {
+          draft.k8s_cluster_id = prevClusterId;
+        }
+        return;
+      }
       if (!draft.enabled) draft.enabled = true;
     }
     markDirty();
   }
 
-  function handleSshTunnelChange(nextConnId: string): void {
+  async function handleSshTunnelChange(nextConnId: string): Promise<void> {
+    const prevConnId = draft.ssh_tunnel_connection_id;
+    const wasEnabled = draft.enabled;
     draft.ssh_tunnel_connection_id = nextConnId;
-    if (nextConnId && !draft.enabled) draft.enabled = true;
+    if (nextConnId) {
+      const picked = effectiveSshConns.find((c) => c.id === nextConnId);
+      if (isProdEnvironment(picked?.environment)) {
+        const allowed = await setEnabledWithGuard(true);
+        if (!allowed && wasEnabled) {
+          draft.ssh_tunnel_connection_id = prevConnId;
+        }
+        return;
+      }
+      if (!draft.enabled) draft.enabled = true;
+    }
     markDirty();
   }
 
@@ -206,10 +292,12 @@
     }
     testing = true;
     try {
-      probeResult = await api.long.post<IdeNetBridgeStatusResp>('/ide/environments/bridge-test', {
+      const res = await api.long.post<IdeNetBridgeStatusResp>('/ide/environments/bridge-test', {
         target: ide.targetPayload,
         bridge: config,
       });
+      probeResult = res;
+      if (res.message) announce(res.message);
     } catch (e) {
       probeError = loadErrorText(e);
     } finally {
@@ -218,15 +306,19 @@
   }
 </script>
 
-<section class="nb-card" aria-labelledby="{idPrefix}-heading" data-testid="ide-network-bridge-card">
+<section
+  class="nb-card"
+  class:is-prod={draft.enabled && isProdSelected}
+  aria-labelledby="{idPrefix}-heading"
+  data-testid="ide-network-bridge-card"
+>
   <div class="nb-head">
     <div class="nb-title-row">
       <Switch
         checked={draft.enabled}
         label="Enable Kubernetes & SSH network bridge for local Run & Debug"
         onchange={(next) => {
-          draft.enabled = next;
-          markDirty();
+          void setEnabledWithGuard(next);
         }}
       />
       <div class="nb-copy">
@@ -234,11 +326,13 @@
           <h3 id="{idPrefix}-heading" class="nb-title">Cluster &amp; SSH network bridge (Run &amp; Debug)</h3>
           {#if draft.enabled}
             <Badge
-              tone="ok"
+              tone={isProdSelected ? 'bad' : 'ok'}
               dot
               label={selectedCluster
-                ? `${selectedCluster.name} · ${draft.k8s_namespace.trim() || 'default'}`
-                : 'Active'}
+                ? `${isProdSelected ? 'PROD · ' : ''}${selectedCluster.name} · ${draft.k8s_namespace.trim() || 'default'}`
+                : isProdSelected
+                  ? 'PROD · Active'
+                  : 'Active'}
             />
           {:else}
             <Badge tone="neutral" variant="outline" label="Off" />
@@ -266,7 +360,7 @@
       {#if onSave}
         <button
           type="button"
-          class="btn small primary"
+          class="btn small"
           disabled={saving}
           onclick={onSave}
           data-testid="ide-netbridge-save-btn"
@@ -279,12 +373,17 @@
 
   <div class="nb-grid">
     <div class="field">
-      <label for="{idPrefix}-cluster">Kubernetes cluster</label>
+      <div class="nb-field-top">
+        <label for="{idPrefix}-cluster">Kubernetes cluster</label>
+        {#if selectedCluster}
+          <EnvBadge env={selectedCluster.environment} />
+        {/if}
+      </div>
       <select
         id="{idPrefix}-cluster"
         class="input"
         value={draft.k8s_cluster_id}
-        onchange={(e) => handleClusterChange((e.currentTarget as HTMLSelectElement).value)}
+        onchange={(e) => void handleClusterChange((e.currentTarget as HTMLSelectElement).value)}
         data-testid="ide-netbridge-cluster-select"
       >
         <option value="">{clustersLoading ? 'Fetching clusters…' : 'None (no K8s cluster)'}</option>
@@ -292,6 +391,22 @@
           <option value={c.id}>{c.name} ({c.environment} · {c.context_name})</option>
         {/each}
       </select>
+      {#if clustersError}
+        <LoadState
+          variant="compact"
+          what="Kubernetes clusters"
+          error={clustersError}
+          empty
+          onretry={() => void loadClusters()}
+        />
+      {:else if !clustersLoading && clusters.length === 0}
+        <div class="nb-empty-link">
+          <span class="nb-note">No Kubernetes clusters registered yet.</span>
+          <button type="button" class="btn small ghost" onclick={() => router.go('kubernetes')}>
+            Open Kubernetes…
+          </button>
+        </div>
+      {/if}
     </div>
 
     <div class="field">
@@ -312,6 +427,15 @@
           <option value={ns}>{ns}</option>
         {/each}
       </datalist>
+      {#if namespacesError && draft.k8s_cluster_id.trim()}
+        <LoadState
+          variant="compact"
+          what="cluster namespaces"
+          error={namespacesError}
+          empty
+          onretry={() => void loadClusterNamespaces(draft.k8s_cluster_id.trim())}
+        />
+      {/if}
       {#if selectedCluster && namespaceChips.length > 0}
         <div class="nb-chip-row">
           {#each namespaceChips as ns (ns)}
@@ -321,8 +445,8 @@
               aria-pressed={draft.k8s_namespace.trim() === ns}
               onclick={() => {
                 draft.k8s_namespace = ns;
-                if (!draft.enabled) draft.enabled = true;
-                markDirty();
+                if (!draft.enabled) void setEnabledWithGuard(true);
+                else markDirty();
               }}
             >
               {ns}
@@ -333,19 +457,40 @@
     </div>
 
     <div class="field">
-      <label for="{idPrefix}-ssh">SSH bastion SOCKS tunnel (optional)</label>
+      <div class="nb-field-top">
+        <label for="{idPrefix}-ssh">SSH bastion SOCKS tunnel (optional)</label>
+        {#if selectedSsh}
+          <EnvBadge env={selectedSsh.environment} readOnly={selectedSsh.read_only} />
+        {/if}
+      </div>
       <select
         id="{idPrefix}-ssh"
         class="input"
         value={draft.ssh_tunnel_connection_id}
-        onchange={(e) => handleSshTunnelChange((e.currentTarget as HTMLSelectElement).value)}
+        onchange={(e) => void handleSshTunnelChange((e.currentTarget as HTMLSelectElement).value)}
         data-testid="ide-netbridge-ssh-select"
       >
-        <option value="">None (direct / K8s only)</option>
+        <option value="">{sshLoading ? 'Fetching SSH hosts…' : 'None (direct / K8s only)'}</option>
         {#each effectiveSshConns as c (c.id)}
           <option value={c.id}>{c.name} ({c.environment})</option>
         {/each}
       </select>
+      {#if sshError && sshConnections === undefined}
+        <LoadState
+          variant="compact"
+          what="SSH connections"
+          error={sshError}
+          empty
+          onretry={() => void loadWorkspaceSshConns()}
+        />
+      {:else if !sshLoading && effectiveSshConns.length === 0}
+        <div class="nb-empty-link">
+          <span class="nb-note">No SSH hosts configured yet.</span>
+          <button type="button" class="btn small ghost" onclick={() => router.go('connections')}>
+            Open Connections…
+          </button>
+        </div>
+      {/if}
     </div>
 
     <div class="nb-flags">
@@ -398,7 +543,7 @@
         </p>
       {:else}
         {#each draft.mappings as row (row.rowId)}
-          <div class="nb-map-row">
+          <div class="nb-map-row" dir="ltr">
             <input
               class="input nb-host-in"
               type="text"
@@ -418,7 +563,7 @@
               bind:value={row.from_port}
               oninput={markDirty}
             />
-            <span class="nb-arrow" aria-hidden="true">→</span>
+            <span class="nb-arrow" aria-hidden="true"><Icon name="chevronRight" size={12} noflip /></span>
             <input
               class="input nb-host-in"
               type="text"
@@ -499,6 +644,10 @@
     display: flex; flex-direction: column; gap: 10px; padding: 12px;
     border-radius: var(--radius-m); background: var(--surface-2); border: 1px solid var(--border);
   }
+  .nb-card.is-prod {
+    border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+    background: color-mix(in srgb, var(--danger-soft) 45%, var(--surface-2));
+  }
   .nb-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px; }
   .nb-title-row { display: flex; align-items: flex-start; gap: 10px; flex: 1; min-inline-size: 240px; }
   .nb-copy { display: flex; flex-direction: column; gap: 4px; min-inline-size: 0; }
@@ -508,6 +657,8 @@
   .nb-sub code, .nb-note code, .nb-flag-item code { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text); }
   .nb-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .nb-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: start; }
+  .nb-field-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .nb-empty-link { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; margin-block-start: 4px; }
   .nb-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-block-start: 4px; }
   .nb-flags { display: flex; flex-direction: column; gap: 6px; padding-block-start: 4px; }
   .nb-flag-item { display: flex; align-items: center; gap: 8px; font-size: var(--fs-xs); color: var(--text); }
@@ -519,7 +670,7 @@
   .nb-map-row { display: flex; align-items: center; gap: 6px; min-inline-size: 0; }
   .nb-host-in { flex: 1; min-inline-size: 96px; font-family: var(--font-mono); }
   .nb-port-in { inline-size: 68px; flex-shrink: 0; font-family: var(--font-mono); }
-  .nb-arrow { font-size: var(--fs-xs); color: var(--text-dim); flex-shrink: 0; }
+  .nb-arrow { display: inline-flex; align-items: center; color: var(--text-dim); flex-shrink: 0; }
   .nb-err { font-size: var(--fs-xs); color: var(--danger); }
   .nb-probe {
     display: flex; flex-direction: column; gap: 8px; padding: 8px;

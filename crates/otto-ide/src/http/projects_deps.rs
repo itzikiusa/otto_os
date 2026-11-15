@@ -275,14 +275,35 @@ pub(super) async fn deps_action<S: IdeCtx>(
             );
             err
         })?;
-    let resp = crate::deps_inspector::run_deps_action(
+    let resp = crate::deps_inspector::run_deps_action_as(
         &canon_root,
         &manifest_path,
         &req,
         &env_map,
         &ctx.ide().history,
+        user.is_root,
     )
     .await?;
+    if resp.ok {
+        let lsp_pool = &ctx.ide().lsp_pool;
+        lsp_pool.notify_watched_file_if_build_manifest(&manifest_path, 2);
+        if let Some(dir) = manifest_path.parent() {
+            for sibling in [
+                "go.sum",
+                "Cargo.lock",
+                "package-lock.json",
+                "pnpm-lock.yaml",
+                "yarn.lock",
+                "uv.lock",
+                "poetry.lock",
+            ] {
+                let lock_path = dir.join(sibling);
+                if lock_path != manifest_path && lock_path.is_file() {
+                    lsp_pool.notify_watched_file_if_build_manifest(&lock_path, 2);
+                }
+            }
+        }
+    }
     Ok(Json(resp))
 }
 

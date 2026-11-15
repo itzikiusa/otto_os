@@ -177,7 +177,10 @@ export interface MessageAttachment {
   id: string;
   kind: 'image' | 'file';
   mime: string;
+  media_type?: string;
   name?: string;
+  /** Optimistic client-side data URL preview before the turn settles. */
+  preview_url?: string;
 }
 
 export type RuntimeRequestStatus = 'pending' | 'resolved' | 'expired' | 'cancelled';
@@ -295,6 +298,11 @@ export interface QueuedDeliverReq {
 export type RuntimeReplay =
   | { kind: 'events'; events: RuntimeEvent[]; last_sequence: number }
   | { kind: 'snapshot'; snapshot_sequence: number; snapshot: RuntimeSnapshot };
+
+/** Response wrapper for hydrated single-item detail (`GET /runtime-sessions/{id}/items/{item_id}`). */
+export interface RuntimeTurnItemDetailResponse {
+  item: TurnItem;
+}
 
 /** POST /runtime-sessions/:id/reopen revives closed/dormant sessions without a prompt; live agents are preserved. */
 export type RuntimeSessionStatus =
@@ -497,9 +505,10 @@ export interface UpdateRuntimeSessionReq {
 }
 
 /** `text` may be empty when `images` is not. `model` / `effort` apply to this
- *  turn and stick for later ones; `effort` is Claude / Codex only. Images:
- *  Claude, Codex, and ACP agents that advertise them; Antigravity is text
- *  only. Unsupported input is a 400. */
+ *  turn and stick for later ones (`effort` is supported by Claude, Codex, agy,
+ *  and pi models that advertise reasoning levels). Images: Claude, Codex, and
+ *  ACP agents that advertise them; Antigravity is text only. Unsupported input
+ *  is a 400. */
 export interface RuntimePromptReq {
   /** Start a fresh provider conversation in the same thread; refuses outstanding work. */
   fresh_context?: boolean;
@@ -561,7 +570,7 @@ export interface RuntimeComposerContext {
 export interface RuntimeDraftContent {
   text: string;
   images: (PromptImage & { name: string })[];
-  model: string | null;
+  model: string | null | undefined;
   effort: import('../../providerModels').EffortLevel | null;
   access_mode: RuntimeAccessMode | null;
   fresh_context: boolean;

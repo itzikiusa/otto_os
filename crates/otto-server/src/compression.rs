@@ -13,6 +13,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 const MIN_COMPRESS_BYTES: u64 = 1_024;
+const BLOCKING_COMPRESS_BYTES: usize = 64 * 1024;
 const MAX_COMPRESS_BYTES: usize = 32 * 1024 * 1024;
 
 fn accepts_gzip(req: &Request) -> bool {
@@ -81,17 +82,26 @@ pub async fn gzip_responses(req: Request, next: Next) -> Response {
 
     let (mut parts, body) = res.into_parts();
     let Ok(raw) = to_bytes(body, MAX_COMPRESS_BYTES).await else {
+        parts.headers.remove(header::CONTENT_LENGTH);
+        parts.headers.remove(header::CONTENT_ENCODING);
+        parts.status = StatusCode::PAYLOAD_TOO_LARGE;
         return Response::from_parts(parts, Body::empty());
     };
     if (raw.len() as u64) < MIN_COMPRESS_BYTES {
         return Response::from_parts(parts, Body::from(raw));
     }
 
-    let mut encoder = GzEncoder::new(Vec::with_capacity(raw.len() / 4), Compression::fast());
-    if encoder.write_all(&raw).is_err() {
-        return Response::from_parts(parts, Body::from(raw));
-    }
-    let Ok(compressed) = encoder.finish() else {
+    let (raw, compressed) = if raw.len() >= BLOCKING_COMPRESS_BYTES {
+        let raw_for_task = raw.clone();
+        match tokio::task::spawn_blocking(move || gzip_bytes(&raw_for_task)).await {
+            Ok(Some(c)) => (raw, Some(c)),
+            _ => (raw, None),
+        }
+    } else {
+        let c = gzip_bytes(&raw);
+        (raw, c)
+    };
+    let Some(compressed) = compressed else {
         return Response::from_parts(parts, Body::from(raw));
     };
     if compressed.len() >= raw.len() {
@@ -108,4 +118,122 @@ pub async fn gzip_responses(req: Request, next: Next) -> Response {
         .headers
         .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
     Response::from_parts(parts, Body::from(compressed))
+}
+
+fn gzip_bytes(raw: &[u8]) -> Option<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::with_capacity(raw.len() / 4), Compression::fast());
+    encoder.write_all(raw).ok()?;
+    encoder.finish().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::get;
+    use axum::Router;
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn compresses_small_and_large_json_and_leaves_tiny_uncompressed() {
+        let app = Router::new()
+            .route(
+                "/tiny",
+                get(|| async { ([("content-type", "application/json")], "{\"ok\":true}") }),
+            )
+            .route(
+                "/medium",
+                get(|| async {
+                    let body = format!("{{\"items\":\"{}\"}}", "abcd".repeat(1_024));
+                    ([("content-type", "application/json")], body)
+                }),
+            )
+            .route(
+                "/large",
+                get(|| async {
+                    let body = format!("{{\"items\":\"{}\"}}", "abcdefgh".repeat(16_384));
+                    ([("content-type", "application/json")], body)
+                }),
+            )
+            .layer(axum::middleware::from_fn(gzip_responses));
+
+        let tiny = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tiny")
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(tiny.headers().get(header::CONTENT_ENCODING).is_none());
+
+        for uri in ["/medium", "/large"] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::ACCEPT_ENCODING, "gzip")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            assert_eq!(
+                res.headers()
+                    .get(header::CONTENT_ENCODING)
+                    .and_then(|v| v.to_str().ok()),
+                Some("gzip")
+            );
+            let bytes = to_bytes(res.into_body(), MAX_COMPRESS_BYTES).await.unwrap();
+            let mut decoded = String::new();
+            GzDecoder::new(&bytes[..])
+                .read_to_string(&mut decoded)
+                .unwrap();
+            assert!(decoded.starts_with("{\"items\":\""));
+        }
+    }
+
+    #[tokio::test]
+    async fn body_read_failure_clears_content_length_and_sets_error_status() {
+        let app = Router::new()
+            .route(
+                "/broken",
+                get(|| async {
+                    let failing = http_body_util::Limited::new(
+                        http_body_util::Full::new(axum::body::Bytes::from(vec![b'x'; 4_096])),
+                        1_024,
+                    );
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::CONTENT_LENGTH, "4096")
+                        .body(Body::new(failing))
+                        .unwrap()
+                }),
+            )
+            .layer(axum::middleware::from_fn(gzip_responses));
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/broken")
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(res
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .is_none_or(|v| v == "0"));
+        assert!(res.headers().get(header::CONTENT_ENCODING).is_none());
+    }
 }

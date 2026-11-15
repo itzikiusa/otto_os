@@ -72,12 +72,16 @@
 
   async function runAction(action: string, dep?: IdeDepItem | null, version?: string | null): Promise<void> {
     busyAction = action;
+    let shouldRefresh = false;
     try {
       const res = await executeIdeDepAction({ root, connectionId, projectFolders, path: filePath, content, action, dep, version, deps: items });
       if (res.updated_content && res.updated_content !== content) onapplycontent(res.updated_content);
-      await refreshDeps();
+      shouldRefresh = true;
     } finally {
       busyAction = null;
+    }
+    if (shouldRefresh) {
+      void refreshDeps().catch(() => {});
     }
   }
 </script>

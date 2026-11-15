@@ -196,32 +196,13 @@ pub fn extract_gemini_ids(html: &str) -> Vec<String> {
         .collect()
 }
 
-/// `agy models` stdout → (id, label) pairs. Lines are `id<TAB>Human Label`;
-/// tolerate plain-space separation and skip banners ("Fetching …").
+/// `agy models` stdout → (id, label) pairs, reusing `otto_sessions`'s unified
+/// family-collapsing + ANSI-stripping parser so Settings and Threads agree.
 pub fn parse_agy_models_output(stdout: &str) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    for line in stdout.split(['\n', '\r']) {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let (id, label) = match line.split_once('\t') {
-            Some((i, l)) => (i.trim(), l.trim()),
-            None => match line.split_once("  ") {
-                Some((i, l)) => (i.trim(), l.trim()),
-                None => (line, ""),
-            },
-        };
-        // An id is a lone lowercase token; banner lines have spaces/uppercase.
-        if id.is_empty() || !id.chars().all(is_id_char) {
-            continue;
-        }
-        let label = if label.is_empty() { id } else { label };
-        if !out.iter().any(|(i, _)| i == id) {
-            out.push((id.to_string(), label.to_string()));
-        }
-    }
-    out
+    otto_sessions::provider_models::parse_agy_models_output(stdout)
+        .into_iter()
+        .map(|m| (m.id, m.label))
+        .collect()
 }
 
 /// models.dev `api.json` → (id, label) pairs for one of our providers.

@@ -115,16 +115,33 @@ export function mergeHistoryPage(p: RuntimeProjection, page: RuntimeSnapshot): R
   };
 }
 
-function upsert<T extends { id: string }>(list: T[], next: T): T[] {
+export const MAX_STREAM_OUTPUT_BYTES = 128 * 1024;
+const STREAM_OUTPUT_TRUNC_MARKER = '…[truncated]\n';
+
+function appendBoundedOutput(prev: string | undefined, chunk: string): string {
+  const combined = (prev ?? '') + chunk;
+  if (combined.length <= MAX_STREAM_OUTPUT_BYTES) return combined;
+  const keep = Math.max(0, MAX_STREAM_OUTPUT_BYTES - STREAM_OUTPUT_TRUNC_MARKER.length);
+  return STREAM_OUTPUT_TRUNC_MARKER + combined.slice(combined.length - keep);
+}
+
+function upsertMut<T extends { id: string }>(list: T[], next: T): void {
   const i = list.findIndex((x) => x.id === next.id);
-  if (i < 0) return [...list, next];
-  const out = list.slice();
-  out[i] = next;
-  return out;
+  if (i < 0) list.push(next);
+  else list[i] = next;
 }
 
 export function replaceHydratedItem(p: RuntimeProjection, item: TurnItem): RuntimeProjection {
-  return { ...p, items: upsertItem(p.items, item) };
+  let mergedItem = item;
+  if (item.type === 'file_change' && !item.diff_str) {
+    const prev = p.items.find((x) => x.id === item.id);
+    if (prev?.type === 'file_change' && prev.diff_str) {
+      mergedItem = { ...item, diff_str: prev.diff_str };
+    }
+  }
+  const items = p.items.slice();
+  upsertItemMut(items, mergedItem);
+  return { ...p, items };
 }
 
 function preserveHydratedItems(prevItems: readonly TurnItem[], nextItems: TurnItem[]): TurnItem[] {
@@ -149,62 +166,164 @@ function preserveHydratedItems(prevItems: readonly TurnItem[], nextItems: TurnIt
   return changed ? merged : nextItems;
 }
 
-function upsertItem(items: TurnItem[], item: TurnItem): TurnItem[] {
+function upsertItemMut(items: TurnItem[], item: TurnItem): void {
   // Streamed updates land on the newest items: search from the end.
   let i = items.length - 1;
   while (i >= 0 && items[i].id !== item.id) i--;
-  const out = items.slice();
   if (i >= 0) {
-    out[i] = item;
-    return out;
+    items[i] = item;
+    return;
   }
-  let at = out.length;
-  while (at > 0 && out[at - 1].ordinal > item.ordinal) at--;
-  out.splice(at, 0, item);
-  return out;
+  let at = items.length;
+  while (at > 0 && items[at - 1].ordinal > item.ordinal) at--;
+  items.splice(at, 0, item);
 }
 
-function applyOne(p: RuntimeProjection, ev: RuntimeEvent): RuntimeProjection {
-  const next = { ...p, lastSequence: ev.sequence };
-  switch (ev.type) {
-    case 'provider_session.updated':
-      return { ...next, session: ev.provider_session };
-    case 'provider_thread.updated':
-      return { ...next, thread: ev.provider_thread };
-    case 'provider_turn.updated': {
-      const prev = p.turns.find((t) => t.id === ev.provider_turn.id);
-      const usage = ev.provider_turn.turn_token_usage ?? prev?.turn_token_usage;
-      return { ...next, turns: upsert(p.turns, usage ? { ...ev.provider_turn, turn_token_usage: usage } : ev.provider_turn) };
+function sortedEvents(events: readonly RuntimeEvent[]): readonly RuntimeEvent[] {
+  for (let i = 1; i < events.length; i++) {
+    if (events[i].sequence < events[i - 1].sequence) {
+      return [...events].sort((a, b) => a.sequence - b.sequence);
     }
-    case 'turn_item.updated':
-      return { ...next, items: upsertItem(p.items, ev.turn_item) };
-    case 'runtime_request.updated':
-      return { ...next, requests: upsert(p.requests, ev.runtime_request) };
-    case 'plan.updated':
-      return { ...next, plans: upsert(p.plans, ev.plan) };
-    case 'queue.updated':
-      return { ...next, queued: ev.queued_prompts };
-    case 'command_output.delta':
-      return { ...next, output: { ...p.output, [ev.item_id]: (p.output[ev.item_id] ?? '') + ev.chunk } };
-    case 'turn.terminal':
-      return { ...next, turns: p.turns.map((t) => (t.id === ev.turn_id ? { ...t, status: ev.status } : t)) };
   }
+  return events;
 }
 
-/** Fold sequenced events. Events at or below `lastSequence` are duplicates
- *  and skipped; a jump past `lastSequence + 1` stops the fold and reports
- *  `gap` (the caller replays from the returned `lastSequence`). */
+function foldEventBatch(
+  p: RuntimeProjection,
+  events: readonly RuntimeEvent[],
+  strictContiguous: boolean,
+): { projection: RuntimeProjection; gap: boolean } {
+  if (events.length === 0) return { projection: p, gap: false };
+  const ordered = sortedEvents(events);
+
+  let lastSequence = p.lastSequence;
+  let session = p.session;
+  let thread = p.thread;
+  let turns = p.turns;
+  let turnsCloned = false;
+  let items = p.items;
+  let itemsCloned = false;
+  let requests = p.requests;
+  let requestsCloned = false;
+  let plans = p.plans;
+  let plansCloned = false;
+  let queued = p.queued;
+  let output = p.output;
+  let outputCloned = false;
+  let mutated = false;
+  let gap = false;
+
+  for (let idx = 0; idx < ordered.length; idx++) {
+    const ev = ordered[idx];
+    if (ev.sequence <= lastSequence) continue;
+    if (strictContiguous && ev.sequence !== lastSequence + 1) {
+      gap = true;
+      break;
+    }
+    lastSequence = ev.sequence;
+    mutated = true;
+    switch (ev.type) {
+      case 'provider_session.updated':
+        session = ev.provider_session;
+        break;
+      case 'provider_thread.updated':
+        thread = ev.provider_thread;
+        break;
+      case 'provider_turn.updated': {
+        if (!turnsCloned) {
+          turns = turns.slice();
+          turnsCloned = true;
+        }
+        const prev = turns.find((t) => t.id === ev.provider_turn.id);
+        const usage = ev.provider_turn.turn_token_usage ?? prev?.turn_token_usage;
+        upsertMut(turns, usage ? { ...ev.provider_turn, turn_token_usage: usage } : ev.provider_turn);
+        break;
+      }
+      case 'turn_item.updated': {
+        if (!itemsCloned) {
+          items = items.slice();
+          itemsCloned = true;
+        }
+        upsertItemMut(items, ev.turn_item);
+        const st = ev.turn_item.status;
+        const settled = st !== 'running' && st !== 'pending' && st !== 'waiting';
+        if (
+          settled &&
+          'output' in ev.turn_item &&
+          ev.turn_item.output !== undefined &&
+          ev.turn_item.output !== null &&
+          ev.turn_item.id in output
+        ) {
+          if (!outputCloned) {
+            output = { ...output };
+            outputCloned = true;
+          }
+          delete output[ev.turn_item.id];
+        }
+        break;
+      }
+      case 'runtime_request.updated':
+        if (!requestsCloned) {
+          requests = requests.slice();
+          requestsCloned = true;
+        }
+        upsertMut(requests, ev.runtime_request);
+        break;
+      case 'plan.updated':
+        if (!plansCloned) {
+          plans = plans.slice();
+          plansCloned = true;
+        }
+        upsertMut(plans, ev.plan);
+        break;
+      case 'queue.updated':
+        queued = ev.queued_prompts;
+        break;
+      case 'command_output.delta':
+        if (!outputCloned) {
+          output = { ...output };
+          outputCloned = true;
+        }
+        output[ev.item_id] = appendBoundedOutput(output[ev.item_id], ev.chunk);
+        break;
+      case 'turn.terminal':
+        if (!turnsCloned) {
+          turns = turns.slice();
+          turnsCloned = true;
+        }
+        for (let i = 0; i < turns.length; i++) {
+          if (turns[i].id === ev.turn_id) turns[i] = { ...turns[i], status: ev.status };
+        }
+        break;
+    }
+  }
+
+  if (!mutated) return { projection: p, gap };
+  return {
+    projection: {
+      ...p,
+      lastSequence,
+      session,
+      thread,
+      turns,
+      items,
+      requests,
+      plans,
+      queued,
+      output,
+    },
+    gap,
+  };
+}
+
+/** Fold sequenced events in a single batched pass. Events at or below
+ *  `lastSequence` are duplicates and skipped; a jump past `lastSequence + 1`
+ *  stops the fold and reports `gap` (the caller replays from `lastSequence`). */
 export function applyEvents(
   p: RuntimeProjection,
   events: readonly RuntimeEvent[],
 ): { projection: RuntimeProjection; gap: boolean } {
-  let cur = p;
-  for (const ev of [...events].sort((a, b) => a.sequence - b.sequence)) {
-    if (ev.sequence <= cur.lastSequence) continue;
-    if (ev.sequence !== cur.lastSequence + 1) return { projection: cur, gap: true };
-    cur = applyOne(cur, ev);
-  }
-  return { projection: cur, gap: false };
+  return foldEventBatch(p, events, true);
 }
 
 /** Apply a `GET …/events?after_sequence=` answer. Replayed events are
@@ -226,35 +345,38 @@ export function applyReplay(p: RuntimeProjection, replay: RuntimeReplay): Runtim
       !p.turns.some((pt) => fresh.turns.some((ft) => ft.ordinal === pt.ordinal && ft.id !== pt.id))
     ) {
       const turnFloor = fresh.oldestTurnOrdinal;
-      const itemFloor = fresh.items.length > 0 ? fresh.items[0].ordinal : Infinity;
       const keptTurns = p.turns.filter((t) => t.ordinal < turnFloor);
-      const keptTurnIds = new Set(keptTurns.map((t) => t.id));
-      const keptItems = p.items.filter(
-        (it) => it.ordinal < itemFloor && (!it.turn_id || keptTurnIds.has(it.turn_id)),
-      );
-      const keptRequestIds = new Set(
-        keptItems.flatMap((it) => (it.type === 'approval_request' ? [it.request_id] : [])),
-      );
-      const keptRequests = p.requests.filter(
-        (r) => (r.turn_id != null && keptTurnIds.has(r.turn_id)) || keptRequestIds.has(r.id),
-      );
-      const keptPlans = p.plans.filter((pl) => pl.turn_id != null && keptTurnIds.has(pl.turn_id));
-      return {
-        ...fresh,
-        turns: mergeById(keptTurns, fresh.turns).sort((a, b) => a.ordinal - b.ordinal),
-        items: mergeById(keptItems, fresh.items).sort((a, b) => a.ordinal - b.ordinal),
-        requests: mergeById(keptRequests, fresh.requests),
-        plans: mergeById(keptPlans, fresh.plans),
-        hasOlder: p.hasOlder,
-        oldestTurnOrdinal: p.oldestTurnOrdinal,
-        olderTurns: p.olderTurns,
-      };
+      let maxPrevOrdinal = -Infinity;
+      for (let i = 0; i < keptTurns.length; i++) {
+        if (keptTurns[i].ordinal > maxPrevOrdinal) maxPrevOrdinal = keptTurns[i].ordinal;
+      }
+      if (keptTurns.length > 0 && maxPrevOrdinal + 1 >= turnFloor) {
+        const itemFloor = fresh.items.length > 0 ? fresh.items[0].ordinal : Infinity;
+        const keptTurnIds = new Set(keptTurns.map((t) => t.id));
+        const keptItems = p.items.filter(
+          (it) => it.ordinal < itemFloor && (!it.turn_id || keptTurnIds.has(it.turn_id)),
+        );
+        const keptRequestIds = new Set(
+          keptItems.flatMap((it) => (it.type === 'approval_request' ? [it.request_id] : [])),
+        );
+        const keptRequests = p.requests.filter(
+          (r) => (r.turn_id != null && keptTurnIds.has(r.turn_id)) || keptRequestIds.has(r.id),
+        );
+        const keptPlans = p.plans.filter((pl) => pl.turn_id != null && keptTurnIds.has(pl.turn_id));
+        return {
+          ...fresh,
+          turns: mergeById(keptTurns, fresh.turns).sort((a, b) => a.ordinal - b.ordinal),
+          items: mergeById(keptItems, fresh.items).sort((a, b) => a.ordinal - b.ordinal),
+          requests: mergeById(keptRequests, fresh.requests),
+          plans: mergeById(keptPlans, fresh.plans),
+          hasOlder: p.hasOlder,
+          oldestTurnOrdinal: p.oldestTurnOrdinal,
+          olderTurns: p.olderTurns,
+        };
+      }
     }
     return fresh;
   }
-  let cur = p;
-  for (const ev of [...replay.events].sort((a, b) => a.sequence - b.sequence)) {
-    if (ev.sequence > cur.lastSequence) cur = applyOne(cur, ev);
-  }
+  const cur = foldEventBatch(p, replay.events, false).projection;
   return cur.lastSequence < replay.last_sequence ? { ...cur, lastSequence: replay.last_sequence } : cur;
 }

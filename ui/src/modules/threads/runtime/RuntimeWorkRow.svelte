@@ -19,6 +19,7 @@
   import RuntimeChildNotice from './RuntimeChildNotice.svelte';
   import { threadNoticeOf } from './childThreads';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   const RuntimeToolImages = lazyComponent(() => import('./RuntimeToolImages.svelte'));
   import { errorText, openedTarget, runNoticeOf, toolError, type PendingApproval } from './timeline';
@@ -130,6 +131,7 @@
   const commandOut = $derived(item.type === 'command_execution' ? (item.output ?? output) : '');
   const tail = $derived(running && commandOut ? lastLine(commandOut) : '');
   const detailLoading = $derived(Boolean(item.detail_omitted && sessionId && runtimeViews.loadingItem[`${sessionId}:${item.id}`]));
+  const itemDetailError = $derived(sessionId ? (runtimeViews.itemError[`${sessionId}:${item.id}`] ?? null) : null);
   const hasFilePatch = $derived(
     item.type === 'file_change' && Boolean(item.detail_omitted || item.diff_str || item.old_str != null || item.new_str != null),
   );
@@ -240,7 +242,18 @@
         <pre class="rw-pre rw-failure" data-testid="runtime-item-error">{error}</pre>
       {/if}
       {#if item.detail_omitted}
-        <p class="rw-tail" data-testid="runtime-item-loading">{detailLoading ? 'Loading details…' : 'Details unavailable.'}</p>
+        {#if itemDetailError && sessionId}
+          <LoadState
+            variant="compact"
+            what="item details"
+            loading={detailLoading}
+            error={itemDetailError}
+            empty
+            onretry={() => void runtimeViews.ensureItemDetail(sessionId, item.id)}
+          />
+        {:else}
+          <p class="rw-tail" data-testid="runtime-item-loading">{detailLoading ? 'Loading details…' : 'Details unavailable.'}</p>
+        {/if}
       {:else if item.type === 'command_execution'}
         <pre class="rw-pre" bind:this={outEl} onscroll={onOutScroll}><span class="rw-cmd">$ {item.input}</span>
 {commandOut || (running ? '' : 'No output.')}</pre>

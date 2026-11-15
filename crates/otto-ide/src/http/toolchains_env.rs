@@ -13,10 +13,11 @@ use serde::Deserialize;
 use super::{require_root_user, ApiResult};
 use crate::types::{
     IdeCreatePythonVenvReq, IdeDeleteLocalSdkQuery, IdeDeleteProjectFolderQuery,
-    IdeEnvironmentResp, IdeInstallJobResp, IdeInstallToolchainReq, IdeOkResp, IdeProjectFolderReq,
-    IdePythonVenvInfo, IdeRegisterLocalSdkReq, IdeRegisterLocalSdkResp, IdeShellEnvResp,
-    IdeTargetKind, IdeTargetQuery, IdeTargetSpec, IdeToolchainPythonVenvReq,
-    IdeToolchainPythonVenvResp, IdeToolchainsResp,
+    IdeEnvironmentResp, IdeEnvironmentsResp, IdeInstallJobResp, IdeInstallToolchainReq,
+    IdeNetBridgeStatusResp, IdeNetBridgeTestReq, IdeNetworkBridgeConfig, IdeOkResp,
+    IdeProjectFolderReq, IdePythonVenvInfo, IdeRegisterLocalSdkReq, IdeRegisterLocalSdkResp,
+    IdeShellEnvResp, IdeTargetKind, IdeTargetQuery, IdeTargetSpec, IdeToolchainPythonVenvReq,
+    IdeToolchainPythonVenvResp, IdeToolchainsResp, IdeUpdateEnvironmentReq,
 };
 use crate::IdeCtx;
 
@@ -352,4 +353,138 @@ pub(super) async fn remove_project_folder<S: IdeCtx>(
         .await?;
     ctx.ide().targets.invalidate_local_resolve_cache();
     Ok(Json(IdeEnvironmentResp { env }))
+}
+
+pub(super) async fn get_environments<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Query(q): Query<IdeTargetQuery>,
+) -> ApiResult<Json<IdeEnvironmentsResp>> {
+    let mut target = q.into_target_spec()?;
+    ctx.ide()
+        .environments
+        .enrich_target_roots(
+            &ctx.pool(),
+            Some(&ctx.ide().projects),
+            Some(&user),
+            &mut target,
+        )
+        .await;
+    let ssh = ctx
+        .ide()
+        .targets
+        .resolve(&ctx, &user, &target)
+        .await?
+        .into_ssh_spec();
+    let resp = ctx
+        .ide()
+        .environments
+        .get_environments_for_user(
+            &ctx.pool(),
+            ctx.secrets(),
+            &ctx.ide().targets,
+            &target,
+            ssh.as_ref(),
+            user.is_root,
+        )
+        .await?;
+    Ok(Json(resp))
+}
+
+pub(super) async fn put_environments<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(req): Json<IdeUpdateEnvironmentReq>,
+) -> ApiResult<Json<IdeEnvironmentResp>> {
+    let _ = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?;
+    if let Some(ref extra_roots) = req.additional_roots {
+        if req.target.kind == IdeTargetKind::Local && !user.is_root {
+            for r in extra_roots {
+                if !r.trim().is_empty() {
+                    ctx.authorize_local_target(&user, &IdeTargetSpec::local(r.clone()), true)
+                        .await?;
+                }
+            }
+        }
+    }
+    let prev_nb = ctx
+        .ide()
+        .environments
+        .get_project_env(&ctx.pool(), &req.target)
+        .await
+        .ok()
+        .and_then(|p| p.network_bridge);
+    let mut should_evict_nb = false;
+    if let Some(ref raw_nb) = req.network_bridge {
+        let clean_nb_opt = crate::netbridge::sanitize_network_bridge(Some(raw_nb.clone()))?;
+        if let Some(ref clean_nb) = clean_nb_opt {
+            if clean_nb.enabled {
+                ctx.ide()
+                    .netbridge
+                    .authorize_config(&ctx, &user, clean_nb)
+                    .await?;
+            } else {
+                let prev_k8s = prev_nb.as_ref().and_then(|p| p.k8s_cluster_id.as_ref());
+                let prev_ns = prev_nb.as_ref().and_then(|p| p.k8s_namespace.as_deref());
+                let prev_ssh = prev_nb
+                    .as_ref()
+                    .and_then(|p| p.ssh_tunnel_connection_id.as_ref());
+                let k8s_changed = clean_nb.k8s_cluster_id.is_some()
+                    && (clean_nb.k8s_cluster_id.as_ref() != prev_k8s
+                        || clean_nb.k8s_namespace.as_deref() != prev_ns);
+                let ssh_changed = clean_nb.ssh_tunnel_connection_id.is_some()
+                    && clean_nb.ssh_tunnel_connection_id.as_ref() != prev_ssh;
+                if k8s_changed || ssh_changed {
+                    let check_nb = IdeNetworkBridgeConfig {
+                        k8s_cluster_id: if k8s_changed {
+                            clean_nb.k8s_cluster_id.clone()
+                        } else {
+                            None
+                        },
+                        k8s_namespace: clean_nb.k8s_namespace.clone(),
+                        ssh_tunnel_connection_id: if ssh_changed {
+                            clean_nb.ssh_tunnel_connection_id.clone()
+                        } else {
+                            None
+                        },
+                        ..Default::default()
+                    };
+                    ctx.ide()
+                        .netbridge
+                        .authorize_config(&ctx, &user, &check_nb)
+                        .await?;
+                }
+            }
+        }
+        should_evict_nb = clean_nb_opt != prev_nb
+            || (prev_nb.is_some() && clean_nb_opt.as_ref().is_none_or(|nb| !nb.enabled));
+    }
+    let env = ctx
+        .ide()
+        .environments
+        .update_environment(&ctx.pool(), ctx.secrets(), req)
+        .await?;
+    if should_evict_nb {
+        ctx.ide().netbridge.evict_user(&user.id);
+    }
+    ctx.ide().targets.invalidate_local_resolve_cache();
+    Ok(Json(IdeEnvironmentResp { env }))
+}
+
+pub(super) async fn test_network_bridge<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(req): Json<IdeNetBridgeTestReq>,
+) -> ApiResult<Json<IdeNetBridgeStatusResp>> {
+    let _ = ctx
+        .ide()
+        .targets
+        .resolve_write(&ctx, &user, &req.target)
+        .await?;
+    let resp = ctx.ide().netbridge.probe_status(&ctx, &user, &req).await?;
+    Ok(Json(resp))
 }

@@ -58,16 +58,24 @@
   let modeBtnEl = $state<HTMLButtonElement | null>(null);
 
   const meta = $derived(auth.meta);
-  const canPickModel = $derived(parts.includes('model') && supportsModelSelection(provider, meta));
-  const canPickEffort = $derived(parts.includes('effort') && supportsEffortSelection(provider));
-  const canPickMode = $derived(parts.includes('mode') && supportsInteractionMode(provider));
-
   const catalog = $derived(modelsForProvider(provider, meta));
   const shownModelId = $derived(pinnedModel ?? effectiveModel ?? null);
   const modelLabel = $derived(formatModelLabel(provider, shownModelId, meta));
   const supportedEfforts = $derived(effortsForModel(provider, shownModelId, meta));
   const effortLabel = $derived(formatEffortShort(effort));
   const modeLabel = $derived(formatInteractionModeLabel(interactionMode));
+
+  const canPickModel = $derived(parts.includes('model') && supportsModelSelection(provider, meta));
+  const canPickEffort = $derived(
+    Boolean(
+      provider &&
+        parts.includes('effort') &&
+        supportsEffortSelection(provider) &&
+        !disabled &&
+        supportedEfforts.length > 0,
+    ),
+  );
+  const canPickMode = $derived(parts.includes('mode') && supportsInteractionMode(provider));
 
   async function promptCustomModel(): Promise<void> {
     const picked = await confirmer.promptText(
@@ -130,12 +138,19 @@
 
   export function openEffortPicker(): void {
     if (!canPickEffort || disabled) return;
+    const applyEffort = (nextEffort: EffortLevel | null): void => {
+      const canon = canonicalModelId(provider, pinnedModel, meta);
+      if (pinnedModel !== null && canon !== null && pinnedModel !== canon) {
+        onmodelchange(canon);
+      }
+      oneffortchange(nextEffort);
+    };
     const items: MenuItem[] = [
       {
         label: 'Default effort',
         hint: 'Model default',
         checked: effort === null,
-        action: () => oneffortchange(null),
+        action: () => applyEffort(null),
       },
       { separator: true },
       ...supportedEfforts.map(
@@ -143,7 +158,7 @@
           label: formatEffortLabel(lvl),
           hint: lvl,
           checked: effort === lvl,
-          action: () => oneffortchange(lvl),
+          action: () => applyEffort(lvl),
         }),
       ),
     ];

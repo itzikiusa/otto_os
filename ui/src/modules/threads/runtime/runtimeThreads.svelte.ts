@@ -332,11 +332,21 @@ class RuntimeThreads {
   async prompt(id: string, req: RuntimePromptReq): Promise<RuntimePromptResp> {
     const resp = await api.post<RuntimePromptResp>(`/runtime-sessions/${id}/prompt`, req);
     this.emitSequence(id, resp.sequence);
-    const mode = req.access_mode;
-    if (mode) {
-      // Sticky on the session (new threads start in the daemon default).
-      const row = this.byId[id];
-      if (row && row.access_mode !== mode) this.byId[id] = { ...row, access_mode: mode };
+    let row = this.byId[id];
+    if (row) {
+      let changed = false;
+      if (req.access_mode && row.access_mode !== req.access_mode) {
+        row = { ...row, access_mode: req.access_mode };
+        changed = true;
+      }
+      if (req.model !== undefined) {
+        const nextModel = req.model.trim() || undefined;
+        if (row.model !== nextModel) {
+          row = { ...row, model: nextModel };
+          changed = true;
+        }
+      }
+      if (changed) this.byId[id] = row;
     }
     return resp;
   }

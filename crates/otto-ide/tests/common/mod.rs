@@ -14,6 +14,7 @@ use otto_core::auth::{AuthUser, BoxFuture, RoleChecker};
 use otto_core::domain::User;
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
+use otto_ide::netbridge::IdeK8sSpec;
 use otto_ide::{IdeCtx, IdeEngine, IdeSshSpec};
 use otto_rbac::RbacRoleChecker;
 use otto_state::DbPool;
@@ -43,6 +44,19 @@ impl SecretStore for MemSecrets {
 }
 
 #[derive(Clone)]
+pub struct TestSshEntry {
+    pub owner_user_id: Option<String>,
+    pub spec: IdeSshSpec,
+}
+
+#[derive(Clone)]
+pub struct TestK8sEntry {
+    pub owner_user_id: Option<String>,
+    pub allowed_namespaces: Vec<String>,
+    pub spec: IdeK8sSpec,
+}
+
+#[derive(Clone)]
 pub struct TestIdeCtx {
     pub ide: Arc<IdeEngine>,
     pub pool: DbPool,
@@ -55,6 +69,8 @@ pub struct TestIdeCtx {
     /// `WorkspaceRole::Viewer` vs `WorkspaceRole::Editor`). `None` defaults to
     /// treating all `allowed_roots` as writable.
     pub writable_roots: Option<Vec<PathBuf>>,
+    pub ssh_connections: Arc<Mutex<HashMap<String, TestSshEntry>>>,
+    pub k8s_clusters: Arc<Mutex<HashMap<String, TestK8sEntry>>>,
 }
 
 impl IdeCtx for TestIdeCtx {
@@ -80,11 +96,70 @@ impl IdeCtx for TestIdeCtx {
 
     fn resolve_ssh_connection<'a>(
         &'a self,
-        _user: &'a User,
+        user: &'a User,
         connection_id: &'a Id,
     ) -> BoxFuture<'a, Result<IdeSshSpec>> {
         let cid = connection_id.clone();
-        Box::pin(async move { Err(Error::NotFound(format!("ssh connection {cid}"))) })
+        Box::pin(async move {
+            let entry = self
+                .ssh_connections
+                .lock()
+                .unwrap()
+                .get(cid.as_str())
+                .cloned()
+                .ok_or_else(|| Error::NotFound(format!("ssh connection {cid}")))?;
+            if !user.is_root && entry.owner_user_id.as_deref() != Some(user.id.as_str()) {
+                return Err(Error::Forbidden(
+                    "SSH connection belongs to another user or workspace".into(),
+                ));
+            }
+            Ok(entry.spec)
+        })
+    }
+
+    fn resolve_k8s_cluster<'a>(
+        &'a self,
+        user: &'a User,
+        cluster_id: &'a Id,
+        namespace: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<IdeK8sSpec>> {
+        let cid = cluster_id.clone();
+        let ns_override = namespace.map(str::to_string);
+        Box::pin(async move {
+            let entry = self
+                .k8s_clusters
+                .lock()
+                .unwrap()
+                .get(cid.as_str())
+                .cloned()
+                .ok_or_else(|| Error::NotFound(format!("k8s cluster {cid}")))?;
+            let effective_ns = ns_override
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&entry.spec.namespace)
+                .to_ascii_lowercase();
+            if !user.is_root {
+                if entry.owner_user_id.as_deref() != Some(user.id.as_str()) {
+                    return Err(Error::Forbidden(
+                        "Kubernetes cluster belongs to another user or workspace".into(),
+                    ));
+                }
+                if !entry.allowed_namespaces.is_empty()
+                    && !entry.allowed_namespaces.iter().any(|n| n == &effective_ns)
+                {
+                    return Err(Error::Forbidden(format!(
+                        "namespace '{effective_ns}' is not allowed on cluster {cid}"
+                    )));
+                }
+            }
+            let allow_cross_namespace = user.is_root || entry.allowed_namespaces.is_empty();
+            Ok(IdeK8sSpec {
+                namespace: effective_ns,
+                allow_cross_namespace,
+                ..entry.spec
+            })
+        })
     }
 
     fn authorize_local_target<'a>(
@@ -222,6 +297,8 @@ pub async fn build_test_app_as(
         roles,
         allowed_roots: allowed_roots.clone(),
         writable_roots: None,
+        ssh_connections: Arc::new(Mutex::new(HashMap::new())),
+        k8s_clusters: Arc::new(Mutex::new(HashMap::new())),
     };
     let router = router_as(&ctx, user, allowed_roots);
     (ctx, router)

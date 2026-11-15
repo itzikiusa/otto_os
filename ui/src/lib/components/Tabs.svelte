@@ -7,6 +7,8 @@
     icon?: IconName;
     /** Shown after the label in --text-dim ("Pending 3"). */
     count?: number | string;
+    /** Unsaved-changes dot indicator on the tab. */
+    dirty?: boolean;
     disabled?: boolean;
     /** Tooltip — e.g. why a tab is disabled. */
     title?: string;
@@ -160,6 +162,10 @@
       >
         {#if t.icon}<Icon name={t.icon} size={size === 's' ? 12 : 13} />{/if}
         <span class="otab-label">{t.label}</span>
+        {#if t.dirty}
+          <span class="otab-dirty" aria-hidden="true"></span>
+          <span class="sr-only"> (unsaved changes)</span>
+        {/if}
         {#if t.count !== undefined && t.count !== ''}<span class="otab-count">{t.count}</span>{/if}
       </button>
     {/each}
@@ -269,5 +275,23 @@
   .otab-count {
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
+  }
+  .otab-dirty {
+    inline-size: 6px;
+    block-size: 6px;
+    border-radius: 50%;
+    background: var(--warning);
+    flex-shrink: 0;
+  }
+  .sr-only {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 </style>

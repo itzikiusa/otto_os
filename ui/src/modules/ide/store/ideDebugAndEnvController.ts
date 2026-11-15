@@ -2,6 +2,7 @@
 // and DAP Debugger helpers for `IdeStore`.
 
 import { api, ApiError } from '../../../lib/api/client';
+import { idePreferences } from '../../../lib/idePreferences.svelte';
 import { loadErrorText } from '../../../lib/loadError';
 import { pollWhileVisible, type Poller } from '../../../lib/poll';
 import { auth } from '../../../lib/stores/auth.svelte';
@@ -314,23 +315,11 @@ export async function upsertRunConfig(host: DebugAndEnvHost, cfg: Partial<IdeRun
   } catch (e) { toastError('Couldn’t save run configuration', e); return null; }
 }
 
-function readPrefsModuleSdkMap(): Record<string, string> {
-  try {
-    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('otto.ide.preferences.v1') : null;
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as { moduleSdkMap?: Record<string, string> };
-    return parsed.moduleSdkMap && typeof parsed.moduleSdkMap === 'object' ? parsed.moduleSdkMap : {};
-  } catch {
-    return {};
-  }
-}
-
 function resolveModuleSdkOverride(host: DebugAndEnvHost, candidatePath?: string | null): string | null {
   if (!candidatePath) return null;
+  const prefsMap = idePreferences.current.moduleSdkMap ?? {};
   const envMap = host.projectEnv?.module_sdks;
-  const map = envMap && Object.keys(envMap).length > 0
-    ? { ...readPrefsModuleSdkMap(), ...envMap }
-    : readPrefsModuleSdkMap();
+  const map = envMap && Object.keys(envMap).length > 0 ? { ...prefsMap, ...envMap } : prefsMap;
   let bestLen = 0;
   let bestSdk: string | null = null;
   for (const [modRoot, sdkPath] of Object.entries(map)) {

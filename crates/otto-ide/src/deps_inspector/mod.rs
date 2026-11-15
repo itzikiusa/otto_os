@@ -5,25 +5,26 @@
 
 pub mod actions;
 mod enrich;
+mod go_mod;
 mod parsers;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use regex::Regex;
-use serde_json::Value;
 
 use crate::java_workspace::{parse_pom_properties, strip_xml_comments};
 use crate::types::{IdeDepItem, IdeDepManagedIn, IdeDepsInspectResp};
 
-pub use self::actions::run_deps_action;
+pub use self::actions::{run_deps_action, run_deps_action_as};
 use self::enrich::{
     enrich_crates_updates, enrich_maven_updates, enrich_npm_updates, enrich_osv_vulnerabilities,
-    enrich_pypi_updates, same_major_minor,
+    enrich_pypi_updates,
 };
+use self::go_mod::enrich_go_mod_updates;
+pub use self::go_mod::parse_go_mod;
 pub use self::parsers::{parse_cargo_toml, parse_package_json, parse_python_deps};
 
 /// Inspect a manifest file (`go.mod`, `pom.xml`, `build.gradle*`, `package.json`,
@@ -81,172 +82,6 @@ pub async fn inspect_dependencies(
     IdeDepsInspectResp {
         ecosystem: ecosystem.into(),
         items,
-    }
-}
-
-// ── 1. Go (`go.mod`) ────────────────────────────────────────────────────────
-
-pub fn parse_go_mod(content: &str) -> Vec<IdeDepItem> {
-    let mut items = Vec::new();
-    let mut in_require = false;
-    for (idx, raw_line) in content.lines().enumerate() {
-        let line_no = (idx + 1) as u32;
-        let code_trimmed = raw_line
-            .split_once("//")
-            .map_or(raw_line, |(c, _)| c)
-            .trim();
-        if code_trimmed.is_empty() {
-            continue;
-        }
-        if let Some(rest) = code_trimmed.strip_prefix("require") {
-            if rest.is_empty() || rest.starts_with(char::is_whitespace) || rest.starts_with('(') {
-                let after = rest.trim();
-                if after.starts_with('(') {
-                    if after.contains(')') {
-                        if let Some(item) = parse_go_require_spec(raw_line, line_no, true) {
-                            items.push(item);
-                        }
-                    } else {
-                        in_require = true;
-                    }
-                    continue;
-                }
-                if let Some(item) = parse_go_require_spec(raw_line, line_no, true) {
-                    items.push(item);
-                }
-                continue;
-            }
-        }
-        if in_require {
-            if code_trimmed.starts_with(')') {
-                in_require = false;
-                continue;
-            }
-            if let Some(item) = parse_go_require_spec(raw_line, line_no, false) {
-                items.push(item);
-            }
-            if code_trimmed.ends_with(')') {
-                in_require = false;
-            }
-        }
-    }
-    items
-}
-
-fn parse_go_require_spec(raw_line: &str, line_no: u32, strip_kw: bool) -> Option<IdeDepItem> {
-    let (code_part, comment_part) = match raw_line.split_once("//") {
-        Some((c, cm)) => (c, Some(cm.trim())),
-        None => (raw_line, None),
-    };
-    let indirect = comment_part.is_some_and(|c| c.contains("indirect"));
-    let inline_dep = comment_part.and_then(|c| {
-        c.strip_prefix("Deprecated:")
-            .or_else(|| c.strip_prefix("deprecated:"))
-            .map(|s| s.trim().to_string())
-    });
-
-    let work = if strip_kw {
-        let pos = code_part.find("require")? + "require".len();
-        &code_part[pos..]
-    } else {
-        code_part
-    };
-    let trimmed_work = work.trim();
-    let inner_work = trimmed_work
-        .strip_prefix('(')
-        .map(|s| s.strip_suffix(')').unwrap_or(s))
-        .unwrap_or_else(|| trimmed_work.strip_suffix(')').unwrap_or(trimmed_work));
-    let mut parts = inner_work.split_whitespace();
-    let mod_name = parts.next()?;
-    let ver = parts.next()?;
-    if mod_name.starts_with('(') || mod_name.starts_with(')') {
-        return None;
-    }
-    let name_byte = raw_line.find(mod_name)?;
-    let ver_search_start = name_byte + mod_name.len();
-    let ver_byte = ver_search_start + raw_line[ver_search_start..].find(ver)?;
-    let name_col = (raw_line[..name_byte].chars().count() + 1) as u32;
-    let name_end_col = name_col + mod_name.chars().count() as u32;
-    let version_col = (raw_line[..ver_byte].chars().count() + 1) as u32;
-    let version_end_col = version_col + ver.chars().count() as u32;
-
-    Some(IdeDepItem {
-        name: mod_name.to_string(),
-        current_version: ver.to_string(),
-        latest_version: None,
-        latest_patch: None,
-        indirect,
-        deprecated: inline_dep,
-        line: line_no,
-        name_col,
-        name_end_col,
-        version_line: line_no,
-        version_col,
-        version_end_col,
-        block_start_line: line_no,
-        block_end_line: line_no,
-        property_name: None,
-        managed_in: None,
-        vulnerabilities: Vec::new(),
-    })
-}
-
-async fn enrich_go_mod_updates(
-    manifest_path: &Path,
-    items: &mut [IdeDepItem],
-    env_map: &BTreeMap<String, String>,
-) {
-    if items.is_empty() || otto_core::e2e::isolated() {
-        return;
-    }
-    let Some(dir) = manifest_path.parent().filter(|d| d.is_dir()) else {
-        return;
-    };
-    let mut cmd = tokio::process::Command::new("go");
-    cmd.args(["list", "-m", "-u", "-json", "all"])
-        .current_dir(dir)
-        .env_clear()
-        .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
-        .envs(env_map)
-        .kill_on_drop(true);
-    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(6), cmd.output()).await else {
-        return;
-    };
-    if out.stdout.is_empty() {
-        return;
-    }
-    let stream = serde_json::Deserializer::from_slice(&out.stdout).into_iter::<Value>();
-    let mut updates: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
-    for val in stream.flatten() {
-        let Some(path) = val.get("Path").and_then(Value::as_str) else {
-            continue;
-        };
-        let latest = val
-            .get("Update")
-            .and_then(|u| u.get("Version"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let dep = val
-            .get("Deprecated")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        updates.insert(path.to_string(), (latest, dep));
-    }
-    for item in items.iter_mut() {
-        if let Some((latest, dep)) = updates.get(&item.name) {
-            if let Some(lv) = latest {
-                if lv != &item.current_version {
-                    item.latest_version = Some(lv.clone());
-                    if same_major_minor(&item.current_version, lv) {
-                        item.latest_patch = Some(lv.clone());
-                    }
-                }
-            }
-            if dep.is_some() {
-                item.deprecated = dep.clone();
-            }
-        }
     }
 }
 

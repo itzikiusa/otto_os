@@ -568,7 +568,9 @@
                 {:else}
                   <p class="dim list-empty">No {s.filter === 'adhoc' ? 'ad-hoc' : s.filter} reports. <button class="btn small ghost" onclick={() => s.setFilter('all')}>Show all</button></p>
                 {/each}
-                {#if filtered.length > shownRows.length || s.hasMoreReports}
+                {#if s.olderError}
+                  <LoadState what="older reports" variant="compact" loading={s.loadingMore} error={s.olderError} empty onretry={loadOlderReports} />
+                {:else if filtered.length > shownRows.length || s.hasMoreReports}
                   <button class="btn small ghost more-reports" onclick={loadOlderReports} disabled={s.loadingMore}>
                     {s.loadingMore ? 'Loading older reports…' : 'Show older reports'}
                   </button>

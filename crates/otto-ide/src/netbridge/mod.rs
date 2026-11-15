@@ -9,23 +9,26 @@
 //!    intercepts `getaddrinfo` (allocating `127.88.x.y` synthetic VIPs with
 //!    instant `AF_INET6` short-circuiting so macOS `.local` mDNS never stalls)
 //!    and `connect` (rewriting `127.88.x.y` and ClusterIPs to `127.0.0.1:<pf>`).
-//! 2. **JVM / SOCKS5 Loopback Proxy (`JAVA_TOOL_OPTIONS`)**:
-//!    covers Apple `/usr/bin/java` SIP-stub launches transparently.
+//! 2. **Authenticated SOCKS5 Loopback Proxy (`OTTO_NETBRIDGE_SOCKS5`)**:
+//!    RFC 1929 (`otto:{token}`) loopback listener with `otto_netguard` SSRF defense.
 //! 3. **Kubernetes Service Environment Variables**:
 //!    populates `OTTO_K8S_NAMESPACE`, `POD_NAMESPACE`, optional
 //!    `CONTAINERIZED=true`, and `<SVC>_SERVICE_HOST` / `<SVC>_SERVICE_PORT`.
 
 pub mod interposer;
 pub mod k8s_discover;
+mod k8s_routing;
 pub mod socks5;
 pub mod tunnel;
+mod tunnel_forward;
+mod tunnel_rpc;
 
 #[cfg(test)]
 mod tests;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -35,15 +38,15 @@ use otto_ssh::{SshTunnel, SshTunnelConfig};
 use sha2::{Digest, Sha256};
 
 pub use interposer::wrap_shell_script_for_interposer;
+pub use k8s_routing::{is_valid_dns1123_label, sanitize_network_bridge};
 
 use crate::types::{
-    IdeHostMapping, IdeNetBridgeStatusResp, IdeNetBridgeTestReq, IdeNetworkBridgeConfig,
-    IdeSshSpec, IdeTargetKind, IdeTargetSpec,
+    IdeNetBridgeStatusResp, IdeNetBridgeTestReq, IdeNetworkBridgeConfig, IdeSshSpec, IdeTargetKind,
+    IdeTargetSpec,
 };
 use crate::IdeCtx;
 
 const WARM_IDLE_TTL: Duration = Duration::from_secs(300);
-const MAX_HOST_MAPPINGS: usize = 128;
 
 /// Resolved Kubernetes cluster & namespace execution parameters supplied by
 /// [`crate::IdeCtx::resolve_k8s_cluster`].
@@ -59,95 +62,6 @@ pub struct IdeK8sSpec {
     /// Args WITHOUT `--request-timeout` for long-running `port-forward`.
     pub kubectl_base_args: Vec<String>,
     pub kubectl_env: Vec<(String, String)>,
-}
-
-pub fn is_valid_dns1123_label(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 63
-        && !s.starts_with('-')
-        && !s.ends_with('-')
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
-fn is_valid_bridge_host(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 253
-        && !s.starts_with('-')
-        && !s.chars().any(|c| c.is_whitespace() || c.is_control())
-}
-
-/// Validate and normalize an optional [`IdeNetworkBridgeConfig`].
-pub fn sanitize_network_bridge(
-    raw: Option<IdeNetworkBridgeConfig>,
-) -> Result<Option<IdeNetworkBridgeConfig>> {
-    let Some(mut cfg) = raw else {
-        return Ok(None);
-    };
-    cfg.k8s_cluster_id = cfg
-        .k8s_cluster_id
-        .map(|s| Id::from(s.as_str().trim()))
-        .filter(|s| !s.as_str().is_empty());
-    cfg.k8s_namespace = cfg
-        .k8s_namespace
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty());
-    if let Some(ns) = cfg.k8s_namespace.as_deref() {
-        if !is_valid_dns1123_label(ns) {
-            return Err(Error::Invalid(format!(
-                "invalid Kubernetes namespace '{ns}' (must be a lowercase DNS-1123 label)"
-            )));
-        }
-    }
-    cfg.ssh_tunnel_connection_id = cfg
-        .ssh_tunnel_connection_id
-        .map(|s| Id::from(s.as_str().trim()))
-        .filter(|s| !s.as_str().is_empty());
-
-    if cfg.host_mappings.len() > MAX_HOST_MAPPINGS {
-        return Err(Error::Invalid(format!(
-            "at most {MAX_HOST_MAPPINGS} host mappings are allowed"
-        )));
-    }
-    let mut cleaned_mappings = Vec::with_capacity(cfg.host_mappings.len());
-    for m in cfg.host_mappings {
-        let from_host = m
-            .from_host
-            .trim()
-            .trim_end_matches('.')
-            .to_ascii_lowercase();
-        let to_host = m.to_host.trim().trim_end_matches('.').to_string();
-        if from_host.is_empty() && to_host.is_empty() {
-            continue;
-        }
-        if !is_valid_bridge_host(&from_host) || !is_valid_bridge_host(&to_host) {
-            return Err(Error::Invalid(format!(
-                "invalid host mapping '{from_host}' -> '{to_host}'"
-            )));
-        }
-        cleaned_mappings.push(IdeHostMapping {
-            from_host,
-            from_port: m.from_port.filter(|&p| p > 0),
-            to_host,
-            to_port: m.to_port.filter(|&p| p > 0),
-        });
-    }
-    cfg.host_mappings = cleaned_mappings;
-
-    if !cfg.has_any_content() {
-        return Ok(None);
-    }
-    if cfg.enabled
-        && cfg.k8s_cluster_id.is_none()
-        && cfg.ssh_tunnel_connection_id.is_none()
-        && cfg.host_mappings.is_empty()
-    {
-        return Err(Error::Invalid(
-            "Network bridge is enabled: select a Kubernetes cluster, an SSH tunnel, or add a host mapping."
-                .into(),
-        ));
-    }
-    Ok(Some(cfg))
 }
 
 fn ssh_spec_to_tunnel_cfg(spec: IdeSshSpec) -> SshTunnelConfig {
@@ -171,11 +85,36 @@ struct PooledBridge {
     counters: Arc<Mutex<LeaseCounters>>,
 }
 
+type PooledBridgeSlot = Arc<tokio::sync::Mutex<Option<PooledBridge>>>;
+type BridgePoolMap = DashMap<(String, String), PooledBridgeSlot>;
+
+fn evict_key_if_idle(pool: &BridgePoolMap, key: &(String, String), ttl: Duration) {
+    let should_remove = if let Some(entry) = pool.get(key) {
+        if let Ok(guard) = entry.value().try_lock() {
+            guard.as_ref().is_some_and(|pb| {
+                pb.counters
+                    .lock()
+                    .is_ok_and(|c| c.active_leases == 0 && c.last_released.elapsed() >= ttl)
+            })
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if should_remove {
+        pool.remove(key);
+    }
+}
+
 /// Active reference-counted lease keeping a [`tunnel::NetBridgeInstance`] alive
 /// for the duration of a local IDE Run or Debug session.
 pub struct NetBridgeLease {
     instance: Arc<tunnel::NetBridgeInstance>,
     counters: Arc<Mutex<LeaseCounters>>,
+    pool: Weak<BridgePoolMap>,
+    pool_key: (String, String),
+    idle_ttl: Duration,
 }
 
 impl std::fmt::Debug for NetBridgeLease {
@@ -196,15 +135,28 @@ impl NetBridgeLease {
 
 impl Drop for NetBridgeLease {
     fn drop(&mut self) {
-        if let Ok(mut c) = self.counters.lock() {
+        let became_idle = if let Ok(mut c) = self.counters.lock() {
             c.active_leases = c.active_leases.saturating_sub(1);
             c.last_released = Instant::now();
+            c.active_leases == 0
+        } else {
+            false
+        };
+        if became_idle && self.pool.strong_count() > 0 {
+            let weak_pool = self.pool.clone();
+            let key = self.pool_key.clone();
+            let ttl = self.idle_ttl;
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    tokio::time::sleep(ttl).await;
+                    if let Some(pool) = weak_pool.upgrade() {
+                        evict_key_if_idle(&pool, &key, ttl);
+                    }
+                });
+            }
         }
     }
 }
-
-type PooledBridgeSlot = Arc<tokio::sync::Mutex<Option<PooledBridge>>>;
-type BridgePoolMap = DashMap<(String, String), PooledBridgeSlot>;
 
 /// Warm pool and status prober for IDE K8s + SSH network bridges.
 #[derive(Clone)]
@@ -212,15 +164,44 @@ pub struct NetBridgeManager {
     data_dir: PathBuf,
     discovery_cache: Arc<k8s_discover::DiscoveryCache>,
     pool: Arc<BridgePoolMap>,
+    idle_ttl: Duration,
 }
 
 impl NetBridgeManager {
     pub fn new(data_dir: PathBuf) -> Self {
+        Self::with_idle_ttl(data_dir, WARM_IDLE_TTL)
+    }
+
+    #[doc(hidden)]
+    pub fn with_idle_ttl(data_dir: PathBuf, idle_ttl: Duration) -> Self {
         Self {
             data_dir,
             discovery_cache: Arc::new(k8s_discover::DiscoveryCache::default()),
             pool: Arc::new(DashMap::new()),
+            idle_ttl,
         }
+    }
+
+    /// Evict all pooled warm bridges owned by `user_id` (e.g. when their
+    /// project `network_bridge` configuration changes or is disabled).
+    pub fn evict_user(&self, user_id: &str) {
+        let keys: Vec<(String, String)> = self
+            .pool
+            .iter()
+            .filter(|e| e.key().0 == user_id)
+            .map(|e| e.key().clone())
+            .collect();
+        for key in keys {
+            self.pool.remove(&key);
+        }
+    }
+
+    /// Number of populated warm bridge slots currently cached for `user_id`.
+    pub fn pooled_count_for_user(&self, user_id: &str) -> usize {
+        self.pool
+            .iter()
+            .filter(|e| e.key().0 == user_id && e.value().try_lock().is_ok_and(|g| g.is_some()))
+            .count()
     }
 
     /// Authorize `cfg` against `user` without starting listeners (called when
@@ -282,7 +263,7 @@ impl NetBridgeManager {
         );
         let slot = self
             .pool
-            .entry(key)
+            .entry(key.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
             .value()
             .clone();
@@ -296,6 +277,9 @@ impl NetBridgeManager {
                 return Ok(Some(Arc::new(NetBridgeLease {
                     instance: Arc::clone(&existing.instance),
                     counters: Arc::clone(&existing.counters),
+                    pool: Arc::downgrade(&self.pool),
+                    pool_key: key,
+                    idle_ttl: self.idle_ttl,
                 })));
             }
         }
@@ -317,7 +301,13 @@ impl NetBridgeManager {
             counters: Arc::clone(&counters),
         });
 
-        Ok(Some(Arc::new(NetBridgeLease { instance, counters })))
+        Ok(Some(Arc::new(NetBridgeLease {
+            instance,
+            counters,
+            pool: Arc::downgrade(&self.pool),
+            pool_key: key,
+            idle_ttl: self.idle_ttl,
+        })))
     }
 
     /// Test connectivity & discover Kubernetes `Service` + `Ingress` endpoints
@@ -402,22 +392,7 @@ impl NetBridgeManager {
     fn evict_expired_idle(&self) {
         let keys: Vec<(String, String)> = self.pool.iter().map(|e| e.key().clone()).collect();
         for key in keys {
-            let should_remove = if let Some(entry) = self.pool.get(&key) {
-                if let Ok(guard) = entry.value().try_lock() {
-                    guard.as_ref().is_some_and(|pb| {
-                        pb.counters.lock().is_ok_and(|c| {
-                            c.active_leases == 0 && c.last_released.elapsed() > WARM_IDLE_TTL
-                        })
-                    })
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            if should_remove {
-                self.pool.remove(&key);
-            }
+            evict_key_if_idle(&self.pool, &key, self.idle_ttl);
         }
     }
 }

@@ -111,6 +111,11 @@ const VALID_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh', 'max', 
 const EFFORT_ORDER: readonly EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const ID_TIER_RE = /^(.+)-(minimal|low|medium|high|xhigh|max|ultra)$/;
 const LABEL_TIER_RE = /^(.*?)\s*\((minimal|low|medium|high|xhigh|x-high|extra high|extra|max|ultra)\)\s*$/i;
+const unifiedCatalogMemo = new WeakMap<readonly ProviderModelOption[], Map<string, ProviderModelOption[]>>();
+
+export function providerFamily(provider: string): string {
+  return provider.trim().toLowerCase();
+}
 
 function mapRawTier(raw: string): EffortLevel {
   const v = raw.trim().toLowerCase();
@@ -119,10 +124,12 @@ function mapRawTier(raw: string): EffortLevel {
   return (VALID_EFFORTS.has(v) ? v : 'medium') as EffortLevel;
 }
 
-function splitTieredEntry(
+export function stripEmbeddedEffortTier(
+  provider: string,
   id: string,
-  label: string,
+  label = id,
 ): { baseId: string; cleanLabel: string; effort: EffortLevel } | null {
+  if (providerFamily(provider) !== 'agy') return null;
   const idMatch = ID_TIER_RE.exec(id);
   if (!idMatch) return null;
   const baseId = idMatch[1];
@@ -137,62 +144,85 @@ function splitTieredEntry(
   return { baseId, cleanLabel, effort };
 }
 
-/** Collapse tier-suffixed model rows (`gemini-4-carbon-{low,medium,high}`) into
- *  one unified family row with exact `supported_efforts`, matching the daemon's
- *  parser even when `/meta` holds an older cached list. */
-function unifyModelCatalog(list: readonly ProviderModelOption[]): ProviderModelOption[] {
-  type Group = {
-    kind: 'family';
-    baseId: string;
-    firstFullId: string;
-    label: string;
-    description: string;
-    firstEffort: EffortLevel;
-    efforts: EffortLevel[];
-  };
-  const out: Array<{ kind: 'plain'; opt: ProviderModelOption } | Group> = [];
-  for (const item of list) {
-    const split = splitTieredEntry(item.id, item.label);
-    if (!split) {
-      out.push({ kind: 'plain', opt: item });
-      continue;
-    }
-    const existing = out.find(
-      (g): g is Group => g.kind === 'family' && g.baseId === split.baseId,
-    );
-    if (existing) {
-      if (!existing.efforts.includes(split.effort)) existing.efforts.push(split.effort);
-    } else {
-      out.push({
-        kind: 'family',
-        baseId: split.baseId,
-        firstFullId: item.id,
-        label: split.cleanLabel,
-        description: item.description,
-        firstEffort: split.effort,
-        efforts: [split.effort],
-      });
-    }
-  }
-  return out.map((entry) => {
-    if (entry.kind === 'plain') return entry.opt;
-    const sorted = [...entry.efforts].sort(
-      (a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b),
-    );
-    const defaultEffort =
-      entry.firstEffort !== 'low'
-        ? entry.firstEffort
-        : sorted.includes('medium')
-          ? 'medium'
-          : entry.firstEffort;
-    return {
-      id: sorted.length >= 2 ? entry.baseId : entry.firstFullId,
-      label: entry.label,
-      description: entry.description,
-      default_effort: defaultEffort,
-      supported_efforts: sorted,
+/** Collapse tier-suffixed `agy` model rows (`gemini-4-carbon-{low,medium,high}`)
+ *  into one unified family row with exact `supported_efforts`, matching the
+ *  daemon's parser even when `/meta` holds an older cached list. Non-`agy`
+ *  providers return their catalog untouched so custom `-low`/`-high`/`-max`
+ *  model IDs are never rewritten. */
+export function unifyModelCatalog(
+  provider: string,
+  list: readonly ProviderModelOption[],
+): ProviderModelOption[] {
+  const fam = providerFamily(provider);
+  let byProvider = unifiedCatalogMemo.get(list);
+  const cached = byProvider?.get(fam);
+  if (cached) return cached;
+
+  let result: ProviderModelOption[];
+  if (fam !== 'agy') {
+    result = [...list];
+  } else {
+    type Group = {
+      kind: 'family';
+      baseId: string;
+      firstFullId: string;
+      label: string;
+      description: string;
+      firstEffort: EffortLevel;
+      efforts: EffortLevel[];
     };
-  });
+    const out: Array<{ kind: 'plain'; opt: ProviderModelOption } | Group> = [];
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
+      const split = stripEmbeddedEffortTier(fam, item.id, item.label);
+      if (!split) {
+        out.push({ kind: 'plain', opt: item });
+        continue;
+      }
+      const existing = out.find(
+        (g): g is Group => g.kind === 'family' && g.baseId === split.baseId,
+      );
+      if (existing) {
+        if (!existing.efforts.includes(split.effort)) existing.efforts.push(split.effort);
+      } else {
+        out.push({
+          kind: 'family',
+          baseId: split.baseId,
+          firstFullId: item.id,
+          label: split.cleanLabel,
+          description: item.description,
+          firstEffort: split.effort,
+          efforts: [split.effort],
+        });
+      }
+    }
+    result = out.map((entry) => {
+      if (entry.kind === 'plain') return entry.opt;
+      const sorted = [...entry.efforts].sort(
+        (a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b),
+      );
+      const defaultEffort =
+        entry.firstEffort !== 'low'
+          ? entry.firstEffort
+          : sorted.includes('medium')
+            ? 'medium'
+            : entry.firstEffort;
+      return {
+        id: sorted.length >= 2 ? entry.baseId : entry.firstFullId,
+        label: entry.label,
+        description: entry.description,
+        default_effort: defaultEffort,
+        supported_efforts: sorted,
+      };
+    });
+  }
+
+  if (!byProvider) {
+    byProvider = new Map();
+    unifiedCatalogMemo.set(list, byProvider);
+  }
+  byProvider.set(fam, result);
+  return result;
 }
 
 export function supportsModelSelection(
@@ -230,12 +260,12 @@ export function modelsForProvider(
   meta?: Pick<MetaResp, 'provider_models'> | null,
 ): ProviderModelOption[] {
   const live = meta?.provider_models?.[provider];
-  if (live && live.length > 0) return unifyModelCatalog(live);
+  if (live && live.length > 0) return unifyModelCatalog(provider, live);
   return FALLBACK_PROVIDER_MODELS[provider] ?? [];
 }
 
-/** Resolve a saved or legacy tier-suffixed model ID (`gemini-4-carbon-high`) to
- *  its unified catalog entry ID (`gemini-4-carbon`) when that family exists. */
+/** Resolve a saved or legacy `agy` tier-suffixed model ID (`gemini-4-carbon-high`)
+ *  to its unified catalog entry ID (`gemini-4-carbon`) when that family exists. */
 export function canonicalModelId(
   provider: string,
   modelId: string | null | undefined,
@@ -245,9 +275,28 @@ export function canonicalModelId(
   if (!trimmed) return null;
   const catalog = modelsForProvider(provider, meta);
   if (catalog.some((m) => m.id === trimmed)) return trimmed;
-  const m = ID_TIER_RE.exec(trimmed);
-  if (m && catalog.some((x) => x.id === m[1])) return m[1];
+  if (providerFamily(provider) === 'agy') {
+    const m = ID_TIER_RE.exec(trimmed);
+    if (m && catalog.some((x) => x.id === m[1])) return m[1];
+  }
   return trimmed;
+}
+
+export function canonicalizeModelSelection(
+  provider: string,
+  modelId: string | null | undefined,
+  effort: EffortLevel | null = null,
+  meta?: Pick<MetaResp, 'provider_models'> | null,
+): { model: string | null; effort: EffortLevel | null } {
+  const trimmed = (modelId ?? '').trim();
+  if (!trimmed) return { model: null, effort };
+  const resolved = canonicalModelId(provider, trimmed, meta) ?? trimmed;
+  let nextEffort = effort;
+  if (!nextEffort && providerFamily(provider) === 'agy' && resolved !== trimmed) {
+    const tier = ID_TIER_RE.exec(trimmed);
+    if (tier) nextEffort = mapRawTier(tier[2]);
+  }
+  return { model: resolved, effort: nextEffort };
 }
 
 export function normalizeEffort(raw: unknown): EffortLevel | null {
@@ -341,10 +390,14 @@ export function formatModelLabel(
     modelsForProvider(provider, meta).find((m) => m.id === resolved) ??
     FALLBACK_PROVIDER_MODELS[provider]?.find((m) => m.id === resolved);
   if (found) return found.label;
-  const labelTier = LABEL_TIER_RE.exec(trimmed);
-  if (labelTier && labelTier[1].trim()) return labelTier[1].trim();
+  if (providerFamily(provider) === 'agy') {
+    const labelTier = LABEL_TIER_RE.exec(trimmed);
+    if (labelTier && labelTier[1].trim()) return labelTier[1].trim();
+  }
   return trimmed;
 }
+
+export const formatModelChipLabel = formatModelLabel;
 
 export function formatInteractionModeLabel(mode: InteractionMode): string {
   return INTERACTION_MODES.find((m) => m.id === mode)?.shortLabel ?? 'Full access';

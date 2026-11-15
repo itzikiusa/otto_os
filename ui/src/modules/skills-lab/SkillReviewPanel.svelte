@@ -141,23 +141,25 @@
   let disposed = false;
   onDestroy(() => { disposed = true; listGeneration++; detailGeneration++; });
 
-  async function loadList(): Promise<void> {
+  async function loadList(background = false): Promise<void> {
     const workspace = wsId;
     const generation = ++listGeneration;
     if (!wsId) {
       listLoading = false;
       return;
     }
-    listLoading = true;
+    if (!background) listLoading = true;
     try {
       const next = await skillReviewApi.list(workspace);
       if (disposed || generation !== listGeneration || workspace !== wsId) return;
       reviews = next;
       listError = null;
     } catch (e) {
-      if (!disposed && generation === listGeneration && workspace === wsId) listError = loadErrorText(e);
+      if (!disposed && generation === listGeneration && workspace === wsId && (!background || reviews.length === 0)) {
+        listError = loadErrorText(e);
+      }
     } finally {
-      if (!disposed && generation === listGeneration && workspace === wsId) listLoading = false;
+      if (!background && !disposed && generation === listGeneration && workspace === wsId) listLoading = false;
     }
   }
 
@@ -310,7 +312,12 @@
 
   // Load on workspace change (restoring cached state on remount within the same workspace).
   let loadedWs = initialReviewState.loaded ? untrack(() => wsId) : '';
-  if (loadedWs) void loadSkills();
+  if (loadedWs) {
+    void loadSkills();
+    void loadList(true);
+    const initialSelectedId = untrack(() => selected?.id ?? null);
+    if (initialSelectedId) void openReview(initialSelectedId, true);
+  }
   $effect(() => {
     if (wsId && wsId !== loadedWs) {
       detailGeneration++;
@@ -325,6 +332,8 @@
         if (cached.fProviders) fProviders = new Set(cached.fProviders);
         fInstructions = cached.fInstructions;
         listLoading = false;
+        void loadList(true);
+        if (cached.selected) void openReview(cached.selected.id, true);
         return;
       }
       selected = null;

@@ -35,6 +35,7 @@ import {
 class IdeProjectsBridge {
   private rev = $state(0);
   private serverProjects = $state<NamedIdeProject[] | null>(null);
+  private localFallback = $state<NamedIdeProject[]>(loadNamedIdeProjectsLocal());
   private hydratedProjects = false;
   private serverRootsByPrimary: Record<string, string[]> = {};
   private hydratedPrimaries = new Set<string>();
@@ -46,17 +47,23 @@ class IdeProjectsBridge {
       const onProjectsChanged = (ev: Event): void => {
         const detail = (ev as CustomEvent<{ projects?: unknown }>).detail;
         if (Array.isArray(detail?.projects)) {
-          this.serverProjects = normalizeNamedIdeProjects(
+          const normalized = normalizeNamedIdeProjects(
             detail.projects as ReadonlyArray<NamedIdeProject | Record<string, unknown>>,
           );
+          this.serverProjects = normalized;
+          this.localFallback = normalized;
           this.hydratedProjects = true;
+        } else {
+          this.localFallback = loadNamedIdeProjectsLocal();
         }
         this.rev = untrack(() => this.rev) + 1;
       };
       const onStorage = (ev: StorageEvent): void => {
         if (ev.key && !ev.key.startsWith('otto.ide.')) return;
         if (!ev.key || ev.key === LS_IDE_PROJECTS) {
-          this.serverProjects = loadNamedIdeProjectsLocal();
+          const local = loadNamedIdeProjectsLocal();
+          this.localFallback = local;
+          this.serverProjects = local;
           this.hydratedProjects = true;
         }
         this.rev = untrack(() => this.rev) + 1;
@@ -70,6 +77,7 @@ class IdeProjectsBridge {
     this.hydratedPrimaries.clear();
     this.hydratedProjects = false;
     this.forceNextFetch = true;
+    this.localFallback = loadNamedIdeProjectsLocal();
     this.serverProjects = null;
     this.rev = untrack(() => this.rev) + 1;
   }
@@ -82,15 +90,11 @@ class IdeProjectsBridge {
     void fetchNamedIdeProjectsFromServer({ force })
       .then((list) => {
         if (list) {
-          const prevJson = this.serverProjects ? JSON.stringify(this.serverProjects) : null;
           this.serverProjects = list;
-          if (prevJson !== JSON.stringify(list)) {
-            this.rev = untrack(() => this.rev) + 1;
-          }
         }
       })
       .catch(() => {
-        // Offline/test harnesses fall back cleanly to `loadNamedIdeProjectsLocal()`.
+        // Offline/test harnesses fall back cleanly to `this.localFallback`.
       });
   }
 
@@ -136,7 +140,11 @@ class IdeProjectsBridge {
   get namedProjects(): NamedIdeProject[] {
     void this.rev;
     this.ensureBackendProjects();
-    return this.serverProjects ?? loadNamedIdeProjectsLocal();
+    return this.serverProjects ?? this.localFallback;
+  }
+
+  hydrateRoot(primaryRoot?: string | null): void {
+    if (primaryRoot) this.hydrateServerEnv(primaryRoot);
   }
 
   get lastRoot(): string | null {
@@ -184,7 +192,8 @@ class IdeProjectsBridge {
       liveContext: live,
       sessions,
     });
-    for (let i = 0; i < list.length; i++) this.hydrateServerEnv(list[i].primaryRoot);
+    if (live?.root) this.hydrateServerEnv(live.root);
+    if (last && last !== live?.root) this.hydrateServerEnv(last);
     return list;
   }
 

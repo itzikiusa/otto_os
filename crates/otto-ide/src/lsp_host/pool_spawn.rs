@@ -236,6 +236,22 @@ pub(crate) fn build_process_spawner(
                 None => collect_safe_non_root_base_env(),
             };
             effective_env.retain(|k, _| !is_daemon_internal_secret_key(k));
+            for go_key in ["GOPRIVATE", "GONOSUMDB", "GOPATH", "GOMODCACHE"] {
+                if !effective_env.contains_key(go_key) {
+                    if let Ok(val) = std::env::var(go_key) {
+                        if !val.is_empty() {
+                            effective_env.insert(go_key.to_string(), val);
+                        }
+                    }
+                }
+            }
+            if owner_is_root && !effective_env.contains_key("SSH_AUTH_SOCK") {
+                if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
+                    if !sock.is_empty() {
+                        effective_env.insert("SSH_AUTH_SOCK".to_string(), sock);
+                    }
+                }
+            }
 
             let shell_snap = if owner_is_root {
                 environments.as_ref().map(|e| e.cached_shell_env_snapshot())

@@ -4,6 +4,8 @@
   // prepending older turns shifts visible messages 0 px.
   import { tick } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
+  import { plural } from '../../../lib/plural';
   import { runtimeViews } from './runtimeView.svelte';
 
   const INITIAL_ROW_CAP = 200;
@@ -40,6 +42,7 @@
   });
 
   const hiddenLocalRows = $derived(Math.max(0, totalRows - rowCap));
+  const olderError = $derived(runtimeViews.olderError[sessionId] ?? null);
   let barEl = $state<HTMLDivElement | null>(null);
   let busy = $state(false);
 
@@ -47,6 +50,9 @@
     if (busy || loadingOlder || (hiddenLocalRows === 0 && !hasOlder)) return;
     busy = true;
     onreleasebottom?.();
+    const hadFocusInBar = Boolean(
+      barEl && typeof document !== 'undefined' && document.activeElement && barEl.contains(document.activeElement),
+    );
     const el = scroller;
     const content = streamEl;
     const anchor = (barEl?.nextElementSibling ?? null) as HTMLElement | null;
@@ -74,6 +80,16 @@
           if (delta > 0) el.scrollTop += delta;
         }
       }
+      if (hadFocusInBar && !barEl?.isConnected) {
+        const nextFocus =
+          content?.querySelector<HTMLElement>('button:not(:disabled), [href], [tabindex]:not([tabindex="-1"])') ?? el;
+        if (nextFocus) {
+          if (nextFocus === el && !nextFocus.hasAttribute('tabindex')) {
+            nextFocus.setAttribute('tabindex', '-1');
+          }
+          nextFocus.focus({ preventScroll: true });
+        }
+      }
     } finally {
       busy = false;
     }
@@ -92,7 +108,14 @@
       prevTop = top;
       prevHeight = height;
       const unpinned = el.dataset.atBottom === '0';
-      if ((scrolledUp || unpinned) && top <= AUTO_LOAD_TOP_PX && (hiddenLocalRows > 0 || hasOlder) && !busy && !loadingOlder) {
+      if (
+        (scrolledUp || unpinned) &&
+        top <= AUTO_LOAD_TOP_PX &&
+        (hiddenLocalRows > 0 || hasOlder) &&
+        !olderError &&
+        !busy &&
+        !loadingOlder
+      ) {
         void loadMore();
       }
     };
@@ -109,24 +132,35 @@
   });
 </script>
 
-{#if hiddenLocalRows > 0 || hasOlder}
+{#if hiddenLocalRows > 0 || hasOlder || olderError}
   <div class="rt-older" bind:this={barEl}>
-    <button
-      type="button"
-      class="btn small ghost"
-      data-testid="runtime-load-older"
-      disabled={busy || loadingOlder}
-      onclick={() => void loadMore()}
-    >
-      <Icon name="arrowUp" size={12} />
-      {#if loadingOlder}
-        Loading earlier…
-      {:else if hasOlder && olderTurns > 0}
-        Load earlier ({olderTurns} {olderTurns === 1 ? 'turn' : 'turns'})
-      {:else}
-        Show earlier ({hiddenLocalRows > 0 ? hiddenLocalRows : 'more'})
-      {/if}
-    </button>
+    {#if olderError}
+      <LoadState
+        variant="compact"
+        what="earlier turns"
+        loading={busy || loadingOlder}
+        error={olderError}
+        empty
+        onretry={() => void loadMore()}
+      />
+    {:else}
+      <button
+        type="button"
+        class="btn small ghost"
+        data-testid="runtime-load-older"
+        disabled={busy || loadingOlder}
+        onclick={() => void loadMore()}
+      >
+        <Icon name="arrowUp" size={12} />
+        {#if loadingOlder}
+          Loading earlier…
+        {:else if hasOlder && olderTurns > 0}
+          Load earlier ({plural(olderTurns, 'turn')})
+        {:else}
+          Show earlier ({hiddenLocalRows > 0 ? hiddenLocalRows : 'more'})
+        {/if}
+      </button>
+    {/if}
   </div>
 {/if}
 

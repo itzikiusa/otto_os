@@ -85,7 +85,18 @@ impl ShellEnvResolver {
     }
 
     fn new_inner(cache_path: Option<PathBuf>) -> Self {
-        let shell = detect_user_shell();
+        let (shell, fp) = match cache_path {
+            Some(_) => cache::current_shell_and_rc_fingerprint(),
+            None => (detect_user_shell(), String::new()),
+        };
+        Self::new_with_shell_and_fp(cache_path, shell, &fp)
+    }
+
+    pub(super) fn new_with_shell_and_fp(
+        cache_path: Option<PathBuf>,
+        shell: String,
+        fp: &str,
+    ) -> Self {
         let mut vars = collect_process_base_env();
         if otto_core::e2e::isolated() {
             return Self {
@@ -104,8 +115,7 @@ impl ShellEnvResolver {
         }
 
         if let Some(ref path) = cache_path {
-            let fp = cache::compute_shell_rc_fingerprint(&shell);
-            if let Some(disk) = cache::load_cached_shell_env(path, &fp) {
+            if let Some(disk) = cache::load_cached_shell_env(path, fp) {
                 vars.extend(disk.vars);
                 return Self {
                     state: RwLock::new(ShellEnvState {
@@ -284,6 +294,15 @@ impl ShellEnvResolver {
         let outcome = capture_shell_env_with_shell(&shell, INTERACTIVE_SHELL_TIMEOUT).await;
         let duration_ms = started.elapsed().as_millis() as u64;
         let now = Utc::now().to_rfc3339();
+        let precomputed_fp = if outcome.is_ok() && self.cache_path.is_some() {
+            let shell_cl = shell.clone();
+            tokio::task::spawn_blocking(move || cache::compute_shell_rc_fingerprint(&shell_cl))
+                .await
+                .ok()
+        } else {
+            None
+        };
+        let base_env = collect_process_base_env();
         let mut persist_job: Option<(PathBuf, cache::CachedShellEnvDisk)> = None;
 
         {
@@ -293,12 +312,13 @@ impl ShellEnvResolver {
             guard.duration_ms = Some(duration_ms);
             match outcome {
                 Ok(mut parsed) => {
-                    if let Some(ref path) = self.cache_path {
+                    if let (Some(ref path), Some(fingerprint)) = (&self.cache_path, precomputed_fp)
+                    {
                         persist_job = Some((
                             path.clone(),
                             cache::CachedShellEnvDisk {
                                 version: 1,
-                                fingerprint: cache::compute_shell_rc_fingerprint(&shell),
+                                fingerprint,
                                 shell,
                                 loaded_at: now,
                                 duration_ms,
@@ -306,7 +326,7 @@ impl ShellEnvResolver {
                             },
                         ));
                     }
-                    let mut merged = collect_process_base_env();
+                    let mut merged = base_env;
                     merged.append(&mut parsed);
                     guard.status = "ready".to_string();
                     guard.vars = merged;
@@ -314,7 +334,7 @@ impl ShellEnvResolver {
                 }
                 Err(err) => {
                     guard.status = "fallback".to_string();
-                    guard.vars = collect_process_base_env();
+                    guard.vars = base_env;
                     guard.error = Some(err);
                 }
             }
@@ -455,7 +475,7 @@ pub async fn probe_remote_shell_env(
     }
 }
 
-fn detect_user_shell() -> String {
+pub(super) fn detect_user_shell() -> String {
     if let Ok(explicit) = std::env::var("SHELL") {
         let trimmed = explicit.trim();
         if trimmed.starts_with('/') && Path::new(trimmed).is_file() {

@@ -156,19 +156,50 @@ pub fn parse_version(text: &str) -> Option<String> {
 /// status on every visit; an upgrade / reinstall changes the mtime (or the
 /// path) and so re-probes.
 type VersionKey = (PathBuf, Option<std::time::SystemTime>);
+type LocateKey = (PathBuf, Option<String>);
+static LOCATE_CACHE: Mutex<Option<(std::time::Instant, LocateKey, Option<VersionKey>)>> =
+    Mutex::new(None);
 static VERSION_CACHE: Mutex<Option<(VersionKey, String)>> = Mutex::new(None);
+const LOCATE_TTL: Duration = Duration::from_secs(30);
 const COLD_VERSION_INLINE_BUDGET: Duration = Duration::from_millis(150);
+
+fn invalidate_locate_cache() {
+    if let Ok(mut g) = LOCATE_CACHE.lock() {
+        *g = None;
+    }
+}
+
+async fn cached_locate(data_dir: &Path) -> Option<VersionKey> {
+    let key: LocateKey = (data_dir.to_path_buf(), std::env::var(BIN_ENV).ok());
+    if let Ok(g) = LOCATE_CACHE.lock() {
+        if let Some((at, k, found)) = g.as_ref() {
+            if *k == key && at.elapsed() < LOCATE_TTL {
+                return found.clone();
+            }
+        }
+    }
+    let dir = data_dir.to_path_buf();
+    let found = tokio::task::spawn_blocking(move || {
+        locate(&dir).map(|p| {
+            let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+            (p, mtime)
+        })
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Ok(mut g) = LOCATE_CACHE.lock() {
+        *g = Some((std::time::Instant::now(), key, found.clone()));
+    }
+    found
+}
 
 fn version_flight() -> &'static tokio::sync::Mutex<()> {
     static FLIGHT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     &FLIGHT
 }
 
-async fn cached_version(bin: &Path) -> Option<String> {
-    let key: VersionKey = (
-        bin.to_path_buf(),
-        std::fs::metadata(bin).and_then(|m| m.modified()).ok(),
-    );
+async fn cached_version(key: VersionKey) -> Option<String> {
     if let Ok(g) = VERSION_CACHE.lock() {
         if let Some((k, v)) = g.as_ref() {
             if *k == key && key.1.is_some() {
@@ -176,8 +207,8 @@ async fn cached_version(bin: &Path) -> Option<String> {
             }
         }
     }
-    let bin_owned = bin.to_path_buf();
-    let key_owned = key.clone();
+    let bin_owned = key.0.clone();
+    let key_owned = key;
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let _guard = version_flight().lock().await;
@@ -208,9 +239,10 @@ async fn cached_version(bin: &Path) -> Option<String> {
 
 /// Presence + version + install-job snapshot.
 pub async fn status(data_dir: &Path) -> AwsStatus {
-    let path = locate(data_dir);
-    let version = match &path {
-        Some(p) => cached_version(p).await,
+    let located = cached_locate(data_dir).await;
+    let path = located.as_ref().map(|(p, _)| p.clone());
+    let version = match located {
+        Some(vk) => cached_version(vk).await,
         None => None,
     };
     AwsStatus {
@@ -280,6 +312,7 @@ impl Installer {
                 InstallState::Idle => {}
             }
         }
+        invalidate_locate_cache();
         let _ = events.send(Event::AwsInstallUpdated {
             tool: TOOL.into(),
             state: state.as_str().into(),
@@ -468,5 +501,47 @@ mod tests {
             inst.append_log(&"x".repeat(100));
         }
         assert!(inst.snapshot().log_tail.len() <= LOG_TAIL_CAP);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cached_version_bounds_cold_probe_then_populates_in_background() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("slow-aws");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nsleep 0.35\nprintf 'aws-cli/2.99.1 Python/3.12.0\\n'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let vk: VersionKey = (
+            script.clone(),
+            std::fs::metadata(&script).and_then(|m| m.modified()).ok(),
+        );
+        let t0 = std::time::Instant::now();
+        let first = cached_version(vk.clone()).await;
+        assert!(
+            t0.elapsed() < Duration::from_millis(320),
+            "cold version probe exceeded inline budget"
+        );
+        assert!(first.is_none());
+
+        for _ in 0..40 {
+            if VERSION_CACHE
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(k, _)| *k == vk)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(cached_version(vk).await.as_deref(), Some("2.99.1"));
     }
 }

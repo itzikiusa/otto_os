@@ -9,11 +9,13 @@ import type {
   TelemetrySuggestion,
 } from '../../lib/api/types';
 import { loadErrorText } from '../../lib/loadError';
+import { plural } from '../../lib/plural';
 import { pollWhileVisible } from '../../lib/poll';
 import { telemetrySettingsChanged } from '../../lib/telemetryBoot';
-import { usageUi, type UsageSubView } from './usageUiState.svelte';
 
-export { usageUi, type UsageSubView };
+export interface TelemetryScope {
+  hours: number;
+}
 
 class OttoTelemetryStore {
   config = $state<TelemetryConfig | null>(null);
@@ -27,8 +29,24 @@ class OttoTelemetryStore {
   suggestions = $state<TelemetrySuggestion[]>([]);
   loading = $state(true);
   loadedOnce = $state(false);
-  busy = $state(false);
+
+  togglingEnabled = $state(false);
+  savingRetention = $state(false);
+  clearing = $state(false);
+  dismissingId = $state<string | null>(null);
   analyzing = $state(false);
+  capturing = $state(false);
+
+  get busy(): boolean {
+    return (
+      this.togglingEnabled ||
+      this.savingRetention ||
+      this.clearing ||
+      this.analyzing ||
+      this.capturing
+    );
+  }
+
   error = $state('');
   loadError = $state('');
   message = $state('');
@@ -44,6 +62,15 @@ class OttoTelemetryStore {
 
   private loadSeq = 0;
   private detailSeq = 0;
+  private scopeGetter: (() => TelemetryScope) | null = null;
+
+  configure(opts: { getScope?: () => TelemetryScope }): void {
+    this.scopeGetter = opts.getScope ?? null;
+  }
+
+  private currentHours(): number {
+    return this.scopeGetter ? this.scopeGetter().hours : this.hours;
+  }
 
   private setMessage(msg: string): void {
     this.message = msg;
@@ -69,7 +96,7 @@ class OttoTelemetryStore {
 
   async load(forceInitial = false): Promise<void> {
     const seq = ++this.loadSeq;
-    const requestedHours = this.hours;
+    const requestedHours = this.currentHours();
     if (forceInitial || !this.loadedOnce) this.loading = true;
     this.loadError = '';
     try {
@@ -100,13 +127,16 @@ class OttoTelemetryStore {
     }
   }
 
-  mount(): () => void {
-    if (!this.analyzing && !this.busy) {
+  mount(opts?: { getScope?: () => TelemetryScope }): () => void {
+    if (opts?.getScope) this.scopeGetter = opts.getScope;
+    if (!this.analyzing && !this.togglingEnabled && !this.savingRetention) {
       void this.load(false);
     }
     const poller = pollWhileVisible(
       () => {
-        if (this.status?.enabled && !this.busy && !this.loading) return this.load(false);
+        if (this.status?.enabled && !this.togglingEnabled && !this.savingRetention && !this.loading) {
+          return this.load(false);
+        }
       },
       { ms: 15_000, immediate: false },
     );
@@ -115,9 +145,35 @@ class OttoTelemetryStore {
     };
   }
 
+  async toggleEnabled(nextEnabled: boolean): Promise<void> {
+    if (!this.config || this.togglingEnabled || this.savingRetention) return;
+    const prevEnabled = this.config.enabled;
+    this.config = { ...this.config, enabled: nextEnabled };
+    this.togglingEnabled = true;
+    this.setError('');
+    this.setMessage('');
+    try {
+      const next = await api.put<TelemetryConfig>('/telemetry/config', { ...this.config });
+      this.config = next;
+      this.savedConfig = JSON.stringify(next);
+      telemetrySettingsChanged();
+      this.setMessage(
+        next.enabled
+          ? 'Collection enabled. The local collector starts automatically.'
+          : 'Collection stopped. Retained history expires on its schedule.',
+      );
+      await this.load(false);
+    } catch (e) {
+      if (this.config) this.config = { ...this.config, enabled: prevEnabled };
+      this.setError(loadErrorText(e));
+    } finally {
+      this.togglingEnabled = false;
+    }
+  }
+
   async save(): Promise<void> {
-    if (!this.config || this.busy) return;
-    this.busy = true;
+    if (!this.config || this.savingRetention || this.togglingEnabled) return;
+    this.savingRetention = true;
     this.setError('');
     this.setMessage('');
     try {
@@ -134,36 +190,43 @@ class OttoTelemetryStore {
     } catch (e) {
       this.setError(loadErrorText(e));
     } finally {
-      this.busy = false;
+      this.savingRetention = false;
     }
   }
 
   async analyze(): Promise<void> {
-    if (this.busy) return;
-    this.busy = true;
+    if (this.analyzing) return;
     this.analyzing = true;
     this.setError('');
     try {
-      this.suggestions = await api.post<TelemetrySuggestion[]>('/telemetry/analyze');
+      const found = await api.post<TelemetrySuggestion[]>('/telemetry/analyze');
+      this.suggestions = found;
+      const openCount = found.filter((s) => !s.dismissed).length;
+      announce(
+        openCount > 0
+          ? `Analysis complete: ${plural(openCount, 'performance suggestion')}.`
+          : 'Analysis complete: no open performance suggestions.',
+      );
       await this.load(false);
     } catch (e) {
       this.setError(loadErrorText(e));
     } finally {
       this.analyzing = false;
-      this.busy = false;
     }
   }
 
   async dismiss(id: string): Promise<void> {
-    if (this.busy) return;
-    this.busy = true;
+    if (this.clearing) return;
+    this.clearing = true;
+    this.dismissingId = id;
     try {
       await api.post(`/telemetry/suggestions/${encodeURIComponent(id)}/dismiss`);
       this.suggestions = this.suggestions.map((s) => (s.id === id ? { ...s, dismissed: true } : s));
     } catch (e) {
       this.setError(loadErrorText(e));
     } finally {
-      this.busy = false;
+      this.clearing = false;
+      this.dismissingId = null;
     }
   }
 
@@ -202,21 +265,22 @@ class OttoTelemetryStore {
   }
 
   async capture(): Promise<void> {
-    if (this.busy) return;
-    this.busy = true;
+    if (this.capturing) return;
+    this.capturing = true;
     this.setError('');
     try {
       this.profile = await api.post<TelemetryProfile>('/telemetry/profile');
     } catch (e) {
       this.setError(loadErrorText(e));
     } finally {
-      this.busy = false;
+      this.capturing = false;
     }
   }
 
   resetForTests(): void {
     this.loadSeq++;
     this.detailSeq++;
+    this.scopeGetter = null;
     this.config = null;
     this.savedConfig = '';
     this.status = null;
@@ -224,8 +288,12 @@ class OttoTelemetryStore {
     this.suggestions = [];
     this.loading = true;
     this.loadedOnce = false;
-    this.busy = false;
+    this.togglingEnabled = false;
+    this.savingRetention = false;
+    this.clearing = false;
+    this.dismissingId = null;
     this.analyzing = false;
+    this.capturing = false;
     this.error = '';
     this.loadError = '';
     this.message = '';
@@ -236,9 +304,7 @@ class OttoTelemetryStore {
     this.profile = null;
     this.hours = 24;
     this.operationPage = 0;
-    usageUi.telemetryDirty = false;
   }
 }
 
 export const ottoTelemetry = new OttoTelemetryStore();
-usageUi.onDiscardTelemetry = () => ottoTelemetry.discardChanges();

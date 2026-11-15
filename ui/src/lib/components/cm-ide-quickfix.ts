@@ -3,7 +3,7 @@
 
 import { EditorSelection, type ChangeSpec, type Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import { detectSemanticLang } from './cm-ide-semantic.ts';
+import { analyzeGoImports, detectSemanticLang, inferGoImportPkgNames } from './cm-ide-semantic.ts';
 
 export interface IdeConcreteTextEdit {
   path?: string;
@@ -129,6 +129,52 @@ function toCamelJsonTag(fieldName: string): string {
   return fieldName[0].toLowerCase() + fieldName.slice(1);
 }
 
+const UNUSED_IMPORT_DIAG_RE = /\b(?:imported and not used|unused\s*import|unusedimport)\b/i;
+
+/**
+ * Returns true only when `line1` is a Go import spec whose qualifier is NOT referenced
+ * outside the `import` declaration (unless `_` or `.`), OR is explicitly flagged by an
+ * unused-import diagnostic on that line.
+ */
+export function isGoImportUnusedInDoc(
+  docText: string,
+  line1: number,
+  diagnostics?: readonly { line?: number; code?: string | null; message?: string }[] | null,
+): boolean {
+  const lines = docText.split('\n');
+  if (line1 < 1 || line1 > lines.length) return false;
+  const curLine = lines[line1 - 1] ?? '';
+  const noComment = curLine.replace(/\/\/.*$/, '').trim();
+  const mImp = /^(?:import\s+)?(?:([._]|[A-Za-z_]\w*)\s+)?(["`][^"`]+["`])\s*$/.exec(noComment);
+  if (!mImp) return false;
+
+  if (diagnostics && diagnostics.some((d) => (d.line == null || d.line === line1) && (UNUSED_IMPORT_DIAG_RE.test(d.message ?? '') || UNUSED_IMPORT_DIAG_RE.test(d.code ?? '')))) {
+    return true;
+  }
+
+  const alias = mImp[1];
+  if (alias === '_' || alias === '.') return false;
+
+  const analyzed = analyzeGoImports(docText);
+  const entry = analyzed.entries.find((e) => e.line === line1);
+  if (entry) {
+    return entry.names.length > 0 && !entry.used;
+  }
+
+  // Fallback for import specs past line 300 if any exist.
+  const { names } = inferGoImportPkgNames(mImp[2].slice(1, -1), alias);
+  if (names.length === 0) return false;
+  for (let i = 0; i < lines.length; i++) {
+    if (i + 1 === line1) continue;
+    const raw = lines[i].replace(/\/\/.*$/, '');
+    if (/^\s*import\b/.test(raw)) continue;
+    if (names.some((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\.`).test(raw))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** Compute deterministic, instant (<5ms) concrete Quick Fixes at 1-based `line` across all 8 languages. */
 export function computeDeterministicQuickFixes(
   docText: string,
@@ -136,6 +182,7 @@ export function computeDeterministicQuickFixes(
   language: string | undefined,
   line: number,
   symbol?: string,
+  diagnostics?: readonly { line?: number; code?: string | null; message?: string }[] | null,
 ): IdeQuickFixAction[] {
   const lines = docText.split('\n');
   if (line < 1 || line > lines.length) return [];
@@ -257,8 +304,8 @@ export function computeDeterministicQuickFixes(
         }
       }
     }
-    // Remove Go import line
-    if (/^\s*(?:[A-Za-z_]\w*\s+)?"[^"]+"\s*$/.test(curLine) || /^\s*import\s+"[^"]+"\s*$/.test(curLine)) {
+    // Remove Go import line ONLY when the imported qualifier is unused in `docText` (or flagged by an unused-import diagnostic)
+    if (isGoImportUnusedInDoc(docText, line, diagnostics)) {
       out.push({
         id: `go-remove-import-${line}`,
         title: `Remove import ${trimmed}`,
@@ -390,8 +437,8 @@ export function hasDeterministicQuickFixAtLine(
     return false;
   }
   if (lang === 'go') {
-    if (/^\s*(?:[A-Za-z_]\w*\s+)?"[^"]+"\s*$/.test(curLine) || /^\s*import\s+"[^"]+"\s*$/.test(curLine)) {
-      return true;
+    if (/^\s*(?:[._]|[A-Za-z_]\w*\s+)?["`][^"`]+["`]\s*(?:\/\/.*)?$/.test(curLine) || /^\s*import\s+(?:[._]\s+|[A-Za-z_]\w*\s+)?["`][^"`]+["`]/.test(curLine)) {
+      if (isGoImportUnusedInDoc(doc.toString(), line)) return true;
     }
     if (/\berr\s*:?=/.test(curLine) && !(line < doc.lines && /^\s*if\s+err\s*!=\s*nil/.test(doc.line(line + 1).text))) {
       return true;

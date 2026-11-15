@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::burst::{
-    classify_tool, is_safe_session_id, now_ms, parse_rfc3339_ms, trim_ascii, unquote_args,
-    MirroredCounts,
+    classify_tool, is_safe_session_id, now_ms, parse_rfc3339_end_ms, parse_rfc3339_ms, trim_ascii,
+    unquote_args, MirroredCounts,
 };
 use super::SidebandAction;
 use crate::driver::SidebandSource;
@@ -27,6 +27,8 @@ pub(crate) struct AgyState {
     #[serde(default)]
     pub last_step_index: Option<u64>,
     #[serde(default)]
+    pub prompted_turn_open: bool,
+    #[serde(default)]
     pub in_autonomous_gap: bool,
     #[serde(default)]
     pub awaiting_planner: bool,
@@ -37,8 +39,18 @@ pub(crate) struct AgyState {
 }
 
 impl AgyState {
-    pub fn reset_turn_flags(&mut self) {
+    pub fn reset_for_prompt(&mut self) {
+        self.prompted_turn_open = false;
         self.in_autonomous_gap = false;
+        self.awaiting_planner = false;
+        self.pending_tools.clear();
+    }
+
+    /// Closing one visual `auto-N` turn in Otto must NOT clear
+    /// `in_autonomous_gap`: if the next `<SYSTEM_MESSAGE>` arrived inside the
+    /// 1.5 s settle window, `in_autonomous_gap` is already `true` for
+    /// `auto-(N+1)` and clearing it would silently drop the entire wakeup.
+    pub fn on_turn_settled(&mut self) {
         self.awaiting_planner = false;
         self.pending_tools.clear();
     }
@@ -96,32 +108,58 @@ impl AgyState {
                 continue;
             };
             let source = v.get("source").and_then(Value::as_str);
-            let created_ms = v
-                .get("created_at")
-                .and_then(Value::as_str)
-                .and_then(parse_rfc3339_ms);
+            let raw_created = v.get("created_at").and_then(Value::as_str);
+            let created_ms = raw_created.and_then(parse_rfc3339_ms);
+            let created_end_ms = raw_created.and_then(parse_rfc3339_end_ms);
 
             match (source, step_type) {
                 (_, "USER_INPUT") => {
-                    self.reset_turn_flags();
+                    self.reset_for_prompt();
+                    self.prompted_turn_open = true;
                 }
                 (Some("SYSTEM"), "SYSTEM_MESSAGE" | "ERROR_MESSAGE") => {
+                    if self.prompted_turn_open {
+                        continue;
+                    }
                     // Skip mid-prompt retries written before the prompted turn ended.
+                    // `created_at` in `agy` has whole-second resolution (`...Z`), so
+                    // compare its end-of-second bound against `idle_since_ms`.
                     if idle_since_ms > 0
-                        && created_ms.is_some_and(|ts| ts.saturating_add(50) < idle_since_ms)
+                        && created_end_ms.is_some_and(|ts| ts.saturating_add(50) < idle_since_ms)
                     {
                         continue;
                     }
-                    if step_type == "SYSTEM_MESSAGE" || self.in_autonomous_gap {
-                        self.in_autonomous_gap = true;
-                        self.awaiting_since_ms = now_ms();
-                    }
+                    self.in_autonomous_gap = true;
+                    self.awaiting_planner = true;
+                    self.awaiting_since_ms = now_ms();
+                    actions.push(SidebandAction::TurnStarted);
                 }
                 (Some("SYSTEM"), "CHECKPOINT") if self.in_autonomous_gap => {
+                    self.awaiting_planner = true;
                     self.awaiting_since_ms = now_ms();
                 }
-                (_, "PLANNER_RESPONSE") if self.in_autonomous_gap => {
-                    self.parse_planner_step(&v, step_idx.unwrap_or(0), mirrored, &mut actions);
+                (_, "PLANNER_RESPONSE") => {
+                    let has_tools = v
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .is_some_and(|c| !c.is_empty());
+                    if self.prompted_turn_open {
+                        if !has_tools && v.get("status").and_then(Value::as_str) != Some("ERROR") {
+                            self.prompted_turn_open = false;
+                        }
+                        continue;
+                    }
+                    // Recover if daemon resumed mid-wakeup after `<SYSTEM_MESSAGE>`
+                    // was already at EOF.
+                    if !self.in_autonomous_gap
+                        && idle_since_ms > 0
+                        && created_ms.is_some_and(|ts| ts > idle_since_ms.saturating_add(1_000))
+                    {
+                        self.in_autonomous_gap = true;
+                    }
+                    if self.in_autonomous_gap {
+                        self.parse_planner_step(&v, step_idx.unwrap_or(0), mirrored, &mut actions);
+                    }
                 }
                 (_, "GENERIC") if self.in_autonomous_gap => {
                     self.parse_generic_step(&v, &mut actions);
@@ -161,7 +199,17 @@ impl AgyState {
             self.awaiting_since_ms = now_ms();
             for (i, call) in calls.iter().enumerate() {
                 mirrored.tool_calls = mirrored.tool_calls.saturating_add(1);
-                let id = format!("tlog-{step_idx}-{i}");
+                let native_id = call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                if let Some(real) = native_id {
+                    mirrored.preseed_tool_id(real);
+                }
+                let id = native_id
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("tlog-{step_idx}-{i}"));
                 let raw_name = call.get("name").and_then(Value::as_str).unwrap_or("tool");
                 let args = call
                     .get("args")
@@ -178,6 +226,9 @@ impl AgyState {
                     diff: desc.diff,
                 });
             }
+        } else if v.get("status").and_then(Value::as_str) == Some("ERROR") {
+            self.awaiting_planner = true;
+            self.awaiting_since_ms = now_ms();
         } else {
             self.awaiting_planner = false;
         }

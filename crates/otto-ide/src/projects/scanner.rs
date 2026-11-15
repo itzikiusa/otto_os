@@ -414,4 +414,26 @@ mod tests {
         let names: Vec<&str> = scanned.repos.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["go_utilities", "supprt_agent"]);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_parent_repos_real_dir_wins_over_earlier_and_later_symlinks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real_repo = tmp.path().join("m_real");
+        fs::create_dir_all(real_repo.join(".git")).expect("mkdir m_real/.git");
+        std::os::unix::fs::symlink(&real_repo, tmp.path().join("a_link"))
+            .expect("create earlier symlink a_link -> m_real");
+        std::os::unix::fs::symlink(&real_repo, tmp.path().join("z_link"))
+            .expect("create later symlink z_link -> m_real");
+
+        let scanned = scan_parent_repos(&tmp.path().to_string_lossy(), true).expect("scan ok");
+        assert_eq!(
+            scanned.repos.len(),
+            1,
+            "both symlinks pointing to m_real must collapse into a single canonical repo"
+        );
+        assert_eq!(scanned.repos[0].name, "m_real");
+        assert_eq!(scanned.repos[0].kind, "git");
+        assert!(scanned.repos[0].has_git);
+    }
 }

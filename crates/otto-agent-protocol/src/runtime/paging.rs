@@ -153,10 +153,16 @@ impl Projection {
 
         if let Some(raw_lines) = max_lines {
             let line_budget = raw_lines.clamp(MIN_MAX_LINES, MAX_MAX_LINES);
+            let candidate_ids: HashSet<&str> =
+                all_turns[split..].iter().map(|t| t.id.as_str()).collect();
             let mut per_turn: std::collections::HashMap<&str, (usize, usize)> =
-                std::collections::HashMap::new();
+                std::collections::HashMap::with_capacity(candidate_ids.len());
             for item in self.items.values() {
-                if let Some(tid) = item.turn_id.as_deref() {
+                if let Some(tid) = item
+                    .turn_id
+                    .as_deref()
+                    .filter(|tid| candidate_ids.contains(tid))
+                {
                     let entry = per_turn.entry(tid).or_insert((0, 0));
                     entry.0 = entry.0.saturating_add(estimate_item_lines(item, compact));
                     entry.1 += 1;
@@ -188,10 +194,16 @@ impl Projection {
                 None => line_split,
             };
         } else if compact && all_turns.len().saturating_sub(split) > 2 {
+            let candidate_ids: HashSet<&str> =
+                all_turns[split..].iter().map(|t| t.id.as_str()).collect();
             let mut per_turn: std::collections::HashMap<&str, usize> =
-                std::collections::HashMap::new();
+                std::collections::HashMap::with_capacity(candidate_ids.len());
             for item in self.items.values() {
-                if let Some(tid) = item.turn_id.as_deref() {
+                if let Some(tid) = item
+                    .turn_id
+                    .as_deref()
+                    .filter(|tid| candidate_ids.contains(tid))
+                {
                     *per_turn.entry(tid).or_default() += 1;
                 }
             }
@@ -339,10 +351,16 @@ impl Projection {
         let mut split = older_all.len().saturating_sub(cap);
         if let Some(raw_lines) = max_lines {
             let line_budget = raw_lines.clamp(MIN_MAX_LINES, MAX_MAX_LINES);
+            let candidate_ids: HashSet<&str> =
+                older_all[split..].iter().map(|t| t.id.as_str()).collect();
             let mut per_turn: std::collections::HashMap<&str, (usize, usize)> =
-                std::collections::HashMap::new();
+                std::collections::HashMap::with_capacity(candidate_ids.len());
             for item in self.items.values() {
-                if let Some(tid) = item.turn_id.as_deref() {
+                if let Some(tid) = item
+                    .turn_id
+                    .as_deref()
+                    .filter(|tid| candidate_ids.contains(tid))
+                {
                     let entry = per_turn.entry(tid).or_insert((0, 0));
                     entry.0 = entry.0.saturating_add(estimate_item_lines(item, compact));
                     entry.1 += 1;
@@ -624,7 +642,8 @@ impl AgentRuntime {
 mod tests {
     use chrono::Utc;
     use otto_core::agent_runtime::{
-        ProviderTurn, ProviderTurnStatus, TurnItem, TurnItemKind, TurnItemStatus, TurnOrigin,
+        ProviderTurn, ProviderTurnStatus, RequestKind, ResponseCapability, RuntimeRequest,
+        RuntimeRequestStatus, TurnItem, TurnItemKind, TurnItemStatus, TurnOrigin,
     };
 
     use super::Projection;
@@ -980,5 +999,72 @@ mod tests {
             .flat_map(|pg| pg.turns.iter().map(|t| t.ordinal))
             .collect();
         assert_eq!(merged_ords, (1..=25).collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn max_lines_never_drops_pinned_pending_approval_turn() {
+        let mut p = Projection::default();
+        let big = "line of output\n".repeat(1_200);
+        for ord in 1..=6u32 {
+            let tid = format!("t-{ord}");
+            p.turns.insert(
+                tid.clone(),
+                ProviderTurn {
+                    id: tid.clone(),
+                    ordinal: ord,
+                    status: ProviderTurnStatus::Completed,
+                    started_at: Some(Utc::now()),
+                    completed_at: Some(Utc::now()),
+                    turn_token_usage: None,
+                    origin: TurnOrigin::User,
+                },
+            );
+            p.items.insert(
+                format!("i-{ord}"),
+                TurnItem {
+                    id: format!("i-{ord}"),
+                    turn_id: Some(tid),
+                    ordinal: ord,
+                    status: TurnItemStatus::Completed,
+                    title: None,
+                    error: None,
+                    started_at: Some(Utc::now()),
+                    completed_at: Some(Utc::now()),
+                    updated_at: Utc::now(),
+                    parent_item_id: None,
+                    detail_omitted: false,
+                    kind: TurnItemKind::AssistantMessage {
+                        message_id: format!("m-{ord}"),
+                        text: big.clone(),
+                        streaming: false,
+                    },
+                },
+            );
+        }
+        // Pin turn 2 with a pending approval request; even with the tightest
+        // `max_lines` clamp (200), turn 2..=6 must stay in the tail snapshot.
+        p.requests.insert(
+            "req-pin".into(),
+            RuntimeRequest {
+                id: "req-pin".into(),
+                turn_id: Some("t-2".into()),
+                kind: RequestKind::Command,
+                status: RuntimeRequestStatus::Pending,
+                response_capability: ResponseCapability::Live,
+                created_at: Utc::now(),
+                resolved_at: None,
+                decision: None,
+                cancel_reason: None,
+                questions: Vec::new(),
+                question_title: None,
+                answers: None,
+            },
+        );
+
+        let tail = p.snapshot_tail_with_lines(40, true, Some(200));
+        let ords: Vec<u32> = tail.turns.iter().map(|t| t.ordinal).collect();
+        assert_eq!(ords, vec![2, 3, 4, 5, 6]);
+        assert!(tail.has_older);
+        assert_eq!(tail.older_turns, 1);
     }
 }

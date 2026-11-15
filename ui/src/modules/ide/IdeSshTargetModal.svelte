@@ -20,8 +20,10 @@
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { ide, type IdeFsEntry, type IdeFsTreeResp, type IdeNetworkBridgeConfig } from './ideStore.svelte';
   import IdeNetworkBridgeCard from './shell/IdeNetworkBridgeCard.svelte';
+  import { confirmProdNetworkBridge } from './shell/networkBridgeGuard.svelte';
   import {
     emptyNetworkBridgeDraft,
+    isProdEnvironment,
     serializeNetworkBridgeDraft,
     type IdeNetworkBridgeDraft,
   } from './shell/networkBridgeModel';
@@ -56,7 +58,6 @@
   let validationError = $state('');
   let bridgeDraft = $state<IdeNetworkBridgeDraft>(emptyNetworkBridgeDraft(null));
   let bridgeDirty = $state(false);
-  let savingBridge = $state(false);
 
   function close(): void {
     ide.sshOpen = false;
@@ -89,28 +90,6 @@
     if (!isOpen || bridgeDirty) return;
     bridgeDraft = emptyNetworkBridgeDraft(ide.projectEnv?.network_bridge ?? null);
   });
-
-  const canSaveBridgeDirectly = $derived(
-    ide.target.kind === 'local' &&
-      localRoot.trim().length > 0 &&
-      localRoot.trim() === ide.target.root.trim(),
-  );
-
-  async function saveLocalBridgeNow(): Promise<void> {
-    validationError = '';
-    const ser = serializeNetworkBridgeDraft(bridgeDraft);
-    if (ser.error) {
-      validationError = ser.error;
-      return;
-    }
-    savingBridge = true;
-    try {
-      const ok = await ide.saveEnvironment({ network_bridge: ser.config });
-      if (ok) bridgeDirty = false;
-    } finally {
-      savingBridge = false;
-    }
-  }
 
   const selectedConn = $derived<Connection | null>(
     sshConns.find((c) => c.id === selectedConnId) ?? sshConns[0] ?? null,
@@ -255,6 +234,10 @@
           validationError = ser.error;
           return;
         }
+        if (ser.config.enabled) {
+          const allowed = await confirmProdNetworkBridge(ser.config, 'save', localWsId);
+          if (!allowed) return;
+        }
         pendingBridge = ser.config;
       }
       switching = true;
@@ -283,7 +266,7 @@
       return;
     }
 
-    if (conn.environment === 'prod') {
+    if (isProdEnvironment(conn.environment)) {
       const ok = await confirmer.ask(
         `Connect IDE to production SSH host "${conn.name}" (${connEndpointText(conn)}) at ${root}? File edits, commands, and debuggers will run directly on that host.`,
         {
@@ -310,7 +293,7 @@
   <Modal
     title="Workspace target & remote SSH"
     width={820}
-    dismissable={!switching && !savingBridge}
+    dismissable={!switching}
     onclose={close}
   >
     <div class="ssh-shell">
@@ -447,8 +430,6 @@
               bind:draft={bridgeDraft}
               sshConnections={sshConns}
               idPrefix="ide-ssh-nb"
-              saving={savingBridge}
-              onSave={canSaveBridgeDirectly ? saveLocalBridgeNow : undefined}
               onDirty={() => (bridgeDirty = true)}
             />
           {:else if selectedConn}

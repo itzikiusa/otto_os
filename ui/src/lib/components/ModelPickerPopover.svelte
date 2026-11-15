@@ -82,6 +82,7 @@
   let view = $state<string>(untrack(() => provider));
   let query = $state('');
   let showAll = $state(false);
+  let activeIdx = $state(0);
   let panelEl = $state<HTMLDivElement | null>(null);
   let searchEl = $state<HTMLInputElement | null>(null);
   let pos = $state<{ top: number; left: number; maxH: number }>({ top: -9999, left: 0, maxH: 480 });
@@ -112,7 +113,23 @@
     return q ? list.filter(({ m }) => `${m.label} ${m.id}`.toLowerCase().includes(q)) : list;
   });
   const shown = $derived(showAll || query.trim() ? rows : rows.slice(0, PAGE));
+  const hasDefaultRow = $derived(view !== '★' && supportsModelSelection(view, meta) && !query);
+  const selectableItems = $derived.by(() => {
+    const out: Array<{ p: string; id: string | null }> = [];
+    if (hasDefaultRow && pickable(view)) out.push({ p: view, id: null });
+    for (let i = 0; i < shown.length; i++) {
+      const r = shown[i];
+      if (pickable(r.p)) out.push({ p: r.p, id: r.m.id });
+    }
+    return out;
+  });
   const efforts = $derived(oneffort && supportsEffortSelection(provider) ? effortsForModel(provider, current, meta) : []);
+
+  $effect(() => {
+    void view;
+    void query;
+    activeIdx = 0;
+  });
 
   function pickable(p: string): boolean {
     return providerReadiness(p).available && (!lockProvider || p === provider);
@@ -143,14 +160,37 @@
     if (panelEl) pos = placeAnchored(anchor, panelEl, { prefer: 'above', align: 'end' });
   }
 
+  function closePicker(): void {
+    onclose();
+    anchor.focus();
+  }
+
+  async function expandMore(): Promise<void> {
+    const firstNewIdx = (hasDefaultRow && pickable(view) ? 1 : 0) + PAGE;
+    showAll = true;
+    await tick();
+    const target = panelEl?.querySelector<HTMLElement>(`[data-mp-idx="${firstNewIdx}"]`) ?? searchEl;
+    target?.focus();
+  }
+
   onMount(() => {
     void tick().then(() => {
       place();
       searchEl?.focus();
     });
     const onResize = (): void => place();
+    const onWinKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      closePicker();
+    };
     window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    window.addEventListener('keydown', onWinKey, true);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('keydown', onWinKey, true);
+    };
   });
 
   $effect(() => {
@@ -159,12 +199,32 @@
     void tick().then(place);
   });
 
+  function onSearchKeydown(e: KeyboardEvent): void {
+    if (selectableItems.length === 0) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const count = selectableItems.length;
+      const clamped = Math.min(Math.max(activeIdx, 0), count - 1);
+      activeIdx = (clamped + (e.key === 'ArrowDown' ? 1 : count - 1)) % count;
+      void tick().then(() => {
+        panelEl?.querySelector<HTMLElement>(`[data-mp-idx="${activeIdx}"]`)?.scrollIntoView({ block: 'nearest' });
+      });
+      return;
+    }
+    if (e.key === 'Enter') {
+      const target = selectableItems[Math.min(Math.max(activeIdx, 0), selectableItems.length - 1)];
+      if (target) {
+        e.preventDefault();
+        pick(target.p, target.id);
+      }
+    }
+  }
+
   function onKey(e: KeyboardEvent): void {
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      onclose();
-      anchor.focus();
+      closePicker();
       return;
     }
     if ((e.metaKey || e.ctrlKey) && /^[1-4]$/.test(e.key)) {
@@ -188,7 +248,7 @@
   }
 </script>
 
-<button type="button" class="mp-catch" aria-label="Close model picker" title="Close" tabindex="-1" onclick={onclose}></button>
+<button type="button" class="mp-catch" aria-label="Close model picker" title="Close model picker" tabindex="-1" onclick={onclose}></button>
 <div
   bind:this={panelEl}
   class="mp-panel"
@@ -208,24 +268,25 @@
       class:on={view === '★'}
       aria-pressed={view === '★'}
       aria-label="Favorite models"
-      title="Favorites"
+      title="Favorite models"
       onclick={() => (view = '★')}
     >
       <Icon name="star" size={14} />
     </button>
     {#each providers as p (p)}
       {@const ready = providerReadiness(p)}
+      {@const provTitle = !ready.available
+        ? `${harnessLabel(p)} — ${ready.message}`
+        : lockProvider && p !== provider
+          ? `${harnessLabel(p)} — start a new thread to use it`
+          : harnessLabel(p)}
       <button
         type="button"
         class="mp-prov"
         class:on={view === p}
         aria-pressed={view === p}
-        aria-label={harnessLabel(p)}
-        title={!ready.available
-          ? `${harnessLabel(p)} — ${ready.message}`
-          : lockProvider && p !== provider
-            ? `${harnessLabel(p)} — start a new thread to use it`
-            : harnessLabel(p)}
+        aria-label={provTitle}
+        title={provTitle}
         disabled={!ready.available}
         data-testid="model-picker-provider-{p}"
         onclick={() => {
@@ -252,14 +313,18 @@
             placeholder="Search models…"
             aria-label="Search models"
             data-testid="model-picker-search"
+            onkeydown={onSearchKeydown}
           />
         </div>
-        {#if view !== '★' && supportsModelSelection(view, meta) && !query}
+        {#if hasDefaultRow}
+          {@const defaultSelectable = pickable(view)}
           <button
             type="button"
             class="mp-row"
             class:cur={view === provider && model === null}
-            disabled={!pickable(view)}
+            class:kbd-active={defaultSelectable && activeIdx === 0}
+            data-mp-idx={defaultSelectable ? 0 : undefined}
+            disabled={!defaultSelectable}
             onclick={() => pick(view, null)}
           >
             <span class="mp-check">{#if view === provider && model === null}<Icon name="check" size={12} />{/if}</span>
@@ -268,14 +333,19 @@
         {/if}
         {#each shown as r, i (`${r.p}:${r.m.id}`)}
           {@const key = `${r.p}:${r.m.id}`}
-          {@const isCur = r.p === provider && currentId === r.m.id}
+          {@const isCur = r.p === provider && model !== null && currentId === r.m.id}
+          {@const rowSelectable = pickable(r.p)}
+          {@const rowIdx = rowSelectable ? selectableItems.findIndex((s) => s.p === r.p && s.id === r.m.id) : -1}
+          {@const favTitle = favs.includes(key) ? `Remove ${r.m.label} from favorites` : `Add ${r.m.label} to favorites`}
           <div class="mp-rowwrap">
             <button
               type="button"
               class="mp-row"
               class:cur={isCur}
+              class:kbd-active={rowIdx >= 0 && activeIdx === rowIdx}
+              data-mp-idx={rowIdx >= 0 ? rowIdx : undefined}
               title={r.m.description || r.m.id}
-              disabled={!pickable(r.p)}
+              disabled={!rowSelectable}
               onclick={() => pick(r.p, r.m.id)}
             >
               <span class="mp-check">{#if isCur}<Icon name="check" size={12} />{/if}</span>
@@ -288,8 +358,8 @@
               class="icon-btn mp-fav"
               class:on={favs.includes(key)}
               aria-pressed={favs.includes(key)}
-              aria-label="{favs.includes(key) ? 'Unfavorite' : 'Favorite'} {r.m.label}"
-              title={favs.includes(key) ? 'Remove from favorites' : 'Add to favorites'}
+              aria-label={favTitle}
+              title={favTitle}
               onclick={() => toggleFav(key)}
             >
               <Icon name="star" size={12} />
@@ -299,7 +369,7 @@
           <p class="mp-empty">{view === '★' ? 'Star a model to keep it here.' : 'No models match.'}</p>
         {/each}
         {#if !showAll && !query.trim() && rows.length > PAGE}
-          <button type="button" class="btn small ghost mp-more" onclick={() => (showAll = true)}>
+          <button type="button" class="btn small ghost mp-more" onclick={() => void expandMore()}>
             Show {rows.length - PAGE} more
           </button>
         {/if}
@@ -474,8 +544,13 @@
     text-align: start;
     cursor: pointer;
   }
-  .mp-row:hover:not(:disabled) {
+  .mp-row:hover:not(:disabled),
+  .mp-row.kbd-active:not(:disabled) {
     background: var(--hover);
+  }
+  .mp-row.kbd-active:not(:disabled) {
+    outline: 1px solid var(--accent-line);
+    outline-offset: -1px;
   }
   .mp-row.cur {
     font-weight: 500;

@@ -20,7 +20,7 @@ import {
   toAbsoluteIdeFilePath,
 } from './cm-ide-lsp-completion';
 
-export { lspLanguageIdFor, normalizeIdeLspServerLang, toAbsoluteIdeFilePath };
+export { lspLanguageIdFor, normalizeIdeLspServerLang, resolveIdeLspModuleRoot, toAbsoluteIdeFilePath };
 
 function lspLangFor(filePath: string, ideMode: boolean, language?: string): string | null {
   return lspLanguageIdFor(filePath, ideMode, language);
@@ -32,12 +32,19 @@ export function uriToPath(uri: string): string {
   catch { return uri.slice('file://'.length); }
 }
 
-function lspWsUrl(lang: string, rootPath: string, connId?: string | null): string {
+export function lspWsUrl(
+  lang: string,
+  rootPath: string,
+  filePath?: string | null,
+  connId?: string | null,
+): string {
   const base = new URL(baseUrl());
   const proto = base.protocol === 'https:' ? 'wss:' : 'ws:';
   const params = new URLSearchParams({ lang, root: rootPath });
   if (connId) params.set('connection_id', connId);
-  return `${proto}//${base.host}/ws/lsp?${params.toString()}`;
+  const trimmedFile = filePath?.trim();
+  const fileSuffix = trimmedFile ? `&file=${encodeURIComponent(trimmedFile)}` : '';
+  return `${proto}//${base.host}/ws/lsp?${params.toString()}${fileSuffix}`;
 }
 
 let capabilitiesCache: LspCapabilities | null = null;
@@ -81,7 +88,7 @@ export async function attachCodeEditorLsp(opts: {
     }
     if (!opts.isCurrent()) return;
 
-    const wsUri = lspWsUrl(serverLang, resolvedRoot, opts.connId);
+    const wsUri = lspWsUrl(serverLang, resolvedRoot, absFile, opts.connId);
     const token = getToken();
     const protocols = token ? [WS_BEARER_SUBPROTOCOL, token] : undefined;
     const rootUri = `file://${resolvedRoot}`;
@@ -96,7 +103,7 @@ export async function attachCodeEditorLsp(opts: {
     const jump = (uri: string, line: number, column: number) => opts.onLocationJump(uriToPath(uri), line, column, absFile);
     try {
       const lspExtensions = await mod.buildPooledLspExtensions({
-        wsUri, protocols, rootPath: resolvedRoot, connId: opts.connId,
+        wsUri, protocols, rootPath: resolvedRoot, projectFolders: opts.projectFolders, connId: opts.connId,
         filePath: absFile, languageId: lspLang,
         onLocationJump: jump, onDiagnostics: opts.onDiagnostics,
       });

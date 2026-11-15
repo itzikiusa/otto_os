@@ -4,6 +4,7 @@
   import { placeAnchored, type AnchorPlacement } from '../../../lib/anchorPlace';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { plural } from '../../../lib/plural';
   import { rowMenu } from '../../../lib/rowMenu';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
@@ -140,7 +141,7 @@
 
   <div class="ws-scroll">
     <div class="ws-sec-head">
-      <span class="ws-sec-label">Multi-Repo Projects ({filteredNamedProjects.length})</span>
+      <span class="ws-sec-label">Multi-repo projects ({filteredNamedProjects.length})</span>
       <button
         type="button"
         class="btn small ghost"
@@ -173,7 +174,7 @@
             <span class="ws-item-copy">
               <span class="ws-item-title" dir="auto">
                 {proj.name}
-                <Badge tone="accent" variant="outline" label={`${proj.folders.length} repos`} />
+                <Badge tone="neutral" variant="outline" label={plural(proj.folders.length, 'repo')} />
               </span>
               <span class="ws-item-sub" dir="ltr">{shortenHomePath(proj.primary_root)}</span>
             </span>
@@ -231,15 +232,6 @@
   </div>
 
   <div class="ws-actions-footer">
-    <button
-      type="button"
-      class="ws-action-btn"
-      onclick={() => { onclose(); ide.bulkRepoPickerMode = 'create'; }}
-      data-testid="ide-switcher-new-project"
-    >
-      <Icon name="layers" size={13} />
-      <span>New multi-repo project…</span>
-    </button>
     {#if ide.hasTarget && ide.target.kind === 'local'}
       <button
         type="button"
@@ -248,7 +240,7 @@
         data-testid="ide-switcher-bulk-attach"
       >
         <Icon name="plus" size={13} />
-        <span>Bulk attach repos…</span>
+        <span>Add repos…</span>
       </button>
     {/if}
     <button type="button" class="ws-action-btn" onclick={() => onpickfolder('open')} data-testid="ide-open-local-folder-btn">
@@ -272,7 +264,7 @@
   .ws-backdrop { position: fixed; inset: 0; z-index: var(--z-popover-backdrop); }
   .ws-popover {
     position: fixed; z-index: var(--z-popover); display: flex; flex-direction: column;
-    background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-m); box-shadow: var(--shadow-card); overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-l); box-shadow: var(--glass-shadow); overflow: hidden;
   }
   .ws-search-bar { display: flex; align-items: center; gap: 8px; padding-block: 8px; padding-inline: 12px; border-block-end: 1px solid var(--border); background: var(--surface-2); color: var(--text-dim); flex-shrink: 0; }
   .ws-search-bar:focus-within { border-color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }

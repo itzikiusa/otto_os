@@ -169,6 +169,8 @@ function makeRuntimeHarness(extraGlobals: Record<string, unknown> = {}) {
       >;
       loadError: Record<string, string>;
       staleError: Record<string, string>;
+      olderError: Record<string, string>;
+      itemError: Record<string, string>;
       loadingOlder: Record<string, boolean>;
       loadingItem: Record<string, boolean>;
       open(id: string): () => void;
@@ -807,15 +809,15 @@ test('RuntimeViews mobile viewport requests tail_turns=12&max_lines=10000&compac
       provider_thread: null,
       turns: [
         {
-          id: 't-1',
-          ordinal: 1,
+          id: 't-2',
+          ordinal: 2,
           status: 'completed',
           started_at: '2026-11-15T10:00:00Z',
           completed_at: '2026-11-15T10:00:02Z',
           origin: 'user',
         },
       ],
-      turn_items: [compactEdit],
+      turn_items: [{ ...compactEdit, turn_id: 't-2' }],
       runtime_requests: [],
       plans: [],
       queued_prompts: [],
@@ -839,7 +841,7 @@ test('RuntimeViews mobile viewport requests tail_turns=12&max_lines=10000&compac
     detail_omitted: undefined,
     diff_str: '--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new',
   };
-  (h.gets[1].gate as unknown as { resolve(v: TurnItem): void }).resolve(hydratedEdit);
+  (h.gets[1].gate as unknown as { resolve(v: { item: TurnItem }): void }).resolve({ item: hydratedEdit });
   const [r1, r2] = await Promise.all([p1, p2]);
   assert.equal(r1?.id, 'fc-1');
   assert.equal(r2?.id, 'fc-1');
@@ -848,10 +850,16 @@ test('RuntimeViews mobile viewport requests tail_turns=12&max_lines=10000&compac
   assert.equal(afterHydrate.detail_omitted, undefined);
   assert.match(afterHydrate.diff_str ?? '', /\+new/);
 
+  // Item hydration failure sets `itemError` for inline Retry, then clears on successful retry.
+  const failItemP = h.views.ensureItemDetail('s-mobile', 'fc-err');
+  (h.gets[2].gate as unknown as { reject(e: Error): void }).reject(new Error('item 502'));
+  assert.equal(await failItemP, null);
+  assert.match(h.views.itemError['s-mobile:fc-err'] ?? '', /item 502/);
+
   // Reconnect snapshot with unchanged updated_at preserves already-hydrated diff_str!
   h.emitResync();
   await flush();
-  h.gets[2].gate.resolve({
+  h.gets[3].gate.resolve({
     kind: 'snapshot',
     snapshot_sequence: 6,
     snapshot: {
@@ -859,15 +867,43 @@ test('RuntimeViews mobile viewport requests tail_turns=12&max_lines=10000&compac
       provider_thread: null,
       turns: [
         {
-          id: 't-1',
-          ordinal: 1,
+          id: 't-2',
+          ordinal: 2,
           status: 'completed',
           started_at: '2026-11-15T10:00:00Z',
           completed_at: '2026-11-15T10:00:02Z',
           origin: 'user',
         },
       ],
-      turn_items: [compactEdit],
+      turn_items: [{ ...compactEdit, turn_id: 't-2' }],
+      runtime_requests: [],
+      plans: [],
+      queued_prompts: [],
+      has_older: true,
+      oldest_turn_ordinal: 2,
+      older_turns: 1,
+    },
+  });
+  await flush();
+  const afterResync = h.views.projections['s-mobile']?.items[0] as Extract<TurnItem, { type: 'file_change' }>;
+  assert.equal(afterResync.detail_omitted, undefined);
+  assert.match(afterResync.diff_str ?? '', /\+new/);
+
+  // `loadOlder` failure records inline `olderError` and clears on Retry.
+  const failOlderP = h.views.loadOlder('s-mobile');
+  h.gets[4].gate.reject(new Error('history timeout'));
+  assert.equal(await failOlderP, false);
+  assert.match(h.views.olderError['s-mobile'] ?? '', /history timeout/);
+
+  const okOlderP = h.views.loadOlder('s-mobile');
+  h.gets[5].gate.resolve({
+    kind: 'snapshot',
+    snapshot_sequence: 6,
+    snapshot: {
+      provider_session: null,
+      provider_thread: null,
+      turns: [],
+      turn_items: [],
       runtime_requests: [],
       plans: [],
       queued_prompts: [],
@@ -876,10 +912,215 @@ test('RuntimeViews mobile viewport requests tail_turns=12&max_lines=10000&compac
       older_turns: 0,
     },
   });
-  await flush();
-  const afterResync = h.views.projections['s-mobile']?.items[0] as Extract<TurnItem, { type: 'file_change' }>;
-  assert.equal(afterResync.detail_omitted, undefined);
-  assert.match(afterResync.diff_str ?? '', /\+new/);
+  assert.equal(await okOlderP, true);
+  assert.equal(h.views.olderError['s-mobile'], undefined);
 
   close();
+});
+
+test('projection.ts caps streaming output at 128 KiB, drops settled duplicate output, batches applyEvents, and guards non-contiguous applyReplay gaps', () => {
+  const projMod = loadSource(
+    new URL('../src/modules/threads/runtime/projection.ts', import.meta.url),
+    {},
+  ) as typeof import('../src/modules/threads/runtime/projection.ts');
+
+  assert.equal(projMod.MAX_STREAM_OUTPUT_BYTES, 128 * 1024);
+
+  // 1) Streaming output caps at 128 KiB retaining newest tail, then deletes transient entry once settled item carries output.
+  const chunkA = 'A'.repeat(90 * 1024);
+  const chunkB = 'B'.repeat(60 * 1024) + 'TAIL_END';
+  const { projection: p1, gap } = projMod.applyEvents(projMod.emptyProjection(), [
+    {
+      sequence: 1,
+      session_id: 's-cap',
+      ts: '2026-11-15T10:00:00Z',
+      type: 'command_output.delta',
+      item_id: 'cmd-1',
+      chunk: chunkA,
+    },
+    {
+      sequence: 2,
+      session_id: 's-cap',
+      ts: '2026-11-15T10:00:01Z',
+      type: 'command_output.delta',
+      item_id: 'cmd-1',
+      chunk: chunkB,
+    },
+  ]);
+  assert.equal(gap, false);
+  assert.equal(p1.output['cmd-1'].length, projMod.MAX_STREAM_OUTPUT_BYTES);
+  assert.ok(p1.output['cmd-1'].startsWith('…[truncated]\n'));
+  assert.ok(p1.output['cmd-1'].endsWith('TAIL_END'));
+
+  const { projection: p2 } = projMod.applyEvents(p1, [
+    {
+      sequence: 3,
+      session_id: 's-cap',
+      ts: '2026-11-15T10:00:02Z',
+      type: 'turn_item.updated',
+      turn_item: {
+        id: 'cmd-1',
+        turn_id: 't-1',
+        ordinal: 1,
+        status: 'completed',
+        title: 'cargo test',
+        started_at: '2026-11-15T10:00:00Z',
+        completed_at: '2026-11-15T10:00:02Z',
+        updated_at: '2026-11-15T10:00:02Z',
+        type: 'command_execution',
+        input: 'cargo test',
+        output: 'settled output',
+        exit_code: 0,
+      },
+    },
+  ]);
+  assert.equal('cmd-1' in p2.output, false, 'settled turn_item with output must release transient delta buffer');
+
+  // 2) `replaceHydratedItem` preserves existing `diff_str` when hydrated detail lacks `diff_str`.
+  const withDiff = projMod.replaceHydratedItem(projMod.emptyProjection(), {
+    id: 'fc-keep',
+    turn_id: 't-1',
+    ordinal: 1,
+    status: 'completed',
+    title: 'lib.rs',
+    started_at: '2026-11-15T10:00:00Z',
+    completed_at: '2026-11-15T10:00:01Z',
+    updated_at: '2026-11-15T10:00:01Z',
+    type: 'file_change',
+    file_name: 'lib.rs',
+    diff_str: '+preserved line',
+  });
+  const afterMissingDiff = projMod.replaceHydratedItem(withDiff, {
+    id: 'fc-keep',
+    turn_id: 't-1',
+    ordinal: 1,
+    status: 'completed',
+    title: 'lib.rs',
+    started_at: '2026-11-15T10:00:00Z',
+    completed_at: '2026-11-15T10:00:01Z',
+    updated_at: '2026-11-15T10:00:01Z',
+    type: 'file_change',
+    file_name: 'lib.rs',
+  });
+  assert.equal(
+    (afterMissingDiff.items[0] as Extract<TurnItem, { type: 'file_change' }>).diff_str,
+    '+preserved line',
+  );
+
+  // 3) Non-contiguous `applyReplay` snapshot drops stale older turns instead of creating an ordinal hole [1, 2, 5, 6].
+  const mkT = (ordinal: number): ProviderTurn => ({
+    id: `t-${ordinal}`,
+    ordinal,
+    status: 'completed',
+    started_at: '2026-11-15T10:00:00Z',
+    completed_at: '2026-11-15T10:00:01Z',
+    origin: 'user',
+  });
+  const stalePaged = projMod.fromSnapshot(
+    {
+      provider_session: null,
+      provider_thread: null,
+      turns: [mkT(1), mkT(2)],
+      turn_items: [],
+      runtime_requests: [],
+      plans: [],
+      queued_prompts: [],
+      has_older: false,
+      oldest_turn_ordinal: 1,
+      older_turns: 0,
+    },
+    2,
+  );
+  const gappedTail = projMod.applyReplay(stalePaged, {
+    kind: 'snapshot',
+    snapshot_sequence: 10,
+    snapshot: {
+      provider_session: null,
+      provider_thread: null,
+      turns: [mkT(5), mkT(6)],
+      turn_items: [],
+      runtime_requests: [],
+      plans: [],
+      queued_prompts: [],
+      has_older: true,
+      oldest_turn_ordinal: 5,
+      older_turns: 4,
+    },
+  });
+  assert.deepEqual(
+    Array.from(gappedTail.turns, (t) => t.ordinal),
+    [5, 6],
+  );
+  assert.equal(gappedTail.hasOlder, true);
+  assert.equal(gappedTail.oldestTurnOrdinal, 5);
+});
+
+test('Go LSP init/dedupe, Go unused-import QuickFix guard, inspection hover suppression, and prod bridge detection', async () => {
+  const lspComp = await import('../src/lib/components/cm-ide-lsp-completion.ts');
+  const qfMod = await import('../src/lib/components/cm-ide-quickfix.ts');
+  const hoverMod = await import('../src/lib/components/cm-ide-hover.ts');
+  const bridgeMod = loadSource(
+    new URL('../src/modules/ide/shell/networkBridgeModel.ts', import.meta.url),
+    {},
+  ) as typeof import('../src/modules/ide/shell/networkBridgeModel.ts');
+
+  // 1) Go LSP `initializationOptions` passes `-mod=mod` and resolves sub-repo module root.
+  const goInit = lspComp.buildLspInitializationOptions('go');
+  assert.deepEqual(goInit?.buildFlags, ['-mod=mod']);
+  assert.equal(
+    lspComp.resolveIdeLspModuleRoot('/ws/multi', 'services/billing/cmd/main.go', [
+      '/ws/multi/services/auth',
+      '/ws/multi/services/billing',
+    ]),
+    '/ws/multi/services/billing',
+  );
+
+  // 2) `dedupeLspJsonRpcMessage` collapses duplicate `compiler(BrokenImport)` diagnostics for regular + test pkg variants.
+  const dupDiag = {
+    range: { start: { line: 4, character: 2 }, end: { line: 4, character: 44 } },
+    severity: 1,
+    code: 'BrokenImport',
+    source: 'compiler',
+    message: 'could not import bitbucket.org/gamescale-rnd/go_utilities/web',
+  };
+  const dedupedMsg = lspComp.dedupeLspJsonRpcMessage({
+    jsonrpc: '2.0',
+    method: 'textDocument/publishDiagnostics',
+    params: { uri: 'file:///ws/main.go', diagnostics: [dupDiag, { ...dupDiag }] },
+  });
+  assert.equal(dedupedMsg.params?.diagnostics?.length, 1);
+
+  // 3) Go `Remove import` only appears when the imported package is genuinely unused (or flagged unused by LSP).
+  const usedGoDoc = [
+    'package main',
+    'import (',
+    '\t"bitbucket.org/gamescale-rnd/go_utilities/web"',
+    '\t"unused/pkg/foo"',
+    '\t_ "embed"',
+    ')',
+    'func main() { web.InitApp() }',
+  ].join('\n');
+  assert.equal(qfMod.isGoImportUnusedInDoc(usedGoDoc, 3), false, 'used `web` import must NOT offer Remove import');
+  assert.equal(qfMod.isGoImportUnusedInDoc(usedGoDoc, 4), true, 'unreferenced `foo` import SHOULD offer Remove import');
+  assert.equal(qfMod.isGoImportUnusedInDoc(usedGoDoc, 5), false, 'blank `_` import must NOT offer Remove import');
+
+  // 4) Hover never synthesizes an inspection card from `primaryDetFix` alone or over an active `@codemirror/lint` range.
+  assert.equal(
+    hoverMod.shouldShowInspectionHoverFallback({ hasParsedDoc: false, hasPrimaryLineFix: false, hasLintAtPos: false }),
+    false,
+  );
+  assert.equal(
+    hoverMod.shouldShowInspectionHoverFallback({ hasParsedDoc: false, hasPrimaryLineFix: true, hasLintAtPos: true }),
+    false,
+  );
+  assert.equal(
+    hoverMod.shouldShowInspectionHoverFallback({ hasParsedDoc: false, hasPrimaryLineFix: true, hasLintAtPos: false }),
+    true,
+  );
+
+  // 5) `isProdEnvironment` catches `prod*` / `production` environments for danger bridge styling & confirmation.
+  assert.equal(bridgeMod.isProdEnvironment('prod-eu'), true);
+  assert.equal(bridgeMod.isProdEnvironment('Production'), true);
+  assert.equal(bridgeMod.isProdEnvironment('stg-m'), false);
+  assert.equal(bridgeMod.isProdEnvironment(null), false);
 });

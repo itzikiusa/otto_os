@@ -185,22 +185,7 @@ fn spawn_boot_warmups(ctx: &ServerCtx) {
                 .map(|name| (name.as_str(), manager.providers().program_for(name))),
         );
         let families = manager.providers().model_families();
-        let program_of = |family: &str| {
-            families
-                .iter()
-                .filter(|(_, f)| f == family)
-                .find_map(|(p, _)| {
-                    let prog = specs.get(p)?;
-                    otto_sessions::tool_probe::executable_in_path_or_fs(prog).then(|| prog.clone())
-                })
-        };
-        let probe = otto_sessions::provider_models::ModelProbe {
-            agy_program: program_of("agy"),
-            grok_program: program_of("grok"),
-            opencode_program: program_of("opencode"),
-            pi_program: program_of("pi"),
-            families,
-        };
+        let probe = otto_sessions::provider_models::ModelProbe::from_tool_specs(families, &specs);
         let agy = manager.provider_program("agy");
         let grok = manager.provider_program("grok");
         let _ = tokio::join!(
@@ -818,7 +803,7 @@ fn start_usage_tracking(ctx: &ServerCtx) {
     tokio::spawn(async move {
         if usage.wait_ready(Duration::from_secs(120)).await {
             tracing::info!("usage tracking started (embedded clickhouse)");
-            crate::routes::usage::warm_session_totals_engine(&usage).await;
+            usage.warm_sidebar_session_totals().await;
         } else {
             tracing::info!(
                 "usage tracking idle (embedded clickhouse not available after 120 s — \

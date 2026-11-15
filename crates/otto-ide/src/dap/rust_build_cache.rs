@@ -1,9 +1,9 @@
-//! Fast source-stamp metadata cache for local Rust debug artifact builds.
+//! Fast source-stamp and Cargo `.d` dep-info cache for local Rust debug builds.
 //!
 //! Avoids spawning `cargo build --message-format=json` / `cargo test --no-run`
 //! (~300ms–1500ms Cargo workspace graph + proc-macro startup overhead even on a
-//! no-op rebuild) when no Rust sources, manifests, lockfiles, or Cargo config
-//! files have changed and the compiled debug executable is untouched on disk.
+//! no-op rebuild) when no transitive Rust inputs, workspace manifests, lockfiles,
+//! toolchains, or `RUSTFLAGS` have changed and the debug binary is intact on disk.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::rust_build_depinfo::{
+    find_workspace_root, hash_dep_info_inputs, hash_rust_tree, hash_single_file,
+};
 use crate::go_build_cache::ide_build_cache_root;
 
 const RUST_ENV_FINGERPRINT_KEYS: &[&str] = &[
@@ -27,10 +30,27 @@ const RUST_ENV_FINGERPRINT_KEYS: &[&str] = &[
     "RUSTC_WRAPPER",
 ];
 
+const ANCESTOR_CONFIG_FILES: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    ".cargo/config.toml",
+    ".cargo/config",
+];
+
 #[derive(Debug, Clone)]
 pub(super) struct RustArtifactStamp {
     pub cache_key: String,
     pub stamp: String,
+    cargo_bin: String,
+    cargo_args: Vec<String>,
+    cargo_cwd: PathBuf,
+    target_root: PathBuf,
+    raw_prog: String,
+    want_test: bool,
+    env_subset: Vec<(String, String)>,
+    allowed_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,7 +88,9 @@ pub(super) async fn lookup_cached_rust_artifact(
     let allowed = allowed_roots.to_vec();
 
     tokio::task::spawn_blocking(move || {
-        let stamp_info = compute_rust_stamp_sync(
+        let cache_dir = rust_build_cache_dir();
+        let stamp_info = compute_rust_stamp_with_cache_dir(
+            &cache_dir,
             &cargo_bin,
             &cargo_args,
             &cargo_cwd,
@@ -78,7 +100,7 @@ pub(super) async fn lookup_cached_rust_artifact(
             &env_subset,
             &allowed,
         )?;
-        let entry_path = rust_build_cache_dir().join(format!("{}.json", stamp_info.cache_key));
+        let entry_path = cache_dir.join(format!("{}.json", stamp_info.cache_key));
         let hit = read_valid_cached_executable(&entry_path, &stamp_info.stamp);
         Some((stamp_info, hit))
     })
@@ -89,12 +111,32 @@ pub(super) async fn lookup_cached_rust_artifact(
 
 pub(super) fn store_cached_rust_artifact(stamp: RustArtifactStamp, executable: String) {
     tokio::task::spawn_blocking(move || {
-        save_cached_executable_sync(&stamp, &executable);
+        save_cached_executable_sync(&rust_build_cache_dir(), &stamp, &executable);
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn compute_rust_stamp_sync(
+fn build_cache_key(
+    canon_cwd: &Path,
+    raw_prog: &str,
+    want_test: bool,
+    cargo_args: &[String],
+) -> String {
+    let mut key_h = Sha256::new();
+    key_h.update(canon_cwd.to_string_lossy().as_bytes());
+    key_h.update(b"\0");
+    key_h.update(raw_prog.as_bytes());
+    key_h.update(b"\0");
+    key_h.update([u8::from(want_test)]);
+    for arg in cargo_args {
+        key_h.update(b"\0");
+        key_h.update(arg.as_bytes());
+    }
+    hex::encode(key_h.finalize())[..32].to_string()
+}
+
+#[allow(clippy::too_many_arguments, clippy::disallowed_methods)]
+fn compute_rust_stamp_with_cache_dir(
+    cache_dir: &Path,
     cargo_bin: &str,
     cargo_args: &[String],
     cargo_cwd: &Path,
@@ -109,21 +151,11 @@ fn compute_rust_stamp_sync(
     }
     let canon_cwd = fs::canonicalize(cargo_cwd).unwrap_or_else(|_| cargo_cwd.to_path_buf());
     let canon_root = fs::canonicalize(target_root).unwrap_or_else(|_| target_root.to_path_buf());
-
-    let mut key_h = Sha256::new();
-    key_h.update(canon_cwd.to_string_lossy().as_bytes());
-    key_h.update(b"\0");
-    key_h.update(raw_prog.as_bytes());
-    key_h.update(b"\0");
-    key_h.update([u8::from(want_test)]);
-    for arg in cargo_args {
-        key_h.update(b"\0");
-        key_h.update(arg.as_bytes());
-    }
-    let cache_key = hex::encode(key_h.finalize())[..32].to_string();
+    let ws_root = find_workspace_root(&canon_cwd, &canon_root, allowed_roots);
+    let cache_key = build_cache_key(&canon_cwd, raw_prog, want_test, cargo_args);
 
     let mut h = Sha256::new();
-    h.update(b"rust-debug-v1\0");
+    h.update(b"rust-debug-v2\0");
     h.update(cargo_bin.as_bytes());
     if cargo_bin.contains('/') {
         hash_single_file(&mut h, Path::new(cargo_bin));
@@ -141,118 +173,86 @@ fn compute_rust_stamp_sync(
         h.update(v.as_bytes());
     }
 
-    hash_rust_tree(&canon_cwd, &canon_cwd, &mut h);
-
-    // Include ancestor workspace Cargo.toml / Cargo.lock / .cargo/config.toml up to target_root.
     let within_allowed = |cand: &Path| -> bool {
         allowed_roots.is_empty() || allowed_roots.iter().any(|r| cand.starts_with(r))
     };
-    let mut anc = canon_cwd.parent();
+
+    // Always fingerprint ancestor Cargo.toml, Cargo.lock, rust-toolchain*, and .cargo/config*
+    // from `canon_cwd` up through `ws_root`.
+    let mut anc = Some(canon_cwd.as_path());
     while let Some(dir) = anc {
         if !within_allowed(dir) {
             break;
         }
-        for rel in [
-            "Cargo.toml",
-            "Cargo.lock",
-            "rust-toolchain",
-            "rust-toolchain.toml",
-            ".cargo/config.toml",
-            ".cargo/config",
-        ] {
+        for rel in ANCESTOR_CONFIG_FILES {
             let p = dir.join(rel);
             if p.is_file() {
                 hash_single_file(&mut h, &p);
+            } else {
+                h.update(b"\nA_NONE:");
+                h.update(p.to_string_lossy().as_bytes());
             }
         }
-        if dir == canon_root {
+        if dir == ws_root {
             break;
         }
         anc = dir.parent();
     }
 
+    let cached_dep_file = cache_dir.join(format!("{cache_key}.d"));
+    let used_dep_info = cached_dep_file.is_file()
+        && hash_dep_info_inputs(
+            &cached_dep_file,
+            &ws_root,
+            &canon_cwd,
+            &within_allowed,
+            &mut h,
+        );
+    if !used_dep_info {
+        h.update(b"\nWSWALK:");
+        hash_rust_tree(&ws_root, &ws_root, &within_allowed, &mut h);
+    }
+
     Some(RustArtifactStamp {
         cache_key,
         stamp: hex::encode(h.finalize()),
+        cargo_bin: cargo_bin.to_string(),
+        cargo_args: cargo_args.to_vec(),
+        cargo_cwd: canon_cwd,
+        target_root: canon_root,
+        raw_prog: raw_prog.to_string(),
+        want_test,
+        env_subset: env_subset.to_vec(),
+        allowed_roots: allowed_roots.to_vec(),
     })
 }
 
-#[allow(clippy::disallowed_methods)] // runs inside tokio::task::spawn_blocking
-fn hash_rust_tree(root: &Path, dir: &Path, h: &mut Sha256) {
-    let Ok(rd) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        let name_os = entry.file_name();
-        let Some(name) = name_os.to_str() else {
-            continue;
-        };
-        if name.starts_with('.') && name != ".cargo" {
-            continue;
-        }
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if ft.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        if ft.is_dir() {
-            if matches!(
-                name,
-                "target" | "node_modules" | "vendor" | "dist" | "build"
-            ) {
-                continue;
-            }
-            hash_rust_tree(root, &path, h);
-        } else if ft.is_file() && is_rust_stamp_input(name) {
-            if let Ok(meta) = entry.metadata() {
-                let rel = path.strip_prefix(root).unwrap_or(&path);
-                h.update(b"\nF:");
-                h.update(rel.to_string_lossy().as_bytes());
-                h.update(meta.len().to_le_bytes());
-                if let Ok(mt) = meta
-                    .modified()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).map_err(std::io::Error::other))
-                {
-                    h.update(mt.as_secs().to_le_bytes());
-                    h.update(mt.subsec_nanos().to_le_bytes());
-                }
-            }
-        }
-    }
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn compute_rust_stamp_sync(
+    cargo_bin: &str,
+    cargo_args: &[String],
+    cargo_cwd: &Path,
+    target_root: &Path,
+    raw_prog: &str,
+    want_test: bool,
+    env_subset: &[(String, String)],
+    allowed_roots: &[PathBuf],
+) -> Option<RustArtifactStamp> {
+    compute_rust_stamp_with_cache_dir(
+        &rust_build_cache_dir(),
+        cargo_bin,
+        cargo_args,
+        cargo_cwd,
+        target_root,
+        raw_prog,
+        want_test,
+        env_subset,
+        allowed_roots,
+    )
 }
 
-fn is_rust_stamp_input(name: &str) -> bool {
-    name.ends_with(".rs")
-        || name.ends_with(".toml")
-        || name.ends_with(".lock")
-        || name.ends_with(".proto")
-        || name.ends_with(".sql")
-        || name.ends_with(".c")
-        || name.ends_with(".cc")
-        || name.ends_with(".cpp")
-        || name.ends_with(".h")
-        || matches!(name, "config" | "rust-toolchain")
-}
-
-fn hash_single_file(h: &mut Sha256, path: &Path) {
-    h.update(b"\nS:");
-    h.update(path.to_string_lossy().as_bytes());
-    if let Ok(meta) = fs::metadata(path) {
-        h.update(meta.len().to_le_bytes());
-        if let Ok(mt) = meta
-            .modified()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).map_err(std::io::Error::other))
-        {
-            h.update(mt.as_secs().to_le_bytes());
-            h.update(mt.subsec_nanos().to_le_bytes());
-        }
-    }
-}
-
+#[allow(clippy::disallowed_methods)]
 fn read_valid_cached_executable(entry_path: &Path, expected_stamp: &str) -> Option<String> {
     let raw = fs::read(entry_path).ok()?;
     let entry: CachedRustArtifactEntry = serde_json::from_slice(&raw).ok()?;
@@ -275,7 +275,32 @@ fn read_valid_cached_executable(entry_path: &Path, expected_stamp: &str) -> Opti
     Some(entry.executable)
 }
 
-fn save_cached_executable_sync(stamp: &RustArtifactStamp, executable: &str) {
+#[allow(clippy::disallowed_methods)]
+fn write_atomic_private(dir: &Path, filename: &str, bytes: &[u8]) -> bool {
+    let nonce = Uuid::new_v4().simple().to_string();
+    let final_path = dir.join(filename);
+    let tmp_path = dir.join(format!(".{filename}.tmp.{nonce}"));
+    let write_res = {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        opts.open(&tmp_path)
+            .and_then(|mut f| f.write_all(bytes).and_then(|()| f.flush()))
+    };
+    if write_res.is_ok() && fs::rename(&tmp_path, &final_path).is_ok() {
+        true
+    } else {
+        let _ = fs::remove_file(&tmp_path);
+        false
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+fn save_cached_executable_sync(cache_dir: &Path, stamp: &RustArtifactStamp, executable: &str) {
     let Ok(exe_meta) = fs::metadata(executable) else {
         return;
     };
@@ -289,12 +314,36 @@ fn save_cached_executable_sync(stamp: &RustArtifactStamp, executable: &str) {
     else {
         return;
     };
-    let dir = rust_build_cache_dir();
-    if fs::create_dir_all(&dir).is_err() {
+    if fs::create_dir_all(cache_dir).is_err() {
         return;
     }
+
+    // Preserve Cargo's `<built_exe>.d` dep-info next to the cache entry so subsequent
+    // lookups stat only the exact transitive source inputs instead of walking the tree.
+    let src_dep_path = PathBuf::from(format!("{executable}.d"));
+    let dst_dep_name = format!("{}.d", stamp.cache_key);
+    if let Ok(dep_bytes) = fs::read(&src_dep_path) {
+        let _ = write_atomic_private(cache_dir, &dst_dep_name, &dep_bytes);
+    } else {
+        let _ = fs::remove_file(cache_dir.join(&dst_dep_name));
+    }
+
+    let final_stamp = compute_rust_stamp_with_cache_dir(
+        cache_dir,
+        &stamp.cargo_bin,
+        &stamp.cargo_args,
+        &stamp.cargo_cwd,
+        &stamp.target_root,
+        &stamp.raw_prog,
+        stamp.want_test,
+        &stamp.env_subset,
+        &stamp.allowed_roots,
+    )
+    .map(|s| s.stamp)
+    .unwrap_or_else(|| stamp.stamp.clone());
+
     let entry = CachedRustArtifactEntry {
-        stamp: stamp.stamp.clone(),
+        stamp: final_stamp,
         executable: executable.to_string(),
         exe_len: exe_meta.len(),
         exe_mtime_nanos: mtime_nanos,
@@ -302,88 +351,9 @@ fn save_cached_executable_sync(stamp: &RustArtifactStamp, executable: &str) {
     let Ok(bytes) = serde_json::to_vec(&entry) else {
         return;
     };
-    let nonce = Uuid::new_v4().simple().to_string();
-    let final_path = dir.join(format!("{}.json", stamp.cache_key));
-    let tmp_path = dir.join(format!(".{}.json.tmp.{nonce}", stamp.cache_key));
-    let write_res = {
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        opts.open(&tmp_path)
-            .and_then(|mut f| f.write_all(&bytes).and_then(|()| f.flush()))
-    };
-    if write_res.is_ok() {
-        if fs::rename(&tmp_path, &final_path).is_err() {
-            let _ = fs::remove_file(&tmp_path);
-        }
-    } else {
-        let _ = fs::remove_file(&tmp_path);
-    }
+    let _ = write_atomic_private(cache_dir, &format!("{}.json", stamp.cache_key), &bytes);
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rust_artifact_stamp_hits_and_invalidates_on_source_or_binary_edit() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let crate_dir = dir.path().join("demo");
-        fs::create_dir_all(crate_dir.join("src")).expect("mkdir src");
-        fs::write(
-            crate_dir.join("Cargo.toml"),
-            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .expect("write Cargo.toml");
-        fs::write(crate_dir.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
-
-        let exe_path = dir.path().join("demo-bin");
-        fs::write(&exe_path, b"fake-elf-macho-binary").expect("write binary");
-
-        let args = vec!["build".to_string(), "--message-format=json".to_string()];
-        let stamp1 =
-            compute_rust_stamp_sync("cargo", &args, &crate_dir, dir.path(), "", false, &[], &[])
-                .expect("stamp1");
-
-        let entry_path = dir.path().join("entry.json");
-        let exe_meta = fs::metadata(&exe_path).unwrap();
-        let mtime = exe_meta
-            .modified()
-            .unwrap()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let entry = CachedRustArtifactEntry {
-            stamp: stamp1.stamp.clone(),
-            executable: exe_path.to_string_lossy().into_owned(),
-            exe_len: exe_meta.len(),
-            exe_mtime_nanos: mtime,
-        };
-        fs::write(&entry_path, serde_json::to_vec(&entry).unwrap()).unwrap();
-
-        assert_eq!(
-            read_valid_cached_executable(&entry_path, &stamp1.stamp).as_deref(),
-            Some(exe_path.to_string_lossy().as_ref())
-        );
-
-        // Editing src/main.rs changes the stamp -> cache miss.
-        fs::write(
-            crate_dir.join("src/main.rs"),
-            "fn main() { println!(\"hi\"); }\n",
-        )
-        .expect("modify main.rs");
-        let stamp2 =
-            compute_rust_stamp_sync("cargo", &args, &crate_dir, dir.path(), "", false, &[], &[])
-                .expect("stamp2");
-        assert_ne!(stamp1.stamp, stamp2.stamp);
-        assert!(read_valid_cached_executable(&entry_path, &stamp2.stamp).is_none());
-
-        // Removing the compiled binary (`cargo clean`) also invalidates even if stamp matched.
-        fs::remove_file(&exe_path).unwrap();
-        assert!(read_valid_cached_executable(&entry_path, &stamp1.stamp).is_none());
-    }
-}
+#[path = "rust_build_cache_tests.rs"]
+mod tests;

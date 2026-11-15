@@ -267,7 +267,12 @@ pub(super) async fn pump_held(
                     None => std::future::pending::<()>().await,
                 }
             } => {
-                if next_sideband.is_some_and(|at| at <= Instant::now()) {
+                let need_poll = next_sideband.is_some_and(|at| at <= Instant::now()) || {
+                    let st = live.lock();
+                    idle_settle_deadline(&st, &inner.config)
+                        .is_some_and(|at| at <= Instant::now())
+                };
+                if need_poll {
                     next_sideband = None;
                     for _ in 0..8 {
                         if !super::poll_driver_sideband(&inner, &live, Some(epoch)).await {

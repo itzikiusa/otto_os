@@ -174,7 +174,8 @@ impl AcpDriver {
             return;
         };
         self.note_stdout_activity();
-        if self.sideband.filter_tool_update(id) {
+        let known = self.tools.contains_key(id);
+        if self.sideband.filter_tool_update(id, known) {
             return;
         }
         self.ensure_autonomous_turn(step);
@@ -244,6 +245,9 @@ impl AcpDriver {
     ) {
         for action in actions {
             match action {
+                SidebandAction::TurnStarted => {
+                    self.ensure_autonomous_turn(step);
+                }
                 SidebandAction::Thought { text, streaming } => {
                     self.ensure_autonomous_turn(step);
                     self.append_text(step, SegmentKind::Thought, &text, None);

@@ -27,6 +27,14 @@ pub(super) struct CachedShellEnvDisk {
     pub vars: BTreeMap<String, String>,
 }
 
+/// Resolve the active login shell and compute its RC metadata fingerprint
+/// outside any `ShellEnvResolver` lock.
+pub(super) fn current_shell_and_rc_fingerprint() -> (String, String) {
+    let shell = super::detect_user_shell();
+    let fp = compute_shell_rc_fingerprint(&shell);
+    (shell, fp)
+}
+
 /// Compute a `<0.2ms` metadata fingerprint over the active login shell binary
 /// and standard zsh/bash/POSIX startup files (`mtime` + `size`).
 pub(super) fn compute_shell_rc_fingerprint(shell: &str) -> String {
@@ -221,5 +229,90 @@ mod tests {
         let fp2 = compute_fingerprint_for_paths("/bin/sh", "tester", Some(&home), None);
         assert_ne!(fp1, fp2);
         assert!(load_cached_shell_env(&cache_path, &fp2).is_none());
+    }
+
+    #[test]
+    fn resolver_with_cache_dir_warm_loads_and_invalidates_on_rc_change() {
+        use super::super::ShellEnvResolver;
+        use std::sync::Arc;
+
+        if otto_core::e2e::isolated() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // 1. Real `ShellEnvResolver::with_cache_dir` warm-loads immediately without spawning a shell.
+        let (shell, real_fp) = current_shell_and_rc_fingerprint();
+        let cache_file = data_dir.join(SHELL_ENV_CACHE_FILENAME);
+        let mut cached_vars = BTreeMap::new();
+        cached_vars.insert(
+            "OTTO_WARM_SHELL_CACHE_SENTINEL".to_string(),
+            "from_disk_cache".to_string(),
+        );
+        save_cached_shell_env(
+            &cache_file,
+            &CachedShellEnvDisk {
+                version: CACHE_SCHEMA_VERSION,
+                fingerprint: real_fp,
+                shell: shell.clone(),
+                loaded_at: "2026-11-15T01:02:03Z".to_string(),
+                duration_ms: 17,
+                vars: cached_vars.clone(),
+            },
+        );
+
+        let warm = Arc::new(ShellEnvResolver::with_cache_dir(&data_dir));
+        assert!(
+            !warm.is_cold_or_warming(),
+            "fresh resolver with valid disk cache must start warm"
+        );
+        let snap = warm.snapshot();
+        assert_eq!(snap.status, "ready");
+        assert_eq!(
+            snap.vars
+                .get("OTTO_WARM_SHELL_CACHE_SENTINEL")
+                .map(String::as_str),
+            Some("from_disk_cache")
+        );
+
+        // 2. When an RC file's fingerprint changes, a fresh resolver invalidates the cache (`cold`).
+        let fake_home = dir.path().join("fake-home");
+        fs::create_dir_all(&fake_home).unwrap();
+        let rc_file = fake_home.join(".zshrc");
+        fs::write(&rc_file, "export FOO=1\n").unwrap();
+        let fp_v1 = compute_fingerprint_for_paths("/bin/sh", "tester", Some(&fake_home), None);
+        let rc_cache_file = dir.path().join("rc-test-cache.json");
+        save_cached_shell_env(
+            &rc_cache_file,
+            &CachedShellEnvDisk {
+                version: CACHE_SCHEMA_VERSION,
+                fingerprint: fp_v1.clone(),
+                shell: "/bin/sh".to_string(),
+                loaded_at: "2026-11-15T01:02:03Z".to_string(),
+                duration_ms: 9,
+                vars: cached_vars,
+            },
+        );
+        let hit = ShellEnvResolver::new_with_shell_and_fp(
+            Some(rc_cache_file.clone()),
+            "/bin/sh".to_string(),
+            &fp_v1,
+        );
+        assert!(!hit.is_cold_or_warming());
+
+        fs::write(&rc_file, "export FOO=1\nexport BAR=2\n").unwrap();
+        let fp_v2 = compute_fingerprint_for_paths("/bin/sh", "tester", Some(&fake_home), None);
+        assert_ne!(fp_v1, fp_v2);
+        let invalidated = ShellEnvResolver::new_with_shell_and_fp(
+            Some(rc_cache_file),
+            "/bin/sh".to_string(),
+            &fp_v2,
+        );
+        assert!(
+            invalidated.is_cold_or_warming(),
+            "changing .zshrc fingerprint must invalidate disk cache to cold state"
+        );
     }
 }

@@ -143,6 +143,73 @@ pub async fn resolve_dap_adapter(
     resolve_dap_adapter_with_manager(data_dir, req, ctx, None).await
 }
 
+struct DebugLaunchSpec<'a> {
+    raw_lang: String,
+    canonical_lang: String,
+    provisional_adapter: String,
+    plugin_spec: Option<&'a PluginDapAdapterSpec>,
+    cwd: String,
+    env: BTreeMap<String, String>,
+}
+
+fn resolve_debug_launch_spec<'a>(
+    data_dir: &Path,
+    req: &IdeStartDebugReq,
+    ctx: &'a DapStartContext,
+    env_mgr: Option<&EnvironmentManager>,
+) -> Result<DebugLaunchSpec<'a>> {
+    req.target.validate()?;
+    let env = build_effective_env_with_manager(data_dir, req, ctx, env_mgr);
+    let raw_cwd = req
+        .launch
+        .cwd
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            ctx.run_config
+                .as_ref()
+                .and_then(|c| c.cwd.as_deref())
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or(&req.target.root);
+    let cwd = normalize_target_path(&req.target, raw_cwd);
+    validate_non_root_debug_request(req, ctx, &cwd, &env)?;
+
+    let raw_lang = req.language.trim().to_ascii_lowercase();
+    let (canonical_lang, provisional_adapter, plugin_spec) = match raw_lang.as_str() {
+        "go" | "golang" => ("go".to_string(), "dlv".to_string(), None),
+        "python" | "py" => ("python".to_string(), "python-dap".to_string(), None),
+        "rust" | "rs" => ("rust".to_string(), "lldb".to_string(), None),
+        "javascript" | "js" => ("javascript".to_string(), "node-inspector".to_string(), None),
+        "typescript" | "ts" | "node" => {
+            ("typescript".to_string(), "node-inspector".to_string(), None)
+        }
+        "java" => ("java".to_string(), "java-jdwp".to_string(), None),
+        "shell" | "bash" | "sh" | "zsh" => ("shell".to_string(), "shell-debug".to_string(), None),
+        other => {
+            if let Some(ps) = ctx
+                .plugin_adapters
+                .iter()
+                .find(|p| p.language.eq_ignore_ascii_case(other))
+            {
+                (other.to_string(), ps.adapter_name.clone(), Some(ps))
+            } else {
+                return Err(Error::Invalid(format!(
+                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, javascript, typescript, java, or shell"
+                )));
+            }
+        }
+    };
+    Ok(DebugLaunchSpec {
+        raw_lang,
+        canonical_lang,
+        provisional_adapter,
+        plugin_spec,
+        cwd,
+        env,
+    })
+}
+
 /// Synchronous `< 0.1 ms` preflight validation for `start_session_async`:
 /// enforces target validity, non-root RBAC/path confinement (`403`), and
 /// language/plugin support (`400`) before spawning heavy target builds.
@@ -152,47 +219,8 @@ pub(crate) fn preflight_debug_request(
     ctx: &DapStartContext,
     env_mgr: Option<&EnvironmentManager>,
 ) -> Result<(String, String)> {
-    req.target.validate()?;
-    let env = build_effective_env_with_manager(data_dir, req, ctx, env_mgr);
-    let raw_cwd = req
-        .launch
-        .cwd
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            ctx.run_config
-                .as_ref()
-                .and_then(|c| c.cwd.as_deref())
-                .filter(|s| !s.trim().is_empty())
-        })
-        .unwrap_or(&req.target.root);
-    let cwd = normalize_target_path(&req.target, raw_cwd);
-    validate_non_root_debug_request(req, ctx, &cwd, &env)?;
-
-    let lang = req.language.trim().to_ascii_lowercase();
-    let pair = match lang.as_str() {
-        "go" | "golang" => ("go".to_string(), "dlv".to_string()),
-        "python" | "py" => ("python".to_string(), "python-dap".to_string()),
-        "rust" | "rs" => ("rust".to_string(), "lldb".to_string()),
-        "javascript" | "js" => ("javascript".to_string(), "node-inspector".to_string()),
-        "typescript" | "ts" | "node" => ("typescript".to_string(), "node-inspector".to_string()),
-        "java" => ("java".to_string(), "java-jdwp".to_string()),
-        "shell" | "bash" | "sh" | "zsh" => ("shell".to_string(), "shell-debug".to_string()),
-        other => {
-            if let Some(plugin_spec) = ctx
-                .plugin_adapters
-                .iter()
-                .find(|p| p.language.eq_ignore_ascii_case(other))
-            {
-                (other.to_string(), plugin_spec.adapter_name.clone())
-            } else {
-                return Err(Error::Invalid(format!(
-                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, javascript, typescript, java, or shell"
-                )));
-            }
-        }
-    };
-    Ok(pair)
+    let spec = resolve_debug_launch_spec(data_dir, req, ctx, env_mgr)?;
+    Ok((spec.canonical_lang, spec.provisional_adapter))
 }
 
 pub(crate) async fn resolve_dap_adapter_with_manager(
@@ -201,73 +229,23 @@ pub(crate) async fn resolve_dap_adapter_with_manager(
     ctx: &DapStartContext,
     env_mgr: Option<&EnvironmentManager>,
 ) -> Result<ResolvedDapAdapter> {
-    req.target.validate()?;
-    let env = build_effective_env_with_manager(data_dir, req, ctx, env_mgr);
-    let raw_cwd = req
-        .launch
-        .cwd
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            ctx.run_config
-                .as_ref()
-                .and_then(|c| c.cwd.as_deref())
-                .filter(|s| !s.trim().is_empty())
-        })
-        .unwrap_or(&req.target.root);
-    let cwd = normalize_target_path(&req.target, raw_cwd);
-    validate_non_root_debug_request(req, ctx, &cwd, &env)?;
-
-    let lang = req.language.trim().to_ascii_lowercase();
-    if !matches!(
-        lang.as_str(),
-        "go" | "golang"
-            | "python"
-            | "py"
-            | "rust"
-            | "rs"
-            | "javascript"
-            | "js"
-            | "typescript"
-            | "ts"
-            | "node"
-            | "java"
-            | "shell"
-            | "bash"
-            | "sh"
-            | "zsh"
-    ) {
-        if let Some(plugin_spec) = ctx
-            .plugin_adapters
-            .iter()
-            .find(|p| p.language.eq_ignore_ascii_case(&lang))
-        {
-            return resolve_plugin_adapter(&lang, plugin_spec, req, &cwd, env);
-        }
+    let spec = resolve_debug_launch_spec(data_dir, req, ctx, env_mgr)?;
+    if let Some(plugin_spec) = spec.plugin_spec {
+        return resolve_plugin_adapter(&spec.raw_lang, plugin_spec, req, &spec.cwd, spec.env);
     }
 
-    match lang.as_str() {
-        "go" | "golang" => resolve_go_adapter(data_dir, req, ctx, &cwd, env).await,
-        "python" | "py" => resolve_python_adapter(data_dir, req, ctx, &cwd, env).await,
-        "rust" | "rs" => resolve_rust_adapter(data_dir, req, ctx, &cwd, env).await,
-        "javascript" | "js" | "typescript" | "ts" | "node" => {
-            resolve_js_ts_adapter(data_dir, &lang, req, ctx, &cwd, env).await
+    match spec.canonical_lang.as_str() {
+        "go" => resolve_go_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
+        "python" => resolve_python_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
+        "rust" => resolve_rust_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
+        "javascript" | "typescript" => {
+            resolve_js_ts_adapter(data_dir, &spec.raw_lang, req, ctx, &spec.cwd, spec.env).await
         }
-        "java" => resolve_java_adapter(data_dir, req, ctx, &cwd, env).await,
-        "shell" | "bash" | "sh" | "zsh" => resolve_shell_adapter(req, ctx, &cwd, env).await,
-        other => {
-            if let Some(plugin_spec) = ctx
-                .plugin_adapters
-                .iter()
-                .find(|p| p.language.eq_ignore_ascii_case(other))
-            {
-                resolve_plugin_adapter(other, plugin_spec, req, &cwd, env)
-            } else {
-                Err(Error::Invalid(format!(
-                    "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, javascript, typescript, java, or shell"
-                )))
-            }
-        }
+        "java" => resolve_java_adapter(data_dir, req, ctx, &spec.cwd, spec.env).await,
+        "shell" => resolve_shell_adapter(req, ctx, &spec.cwd, spec.env).await,
+        other => Err(Error::Invalid(format!(
+            "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, javascript, typescript, java, or shell"
+        ))),
     }
 }
 

@@ -604,20 +604,48 @@ impl AcpDriver {
         if self.available_models.is_empty() {
             return None;
         }
-        const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-        let base = LEVELS
+        const SUFFIXES: [(&str, &str); 7] = [
+            ("-minimal", "low"),
+            ("-low", "low"),
+            ("-medium", "medium"),
+            ("-high", "high"),
+            ("-xhigh", "xhigh"),
+            ("-max", "max"),
+            ("-ultra", "max"),
+        ];
+        let base = SUFFIXES
             .iter()
-            .find_map(|lvl| model.strip_suffix(&format!("-{lvl}")))
+            .find_map(|(suf, _)| model.strip_suffix(suf))
             .unwrap_or(model);
-        let opts: Vec<String> = LEVELS
-            .iter()
-            .filter(|lvl| {
-                let candidate = format!("{base}-{lvl}");
-                self.available_models.iter().any(|m| m == &candidate)
-            })
-            .map(|lvl| (*lvl).to_string())
-            .collect();
-        (!opts.is_empty()).then_some(opts)
+        let mut opts: Vec<String> = Vec::new();
+        for (_, canonical) in SUFFIXES {
+            if opts.iter().any(|o| o == canonical) {
+                continue;
+            }
+            let has_variant = SUFFIXES.iter().any(|(suf, c)| {
+                *c == canonical && {
+                    let candidate = format!("{base}{suf}");
+                    self.available_models.iter().any(|m| m == &candidate)
+                }
+            });
+            if has_variant {
+                opts.push(canonical.to_string());
+            }
+        }
+        if !opts.is_empty() {
+            return Some(opts);
+        }
+        if self.available_models.iter().any(|m| m == base) {
+            return Some(Vec::new());
+        }
+        None
+    }
+
+    fn model_is_untiered(&self) -> bool {
+        self.model
+            .as_deref()
+            .and_then(|m| self.efforts_for_model(m))
+            .is_some_and(|opts| opts.is_empty())
     }
 
     fn resolve_effort(&self, raw: &str) -> Result<String, DriverError> {
@@ -671,16 +699,18 @@ impl AcpDriver {
             self.write_model_config(step);
         }
         let sid = self.session_id.clone().unwrap_or_default();
-        if let Some(raw) = req.effort.as_deref().filter(|e| !e.trim().is_empty()) {
-            if let (Some(config_id), Ok(val)) =
-                (self.flavor.effort_config_id, self.resolve_effort(raw))
-            {
-                let (id, line) = self.request(
-                    M_SET_CONFIG_OPTION,
-                    json!({"sessionId": sid, "configId": config_id, "value": val}),
-                );
-                self.effort_req = Some(id);
-                step.write(line);
+        if !self.model_is_untiered() {
+            if let Some(raw) = req.effort.as_deref().filter(|e| !e.trim().is_empty()) {
+                if let (Some(config_id), Ok(val)) =
+                    (self.flavor.effort_config_id, self.resolve_effort(raw))
+                {
+                    let (id, line) = self.request(
+                        M_SET_CONFIG_OPTION,
+                        json!({"sessionId": sid, "configId": config_id, "value": val}),
+                    );
+                    self.effort_req = Some(id);
+                    step.write(line);
+                }
             }
         }
         let mut blocks: Vec<ContentBlock> = req
@@ -711,6 +741,7 @@ impl AcpDriver {
         self.autonomous = false;
         self.segments = 0;
         self.closed_named.clear();
+        self.tools.clear();
         step.write(line);
     }
 
@@ -1114,7 +1145,11 @@ impl AcpDriver {
             }
             SessionUpdate::ToolCallUpdate(up) => {
                 self.note_stdout_activity();
-                if self.sideband.filter_tool_update(up.tool_call_id.0.as_ref()) {
+                let known = self.tools.contains_key(up.tool_call_id.0.as_ref());
+                if self
+                    .sideband
+                    .filter_tool_update(up.tool_call_id.0.as_ref(), known)
+                {
                     return;
                 }
                 self.ensure_autonomous_turn(step);
@@ -2869,7 +2904,10 @@ mod tests {
                         {"modelId": "gemini-4-hydrogen-low"},
                         {"modelId": "gemini-4-hydrogen-medium"},
                         {"modelId": "gemini-4-hydrogen-high"},
-                        {"modelId": "gemini-4-hydrogen-xhigh"}
+                        {"modelId": "gemini-4-hydrogen-xhigh"},
+                        {"modelId": "gemini-4-flash-minimal"},
+                        {"modelId": "gemini-4-flash-ultra"},
+                        {"modelId": "gemini-pro-orchestrator"}
                     ]},
                     "configOptions": [{
                         "id": "thought_level",
@@ -2893,6 +2931,63 @@ mod tests {
         assert_eq!(sent(&s2, 0)["params"]["modelId"], "gemini-4-hydrogen");
         assert_eq!(sent(&s2, 1)["method"], "session/set_config_option");
         assert_eq!(sent(&s2, 1)["params"]["value"], "xhigh");
+        let p2_id = sent(&s2, 2)["id"].clone();
+        d2.on_line(
+            &json!({"jsonrpc":"2.0","id":p2_id,"result":{"stopReason":"end_turn"}}).to_string(),
+        );
+
+        // Switching to an untiered model (`gemini-pro-orchestrator`) clears
+        // stale `xhigh` options and omits unsupported `thought_level` writes.
+        let s3 = d2
+            .prompt(
+                "t3",
+                &RuntimePromptReq {
+                    model: Some("gemini-pro-orchestrator".into()),
+                    effort: Some("xhigh".into()),
+                    ..RuntimePromptReq::of("orchestrate")
+                },
+            )
+            .unwrap();
+        assert_eq!(s3.writes.len(), 2);
+        assert_eq!(sent(&s3, 0)["method"], "session/set_model");
+        assert_eq!(sent(&s3, 0)["params"]["modelId"], "gemini-pro-orchestrator");
+        assert_eq!(sent(&s3, 1)["method"], "session/prompt");
+        let p3_id = sent(&s3, 1)["id"].clone();
+        d2.on_line(
+            &json!({"jsonrpc":"2.0","id":p3_id,"result":{"stopReason":"end_turn"}}).to_string(),
+        );
+
+        // Switching to `-minimal` / `-ultra` variants maps to canonical `low` / `max`,
+        // and launching directly with a unified model (`LaunchContext.model`) resolves
+        // its family effort options during `session/new`.
+        let mut d3 = AcpDriver::agy("agy");
+        d3.start(&ctx(Some("gemini-4-flash")));
+        d3.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d3.on_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "sessionId": "s3",
+                    "models": {"availableModels": [
+                        {"modelId": "gemini-4-flash-minimal"},
+                        {"modelId": "gemini-4-flash-ultra"}
+                    ]}
+                }
+            })
+            .to_string(),
+        );
+        let s4 = d3
+            .prompt(
+                "t4",
+                &RuntimePromptReq {
+                    effort: Some("ultra".into()),
+                    ..RuntimePromptReq::of("fast-max")
+                },
+            )
+            .unwrap();
+        assert_eq!(sent(&s4, 0)["method"], "session/set_config_option");
+        assert_eq!(sent(&s4, 0)["params"]["value"], "max");
     }
 
     #[test]

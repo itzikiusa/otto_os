@@ -15,7 +15,12 @@ import { appLive, onLive } from '../../../lib/live';
 import { loadErrorText } from '../../../lib/loadError';
 import { pollWhileVisible } from '../../../lib/poll';
 import { startMeasurement, type Measurement } from '../../../lib/telemetry';
-import type { RuntimeEvent, RuntimeReplay, TurnItem } from '../../../lib/api/types';
+import type {
+  RuntimeEvent,
+  RuntimeReplay,
+  RuntimeTurnItemDetailResponse,
+  TurnItem,
+} from '../../../lib/api/types';
 import {
   applyEvents,
   applyReplay,
@@ -85,8 +90,12 @@ export class RuntimeViews {
   staleError = $state<Record<string, string>>({});
   /** In-flight older-history pagination requests, by session id. */
   loadingOlder = $state<Record<string, boolean>>({});
+  /** Failed older-history pagination error text, by session id. */
+  olderError = $state<Record<string, string>>({});
   /** In-flight single-item detail hydration (`${sessionId}:${itemId}`). */
   loadingItem = $state<Record<string, boolean>>({});
+  /** Failed single-item detail hydration error text (`${sessionId}:${itemId}`). */
+  itemError = $state<Record<string, string>>({});
 
   private views = new Map<string, View>();
   private inFlightItems = new Map<string, Promise<TurnItem | null>>();
@@ -158,6 +167,10 @@ export class RuntimeViews {
         const { [id]: _old, ...older } = this.loadingOlder;
         this.loadingOlder = older;
       }
+      if (this.olderError[id]) {
+        const { [id]: _oerr, ...olderErrs } = this.olderError;
+        this.olderError = olderErrs;
+      }
       const prefix = `${id}:`;
       for (const k of this.inFlightItems.keys()) {
         if (k.startsWith(prefix)) this.inFlightItems.delete(k);
@@ -168,6 +181,13 @@ export class RuntimeViews {
           if (!k.startsWith(prefix)) next[k] = val;
         }
         this.loadingItem = next;
+      }
+      if (Object.keys(this.itemError).some((k) => k.startsWith(prefix))) {
+        const nextErr: Record<string, string> = {};
+        for (const [k, val] of Object.entries(this.itemError)) {
+          if (!k.startsWith(prefix)) nextErr[k] = val;
+        }
+        this.itemError = nextErr;
       }
       if (this.views.size === 0) {
         this.stopLive?.();
@@ -388,6 +408,10 @@ export class RuntimeViews {
     if (view) this.flushPendingLive(id, view);
     const cur = this.projections[id];
     if (!cur || !cur.hasOlder || cur.oldestTurnOrdinal == null || this.loadingOlder[id]) return false;
+    if (this.olderError[id]) {
+      const { [id]: _clr, ...restErr } = this.olderError;
+      this.olderError = restErr;
+    }
     this.loadingOlder = { ...this.loadingOlder, [id]: true };
     const path = `/runtime-sessions/${id}/events?before_turn_ordinal=${cur.oldestTurnOrdinal}&limit_turns=${limitTurns}&max_lines=${TAIL_MAX_LINES}&compact=true`;
     try {
@@ -397,7 +421,10 @@ export class RuntimeViews {
       if (!latest) return false;
       this.projections[id] = mergeHistoryPage(latest, replay.snapshot);
       return true;
-    } catch {
+    } catch (e) {
+      if (this.views.has(id)) {
+        this.olderError = { ...this.olderError, [id]: loadErrorText(e) };
+      }
       return false;
     } finally {
       if (this.loadingOlder[id]) {
@@ -414,17 +441,27 @@ export class RuntimeViews {
     const key = `${id}:${itemId}`;
     const existing = this.inFlightItems.get(key);
     if (existing) return existing;
+    if (this.itemError[key]) {
+      const { [key]: _clr, ...restErr } = this.itemError;
+      this.itemError = restErr;
+    }
     this.loadingItem = { ...this.loadingItem, [key]: true };
     const req = api
-      .get<TurnItem>(`/runtime-sessions/${id}/items/${encodeURIComponent(itemId)}`)
-      .then((item) => {
+      .get<RuntimeTurnItemDetailResponse | TurnItem>(`/runtime-sessions/${id}/items/${encodeURIComponent(itemId)}`)
+      .then((res) => {
+        const item = res && typeof res === 'object' && 'item' in res ? res.item : res;
         const latest = this.projections[id];
         if (this.views.has(id) && latest) {
           this.projections[id] = replaceHydratedItem(latest, item);
         }
         return item;
       })
-      .catch(() => null)
+      .catch((e) => {
+        if (this.views.has(id)) {
+          this.itemError = { ...this.itemError, [key]: loadErrorText(e) };
+        }
+        return null;
+      })
       .finally(() => {
         this.inFlightItems.delete(key);
         if (this.loadingItem[key]) {

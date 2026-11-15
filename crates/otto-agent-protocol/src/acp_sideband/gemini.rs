@@ -41,9 +41,11 @@ pub(crate) struct GeminiState {
 }
 
 impl GeminiState {
-    pub fn reset_turn_flags(&mut self) {
+    pub fn reset_for_prompt(&mut self) {
         self.open_tools = 0;
     }
+
+    pub fn on_turn_settled(&mut self) {}
 
     pub fn is_awaiting(&self) -> bool {
         self.open_tools > 0
@@ -203,6 +205,7 @@ impl GeminiState {
             let desc = classify_tool(name, args.as_ref());
             if prev.is_none() {
                 mirrored.tool_calls = mirrored.tool_calls.saturating_add(1);
+                mirrored.preseed_tool_id(&id);
                 actions.push(SidebandAction::ToolStart {
                     id: id.clone(),
                     title: desc.title.clone(),

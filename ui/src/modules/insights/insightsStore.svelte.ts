@@ -52,15 +52,19 @@ class CapabilitiesStore {
   expanded = $state<Set<string>>(new Set());
 
   async load(force = false): Promise<void> {
-    if (force || !this.loadedOnce) this.loading = true;
-    this.loadErr = '';
+    const background = !force && this.loadedOnce;
+    if (!background) {
+      this.loading = true;
+      this.loadErr = '';
+    }
     try {
       this.caps = await capabilitiesApi.list();
+      this.loadErr = '';
       this.loadedOnce = true;
     } catch (e) {
-      this.loadErr = loadErrorText(e);
+      if (!background || this.caps.length === 0) this.loadErr = loadErrorText(e);
     } finally {
-      this.loading = false;
+      if (!background) this.loading = false;
     }
   }
 
@@ -88,6 +92,7 @@ class InsightsStore {
   hasMoreReports = $state(false);
   archiveOffset = 0;
   loadingMore = $state(false);
+  olderError: string | null = $state(null);
   index: InsightsIndex = $state({ series: [], ledger: new Map() });
   fullMd: Record<string, string> = $state({});
   schedule = $state<InsightsConfig | null>(null);
@@ -119,8 +124,11 @@ class InsightsStore {
   }
 
   async load(routeKey: string | null = null, forceSpinner = false): Promise<void> {
-    if (forceSpinner || !this.loadedOnce) this.loading = true;
-    this.loadError = null;
+    const background = !forceSpinner && this.loadedOnce;
+    if (!background) {
+      this.loading = true;
+      this.loadError = null;
+    }
     void insightsApi
       .getConfig()
       .then((c) => {
@@ -131,9 +139,17 @@ class InsightsStore {
       });
     try {
       const next = await insightsApi.listReports();
-      this.reports = next;
-      this.archiveOffset = next.length;
-      this.hasMoreReports = next.length === 200;
+      this.loadError = null;
+      if (background && this.archiveOffset > next.length) {
+        const freshKeys = new Set(next.map((r) => periodKey(r)));
+        const retainedOlder = this.reports.filter((r) => !freshKeys.has(periodKey(r)));
+        this.reports = [...next, ...retainedOlder];
+        this.archiveOffset = Math.max(this.archiveOffset, next.length);
+      } else {
+        this.reports = next;
+        this.archiveOffset = next.length;
+        this.hasMoreReports = next.length === INSIGHTS_LIST_PAGE;
+      }
       if (routeKey && !this.reports.some((r) => periodKey(r) === routeKey)) {
         const linked = await insightsApi.reportStatus(routeKey);
         if (linked.report) this.reports = [...this.reports, linked.report];
@@ -141,9 +157,9 @@ class InsightsStore {
       this.loadedOnce = true;
       void this.loadIndex();
     } catch (e) {
-      this.loadError = loadErrorText(e);
+      if (!background || this.reports.length === 0) this.loadError = loadErrorText(e);
     } finally {
-      this.loading = false;
+      if (!background) this.loading = false;
     }
   }
 
@@ -153,28 +169,28 @@ class InsightsStore {
       void this.restoreActiveRun();
       return;
     }
-    if (routeKey && !this.reports.some((r) => periodKey(r) === routeKey)) {
-      void this.load(routeKey, false);
-    }
+    void this.load(routeKey, false);
     if (!this.pollRunId) void this.restoreActiveRun();
   }
 
   async loadOlderReports(shownLen: number, filteredLen: number): Promise<void> {
     if (this.loadingMore) return;
     if (shownLen < filteredLen) {
+      this.olderError = null;
       this.listShown = shownLen + INSIGHTS_LIST_PAGE;
       return;
     }
     this.loadingMore = true;
+    this.olderError = null;
     try {
       const page = await insightsApi.listReports(this.archiveOffset);
       this.archiveOffset += page.length;
-      this.hasMoreReports = page.length === 200;
+      this.hasMoreReports = page.length === INSIGHTS_LIST_PAGE;
       const ids = new Set(this.reports.map((r) => periodKey(r)));
       this.reports = [...this.reports, ...page.filter((r) => !ids.has(periodKey(r)))];
       this.listShown += INSIGHTS_LIST_PAGE;
     } catch (e) {
-      toasts.error('Couldn’t load older reports', loadErrorText(e));
+      this.olderError = loadErrorText(e);
     } finally {
       this.loadingMore = false;
     }
@@ -353,6 +369,7 @@ class InsightsStore {
     this.hasMoreReports = false;
     this.archiveOffset = 0;
     this.loadingMore = false;
+    this.olderError = null;
     this.index = { series: [], ledger: new Map() };
     this.fullMd = {};
     this.schedule = null;

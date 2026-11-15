@@ -58,7 +58,7 @@
     if (usageUi.telemetryDirty && !await confirmer.ask('You have unsaved telemetry settings. Leaving now discards them.', { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing', danger: true })) return;
     if (usageUi.telemetryDirty) usageUi.discardTelemetry();
     usageUi.view = next;
-    if (router.module === 'usage') router.replace(next === 'overview' ? 'usage' : `usage/${next}`);
+    if (router.module === 'usage') router.go(next === 'overview' ? 'usage' : `usage/${next}`);
   }
 
   // Navigate to a session from the top-sessions table (click-through drill-down).

@@ -24,6 +24,17 @@ pub async fn run_deps_action(
     env_map: &BTreeMap<String, String>,
     history: &LocalHistoryStore,
 ) -> Result<IdeDepsActionResp> {
+    run_deps_action_as(canon_root, manifest_path, req, env_map, history, false).await
+}
+
+pub async fn run_deps_action_as(
+    canon_root: &Path,
+    manifest_path: &Path,
+    req: &IdeDepsActionReq,
+    env_map: &BTreeMap<String, String>,
+    history: &LocalHistoryStore,
+    actor_is_root: bool,
+) -> Result<IdeDepsActionResp> {
     if !manifest_path.is_file() {
         return Err(Error::NotFound(format!(
             "manifest '{}' does not exist",
@@ -58,12 +69,25 @@ pub async fn run_deps_action(
     }
 
     let (ok, output) = match (fname, action) {
-        ("go.mod", "tidy") => exec_cmd("go", &["mod", "tidy"], &dir, env_map).await?,
-        ("go.mod", "vendor") => exec_cmd("go", &["mod", "vendor"], &dir, env_map).await?,
-        ("go.mod", "sync") => exec_cmd("go", &["mod", "download"], &dir, env_map).await?,
+        ("go.mod", "tidy") => {
+            exec_cmd("go", &["mod", "tidy"], &dir, env_map, actor_is_root).await?
+        }
+        ("go.mod", "vendor") => {
+            exec_cmd("go", &["mod", "vendor"], &dir, env_map, actor_is_root).await?
+        }
+        ("go.mod", "sync") => {
+            exec_cmd("go", &["mod", "download"], &dir, env_map, actor_is_root).await?
+        }
         ("go.mod", "why") => {
             let m = validate_dep_spec("module", req.module.as_deref().unwrap_or(""))?;
-            exec_cmd("go", &["mod", "why", "-m", "--", m], &dir, env_map).await?
+            exec_cmd(
+                "go",
+                &["mod", "why", "-m", "--", m],
+                &dir,
+                env_map,
+                actor_is_root,
+            )
+            .await?
         }
         ("go.mod", "merge_directives") => {
             let raw = fs::read_to_string(manifest_path)
@@ -89,7 +113,8 @@ pub async fn run_deps_action(
             }
             if !otto_core::e2e::isolated() {
                 let spec = format!("{m}@{v}");
-                let (cmd_ok, out) = exec_cmd("go", &["get", "--", &spec], &dir, env_map).await?;
+                let (cmd_ok, out) =
+                    exec_cmd("go", &["get", "--", &spec], &dir, env_map, actor_is_root).await?;
                 if !cmd_ok {
                     (false, out)
                 } else {
@@ -128,17 +153,26 @@ pub async fn run_deps_action(
                     for dm in &direct_mods {
                         args.push(dm.as_str());
                     }
-                    exec_cmd("go", &args, &dir, env_map).await?
+                    exec_cmd("go", &args, &dir, env_map, actor_is_root).await?
                 }
             } else {
                 let flag = if patch_only { "-u=patch" } else { "-u" };
-                exec_cmd("go", &["get", flag, "./..."], &dir, env_map).await?
+                exec_cmd("go", &["get", flag, "./..."], &dir, env_map, actor_is_root).await?
             }
         }
         ("pom.xml", "maven_sync" | "sync") => {
-            exec_cmd("mvn", &["dependency:resolve", "-q"], &dir, env_map).await?
+            exec_cmd(
+                "mvn",
+                &["dependency:resolve", "-q"],
+                &dir,
+                env_map,
+                actor_is_root,
+            )
+            .await?
         }
-        ("pom.xml", "maven_tree") => exec_cmd("mvn", &["dependency:tree"], &dir, env_map).await?,
+        ("pom.xml", "maven_tree") => {
+            exec_cmd("mvn", &["dependency:tree"], &dir, env_map, actor_is_root).await?
+        }
         ("build.gradle" | "build.gradle.kts", "gradle_sync" | "maven_sync" | "sync") => {
             let bin = if dir.join("gradlew").is_file() {
                 "./gradlew"
@@ -150,6 +184,7 @@ pub async fn run_deps_action(
                 &["dependencies", "--configuration", "compileClasspath"],
                 &dir,
                 env_map,
+                actor_is_root,
             )
             .await?
         }
@@ -263,6 +298,7 @@ async fn exec_cmd(
     args: &[&str],
     dir: &Path,
     env_map: &BTreeMap<String, String>,
+    actor_is_root: bool,
 ) -> Result<(bool, String)> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
@@ -270,7 +306,30 @@ async fn exec_cmd(
         .env_clear()
         .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
         .envs(env_map)
+        .env("GIT_TERMINAL_PROMPT", "0")
         .kill_on_drop(true);
+    for go_key in [
+        "GOPRIVATE",
+        "GONOSUMDB",
+        "GONOPROXY",
+        "GOPATH",
+        "GOMODCACHE",
+    ] {
+        if !env_map.contains_key(go_key) {
+            if let Ok(val) = std::env::var(go_key) {
+                if !val.is_empty() {
+                    cmd.env(go_key, val);
+                }
+            }
+        }
+    }
+    if actor_is_root && !env_map.contains_key("SSH_AUTH_SOCK") {
+        if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
+            if !sock.is_empty() {
+                cmd.env("SSH_AUTH_SOCK", sock);
+            }
+        }
+    }
     let out = tokio::time::timeout(Duration::from_secs(30), cmd.output())
         .await
         .map_err(|_| Error::Internal(format!("'{bin}' timed out after 30s")))?

@@ -63,15 +63,21 @@ function patchMergeChecks(
   });
 }
 
-function applyDerivedReviewState(pr: PrDetail, reviewers: PrReviewer[], approved_by: string[], now: string): PrDetail {
+function applyDerivedReviewState(
+  pr: PrDetail,
+  reviewers: PrReviewer[],
+  approved_by: string[],
+  serverUpdatedAt?: string,
+): PrDetail {
   const review = reviewSummaryFrom(reviewers, approved_by);
   const approvals = review?.approvals ?? 0;
+  const nextUpdatedAt = serverUpdatedAt !== undefined ? serverUpdatedAt : pr.updated_at;
   return {
     ...pr,
     reviewers,
     approved_by,
     review,
-    ...(pr.updated_at !== undefined ? { updated_at: now } : {}),
+    ...(nextUpdatedAt !== undefined ? { updated_at: nextUpdatedAt } : {}),
     ...(pr.merge_checks != null ? { merge_checks: patchMergeChecks(pr.merge_checks, reviewers, approvals) } : {}),
   };
 }
@@ -89,21 +95,20 @@ export function withMyReview(pr: PrDetail, kind: Exclude<MyReview, null>, isMe: 
   const me = hit?.name ?? fallbackName;
   const others = pr.approved_by.filter((n) => n !== me && !isMe(n));
   const approved_by = kind === 'approved' ? [...others, me] : others;
-  return applyDerivedReviewState(pr, reviewers, approved_by, now);
+  return applyDerivedReviewState(pr, reviewers, approved_by, pr.updated_at);
 }
 
 /** `pr` with your `kind` review withdrawn: your reviewer row stays (you are
  *  still a reviewer) but no longer approves / requests changes, and you leave
  *  `approved_by`. No-op when that isn't your current review. */
 export function withoutMyReview(pr: PrDetail, kind: Exclude<MyReview, null>, isMe: (name: string) => boolean): PrDetail {
-  const now = new Date().toISOString();
   const hit = myReviewer(pr.reviewers, isMe);
   const reviewers = hit
     ? pr.reviewers.map((r) => (r === hit ? { ...r, approved: kind === 'approved' ? false : r.approved, changes_requested: kind === 'changes' ? false : r.changes_requested } : r))
     : pr.reviewers;
   const approved_by = kind === 'approved' ? pr.approved_by.filter((n) => n !== hit?.name && !isMe(n)) : pr.approved_by;
   if (reviewers === pr.reviewers && approved_by === pr.approved_by) return pr;
-  return applyDerivedReviewState(pr, reviewers, approved_by, now);
+  return applyDerivedReviewState(pr, reviewers, approved_by, pr.updated_at);
 }
 
 /** Guard against eventually-consistent forge read replicas (e.g. Bitbucket Cloud
@@ -114,18 +119,39 @@ export function reconcileConfirmedReview(
   expected: MyReview,
   isMe: (name: string) => boolean,
   fallbackName: string,
-): { detail: PrDetail; caughtUp: boolean } {
-  if (myReview(fetched, isMe) === expected) return { detail: fetched, caughtUp: true };
-  if (expected === 'approved' || expected === 'changes') {
-    return { detail: withMyReview(fetched, expected, isMe, fallbackName), caughtUp: false };
+): { detail: PrDetail; caughtUp: boolean; serverUpdatedAt: string | undefined } {
+  const serverUpdatedAt = fetched.updated_at;
+  if (myReview(fetched, isMe) === expected) {
+    return { detail: fetched, caughtUp: true, serverUpdatedAt };
   }
+  if (expected === 'approved' || expected === 'changes') {
+    const patched = withMyReview(fetched, expected, isMe, fallbackName);
+    return {
+      detail: serverUpdatedAt !== undefined ? { ...patched, updated_at: serverUpdatedAt } : patched,
+      caughtUp: false,
+      serverUpdatedAt,
+    };
+  }
+  const cleared = withoutMyReview(withoutMyReview(fetched, 'approved', isMe), 'changes', isMe);
   return {
-    detail: withoutMyReview(withoutMyReview(fetched, 'approved', isMe), 'changes', isMe),
+    detail: serverUpdatedAt !== undefined ? { ...cleared, updated_at: serverUpdatedAt } : cleared,
     caughtUp: false,
+    serverUpdatedAt,
   };
 }
 
-const REVIEW_RECONCILE_WINDOW_MS = 12_000;
+export const REVIEW_RECONCILE_WINDOW_MS = 12_000;
+
+export interface ReviewReconcilerEnv {
+  now?: () => number;
+  setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  clearTimer?: (id: ReturnType<typeof setTimeout>) => void;
+}
+
+export interface ReviewReconcileMeta {
+  detail: PrDetail;
+  ownReviewSettled: boolean;
+}
 
 export interface ReviewReconciler {
   note(rid: string, num: number, kind: MyReview): void;
@@ -139,47 +165,75 @@ export interface ReviewReconciler {
     fallbackName: string,
     onRetry?: () => void,
   ): PrDetail;
+  reconcileWithMeta(
+    rid: string,
+    num: number,
+    fetched: PrDetail,
+    isMe: (name: string) => boolean,
+    fallbackName: string,
+    onRetry?: () => void,
+  ): ReviewReconcileMeta;
 }
 
 /** Per-PR write-verdict reconciler with bounded background retry timers (1.5s, 3s, 4.5s). */
-export function createReviewReconciler(): ReviewReconciler {
-  let state: { rid: string; num: number; kind: MyReview; at: number; retries: number } | null = null;
+export function createReviewReconciler(env: ReviewReconcilerEnv = {}): ReviewReconciler {
+  const nowFn = env.now ?? (() => Date.now());
+  const setTimer = env.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearTimer = env.clearTimer ?? ((id) => clearTimeout(id));
+  let state: { rid: string; num: number; kind: MyReview; at: number; retries: number; settledClock: boolean } | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
-  const clear = (): void => {
-    state = null;
+  const clearTimerOnly = (): void => {
     if (timer !== null) {
-      clearTimeout(timer);
+      clearTimer(timer);
       timer = null;
     }
+  };
+  const clear = (): void => {
+    state = null;
+    clearTimerOnly();
+  };
+  const reconcileWithMeta = (
+    rid: string,
+    num: number,
+    fetched: PrDetail,
+    isMe: (name: string) => boolean,
+    fallbackName: string,
+    onRetry?: () => void,
+  ): ReviewReconcileMeta => {
+    if (!state || state.rid !== rid || state.num !== num) {
+      return { detail: fetched, ownReviewSettled: false };
+    }
+    const rec = reconcileConfirmedReview(fetched, state.kind, isMe, fallbackName);
+    if (rec.caughtUp) {
+      const ownReviewSettled = !state.settledClock;
+      clear();
+      return { detail: fetched, ownReviewSettled };
+    }
+    if (nowFn() - state.at > REVIEW_RECONCILE_WINDOW_MS) {
+      clear();
+      return { detail: fetched, ownReviewSettled: false };
+    }
+    if (onRetry && state.retries < 3 && timer === null) {
+      state.retries += 1;
+      timer = setTimer(() => {
+        timer = null;
+        onRetry();
+      }, 1500 * state.retries);
+    }
+    return { detail: rec.detail, ownReviewSettled: false };
   };
   return {
     clear,
     note(rid, num, kind) {
       clear();
-      state = { rid, num, kind, at: Date.now(), retries: 0 };
+      state = { rid, num, kind, at: nowFn(), retries: 0, settledClock: false };
     },
     resetFor(rid, num) {
       if (state && (state.rid !== rid || state.num !== num)) clear();
     },
     reconcile(rid, num, fetched, isMe, fallbackName, onRetry) {
-      if (!state || state.rid !== rid || state.num !== num) return fetched;
-      if (Date.now() - state.at > REVIEW_RECONCILE_WINDOW_MS) {
-        clear();
-        return fetched;
-      }
-      const rec = reconcileConfirmedReview(fetched, state.kind, isMe, fallbackName);
-      if (rec.caughtUp) {
-        clear();
-        return fetched;
-      }
-      if (onRetry && state.retries < 3 && timer === null) {
-        state.retries += 1;
-        timer = setTimeout(() => {
-          timer = null;
-          onRetry();
-        }, 1500 * state.retries);
-      }
-      return rec.detail;
+      return reconcileWithMeta(rid, num, fetched, isMe, fallbackName, onRetry).detail;
     },
+    reconcileWithMeta,
   };
 }

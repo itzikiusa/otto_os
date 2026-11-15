@@ -33,8 +33,12 @@ pub(crate) struct GrokState {
 }
 
 impl GrokState {
-    pub fn reset_turn_flags(&mut self) {
+    pub fn reset_for_prompt(&mut self) {
         self.in_prompted_turn = false;
+        self.open_tools = 0;
+    }
+
+    pub fn on_turn_settled(&mut self) {
         self.open_tools = 0;
     }
 
@@ -183,6 +187,7 @@ impl GrokState {
                         continue;
                     };
                     mirrored.tool_calls = mirrored.tool_calls.saturating_add(1);
+                    mirrored.preseed_tool_id(id);
                     let raw_title = up.get("title").and_then(Value::as_str).unwrap_or("tool");
                     let raw_input = up.get("rawInput").cloned();
                     let classified = classify_tool(raw_title, raw_input.as_ref());

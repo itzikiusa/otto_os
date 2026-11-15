@@ -6,6 +6,7 @@
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { viewport } from '../../../lib/stores/viewport.svelte';
   import { ide, type IdeRunConfig } from '../ideStore.svelte';
+  import { bridgeEnvCache } from './networkBridgeGuard.svelte';
   import { formatBridgeToolbarLabel } from './networkBridgeModel';
 
   const IdeRunConfigPopoverLazy = lazyComponent(() => import('./IdeRunConfigPopover.svelte'));
@@ -26,6 +27,15 @@
   const bridgeLabel = $derived(
     ide.target.kind === 'local' ? formatBridgeToolbarLabel(ide.projectEnv?.network_bridge) : null,
   );
+  const isProdBridge = $derived(
+    ide.target.kind === 'local' && bridgeEnvCache.isProdBridge(ide.projectEnv?.network_bridge),
+  );
+
+  $effect(() => {
+    if (ide.target.kind === 'local' && ide.projectEnv?.network_bridge?.enabled) {
+      void bridgeEnvCache.ensureLoaded(ide.target.workspace_id);
+    }
+  });
 </script>
 
 {#if !viewport.isPhone}
@@ -34,11 +44,17 @@
       <button
         type="button"
         class="run-bridge-btn"
-        title="Active cluster / SSH network bridge — click to configure"
+        class:is-prod={isProdBridge}
+        title={isProdBridge
+          ? 'Active PRODUCTION cluster / SSH network bridge — click to configure'
+          : 'Active cluster / SSH network bridge — click to configure'}
         onclick={() => ide.openEnvironmentsModal('env')}
         data-testid="ide-netbridge-toolbar-pill"
       >
         <Icon name="helm" size={12} />
+        {#if isProdBridge}
+          <span class="run-bridge-prod">PROD</span>
+        {/if}
         <span class="run-cfg-label" dir="ltr">{bridgeLabel}</span>
       </button>
     {/if}
@@ -74,7 +90,7 @@
     <button
       type="button"
       class="icon-btn"
-      aria-label="Debug"
+      aria-label="Debug selected target (⌃D)"
       title="Debug selected target (⌃D)"
       onclick={() => void ide.startDebug()}
       data-testid="ide-debug-btn"
@@ -98,7 +114,7 @@
     <button
       type="button"
       class="icon-btn"
-      aria-label="Launch settings"
+      aria-label="Launch settings…"
       title="Launch settings…"
       onclick={() => ide.openEnvironmentsModal('configs')}
       data-testid="ide-edit-configs-btn"
@@ -107,6 +123,17 @@
     </button>
   </div>
 {:else}
+  {#if bridgeLabel && isProdBridge}
+    <button
+      type="button"
+      class="run-bridge-btn is-prod is-compact"
+      title="Active PRODUCTION cluster / SSH network bridge — click to configure"
+      onclick={() => ide.openEnvironmentsModal('env')}
+      data-testid="ide-netbridge-toolbar-pill"
+    >
+      <span class="run-bridge-prod">PROD</span>
+    </button>
+  {/if}
   {#if isRunning || isDebugging}
     <button
       type="button"
@@ -164,12 +191,22 @@
   }
   .run-cfg-btn:hover { border-color: var(--border-strong); background: var(--hover); }
   .run-bridge-btn {
-    display: inline-flex; align-items: center; gap: 4px; max-inline-size: 136px;
+    display: inline-flex; align-items: center; gap: 4px; max-inline-size: 168px;
     min-inline-size: 0; block-size: 26px; padding-inline: 8px; background: var(--accent-soft);
     color: var(--accent-text); border: 1px solid var(--accent-line); border-radius: var(--radius-s);
     font-size: var(--fs-xs); font-weight: 500; cursor: pointer;
   }
   .run-bridge-btn:hover { background: var(--hover); }
+  .run-bridge-btn.is-prod {
+    background: var(--danger-soft);
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  }
+  .run-bridge-btn.is-compact { padding-inline: 6px; flex-shrink: 0; }
+  .run-bridge-prod { font-weight: 600; letter-spacing: 0.06em; flex-shrink: 0; }
   .run-cfg-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
-  @media (max-width: 1024px) { .run-cfg-btn { max-inline-size: 150px; } }
+  @media (max-width: 1024px) {
+    .run-cfg-btn { max-inline-size: 150px; }
+    .run-bridge-btn { max-inline-size: 136px; }
+  }
 </style>

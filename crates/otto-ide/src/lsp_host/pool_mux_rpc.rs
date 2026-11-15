@@ -19,6 +19,7 @@ fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
 
 fn default_gopls_settings() -> Value {
     json!({
+        "buildFlags": ["-mod=mod"],
         "directoryFilters": [
             "-**/node_modules",
             "-**/target",

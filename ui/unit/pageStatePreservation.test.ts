@@ -2,9 +2,19 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
 
-test('ottoTelemetry analyze completes across unmount and preserves view, hours and page', async () => {
+test('ottoTelemetry analyze completes across unmount, decouples usageUi scope, and splits busy flags', async () => {
   const analyzeGate = deferred<any[]>();
+  const toggleGate = deferred<{ enabled: boolean; retention_days: number }>();
+  const dismissGate = deferred<void>();
   const getCalls: string[] = [];
+  let serverSuggestions = [
+    { id: 'sug-1', component: 'git', name: 'git.execute', dismissed: false },
+    { id: 'sug-2', component: 'ide', name: 'ide.lsp', dismissed: false },
+  ];
+  const { usageUi } = loadSource(
+    new URL('../src/modules/usage/usageUiState.svelte.ts', import.meta.url),
+    {},
+  );
   const storeMod = loadSource(
     new URL('../src/modules/usage/ottoTelemetryStore.svelte.ts', import.meta.url),
     {
@@ -17,15 +27,24 @@ test('ottoTelemetry analyze completes across unmount and preserves view, hours a
             if (url === '/telemetry/status') return { enabled: true, collector_ready: true };
             if (url.startsWith('/telemetry/overview')) return { spans: 42, operations: [] };
             if (url === '/telemetry/suggestions') {
-              return [{ id: 'sug-1', component: 'git', name: 'git.execute', dismissed: false }];
+              return serverSuggestions;
             }
             throw new Error(`unexpected GET ${url}`);
           },
           post: async (url: string) => {
-            if (url === '/telemetry/analyze') return analyzeGate.promise;
+            if (url === '/telemetry/analyze') {
+              const res = await analyzeGate.promise;
+              serverSuggestions = res;
+              return res;
+            }
+            if (url === '/telemetry/suggestions/sug-2/dismiss') {
+              await dismissGate.promise;
+              serverSuggestions = serverSuggestions.map((s) => (s.id === 'sug-2' ? { ...s, dismissed: true } : s));
+              return;
+            }
             throw new Error(`unexpected POST ${url}`);
           },
-          put: async () => ({ enabled: true, retention_days: 7 }),
+          put: async () => toggleGate.promise,
         },
       },
       '../../lib/poll': {
@@ -37,17 +56,38 @@ test('ottoTelemetry analyze completes across unmount and preserves view, hours a
     { relative: true },
   );
 
-  const { ottoTelemetry, usageUi } = storeMod;
+  const { ottoTelemetry } = storeMod;
   usageUi.resetForTests();
   ottoTelemetry.resetForTests();
 
   usageUi.view = 'otto';
-  ottoTelemetry.hours = 168;
+  usageUi.telemetryHours = 168;
   ottoTelemetry.operationPage = 2;
 
-  const unmountFirst = ottoTelemetry.mount();
+  const unmountFirst = ottoTelemetry.mount({
+    getScope: () => ({ hours: usageUi.telemetryHours }),
+  });
+  await new Promise((r) => setTimeout(r, 0));
+
+  // Independent action flags: Analyze, Dismiss, and Toggle can overlap without blocking unrelated controls!
   const analyzePromise = ottoTelemetry.analyze();
+  const dismissPromise = ottoTelemetry.dismiss('sug-2');
+  const togglePromise = ottoTelemetry.toggleEnabled(false);
   assert.equal(ottoTelemetry.analyzing, true);
+  assert.equal(ottoTelemetry.clearing, true);
+  assert.equal(ottoTelemetry.dismissingId, 'sug-2');
+  assert.equal(ottoTelemetry.togglingEnabled, true);
+  assert.equal(ottoTelemetry.savingRetention, false);
+
+  dismissGate.resolve();
+  await dismissPromise;
+  assert.equal(ottoTelemetry.clearing, false);
+  assert.equal(ottoTelemetry.dismissingId, null);
+  assert.equal(ottoTelemetry.analyzing, true);
+
+  toggleGate.resolve({ enabled: false, retention_days: 7 });
+  await togglePromise;
+  assert.equal(ottoTelemetry.togglingEnabled, false);
 
   // User navigates away while Analyze is still running.
   unmountFirst();
@@ -61,12 +101,14 @@ test('ottoTelemetry analyze completes across unmount and preserves view, hours a
   assert.equal(ottoTelemetry.analyzing, false);
   assert.equal(ottoTelemetry.suggestions.length, 1);
   assert.equal(ottoTelemetry.suggestions[0].id, 'sug-1');
-  assert.equal(ottoTelemetry.hours, 168);
+  assert.equal(usageUi.telemetryHours, 168);
   assert.equal(ottoTelemetry.operationPage, 2);
   assert.ok(getCalls.includes('/telemetry/overview?hours=168'));
 
   // Returning to Otto Telemetry keeps the sub-view, filter window, page, and suggestions.
-  const unmountSecond = ottoTelemetry.mount();
+  const unmountSecond = ottoTelemetry.mount({
+    getScope: () => ({ hours: usageUi.telemetryHours }),
+  });
   assert.equal(usageUi.view, 'otto');
   assert.equal(ottoTelemetry.suggestions[0].id, 'sug-1');
   unmountSecond();
@@ -180,4 +222,127 @@ test('skillsLabState and workflowsUi preserve filters, selections, and in-flight
   assert.equal(workflowsUi.instructionsOpen, true);
   assert.equal(workflowsUi.selectedNodeByWorkflow.get('wf-existing'), 'node-2');
   assert.deepEqual(remembered, [['workflows', 'wf-generated']]);
+});
+
+test('insightsStore silently refreshes on remount while preserving paged older reports and surfaces inline olderError', async () => {
+  let listCalls = 0;
+  let failOlder = true;
+  let toastErrors = 0;
+  const mkReport = (start: string) => ({
+    kind: 'daily',
+    period_start: start,
+    period_end: start,
+    generated_at: `${start}T08:00:00Z`,
+    html_path: null,
+    md_path: null,
+    summary: `Summary ${start}`,
+  });
+
+  const { insightsStore } = loadSource(
+    new URL('../src/modules/insights/insightsStore.svelte.ts', import.meta.url),
+    {
+      '../../lib/api/insights': {
+        insightsApi: {
+          getConfig: async () => null,
+          activeRuns: async () => [],
+          reportStatus: async () => ({ report: null, html_revision: null }),
+          readText: async () => '{}',
+          listReports: async (offset?: number) => {
+            listCalls += 1;
+            if (offset && offset > 0) {
+              if (failOlder) throw new Error('archive offline');
+              return [mkReport('2026-11-01')];
+            }
+            return listCalls === 1
+              ? [mkReport('2026-11-14'), mkReport('2026-11-13')]
+              : [mkReport('2026-11-15'), mkReport('2026-11-14'), mkReport('2026-11-13')];
+          },
+        },
+      },
+      '../../lib/confirm.svelte': { confirmer: { ask: async () => false } },
+      '../../lib/toast.svelte': {
+        toasts: {
+          info() {},
+          success() {},
+          error() {
+            toastErrors += 1;
+          },
+        },
+      },
+      '../../lib/toastError': { toastError() {} },
+      './capabilities': { capabilitiesApi: { list: async () => [] } },
+    },
+    {},
+    { relative: true },
+  );
+
+  insightsStore.resetForTests();
+  await insightsStore.load(null, true);
+  assert.equal(insightsStore.loading, false);
+  assert.equal(insightsStore.loadedOnce, true);
+  assert.equal(insightsStore.reports.length, 2);
+
+  // Failing older page sets inline `olderError` instead of firing a toast.
+  await insightsStore.loadOlderReports(2, 2);
+  assert.match(insightsStore.olderError ?? '', /archive offline/);
+  assert.equal(toastErrors, 0);
+
+  // Retrying older page clears `olderError` and appends older archive rows.
+  failOlder = false;
+  await insightsStore.loadOlderReports(2, 2);
+  assert.equal(insightsStore.olderError, null);
+  assert.equal(insightsStore.reports.length, 3);
+  insightsStore.archiveOffset = 10;
+
+  // Remounting triggers silent SWR refresh (`loading === false`) and retains paged older rows!
+  insightsStore.mount(null);
+  assert.equal(insightsStore.loading, false, 'remount must keep rendered list visible without loading flash');
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(insightsStore.reports.length, 4);
+  assert.equal(insightsStore.reports[0].period_start, '2026-11-15');
+  assert.equal(insightsStore.reports[3].period_start, '2026-11-01');
+});
+
+test('mcpUiState preserves selectedServerId and expandedServerId across same-workspace remounts and resets on workspace switch', () => {
+  const { mcpUiState } = loadSource(
+    new URL('../src/modules/mcp/mcpUiState.svelte.ts', import.meta.url),
+    {},
+  );
+  mcpUiState.resetForTests();
+
+  assert.equal(mcpUiState.syncWorkspace('ws-1'), true);
+  mcpUiState.setServers(
+    [
+      { id: 'srv-1', name: 'github' } as any,
+      { id: 'srv-2', name: 'postgres' } as any,
+    ],
+    (items: Array<{ id: string }>) => items[0]?.id ?? null,
+  );
+  assert.equal(mcpUiState.selectedServerId, 'srv-1');
+
+  // User picks `srv-2` and expands its details, then switches tabs/routes within `ws-1`.
+  mcpUiState.selectServer('srv-2');
+  mcpUiState.expandedServerId = 'srv-2';
+  assert.equal(mcpUiState.syncWorkspace('ws-1'), false);
+  assert.equal(mcpUiState.selectedServerId, 'srv-2');
+  assert.equal(mcpUiState.expandedServerId, 'srv-2');
+
+  // Background server reload keeps `srv-2` selected; removing `srv-2` falls back cleanly.
+  mcpUiState.setServers(
+    [{ id: 'srv-1', name: 'github' } as any, { id: 'srv-2', name: 'postgres' } as any],
+    (items: Array<{ id: string }>) => items[0]?.id ?? null,
+  );
+  assert.equal(mcpUiState.selectedServerId, 'srv-2');
+
+  mcpUiState.setServers(
+    [{ id: 'srv-1', name: 'github' } as any],
+    (items: Array<{ id: string }>) => items[0]?.id ?? null,
+  );
+  assert.equal(mcpUiState.selectedServerId, 'srv-1');
+  assert.equal(mcpUiState.expandedServerId, null);
+
+  // Switching workspaces resets workspace-scoped selection.
+  assert.equal(mcpUiState.syncWorkspace('ws-2'), true);
+  assert.equal(mcpUiState.selectedServerId, null);
+  assert.equal(mcpUiState.loaded, false);
 });
