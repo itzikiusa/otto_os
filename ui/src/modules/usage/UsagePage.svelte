@@ -62,16 +62,9 @@
     if (router.module === 'usage') router.go(next === 'overview' ? 'usage' : `usage/${next}`);
   }
 
-  // Navigate to a session from the top-sessions table (click-through drill-down).
-  // Only known Otto sessions (those with a title or kind) can be navigated to;
-  // a Threads session opens in Threads, a terminal session in its tab.
-  function openSession(sessionId: string): void {
-    void openAgentSession(sessionId);
-  }
-  // A row with no Otto session behind it: run outside Otto, or since deleted.
-  function unknownSessionLabel(s: { workspace_id: string }): string {
-    return s.workspace_id === 'external' ? 'Session outside Otto' : 'Deleted session';
-  }
+  // A top-sessions row with no Otto session behind it: run outside Otto, or deleted.
+  const unknownSessionLabel = (s: { workspace_id: string }) =>
+    s.workspace_id === 'external' ? 'Session outside Otto' : 'Deleted session';
 
   const WINDOWS = [
     { days: 7, label: '7d' },
@@ -1281,7 +1274,7 @@
                       <div class="sess-cell" title={s.title ? `${s.title}\n${s.session_id}` : s.session_id}>
                         <div class="sess-top">
                           {#if isOttoSession}
-                            <button class="sess-name sess-open ellip-any" onclick={() => openSession(s.session_id)}
+                            <button class="sess-name sess-open ellip-any" onclick={() => void openAgentSession(s.session_id)}
                               aria-label="Open session {s.title ?? s.session_id}">{s.title ?? s.session_id.slice(0, 12)}</button>
                           {:else}
                             <span class="sess-name ellip-any">{s.title ?? unknownSessionLabel(s)}</span>
