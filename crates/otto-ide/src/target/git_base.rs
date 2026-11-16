@@ -119,6 +119,9 @@ async fn resolve_git_toplevel(probe_dir: &Path) -> Option<PathBuf> {
     #[cfg(unix)]
     cmd.process_group(0);
 
+    // Only an answer git actually gave is cached: a spawn failure or timeout
+    // must not pin "not a repo" (and an empty gutter baseline) for the TTL.
+    let mut definitive = false;
     let resolved = async {
         let mut child = cmd.spawn().ok()?;
         let mut guard = PgKillGuard(child.id());
@@ -127,6 +130,7 @@ async fn resolve_git_toplevel(probe_dir: &Path) -> Option<PathBuf> {
         let ok = tokio::time::timeout(GIT_BASE_TIMEOUT, async {
             stdout.take(16 * 1024).read_to_end(&mut buf).await.ok()?;
             let status = child.wait().await.ok()?;
+            definitive = true;
             status.success().then_some(())
         })
         .await
@@ -156,6 +160,9 @@ async fn resolve_git_toplevel(probe_dir: &Path) -> Option<PathBuf> {
     }
     .await;
 
+    if !definitive {
+        return resolved;
+    }
     let cache = toplevel_cache();
     if cache.len() >= TOPLEVEL_CACHE_CAP {
         cache.retain(|_, (ts, _)| ts.elapsed() < TOPLEVEL_CACHE_TTL);
@@ -461,12 +468,16 @@ fn is_broad_remote_git_root(top: &str, remote_home: &str) -> bool {
     !h.is_empty() && clean == h
 }
 
+/// `Ok(None)` = genuinely not in a repo (the probe script exits 0 then); an
+/// SSH failure is an error, so the UI never caches a missing baseline for it.
 async fn resolve_ssh_git_toplevel_and_rel(
     mgr: &TargetManager,
     target: &ResolvedTarget,
     remote_file: &str,
-) -> Option<(String, String)> {
-    let parent = remote_parent(remote_file)?;
+) -> Result<Option<(String, String)>> {
+    let Some(parent) = remote_parent(remote_file) else {
+        return Ok(None);
+    };
     let q_file = shell_words::quote(remote_file);
     let q_parent = shell_words::quote(&parent);
     let script = format!(
@@ -494,15 +505,21 @@ async fn resolve_ssh_git_toplevel_and_rel(
             &BTreeMap::new(),
             SSH_GIT_BASE_TIMEOUT,
         )
-        .await
-        .ok()?;
+        .await?;
     if out.exit_code != 0 {
-        return None;
+        return Err(Error::Upstream(format!(
+            "remote git probe failed (exit {})",
+            out.exit_code
+        )));
     }
+    Ok(parse_ssh_git_probe(&out.stdout, remote_file))
+}
+
+fn parse_ssh_git_probe(stdout: &str, remote_file: &str) -> Option<(String, String)> {
     let mut top = String::new();
     let mut phys_file = String::new();
     let mut r_home = String::new();
-    for line in out.stdout.lines() {
+    for line in stdout.lines() {
         if let Some(v) = line.strip_prefix("TOP:") {
             top = v.trim().to_string();
         } else if let Some(v) = line.strip_prefix("FILE:") {
@@ -666,7 +683,7 @@ pub(super) async fn read_git_base_for_target(
         } => {
             let (remote_file, _) = resolve_remote_in_roots_or_sdk(root, additional_roots, path)?;
             let Some((toplevel, rel_path)) =
-                resolve_ssh_git_toplevel_and_rel(mgr, target, &remote_file).await
+                resolve_ssh_git_toplevel_and_rel(mgr, target, &remote_file).await?
             else {
                 return Ok(IdeGitBaseResp::not_in_repo());
             };
