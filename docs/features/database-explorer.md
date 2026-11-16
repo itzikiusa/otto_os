@@ -858,13 +858,18 @@ Connection right-click → **Processes…** (MySQL, PostgreSQL, ClickHouse and
 MongoDB) opens a small panel listing what runs on the server now — id, user,
 database / namespace (PostgreSQL / MongoDB), time, state and the statement —
 with **Refresh** (`ProcessList.svelte`, `process-list.ts`). Redis has no list.
+The header counts the sessions running a statement (not an idle PostgreSQL
+session or a MySQL `Sleep` connection) and is hidden when the list failed to
+load. The table fits the dialog: the query column takes the spare width and
+ellipsizes (hover for the whole statement).
 
 - **Listing is read-only.** One fixed statement per engine goes through
   `…/db/query` with `read_only: true`, so the server classifies it as a read
   and runs it in the engine's native read-only mode — it works on a Read-only
   connection. These exact listings, sent read-only, are **not recorded in query
   history** (`service/process_list.rs`); the same text typed into the editor is.
-  - MySQL `SHOW FULL PROCESSLIST`; ClickHouse `SELECT … FROM system.processes`.
+  - MySQL `SHOW FULL PROCESSLIST`; ClickHouse `SELECT … FROM system.processes`
+    (the panel drops its own listing query).
   - PostgreSQL `SELECT … FROM pg_stat_activity`: client sessions plus busy
     background workers, the time in the current state, wait event, client
     address, and the statement capped at 4,000 characters. It uses only the
