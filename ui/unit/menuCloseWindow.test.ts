@@ -17,7 +17,8 @@ function menu(closedTab: boolean) {
     './stores/sidePane.svelte': { sidePane: { handleMenu: () => false, nativeState: null, focused: false } },
     './nativePane': { nativePane: { focus: async () => {} } },
     './desktop': { isEmbedded: false, closePopoutWindow: async () => { calls.push('window'); return true; } },
-    './keys': { dismissTopDialog() {}, modalKeyVerdict: () => 'run' },
+    './embedGuest': { postToHost() {} },
+    './keys': { dismissTopDialog() {}, modalKeyVerdict: () => 'run', keyContext: { terminalFocused: false }, pageClaimsAlias: () => false },
     './stores/sessionScope': { sessionVerbsApply: () => true },
   });
   return { handleMenu, calls };

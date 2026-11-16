@@ -31,6 +31,8 @@ export interface MenuItem {
   /** In a filterable menu: always visible, never filtered or capped (use for
    *  the fixed action rows above a long data-driven list). */
   pinned?: boolean;
+  /** Optional cascading flyout submenu (clamped into the viewport). */
+  children?: MenuItem[];
   action?: () => void;
 }
 

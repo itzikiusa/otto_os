@@ -20,14 +20,12 @@
   import { onTabKey } from '../../lib/tabKeys';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
-  import type { InsightKind, InsightReport, InsightRunPeriod, InsightsConfig } from '../../lib/api/types';
+  import type { InsightReport } from '../../lib/api/types';
   import { scheduleCopy } from './scheduleStatus';
-  import { runPollDelay } from './runPoll';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { rel, now } from '../../lib/stores/now.svelte';
@@ -37,7 +35,6 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { loadErrorText } from '../../lib/loadError';
   import { downloadJson, downloadText } from '../../lib/components/exporters';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -47,8 +44,9 @@
   import { capabilitiesApi } from './capabilities';
   import type { SupportBundle } from './capabilities';
   import { escapeHtml } from '../../lib/html';
-  import { METRIC_KEYS, delta, indexPathFrom, itemStatus, parseIndex, parseSummaryCached,
-    periodKey, reportMetrics, siblingPath, type InsightsIndex, type MetricKey, type ParsedSummary } from './insightsParse';
+  import { METRIC_KEYS, delta, itemStatus, parseSummaryCached,
+    periodKey, reportMetrics, siblingPath, type MetricKey, type ParsedSummary } from './insightsParse';
+  import { insightsStore as s, type InsightsFilter } from './insightsStore.svelte';
 
   // ---------------------------------------------------------------------------
   // Routing
@@ -92,87 +90,24 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Reports: load
+  // Reports: load (backed by singleton insightsStore so state survives navigation)
   // ---------------------------------------------------------------------------
 
-  let reports: InsightReport[] = $state([]);
-  let loading = $state(true);
-  let loadError: string | null = $state(null);
-  let hasMoreReports = $state(false);
-  let archiveOffset = 0;
-  let loadingMore = $state(false);
-  /** `index.json` (series + action ledger) — best-effort, may stay empty. */
-  let index: InsightsIndex = $state({ series: [], ledger: new Map() });
-  /** Full summary markdown per report key (the list carries an 80-line excerpt). */
-  let fullMd: Record<string, string> = $state({});
-
-  let loaded = false;
-  let disposed = false;
+  let mounted = false;
   $effect(() => {
-    if (loaded) return;
-    loaded = true;
-    void load();
-    void restoreActiveRun();
-    return () => {
-      disposed = true;
-      if (pollTimer) clearTimeout(pollTimer);
-    };
+    if (mounted) return;
+    mounted = true;
+    s.mount(untrack(() => routeKey));
   });
 
-  /** The schedule config (with its last failed scheduled attempts), so the
-   *  empty state says "off" only when it is (error-handling-6-03). A failed
-   *  read keeps the generic copy — the reports load is what matters here. */
-  let schedule = $state<InsightsConfig | null>(null);
-  const emptySchedule = $derived(scheduleCopy(schedule));
+  const emptySchedule = $derived(scheduleCopy(s.schedule));
 
-  async function load(): Promise<void> {
-    loading = true;
-    loadError = null;
-    void insightsApi.getConfig().then((c) => { schedule = c; }).catch(() => { schedule = null; });
-    try {
-      reports = await insightsApi.listReports();
-      archiveOffset = reports.length;
-      hasMoreReports = reports.length === 200;
-      if (routeKey && !reports.some((r) => keyOf(r) === routeKey)) {
-        const linked = await insightsApi.reportStatus(routeKey);
-        if (linked.report) reports = [...reports, linked.report];
-      }
-      void loadIndex();
-    } catch (e) {
-      loadError = loadErrorText(e);
-    } finally {
-      loading = false;
-    }
+  function load(): Promise<void> {
+    return s.load(routeKey, true);
   }
 
-  async function loadOlderReports(): Promise<void> {
-    if (loadingMore) return;
-    if (shownRows.length < filtered.length) { listShown = shownRows.length + LIST_PAGE; return; }
-    loadingMore = true;
-    try {
-      const page = await insightsApi.listReports(archiveOffset);
-      if (disposed) return;
-      archiveOffset += page.length;
-      hasMoreReports = page.length === 200;
-      const ids = new Set(reports.map(keyOf));
-      reports = [...reports, ...page.filter((r) => !ids.has(keyOf(r)))];
-      listShown += LIST_PAGE;
-    } catch (e) { toasts.error('Couldn’t load older reports', loadErrorText(e)); }
-    finally { loadingMore = false; }
-  }
-
-  let indexRequest = 0;
-  async function loadIndex(): Promise<void> {
-    const request = ++indexRequest;
-    const html = reports.find((r) => r.html_path)?.html_path;
-    const path = html ? indexPathFrom(html) : null;
-    if (!path) return;
-    try {
-      const next = parseIndex(JSON.parse(await insightsApi.readText(path)));
-      if (!disposed && request === indexRequest) index = next;
-    } catch {
-      /* no index yet / unreadable — KPIs fall back to the summaries alone */
-    }
+  function loadOlderReports(): Promise<void> {
+    return s.loadOlderReports(shownRows.length, filtered.length);
   }
 
   // ---------------------------------------------------------------------------
@@ -183,18 +118,16 @@
 
   const parsedByKey = $derived.by(() => {
     const m = new Map<string, ParsedSummary>();
-    for (const r of reports) m.set(keyOf(r), parseSummaryCached(fullMd[keyOf(r)] ?? r.summary));
+    for (const r of s.reports) m.set(keyOf(r), parseSummaryCached(s.fullMd[keyOf(r)] ?? r.summary));
     return m;
   });
-  const seriesByKey = $derived(new Map(index.series.map((s) => [s.periodKey, s])));
+  const seriesByKey = $derived(new Map(s.index.series.map((x) => [x.periodKey, x])));
 
   function metricsOf(r: InsightReport) {
     return reportMetrics(parsedByKey.get(keyOf(r))?.metrics ?? {}, seriesByKey.get(keyOf(r)));
   }
 
-  type Filter = 'all' | InsightKind;
-  let filter: Filter = $state('all');
-  const kinds: { id: Filter; label: string }[] = [
+  const kinds: { id: InsightsFilter; label: string }[] = [
     { id: 'all', label: 'All' },
     { id: 'daily', label: 'Daily' },
     { id: 'weekly', label: 'Weekly' },
@@ -202,78 +135,60 @@
     { id: 'adhoc', label: 'Ad-hoc' },
   ];
   const counts = $derived.by(() => {
-    const c: Record<string, number> = { all: reports.length };
-    for (const r of reports) c[r.kind] = (c[r.kind] ?? 0) + 1;
+    const c: Record<string, number> = { all: s.reports.length };
+    for (const r of s.reports) c[r.kind] = (c[r.kind] ?? 0) + 1;
     return c;
   });
   // Only offer kinds that exist (plus All) — no dead "Ad-hoc 0" chip.
   const visibleKinds = $derived(kinds.filter((k) => k.id === 'all' || (counts[k.id] ?? 0) > 0));
-  const filtered = $derived(filter === 'all' ? reports : reports.filter((r) => r.kind === filter));
+  const filtered = $derived(s.filter === 'all' ? s.reports : s.reports.filter((r) => r.kind === s.filter));
 
-  let selectedKey: string | null = $state(null);
-  // SE-17: daily reports grow by 365 a year. Rows vary in height, so instead of
-  // a fixed-row window the list mounts a page and grows on demand; the
-  // selected report is always mounted, and off-screen rows skip layout
-  // (content-visibility).
-  const LIST_PAGE = 200;
-  let listShown = $state(LIST_PAGE);
-  $effect(() => {
-    void filter;
-    listShown = LIST_PAGE;
-  });
-  const selectedIndex = $derived(selectedKey ? filtered.findIndex((r) => keyOf(r) === selectedKey) : -1);
-  const shownRows = $derived(filtered.slice(0, Math.max(listShown, selectedIndex + 1)));
+  const selectedIndex = $derived(s.selectedKey ? filtered.findIndex((r) => keyOf(r) === s.selectedKey) : -1);
+  const shownRows = $derived(filtered.slice(0, Math.max(s.listShown, selectedIndex + 1)));
   /** Phone: list/detail is push navigation — the detail replaces the list. */
   let phoneDetail = $state(false);
   $effect(() => { phoneDetail = routeKey !== null; });
 
   // Open on the routed report, else the last-viewed one, else the newest.
   $effect(() => {
-    if (loading || reports.length === 0) return;
+    if (s.loading || s.reports.length === 0) return;
     if (routeKey) {
-      if (selectedKey !== routeKey) selectedKey = routeKey;
+      if (s.selectedKey !== routeKey) s.selectedKey = routeKey;
       return;
     }
-    if (selectedKey && filtered.some((r) => keyOf(r) === selectedKey)) return;
-    selectedKey = initialSelection('insights', filtered, keyOf);
+    if (s.selectedKey && filtered.some((r) => keyOf(r) === s.selectedKey)) return;
+    s.selectedKey = initialSelection('insights', filtered, keyOf);
   });
   $effect(() => {
-    if (selectedKey && !detailOnly) rememberSelection('insights', selectedKey);
+    if (s.selectedKey && !detailOnly) rememberSelection('insights', s.selectedKey);
   });
 
-  const selected = $derived(reports.find((r) => keyOf(r) === selectedKey) ?? null);
+  const selected = $derived(s.reports.find((r) => keyOf(r) === s.selectedKey) ?? null);
 
   function select(r: InsightReport): void {
-    selectedKey = keyOf(r);
+    s.selectedKey = keyOf(r);
     if (viewport.isPhone) phoneDetail = true;
     if (routeKey) router.replace('insights');
   }
 
-  // Fetch the full summary for the open report (the list has an excerpt) AND
-  // for the report its deltas compare against: a metric the excerpt cuts off
-  // falls back to the index (tool errors: 0), so comparing the open report's
-  // summary value with the previous one's index value showed "Up 24, worse"
-  // for a day that actually went 41 → 24.
   $effect(() => {
     const r = selected;
     if (!r) return;
     const prev = untrack(() => previousOf(r));
-    const want = [r, ...(prev ? [prev] : [])].filter((x) => untrack(() => fullMd[keyOf(x)]) == null);
+    const want = [r, ...(prev ? [prev] : [])].filter((x) => untrack(() => s.fullMd[keyOf(x)]) == null);
     if (!want.length) return;
-    let current = true;
     for (const x of want) {
       const k = keyOf(x);
       const path = x.html_path ? siblingPath(x.html_path, 'summary') : null;
       const summary = path ? insightsApi.readText(path) : insightsApi.reportStatus(k, true).then(({ report }) => report?.summary ?? '');
       void summary
         .then((text) => {
-          if (current && text.trim()) fullMd = { ...fullMd, [k]: text };
+          if (text.trim()) s.fullMd = { ...s.fullMd, [k]: text };
         })
         .catch(() => {
-          if (current) fullMd = { ...fullMd, [k]: x.summary };
+          s.fullMd = { ...s.fullMd, [k]: x.summary };
         });
     }
-    return () => { current = false; };
   });
 
   // ---------------------------------------------------------------------------
@@ -290,17 +205,13 @@
   };
   const TREND_LEN = 12;
 
-  /** Same-kind reports, newest first (the list is already newest first). */
   function sameKind(r: InsightReport): InsightReport[] {
-    return reports.filter((x) => x.kind === r.kind);
+    return s.reports.filter((x) => x.kind === r.kind);
   }
-  /** Report key → the previous report of the same kind, built once per
-   *  `reports` change. `previousOf` used to filter + findIndex over every
-   *  report for each row (twice per row) — O(rows × reports) per render. */
   const previousByKey = $derived.by(() => {
     const m = new Map<string, InsightReport | null>();
     const byKind = new Map<string, InsightReport[]>();
-    for (const r of reports) {
+    for (const r of s.reports) {
       const list = byKind.get(r.kind);
       if (list) list.push(r);
       else byKind.set(r.kind, [r]);
@@ -374,7 +285,7 @@
   }
 
   function markdownOf(r: InsightReport): string {
-    return fullMd[keyOf(r)] ?? r.summary;
+    return s.fullMd[keyOf(r)] ?? r.summary;
   }
   function fileStem(r: InsightReport): string {
     return `insights-${r.kind}-${r.period_start}${r.period_end !== r.period_start ? `_${r.period_end}` : ''}`;
@@ -417,23 +328,8 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Run now — with run_id polling
+  // Run now — delegated to singleton insightsStore
   // ---------------------------------------------------------------------------
-
-  // Compatibility for older daemons without report_key. New daemons resolve
-  // this in their own local timezone, matching the skill collector.
-  function localReportKey(period: InsightRunPeriod, offset: number): string {
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    if (period === 'day') start.setDate(start.getDate() - offset);
-    else if (period === 'week') start.setDate(start.getDate() - (start.getDay() + 6) % 7 - offset * 7);
-    else { start.setDate(1); start.setMonth(start.getMonth() - offset); }
-    const end = new Date(start);
-    if (period === 'week') end.setDate(end.getDate() + 6);
-    else if (period === 'month') { end.setMonth(end.getMonth() + 1); end.setDate(0); }
-    const ymd = (d: Date) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-    return `${period === 'day' ? 'daily' : period === 'week' ? 'weekly' : 'monthly'}:${ymd(start)}_${ymd(end)}`;
-  }
 
   const RUN_OPTIONS: { value: string; label: string }[] = [
     { value: 'day:1', label: 'Yesterday' },
@@ -443,178 +339,13 @@
     { value: 'month:1', label: 'Last month' },
     { value: 'month:2', label: '2 months ago' },
   ];
-  /** Starting / stopping a run is root-only on the daemon (`POST /insights/run`,
-   *  `/insights/runs/{id}/cancel` → `require_root`): other members read the
-   *  reports but never see controls that can only end in a 403. */
   const canRun = $derived(auth.isRoot);
-  let runChoice = $state('day:1');
-  let running = $state(false);
-  /** Why the last run banner is up: start refused, or a run that ended with no report. */
-  let runFailKind = $state<'start' | 'ended' | null>(null);
-  /** Reason shown under that banner. */
-  let runFailReason: string | null = $state(null);
-  /** Session of a run that ended without a report, so the banner can open it. */
-  let endedRunId = $state<string | null>(null);
-  let pollRunId: string | null = $state(null);
-  let pollReportKey: string | null = null;
-  let reportBeforeRun: string | null | undefined;
-  let pollTimer: ReturnType<typeof setTimeout> | null = null;
-  // Visible ticks so far: 3 s for ~5 min, then 30 s while the run is still
-  // active (runPoll.ts) — the banner never times out under a working agent.
-  let pollCount = $state(0);
-  /** Consecutive poll ticks the run was missing from the active-run list. */
-  let pollGoneTicks = 0;
-  /** Wall time is independent of visibility-aware polling attempts. */
-  let pollStartedAt = $state(Date.now());
-  const pollElapsed = $derived(Math.max(0, Math.floor((now() - pollStartedAt) / 1000)));
-  let stoppingRun = $state(false);
-
-  /** A run started earlier (this page was left, or another window started it)
-   *  is still generating: bring its banner back and resume polling for it. */
-  async function restoreActiveRun(): Promise<void> {
-    try {
-      const runs = await insightsApi.activeRuns();
-      const r = runs[runs.length - 1];
-      if (disposed || !r || pollRunId) return;
-      pollRunId = r.run_id;
-      pollGoneTicks = 0;
-      pollReportKey = r.report_key;
-      reportBeforeRun = r.report_revision;
-      pollCount = 0;
-      pollStartedAt = Number.isFinite(Date.parse(r.started_at)) ? Date.parse(r.started_at) : Date.now();
-      schedulePoll();
-    } catch {
-      /* best-effort: without it the page still works, just without the banner */
-    }
+  const pollElapsed = $derived(Math.max(0, Math.floor((now() - s.pollStartedAt) / 1000)));
+  function runNow(choice = s.runChoice): Promise<void> {
+    return s.runNow(canRun, choice);
   }
-
-  async function stopRun(): Promise<void> {
-    const id = pollRunId;
-    if (!id || stoppingRun) return;
-    const ok = await confirmer.ask('Stop generating this insights report? The agent session is ended; nothing already published is removed.', {
-      title: 'Stop insights run', danger: true, confirmLabel: 'Stop run',
-    });
-    if (!ok) return;
-    stoppingRun = true;
-    try {
-      await insightsApi.cancelRun(id);
-      if (pollTimer) clearTimeout(pollTimer);
-      pollRunId = null;
-      toasts.info('Insights run stopped');
-    } catch (e) {
-      toastError('Couldn’t stop the insights run', e);
-    } finally {
-      stoppingRun = false;
-    }
-  }
-
-  async function runNow(choice = runChoice): Promise<void> {
-    if (!canRun || loading || loadError || running || pollRunId) return;
-    const [p, o] = choice.split(':');
-    running = true;
-    runFailReason = null;
-    runFailKind = null;
-    endedRunId = null;
-    pollCount = 0;
-    pollStartedAt = Date.now();
-    const period = p as InsightRunPeriod;
-    const offset = Number(o) || 1;
-    const fallbackKey = localReportKey(period, offset);
-    try {
-      const resp = await insightsApi.run({ period, offset });
-      if (disposed) return;
-      if (!resp.started) {
-        runFailKind = 'start';
-        runFailReason = resp.reason ?? 'Check that the insights skill is installed.';
-        return;
-      }
-      if (resp.attached) toasts.info('Already generating this report', 'Showing the run in progress instead of starting another.');
-      if (resp.run_id) {
-        pollRunId = resp.run_id;
-        if (resp.attached) {
-          void insightsApi.activeRuns().then(runs => {
-            const active = runs.find(r => r.run_id === resp.run_id);
-            if (!disposed && pollRunId === resp.run_id && active && Number.isFinite(Date.parse(active.started_at))) pollStartedAt = Date.parse(active.started_at);
-          }).catch(() => {});
-        }
-        pollGoneTicks = 0;
-        pollReportKey = resp.report_key ?? fallbackKey;
-        reportBeforeRun = resp.report_revision;
-        schedulePoll();
-      } else {
-        setTimeout(() => void load(), 2500);
-        toasts.success('Insights run started', 'The report appears here when it is ready.');
-      }
-    } catch (e) {
-      toastError('Couldn’t start the insights run', e);
-    } finally {
-      running = false;
-    }
-  }
-
-  function schedulePoll(): void {
-    if (disposed) return;
-    if (!pollRunId) {
-      void load();
-      return;
-    }
-    pollTimer = setTimeout(async () => {
-      // Hidden window: wait (the tick isn't counted toward slowing down).
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-        schedulePoll();
-        return;
-      }
-      pollCount += 1;
-      let ready: InsightReport | null = null;
-      try {
-        // No key to poll (an older daemon's run): end the banner instead of
-        // returning without rescheduling — that left it stuck and blocked Run now.
-        if (!pollReportKey) {
-          pollRunId = null;
-          return;
-        }
-        const status = await insightsApi.reportStatus(pollReportKey);
-        if (disposed) return;
-        if (status.report?.html_path && status.html_revision && status.html_revision !== reportBeforeRun) ready = status.report;
-      } catch {
-        /* keep polling; the next tick retries */
-      }
-      // The run itself ended (failed, or stopped from another window) without
-      // publishing: end the banner with why instead of polling ~5 min and
-      // blocking Run now (S17-311). Two consecutive sightings, so a run that
-      // finished between the report check and this one isn't misread.
-      if (!ready && pollRunId) {
-        try {
-          const active = await insightsApi.activeRuns();
-          if (disposed) return;
-          pollGoneTicks = active.some((r) => r.run_id === pollRunId) ? 0 : pollGoneTicks + 1;
-        } catch {
-          /* unknown — keep polling */
-        }
-        if (pollGoneTicks >= 2) {
-          endedRunId = pollRunId;
-          pollRunId = null;
-          pollGoneTicks = 0;
-          runFailKind = 'ended';
-          runFailReason = 'The insights run ended without publishing a report — it failed or was stopped. Its session shows what happened.';
-          void load();
-          return;
-        }
-      }
-      if (ready) {
-        pollRunId = null;
-        await load();
-        if (disposed) return;
-        if (!reports.some((r) => keyOf(r) === keyOf(ready!))) reports = [...reports, ready];
-        fullMd = {};
-        filter = 'all';
-        select(ready);
-        void loadIndex();
-        toasts.success('Insights report ready', periodShort(ready));
-      } else {
-        schedulePoll();
-      }
-    }, runPollDelay(pollCount));
+  function stopRun(): Promise<void> {
+    return s.stopRun();
   }
 
   // ---------------------------------------------------------------------------
@@ -667,14 +398,14 @@
     let improved = 0;
     let fresh = 0;
     for (const a of acts) {
-      const s = itemStatus(a, index.ledger);
-      if (s === 'regressed') regressed++;
-      else if (s === 'improved' || s === 'closed') improved++;
-      else if (s === 'new') fresh++;
+      const st = itemStatus(a, s.index.ledger);
+      if (st === 'regressed') regressed++;
+      else if (st === 'improved' || st === 'closed') improved++;
+      else if (st === 'new') fresh++;
     }
     return { total: acts.length, regressed, improved, fresh };
   }
-  $effect(() => { if (runFailReason) announce(`${runFailKind === 'ended' ? 'The insights run didn’t publish a report.' : 'Couldn’t start the insights run.'} ${runFailReason}`, { assertive: true }); });
+  $effect(() => { if (s.runFailReason) announce(`${s.runFailKind === 'ended' ? 'The insights run didn’t publish a report.' : 'Couldn’t start the insights run.'} ${s.runFailReason}`, { assertive: true }); });
 </script>
 
 <div class="insights-page">
@@ -709,13 +440,13 @@
         <button class="icon-btn" data-overflow="-1" data-icon="gear" data-label="Schedule settings" onclick={() => router.go('settings/insights')} aria-label="Schedule settings" title="Schedule settings">
           <Icon name="gear" size={14} />
         </button>
-        {#if canRun && (reports.length > 0 || loading)}
-          <select class="input run-period" bind:value={runChoice} disabled={loading || !!loadError || running || !!pollRunId} aria-label="Period to report on" title="Period to report on">
+        {#if canRun && (s.reports.length > 0 || s.loading)}
+          <select class="input run-period" bind:value={s.runChoice} disabled={s.loading || !!s.loadError || s.running || !!s.pollRunId} aria-label="Period to report on" title="Period to report on">
             {#each RUN_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
           </select>
-          <button class="btn small primary" disabled={loading || !!loadError || running || !!pollRunId} onclick={() => runNow()}>
+          <button class="btn small primary" disabled={s.loading || !!s.loadError || s.running || !!s.pollRunId} onclick={() => void runNow()}>
             <Icon name="play" size={12} />
-            {running ? 'Starting…' : pollRunId ? 'Running…' : 'Run now'}
+            {s.running ? 'Starting…' : s.pollRunId ? 'Running…' : 'Run now'}
           </button>
         {/if}
       {/if}
@@ -724,31 +455,31 @@
 
   <!-- Always mounted (outside the tab switch), so the edge is spoken; never
        holds the ticking elapsed clock. -->
-  <div class="sr-only" role="status">{pollRunId ? 'Generating the report' : ''}</div>
+  <div class="sr-only" role="status">{s.pollRunId ? 'Generating the report' : ''}</div>
   {#if tab === 'health'}
     <PageBody width="readable">
       <CapabilitiesPage />
     </PageBody>
   {:else}
     <PageBody fill padded={false}>
-      {#if runFailReason || pollRunId}
+      {#if s.runFailReason || s.pollRunId}
         <div class="banners">
-          {#if runFailReason}
+          {#if s.runFailReason}
             <div class="banner warn">
               <Icon name="warning" size={14} />
               <div class="banner-body">
-                <strong>{runFailKind === 'ended' ? 'The insights run didn’t publish a report.' : 'Couldn’t start the insights run.'}</strong>
-                <span>{runFailReason}</span>
+                <strong>{s.runFailKind === 'ended' ? 'The insights run didn’t publish a report.' : 'Couldn’t start the insights run.'}</strong>
+                <span>{s.runFailReason}</span>
               </div>
-              {#if runFailKind === 'ended' && endedRunId}
-                <button class="btn small" onclick={() => endedRunId && ws.navigateToSession(endedRunId)}><Icon name="terminal" size={12} /> View live session</button>
+              {#if s.runFailKind === 'ended' && s.endedRunId}
+                <button class="btn small" onclick={() => s.endedRunId && ws.navigateToSession(s.endedRunId)}><Icon name="terminal" size={12} /> View live session</button>
               {:else}
                 <button class="btn small" onclick={() => router.go('skills-eval/bundled')}>Open Skills Lab → Bundled</button>
               {/if}
-              <button class="icon-btn" onclick={() => { runFailReason = null; runFailKind = null; endedRunId = null; }} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={14} /></button>
+              <button class="icon-btn" onclick={() => { s.runFailReason = null; s.runFailKind = null; s.endedRunId = null; }} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={14} /></button>
             </div>
           {/if}
-          {#if pollRunId}
+          {#if s.pollRunId}
             <!-- Not a live region: the elapsed clock ticks every second and the
                  buttons' names would be re-read with it. The sr-only status
                  above the banners says "Generating the report" once. -->
@@ -756,34 +487,34 @@
               <Icon name="refresh" size={14} />
               <span class="banner-text">Generating the report — an agent is reading your transcripts. This can take a few minutes; it appears in the list when it’s done.</span>
               <span class="dim" aria-hidden="true">{Math.floor(pollElapsed / 60)}:{String(pollElapsed % 60).padStart(2, '0')} elapsed</span>
-              <button class="btn small" onclick={() => pollRunId && ws.navigateToSession(pollRunId)}><Icon name="terminal" size={12} /> View live session</button>
-              {#if canRun}<button class="btn small" disabled={stoppingRun} aria-busy={stoppingRun} onclick={() => void stopRun()}><Icon name="stop" size={12} /> {stoppingRun ? 'Stopping…' : 'Stop'}</button>{/if}
+              <button class="btn small" onclick={() => s.pollRunId && ws.navigateToSession(s.pollRunId)}><Icon name="terminal" size={12} /> View live session</button>
+              {#if canRun}<button class="btn small" disabled={s.stoppingRun} aria-busy={s.stoppingRun} onclick={() => void stopRun()}><Icon name="stop" size={12} /> {s.stoppingRun ? 'Stopping…' : 'Stop'}</button>{/if}
             </div>
           {/if}
         </div>
       {/if}
 
-      {#if loadError && reports.length > 0}
-        <LoadState what="insight reports" variant="compact" error={loadError} empty={true} onretry={load} />
+      {#if s.loadError && s.reports.length > 0}
+        <LoadState what="insight reports" variant="compact" error={s.loadError} empty={true} onretry={load} />
       {/if}
-      {#if loading && reports.length === 0}
+      {#if s.loading && s.reports.length === 0}
         <div class="split">
           <!-- One announcing skeleton (the list); the detail's is silent. -->
           <aside class="list-pane"><Skeleton rows={6} height={84} label="insight reports" /></aside>
           <section class="detail-pane" class:hide-phone={viewport.isPhone}><Skeleton rows={4} height={36} announce={false} /></section>
         </div>
-      {:else if loadError && reports.length === 0}
+      {:else if s.loadError && s.reports.length === 0}
         <!-- Same inline error + Retry as every other module's failed load. -->
-        <LoadState what="insight reports" variant="page" {loading} error={loadError} empty onretry={load} />
-      {:else if reports.length === 0}
+        <LoadState what="insight reports" variant="page" loading={s.loading} error={s.loadError} empty onretry={load} />
+      {:else if s.reports.length === 0}
         <EmptyState
           variant="page"
           icon="gauge"
           title="No insight reports yet"
           body={`An agent reads your recent sessions and writes an action-first report: what’s working, what’s slowing you down, and five things to change. ${emptySchedule.text}`.trim()}
-          actionLabel={canRun ? (running ? 'Starting…' : "Run yesterday’s report") : undefined}
+          actionLabel={canRun ? (s.running ? 'Starting…' : "Run yesterday’s report") : undefined}
           actionIcon="play"
-          onaction={canRun ? () => runNow('day:1') : undefined}
+          onaction={canRun ? () => void runNow('day:1') : undefined}
         >
           <button class="btn ghost" onclick={() => router.go('settings/insights')}>{emptySchedule.offerTurnOn ? 'Turn on scheduled reports' : 'Schedule settings'}</button>
         </EmptyState>
@@ -793,7 +524,7 @@
             <aside class="list-pane" class:hide-phone={viewport.isPhone && phoneDetail} aria-label="Reports" style="--list-pane-w:{listW}px">
               <div class="filters" role="group" aria-label="Filter by period">
                 {#each visibleKinds as k (k.id)}
-                  <button class="filter-chip" class:active={filter === k.id} aria-pressed={filter === k.id} onclick={() => { filter = k.id; if (routeKey) router.replace('insights'); }}>
+                  <button class="filter-chip" class:active={s.filter === k.id} aria-pressed={s.filter === k.id} onclick={() => { s.setFilter(k.id); if (routeKey) router.replace('insights'); }}>
                     {k.label} <span class="count">{counts[k.id] ?? 0}</span>
                   </button>
                 {/each}
@@ -803,7 +534,7 @@
                   {@const p = parsedByKey.get(keyOf(r))}
                   {@const acts = actionSummary(r)}
                   {@const stats = rowStats(r)}
-                  <button class="rep-row" class:active={keyOf(r) === selectedKey} aria-current={keyOf(r) === selectedKey ? 'true' : undefined} onclick={() => select(r)}>
+                  <button class="rep-row" class:active={keyOf(r) === s.selectedKey} aria-current={keyOf(r) === s.selectedKey ? 'true' : undefined} onclick={() => select(r)}>
                     <div class="row-top">
                       <span class="chip">{kindLabel(r.kind)}</span>
                       <span class="row-date">{periodShort(r)}</span>
@@ -817,10 +548,10 @@
                     {/if}
                     {#if stats.length > 0}
                       <div class="row-stats">
-                        {#each stats as s (s.key)}
-                          <span class="stat {s.d?.tone ?? 'neutral'}" title={statTitle(s.key, s.value)}>
-                            {statText(s.key, s.value)}
-                            {#if s.d && s.d.direction !== 'flat'}<Icon name={s.d.direction === 'up' ? 'arrowUp' : 'arrowDown'} size={12} />{/if}
+                        {#each stats as st (st.key)}
+                          <span class="stat {st.d?.tone ?? 'neutral'}" title={statTitle(st.key, st.value)}>
+                            {statText(st.key, st.value)}
+                            {#if st.d && st.d.direction !== 'flat'}<Icon name={st.d.direction === 'up' ? 'arrowUp' : 'arrowDown'} size={12} />{/if}
                           </span>
                         {/each}
                       </div>
@@ -835,11 +566,13 @@
                     {/if}
                   </button>
                 {:else}
-                  <p class="dim list-empty">No {filter === 'adhoc' ? 'ad-hoc' : filter} reports. <button class="btn small ghost" onclick={() => (filter = 'all')}>Show all</button></p>
+                  <p class="dim list-empty">No {s.filter === 'adhoc' ? 'ad-hoc' : s.filter} reports. <button class="btn small ghost" onclick={() => s.setFilter('all')}>Show all</button></p>
                 {/each}
-                {#if filtered.length > shownRows.length || hasMoreReports}
-                  <button class="btn small ghost more-reports" onclick={loadOlderReports} disabled={loadingMore}>
-                    {loadingMore ? 'Loading older reports…' : 'Show older reports'}
+                {#if s.olderError}
+                  <LoadState what="older reports" variant="compact" loading={s.loadingMore} error={s.olderError} empty onretry={loadOlderReports} />
+                {:else if filtered.length > shownRows.length || s.hasMoreReports}
+                  <button class="btn small ghost more-reports" onclick={loadOlderReports} disabled={s.loadingMore}>
+                    {s.loadingMore ? 'Loading older reports…' : 'Show older reports'}
                   </button>
                 {/if}
               </div>
@@ -858,7 +591,7 @@
                 markdown={markdownOf(selected)}
                 {kpis}
                 compareLabel={prev ? periodShort(prev) : null}
-                ledger={index.ledger}
+                ledger={s.index.ledger}
                 {mode}
                 onmode={setMode}
                 onopenwindow={() => openWindow(selected)}

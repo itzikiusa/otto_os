@@ -8,22 +8,37 @@
 // must render from THIS list so a custom provider is a first-class citizen,
 // never a hardcoded subset. Supports any number of providers (10, 50, …).
 //
-// These are plain functions (not $derived) so any module can import them; call
-// them inside a component `$derived(...)` and they stay reactive, because they
-// read `auth.meta` (a $state field).
-//
-// NOTE: the Product tabs' `claude/openai/gemini` picker is a DIFFERENT axis
-// (direct LLM-API model providers, not spawnable agent CLIs) and intentionally
-// does not use this registry.
+// Pure zero-Svelte constants, capabilities, and harness helpers live in
+// `providerRegistry.ts` and are re-exported here so callers have one import.
 
 import { auth } from './stores/auth.svelte';
+import { inferProviderFamily, KNOWN_AGENT_FAMILIES, SHELL_PROVIDER } from './providerRegistry.ts';
 
-/** The pseudo-provider that opens a raw shell — can't plan/review/analyze. */
-export const SHELL_PROVIDER = 'shell';
+export {
+  attachmentSupport,
+  capsOf,
+  harnessLabel,
+  IDE_RUNTIME_PROVIDERS,
+  inferProviderFamily,
+  isPlainShellSession,
+  isRuntimeProvider,
+  KNOWN_AGENT_FAMILIES,
+  orderThreadHarnesses,
+  providerSubtitle,
+  resolveIdeHarnesses,
+  resolveIdeInlineProviders,
+  RUNTIME_PROVIDERS,
+  runtimeBaselineCaps,
+  sessionProviderSlug,
+  SHELL_PROVIDER,
+  takesFile,
+  type IdeRuntimeProvider,
+  type TakesCaps,
+} from './providerRegistry.ts';
 
 /** Built-in fallback used only before `/meta` has loaded (meta is normally
  *  present by the time any picker renders). */
-const FALLBACK: readonly string[] = ['claude', 'codex', 'agy', 'shell'];
+const FALLBACK: readonly string[] = ['claude', 'codex', 'agy', 'opencode', 'pi', 'shell'];
 
 /** All registered provider names (built-ins + custom), INCLUDING `shell`.
  *  Already sorted by the daemon. Use for surfaces where a shell is valid
@@ -100,25 +115,10 @@ export function defaultAgentProvider(): string {
 /** Whether `provider` accepts a model flag — its daemon spec carries a
  *  `model_args` template (`/meta.model_flags`). Surfaces hide their model
  *  control when false, so a picked model is never silently dropped. Falls back
- *  to the built-in trio before `/meta` has loaded (or on an older daemon). */
+ *  to the built-in CLI harnesses before `/meta` has loaded (or on an older daemon). */
 export function providerSupportsModel(provider: string): boolean {
   const flags = auth.meta?.model_flags;
   if (flags && provider in flags) return flags[provider];
-  return provider === 'claude' || provider === 'codex' || provider === 'agy';
-}
-
-/** Harness display name for pickers, cards and badges. */
-export function harnessLabel(provider: string): string {
-  switch (provider) {
-    case 'claude':
-      return 'Claude Code';
-    case 'codex':
-      return 'Codex';
-    case 'agy':
-      return 'Antigravity';
-    case 'shell':
-      return 'Shell';
-    default:
-      return provider.charAt(0).toUpperCase() + provider.slice(1);
-  }
+  const fam = inferProviderFamily(provider, auth.meta);
+  return (KNOWN_AGENT_FAMILIES as readonly string[]).includes(fam);
 }

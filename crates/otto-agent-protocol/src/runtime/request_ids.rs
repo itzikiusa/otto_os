@@ -2,7 +2,7 @@
 //! including across daemon restarts, so an old card never answers a new request.
 use otto_core::{new_id, Error, Result};
 
-pub(super) struct RequestIds {
+pub(crate) struct RequestIds {
     prefix: String,
 }
 
@@ -13,9 +13,12 @@ impl RequestIds {
         }
     }
 
-    /// The same generation again (a process a new daemon adopted).
     pub(super) fn from_prefix(prefix: String) -> Self {
-        Self { prefix }
+        if prefix.is_empty() {
+            Self::new()
+        } else {
+            Self { prefix }
+        }
     }
 
     pub(super) fn prefix(&self) -> &str {

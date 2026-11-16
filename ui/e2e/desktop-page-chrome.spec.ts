@@ -23,6 +23,7 @@ const ROUTES = [
   'rooms/recaps',
   'connections',
   'loops',
+  'ide',
   'git',
   'product',
   'vault',

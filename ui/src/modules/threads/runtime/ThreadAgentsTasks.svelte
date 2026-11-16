@@ -1,38 +1,81 @@
 <script lang="ts">
-  // Thread details' "Agents & tasks": every subagent and background task of
-  // the focused runtime thread (agentTasks.ts) — running first with its
-  // elapsed time, the last few finished folded under one line. Hidden when
-  // the thread has none. The strip above the composer brings it into view
-  // (threads.showAgentsTasks). A row opens its work in place (Back returns;
-  // a Modal on a narrow window): a subagent is the very card the timeline
-  // shows (RuntimeSubagentCard — its prompt, activity, result; an
-  // Antigravity swarm member's board and steps), a background command its
-  // description, command, launch call and output (T3 Code's
-  // BackgroundWorkDetails, MIT, Copyright (c) 2026 T3 Tools Inc.).
+  // Thread details' "Agents & tasks": every subagent, linked child thread, and
+  // background task of the focused runtime thread (agentTasks.ts) — running
+  // first with live step/log preview and elapsed time, finished folded below.
+  // Clicking any row drills down to inspect its prompt/command, live tool steps,
+  // streaming stdout/stderr logs, final output, or open its child thread.
   import { tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import type { IconName } from '../../../lib/components/Icon.svelte';
-  import Modal from '../../../lib/components/Modal.svelte';
-  import type { TurnItem } from '../../../lib/api/types';
+  import LoadState from '../../../lib/components/LoadState.svelte';
+  import { scrollBehavior } from '../../../lib/motion';
+  import { sessionProviderSlug } from '../../../lib/providers';
   import { now } from '../../../lib/stores/now.svelte';
+  import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { threads } from '../threadsStore.svelte';
-  import { agentTasks, SWARM_ROW, taskElapsed, withSwarm, type AgentTask, type SwarmMemberLite } from './agentTasks';
   import { api } from '../../../lib/api/client';
   import type { RuntimeSwarm } from '../../../lib/api/types';
+  import {
+    agentTasks,
+    SWARM_ROW,
+    taskElapsed,
+    withSwarm,
+    type AgentTask,
+    type LinkedChildThreadSummary,
+    type SwarmMemberLite,
+  } from './agentTasks';
   import RuntimeSwarmWork from './RuntimeSwarmWork.svelte';
-  import { runtimeThreads } from './runtimeThreads.svelte';
-  import { runtimeViews } from './runtimeView.svelte';
-  import { subagentChildren } from './timeline';
-  import RuntimeSubagentCard from './RuntimeSubagentCard.svelte';
   import RuntimeTaskOutput from './RuntimeTaskOutput.svelte';
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
+  import { runtimeThreads } from './runtimeThreads.svelte';
+  import { runtimeViews } from './runtimeView.svelte';
+  import { subagentChildren, workLabel } from './timeline';
 
   let { sessionId }: { sessionId: string } = $props();
 
   /** Finished tasks shown when the fold opens (newest first). */
-  const FINISHED_SHOWN = 5;
+  const FINISHED_SHOWN = 8;
+  let showAllFinished = $state(false);
+  let maxBlockPx = $state(340);
+
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    const syncHeight = (): void => {
+      maxBlockPx = Math.max(160, Math.floor((window.innerHeight || 720) * 0.48));
+    };
+    syncHeight();
+    window.addEventListener('resize', syncHeight);
+    return () => window.removeEventListener('resize', syncHeight);
+  });
 
   const p = $derived(runtimeViews.projections[sessionId] ?? null);
+  const childThreads = $derived.by((): LinkedChildThreadSummary[] => {
+    const out: LinkedChildThreadSummary[] = [];
+    const all = Object.values(runtimeThreads.byId);
+    for (let i = 0; i < all.length; i++) {
+      const s = all[i];
+      if (s.parent_id !== sessionId) continue;
+      const cp = runtimeViews.projections[s.id];
+      const lastItem = cp?.items.findLast((it) => it.type !== 'user_message');
+      const stepSummary = lastItem
+        ? lastItem.type === 'assistant_message'
+          ? (lastItem.text.trim().split('\n')[0]?.slice(0, 120) ?? null)
+          : workLabel(lastItem)
+        : null;
+      out.push({
+        id: s.id,
+        title: s.title,
+        provider: sessionProviderSlug(s),
+        model: s.model ?? null,
+        status: s.status,
+        createdAt: s.created_at,
+        updatedAt: s.last_active_at,
+        stepSummary,
+      });
+    }
+    return out;
+  });
+
   /** An Antigravity thread's swarm, read from agy's own files: members of a
    *  swarm started before this thread's cards (or before an agent restart)
    *  still show. Refreshed while the panel is open. */
@@ -59,35 +102,71 @@
       swarm = [];
     };
   });
-  const tasks = $derived(
-    withSwarm(agentTasks(p?.items ?? [], p?.session?.background_tasks ?? runtimeThreads.get(sessionId)?.background_tasks ?? []), swarm, p?.items ?? []),
-  );
-  const any = $derived(tasks.running.length + tasks.finished.length > 0);
-  const byId = $derived(new Map((p?.items ?? []).map((i) => [i.id, i] as const)));
-  const children = $derived(p ? subagentChildren(p.items) : new Map<string, TurnItem[]>());
 
-  // The shared 1 s clock, read only while something runs.
+  const tasks = $derived(
+    withSwarm(
+      agentTasks(
+        p?.items ?? [],
+        p?.session?.background_tasks ?? runtimeThreads.get(sessionId)?.background_tasks ?? [],
+        { output: p?.output ?? {}, childThreads },
+      ),
+      swarm,
+      p?.items ?? [],
+    ),
+  );
+  const childrenMap = $derived(subagentChildren(p?.items ?? []));
+  const any = $derived(tasks.running.length + tasks.finished.length > 0);
   const nowMs = $derived(tasks.running.length ? now() : Date.now());
 
-  /** The task opened, by its item when it has one: a running background
-   *  task's row becomes its card's (or notice's) row when it finishes. */
-  let openId = $state<string | null>(null);
-  const keyOf = (t: AgentTask): string => t.itemId ?? t.taskId ?? t.id;
-  const opened = $derived(openId ? ([...tasks.running, ...tasks.finished].find((t) => keyOf(t) === openId) ?? null) : null);
-  // Another thread: back to its list.
+  let expandedIds = $state<Record<string, boolean>>({});
+  let attemptedHydration = new Set<string>();
+  let lastSessionId = untrack(() => sessionId);
   $effect(() => {
-    void sessionId;
-    untrack(() => (openId = null));
+    if (sessionId !== lastSessionId) {
+      lastSessionId = sessionId;
+      expandedIds = {};
+      attemptedHydration = new Set<string>();
+    }
+  });
+  function toggleExpand(id: string): void {
+    expandedIds = { ...expandedIds, [id]: !expandedIds[id] };
+  }
+
+  // Hydrate omitted TurnItem details and keep expanded child thread projections live.
+  $effect(() => {
+    const allRows = [...tasks.running, ...tasks.finished];
+    const releases: Array<() => void> = [];
+    for (let i = 0; i < allRows.length; i++) {
+      const r = allRows[i];
+      if (!expandedIds[r.id]) continue;
+      if (r.itemId) {
+        const hKey = `${sessionId}:${r.itemId}`;
+        if (r.detailOmitted) {
+          void runtimeViews.ensureItemDetail(sessionId, r.itemId);
+        } else if (!r.prompt && !r.output && !r.error && r.status !== 'running' && !attemptedHydration.has(hKey)) {
+          attemptedHydration.add(hKey);
+          void runtimeViews.ensureItemDetail(sessionId, r.itemId, { force: true });
+        }
+      }
+      if (r.childSessionId) {
+        releases.push(runtimeViews.open(r.childSessionId));
+      }
+    }
+    return () => {
+      for (let i = 0; i < releases.length; i++) releases[i]();
+    };
   });
 
-  /** The subagent card a row stands for. */
-  function cardOf(t: AgentTask): Extract<TurnItem, { type: 'subagent' }> | null {
-    const i = t.itemId ? byId.get(t.itemId) : undefined;
-    return i?.type === 'subagent' ? i : null;
+  function scrollToTimelineCard(itemId: string): void {
+    if (typeof document === 'undefined') return;
+    const esc = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(itemId) : itemId;
+    const target =
+      document.querySelector<HTMLElement>(`[data-testid="runtime-subagent-${esc}"]`) ??
+      document.querySelector<HTMLElement>(`[data-item-id="${esc}"]`);
+    target?.scrollIntoView({ behavior: scrollBehavior(), block: 'center' });
   }
 
   let el = $state<HTMLElement | null>(null);
-  /** Reveals asked for before this mount are not ours to replay. */
   const revealed = untrack(() => threads.agentsTasksReveal);
   $effect(() => {
     if (threads.agentsTasksReveal <= revealed) return;
@@ -103,97 +182,202 @@
     failed: { icon: 'warning', label: 'Failed' },
     stopped: { icon: 'stop', label: 'Stopped' },
   };
+
+  function kindIcon(kind: string): IconName {
+    if (kind === 'agent') return 'assistant';
+    if (kind === 'timer') return 'clock';
+    return 'terminal';
+  }
 </script>
 
 {#snippet row(t: AgentTask)}
-  {@const card = cardOf(t)}
-  {#if card}
-    <li class="tat-card" data-testid="agents-tasks-row" data-status={t.status}>
-      <RuntimeSubagentCard item={card} activity={children.get(card.id) ?? []} output={p?.output} {sessionId} onopen={() => (openId = keyOf(t))} />
-    </li>
-  {:else}
-    {@const e = taskElapsed(t, nowMs)}
-    <li data-testid="agents-tasks-row" data-status={t.status}>
-      <button type="button" class="tat-row" class:failed={t.status === 'failed'} onclick={() => (openId = keyOf(t))}>
+  {@const e = taskElapsed(t, nowMs)}
+  {@const open = Boolean(expandedIds[t.id])}
+  {@const subLine = [t.sublabel, t.stepSummary].filter(Boolean).join(' · ')}
+  {@const activity = t.itemId
+    ? (childrenMap.get(t.itemId) ?? [])
+    : t.childSessionId
+      ? (runtimeViews.projections[t.childSessionId]?.items.filter((it) => it.type !== 'user_message').slice(-10) ?? [])
+      : []}
+  {@const liveOut = (t.itemId ? p?.output?.[t.itemId] : null) || t.output}
+  {@const detailKey = t.itemId ? `${sessionId}:${t.itemId}` : ''}
+  {@const detailLoading = Boolean(detailKey && runtimeViews.loadingItem[detailKey])}
+  {@const detailError = detailKey ? (runtimeViews.itemError[detailKey] ?? null) : null}
+  <li
+    class="tat-item"
+    class:failed={t.status === 'failed'}
+    class:expanded={open}
+    data-testid="agents-tasks-row"
+    data-status={t.status}
+    data-kind={t.kind}
+  >
+    <button
+      type="button"
+      class="tat-row-btn"
+      aria-expanded={open}
+      onclick={() => toggleExpand(t.id)}
+      data-testid="agents-tasks-toggle"
+    >
+      <span class="tat-main">
         {#if t.status === 'running'}
           <span class="spinner" aria-hidden="true"></span>
         {:else}
           <Icon name={STATUS[t.status].icon} size={12} />
         {/if}
-        <Icon name={t.kind === 'agent' ? 'assistant' : 'terminal'} size={12} />
-        <span class="tat-text">
-          <span class="ellipsis" dir="auto" title={t.label}>{t.label}</span>
-          {#if t.command && t.command !== t.label}<span class="tat-cmd ellipsis mono" dir="ltr" title={t.command}>{t.command}</span>{/if}
+        <Icon name={kindIcon(t.kind)} size={12} />
+        <span class="ellipsis" dir="auto" title={t.label}>{t.label}</span>
+        <span class="tat-meta">
+          {STATUS[t.status].label}{t.background && t.status === 'running' ? ' · bg' : ''}{e ? ` · ${e}` : ''}
         </span>
-        <span class="tat-meta">{STATUS[t.status].label}{t.background && t.status === 'running' ? ' · background' : ''}{e ? ` · ${e}` : ''}</span>
-        <Icon name="chevronRight" size={12} />
-      </button>
-    </li>
-  {/if}
-{/snippet}
-
-{#snippet detail(t: AgentTask)}
-  {@const card = cardOf(t)}
-  {#if t.id.startsWith(SWARM_ROW)}
-    <RuntimeSwarmWork {sessionId} member={t.label} live={t.status === 'running'} />
-  {:else if card}
-    <RuntimeSubagentCard item={card} activity={children.get(card.id) ?? []} output={p?.output} {sessionId} startOpen />
-  {:else}
-    {@const launch = t.itemId ? byId.get(t.itemId) : undefined}
-    {@const e = taskElapsed(t, nowMs)}
-    <div class="tat-cmd-detail">
-      <p class="tat-meta">{STATUS[t.status].label}{t.background ? ' · background' : ''}{e ? ` · ${e}` : ''}</p>
-      {#if t.command && t.command !== t.label}<pre class="tat-command mono" dir="ltr">{t.command}</pre>{/if}
-      {#if launch}<RuntimeWorkRow item={launch} output={p?.output?.[launch.id]} cwd={runtimeThreads.get(sessionId)?.cwd ?? null} startOpen={!t.taskId} />{/if}
-      {#if t.taskId}
-        <RuntimeTaskOutput {sessionId} taskId={t.taskId} live={t.status === 'running'} />
-      {:else if !launch}
-        <p class="tat-meta">The agent reported no output for it.</p>
+        <span class="tat-chev" aria-hidden="true">
+          <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
+        </span>
+      </span>
+      {#if subLine}
+        <span class="tat-sub ellipsis" dir="auto" title={subLine}>{subLine}</span>
       {/if}
-    </div>
-  {/if}
+    </button>
+
+    {#if open && t.id.startsWith(SWARM_ROW)}
+      <div class="tat-detail" data-testid="agents-tasks-detail">
+        <RuntimeSwarmWork {sessionId} member={t.label} live={t.status === 'running'} />
+      </div>
+    {:else if open}
+      <div class="tat-detail" data-testid="agents-tasks-detail">
+        {#if t.childSessionId || t.itemId}
+          <div class="tat-actions">
+            {#if t.childSessionId}
+              {@const cid = t.childSessionId}
+              <button
+                type="button"
+                class="tat-act-btn"
+                onclick={() => threads.openBeside(cid)}
+              >
+                <Icon name="split" size={12} />
+                Open beside
+              </button>
+              <button
+                type="button"
+                class="tat-act-btn"
+                onclick={() => threads.selectThread(cid)}
+              >
+                <Icon name="arrow" size={12} />
+                Open thread
+              </button>
+            {:else if t.itemId && t.kind === 'agent'}
+              {@const iid = t.itemId}
+              <button
+                type="button"
+                class="tat-act-btn"
+                onclick={() => scrollToTimelineCard(iid)}
+              >
+                <Icon name="arrow" size={12} />
+                Show in chat
+              </button>
+            {/if}
+          </div>
+        {/if}
+
+        {#if detailLoading || detailError}
+          <LoadState
+            variant="compact"
+            what="task details"
+            loading={detailLoading}
+            error={detailError}
+            empty
+            rows={1}
+            onretry={t.itemId ? () => void runtimeViews.ensureItemDetail(sessionId, t.itemId!, { force: true }) : undefined}
+          />
+        {/if}
+
+        {#if t.prompt}
+          <p class="tat-sec-label">{t.kind === 'command' ? 'Command' : t.kind === 'timer' ? 'Schedule' : 'Task'}</p>
+          <pre class="tat-prompt" dir="auto">{t.prompt}</pre>
+        {/if}
+
+        {#if activity.length > 0}
+          <p class="tat-sec-label">Activity ({activity.length})</p>
+          <div class="tat-activity">
+            {#each activity as a (a.id)}
+              {#if a.type === 'assistant_message'}
+                <div class="tat-md" dir="auto"><Markdown md={a.text} /></div>
+              {:else}
+                <RuntimeWorkRow
+                  sessionId={t.childSessionId ?? sessionId}
+                  item={a}
+                  output={(t.childSessionId ? runtimeViews.projections[t.childSessionId]?.output : p?.output)?.[a.id]}
+                />
+              {/if}
+            {/each}
+          </div>
+        {/if}
+
+        {#if t.error}
+          <p class="tat-sec-label">Error</p>
+          <pre class="tat-log is-error" dir="auto">{t.error}</pre>
+        {:else if liveOut}
+          <p class="tat-sec-label">{t.kind === 'agent' ? 'Result' : 'Output'}</p>
+          {#if t.kind === 'agent'}
+            <div class="tat-md" dir="auto"><Markdown md={liveOut} /></div>
+          {:else}
+            <pre class="tat-log" dir="ltr">{liveOut}</pre>
+          {/if}
+        {:else if t.taskId && runtimeThreads.get(sessionId)?.provider === 'claude'}
+          <RuntimeTaskOutput {sessionId} taskId={t.taskId} live={t.status === 'running'} />
+        {:else if activity.length === 0 && !t.prompt}
+          <p class="tat-empty-note">
+            {t.kind === 'timer'
+              ? 'Scheduled timer — resumes thread automatically when due.'
+              : t.status === 'running'
+                ? 'Running in background — waiting for live steps or output…'
+                : 'Completed with no captured output.'}
+          </p>
+        {/if}
+      </div>
+    {/if}
+  </li>
 {/snippet}
 
 {#if any}
-  <section class="tat" class:drilled={opened && !threads.inspectorCompact} aria-label="Agents and tasks" data-testid="thread-agents-tasks" tabindex="-1" bind:this={el}>
-    {#if opened && !threads.inspectorCompact}
-      <div class="tat-detail" data-testid="agents-tasks-detail">
-        <header class="tat-detail-head">
-          <button type="button" class="icon-btn" aria-label="Back to agents and tasks" title="Back" data-testid="agents-tasks-back" onclick={() => (openId = null)}>
-            <Icon name="chevronLeft" size={13} />
+  <section
+    class="tat"
+    style:--tat-max="{maxBlockPx}px"
+    aria-label="Agents and tasks"
+    data-testid="thread-agents-tasks"
+    tabindex="-1"
+    bind:this={el}
+  >
+    <h3 class="tat-head">
+      Agents &amp; tasks
+      {#if tasks.running.length}<span class="tat-count">{tasks.running.length} running</span>{/if}
+    </h3>
+    {#if tasks.running.length}
+      <ul class="tat-list">{#each tasks.running as t (t.id)}{@render row(t)}{/each}</ul>
+    {/if}
+    {#if tasks.finished.length}
+      {@const visibleFinished = showAllFinished ? tasks.finished : tasks.finished.slice(0, FINISHED_SHOWN)}
+      <details class="tat-done">
+        <summary>{tasks.finished.length} finished</summary>
+        <ul class="tat-list">{#each visibleFinished as t (t.id)}{@render row(t)}{/each}</ul>
+        {#if tasks.finished.length > FINISHED_SHOWN}
+          <button
+            type="button"
+            class="btn small ghost tat-more"
+            onclick={() => (showAllFinished = !showAllFinished)}
+            data-testid="thread-agents-tasks-more"
+          >
+            {showAllFinished ? 'Show fewer' : `Show all (${tasks.finished.length})`}
           </button>
-          <h3 class="tat-head ellipsis" dir="auto" title={opened.label}>{opened.label}</h3>
-        </header>
-        {@render detail(opened)}
-      </div>
-    {:else}
-      <h3 class="tat-head">
-        Agents &amp; tasks
-        {#if tasks.running.length}<span class="tat-count">{tasks.running.length} running</span>{/if}
-      </h3>
-      {#if tasks.running.length}
-        <ul class="tat-list">{#each tasks.running as t (t.id)}{@render row(t)}{/each}</ul>
-      {/if}
-      {#if tasks.finished.length}
-        <details class="tat-done">
-          <summary>{tasks.finished.length} finished</summary>
-          <ul class="tat-list">{#each tasks.finished.slice(0, FINISHED_SHOWN) as t (t.id)}{@render row(t)}{/each}</ul>
-        </details>
-      {/if}
+        {/if}
+      </details>
     {/if}
   </section>
-{/if}
-
-{#if opened && threads.inspectorCompact}
-  <Modal title={opened.label} width={640} onclose={() => (openId = null)}>
-    <div class="tat-detail" data-testid="agents-tasks-detail">{@render detail(opened)}</div>
-  </Modal>
 {/if}
 
 <style>
   .tat {
     flex-shrink: 0;
-    max-block-size: 40vh;
+    max-block-size: var(--tat-max, 340px);
     overflow-y: auto;
     padding-block: 8px;
     padding-inline: 10px;
@@ -215,6 +399,7 @@
   .tat-count {
     font-weight: 400;
     color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
   .tat-list {
     list-style: none;
@@ -224,87 +409,157 @@
     flex-direction: column;
     gap: 2px;
   }
-  .tat.drilled {
-    max-block-size: 70vh;
-  }
-  .tat-row {
+  .tat-item {
     display: flex;
-    align-items: center;
-    gap: 6px;
-    inline-size: 100%;
-    min-width: 0;
-    min-block-size: 30px;
-    padding: 2px 6px;
-    border: 1px solid transparent;
-    border-radius: var(--radius-m);
-    background: none;
-    font: inherit;
-    font-size: var(--fs-s);
+    flex-direction: column;
+    min-inline-size: 0;
+    border-radius: var(--radius-s);
+  }
+  .tat-item.expanded {
+    background: var(--surface-2);
+  }
+  .tat-row-btn {
+    appearance: none;
+    border: none;
+    background: transparent;
     color: var(--text);
+    font: inherit;
     text-align: start;
     cursor: pointer;
+    padding-block: 4px;
+    padding-inline: 6px;
+    border-radius: var(--radius-s);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    inline-size: 100%;
+    min-inline-size: 0;
   }
-  .tat-row:hover {
+  .tat-row-btn:hover {
     background: var(--hover);
   }
-  .tat-row:focus-visible {
+  .tat-row-btn:focus-visible {
     outline: 2px solid var(--accent-text);
-    outline-offset: 1px;
+    outline-offset: -2px;
   }
-  .tat-row.failed {
+  .tat-item.failed .tat-row-btn {
     color: var(--danger);
   }
-  .tat-text {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-  }
-  .tat-cmd {
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-  }
-  .tat-card {
-    min-width: 0;
-  }
-  .tat-detail {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 0;
-  }
-  .tat-detail-head {
+  .tat-main {
     display: flex;
     align-items: center;
-    gap: 4px;
-    min-width: 0;
-  }
-  .tat-detail-head .tat-head {
-    margin: 0;
-    min-width: 0;
-  }
-  .tat-cmd-detail {
-    display: flex;
-    flex-direction: column;
     gap: 6px;
-    min-width: 0;
+    min-inline-size: 0;
+    min-block-size: 20px;
+    font-size: var(--fs-s);
   }
-  .tat-command {
-    margin: 0;
-    padding: 6px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    color: var(--text);
-    font-size: var(--fs-xs);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
+  .tat-main .ellipsis {
+    flex: 1;
+    min-inline-size: 0;
   }
-  .tat-row .spinner {
+  .tat-main .spinner {
     --spinner-size: 11px;
   }
   .tat-meta {
     flex-shrink: 0;
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .tat-more {
+    margin-block-start: 4px;
+  }
+  .tat-chev {
+    flex-shrink: 0;
+    display: inline-flex;
+    color: var(--text-dim);
+  }
+  .tat-sub {
+    padding-inline-start: 28px;
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+    min-inline-size: 0;
+  }
+  .tat-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-block: 4px 8px;
+    padding-inline: 12px 8px;
+    margin-inline-start: 14px;
+    border-inline-start: 2px solid var(--border);
+    min-inline-size: 0;
+  }
+  .tat-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .tat-act-btn {
+    appearance: none;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font-size: var(--fs-xs);
+    padding-block: 2px;
+    padding-inline: 8px;
+    border-radius: var(--radius-s);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+  }
+  .tat-act-btn:hover {
+    background: var(--hover);
+  }
+  .tat-act-btn:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 1px;
+  }
+  .tat-sec-label {
+    margin: 4px 0 0;
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .tat-prompt,
+  .tat-log {
+    margin: 0;
+    padding: 6px 8px;
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    color: var(--text);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-block-size: 160px;
+    overflow-y: auto;
+  }
+  .tat-log.is-error {
+    color: var(--danger);
+    border-color: var(--danger);
+  }
+  .tat-activity {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-inline-size: 0;
+    max-block-size: 200px;
+    overflow-y: auto;
+  }
+  .tat-md {
+    min-inline-size: 0;
+    font-size: var(--fs-s);
+    color: var(--text);
+    max-block-size: 180px;
+    overflow-y: auto;
+  }
+  .tat-empty-note {
+    margin: 0;
     color: var(--text-dim);
     font-size: var(--fs-xs);
   }

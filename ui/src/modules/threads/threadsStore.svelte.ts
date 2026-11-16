@@ -243,17 +243,28 @@ class ThreadsStore {
     };
   }
 
-  /** Seed recent cross-session messages from workspace trail once per workspace. */
+  /** Seed recent cross-session messages from already-loaded per-session trail state once per workspace. */
   async seedWorkspaceTrail(workspaceId: string | null): Promise<void> {
     if (!workspaceId || this.seededTrailWs === workspaceId) return;
     this.seededTrailWs = workspaceId;
     try {
-      const list = await api.get<TrailEvent[]>(`/workspaces/${workspaceId}/trail?limit=60`);
-      for (const entry of [...list].reverse()) {
-        this.ingestTrailEntry(entry);
+      const { activity } = await import('../../lib/stores/activity.svelte');
+      const sessions = Array.isArray(ws.sessions)
+        ? ws.sessions.filter((s) => s.workspace_id === workspaceId)
+        : [];
+      const entries: TrailEvent[] = [];
+      for (let i = 0; i < sessions.length; i++) {
+        const list = activity.trail(sessions[i].id);
+        for (let j = 0; j < list.length; j++) {
+          entries.push(list[j]);
+        }
+      }
+      entries.sort((a, b) => a.ts.localeCompare(b.ts));
+      for (let i = 0; i < entries.length; i++) {
+        this.ingestTrailEntry(entries[i]);
       }
     } catch {
-      /* trail endpoint optional on restricted roles */
+      /* activity store unavailable in isolated unit harnesses */
     }
   }
 

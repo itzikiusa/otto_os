@@ -1,47 +1,19 @@
 //! ACP (Agent Client Protocol, v1) client driver — used for Gemini
-//! (`gemini --acp`), Grok (`grok … agent stdio`) and by the tests' fake ACP
-//! agent. Per-agent differences live in an [`AcpFlavor`] (T3 Code: the
-//! `AcpFlavor` hooks of `packages/provider-acp/src/server/adapter.ts`, Grok's
-//! in `packages/provider-grok/src/server/acpSupport.ts`).
+//! (`gemini --acp`), Grok (`grok … agent stdio`), OpenCode, Antigravity (`agy`),
+//! and the fake ACP test agent. Per-agent differences live in [`AcpFlavor`].
 //!
-//! Wire types are the official SDK's (`agent-client-protocol` 5.0.0, schema
-//! 1.15.1); this module only does JSON-RPC framing + request correlation,
-//! because the runtime — not the SDK's connection — owns the process (every
-//! spawn passes Otto's safety pipeline) and the driver stays sans-IO.
-//!
-//! The lifecycle and the update → entity mapping are ported from T3 Code
-//! (MIT, Copyright (c) 2026 T3 Tools Inc.):
-//! * `packages/provider-acp/src/server/AcpSessionRuntime.ts` — `initialize`
-//!   with no fs / terminal client capabilities (Otto offers neither, like T3
-//!   Code for Claude/Gemini), then `session/load` when resuming and the agent
-//!   advertises `loadSession`, else `session/new`; a failed load falls back
-//!   to a fresh session; `session/cancel` on interrupt. `authenticate` is
-//!   lazy: only after `session/new|load` fails with `-32000` (auth
-//!   required), with the flavour's preferred method if advertised, else the
-//!   first `agent`-type method, then the session call is retried once
-//!   (`AcpSessionRuntime.ts:1065-1078`, `:2164-2208`).
-//! * `packages/provider-acp/src/server/runtimeModel.ts` + `adapter.ts` —
-//!   `agent_message_chunk` / `agent_thought_chunk` accumulate into one
-//!   `assistant_message` / `reasoning` item re-emitted whole with
-//!   `streaming: true` (a non-text update closes the segment); `tool_call` /
-//!   `tool_call_update` merge into one `command_execution` / `file_change` /
-//!   `dynamic_tool` item; `plan` → `plan.updated` + a `todo_list` item;
-//!   `session/request_permission` → a pending runtime request + an
-//!   `approval_request` item; answers pick `allow_once` for accept,
-//!   `allow_always` for accept-for-session (narrowed to `allow_once` when
-//!   the agent offers no session grant), `reject_once` for decline, and
-//!   `{outcome: cancelled}` for cancel or a missing option
-//!   (`adapter.ts:1255-1266`). Updates replayed by `session/load` are history
-//!   the agent re-sends; Otto keeps its own, so they are dropped.
-//! * access mode: the flavour's launch argv per mode (Grok,
-//!   `acpSupport.ts:47-58`; Gemini's `--approval-mode`); Gemini switches live
-//!   with `session/set_mode` when `session/new|load` advertised the mode
-//!   (`AcpSessionRuntime.ts:2671-2688`), otherwise the runtime respawns and
-//!   loads the session. A failed `tool_call_update` carries its content as
-//!   the item's `error`. PDFs go as an embedded `resource` blob only when the
-//!   agent advertises `promptCapabilities.embeddedContext`.
+//! Wire types come from `agent-client-protocol` 5.0.0; this module handles
+//! JSON-RPC framing + request correlation while keeping the driver sans-IO so
+//! every spawn passes Otto's safety pipeline. Lifecycle and entity mapping are
+//! ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.):
+//! * `AcpSessionRuntime.ts` — `initialize`, `session/load` or `session/new`,
+//!   lazy `authenticate` on `-32000`, and `session/cancel` on interrupt.
+//! * `runtimeModel.ts` + `adapter.ts` — message/thought chunk accumulation,
+//!   `tool_call` / `tool_call_update` merging, `plan` → `todo_list`,
+//!   `session/request_permission` → `approval_request`, and `session/set_mode`
+//!   or respawn for live access-mode transitions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::v1::schema::{
@@ -55,16 +27,25 @@ use agent_client_protocol::v1::schema::{
     ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderCommand, ProviderFailure,
-    RequestKind, RuntimeAccessMode, RuntimeCapabilities, RuntimePromptReq, RuntimeProvider,
-    ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, PlanStepStatus, ProviderCommand,
+    ProviderFailure, RequestKind, RuntimeAccessMode, RuntimeCapabilities, RuntimePromptReq,
+    RuntimeProvider, ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
+    TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
 use crate::driver::{
     item, rpc_failure, rpc_key, tool_error, DriverError, DriverEvent, DriverStep, LaunchContext,
-    LaunchSpec, McpDelivery, McpServerDef, StructuredDriver,
+    LaunchSpec, McpDelivery, McpServerDef, SidebandPayload, SidebandPoll, SidebandResumeSeed,
+    SidebandSource, StructuredDriver,
 };
+
+#[path = "acp_bg.rs"]
+mod bg;
+#[path = "acp_raw.rs"]
+mod raw;
+#[path = "acp_subagent.rs"]
+pub(crate) mod subagent;
 
 const M_INITIALIZE: &str = "initialize";
 const M_AUTHENTICATE: &str = "authenticate";
@@ -81,11 +62,16 @@ const M_REQUEST_PERMISSION: &str = "session/request_permission";
 const M_SESSION_SET_MODE: &str = "session/set_mode";
 const M_SESSION_SET_MODEL: &str = "session/set_model";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum Phase {
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) enum Phase {
+    #[default]
     Initializing,
-    Creating { loading: bool },
-    Authenticating { load: bool },
+    Creating {
+        loading: bool,
+    },
+    Authenticating {
+        load: bool,
+    },
     Ready,
 }
 
@@ -125,6 +111,10 @@ pub struct AcpFlavor {
     /// The model goes as `session/set_model {modelId}` once ready (agy:
     /// `gemini-4-argon-high` — the config option would drop the effort).
     pub set_model: bool,
+    /// When the agent exposes reasoning effort as a session config option
+    /// (agy: `session/set_config_option {configId: "thought_level"}`), that
+    /// option's id.
+    pub effort_config_id: Option<&'static str>,
     /// The env var naming an Otto context bundle (`AGENTS.md` +
     /// `.agents/skills`) to send as `_meta.antigravity.systemPrompt.append`
     /// instead of a workspace root (otto-context `AGY_BUNDLE_ENV`).
@@ -132,148 +122,181 @@ pub struct AcpFlavor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum SegmentKind {
+pub(super) enum SegmentKind {
     Message,
     Thought,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Segment {
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct Segment {
     kind: SegmentKind,
     item_id: String,
     message_id: String,
     /// The agent named it (`messageId`): later chunks of that id append.
     named: bool,
     text: String,
+    started_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Default, serde::Serialize, serde::Deserialize)]
-struct Tool {
-    title: String,
-    kind: ToolKind,
-    status: ToolCallStatus,
-    raw_input: Option<Value>,
-    output: String,
-    images: Vec<otto_core::agent_runtime::ToolOutputImage>,
-    file: Option<String>,
-    diff: Option<(Option<String>, String)>,
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct Tool {
+    pub(super) title: String,
+    pub(super) kind: ToolKind,
+    pub(super) status: ToolCallStatus,
+    pub(super) raw_input: Option<Value>,
+    pub(super) output: String,
+    pub(super) images: Vec<otto_core::agent_runtime::ToolOutputImage>,
+    pub(super) file: Option<String>,
+    pub(super) diff: Option<(Option<String>, String)>,
     /// Every `(path, old, new)` diff of the call — a multi-file edit renders
     /// as one patch (T3 Code `acpToolCallDiffPatch`, ddd36a53a5).
-    diffs: Vec<(String, Option<String>, String)>,
+    pub(super) diffs: Vec<(String, Option<String>, String)>,
 }
 
-/// A whole-file unified patch over `diffs`, one `diff --git` section each.
-fn multi_file_patch(diffs: &[(String, Option<String>, String)]) -> String {
-    let mut out = String::new();
-    for (path, old, new) in diffs {
-        let p = path.trim_start_matches('/');
-        out.push_str(&format!("diff --git a/{p} b/{p}\n"));
-        let old_lines: Vec<&str> = old
-            .as_deref()
-            .map(|o| o.lines().collect())
-            .unwrap_or_default();
-        let new_lines: Vec<&str> = new.lines().collect();
-        if old.is_none() {
-            out.push_str("--- /dev/null\n");
-        } else {
-            out.push_str(&format!("--- a/{p}\n"));
-        }
-        out.push_str(&format!("+++ b/{p}\n"));
-        out.push_str(&format!(
-            "@@ -{},{} +{},{} @@\n",
-            usize::from(!old_lines.is_empty()),
-            old_lines.len(),
-            usize::from(!new_lines.is_empty()),
-            new_lines.len()
-        ));
-        for l in old_lines {
-            out.push_str(&format!("-{l}\n"));
-        }
-        for l in new_lines {
-            out.push_str(&format!("+{l}\n"));
+const MAX_RETIRED_TOOL_IDS: usize = 512;
+
+impl Tool {
+    pub(super) fn compact_terminal(&mut self) {
+        if matches!(
+            self.status,
+            ToolCallStatus::Completed | ToolCallStatus::Failed
+        ) {
+            self.output = String::new();
+            self.diff = None;
+            self.diffs = Vec::new();
+            self.images = Vec::new();
+            if matches!(
+                self.kind,
+                ToolKind::Edit | ToolKind::Delete | ToolKind::Move
+            ) {
+                self.raw_input = None;
+            }
         }
     }
-    out
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Pending {
+/// A bounded contextual unified patch over `diffs`, one `diff --git` section each.
+pub(super) fn multi_file_patch(diffs: &[(String, Option<String>, String)]) -> String {
+    crate::diff_compact::multi_file_unified_patch(diffs)
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct Pending {
     rpc_id: Value,
     options: Vec<PermissionOption>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct AcpDriver {
-    provider: RuntimeProvider,
-    /// Static per provider (fn pointers): kept from the factory's driver.
-    #[serde(skip)]
-    flavor: AcpFlavor,
-    cwd: String,
-    resume: Option<String>,
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(super) struct AcpDriverState {
+    pub(super) cwd: String,
+    pub(super) resume: Option<String>,
+    /// Otto runtime session ID (for scoping `/tmp/otto-acp-bg/<sid>/` tails).
+    #[serde(default)]
+    pub(super) otto_session_id: Option<String>,
+    /// `agy` conversation IDs observed for this session and its spawned
+    /// subagents (caps brain-dir transcript/task-log reads to this session).
+    #[serde(default)]
+    pub(super) observed_agy_conv_ids: VecDeque<String>,
     /// Handed over in `session/new|load` (Otto's `otto` tools + the user's
-    /// enabled servers — the set a terminal session gets). Never exported:
-    /// their env carries the session's credential, and the handshake that
-    /// sends them is over by the time a state is restored.
+    /// enabled servers — the set a terminal session gets). Never in a
+    /// snapshot: their env carries the session's credential, and the
+    /// handshake that sends them is over by the time a state is restored.
     #[serde(skip)]
-    mcp_servers: Vec<McpServerDef>,
+    pub(super) mcp_servers: Vec<McpServerDef>,
     /// The model to apply through `flavor.model_config_id` / `set_model`
     /// once ready.
-    model: Option<String>,
-    config_req: Option<u64>,
+    pub(super) model: Option<String>,
+    pub(super) config_req: Option<u64>,
     /// The model write failed for a reason other than a refusal: written
     /// again before the next prompt (T3 Code #34782).
-    config_retry: bool,
-    next_id: u64,
-    phase: Phase,
-    init_id: u64,
-    create_id: u64,
-    auth_id: u64,
+    pub(super) config_retry: bool,
+    pub(super) next_id: u64,
+    pub(super) phase: Phase,
+    pub(super) init_id: u64,
+    pub(super) create_id: u64,
+    pub(super) auth_id: u64,
     /// `authMethods` from `initialize`: `(id, type)`.
-    auth_methods: Vec<(String, Option<String>)>,
-    authenticated: bool,
-    session_id: Option<String>,
+    pub(super) auth_methods: Vec<(String, Option<String>)>,
+    pub(super) authenticated: bool,
+    pub(super) session_id: Option<String>,
     /// `promptCapabilities.image` / `.embeddedContext` from `initialize`.
-    images: bool,
-    embedded: bool,
+    pub(super) images: bool,
+    pub(super) embedded: bool,
     /// `modes.availableModes[].id` from `session/new|load`.
-    modes: Vec<String>,
-    access: RuntimeAccessMode,
-    mode_req: Option<u64>,
+    pub(super) modes: Vec<String>,
+    /// `models.availableModels[].modelId` from `session/new|load`, when advertised.
+    #[serde(default)]
+    pub(super) available_models: Vec<String>,
+    /// Offered `thought_level` values from `configOptions`, when advertised.
+    pub(super) effort_options: Vec<String>,
+    pub(super) access: RuntimeAccessMode,
+    pub(super) mode_req: Option<u64>,
+    pub(super) effort_req: Option<u64>,
     /// The bundle text for `_meta.antigravity.systemPrompt.append`.
-    system_append: Option<String>,
-    queued: Option<(String, RuntimePromptReq)>,
-    prompt_id: Option<u64>,
-    turn_id: Option<String>,
-    segment: Option<Segment>,
-    segments: u32,
+    pub(super) system_append: Option<String>,
+    pub(super) queued: Option<(String, RuntimePromptReq)>,
+    pub(super) prompt_id: Option<u64>,
+    pub(super) turn_id: Option<String>,
+    /// Armed when `session/cancel` goes out for an active `session/prompt` so
+    /// buffered pre-cancel notifications are dropped until `PromptResponse`
+    /// settles or the next prompt begins.
+    #[serde(default)]
+    pub(super) cancelling: bool,
+    pub(super) autonomous: bool,
+    pub(super) auto_turns: u64,
+    pub(super) segment: Option<Segment>,
+    pub(super) segments: u32,
     /// This turn's closed named segments by `messageId`: a message that
     /// resumes after a thought (or another message) keeps its text and its
     /// place (T3 Code #33604).
-    closed_named: HashMap<String, Segment>,
-    tools: HashMap<String, Tool>,
-    pending: HashMap<String, Pending>,
-    questions: HashMap<String, (Value, Vec<otto_core::agent_runtime::RuntimeQuestion>)>,
-    /// The session's reasoning-effort config option (agy `thought_level`,
-    /// grok `reasoning_effort`): `(configId, values low → high)`.
-    effort_option: Option<(String, Vec<String>)>,
-    /// The effort value last written to it.
-    effort: Option<String>,
-    effort_req: Option<u64>,
+    pub(super) closed_named: HashMap<String, Segment>,
+    pub(super) tools: HashMap<String, Tool>,
+    #[serde(default)]
+    pub(super) retired_tool_ids: VecDeque<String>,
+    pub(super) bg_tasks: Vec<BackgroundTask>,
+    #[serde(default)]
+    pub(super) bg_meta: HashMap<String, subagent::BgTaskMeta>,
+    #[serde(default)]
+    pub(super) subagents: HashMap<String, subagent::AcpSubagent>,
+    #[serde(default)]
+    pub(super) child_tools: HashMap<String, subagent::ChildToolEntry>,
+    #[serde(default)]
+    pub(super) finished_bg_ids: VecDeque<String>,
+    pub(super) pending: HashMap<String, Pending>,
+    pub(super) questions: HashMap<String, (Value, Vec<otto_core::agent_runtime::RuntimeQuestion>)>,
+    #[serde(default, alias = "agy_tail")]
+    pub(super) sideband: crate::acp_sideband::AcpSideband,
     /// agy swarm members this session added, by member name.
-    swarm: HashMap<String, TurnItem>,
+    pub(super) swarm: HashMap<String, TurnItem>,
     /// The mode the session opened in (`modes.currentModeId`): where leaving
     /// plan mode returns when the access mode has no mode of its own.
-    #[serde(default)]
-    base_mode: Option<String>,
+    pub(super) base_mode: Option<String>,
     /// The session is in the agent's `plan` mode.
-    #[serde(default)]
-    plan_active: bool,
+    pub(super) plan_active: bool,
     /// The session's running cost (`usage_update.cost`, USD) and its value
     /// when the running turn started.
-    #[serde(default)]
-    cost_total: Option<f64>,
-    #[serde(default)]
-    cost_at_turn: Option<f64>,
+    pub(super) cost_total: Option<f64>,
+    pub(super) cost_at_turn: Option<f64>,
+}
+
+impl AcpDriverState {
+    pub(super) fn note_agy_conv_id(&mut self, id: &str) {
+        let trimmed = id.trim();
+        if trimmed.is_empty() || self.observed_agy_conv_ids.iter().any(|x| x == trimmed) {
+            return;
+        }
+        while self.observed_agy_conv_ids.len() >= 64 {
+            self.observed_agy_conv_ids.pop_front();
+        }
+        self.observed_agy_conv_ids.push_back(trimmed.to_string());
+    }
+}
+
+pub struct AcpDriver {
+    provider: RuntimeProvider,
+    flavor: AcpFlavor,
+    pub(super) state: AcpDriverState,
 }
 
 impl AcpDriver {
@@ -294,44 +317,116 @@ impl AcpDriver {
         Self {
             provider,
             flavor,
-            cwd: String::new(),
-            resume: None,
-            mcp_servers: Vec::new(),
-            model: None,
-            config_req: None,
-            config_retry: false,
-            next_id: 0,
-            phase: Phase::Initializing,
-            init_id: 0,
-            create_id: 0,
-            auth_id: 0,
-            auth_methods: Vec::new(),
-            authenticated: false,
-            session_id: None,
-            images: false,
-            embedded: false,
-            modes: Vec::new(),
-            access: RuntimeAccessMode::default(),
-            mode_req: None,
-            system_append: None,
-            queued: None,
-            prompt_id: None,
-            turn_id: None,
-            segment: None,
-            segments: 0,
-            closed_named: HashMap::new(),
-            tools: HashMap::new(),
-            pending: HashMap::new(),
-            questions: HashMap::new(),
-            effort_option: None,
-            effort: None,
-            effort_req: None,
-            swarm: HashMap::new(),
-            base_mode: None,
-            plan_active: false,
-            cost_total: None,
-            cost_at_turn: None,
+            state: AcpDriverState {
+                cwd: String::new(),
+                resume: None,
+                otto_session_id: None,
+                observed_agy_conv_ids: VecDeque::new(),
+                mcp_servers: Vec::new(),
+                model: None,
+                config_req: None,
+                config_retry: false,
+                next_id: 0,
+                phase: Phase::Initializing,
+                init_id: 0,
+                create_id: 0,
+                auth_id: 0,
+                auth_methods: Vec::new(),
+                authenticated: false,
+                session_id: None,
+                images: false,
+                embedded: false,
+                modes: Vec::new(),
+                available_models: Vec::new(),
+                effort_options: Vec::new(),
+                access: RuntimeAccessMode::default(),
+                mode_req: None,
+                effort_req: None,
+                system_append: None,
+                queued: None,
+                prompt_id: None,
+                turn_id: None,
+                cancelling: false,
+                autonomous: false,
+                auto_turns: 0,
+                segment: None,
+                segments: 0,
+                closed_named: HashMap::new(),
+                tools: HashMap::new(),
+                retired_tool_ids: VecDeque::new(),
+                bg_tasks: Vec::new(),
+                bg_meta: HashMap::new(),
+                subagents: HashMap::new(),
+                child_tools: HashMap::new(),
+                finished_bg_ids: VecDeque::new(),
+                pending: HashMap::new(),
+                questions: HashMap::new(),
+                sideband: crate::acp_sideband::AcpSideband::for_provider(provider),
+                swarm: HashMap::new(),
+                base_mode: None,
+                plan_active: false,
+                cost_total: None,
+                cost_at_turn: None,
+            },
         }
+    }
+
+    pub(super) fn retire_tool_id(&mut self, id: String) {
+        if id.is_empty() || self.state.retired_tool_ids.iter().any(|r| r == &id) {
+            return;
+        }
+        if self.state.retired_tool_ids.len() >= MAX_RETIRED_TOOL_IDS {
+            self.state.retired_tool_ids.pop_front();
+        }
+        self.state.retired_tool_ids.push_back(id);
+    }
+
+    pub(super) fn retire_tools(&mut self) {
+        let ids: Vec<String> = self.state.tools.drain().map(|(id, _)| id).collect();
+        for id in ids {
+            if !self.state.subagents.contains_key(&id) {
+                self.retire_tool_id(id);
+            }
+        }
+    }
+
+    pub(super) fn settle_foreground_subagents(
+        &mut self,
+        step: &mut DriverStep,
+        status: TurnItemStatus,
+    ) {
+        let fg_ids: Vec<String> = self
+            .state
+            .subagents
+            .iter()
+            .filter(|(_, a)| !a.background && a.status.is_open())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for cid in fg_ids {
+            self.finish_subagent_children(step, &cid, status);
+            if let Some(mut card) = self.state.subagents.remove(&cid) {
+                card.status = status;
+                step.push(DriverEvent::TurnItem(self.subagent_turn_item(&card)));
+                self.retire_tool_id(cid);
+            }
+        }
+    }
+
+    /// Override the provider's on-disk sideband home/data directory (for
+    /// isolated unit/integration tests so real `$HOME` is never consulted).
+    pub fn set_sideband_root_dir(&mut self, dir: impl Into<String>) {
+        self.state.sideband.set_root_dir(Some(dir.into()));
+    }
+
+    /// Override an explicit JSONL sideband file path (`OTTO_ACP_SIDEBAND_FILE`).
+    pub fn set_custom_sideband_file(&mut self, path: impl Into<String>) {
+        self.state.sideband.set_custom_file(Some(path.into()));
+    }
+
+    /// Override the `agy` brain directory (for unit/integration tests so real
+    /// `$HOME` is never consulted).
+    pub fn set_agy_brain_dir(&mut self, dir: impl Into<String>) {
+        self.set_sideband_root_dir(dir);
     }
 
     /// The Gemini CLI in ACP mode (T3 Code runs it from the ACP registry's
@@ -386,6 +481,7 @@ impl AcpDriver {
                     RuntimeAccessMode::FullAccess => None,
                 }),
                 set_model: true,
+                effort_config_id: Some("thought_level"),
                 bundle_env: Some("OTTO_AGY_CONTEXT_DIR"),
                 ..AcpFlavor::default()
             },
@@ -422,6 +518,7 @@ impl AcpDriver {
                     }
                 }),
                 model_flag: "-m".into(),
+                effort_config_id: Some("reasoning_effort"),
                 auth_preference: Some(auth.into()),
                 initialize_meta: Some(json!({"clientType": "extension"})),
                 cancel_meta: Some(json!({"cancelTrigger": "ctrl_c"})),
@@ -465,7 +562,8 @@ impl AcpDriver {
     }
 
     fn acp_mcp_servers(&self) -> Vec<McpServer> {
-        self.mcp_servers
+        self.state
+            .mcp_servers
             .iter()
             .map(|s| {
                 McpServer::Stdio(
@@ -483,37 +581,37 @@ impl AcpDriver {
     }
 
     fn request(&mut self, method: &str, params: impl serde::Serialize) -> (u64, String) {
-        self.next_id += 1;
-        let id = self.next_id;
+        self.state.next_id += 1;
+        let id = self.state.next_id;
         let line = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
         (id, line)
     }
 
     fn create_session(&mut self, step: &mut DriverStep, load: bool) {
-        let line = match (&self.resume, load) {
+        let line = match (&self.state.resume, load) {
             (Some(sid), true) => {
-                let mut req = LoadSessionRequest::new(sid.clone(), self.cwd.clone())
+                let mut req = LoadSessionRequest::new(sid.clone(), self.state.cwd.clone())
                     .mcp_servers(self.acp_mcp_servers());
                 req.meta = self.session_meta();
                 let (id, l) = self.request(M_SESSION_LOAD, req);
-                self.create_id = id;
+                self.state.create_id = id;
                 l
             }
             _ => {
-                let mut req =
-                    NewSessionRequest::new(self.cwd.clone()).mcp_servers(self.acp_mcp_servers());
+                let mut req = NewSessionRequest::new(self.state.cwd.clone())
+                    .mcp_servers(self.acp_mcp_servers());
                 req.meta = self.session_meta();
                 let (id, l) = self.request(M_SESSION_NEW, req);
-                self.create_id = id;
+                self.state.create_id = id;
                 l
             }
         };
-        self.phase = Phase::Creating { loading: load };
+        self.state.phase = Phase::Creating { loading: load };
         step.write(line);
     }
 
     fn session_meta(&self) -> Option<serde_json::Map<String, Value>> {
-        let text = self.system_append.as_ref()?;
+        let text = self.state.system_append.as_ref()?;
         let meta = json!({"antigravity": {"systemPrompt": {"append": text}}});
         meta.as_object().cloned()
     }
@@ -523,34 +621,168 @@ impl AcpDriver {
     fn write_model_config(&mut self, step: &mut DriverStep) {
         if let (true, Some(model), Some(sid)) = (
             self.flavor.set_model,
-            self.model.clone(),
-            self.session_id.clone(),
+            self.state.model.clone(),
+            self.state.session_id.clone(),
         ) {
             let (id, line) = self.request(
                 M_SESSION_SET_MODEL,
                 json!({"sessionId": sid, "modelId": model}),
             );
-            self.config_req = Some(id);
+            self.state.config_req = Some(id);
             step.write(line);
         } else if let (Some(config_id), Some(model), Some(sid)) = (
             self.flavor.model_config_id,
-            self.model.clone(),
-            self.session_id.clone(),
+            self.state.model.clone(),
+            self.state.session_id.clone(),
         ) {
             let (id, line) = self.request(
                 M_SET_CONFIG_OPTION,
                 json!({"sessionId": sid, "configId": config_id, "value": model}),
             );
-            self.config_req = Some(id);
+            self.state.config_req = Some(id);
             step.write(line);
         }
     }
 
+    fn update_effort_options(&mut self, root: &Value) {
+        let Some(config_id) = self.flavor.effort_config_id else {
+            return;
+        };
+        let Some(opts) = root
+            .get("configOptions")
+            .and_then(Value::as_array)
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|c| c.get("id").and_then(Value::as_str) == Some(config_id))
+            })
+            .and_then(|c| c.get("options"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        let vals: Vec<String> = opts
+            .iter()
+            .filter_map(|o| o.get("value").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        if !vals.is_empty() {
+            self.state.effort_options = vals;
+        }
+    }
+
+    fn efforts_for_model(&self, model: &str) -> Option<Vec<String>> {
+        if self.state.available_models.is_empty() {
+            return None;
+        }
+        const SUFFIXES: [(&str, &str); 7] = [
+            ("-minimal", "low"),
+            ("-low", "low"),
+            ("-medium", "medium"),
+            ("-high", "high"),
+            ("-xhigh", "xhigh"),
+            ("-max", "max"),
+            ("-ultra", "max"),
+        ];
+        let base = SUFFIXES
+            .iter()
+            .find_map(|(suf, _)| model.strip_suffix(suf))
+            .unwrap_or(model);
+        let mut opts: Vec<String> = Vec::new();
+        for (_, canonical) in SUFFIXES {
+            if opts.iter().any(|o| o == canonical) {
+                continue;
+            }
+            let has_variant = SUFFIXES.iter().any(|(suf, c)| {
+                *c == canonical && {
+                    let candidate = format!("{base}{suf}");
+                    self.state.available_models.iter().any(|m| m == &candidate)
+                }
+            });
+            if has_variant {
+                opts.push(canonical.to_string());
+            }
+        }
+        if !opts.is_empty() {
+            return Some(opts);
+        }
+        if self.state.available_models.iter().any(|m| m == base) {
+            return Some(Vec::new());
+        }
+        None
+    }
+
+    fn model_is_untiered(&self) -> bool {
+        self.state
+            .model
+            .as_deref()
+            .and_then(|m| self.efforts_for_model(m))
+            .is_some_and(|opts| opts.is_empty())
+    }
+
+    fn resolve_effort(&self, raw: &str) -> Result<String, DriverError> {
+        self.resolve_effort_with(&self.state.effort_options, raw)
+    }
+
+    fn resolve_effort_with(&self, options: &[String], raw: &str) -> Result<String, DriverError> {
+        let name = self.provider.as_str();
+        if self.flavor.effort_config_id.is_none() {
+            return Err(DriverError(format!(
+                "{name} does not take a reasoning effort"
+            )));
+        }
+        let rank = match raw.trim().to_ascii_lowercase().as_str() {
+            "minimal" | "low" => 0,
+            "medium" => 1,
+            "high" => 2,
+            "xhigh" => 3,
+            "max" | "ultra" => 4,
+            other => {
+                return Err(DriverError(format!(
+                    "{name} has no '{other}' reasoning effort"
+                )))
+            }
+        };
+        const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+        let wanted = LEVELS[rank];
+        if options.is_empty() || options.iter().any(|o| o == wanted) {
+            return Ok(wanted.to_string());
+        }
+        for candidate in LEVELS[..=rank].iter().rev() {
+            if options.iter().any(|o| o == candidate) {
+                return Ok((*candidate).to_string());
+            }
+        }
+        Ok(options[0].clone())
+    }
+
     fn send_prompt(&mut self, step: &mut DriverStep, turn_id: String, req: &RuntimePromptReq) {
-        if std::mem::take(&mut self.config_retry) {
+        let model_changed = req
+            .model
+            .as_ref()
+            .is_some_and(|m| self.state.model.as_ref() != Some(m));
+        if let Some(m) = req.model.as_ref().filter(|_| model_changed) {
+            self.state.model = Some(m.clone());
+            if let Some(opts) = self.efforts_for_model(m) {
+                self.state.effort_options = opts;
+            }
+        }
+        if std::mem::take(&mut self.state.config_retry) || model_changed {
             self.write_model_config(step);
         }
-        let sid = self.session_id.clone().unwrap_or_default();
+        let sid = self.state.session_id.clone().unwrap_or_default();
+        if !self.model_is_untiered() {
+            if let Some(raw) = req.effort.as_deref().filter(|e| !e.trim().is_empty()) {
+                if let (Some(config_id), Ok(val)) =
+                    (self.flavor.effort_config_id, self.resolve_effort(raw))
+                {
+                    let (id, line) = self.request(
+                        M_SET_CONFIG_OPTION,
+                        json!({"sessionId": sid, "configId": config_id, "value": val}),
+                    );
+                    self.state.effort_req = Some(id);
+                    step.write(line);
+                }
+            }
+        }
         let mut blocks: Vec<ContentBlock> = req
             .images
             .iter()
@@ -566,61 +798,51 @@ impl AcpDriver {
         if !req.text.is_empty() {
             blocks.push(ContentBlock::Text(TextContent::new(&req.text)));
         }
-        let access_changed = req.access_mode.is_some_and(|m| m != self.access);
-        self.access = req.access_mode.unwrap_or(self.access);
-        if req.plan && self.modes.iter().any(|m| m == "plan") {
+        let access_changed = req.access_mode.is_some_and(|m| m != self.state.access);
+        self.state.access = req.access_mode.unwrap_or(self.state.access);
+        if req.plan && self.state.modes.iter().any(|m| m == "plan") {
             // Plan mode is one of the agent's session modes (agy `plan`).
-            if !self.plan_active {
+            if !self.state.plan_active {
                 let (id, line) = self.request(
                     M_SESSION_SET_MODE,
                     SetSessionModeRequest::new(sid.clone(), "plan"),
                 );
-                self.mode_req = Some(id);
+                self.state.mode_req = Some(id);
                 step.write(line);
-                self.plan_active = true;
+                self.state.plan_active = true;
             }
-        } else if self.plan_active {
+        } else if self.state.plan_active {
             // Leaving plan mode: back to the access mode's own mode, else
             // the one the session opened in.
-            self.plan_active = false;
+            self.state.plan_active = false;
             let back = self
                 .flavor
                 .mode_id
-                .and_then(|f| f(self.access))
+                .and_then(|f| f(self.state.access))
                 .map(str::to_string)
-                .or_else(|| self.base_mode.clone());
+                .or_else(|| self.state.base_mode.clone());
             if let Some(mode) = back {
                 let (id, line) = self.request(
                     M_SESSION_SET_MODE,
                     SetSessionModeRequest::new(sid.clone(), mode),
                 );
-                self.mode_req = Some(id);
+                self.state.mode_req = Some(id);
                 step.write(line);
             }
         } else if access_changed {
-            self.write_mode(step, &sid, self.access);
+            self.write_mode(step, &sid, self.state.access);
         }
-        self.cost_at_turn = self.cost_total;
-        // The effort as the session's own config option (T3 Code:
-        // `antigravityThinkingConfig`, grok's `reasoning_effort`).
-        let effort = req.effort.as_deref().and_then(|e| {
-            let (config, levels) = self.effort_option.as_ref()?;
-            Some((config.clone(), effort_value(levels, e)?))
-        });
-        if let Some((config, value)) = effort.filter(|(_, v)| self.effort.as_ref() != Some(v)) {
-            let (id, line) = self.request(
-                M_SET_CONFIG_OPTION,
-                json!({"sessionId": sid, "configId": config, "value": value}),
-            );
-            self.effort_req = Some(id);
-            self.effort = Some(value);
-            step.write(line);
-        }
+        self.state.cost_at_turn = self.state.cost_total;
         let (id, line) = self.request(M_SESSION_PROMPT, PromptRequest::new(sid, blocks));
-        self.prompt_id = Some(id);
-        self.turn_id = Some(turn_id);
-        self.segments = 0;
-        self.closed_named.clear();
+        self.state.sideband.arm_burst_filter();
+        self.retire_tools();
+        self.state.cancelling = false;
+        self.state.prompt_id = Some(id);
+        self.state.turn_id = Some(turn_id);
+        self.state.autonomous = false;
+        self.state.segments = 0;
+        self.state.closed_named.clear();
+        self.settle_bg_on_user_prompt(step);
         step.write(line);
     }
 
@@ -630,7 +852,7 @@ impl AcpDriver {
                 M_SESSION_SET_MODE,
                 SetSessionModeRequest::new(sid.to_string(), mode_id),
             );
-            self.mode_req = Some(id);
+            self.state.mode_req = Some(id);
             step.write(line);
         }
     }
@@ -639,14 +861,15 @@ impl AcpDriver {
     /// method the agent advertised, else the first `agent`-type (or untyped)
     /// one. `terminal` / `env_var` methods are never sent to `authenticate`.
     fn auth_method(&self) -> Option<String> {
-        let advertised = |id: &str| self.auth_methods.iter().any(|(m, _)| m == id);
+        let advertised = |id: &str| self.state.auth_methods.iter().any(|(m, _)| m == id);
         self.flavor
             .auth_preference
             .iter()
             .find(|p| advertised(p))
             .cloned()
             .or_else(|| {
-                self.auth_methods
+                self.state
+                    .auth_methods
                     .iter()
                     .find(|(_, ty)| ty.as_deref().is_none_or(|t| t == "agent"))
                     .map(|(id, _)| id.clone())
@@ -654,7 +877,40 @@ impl AcpDriver {
     }
 
     fn turn(&self) -> String {
-        self.turn_id.clone().unwrap_or_default()
+        self.state.turn_id.clone().unwrap_or_default()
+    }
+
+    /// Open a fresh agent-initiated (`origin: agent`) turn when substantive
+    /// ACP notifications/requests arrive outside an active `session/prompt`
+    /// RPC (e.g. `agy` waking from `schedule`, background `run_command`,
+    /// subagents, or `swarm_wait`).
+    fn ensure_autonomous_turn(&mut self, step: &mut DriverStep) {
+        self.ensure_autonomous_turn_inner(step, true);
+    }
+
+    pub(super) fn ensure_autonomous_turn_for_sideband_wakeup(&mut self, step: &mut DriverStep) {
+        self.ensure_autonomous_turn_inner(step, false);
+    }
+
+    fn ensure_autonomous_turn_inner(&mut self, step: &mut DriverStep, native_wakeup: bool) {
+        if self.state.phase != Phase::Ready
+            || self.state.turn_id.is_some()
+            || self.state.prompt_id.is_some()
+            || self.state.queued.is_some()
+        {
+            return;
+        }
+        self.retire_tools();
+        self.state.auto_turns += 1;
+        let id = format!("auto-{}", self.state.auto_turns);
+        self.state.turn_id = Some(id.clone());
+        self.state.autonomous = true;
+        self.state.segments = 0;
+        self.state.closed_named.clear();
+        step.push(DriverEvent::TurnStarted { turn_id: id });
+        if native_wakeup {
+            self.settle_bg_on_native_wakeup(step);
+        }
     }
 
     fn segment_item(&self, seg: &Segment, streaming: bool) -> TurnItem {
@@ -674,14 +930,16 @@ impl AcpDriver {
                 streaming,
             },
         };
-        item(seg.item_id.clone(), status, None, kind)
+        let mut it = item(seg.item_id.clone(), status, None, kind);
+        it.started_at = Some(seg.started_at);
+        it
     }
 
     fn close_segment(&mut self, step: &mut DriverStep) {
-        if let Some(seg) = self.segment.take() {
+        if let Some(seg) = self.state.segment.take() {
             step.push(DriverEvent::TurnItem(self.segment_item(&seg, false)));
             if seg.named {
-                self.closed_named.insert(seg.message_id.clone(), seg);
+                self.state.closed_named.insert(seg.message_id.clone(), seg);
             }
         }
     }
@@ -694,6 +952,7 @@ impl AcpDriver {
         mid: Option<String>,
     ) {
         let reuse = self
+            .state
             .segment
             .as_ref()
             .is_some_and(|s| s.kind == kind && mid.as_ref().is_none_or(|m| *m == s.message_id));
@@ -701,27 +960,28 @@ impl AcpDriver {
             self.close_segment(step);
             let resumed = mid
                 .as_ref()
-                .and_then(|m| self.closed_named.remove(m))
+                .and_then(|m| self.state.closed_named.remove(m))
                 .filter(|seg| seg.kind == kind);
-            self.segment = Some(match resumed {
+            self.state.segment = Some(match resumed {
                 Some(seg) => seg,
                 None => {
-                    self.segments += 1;
-                    let item_id = format!("{}:seg{}", self.turn(), self.segments);
+                    self.state.segments += 1;
+                    let item_id = format!("{}:seg{}", self.turn(), self.state.segments);
                     Segment {
                         kind,
                         named: mid.is_some(),
                         message_id: mid.unwrap_or_else(|| item_id.clone()),
                         item_id,
                         text: String::new(),
+                        started_at: chrono::Utc::now(),
                     }
                 }
             });
         }
-        let seg = self.segment.as_mut().expect("set above");
+        let seg = self.state.segment.as_mut().expect("set above");
         seg.text.push_str(text);
         let item = {
-            let seg = self.segment.as_ref().expect("set above");
+            let seg = self.state.segment.as_ref().expect("set above");
             self.segment_item(seg, true)
         };
         step.push(DriverEvent::TurnItem(item));
@@ -744,12 +1004,29 @@ impl AcpDriver {
                 output,
                 exit_code: None,
             },
-            ToolKind::Edit | ToolKind::Delete | ToolKind::Move => TurnItemKind::FileChange {
-                file_name: t.file.clone().unwrap_or_else(|| t.title.clone()),
-                diff_str: (t.diffs.len() > 1).then(|| multi_file_patch(&t.diffs)),
-                old_str: t.diff.as_ref().and_then(|d| d.0.clone()),
-                new_str: t.diff.as_ref().map(|d| d.1.clone()),
-            },
+            ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
+                let file_name = t.file.clone().unwrap_or_else(|| t.title.clone());
+                let raw_diff = (t.diffs.len() > 1).then(|| multi_file_patch(&t.diffs));
+                let raw_old = if t.diffs.len() > 1 {
+                    None
+                } else {
+                    t.diff.as_ref().and_then(|d| d.0.clone())
+                };
+                let raw_new = if t.diffs.len() > 1 {
+                    None
+                } else {
+                    t.diff.as_ref().map(|d| d.1.clone())
+                };
+                let (diff_str, old_str, new_str) = crate::diff_compact::compact_file_change_fields(
+                    &file_name, raw_diff, raw_old, raw_new,
+                );
+                TurnItemKind::FileChange {
+                    file_name,
+                    diff_str,
+                    old_str,
+                    new_str,
+                }
+            }
             _ => TurnItemKind::DynamicTool {
                 image_files: Vec::new(),
                 tool_name: t.title.clone(),
@@ -820,22 +1097,155 @@ impl AcpDriver {
         t.images = media.images;
     }
 
-    fn on_tool_call(&mut self, step: &mut DriverStep, call: ToolCall) {
-        self.close_segment(step);
+    fn on_tool_call(
+        &mut self,
+        step: &mut DriverStep,
+        call: ToolCall,
+        has_raw_status: bool,
+        parent_call_id: Option<&str>,
+    ) {
+        if parent_call_id.is_none() {
+            self.close_segment(step);
+        }
         let id = call.tool_call_id.0.to_string();
+        self.state.retired_tool_ids.retain(|r| r != &id);
+        let (title, kind, classified_file, classified_diff) = if call.kind == ToolKind::Other {
+            let c = crate::acp_sideband::burst::classify_tool(&call.title, call.raw_input.as_ref());
+            if c.kind != ToolKind::Other {
+                (c.title, c.kind, c.file, c.diff)
+            } else {
+                (call.title, call.kind, None, None)
+            }
+        } else {
+            (call.title, call.kind, None, None)
+        };
+        let status = if !has_raw_status && call.status == ToolCallStatus::Pending {
+            ToolCallStatus::InProgress
+        } else {
+            call.status
+        };
+        let file = call
+            .locations
+            .first()
+            .map(|l| l.path.display().to_string())
+            .or(classified_file);
+        let diffs = match (&file, &classified_diff) {
+            (Some(f), Some((old, new))) => vec![(f.clone(), old.clone(), new.clone())],
+            _ => Vec::new(),
+        };
         let mut t = Tool {
-            title: call.title,
-            kind: call.kind,
-            status: call.status,
+            title,
+            kind,
+            status,
             raw_input: call.raw_input,
-            file: call.locations.first().map(|l| l.path.display().to_string()),
+            file,
+            diff: classified_diff,
+            diffs,
             ..Tool::default()
         };
         Self::merge_content(&mut t, &call.content);
+        if t.output.is_empty() {
+            if let Some(txt) = raw_output_text(call.raw_output.as_ref()) {
+                t.output = txt;
+            }
+        }
         Self::merge_raw_images(&mut t, call.raw_output.as_ref());
-        step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
-        self.swarm_members(step, &t);
-        self.tools.insert(id, t);
+        let meta_val = call.meta.map(Value::Object);
+        self.emit_tool_or_subagent(
+            step,
+            &id,
+            &t,
+            meta_val.as_ref(),
+            call.raw_output.as_ref(),
+            parent_call_id,
+        );
+        if parent_call_id.is_none() {
+            self.swarm_members(step, &t);
+            if !self
+                .state
+                .subagents
+                .get(&id)
+                .is_some_and(|a| a.background && a.status.is_open())
+            {
+                t.compact_terminal();
+            }
+            self.state.tools.insert(id, t);
+        }
+    }
+
+    fn on_tool_update(
+        &mut self,
+        step: &mut DriverStep,
+        up: ToolCallUpdate,
+        parent_call_id: Option<&str>,
+    ) {
+        if parent_call_id.is_none() {
+            self.close_segment(step);
+        }
+        let id = up.tool_call_id.0.to_string();
+        let mut t = if parent_call_id.is_some() {
+            self.state
+                .child_tools
+                .get(&id)
+                .map(|e| e.tool.clone())
+                .unwrap_or_default()
+        } else {
+            self.state.tools.remove(&id).unwrap_or_default()
+        };
+        let meta_val = up.meta.map(Value::Object);
+        let f = up.fields;
+        if let Some(k) = f.kind {
+            t.kind = k;
+        }
+        if let Some(s) = f.status {
+            t.status = s;
+        }
+        if let Some(title) = f.title {
+            t.title = title;
+        }
+        if let Some(i) = f.raw_input {
+            t.raw_input = Some(i);
+        }
+        if let Some(locs) = &f.locations {
+            if let Some(l) = locs.first() {
+                t.file = Some(l.path.display().to_string());
+            }
+        }
+        if let Some(content) = &f.content {
+            // An update's content replaces the previous content (ACP).
+            t.output.clear();
+            Self::merge_content(&mut t, content);
+        } else if let Some(txt) = raw_output_text(f.raw_output.as_ref()) {
+            t.output = txt;
+        }
+        if f.content.is_none()
+            && f.raw_output
+                .as_ref()
+                .is_some_and(|raw| raw.get("attachments").is_some() || raw.get("content").is_some())
+        {
+            t.images.clear();
+        }
+        Self::merge_raw_images(&mut t, f.raw_output.as_ref());
+        self.emit_tool_or_subagent(
+            step,
+            &id,
+            &t,
+            meta_val.as_ref(),
+            f.raw_output.as_ref(),
+            parent_call_id,
+        );
+        if parent_call_id.is_none() {
+            self.swarm_members(step, &t);
+            if !self
+                .state
+                .subagents
+                .get(&id)
+                .is_some_and(|a| a.background && a.status.is_open())
+            {
+                t.compact_terminal();
+            }
+            self.state.tools.insert(id, t);
+        }
     }
 
     /// agy's native swarm (`swarm{action: add|kill, name, brief, n?,
@@ -887,7 +1297,7 @@ impl AcpDriver {
                     vec![(name.to_string(), brief.to_string())]
                 };
                 for (member, prompt) in members {
-                    if self.swarm.contains_key(&member) {
+                    if self.state.swarm.contains_key(&member) {
                         continue;
                     }
                     let mut it = item(
@@ -906,14 +1316,15 @@ impl AcpDriver {
                         },
                     );
                     // Its card stays in the turn that added it.
-                    it.turn_id = self.turn_id.clone();
+                    it.turn_id = self.state.turn_id.clone();
                     step.push(DriverEvent::TurnItem(it.clone()));
-                    self.swarm.insert(member, it);
+                    self.state.swarm.insert(member, it);
                 }
             }
             // `kill{name}` also takes a whole `name-1..k` group.
             Some("kill") => {
                 let gone: Vec<String> = self
+                    .state
                     .swarm
                     .keys()
                     .filter(|m| {
@@ -927,7 +1338,7 @@ impl AcpDriver {
                     .cloned()
                     .collect();
                 for m in gone {
-                    if let Some(mut it) = self.swarm.remove(&m) {
+                    if let Some(mut it) = self.state.swarm.remove(&m) {
                         let now = chrono::Utc::now();
                         it.status = TurnItemStatus::Interrupted;
                         it.completed_at = Some(now);
@@ -938,46 +1349,6 @@ impl AcpDriver {
             }
             _ => {}
         }
-    }
-
-    fn on_tool_update(&mut self, step: &mut DriverStep, up: ToolCallUpdate) {
-        self.close_segment(step);
-        let id = up.tool_call_id.0.to_string();
-        let mut t = self.tools.remove(&id).unwrap_or_default();
-        let f = up.fields;
-        if let Some(k) = f.kind {
-            t.kind = k;
-        }
-        if let Some(s) = f.status {
-            t.status = s;
-        }
-        if let Some(title) = f.title {
-            t.title = title;
-        }
-        if let Some(i) = f.raw_input {
-            t.raw_input = Some(i);
-        }
-        if let Some(locs) = &f.locations {
-            if let Some(l) = locs.first() {
-                t.file = Some(l.path.display().to_string());
-            }
-        }
-        if let Some(content) = &f.content {
-            // An update's content replaces the previous content (ACP).
-            t.output.clear();
-            Self::merge_content(&mut t, content);
-        }
-        if f.content.is_none()
-            && f.raw_output
-                .as_ref()
-                .is_some_and(|raw| raw.get("attachments").is_some() || raw.get("content").is_some())
-        {
-            t.images.clear();
-        }
-        Self::merge_raw_images(&mut t, f.raw_output.as_ref());
-        step.push(DriverEvent::TurnItem(self.tool_item(&id, &t)));
-        self.swarm_members(step, &t);
-        self.tools.insert(id, t);
     }
 
     fn on_plan(&mut self, step: &mut DriverStep, plan: Plan) {
@@ -1002,7 +1373,13 @@ impl AcpDriver {
         });
     }
 
-    fn on_update(&mut self, step: &mut DriverStep, n: SessionNotification) {
+    fn on_update(
+        &mut self,
+        step: &mut DriverStep,
+        n: SessionNotification,
+        has_raw_status: bool,
+        parent_call_id: Option<&str>,
+    ) {
         // Session-level news counts during a `session/load` replay too.
         match &n.update {
             SessionUpdate::AvailableCommandsUpdate(u) => {
@@ -1036,9 +1413,9 @@ impl AcpDriver {
                     .as_ref()
                     .filter(|c| c.currency.eq_ignore_ascii_case("USD"))
                 {
-                    self.cost_total = Some(c.amount);
-                    let at_turn = self.cost_at_turn.unwrap_or(c.amount);
-                    if self.turn_id.is_some() && c.amount >= at_turn {
+                    self.state.cost_total = Some(c.amount);
+                    let at_turn = self.state.cost_at_turn.unwrap_or(c.amount);
+                    if self.state.turn_id.is_some() && c.amount >= at_turn {
                         step.push(DriverEvent::TurnCost(c.amount - at_turn));
                     }
                 }
@@ -1051,29 +1428,95 @@ impl AcpDriver {
                 return;
             }
             SessionUpdate::CurrentModeUpdate(u) => {
-                self.plan_active = u.current_mode_id.0.as_ref() == "plan";
+                self.state.plan_active = u.current_mode_id.0.as_ref() == "plan";
                 return;
             }
             _ => {}
         }
-        if matches!(self.phase, Phase::Creating { loading: true }) {
+        if matches!(self.state.phase, Phase::Creating { loading: true }) {
             return; // history replayed by session/load
         }
         match n.update {
             SessionUpdate::AgentMessageChunk(c) => {
                 if let ContentBlock::Text(t) = c.content {
-                    let mid = c.message_id.map(|m| m.0.to_string());
-                    self.append_text(step, SegmentKind::Message, &t.text, mid);
+                    self.note_stdout_activity();
+                    if let Some(text) = self
+                        .state
+                        .sideband
+                        .filter_message(&t.text)
+                        .filter(|s| !s.is_empty())
+                    {
+                        self.ensure_autonomous_turn(step);
+                        let mid = c.message_id.map(|m| m.0.to_string());
+                        if let Some(pid) = parent_call_id {
+                            self.append_child_text(step, pid, SegmentKind::Message, &text, mid);
+                        } else {
+                            self.append_text(step, SegmentKind::Message, &text, mid);
+                        }
+                    }
                 }
             }
             SessionUpdate::AgentThoughtChunk(c) => {
                 if let ContentBlock::Text(t) = c.content {
-                    self.append_text(step, SegmentKind::Thought, &t.text, None);
+                    self.note_stdout_activity();
+                    if let Some(text) = self
+                        .state
+                        .sideband
+                        .filter_thought(&t.text)
+                        .filter(|s| !s.is_empty())
+                    {
+                        self.ensure_autonomous_turn(step);
+                        if let Some(pid) = parent_call_id {
+                            self.append_child_text(step, pid, SegmentKind::Thought, &text, None);
+                        } else {
+                            self.append_text(step, SegmentKind::Thought, &text, None);
+                        }
+                    }
                 }
             }
-            SessionUpdate::ToolCall(call) => self.on_tool_call(step, call),
-            SessionUpdate::ToolCallUpdate(up) => self.on_tool_update(step, up),
-            SessionUpdate::Plan(plan) => self.on_plan(step, plan),
+            SessionUpdate::ToolCall(call) => {
+                self.note_stdout_activity();
+                if self
+                    .state
+                    .sideband
+                    .filter_tool_call(call.tool_call_id.0.as_ref())
+                {
+                    return;
+                }
+                self.ensure_autonomous_turn(step);
+                self.on_tool_call(step, call, has_raw_status, parent_call_id);
+            }
+            SessionUpdate::ToolCallUpdate(up) => {
+                let id = up.tool_call_id.0.as_ref();
+                let known = self.state.tools.contains_key(id)
+                    || self.state.subagents.contains_key(id)
+                    || self.state.child_tools.contains_key(id);
+                if !known {
+                    let has_title = up
+                        .fields
+                        .title
+                        .as_deref()
+                        .is_some_and(|s| !s.trim().is_empty());
+                    let is_retired = self.state.retired_tool_ids.iter().any(|r| r == id);
+                    if is_retired || (self.state.prompt_id.is_none() && !has_title) {
+                        return;
+                    }
+                }
+                self.note_stdout_activity();
+                if self
+                    .state
+                    .sideband
+                    .filter_tool_update(id, known, self.state.prompt_id.is_some())
+                {
+                    return;
+                }
+                self.ensure_autonomous_turn(step);
+                self.on_tool_update(step, up, parent_call_id);
+            }
+            SessionUpdate::Plan(plan) => {
+                self.ensure_autonomous_turn(step);
+                self.on_plan(step, plan);
+            }
             _ => {}
         }
     }
@@ -1084,6 +1527,7 @@ impl AcpDriver {
         rpc_id: Value,
         req: RequestPermissionRequest,
     ) {
+        self.ensure_autonomous_turn(step);
         self.close_segment(step);
         let request_id = format!("acp-{}", rpc_key(&rpc_id));
         let kind = match req.tool_call.fields.kind {
@@ -1111,7 +1555,7 @@ impl AcpDriver {
         }
         let title = req.tool_call.fields.title.clone();
         let tool_item_id = format!("{}:tool:{}", self.turn(), req.tool_call.tool_call_id.0);
-        self.pending.insert(
+        self.state.pending.insert(
             request_id.clone(),
             Pending {
                 rpc_id,
@@ -1136,8 +1580,8 @@ impl AcpDriver {
         result: Option<Value>,
         error: Option<Value>,
     ) {
-        if let Phase::Authenticating { load } = self.phase {
-            if id == self.auth_id {
+        if let Phase::Authenticating { load } = self.state.phase {
+            if id == self.state.auth_id {
                 if let Some(e) = error {
                     step.push(DriverEvent::Fatal(rpc_failure("auth_required", &e)));
                     return;
@@ -1146,8 +1590,8 @@ impl AcpDriver {
                 return;
             }
         }
-        if id == self.init_id && self.phase == Phase::Initializing {
-            self.auth_methods = result
+        if id == self.state.init_id && self.state.phase == Phase::Initializing {
+            self.state.auth_methods = result
                 .as_ref()
                 .and_then(|r| r.get("authMethods"))
                 .and_then(Value::as_array)
@@ -1165,39 +1609,60 @@ impl AcpDriver {
                 .and_then(|r| serde_json::from_value::<InitializeResponse>(r).ok())
                 .map(|r| r.agent_capabilities);
             let load = caps.as_ref().is_some_and(|c| c.load_session);
-            self.images = caps.as_ref().is_some_and(|c| c.prompt_capabilities.image);
-            self.embedded = caps.is_some_and(|c| c.prompt_capabilities.embedded_context);
+            self.state.images = caps.as_ref().is_some_and(|c| c.prompt_capabilities.image);
+            self.state.embedded = caps.is_some_and(|c| c.prompt_capabilities.embedded_context);
             if let Some(e) = error {
                 step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
             }
-            self.create_session(step, load && self.resume.is_some());
-        } else if id == self.create_id && matches!(self.phase, Phase::Creating { .. }) {
-            let loading = matches!(self.phase, Phase::Creating { loading: true });
+            self.create_session(step, load && self.state.resume.is_some());
+        } else if id == self.state.create_id && matches!(self.state.phase, Phase::Creating { .. }) {
+            let loading = matches!(self.state.phase, Phase::Creating { loading: true });
             if let Some(e) = error {
                 if e.get("code").and_then(Value::as_i64) == Some(AUTH_REQUIRED)
-                    && !self.authenticated
+                    && !self.state.authenticated
                 {
                     if let Some(method) = self.auth_method() {
                         let (id, line) =
                             self.request(M_AUTHENTICATE, AuthenticateRequest::new(method));
-                        self.auth_id = id;
-                        self.authenticated = true;
-                        self.phase = Phase::Authenticating { load: loading };
+                        self.state.auth_id = id;
+                        self.state.authenticated = true;
+                        self.state.phase = Phase::Authenticating { load: loading };
                         step.write(line);
                         return;
                     }
                 }
                 if loading {
                     // T3 Code: a failed load / resume starts a fresh session.
-                    self.resume = None;
+                    self.state.resume = None;
                     self.create_session(step, false);
                     return;
                 }
                 step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
             }
-            self.modes = result
+            if let Some(r) = &result {
+                self.update_effort_options(r);
+            }
+            self.state.available_models = result
+                .as_ref()
+                .and_then(|r| r.pointer("/models/availableModels"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| Some(m.get("modelId")?.as_str()?.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(opts) = self
+                .state
+                .model
+                .as_deref()
+                .and_then(|m| self.efforts_for_model(m))
+            {
+                self.state.effort_options = opts;
+            }
+            self.state.modes = result
                 .as_ref()
                 .and_then(|r| r.pointer("/modes/availableModes"))
                 .and_then(Value::as_array)
@@ -1207,84 +1672,98 @@ impl AcpDriver {
                         .collect()
                 })
                 .unwrap_or_default();
-            if let Some(opts) = result
-                .as_ref()
-                .and_then(|r| r.get("configOptions"))
-                .and_then(Value::as_array)
-            {
-                self.effort_option = opts.iter().find_map(effort_config);
-                self.effort = self.effort_option.as_ref().and_then(|(id, _)| {
-                    opts.iter()
-                        .find(|o| o.get("id").and_then(Value::as_str) == Some(id.as_str()))
-                        .and_then(|o| o.get("currentValue"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                });
-            }
             let current_mode = result
                 .as_ref()
                 .and_then(|r| r.pointer("/modes/currentModeId"))
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            self.plan_active = current_mode.as_deref() == Some("plan");
+            self.state.plan_active = current_mode.as_deref() == Some("plan");
             // A new session has spent nothing; a loaded one's running cost is
             // unknown until its first `usage_update` (that turn counts none).
-            self.cost_total = (!loading).then_some(0.0);
-            self.base_mode = current_mode.clone().filter(|m| m != "plan");
-            self.session_id = if loading {
-                self.resume.clone()
+            self.state.cost_total = (!loading).then_some(0.0);
+            self.state.base_mode = current_mode.clone().filter(|m| m != "plan");
+            self.state.session_id = if loading {
+                self.state.resume.clone()
             } else {
                 result
                     .and_then(|r| serde_json::from_value::<NewSessionResponse>(r).ok())
                     .map(|r| r.session_id.0.to_string())
             };
-            self.phase = Phase::Ready;
+            if self.provider == RuntimeProvider::Agy {
+                if let Some(sid) = self.state.session_id.clone() {
+                    self.state.note_agy_conv_id(&sid);
+                }
+            }
+            self.state.phase = Phase::Ready;
             step.push(DriverEvent::Ready {
-                native_thread_id: self.session_id.clone(),
+                native_thread_id: self.state.session_id.clone(),
                 model: None,
             });
             self.write_model_config(step);
             // A mode no launch flag gave (agy has none): set it now.
-            if let Some(want) = self.flavor.mode_id.and_then(|f| f(self.access)) {
-                if current_mode.as_deref() != Some(want) && self.modes.iter().any(|m| m == want) {
-                    let sid = self.session_id.clone().unwrap_or_default();
-                    self.write_mode(step, &sid, self.access);
+            if let Some(want) = self.flavor.mode_id.and_then(|f| f(self.state.access)) {
+                if current_mode.as_deref() != Some(want)
+                    && self.state.modes.iter().any(|m| m == want)
+                {
+                    let sid = self.state.session_id.clone().unwrap_or_default();
+                    self.write_mode(step, &sid, self.state.access);
                 }
             }
             // A prompt queued before `initialize` answered goes as is; the
             // agent refuses images it cannot take.
-            if let Some((turn, req)) = self.queued.take() {
+            if let Some((turn, req)) = self.state.queued.take() {
                 self.send_prompt(step, turn, &req);
+            } else {
+                self.state.sideband.ensure_idle_floor();
             }
-        } else if Some(id) == self.config_req {
-            self.config_req = None;
+        } else if Some(id) == self.state.config_req {
+            self.state.config_req = None;
+            if let Some(r) = &result {
+                self.update_effort_options(r);
+            }
             if let Some(e) = error {
                 // -32602: the agent refused the value; anything else (an
                 // internal error, a dropped request) was not applied.
-                self.config_retry = e.get("code").and_then(Value::as_i64) != Some(-32602);
+                self.state.config_retry = e.get("code").and_then(Value::as_i64) != Some(-32602);
                 step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
             }
-        } else if Some(id) == self.effort_req {
-            self.effort_req = None;
-            if let Some(e) = error {
-                self.effort = None;
-                step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
+        } else if Some(id) == self.state.effort_req {
+            self.state.effort_req = None;
+            if let Some(r) = &result {
+                self.update_effort_options(r);
             }
-        } else if Some(id) == self.mode_req {
-            self.mode_req = None;
             if let Some(e) = error {
                 step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
             }
-        } else if Some(id) == self.prompt_id {
-            self.prompt_id = None;
+        } else if Some(id) == self.state.mode_req {
+            self.state.mode_req = None;
+            if let Some(e) = error {
+                step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
+            }
+        } else if Some(id) == self.state.prompt_id {
+            let was_cancelling = std::mem::replace(&mut self.state.cancelling, false);
+            self.state.prompt_id = None;
+            self.state.sideband.finish_prompted_turn();
             self.close_segment(step);
-            for (_, t) in self.tools.drain() {
-                drop(t);
-            }
+            self.settle_foreground_subagents(
+                step,
+                if was_cancelling {
+                    TurnItemStatus::Interrupted
+                } else if error.is_some() {
+                    TurnItemStatus::Failed
+                } else {
+                    TurnItemStatus::Completed
+                },
+            );
+            self.retire_tools();
             let ev = match (result, error) {
                 (_, Some(e)) => DriverEvent::Terminal {
-                    status: TurnTerminalStatus::Failed,
-                    failure: Some(rpc_failure("provider_error", &e)),
+                    status: if was_cancelling {
+                        TurnTerminalStatus::Interrupted
+                    } else {
+                        TurnTerminalStatus::Failed
+                    },
+                    failure: (!was_cancelling).then(|| rpc_failure("provider_error", &e)),
                     reason: None,
                 },
                 (Some(r), None) => {
@@ -1293,26 +1772,30 @@ impl AcpDriver {
                     if let Some(u) = r.get("usage").filter(|u| u.is_object()) {
                         let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
                         step.push(DriverEvent::Usage(TurnTokenUsage {
-                            cost_usd: None,
                             input_tokens: n("inputTokens") + n("cachedReadTokens"),
                             output_tokens: n("outputTokens"),
                             cached_input_tokens: Some(n("cachedReadTokens")),
                             reasoning_tokens: Some(n("thoughtTokens")),
+                            cost_usd: None,
                         }));
                     }
                     let stop = serde_json::from_value::<PromptResponse>(r)
                         .map(|p| p.stop_reason)
                         .unwrap_or(StopReason::EndTurn);
-                    let (status, reason) = match stop {
-                        StopReason::Cancelled => (TurnTerminalStatus::Interrupted, None),
-                        StopReason::MaxTokens => {
-                            (TurnTerminalStatus::Completed, Some("max_tokens"))
+                    let (status, reason) = if was_cancelling {
+                        (TurnTerminalStatus::Interrupted, None)
+                    } else {
+                        match stop {
+                            StopReason::Cancelled => (TurnTerminalStatus::Interrupted, None),
+                            StopReason::MaxTokens => {
+                                (TurnTerminalStatus::Completed, Some("max_tokens"))
+                            }
+                            StopReason::MaxTurnRequests => {
+                                (TurnTerminalStatus::Completed, Some("max_turn_requests"))
+                            }
+                            StopReason::Refusal => (TurnTerminalStatus::Completed, Some("refusal")),
+                            _ => (TurnTerminalStatus::Completed, None),
                         }
-                        StopReason::MaxTurnRequests => {
-                            (TurnTerminalStatus::Completed, Some("max_turn_requests"))
-                        }
-                        StopReason::Refusal => (TurnTerminalStatus::Completed, Some("refusal")),
-                        _ => (TurnTerminalStatus::Completed, None),
                     };
                     DriverEvent::Terminal {
                         status,
@@ -1321,68 +1804,31 @@ impl AcpDriver {
                     }
                 }
                 (None, None) => DriverEvent::Terminal {
-                    status: TurnTerminalStatus::Completed,
+                    status: if was_cancelling {
+                        TurnTerminalStatus::Interrupted
+                    } else {
+                        TurnTerminalStatus::Completed
+                    },
                     failure: None,
                     reason: None,
                 },
             };
             step.push(ev);
-            self.turn_id = None;
+            self.state.autonomous = false;
+            self.state.turn_id = None;
         }
     }
-}
-
-/// A `select` config option that sets reasoning effort — agy's
-/// `thought_level` (category `thought_level`), grok's `reasoning_effort` —
-/// as `(configId, values)`.
-fn effort_config(o: &Value) -> Option<(String, Vec<String>)> {
-    let id = o.get("id")?.as_str()?;
-    let category = o.get("category").and_then(Value::as_str);
-    if !(matches!(id, "thought_level" | "reasoning_effort") || category == Some("thought_level"))
-        || o.get("type").and_then(Value::as_str) != Some("select")
-    {
-        return None;
-    }
-    // Options may come grouped (`{group, options: […]}`).
-    let mut values = Vec::new();
-    for entry in o.get("options")?.as_array()? {
-        let nested = entry.get("options").and_then(Value::as_array);
-        for v in nested.map_or_else(|| vec![entry], |n| n.iter().collect()) {
-            if let Some(v) = v.get("value").and_then(Value::as_str) {
-                values.push(v.to_string());
-            }
-        }
-    }
-    (!values.is_empty()).then(|| (id.to_string(), values))
 }
 
 /// Effort names low → high (agents list theirs in either order: grok
 /// advertises `xhigh, high, medium, low`).
 const EFFORT_RANK: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
-fn effort_rank(l: &str) -> usize {
-    EFFORT_RANK.iter().position(|r| *r == l).unwrap_or(2)
-}
-
 /// The agent's levels low → high (what the effort picker lists).
 fn effort_levels(levels: &[String]) -> Vec<String> {
     let mut out = levels.to_vec();
-    out.sort_by_key(|l| effort_rank(l));
+    out.sort_by_key(|l| EFFORT_RANK.iter().position(|r| r == l).unwrap_or(2));
     out
-}
-
-/// Otto's effort name as one of the agent's `levels`: the same name, else
-/// its lowest for `minimal` / its highest for `xhigh` / `max`.
-fn effort_value(levels: &[String], want: &str) -> Option<String> {
-    if levels.iter().any(|l| l == want) {
-        return Some(want.to_string());
-    }
-    let sorted = effort_levels(levels);
-    match want {
-        "minimal" => sorted.first().cloned(),
-        "xhigh" | "max" => sorted.last().cloned(),
-        _ => None,
-    }
 }
 
 /// An Otto context bundle as system-prompt text: its `AGENTS.md`, then an
@@ -1434,8 +1880,9 @@ fn bundle_prompt(dir: &std::path::Path) -> Option<String> {
 }
 
 /// `raw_input.command` as a display string (a string or an argv array).
-fn command_text(raw: Option<&Value>) -> Option<String> {
-    match raw?.get("command")? {
+pub(super) fn command_text(raw: Option<&Value>) -> Option<String> {
+    let raw = raw?;
+    match raw.get("command").or_else(|| raw.get("CommandLine"))? {
         Value::String(s) => Some(s.clone()),
         Value::Array(a) => Some(
             a.iter()
@@ -1447,36 +1894,37 @@ fn command_text(raw: Option<&Value>) -> Option<String> {
     }
 }
 
+fn raw_output_text(raw: Option<&Value>) -> Option<String> {
+    let raw = raw?;
+    if let Some(s) = raw.as_str() {
+        return (!s.is_empty()).then(|| s.to_string());
+    }
+    raw.get("output")
+        .or_else(|| raw.get("stdout"))
+        .or_else(|| raw.get("error"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 impl StructuredDriver for AcpDriver {
-    fn export_state(&self) -> Option<Value> {
-        serde_json::to_value(self).ok()
-    }
-
-    fn import_state(&mut self, state: Value) -> Result<(), DriverError> {
-        let mut restored: Self =
-            serde_json::from_value(state).map_err(|e| DriverError(e.to_string()))?;
-        restored.flavor = std::mem::take(&mut self.flavor);
-        *self = restored;
-        Ok(())
-    }
-
     fn provider(&self) -> RuntimeProvider {
         self.provider
     }
 
     /// The provider baseline, then what `initialize` / `session/new|load`
-    /// advertised: `promptCapabilities` and the effort config option.
+    /// advertised: `promptCapabilities`, the effort option, a `plan` mode.
     fn capabilities(&self) -> RuntimeCapabilities {
         let mut c = RuntimeCapabilities::for_provider(self.provider);
-        if self.phase == Phase::Ready {
-            c.images = self.images;
-            c.files = self.embedded;
-            c.efforts = self
-                .effort_option
-                .as_ref()
-                .map(|(_, l)| effort_levels(l))
-                .unwrap_or_default();
-            c.plan = self.modes.iter().any(|m| m == "plan");
+        if self.state.phase == Phase::Ready {
+            c.images = self.state.images;
+            c.files = self.state.embedded;
+            if self.flavor.effort_config_id.is_none() {
+                c.efforts.clear();
+            } else if !self.state.effort_options.is_empty() {
+                c.efforts = effort_levels(&self.state.effort_options);
+            }
+            c.plan = self.state.modes.iter().any(|m| m == "plan");
         }
         c
     }
@@ -1513,11 +1961,18 @@ impl StructuredDriver for AcpDriver {
     }
 
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
-        self.cwd = ctx.cwd.clone();
-        self.resume = ctx.resume.clone();
-        self.mcp_servers = ctx.mcp_servers.clone();
-        self.model = ctx.model.clone();
-        self.access = ctx.access_mode;
+        self.state.cwd = ctx.cwd.clone();
+        self.state.resume = ctx.resume.clone();
+        self.state.otto_session_id =
+            (!ctx.session_id.trim().is_empty()).then(|| ctx.session_id.clone());
+        if self.provider == RuntimeProvider::Agy {
+            if let Some(r) = ctx.resume.as_deref() {
+                self.state.note_agy_conv_id(r);
+            }
+        }
+        self.state.mcp_servers = ctx.mcp_servers.clone();
+        self.state.model = ctx.model.clone();
+        self.state.access = ctx.access_mode;
         let mut step = DriverStep::default();
         let mut init = InitializeRequest::new(ProtocolVersion::V1);
         if let Some(Value::Object(meta)) = &self.flavor.initialize_meta {
@@ -1527,35 +1982,32 @@ impl StructuredDriver for AcpDriver {
         let mut init = serde_json::to_value(init).expect("initialize serializes");
         init["clientCapabilities"]["elicitation"] = json!({"form":{}});
         let (id, line) = self.request(M_INITIALIZE, init);
-        self.init_id = id;
+        self.state.init_id = id;
         step.write(line);
         step
     }
 
     fn prompt(&mut self, turn_id: &str, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
-        if self.prompt_id.is_some() || self.queued.is_some() {
+        if self.state.prompt_id.is_some()
+            || self.state.queued.is_some()
+            || self.state.turn_id.is_some()
+        {
             return Err(DriverError("a prompt is already running".into()));
         }
         let name = self.provider.as_str();
-        let ready = self.phase == Phase::Ready;
-        if let Some(e) = &req.effort {
-            let takes = self
-                .effort_option
-                .as_ref()
-                .is_some_and(|(_, levels)| effort_value(levels, e).is_some());
-            if ready && !takes {
-                return Err(DriverError(format!(
-                    "{name} does not take reasoning effort {e}"
-                )));
-            }
+        if let Some(raw) = req.effort.as_deref().filter(|e| !e.trim().is_empty()) {
+            let next_opts = req.model.as_deref().and_then(|m| self.efforts_for_model(m));
+            let opts = next_opts.as_deref().unwrap_or(&self.state.effort_options);
+            self.resolve_effort_with(opts, raw)?;
         }
-        if ready && req.plan && !self.modes.iter().any(|m| m == "plan") {
+        let ready = self.state.phase == Phase::Ready;
+        if ready && req.plan && !self.state.modes.iter().any(|m| m == "plan") {
             return Err(DriverError(format!("{name} has no plan mode")));
         }
-        if ready && !req.images.is_empty() && !self.images {
+        if !req.images.is_empty() && !self.state.images {
             return Err(DriverError(format!("{name} does not accept images")));
         }
-        if ready && !req.files.is_empty() && !self.embedded {
+        if !req.files.is_empty() && !self.state.embedded {
             return Err(DriverError(format!(
                 "{name} does not accept file attachments"
             )));
@@ -1564,56 +2016,88 @@ impl StructuredDriver for AcpDriver {
         if ready {
             self.send_prompt(&mut step, turn_id.to_string(), req);
         } else {
-            self.turn_id = Some(turn_id.to_string());
-            self.queued = Some((turn_id.to_string(), req.clone()));
+            if self.switches_model_live() {
+                if let Some(m) = &req.model {
+                    self.state.model = Some(m.clone());
+                }
+            }
+            self.state.turn_id = Some(turn_id.to_string());
+            self.state.queued = Some((turn_id.to_string(), req.clone()));
         }
         Ok(step)
+    }
+
+    fn switches_model_live(&self) -> bool {
+        self.flavor.set_model || self.flavor.model_config_id.is_some()
     }
 
     /// Live only through an advertised `session/set_mode`, between modes
     /// that both have one.
     fn switches_access_live(&self, to: RuntimeAccessMode) -> bool {
         self.flavor.mode_id.is_some_and(|f| {
-            f(self.access).is_some() && f(to).is_some_and(|id| self.modes.iter().any(|m| m == id))
+            f(self.state.access).is_some()
+                && f(to).is_some_and(|id| self.state.modes.iter().any(|m| m == id))
         })
     }
 
     fn adopt_spec(&mut self, spec: &mut LaunchSpec) {
+        self.state.sideband.adopt_env(self.provider, &mut spec.env);
         let Some(var) = self.flavor.bundle_env else {
             return;
         };
         if let Some(i) = spec.env.iter().position(|(k, _)| k == var) {
             let (_, dir) = spec.env.remove(i);
-            self.system_append = bundle_prompt(std::path::Path::new(&dir));
+            self.state.system_append = bundle_prompt(std::path::Path::new(&dir));
         }
     }
 
     fn interrupt(&mut self) -> DriverStep {
         let mut step = DriverStep::default();
+        self.state.sideband.on_turn_settled();
         // ACP: the client answers every open permission request `cancelled`.
-        for (_, (rpc_id, _)) in self.questions.drain() {
+        for (_, (rpc_id, _)) in self.state.questions.drain() {
             step.write(
                 json!({"jsonrpc":"2.0","id":rpc_id,"result":{"action":"cancel"}}).to_string(),
             );
         }
-        let mut open: Vec<(String, Pending)> = self.pending.drain().collect();
+        let mut open: Vec<(String, Pending)> = self.state.pending.drain().collect();
         open.sort_by(|a, b| a.0.cmp(&b.0));
         for (_, p) in open {
             let resp = RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled);
             step.write(json!({"jsonrpc":"2.0","id":p.rpc_id,"result":resp}).to_string());
         }
-        if self.queued.take().is_some() {
+        if self.state.queued.take().is_some() {
+            self.state.cancelling = false;
+            self.state.autonomous = false;
+            self.state.turn_id = None;
             step.push(DriverEvent::Terminal {
                 status: TurnTerminalStatus::Interrupted,
                 failure: None,
                 reason: None,
             });
-        } else if let Some(sid) = &self.session_id {
-            let mut n = CancelNotification::new(sid.clone());
+        } else if let Some(sid) = self.state.session_id.clone() {
+            self.state.cancelling = self.state.prompt_id.is_some();
+            let mut n = CancelNotification::new(sid);
             if let Some(Value::Object(meta)) = &self.flavor.cancel_meta {
                 n.meta = Some(meta.clone());
             }
             step.write(json!({"jsonrpc":"2.0","method":M_SESSION_CANCEL,"params":n}).to_string());
+            if self.state.autonomous
+                && self.state.prompt_id.is_none()
+                && self.state.turn_id.is_some()
+            {
+                self.close_segment(&mut step);
+                self.settle_foreground_subagents(&mut step, TurnItemStatus::Interrupted);
+                self.retire_tools();
+                self.state.cancelling = false;
+                self.state.autonomous = false;
+                self.state.turn_id = None;
+                step.push(DriverEvent::Terminal {
+                    status: TurnTerminalStatus::Interrupted,
+                    failure: None,
+                    reason: None,
+                });
+            }
         }
         step
     }
@@ -1624,6 +2108,7 @@ impl StructuredDriver for AcpDriver {
         decision: ApprovalDecision,
     ) -> Result<DriverStep, DriverError> {
         let p = self
+            .state
             .pending
             .remove(request_id)
             .ok_or_else(|| DriverError(format!("unknown request {request_id}")))?;
@@ -1663,6 +2148,7 @@ impl StructuredDriver for AcpDriver {
         answers: &[otto_core::agent_runtime::QuestionAnswer],
     ) -> Result<DriverStep, DriverError> {
         let (rpc_id, questions) = self
+            .state
             .questions
             .get(request_id)
             .ok_or_else(|| DriverError("no such pending question".into()))?;
@@ -1692,7 +2178,7 @@ impl StructuredDriver for AcpDriver {
             json!({"jsonrpc":"2.0","id":rpc_id,"result":{"action":"accept","content":content}})
                 .to_string(),
         );
-        self.questions.remove(request_id);
+        self.state.questions.remove(request_id);
         Ok(step)
     }
 
@@ -1702,12 +2188,13 @@ impl StructuredDriver for AcpDriver {
         action: otto_core::agent_runtime::QuestionDismissAction,
     ) -> Result<DriverStep, DriverError> {
         let (rpc_id, _) = self
+            .state
             .questions
             .get(request_id)
             .ok_or_else(|| DriverError("no such pending question".into()))?;
         let mut step = DriverStep::default();
         step.write(json!({"jsonrpc":"2.0","id":rpc_id,"result":{"action":action}}).to_string());
-        self.questions.remove(request_id);
+        self.state.questions.remove(request_id);
         Ok(step)
     }
 
@@ -1733,15 +2220,30 @@ impl StructuredDriver for AcpDriver {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         match (method, id) {
             (Some(m), None) if m == M_SESSION_UPDATE => {
-                if let Ok(n) = serde_json::from_value::<SessionNotification>(params) {
-                    self.on_update(&mut step, n);
+                if let Some(up) = params.get("update") {
+                    self.update_effort_options(up);
+                }
+                if self.state.cancelling {
+                    return step;
+                }
+                let parent_cid = self.resolve_parent_subagent_call_id(&params);
+                let has_raw_status = params.pointer("/update/status").is_some();
+                match serde_json::from_value::<SessionNotification>(params.clone()) {
+                    Ok(n) => self.on_update(&mut step, n, has_raw_status, parent_cid.as_deref()),
+                    Err(_) => self.on_raw_update(&mut step, &params, parent_cid.as_deref()),
                 }
             }
             (Some(_), None) => {} // unknown notification
             (Some(m), Some(id)) if m == "elicitation/create" => {
+                if self.state.cancelling {
+                    step.write(
+                        json!({"jsonrpc":"2.0","id":id,"result":{"action":"cancel"}}).to_string(),
+                    );
+                    return step;
+                }
                 let parsed = if params.get("sessionId").and_then(Value::as_str)
-                    != self.session_id.as_deref()
-                    || self.session_id.is_none()
+                    != self.state.session_id.as_deref()
+                    || self.state.session_id.is_none()
                     || params.get("requestId").is_some()
                 {
                     Err("elicitation must belong to this live session".to_string())
@@ -1750,8 +2252,11 @@ impl StructuredDriver for AcpDriver {
                 };
                 match parsed {
                     Ok(questions) => {
+                        self.ensure_autonomous_turn(&mut step);
+                        self.close_segment(&mut step);
                         let request_id = format!("acp-question-{}", rpc_key(&id));
-                        self.questions
+                        self.state
+                            .questions
                             .insert(request_id.clone(), (id, questions.clone()));
                         step.push(DriverEvent::Question {
                             id: request_id,
@@ -1770,6 +2275,11 @@ impl StructuredDriver for AcpDriver {
                 }
             }
             (Some(m), Some(id)) if m == M_REQUEST_PERMISSION => {
+                if self.state.cancelling {
+                    let resp = RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled);
+                    step.write(json!({"jsonrpc":"2.0","id":id,"result":resp}).to_string());
+                    return step;
+                }
                 match serde_json::from_value::<RequestPermissionRequest>(params) {
                     Ok(req) => self.on_permission(&mut step, id, req),
                     Err(e) => step.write(
@@ -1798,12 +2308,127 @@ impl StructuredDriver for AcpDriver {
     }
 
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
-        self.pending.clear();
-        self.questions.clear();
-        self.tools.clear();
-        self.segment = None;
-        self.closed_named.clear();
+        self.state.pending.clear();
+        self.state.questions.clear();
+        self.state.tools.clear();
+        self.state.retired_tool_ids.clear();
+        self.state.bg_tasks.clear();
+        self.state.bg_meta.clear();
+        self.state.subagents.clear();
+        self.state.child_tools.clear();
+        self.state.finished_bg_ids.clear();
+        self.state.cancelling = false;
+        self.state.autonomous = false;
+        self.state.segment = None;
+        self.state.closed_named.clear();
+        self.state.sideband.on_turn_settled();
         DriverStep::default()
+    }
+
+    fn snapshot_state(&self) -> Value {
+        serde_json::to_value(&self.state).unwrap_or(Value::Null)
+    }
+
+    fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
+        if state.is_null() {
+            return Ok(());
+        }
+        let mut s: AcpDriverState = serde_json::from_value(state.clone())
+            .map_err(|e| DriverError(format!("invalid acp driver state: {e}")))?;
+        s.sideband.ensure_restored(self.provider);
+        s.mcp_servers = std::mem::take(&mut self.state.mcp_servers);
+        self.state = s;
+        Ok(())
+    }
+
+    fn needs_idle_turn_settle(&self) -> bool {
+        self.state.autonomous
+            && self.state.turn_id.is_some()
+            && self.state.prompt_id.is_none()
+            && self.state.pending.is_empty()
+            && self.state.questions.is_empty()
+            && !self.state.sideband.is_awaiting_followup()
+            && !self.state.tools.values().any(|t| {
+                matches!(
+                    t.status,
+                    ToolCallStatus::Pending | ToolCallStatus::InProgress
+                )
+            })
+    }
+
+    fn on_idle_settle(&mut self) -> DriverStep {
+        let mut step = DriverStep::default();
+        self.settle_expired_timers(&mut step, chrono::Utc::now());
+        if !self.needs_idle_turn_settle() {
+            return step;
+        }
+        self.settle_autonomous_now(&mut step, TurnTerminalStatus::Completed, None);
+        step
+    }
+
+    fn sideband_poll(&self) -> Option<SidebandPoll> {
+        self.build_sideband_poll()
+    }
+
+    fn sideband_resume_poll(&self, resume_id: &str, cwd: &str) -> Option<SidebandSource> {
+        self.state
+            .sideband
+            .resume_source(self.provider, cwd, resume_id)
+    }
+
+    fn init_sideband_resume(&mut self, seed: SidebandResumeSeed) {
+        self.state.sideband.init_resume(self.provider, seed);
+    }
+
+    fn on_sideband(&mut self, payload: SidebandPayload) -> DriverStep {
+        let mut step = DriverStep::default();
+        let ready_and_live = self.state.phase == Phase::Ready && !self.state.cancelling;
+
+        let primary_payload = match payload {
+            SidebandPayload::Batch {
+                primary,
+                tails,
+                timer_tick: _,
+            } => {
+                if ready_and_live {
+                    self.apply_active_tail_chunks(&mut step, tails);
+                    self.settle_expired_timers(&mut step, chrono::Utc::now());
+                }
+                primary.map(|p| *p)
+            }
+            other => {
+                if ready_and_live {
+                    self.settle_expired_timers(&mut step, chrono::Utc::now());
+                }
+                Some(other)
+            }
+        };
+
+        let Some(prim) = primary_payload else {
+            return step;
+        };
+        let has_open_subagent = self.state.subagents.values().any(|a| a.status.is_open());
+        let actions = self.state.sideband.on_payload(
+            self.provider,
+            self.state.session_id.as_deref(),
+            has_open_subagent,
+            prim,
+        );
+        if !ready_and_live {
+            return step;
+        }
+        if self.state.prompt_id.is_some() || self.state.queued.is_some() {
+            let child_actions: Vec<_> = actions
+                .into_iter()
+                .filter(|a| matches!(a, crate::acp_sideband::SidebandAction::ChildScope { .. }))
+                .collect();
+            if !child_actions.is_empty() {
+                self.apply_sideband_actions(&mut step, child_actions);
+            }
+            return step;
+        }
+        self.apply_sideband_actions(&mut step, actions);
+        step
     }
 }
 
@@ -1901,8 +2526,10 @@ mod tests {
         assert_eq!(w[1]["method"], "session/prompt");
         // grok lists high → low; `max` is its top level, the picker sorts low → high.
         assert_eq!(
-            effort_value(&["xhigh".into(), "high".into(), "low".into()], "max").as_deref(),
-            Some("xhigh")
+            AcpDriver::grok()
+                .resolve_effort_with(&["xhigh".into(), "high".into(), "low".into()], "max")
+                .unwrap(),
+            "xhigh"
         );
         assert_eq!(
             effort_levels(&["xhigh".into(), "high".into(), "low".into()]),
@@ -2108,6 +2735,7 @@ mod tests {
             images: vec![otto_core::agent_runtime::PromptImage {
                 mime: "image/png".into(),
                 data_base64: "AAAA".into(),
+                name: None,
             }],
             ..RuntimePromptReq::of("look")
         };
@@ -2398,7 +3026,7 @@ mod tests {
     fn form_elicitation_preserves_values_and_rejects_wrong_session() {
         use otto_core::agent_runtime::QuestionAnswer;
         let mut d = AcpDriver::gemini("gemini");
-        d.session_id = Some("s1".into());
+        d.state.session_id = Some("s1".into());
         let form = json!({"jsonrpc":"2.0","id":7,"method":"elicitation/create","params":{"sessionId":"s1","mode":"form","message":"Choose","requestedSchema":{"type":"object","properties":{"strategy":{"type":"string","oneOf":[{"const":"safe_v1","title":"Safe"}]}},"required":["strategy"]}}});
         let s = d.on_line(&form.to_string());
         let DriverEvent::Question { id, .. } = &s.events[0] else {
@@ -2430,7 +3058,7 @@ mod tests {
     fn a_choice_with_an_other_field_is_one_question_answered_either_way() {
         use otto_core::agent_runtime::QuestionAnswer;
         let mut d = AcpDriver::gemini("gemini");
-        d.session_id = Some("s1".into());
+        d.state.session_id = Some("s1".into());
         let form = |id: u64| {
             json!({"jsonrpc":"2.0","id":id,"method":"elicitation/create","params":{"sessionId":"s1","mode":"form","message":"Pick a database","requestedSchema":{"type":"object","properties":{
                 "q0":{"type":"string","description":"Which database?","enum":["Postgres","MySQL"]},
@@ -2476,7 +3104,7 @@ mod tests {
     fn required_unconstrained_acp_fields_keep_empty_values() {
         use otto_core::agent_runtime::QuestionAnswer;
         let mut d = AcpDriver::gemini("gemini");
-        d.session_id = Some("s1".into());
+        d.state.session_id = Some("s1".into());
         let step = d.on_line(&json!({"jsonrpc":"2.0","id":"empty-form","method":"elicitation/create","params":{"sessionId":"s1","mode":"form","requestedSchema":{"type":"object","properties":{"tags":{"type":"array","items":{"type":"string","enum":["api"]}},"name":{"type":"string"}},"required":["tags","name"]}}}).to_string());
         let DriverEvent::Question { id, .. } = &step.events[0] else {
             panic!("missing question")
@@ -2587,5 +3215,389 @@ mod tests {
         d.on_line(&update("agent_thought_chunk", "hm", None));
         let y = last_item(&d.on_line(&update("agent_message_chunk", "y", None)));
         assert_ne!(x.id, y.id);
+    }
+
+    #[test]
+    fn autonomous_wakeup_turns_track_background_tasks_and_idle_settle_cleanly() {
+        let mut d = AcpDriver::agy("agy");
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+
+        // Turn 1 schedules a timer + spawns a background command, then finishes.
+        let p1 = d.prompt("t1", &RuntimePromptReq::of("monitor")).unwrap();
+        let pid = sent(&p1, 0)["id"].clone();
+        d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"tool_call","toolCallId":"sc1","title":"schedule","kind":"other","status":"pending",
+                "rawInput":{"DurationSeconds":30,"Prompt":"check deploy"}
+            }}})
+            .to_string(),
+        );
+        let bg = d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"tool_call_update","toolCallId":"sc1","status":"completed"
+            }}})
+            .to_string(),
+        );
+        assert!(bg.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::BackgroundTasks(tasks)
+                if tasks.len() == 1 && tasks[0].kind == "timer" && tasks[0].label.contains("check deploy")
+        )));
+        d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"tool_call","toolCallId":"cmd1","title":"run_command","kind":"execute","status":"pending",
+                "rawInput":{"CommandLine":"npm test"}
+            }}})
+            .to_string(),
+        );
+        let bg2 = d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"tool_call_update","toolCallId":"cmd1","status":"completed",
+                "content":[{"type":"content","content":{"type":"text","text":"Command is running in background task with task id: task_42."}}]
+            }}})
+            .to_string(),
+        );
+        assert!(bg2.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::BackgroundTasks(tasks) if tasks.len() == 2 && tasks.iter().any(|t| t.id == "task_42")
+        )));
+        d.on_line(
+            &json!({"jsonrpc":"2.0","id":pid,"result":{"stopReason":"end_turn"}}).to_string(),
+        );
+        assert!(!d.needs_idle_turn_settle());
+
+        // Autonomous wakeup #1 arrives with no session/prompt RPC.
+        let w1 = d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Timer fired"}
+            }}})
+            .to_string(),
+        );
+        assert!(w1
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::BackgroundTasks(tasks) if tasks.is_empty())));
+        assert!(w1
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::TurnStarted { turn_id } if turn_id == "auto-1")));
+        assert!(d.needs_idle_turn_settle());
+
+        // While a tool call is pending in the autonomous turn, do NOT idle-settle early.
+        d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"tool_call","toolCallId":"t_auto","title":"ls","kind":"execute","status":"in_progress"
+            }}})
+            .to_string(),
+        );
+        assert!(!d.needs_idle_turn_settle());
+        d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"tool_call_update","toolCallId":"t_auto","status":"completed"
+            }}})
+            .to_string(),
+        );
+        // Raw ACP v2 message variant + unrecognized experimental variant are handled safely.
+        let msg = d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"agent_message","content":[{"type":"text","text":"Deploy healthy!"}]
+            }}})
+            .to_string(),
+        );
+        assert!(msg.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if i.id.starts_with("auto-1:")
+                    && matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "Deploy healthy!")
+        )));
+        assert!(d
+            .on_line(
+                &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                    "sessionUpdate":"experimental_heartbeat","seq":1
+                }}})
+                .to_string(),
+            )
+            .events
+            .is_empty());
+
+        assert!(d.needs_idle_turn_settle());
+        let settled = d.on_idle_settle();
+        assert!(settled.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == "Deploy healthy!")
+        )));
+        assert!(settled.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
+        assert!(!d.needs_idle_turn_settle());
+
+        // Second autonomous wakeup 20 minutes later opens auto-2 cleanly.
+        let w2 = d.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{
+                "sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Wakeup 2"}
+            }}})
+            .to_string(),
+        );
+        assert!(w2
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::TurnStarted { turn_id } if turn_id == "auto-2")));
+    }
+
+    #[test]
+    fn agy_switches_model_live_and_clamps_thought_level_effort_to_advertised_options() {
+        let mut d = AcpDriver::agy("agy");
+        assert!(d.switches_model_live());
+        assert!(!AcpDriver::gemini("gemini").switches_model_live());
+        assert!(!AcpDriver::grok().switches_model_live());
+        assert!(AcpDriver::opencode().switches_model_live());
+
+        let c = LaunchContext {
+            mcp_servers: Vec::new(),
+            session_id: "s".into(),
+            cwd: "/w".into(),
+            model: Some("gemini-4-argon-medium".into()),
+            resume: None,
+            sandboxed: false,
+            access_mode: RuntimeAccessMode::ApprovalRequired,
+        };
+        d.start(&c);
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "sessionId": "s1",
+                    "modes": {"currentModeId": "default", "availableModes": [{"id": "default"}]},
+                    "configOptions": [{
+                        "id": "thought_level",
+                        "options": [{"value": "low"}, {"value": "medium"}, {"value": "high"}]
+                    }]
+                }
+            })
+            .to_string(),
+        );
+
+        let req = RuntimePromptReq {
+            model: Some("gemini-4-argon-high".into()),
+            effort: Some("max".into()),
+            ..RuntimePromptReq::of("think")
+        };
+        let s = d.prompt("t1", &req).unwrap();
+        assert_eq!(s.writes.len(), 3);
+        assert_eq!(sent(&s, 0)["method"], "session/set_model");
+        assert_eq!(sent(&s, 0)["params"]["modelId"], "gemini-4-argon-high");
+        assert_eq!(sent(&s, 1)["method"], "session/set_config_option");
+        assert_eq!(sent(&s, 1)["params"]["configId"], "thought_level");
+        assert_eq!(sent(&s, 1)["params"]["value"], "high");
+        assert_eq!(sent(&s, 2)["method"], "session/prompt");
+
+        // Switching to a unified family (`gemini-4-hydrogen`) that advertises
+        // `xhigh` in `models.availableModels` updates `effort_options` before
+        // resolving `thought_level`, so `xhigh` is preserved without clamping
+        // to the previous family's `high` ceiling.
+        let mut d2 = AcpDriver::agy("agy");
+        d2.start(&ctx(Some("gemini-4-carbon")));
+        d2.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d2.on_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "sessionId": "s2",
+                    "models": {"availableModels": [
+                        {"modelId": "gemini-4-carbon-low"},
+                        {"modelId": "gemini-4-carbon-medium"},
+                        {"modelId": "gemini-4-carbon-high"},
+                        {"modelId": "gemini-4-hydrogen-low"},
+                        {"modelId": "gemini-4-hydrogen-medium"},
+                        {"modelId": "gemini-4-hydrogen-high"},
+                        {"modelId": "gemini-4-hydrogen-xhigh"},
+                        {"modelId": "gemini-4-flash-minimal"},
+                        {"modelId": "gemini-4-flash-ultra"},
+                        {"modelId": "gemini-pro-orchestrator"}
+                    ]},
+                    "configOptions": [{
+                        "id": "thought_level",
+                        "options": [{"value": "low"}, {"value": "medium"}, {"value": "high"}]
+                    }]
+                }
+            })
+            .to_string(),
+        );
+        let s2 = d2
+            .prompt(
+                "t2",
+                &RuntimePromptReq {
+                    model: Some("gemini-4-hydrogen".into()),
+                    effort: Some("xhigh".into()),
+                    ..RuntimePromptReq::of("deep")
+                },
+            )
+            .unwrap();
+        assert_eq!(sent(&s2, 0)["method"], "session/set_model");
+        assert_eq!(sent(&s2, 0)["params"]["modelId"], "gemini-4-hydrogen");
+        assert_eq!(sent(&s2, 1)["method"], "session/set_config_option");
+        assert_eq!(sent(&s2, 1)["params"]["value"], "xhigh");
+        let p2_id = sent(&s2, 2)["id"].clone();
+        d2.on_line(
+            &json!({"jsonrpc":"2.0","id":p2_id,"result":{"stopReason":"end_turn"}}).to_string(),
+        );
+
+        // Switching to an untiered model (`gemini-pro-orchestrator`) clears
+        // stale `xhigh` options and omits unsupported `thought_level` writes.
+        let s3 = d2
+            .prompt(
+                "t3",
+                &RuntimePromptReq {
+                    model: Some("gemini-pro-orchestrator".into()),
+                    effort: Some("xhigh".into()),
+                    ..RuntimePromptReq::of("orchestrate")
+                },
+            )
+            .unwrap();
+        assert_eq!(s3.writes.len(), 2);
+        assert_eq!(sent(&s3, 0)["method"], "session/set_model");
+        assert_eq!(sent(&s3, 0)["params"]["modelId"], "gemini-pro-orchestrator");
+        assert_eq!(sent(&s3, 1)["method"], "session/prompt");
+        let p3_id = sent(&s3, 1)["id"].clone();
+        d2.on_line(
+            &json!({"jsonrpc":"2.0","id":p3_id,"result":{"stopReason":"end_turn"}}).to_string(),
+        );
+
+        // Switching to `-minimal` / `-ultra` variants maps to canonical `low` / `max`,
+        // and launching directly with a unified model (`LaunchContext.model`) resolves
+        // its family effort options during `session/new`.
+        let mut d3 = AcpDriver::agy("agy");
+        d3.start(&ctx(Some("gemini-4-flash")));
+        d3.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d3.on_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "sessionId": "s3",
+                    "models": {"availableModels": [
+                        {"modelId": "gemini-4-flash-minimal"},
+                        {"modelId": "gemini-4-flash-ultra"}
+                    ]}
+                }
+            })
+            .to_string(),
+        );
+        let s4 = d3
+            .prompt(
+                "t4",
+                &RuntimePromptReq {
+                    effort: Some("ultra".into()),
+                    ..RuntimePromptReq::of("fast-max")
+                },
+            )
+            .unwrap();
+        assert_eq!(sent(&s4, 0)["method"], "session/set_config_option");
+        assert_eq!(sent(&s4, 0)["params"]["value"], "max");
+    }
+
+    #[test]
+    fn snapshot_and_restore_preserve_cancel_barrier_and_drop_stale_pre_cancel_deltas() {
+        let mut d1 = AcpDriver::agy("agy");
+        d1.start(&ctx(None));
+        d1.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":true}}}}"#);
+        d1.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s-cancel"}}"#);
+
+        let p1 = d1.prompt("t1", &RuntimePromptReq::of("work")).unwrap();
+        let prompt_id = sent(&p1, 0)["id"].clone();
+        d1.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-cancel","update":{
+                "sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Before cancel"}
+            }}})
+            .to_string(),
+        );
+        let cancel_step = d1.interrupt();
+        assert_eq!(sent(&cancel_step, 0)["method"], "session/cancel");
+
+        // Snapshot mid-cancel and restore into a fresh driver instance.
+        let snap = d1.snapshot_state();
+        let mut d2 = AcpDriver::agy("agy");
+        d2.restore_state(&snap).unwrap();
+
+        // Stale pre-cancel delta and late permission request arriving before the
+        // cancelled prompt response must be dropped/cancelled cleanly.
+        let stale = d2.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-cancel","update":{
+                "sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" STALE"}
+            }}})
+            .to_string(),
+        );
+        assert!(
+            stale.events.is_empty(),
+            "stale pre-cancel delta must be dropped"
+        );
+
+        let late_perm = d2.on_line(
+            r#"{"jsonrpc":"2.0","id":"p-late","method":"session/request_permission","params":{"sessionId":"s-cancel","toolCall":{"toolCallId":"c1","kind":"execute","title":"ls"},"options":[]}}"#,
+        );
+        assert!(late_perm.events.is_empty());
+        assert_eq!(
+            sent(&late_perm, 0)["result"]["outcome"]["outcome"],
+            "cancelled"
+        );
+
+        // Cancelled prompt settles as Interrupted even if agent returns end_turn.
+        let done = d2.on_line(
+            &json!({"jsonrpc":"2.0","id":prompt_id,"result":{"stopReason":"end_turn"}}).to_string(),
+        );
+        assert!(done.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Interrupted,
+                ..
+            }
+        )));
+
+        // Next prompt starts cleanly with preserved image capability and fresh text.
+        let p2 = d2
+            .prompt(
+                "t2",
+                &RuntimePromptReq {
+                    images: vec![otto_core::agent_runtime::PromptImage {
+                        mime: "image/png".into(),
+                        data_base64: "AAAA".into(),
+                        name: None,
+                    }],
+                    ..RuntimePromptReq::of("steered follow-up")
+                },
+            )
+            .unwrap();
+        let next_id = sent(&p2, 0)["id"].clone();
+        let fresh = d2.on_line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-cancel","update":{
+                "sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Fresh reply"}
+            }}})
+            .to_string(),
+        );
+        assert!(fresh.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "Fresh reply")
+        )));
+        let fin2 = d2.on_line(
+            &json!({"jsonrpc":"2.0","id":next_id,"result":{"stopReason":"end_turn"}}).to_string(),
+        );
+        assert!(fin2.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
     }
 }

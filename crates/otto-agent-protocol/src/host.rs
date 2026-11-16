@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use otto_core::agent_runtime::{RuntimeAccessMode, RuntimeEvent, RuntimeSession};
+use otto_core::agent_runtime::{RuntimeAccessMode, RuntimeEvent, RuntimeProvider, RuntimeSession};
 use otto_core::domain::{Session, SessionKind, SessionStatus, Workspace};
 use otto_core::event::Event;
 use otto_core::{Id, Result};
@@ -45,21 +45,31 @@ pub trait RuntimeHost: Send + Sync + 'static {
         RuntimeAccessMode::ApprovalRequired
     }
 
-    /// Deliver one event to WebSocket clients (owner / admin / root).
-    fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>);
-
-    /// Where structured children run detached ([`otto_pty::stdio_holder`])
-    /// so they outlive a daemon restart. `None` = plain children of the
-    /// daemon.
-    fn stdio_holders(&self) -> Option<otto_pty::HolderConfig> {
+    /// Resolve a custom provider slug (e.g. `"claudework"`) to its underlying
+    /// structured [`RuntimeProvider`] when enabled in `ProviderRegistry`.
+    fn resolve_custom_provider(&self, _slug: &str) -> Option<RuntimeProvider> {
         None
     }
 
-    /// Whether children should survive the next restart (spawned held,
-    /// detached on shutdown) — Settings › session persistence.
-    async fn keep_children(&self) -> bool {
-        self.stdio_holders().is_some()
+    /// Whether `slug` (built-in or custom) is enabled in `ProviderRegistry`.
+    /// Defaults to `true` for unit tests without a registry.
+    fn is_provider_enabled(&self, _slug: &str) -> bool {
+        true
     }
+
+    /// Resolved custom `CLAUDE_CONFIG_DIR` for a Claude-family provider `slug`
+    /// (including wrapper-script / `~/.zshrc` alias inference).
+    fn claude_config_dir_for(&self, _slug: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// Whether session persistence across daemon restarts is enabled.
+    async fn session_persistence_enabled(&self) -> bool {
+        true
+    }
+
+    /// Deliver one event to WebSocket clients (owner / admin / root).
+    fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>);
 }
 
 /// The synthetic PTY-shaped [`Session`] the safety helpers read (never
@@ -81,7 +91,7 @@ pub fn as_agent_session(s: &RuntimeSession) -> Session {
         id: s.id.clone(),
         workspace_id: s.workspace_id.clone(),
         kind: SessionKind::Agent,
-        provider: s.provider.as_str().to_string(),
+        provider: s.provider_slug().to_string(),
         title: s.title.clone(),
         status: SessionStatus::Running,
         cwd: s.cwd.clone(),
@@ -101,9 +111,6 @@ pub struct SessionManagerHost {
     pub workspaces: WorkspacesRepo,
     /// Publishes on the WS streaming path (otto-server's `publish_stream`).
     pub publish: Box<dyn Fn(Event) + Send + Sync>,
-    /// `<data_dir>/rt-holders`, started like the PTY holders
-    /// (`ottod pty-holder`); `None` when the daemon has none.
-    pub holders: Option<otto_pty::HolderConfig>,
 }
 
 #[async_trait::async_trait]
@@ -172,13 +179,20 @@ impl RuntimeHost for SessionManagerHost {
         }
     }
 
-    fn stdio_holders(&self) -> Option<otto_pty::HolderConfig> {
-        self.holders.clone()
+    fn resolve_custom_provider(&self, slug: &str) -> Option<RuntimeProvider> {
+        self.manager.providers().runtime_provider_for(slug)
     }
 
-    /// The setting that keeps terminal sessions alive keeps threads too.
-    async fn keep_children(&self) -> bool {
-        self.holders.is_some() && self.manager.persistence_enabled().await
+    fn is_provider_enabled(&self, slug: &str) -> bool {
+        self.manager.providers().is_enabled(slug)
+    }
+
+    fn claude_config_dir_for(&self, slug: &str) -> Option<std::path::PathBuf> {
+        self.manager.claude_config_dir_for(slug)
+    }
+
+    async fn session_persistence_enabled(&self) -> bool {
+        self.manager.session_persistence_enabled().await
     }
 
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>) {

@@ -112,6 +112,94 @@ fn context_injection(
     hook.before_spawn(ws, cwd, provider)
 }
 
+/// Rewrite a structured driver's `spec` when `session.provider` resolves to a
+/// custom or overridden [`crate::providers::ProviderSpec`] (e.g. `claudework` ->
+/// `claude-work`). Strips PTY-only `--session-id`/`--resume` flags and strips
+/// unconditional skip-permissions flags unless the structured runtime session's
+/// `RuntimeAccessMode` (`FullAccess`) already requested skip-permissions.
+fn apply_custom_provider_spec(
+    pspec: Option<&crate::providers::ProviderSpec>,
+    session: &Session,
+    spec: &mut CommandSpec,
+    tail_args: &[String],
+) -> bool {
+    let Some(pspec) = pspec.filter(|p| p.shell_fallback) else {
+        return false;
+    };
+    let is_skip_flag = |a: &str| {
+        matches!(
+            a,
+            "--dangerously-skip-permissions"
+                | "--dangerously-bypass-approvals-and-sandbox"
+                | "--yolo"
+                | "--always-approve"
+                | "--auto"
+        )
+    };
+    let driver_allows_skip = spec
+        .args
+        .iter()
+        .chain(tail_args.iter())
+        .any(|a| is_skip_flag(a.as_str()));
+    let driver_sets_perm_mode = spec
+        .args
+        .iter()
+        .chain(tail_args.iter())
+        .any(|a| a == "--permission-mode" || a.starts_with("--permission-mode="));
+    spec.program = crate::providers::expand_template(&pspec.cmd, &session.id, &session.cwd);
+    let home = otto_transcript::roots::home_dir();
+    for (k, v) in &pspec.env {
+        let expanded = crate::providers::expand_template(v, &session.id, &session.cwd);
+        let expanded = if expanded.starts_with("~/") || expanded == "~" {
+            otto_transcript::claude_config::expand_home_path(&expanded, &home)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(expanded)
+        } else {
+            expanded
+        };
+        spec.env.retain(|(ek, _)| ek != k);
+        spec.env.push((k.clone(), expanded));
+    }
+    let mut prefix = Vec::with_capacity(pspec.args.len());
+    let mut i = 0;
+    while i < pspec.args.len() {
+        let raw = &pspec.args[i];
+        if raw == "--session-id"
+            || raw == "--resume"
+            || raw == "--conversation"
+            || (driver_sets_perm_mode && raw == "--permission-mode")
+        {
+            i += 2;
+            continue;
+        }
+        if raw.starts_with("--session-id=")
+            || raw.starts_with("--resume=")
+            || raw.starts_with("--conversation=")
+            || (driver_sets_perm_mode && raw.starts_with("--permission-mode="))
+        {
+            i += 1;
+            continue;
+        }
+        let expanded = crate::providers::expand_template(raw, &session.id, &session.cwd);
+        if is_skip_flag(&expanded)
+            && (!driver_allows_skip
+                || driver_sets_perm_mode
+                || spec.args.contains(&expanded)
+                || prefix.contains(&expanded))
+        {
+            i += 1;
+            continue;
+        }
+        prefix.push(expanded);
+        i += 1;
+    }
+    if !prefix.is_empty() {
+        prefix.extend(std::mem::take(&mut spec.args));
+        spec.args = prefix;
+    }
+    true
+}
+
 impl SessionManager {
     /// Prepare `spec` (the runtime driver's launch command) for spawning as
     /// agent session `session` in `ws`. `tail_args` go after the context
@@ -152,15 +240,24 @@ impl SessionManager {
         let unconfined = !read_only && !self.process_sandbox_enabled().await;
         self.check_session_cwd(ws, &session.cwd, unconfined)?;
         let _ = std::fs::create_dir_all(&session.cwd);
+        let cli_family = self.cli_family(&session.provider);
+        let custom_spec = self.providers.get(&session.provider);
+        let shell_fallback =
+            apply_custom_provider_spec(custom_spec.as_ref(), session, spec, &tail_args);
         // A named account's CLI keeps trust in its own home (as `create`).
         if account.is_none() {
-            crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
+            crate::trust::ensure_trusted_with_claude_dir_async(
+                &cli_family,
+                &session.cwd,
+                self.claude_config_dir_for(&session.provider),
+            )
+            .await;
         }
         // MCP before the context hook — the PTY spawn's order.
         let _mcp_activation = crate::mcp::activation_gate().read().await;
         let protocol_mcp = match delivery {
             RuntimeMcpDelivery::Launcher => {
-                self.apply_launcher_mcp(session, spec).await;
+                self.apply_launcher_mcp(session, &cli_family, spec).await;
                 Vec::new()
             }
             RuntimeMcpDelivery::Protocol => self.protocol_mcp_servers(session).await,
@@ -169,7 +266,7 @@ impl SessionManager {
             let hook = Arc::clone(hook);
             let ws_owned = ws.clone();
             let cwd = session.cwd.clone();
-            let prov = session.provider.clone();
+            let prov = cli_family.clone();
             let persona = carries_persona(&session.meta);
             // A named account gets its bundle scoped to its home (`create`).
             let context = account
@@ -192,9 +289,17 @@ impl SessionManager {
         // what its terminal spawn adds; `read_only_strip` has nothing to drop
         // from a structured driver's argv.
         spec.args
-            .extend(cli_flags::read_only_args(&session.provider, &session.meta));
-        // A subcommand that must follow the injected top-level flags.
-        spec.args.extend(tail_args);
+            .extend(cli_flags::read_only_args(&cli_family, &session.meta));
+        // A subcommand that must follow the injected top-level flags (unless a
+        // custom provider spec already carried it).
+        if !tail_args.is_empty()
+            && !spec
+                .args
+                .windows(tail_args.len())
+                .any(|w| w == tail_args.as_slice())
+        {
+            spec.args.extend(tail_args);
+        }
         // The PTY spawn's build budget (`manager/resources.rs`); priority and
         // admission stay with the runtime, which spawns the child itself.
         self.apply_machine_budget(session, spec).await;
@@ -215,6 +320,14 @@ impl SessionManager {
                 .insert(session.id.clone(), exit_tx);
         }
         self.networks.activate(session.id.clone(), network, exit_rx);
+        // Wrap shell aliases/functions (e.g. `claude-work` in `~/.zshrc`) BEFORE
+        // Seatbelt so the outer sandbox wraps the login shell cleanly.
+        if shell_fallback && !crate::providers::resolves_on_path(&spec.program) {
+            let (prog, wrapped_args) =
+                crate::providers::shell_wrapped(&spec.program, std::mem::take(&mut spec.args));
+            spec.program = prog;
+            spec.args = wrapped_args;
+        }
         // Last, over the fully-built spec — as `create` does.
         self.apply_sandbox(spec, session).await;
         Ok(protocol_mcp)
@@ -222,7 +335,12 @@ impl SessionManager {
 
     /// [`RuntimeMcpDelivery::Launcher`]: the PTY spawn's MCP steps, plus
     /// `--mcp-config` for Claude.
-    async fn apply_launcher_mcp(&self, session: &Session, spec: &mut CommandSpec) {
+    async fn apply_launcher_mcp(
+        &self,
+        session: &Session,
+        cli_family: &str,
+        spec: &mut CommandSpec,
+    ) {
         let otto_tools = self.maybe_enable_otto_tools(session).await;
         let codex_otto = !otto_tools.args.is_empty();
         spec.args.extend(otto_tools.args);
@@ -231,7 +349,7 @@ impl SessionManager {
             .sync_workspace_mcp(session, otto_tools.server, codex_otto)
             .await;
         spec.args.extend(codex_user_args);
-        if session.provider != "claude" {
+        if cli_family != "claude" {
             return;
         }
         let cwd = session.cwd.clone();

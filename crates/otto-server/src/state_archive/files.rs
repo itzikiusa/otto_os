@@ -27,6 +27,7 @@ pub const DATA_ROOTS: &[&str] = &[
     "scheduled",
     "personal",
     "insights",
+    "ide-plugins",
 ];
 /// The Design Hall blob store (`<data>/design/blobs/<sha256>`), relative to
 /// the data dir. NOT a [`DATA_ROOTS`] entry — it is never walked wholesale:
@@ -256,6 +257,10 @@ fn walk(
         if name == ".otto-sync" {
             continue;
         }
+        if root.id == "data-ide-plugins" && path == "state.json" {
+            excluded.push("file data-ide-plugins/state.json: host plugin enablement state".into());
+            continue;
+        }
         if excluded_name(&name) {
             excluded.push(format!(
                 "file {}/{}: credentials or repository metadata",
@@ -366,9 +371,15 @@ pub fn validate_files(archive: &StateArchive) -> ApiResult<()> {
         if !roots.contains_key(file.root.as_str()) {
             return Err(invalid("File refers to an unknown archive root"));
         }
-        if relative(&file.path)?.iter().any(|part| excluded_name(part)) {
+        let parts = relative(&file.path)?;
+        if parts.iter().any(|part| excluded_name(part)) {
             return Err(invalid(
                 "Credential files and Git metadata cannot be imported",
+            ));
+        }
+        if file.root == "data-ide-plugins" && file.path == "state.json" {
+            return Err(invalid(
+                "Host IDE plugin enablement state cannot be imported",
             ));
         }
         // Design blobs restore under their content hash only.
@@ -392,6 +403,18 @@ pub fn validate_files(archive: &StateArchive) -> ApiResult<()> {
             .map_err(|_| invalid("Invalid archive file encoding"))?;
         if bytes.len() > MAX_FILE_BYTES || digest(&bytes) != file.sha256 {
             return Err(invalid("Archive asset hash/size validation failed"));
+        }
+        if file.root == "data-ide-plugins" && parts.len() == 2 && parts[1] == "otto-ide-plugin.json"
+        {
+            if let Ok(manifest) = serde_json::from_slice::<Value>(&bytes) {
+                if let Some(slug) = manifest.get("slug").and_then(Value::as_str) {
+                    if slug != parts[0] {
+                        return Err(invalid(
+                            "IDE plugin manifest slug must match its directory name",
+                        ));
+                    }
+                }
+            }
         }
     }
     Ok(())

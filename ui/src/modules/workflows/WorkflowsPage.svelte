@@ -52,6 +52,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { RunInputForm } from './runInputForm.svelte';
   import RunInputPanel from './RunInputPanel.svelte';
+  import { workflowsUi } from './workflowsUiState.svelte';
   import type {
     Workflow,
     WorkflowGraph,
@@ -81,8 +82,6 @@
   let dirty = $state(false);
   let savingGraph = $state(false);
 
-  let prompt = $state('');
-  let generating = $state(false);
   /** Only while the run POST is in flight (double-click guard). It used to stay
    *  set until the started run finished — hours for agent steps — disabling Run
    *  on EVERY workflow and pointing the header's Cancel at whatever run was on
@@ -100,13 +99,11 @@
   // that the trigger emits to the graph.
   let paletteOpen = $state(false);
   let templatesOpen = $state(false);
-  let triggersOpen = $state(false);
   let triggers = $state<WorkflowTrigger[]>([]);
 
   // Instructions editor: standing free-text guidance every step follows,
   // distinct from `description`. Saved via an explicit action (like graph
   // Save), not tied into the canvas's `dirty` flag.
-  let instructionsOpen = $state(false);
   let wfInstructions = $state('');
   let savingInstructions = $state(false);
 
@@ -368,8 +365,8 @@
     items.push(
       { label: 'Runs', icon: 'clock', title: 'Past and live runs of this workflow', action: () => { popRight = 8; popOpener = opener; runsOpen = true; void loadRuns(); } },
       { separator: true },
-      { label: 'Instructions', checked: instructionsOpen, title: 'Standing rules every step follows, by the letter', action: () => (instructionsOpen = !instructionsOpen) },
-      { label: 'Triggers', checked: triggersOpen, title: 'Configure what starts this workflow', action: () => (triggersOpen = !triggersOpen) },
+      { label: 'Instructions', checked: workflowsUi.instructionsOpen, title: 'Standing rules every step follows, by the letter', action: () => (workflowsUi.instructionsOpen = !workflowsUi.instructionsOpen) },
+      { label: 'Triggers', checked: workflowsUi.triggersOpen, title: 'Configure what starts this workflow', action: () => (workflowsUi.triggersOpen = !workflowsUi.triggersOpen) },
       { label: 'Versions', checked: versionsOpen, title: 'Version history', action: () => { versionsOpen = !versionsOpen; if (versionsOpen) void loadVersions(); } },
       ...(viewport.isDesktop
         ? [{
@@ -463,7 +460,8 @@
     current = wf;
     const g = structuredClone($state.snapshot(wf.graph)) as WorkflowGraph;
     graph = g && g.nodes ? g : { nodes: [], edges: [] };
-    selectedId = null;
+    const savedNode = workflowsUi.selectedNodeByWorkflow.get(wf.id) ?? null;
+    selectedId = savedNode && graph.nodes.some((n) => n.id === savedNode) ? savedNode : null;
     selectedEdgeId = null;
     mon.run = null;
     runsOpen = false;
@@ -480,6 +478,10 @@
     void loadRuns();
     dirty = false;
   }
+
+  $effect(() => {
+    if (current) workflowsUi.selectedNodeByWorkflow.set(current.id, selectedId);
+  });
 
   /** Opening another workflow (or restoring a version) replaces the canvas,
    *  so unsaved node/edge edits would vanish silently — ask first. */
@@ -499,21 +501,11 @@
   }
 
   async function generate(): Promise<void> {
-    if (generating || prompt.trim() === '') return;
-    generating = true;
-    try {
-      const wf = await api.post<Workflow>(`/workspaces/${ws.currentId}/workflows/generate`, {
-        description: prompt.trim(),
-      });
-      workflows = [wf, ...workflows];
-      open(wf);
-      prompt = '';
-      toasts.success('Workflow generated', 'Tweak it on the canvas, then run.');
-    } catch (e) {
-      toastError('Couldn’t generate the workflow', e);
-    } finally {
-      generating = false;
-    }
+    const wsId = ws.currentId;
+    const wf = await workflowsUi.generate(wsId);
+    if (!wf || destroyed || ws.currentId !== wsId) return;
+    workflows = [wf, ...workflows.filter((w) => w.id !== wf.id)];
+    open(wf);
   }
 
   async function createBlank(): Promise<void> {
@@ -1184,7 +1176,7 @@
     <label for="wf-prompt">Describe the flow</label>
     <textarea dir="auto"
       id="wf-prompt"
-      bind:value={prompt}
+      bind:value={workflowsUi.prompt}
       rows={mode === 'page' ? 4 : 3}
       placeholder="e.g. Ask an agent to summarize the repo, then POST the summary to our webhook."
       onkeydown={(e) => {
@@ -1197,11 +1189,11 @@
         <span class="grow"></span>
         <button
           class="btn primary"
-          disabled={generating || prompt.trim() === ''}
-          title={prompt.trim() === '' ? 'Describe the flow first' : 'Generate the workflow (⌘↵)'}
+          disabled={workflowsUi.generating || workflowsUi.prompt.trim() === ''}
+          title={workflowsUi.prompt.trim() === '' ? 'Describe the flow first' : 'Generate the workflow (⌘↵)'}
           onclick={generate}
         >
-          {#if generating}<span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
+          {#if workflowsUi.generating}<span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
         </button>
       </div>
       {#if templates.length > 0}
@@ -1225,11 +1217,11 @@
            view's one primary action. -->
       <button
         class="btn full"
-        disabled={generating || prompt.trim() === ''}
-        title={prompt.trim() === '' ? 'Describe the flow first' : 'Generate the workflow (⌘↵)'}
+        disabled={workflowsUi.generating || workflowsUi.prompt.trim() === ''}
+        title={workflowsUi.prompt.trim() === '' ? 'Describe the flow first' : 'Generate the workflow (⌘↵)'}
         onclick={generate}
       >
-        {#if generating}<span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
+        {#if workflowsUi.generating}<span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
       </button>
       <button class="btn ghost full" onclick={createBlank}>
         <Icon name="plus" size={13} /> Start blank
@@ -1488,7 +1480,7 @@
         />
       </div>
 
-      {#if instructionsOpen && current}
+      {#if workflowsUi.instructionsOpen && current}
         <div class="instructions-wrap">
           <div class="instructions-h">
             <span>Instructions</span>
@@ -1523,7 +1515,7 @@
         </div>
       {/if}
 
-      {#if triggersOpen && current}
+      {#if workflowsUi.triggersOpen && current}
         {#key current.id}
         <div class="triggers-wrap">
           <TriggersPanel

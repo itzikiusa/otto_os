@@ -3,7 +3,7 @@ import { pollWhileVisible, type Poller } from './poll';
 /** Bounded, opt-in application measurements. No URLs, payloads or user text. */
 
 export const TELEMETRY_COMPONENTS = [
-  'agents', 'workbench', 'connections', 'home', 'git', 'database', 'api', 'vault',
+  'agents', 'threads', 'ide', 'workbench', 'connections', 'home', 'git', 'database', 'api', 'vault',
   'rooms', 'workflows', 'scheduled-tasks', 'personal-agents',
   'loops', 'product', 'design', 'canvas', 'browser',
   'mcp', 'brokers', 'kubernetes', 'aws', 'insights', 'usage', 'skills-eval',
@@ -14,16 +14,23 @@ export function telemetryComponent(value: string): string {
   return components.has(value) ? value : 'other';
 }
 
+function segmentComponent(seg: string | undefined): string {
+  if (seg === 'sessions') return 'agents';
+  if (seg === 'runtime-sessions') return 'threads';
+  if (seg === 'repos') return 'git';
+  if (seg === 'connections' || seg === 'db') return 'database';
+  if (seg === 'k8s') return 'kubernetes';
+  if (seg === 'api-client') return 'api';
+  return telemetryComponent(seg ?? 'other');
+}
+
 /** Never retain a path segment unless it is a known, static module name. */
 export function apiComponent(path: string): string {
   const parts = path.split('?')[0].split('/').filter(Boolean);
-  const root = parts[0];
-  if (root === 'workspaces') return telemetryComponent(parts[2] ?? 'other');
-  if (root === 'sessions') return 'agents';
-  if (root === 'repos') return 'git';
-  if (root === 'connections' || root === 'db') return 'database';
-  if (root === 'k8s') return 'kubernetes';
-  return telemetryComponent(root ?? 'other');
+  const offset = parts[0] === 'api' && parts[1] === 'v1' ? 2 : 0;
+  const root = parts[offset];
+  if (root === 'workspaces') return segmentComponent(parts[offset + 2]);
+  return segmentComponent(root);
 }
 
 const SAFE_NAME = /^[a-z0-9._-]{1,96}$/;

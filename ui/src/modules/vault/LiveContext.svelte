@@ -68,6 +68,7 @@
     ApiCollection,
     Connection,
     DbDashboard,
+    GitAccount,
     K8sMonitorOverviewRow,
     K8sMonitorWorkloadRow,
     K8sMonitorWorkloadsResp,
@@ -159,9 +160,15 @@
   }
   let prLoading = $state<string | null>(null);
   async function loadPrs(h: RepoHit): Promise<void> {
-    if (prLoading) return;
+    if (!h.repo.provider || prLoading) return;
     prLoading = h.repo.id;
     try {
+      const accs = await cached(
+        'git:accounts',
+        () => api.bg.get<GitAccount[]>('/git/accounts'),
+        TTL_MS,
+      ).catch(() => null);
+      if (accs && !accs.some((a) => a.provider === h.repo.provider)) return;
       const n = await cached(
         `git:prs:${h.repo.id}`,
         () => api.bg.get<{ items: unknown[] }>(`/repos/${h.repo.id}/prs?state=open`).then((r) => r.items.length),
@@ -338,7 +345,7 @@
             {/if}
             {#if h.prs !== null}
               <span>{plural(h.prs, 'open PR')}</span>
-            {:else if h.repo.remote_url}
+            {:else if h.repo.remote_url && h.repo.provider}
               <button
                 class="link prs"
                 data-testid="vault-live-prs"
@@ -350,7 +357,7 @@
           </div>
           <div class="acts">
             <button class="btn small" onclick={() => openRepo(h.repo.id)}>Open repo</button>
-            {#if h.repo.remote_url}<button class="btn small ghost" onclick={() => openRepo(h.repo.id, 'prs')}>Pull requests</button>{/if}
+            {#if h.repo.remote_url && h.repo.provider}<button class="btn small ghost" onclick={() => openRepo(h.repo.id, 'prs')}>Pull requests</button>{/if}
           </div>
         </div>
       {/each}

@@ -45,7 +45,7 @@ pub enum McpDelivery {
 }
 
 /// One stdio MCP server handed over the protocol. `command` is absolute.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct McpServerDef {
     pub name: String,
     pub command: String,
@@ -188,6 +188,7 @@ pub fn item(
         updated_at: now,
         error: None,
         parent_item_id: None,
+        detail_omitted: false,
         kind,
     }
 }
@@ -249,6 +250,133 @@ pub fn rpc_failure(class: &str, e: &serde_json::Value) -> ProviderFailure {
     }
 }
 
+/// Sideband storage source polled asynchronously off the session lock when an
+/// ACP agent buffers between-prompt notifications in memory while persisting
+/// real-time session steps on disk (`agy`, `grok`, `gemini`, `opencode`, or an
+/// explicit `OTTO_ACP_SIDEBAND_FILE` stream).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebandSource {
+    /// No primary session transcript poll (active child tails / timer ticks only).
+    None,
+    /// Append-only `\n`-terminated JSONL (`agy` `transcript_full.jsonl`, `grok`
+    /// `updates.jsonl`, or `OTTO_ACP_SIDEBAND_FILE`).
+    AppendLines {
+        path: std::path::PathBuf,
+        fallback_path: Option<std::path::PathBuf>,
+        /// Optional `<sessions_root>/<project_dir>/<session_id>/updates.jsonl`
+        /// scan fallback when `cwd` was symlink-resolved differently by the CLI.
+        scan_sessions_dir: Option<(std::path::PathBuf, String)>,
+        offset: u64,
+        using_fallback: bool,
+    },
+    /// Rewritten JSON session snapshot (`gemini --acp` `chats/session-*.json`),
+    /// read only when `(mtime_ns, len)` changes.
+    GeminiJson {
+        gemini_home: std::path::PathBuf,
+        cwd: String,
+        session_id: String,
+        resolved_path: Option<std::path::PathBuf>,
+        last_stamp: (u64, u64),
+        allow_scan: bool,
+    },
+    /// Read-only SQLite `part` + `message` rows (`opencode acp` `opencode.db`),
+    /// queried only when `(db_mtime_ns, db_len, wal_mtime_ns, wal_len)` changes.
+    OpencodeSqlite {
+        db_path: std::path::PathBuf,
+        session_id: String,
+        min_time_ms: i64,
+        min_part_id: String,
+        last_stamp: (u64, u64, u64, u64),
+    },
+}
+
+/// Kind of auxiliary background file tailed off-lock alongside the session's
+/// primary sideband stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ActiveTailKind {
+    CommandLog,
+    AgySubagentTranscript,
+}
+
+/// One active background command `.log` or `agy` child `transcript.jsonl` to
+/// tail off-lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTailSource {
+    pub task_id: String,
+    pub kind: ActiveTailKind,
+    pub path: std::path::PathBuf,
+    pub fallback_path: Option<std::path::PathBuf>,
+    pub offset: u64,
+    pub using_fallback: bool,
+    pub allowed_cwd: Option<std::path::PathBuf>,
+    pub agy_brain_dir: Option<std::path::PathBuf>,
+    pub allowed_agy_conv_ids: Option<Vec<String>>,
+    pub otto_session_id: Option<String>,
+}
+
+/// Off-lock read chunk from an [`ActiveTailSource`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTailChunk {
+    pub task_id: String,
+    pub kind: ActiveTailKind,
+    pub using_fallback: bool,
+    pub next_offset: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// Periodic sideband poll descriptor returned by a sans-IO driver while idle
+/// between `session/prompt` RPCs (or while tailing active background tasks).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebandPoll {
+    pub source: SidebandSource,
+    pub interval: std::time::Duration,
+    pub active_tails: Vec<ActiveTailSource>,
+    pub timer_expired: bool,
+}
+
+/// Initial watermark seeded asynchronously before spawning a resumed session so
+/// historical on-disk steps are skipped in `O(1)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebandResumeSeed {
+    AppendOffset {
+        resolved_path: Option<std::path::PathBuf>,
+        using_fallback: bool,
+        offset: u64,
+    },
+    IdleSinceMs(u64),
+}
+
+/// Off-lock read result delivered to [`StructuredDriver::on_sideband`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebandPayload {
+    AppendLines {
+        resolved_path: Option<std::path::PathBuf>,
+        using_fallback: bool,
+        next_offset: u64,
+        bytes: Vec<u8>,
+    },
+    GeminiJson {
+        resolved_path: std::path::PathBuf,
+        stamp: (u64, u64),
+        doc: serde_json::Value,
+    },
+    OpencodeSqlite {
+        stamp: (u64, u64, u64, u64),
+        rows_jsonl: Vec<u8>,
+        has_more: bool,
+    },
+    /// Directory scan attempted to locate an unresolved transcript file and
+    /// found no matching file; arms a negative-lookup backoff on the driver.
+    Unresolved,
+    /// Combined primary sideband payload, active child/command tail chunks,
+    /// and/or due timer tick.
+    Batch {
+        primary: Option<Box<SidebandPayload>>,
+        tails: Vec<ActiveTailChunk>,
+        timer_tick: bool,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriverError(pub String);
 
@@ -288,6 +416,12 @@ pub trait StructuredDriver: Send + 'static {
         false
     }
 
+    /// Whether `steer` can switch `req.model` mid-turn without queuing for the
+    /// next turn boundary.
+    fn steers_model_live(&self) -> bool {
+        false
+    }
+
     /// Whether the running process can switch to access mode `to` (its next
     /// `prompt` carries it). Otherwise the runtime restarts the child in the
     /// new mode, resuming its thread.
@@ -307,6 +441,12 @@ pub trait StructuredDriver: Send + 'static {
     /// while the thread's title is still Otto's placeholder.
     fn title_transcript(&self) -> Option<std::path::PathBuf> {
         None
+    }
+
+    /// Whether `steer` can switch to access mode `to` mid-turn without queuing
+    /// for the next turn boundary.
+    fn steers_access_live(&self, _to: RuntimeAccessMode) -> bool {
+        false
     }
 
     /// Add a person's message to the RUNNING turn (steering): the agent
@@ -351,21 +491,53 @@ pub trait StructuredDriver: Send + 'static {
 
     fn on_line(&mut self, line: &str) -> DriverStep;
 
-    /// This driver's whole protocol state (session / request ids, open
-    /// items and requests, text so far), so a NEW daemon can carry on with a
-    /// child that outlived the old one (`runtime/held.rs`). `None` = it
-    /// cannot be restored, and its child is never held.
-    fn export_state(&self) -> Option<serde_json::Value> {
+    /// Whether the running agent-initiated (`origin: agent`) turn has no
+    /// protocol-level end frame (e.g. ACP notifications) and is ready to settle
+    /// once stdout stays quiet for `RuntimeConfig::autonomous_settle`.
+    fn needs_idle_turn_settle(&self) -> bool {
+        false
+    }
+
+    /// Settle an idle agent-initiated turn once `autonomous_settle` elapses.
+    fn on_idle_settle(&mut self) -> DriverStep {
+        DriverStep::default()
+    }
+
+    /// Optional sideband file tail descriptor while the driver is idle between
+    /// prompts. All disk I/O runs asynchronously outside the session lock.
+    fn sideband_poll(&self) -> Option<SidebandPoll> {
         None
     }
 
-    /// Restore [`Self::export_state`] onto a driver fresh from the factory.
-    fn import_state(&mut self, _state: serde_json::Value) -> Result<(), DriverError> {
-        Err(DriverError("this driver cannot be restored".into()))
+    /// Optional sideband source for `resume_id` so `ensure_process` can seed
+    /// the initial watermark asynchronously before spawning.
+    fn sideband_resume_poll(&self, _resume_id: &str, _cwd: &str) -> Option<SidebandSource> {
+        None
+    }
+
+    /// Seed the initial sideband watermark on resume (`session/load`) before
+    /// the child spawns so historical steps on disk are skipped in `O(1)`.
+    fn init_sideband_resume(&mut self, _seed: SidebandResumeSeed) {}
+
+    /// Translate off-lock sideband data into a sans-IO [`DriverStep`].
+    fn on_sideband(&mut self, _payload: SidebandPayload) -> DriverStep {
+        DriverStep::default()
     }
 
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
         DriverStep::default()
+    }
+
+    /// Snapshot live protocol state so a restarted daemon adopting a detached
+    /// holder can resume mid-turn without losing request correlations or
+    /// negotiated session capabilities.
+    fn snapshot_state(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// Restore live protocol state captured by [`Self::snapshot_state`].
+    fn restore_state(&mut self, _state: &serde_json::Value) -> Result<(), DriverError> {
+        Ok(())
     }
 }
 
@@ -381,4 +553,44 @@ where
     fn create(&self, provider: RuntimeProvider) -> Option<Box<dyn StructuredDriver>> {
         self(provider)
     }
+}
+
+/// Extract a clamped one-shot timer `due_at` (`0..=365d`) from tool arguments,
+/// returning `None` when a recurring `CronExpression` / `cron_expression` is set
+/// or when the duration is missing/negative.
+pub fn one_shot_due_at(
+    raw: Option<&serde_json::Value>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    const MAX_TIMER_SECS: i64 = 86_400 * 365;
+    let v = raw?;
+    let has_cron = v
+        .get("CronExpression")
+        .or_else(|| v.get("cron_expression"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+    if has_cron {
+        return None;
+    }
+    let dur = v
+        .get("DurationSeconds")
+        .or_else(|| v.get("duration_seconds"))
+        .or_else(|| v.get("delay_seconds"))?;
+    if let Some(secs) = dur.as_i64() {
+        if secs < 0 {
+            return None;
+        }
+        return Some(now + chrono::Duration::seconds(secs.clamp(0, MAX_TIMER_SECS)));
+    }
+    if let Some(secs) = dur.as_u64() {
+        let clamped = secs.min(MAX_TIMER_SECS as u64) as i64;
+        return Some(now + chrono::Duration::seconds(clamped));
+    }
+    if let Some(secs_f) = dur.as_f64() {
+        if secs_f.is_finite() && secs_f >= 0.0 {
+            let ms = (secs_f.min(MAX_TIMER_SECS as f64) * 1_000.0) as i64;
+            return Some(now + chrono::Duration::milliseconds(ms));
+        }
+    }
+    None
 }

@@ -9,7 +9,7 @@
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import { modelsForProvider } from '../../lib/providerModels';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { agentProvidersWith, defaultAgentProvider, harnessLabel } from '../../lib/providers';
+  import { agentProviders, agentProvidersWith, defaultAgentProvider, harnessLabel } from '../../lib/providers';
   import { canCarryPersona, personaDefault, personaProviders, personaRefusal } from './personaProviders';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -89,7 +89,7 @@
   let fName = $state(init?.name ?? '');
   let fAvatar = $state(init?.avatar ?? '');
   let fSoul = $state(init?.soul_md ?? '');
-  let fProvider = $state(init?.provider || personaDefault(defaultAgentProvider()));
+  let fProvider = $state(init?.provider || personaDefault(defaultAgentProvider(), agentProviders()));
   let fModel = $state(init?.model ?? ''); // '' = provider default
   let fCwd = $state(init?.cwd ?? '');
   let fBrowser = $state(init?.browser ?? false);

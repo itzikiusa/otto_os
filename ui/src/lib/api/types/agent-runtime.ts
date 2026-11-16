@@ -11,8 +11,12 @@
 // names are snake_case where T3 Code uses camelCase.
 
 import type { Id } from './core';
+import { sessionProviderSlug as resolveSessionProviderSlug } from '../../providerRegistry';
 
 export type RuntimeProvider = 'claude' | 'codex' | 'gemini' | 'grok' | 'agy' | 'opencode' | 'pi';
+
+/** Built-in `RuntimeProvider` id or a custom `ProviderRegistry` slug (e.g. `'claudework'`). */
+export type RuntimeProviderOrSlug = RuntimeProvider | (string & {});
 
 export type ProviderSessionStatus = 'starting' | 'ready' | 'running' | 'waiting' | 'stopped' | 'error';
 
@@ -81,15 +85,26 @@ export interface RuntimeSwarmMember {
 }
 
 /** One piece of background work (a `run_in_background` command, a
- *  background subagent). */
+ *  background subagent, or a one-shot timer). */
 export interface BackgroundTask {
   id: string;
-  /** `command`, `agent`, or the provider's own task type. */
+  /** `command`, `agent`, `timer`, or the provider's own task type. */
   kind: string;
   label: string;
   started_at: string;
   /** The tool call that started it, when known. */
   item_id?: Id;
+  /** Optional scheduled fire timestamp for one-shot timers (`schedule`). */
+  due_at?: string;
+}
+
+/** Structured settlement metadata on `system_notice` when background work finishes. */
+export interface TaskSettlement {
+  task_id: string;
+  kind: string;
+  /** `'completed' | 'stopped' | 'failed'` */
+  status: string;
+  label: string;
 }
 
 /** Who started a turn; `agent` = the agent continued on its own (its
@@ -188,7 +203,7 @@ export type TurnItemKind =
       cancel_reason?: RequestCancelReason;
     }
   | { type: 'session_boundary' }
-  | { type: 'system_notice'; message: string }
+  | { type: 'system_notice'; message: string; task_settlement?: TaskSettlement }
   /** A subagent (Claude's Agent / Task tool): its own messages and tools are
    *  items whose `parent_item_id` is this item. A background one stays
    *  `running` past its turn until its task ends. */
@@ -219,6 +234,8 @@ export type TurnItem = {
   updated_at: string;
   /** The `subagent` item this item is the activity of. */
   parent_item_id?: Id;
+  /** True when heavy settled tool/diff/output fields were omitted in a compact snapshot. */
+  detail_omitted?: boolean;
 } & TurnItemKind;
 
 /** Why a request was cancelled: `agent` = the provider withdrew it (Claude
@@ -233,6 +250,8 @@ export interface MessageAttachment {
   kind: 'image' | 'file';
   mime: string;
   name?: string;
+  /** Optimistic client-side data URL preview before the turn settles. */
+  preview_url?: string;
 }
 
 export type RuntimeRequestStatus = 'pending' | 'resolved' | 'expired' | 'cancelled';
@@ -323,6 +342,12 @@ export interface RuntimeSnapshot {
   queued_prompts?: QueuedPrompt[];
   /** The agent's own slash commands. */
   commands?: ProviderCommand[];
+  /** Set when `tail_turns` / `before_turn_ordinal` omitted earlier turns. */
+  has_older?: boolean;
+  /** `ordinal` of the earliest turn included in this slice, when paginated. */
+  oldest_turn_ordinal?: number;
+  /** Count of earlier turns omitted before `oldest_turn_ordinal`. */
+  older_turns?: number;
 }
 
 /** A message waiting in a thread's queue (sent when the running turn ends). */
@@ -344,10 +369,21 @@ export interface QueuedDeliverReq {
   delivery: PromptDelivery;
 }
 
+/** Response of DELETE /runtime-sessions/{id}/queue/{queued_id}. */
+export interface UnqueuePromptResp {
+  ok: boolean;
+  text?: string;
+  images?: PromptImage[];
+  files?: PromptFile[];
+}
+
 /** Response of GET /runtime-sessions/{id}/events?after_sequence=. */
 export type RuntimeReplay =
   | { kind: 'events'; events: RuntimeEvent[]; last_sequence: number }
   | { kind: 'snapshot'; snapshot_sequence: number; snapshot: RuntimeSnapshot };
+
+/** Response for hydrated single-item detail (`GET /runtime-sessions/{id}/items/{item_id}`). */
+export type RuntimeTurnItemDetailResponse = TurnItem;
 
 /** POST /runtime-sessions/:id/reopen revives closed/dormant sessions without a prompt; live agents are preserved. */
 export type RuntimeSessionStatus =
@@ -376,7 +412,12 @@ export interface RuntimeSession {
    *  (`personal_agent`, `read_only`, `source`, `run_id`, …); absent on a plain
    *  thread. A client sets only an embedded thread's `source` / `origin`, via
    *  the create body (`CreateRuntimeSessionReq.source` / `.origin`). */
-  meta?: (Record<string, unknown> & { source?: string; origin?: EmbeddedOrigin; council?: CouncilMeta }) | null;
+  meta?: (Record<string, unknown> & {
+    source?: string;
+    origin?: EmbeddedOrigin;
+    council?: CouncilMeta;
+    provider_slug?: string;
+  }) | null;
   /** Background work still pending (live; absent = none). */
   background_tasks?: BackgroundTask[];
   /** What its agent takes (see `ProviderSession.capabilities` for the live value). */
@@ -386,9 +427,18 @@ export interface RuntimeSession {
   title_auto?: boolean;
 }
 
+/** Effective provider slug of a runtime session (`meta.provider_slug` for custom
+ *  providers such as `'claudework'`, or `session.provider` for built-ins). */
+export function sessionProviderSlug(
+  session: Pick<RuntimeSession, 'provider' | 'meta'> | null | undefined,
+): string {
+  return resolveSessionProviderSlug(session);
+}
+
 /** Body of `POST /runtime-sessions/{id}/peers` — open a linked thread. */
 export interface OpenPeerReq {
-  provider: RuntimeProvider;
+  provider: RuntimeProviderOrSlug;
+  provider_slug?: string;
   prompt?: string;
   title?: string;
   /** Omitted = the provider's default model. */
@@ -408,7 +458,8 @@ export interface CouncilMeta {
 
 /** One seat of a council; the same provider may sit more than once. */
 export interface CouncilSeatReq {
-  provider: RuntimeProvider;
+  provider: RuntimeProviderOrSlug;
+  provider_slug?: string;
   model?: string;
   effort?: string;
 }
@@ -437,7 +488,8 @@ export interface ChildOf {
 
 /** One agent of `POST /runtime-sessions/{id}/children`. */
 export interface AskChildTarget {
-  provider: RuntimeProvider;
+  provider: RuntimeProviderOrSlug;
+  provider_slug?: string;
   model?: string;
   effort?: string;
 }
@@ -459,7 +511,8 @@ export interface AskChildResp {
 /** Body of `POST /runtime-sessions/{id}/council/synthesize` — the judge of the
  *  CURRENT round. 409 while a seat of the round works. */
 export interface SynthesizeCouncilReq {
-  provider: RuntimeProvider;
+  provider: RuntimeProviderOrSlug;
+  provider_slug?: string;
   model?: string;
   effort?: string;
 }
@@ -494,6 +547,7 @@ export interface CouncilFollowUpReq {
 export interface PeerInfo {
   id: Id;
   provider: RuntimeProvider;
+  provider_slug?: string | null;
   title: string;
   status: RuntimeSessionStatus;
   is_self: boolean;
@@ -527,7 +581,7 @@ export interface EmbeddedOrigin {
 
 /** Body of POST /workspaces/{id}/runtime-sessions. */
 export interface CreateRuntimeSessionReq {
-  provider: RuntimeProvider;
+  provider: RuntimeProviderOrSlug;
   /** Absolute; defaults to the workspace root. */
   cwd?: string | null;
   title?: string | null;
@@ -561,9 +615,10 @@ export interface UpdateRuntimeSessionReq {
 }
 
 /** `text` may be empty when `images` is not. `model` / `effort` apply to this
- *  turn and stick for later ones; `effort` is Claude / Codex only. Images:
- *  Claude, Codex, and ACP agents that advertise them; Antigravity is text
- *  only. Unsupported input is a 400. */
+ *  turn and stick for later ones (`effort` is supported by Claude, Codex, agy,
+ *  and pi models that advertise reasoning levels). Images: Claude, Codex, and
+ *  ACP agents that advertise them; Antigravity is text only. Unsupported input
+ *  is a 400. */
 export interface RuntimePromptReq {
   /** Start a fresh provider conversation in the same thread; refuses outstanding work. */
   fresh_context?: boolean;
@@ -592,6 +647,7 @@ export interface PromptFile {
 export interface PromptImage {
   mime: string;
   data_base64: string;
+  name?: string;
 }
 
 export interface RuntimePromptResp {
@@ -627,7 +683,9 @@ export interface RuntimeComposerContext {
 export interface RuntimeDraftContent {
   text: string;
   images: (PromptImage & { name: string })[];
-  model: string | null;
+  model: string | null | undefined;
+  /** True when user explicitly picked "Default model" (`model === null`) rather than inherit (`undefined`). */
+  model_default?: boolean;
   effort: import('../../providerModels').EffortLevel | null;
   access_mode: RuntimeAccessMode | null;
   fresh_context: boolean;

@@ -688,6 +688,7 @@ async fn codex_takes_model_effort_and_images_per_turn_without_a_respawn() {
         images: vec![PromptImage {
             mime: "image/png".into(),
             data_base64: "iVBORw0KGgo=".into(),
+            name: None,
         }],
         ..RuntimePromptReq::default()
     };
@@ -701,6 +702,7 @@ async fn codex_takes_model_effort_and_images_per_turn_without_a_respawn() {
         images: vec![PromptImage {
             mime: "text/plain".into(),
             data_base64: "eA==".into(),
+            name: None,
         }],
         ..RuntimePromptReq::of("x")
     };
@@ -721,7 +723,6 @@ async fn acp_model_switch_respawns_and_resumes_and_unsupported_input_is_refused(
     rt.prompt(&s.id, "hi").await.unwrap();
     host.wait(is_terminal).await;
     let native = rt.get(&s.id).await.unwrap().native_thread_id;
-
     let switch = RuntimePromptReq {
         model: Some("m2".into()),
         ..RuntimePromptReq::of("again")
@@ -738,16 +739,15 @@ async fn acp_model_switch_respawns_and_resumes_and_unsupported_input_is_refused(
         now.native_thread_id, native,
         "the session was loaded, not replaced"
     );
-
     // the same model again: no respawn
     rt.prompt_with(&s.id, &switch).await.unwrap();
     host.wait_n(is_terminal, 3).await;
     assert_eq!(host.prepared.lock().unwrap().len(), 2);
-
     let image = RuntimePromptReq {
         images: vec![PromptImage {
             mime: "image/png".into(),
             data_base64: "iVBORw0KGgo=".into(),
+            name: None,
         }],
         ..RuntimePromptReq::of("look")
     };
@@ -1260,6 +1260,7 @@ async fn attachments_are_stored_served_and_refused_where_unsupported() {
     let png = PromptImage {
         mime: "image/png".into(),
         data_base64: "iVBORw0KGgo=".into(),
+        name: None,
     };
     let pdf = PromptFile {
         path: None,
@@ -1277,7 +1278,6 @@ async fn attachments_are_stored_served_and_refused_where_unsupported() {
             })
             .unwrap()
     };
-
     // Gemini (the fake) takes embedded PDFs but no images.
     let g = create(&rt, dir.path().to_str().unwrap()).await;
     let with_pdf = RuntimePromptReq {
@@ -1513,8 +1513,14 @@ async fn linked_threads_open_message_and_read_within_their_group() {
     let marker = format!("[otto-thread:{}:finished]", worker.id);
     host.wait(|e| {
         e.session_id == lead.id
-            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
-                if matches!(&turn_item.kind, TurnItemKind::SystemNotice { message } if message.ends_with(&marker)))
+            && matches!(
+                &e.body,
+                RuntimeEventBody::TurnItemUpdated { turn_item }
+                    if matches!(
+                        &turn_item.kind,
+                        TurnItemKind::SystemNotice { message, .. } if message.ends_with(&marker)
+                    )
+            )
     })
     .await;
     assert_eq!(
@@ -1569,10 +1575,10 @@ async fn a_person_asks_other_agents_from_a_thread() {
     let lead = create(&rt, cwd).await;
     let target = |p| AskChildTarget {
         provider: p,
+        provider_slug: None,
         model: None,
         effort: None,
     };
-
     // Never more access than the parent's.
     let wider = rt
         .ask_children(
@@ -1620,8 +1626,14 @@ async fn a_person_asks_other_agents_from_a_thread() {
         let done = format!("[otto-thread:{}:finished]", k.id);
         host.wait(|e| {
             e.session_id == lead.id
-                && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
-                    if matches!(&turn_item.kind, TurnItemKind::SystemNotice { message } if message.ends_with(&done)))
+                && matches!(
+                    &e.body,
+                    RuntimeEventBody::TurnItemUpdated { turn_item }
+                        if matches!(
+                            &turn_item.kind,
+                            TurnItemKind::SystemNotice { message, .. } if message.ends_with(&done)
+                        )
+                )
         })
         .await;
     }
@@ -1696,7 +1708,7 @@ fn notices(host: &TestHost) -> Vec<String> {
     host.items()
         .into_iter()
         .filter_map(|i| match i.kind {
-            TurnItemKind::SystemNotice { message } => Some(message),
+            TurnItemKind::SystemNotice { message, .. } => Some(message),
             _ => None,
         })
         .collect()
@@ -2196,7 +2208,7 @@ async fn a_child_interrupted_by_restart_reports_to_its_parent() {
             .filter(|e| e.session_id == lead.id)
             .filter_map(|e| match e.body {
                 RuntimeEventBody::TurnItemUpdated { turn_item } => match turn_item.kind {
-                    TurnItemKind::SystemNotice { message } => Some(message),
+                    TurnItemKind::SystemNotice { message, .. } => Some(message),
                     _ => None,
                 },
                 _ => None,
@@ -2273,9 +2285,18 @@ async fn closing_a_parent_leaves_its_children_running_and_tells_it_nothing() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let finished = format!("[otto-thread:{}:finished]", worker.id);
     assert!(
-        !host.all().iter().any(|e| e.session_id == lead.id
-            && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
-                if matches!(&turn_item.kind, TurnItemKind::SystemNotice { message } if message.ends_with(&finished)))),
+        !host.all().iter().any(|e| {
+            e.session_id == lead.id
+                && matches!(
+                    &e.body,
+                    RuntimeEventBody::TurnItemUpdated { turn_item }
+                        if matches!(
+                            &turn_item.kind,
+                            TurnItemKind::SystemNotice { message, .. }
+                                if message.ends_with(&finished)
+                        )
+                )
+        }),
         "nothing lands in a closed parent"
     );
     assert!(queue_texts(&host, &lead.id).unwrap_or_default().is_empty());
@@ -2781,6 +2802,7 @@ async fn rejected_fresh_prompt_preserves_old_native_identity_without_a_boundary(
         fresh_context: true,
         // The fake Gemini takes no images.
         images: vec![PromptImage {
+            name: None,
             mime: "image/png".into(),
             data_base64: "iVBORw0KGgo=".into(),
         }],
@@ -3256,6 +3278,7 @@ fn seat(
 ) -> otto_core::agent_runtime::CouncilSeatReq {
     otto_core::agent_runtime::CouncilSeatReq {
         provider,
+        provider_slug: None,
         model: None,
         effort: effort.map(str::to_string),
     }
@@ -3274,13 +3297,9 @@ fn council_req(
     }
 }
 
-/// A council is one linked group (seat 1 the root), every seat read-only and
-/// approval-required, each sent the prompt (the same provider may sit
-/// twice); the judge is linked to seat 1, reads every answer and gets the
-/// daemon's own prompt without the "Opened by" header.
 #[tokio::test]
 async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer() {
-    use otto_core::agent_runtime::{CouncilRole, SynthesizeCouncilReq};
+    use otto_core::agent_runtime::CouncilRole;
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap();
     let pool = pool().await;
@@ -3331,14 +3350,7 @@ async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer
     );
 
     let judge = rt
-        .synthesize_council(
-            &seats[2].id,
-            SynthesizeCouncilReq {
-                provider: RuntimeProvider::Gemini,
-                model: None,
-                effort: None,
-            },
-        )
+        .synthesize_council(&seats[2].id, gemini_judge())
         .await
         .unwrap();
     assert_eq!(judge.parent_id.as_ref(), Some(&root.id));
@@ -3364,19 +3376,10 @@ async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer
     ] {
         assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
     }
-
     // A thread outside any council has nothing to synthesize.
     let plain = create(&rt, cwd).await;
     assert!(matches!(
-        rt.synthesize_council(
-            &plain.id,
-            SynthesizeCouncilReq {
-                provider: RuntimeProvider::Gemini,
-                model: None,
-                effort: None,
-            },
-        )
-        .await,
+        rt.synthesize_council(&plain.id, gemini_judge()).await,
         Err(Error::Invalid(_))
     ));
 }
@@ -3426,11 +3429,9 @@ async fn council_is_created_all_or_none() {
     );
 }
 
-/// The judge waits for every seat (409 while one works) and counts against
-/// the group's open-thread cap like any linked thread.
 #[tokio::test]
 async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
-    use otto_core::agent_runtime::{OpenPeerReq, SynthesizeCouncilReq};
+    use otto_core::agent_runtime::OpenPeerReq;
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap();
     let pool = pool().await;
@@ -3445,21 +3446,14 @@ async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
         )
         .await
         .unwrap();
-    let judge = || SynthesizeCouncilReq {
-        provider: RuntimeProvider::Gemini,
-        model: None,
-        effort: None,
-    };
     let busy = rt
-        .synthesize_council(&seats[0].id, judge())
+        .synthesize_council(&seats[0].id, gemini_judge())
         .await
         .expect_err("seats are still in their turn");
     assert!(
         matches!(&busy, Error::Conflict(m) if m.contains("is still working")),
         "{busy:?}"
     );
-    // Both seats have started answering ("working") before they are stopped,
-    // so each keeps a partial answer for the judge.
     for s in &seats {
         host.wait(|e| {
             e.session_id == s.id
@@ -3472,12 +3466,10 @@ async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
         assert!(rt.interrupt(&s.id).await.unwrap());
         assert!(!rt.latest_reply(&s.id, WAIT).await.unwrap().busy);
     }
-
-    // Fill the group to its cap (seat 1 + 8 linked threads).
     let mut extra = Vec::new();
     for i in 0..7 {
-        let p = rt
-            .open_peer(
+        extra.push(
+            rt.open_peer(
                 &seats[0].id,
                 OpenPeerReq {
                     provider: RuntimeProvider::Gemini,
@@ -3490,12 +3482,11 @@ async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
                 },
             )
             .await
-            .unwrap();
-        extra.push(p);
+            .unwrap(),
+        );
     }
-    // The cap is checked before the answers are read.
     let full = rt
-        .synthesize_council(&seats[1].id, judge())
+        .synthesize_council(&seats[1].id, gemini_judge())
         .await
         .expect_err("the group is full");
     assert!(
@@ -3503,13 +3494,12 @@ async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
         "{full:?}"
     );
     rt.close(&extra[0].id).await.unwrap();
-    let j = rt.synthesize_council(&seats[1].id, judge()).await.unwrap();
+    let j = rt
+        .synthesize_council(&seats[1].id, gemini_judge())
+        .await
+        .unwrap();
     let verdict = rt.latest_reply(&j.id, WAIT).await.unwrap();
-    assert!(
-        verdict.text.contains("working"),
-        "the interrupted seats' partial answers: {}",
-        verdict.text
-    );
+    assert!(verdict.text.contains("working"), "{}", verdict.text);
 }
 
 // ---- council rounds: follow-ups, per-round synthesis, restart ----
@@ -3527,6 +3517,7 @@ fn follow_up(
 fn gemini_judge() -> otto_core::agent_runtime::SynthesizeCouncilReq {
     otto_core::agent_runtime::SynthesizeCouncilReq {
         provider: RuntimeProvider::Gemini,
+        provider_slug: None,
         model: None,
         effort: None,
     }
@@ -3846,6 +3837,568 @@ async fn council_rounds_survive_a_restart_and_a_cut_round_can_be_asked_again() {
     ] {
         assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
     }
+}
+
+#[tokio::test]
+async fn agy_autonomous_wakeups_open_agent_turns_settle_and_persist_to_sqlite() {
+    use otto_core::agent_runtime::TurnOrigin;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(
+        &pool,
+        &host,
+        RuntimeConfig {
+            autonomous_settle: Duration::from_millis(90),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = create_as(&rt, cwd, RuntimeProvider::Agy).await;
+    host.wait(is_ready).await;
+
+    // Turn 1 schedules a background timer and ends (`end_turn`).
+    rt.prompt(&s.id, "schedule").await.unwrap();
+    host.wait_n(is_terminal, 1).await;
+    let after_t1 = rt.get(&s.id).await.unwrap();
+    assert_eq!(after_t1.background_tasks.len(), 1);
+    assert!(after_t1.background_tasks[0].label.contains("check status"));
+
+    // Autonomous wakeup #1 arrives (~40ms later) and idle-settles (~90ms after that),
+    // then autonomous wakeup #2 arrives (~180ms later) and idle-settles too.
+    host.wait_n(is_terminal, 2).await;
+    host.wait_n(is_terminal, 3).await;
+    rt.flush(&s.id).await;
+
+    let now = rt.get(&s.id).await.unwrap();
+    assert_eq!(now.status, RuntimeSessionStatus::Idle);
+    assert!(now.background_tasks.is_empty());
+
+    // User can still send a normal follow-up turn after autonomous turns settled.
+    rt.prompt(&s.id, "afterwards").await.unwrap();
+    host.wait_n(is_terminal, 4).await;
+    rt.flush(&s.id).await;
+
+    // Verify SQLite persistence via a fresh runtime replay(0) snapshot!
+    rt.shutdown().await;
+    let host2 = TestHost::new(cwd, false);
+    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
+    let RuntimeReplay::Snapshot { snapshot, .. } = rt2.replay(&s.id, 0).await.unwrap() else {
+        panic!("expected persisted snapshot from SQLite");
+    };
+    let origins: Vec<TurnOrigin> = snapshot.turns.iter().map(|t| t.origin).collect();
+    assert_eq!(
+        origins,
+        vec![
+            TurnOrigin::User,
+            TurnOrigin::Agent,
+            TurnOrigin::Agent,
+            TurnOrigin::User,
+        ]
+    );
+    assert!(snapshot
+        .turns
+        .iter()
+        .all(|t| t.status == ProviderTurnStatus::Completed));
+    for expected in [
+        "scheduled",
+        "autonomous report 1",
+        "autonomous report 2",
+        "echo: afterwards",
+    ] {
+        assert!(
+            snapshot.turn_items.iter().any(|i| matches!(
+                &i.kind,
+                TurnItemKind::AssistantMessage {
+                    text,
+                    streaming: false,
+                    ..
+                } if text == expected
+            )),
+            "missing settled persisted message {expected:?} in {:#?}",
+            snapshot.turn_items
+        );
+    }
+}
+
+#[tokio::test]
+async fn replay_flushes_held_coalesced_chunks_immediately() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(
+        &pool,
+        &host,
+        RuntimeConfig {
+            // Very long coalesce window so the 2nd rapid chunk stays in `st.held`.
+            stream_coalesce: Duration::from_secs(30),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = create_as(&rt, cwd, RuntimeProvider::Agy).await;
+    host.wait(is_ready).await;
+
+    rt.prompt(&s.id, "hold-chunk").await.unwrap();
+    let first_chunk = host
+        .wait(|e| {
+            matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+                if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "part1"))
+        })
+        .await;
+    // Poll replay until the stdout pump ingests the immediately-following "part2" into `st.held`
+    // and `replay` flushes it into the ring.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut last_events = Vec::new();
+    let flushed = loop {
+        let RuntimeReplay::Events { events, .. } =
+            rt.replay(&s.id, first_chunk.sequence).await.unwrap()
+        else {
+            panic!("expected replay events");
+        };
+        let found = events.iter().any(|e| {
+            matches!(
+                &e.body,
+                RuntimeEventBody::TurnItemUpdated { turn_item }
+                    if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "part1part2")
+            )
+        });
+        if found {
+            break true;
+        }
+        last_events = events;
+        if tokio::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        flushed,
+        "expected held chunk to be flushed on replay within 2s, got {last_events:#?}"
+    );
+
+    rt.interrupt(&s.id).await.unwrap();
+    host.wait(is_terminal).await;
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_steer_lands_in_the_running_turn_without_cancelling_it() {
+    use otto_core::agent_runtime::PromptDelivery;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Codex).await;
+    let first = rt.prompt(&s.id, "slow 4").await.unwrap();
+    host.wait(|e| {
+        matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+            if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == "Working…"))
+    })
+    .await;
+
+    let steer_req = RuntimePromptReq {
+        text: "more".into(),
+        delivery: Some(PromptDelivery::Steer),
+        images: vec![PromptImage {
+            mime: "image/png".into(),
+            data_base64: "iVBORw0KGgo=".into(),
+            name: None,
+        }],
+        ..Default::default()
+    };
+    let r = rt.prompt_with(&s.id, &steer_req).await.unwrap();
+    assert!(r.steered);
+    assert_eq!(r.turn_id, first.turn_id);
+    host.wait(|e| {
+        matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+            if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "steered: more [1]"))
+    })
+    .await;
+
+    let steered_user = host
+        .items()
+        .into_iter()
+        .find(|i| matches!(&i.kind, TurnItemKind::UserMessage { text, .. } if text == "more"))
+        .unwrap();
+    assert_eq!(steered_user.turn_id.as_ref(), Some(&first.turn_id));
+    if let TurnItemKind::UserMessage { attachments, .. } = &steered_user.kind {
+        assert_eq!(attachments.len(), 1);
+        let (mime, bytes) = rt.attachment(&s.id, &attachments[0].id).await.unwrap();
+        assert_eq!((mime.as_str(), &bytes[..4]), ("image/png", &b"\x89PNG"[..]));
+    } else {
+        unreachable!();
+    }
+
+    // Send now cancels the running turn and runs next.
+    let next = rt
+        .prompt_with(&s.id, &queued(PromptDelivery::Interrupt, "next"))
+        .await
+        .unwrap();
+    assert!(next.queued_id.is_some());
+    let stopped = host.wait(is_terminal).await;
+    assert_eq!(terminal(&stopped), Some(TurnTerminalStatus::Interrupted));
+    let done = host.wait_n(is_terminal, 2).await;
+    assert_eq!(terminal(&done), Some(TurnTerminalStatus::Completed));
+    assert_eq!(last_assistant_text(&host), "echo: next");
+    assert_eq!(turns(&host).len(), 2, "steer stayed inside the first turn");
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn pi_steer_lands_in_the_running_turn_and_settles_same_turn() {
+    use otto_agent_protocol::pi::PiDriver;
+    use otto_core::agent_runtime::PromptDelivery;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let fake_pi = dir.path().join("fake-pi.py");
+    std::fs::write(
+        &fake_pi,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+thinking = "default"
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    cmd = json.loads(raw)
+    cid = cmd.get("id")
+    ty = cmd.get("type")
+    if ty == "get_state":
+        emit({
+            "id": cid,
+            "type": "response",
+            "command": "get_state",
+            "success": True,
+            "data": {"sessionId": "pi-sess-1", "model": {"provider": "anthropic", "id": "claude-sonnet"}},
+        })
+    elif ty == "set_thinking_level":
+        thinking = cmd.get("level", "default")
+        emit({"id": cid, "type": "response", "command": "set_thinking_level", "success": True})
+    elif ty == "prompt":
+        emit({"id": cid, "type": "response", "command": "prompt", "success": True, "data": {"disposition": "started"}})
+        emit({"type": "agent_start"})
+        emit({"type": "message_start"})
+        emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Working…"}})
+        emit({"type": "message_end", "message": {"role": "assistant", "stopReason": "toolUse"}})
+    elif ty == "steer":
+        emit({"id": cid, "type": "response", "command": "steer", "success": True})
+        imgs = len(cmd.get("images") or [])
+        emit({"type": "message_start"})
+        emit({
+            "type": "message_update",
+            "assistantMessageEvent": {
+                "type": "text_delta",
+                "delta": f"steered: {cmd.get('message', '')} ({thinking}, imgs={imgs})",
+            },
+        })
+        emit({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop"}})
+        emit({"type": "agent_end", "messages": [{"role": "assistant", "stopReason": "stop"}], "willRetry": False})
+        emit({"type": "agent_settled", "aborted": False})
+    elif ty == "abort":
+        emit({"id": cid, "type": "response", "command": "abort", "success": True})
+        emit({"type": "agent_end", "messages": [{"role": "assistant", "stopReason": "aborted"}], "willRetry": False})
+        emit({"type": "agent_settled", "aborted": True})
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let pi_prog = fake_pi.to_str().unwrap().to_string();
+    let factory: Arc<dyn DriverFactory> = Arc::new(
+        move |p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
+            match p {
+                RuntimeProvider::Pi => Some(Box::new(PiDriver::with_program(&pi_prog))),
+                _ => drivers().create(p),
+            }
+        },
+    );
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool.clone()),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        factory,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("attachments"),
+            ..RuntimeConfig::default()
+        },
+    );
+
+    let s = create_as(&rt, cwd, RuntimeProvider::Pi).await;
+    let first = rt.prompt(&s.id, "slow").await.unwrap();
+    host.wait(|e| {
+        matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+            if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == "Working…"))
+    })
+    .await;
+
+    let steer_req = RuntimePromptReq {
+        text: "check null".into(),
+        effort: Some("high".into()),
+        delivery: Some(PromptDelivery::Steer),
+        images: vec![PromptImage {
+            mime: "image/png".into(),
+            data_base64: "iVBORw0KGgo=".into(),
+            name: None,
+        }],
+        ..Default::default()
+    };
+    let r = rt.prompt_with(&s.id, &steer_req).await.unwrap();
+    assert!(r.steered);
+    assert_eq!(r.turn_id, first.turn_id);
+    let done = host.wait(is_terminal).await;
+    assert_eq!(terminal(&done), Some(TurnTerminalStatus::Completed));
+    assert_eq!(
+        last_assistant_text(&host),
+        "steered: check null (high, imgs=1)"
+    );
+    assert_eq!(turns(&host).len(), 1, "steer settled inside the same turn");
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn agy_switches_model_and_effort_live_while_acp_steer_falls_back_to_queue() {
+    use otto_core::agent_runtime::PromptDelivery;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Agy),
+                cwd: Some(cwd.into()),
+                model: Some("gemini-4-argon-medium".into()),
+                ..CreateRuntimeSessionReq::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    rt.prompt(&s.id, "model").await.unwrap();
+    host.wait(is_terminal).await;
+    assert_eq!(last_assistant_text(&host), "model: gemini-4-argon-medium");
+    assert_eq!(host.prepared.lock().unwrap().len(), 1);
+
+    let switched = RuntimePromptReq {
+        model: Some("gemini-4-argon-high".into()),
+        effort: Some("high".into()),
+        ..RuntimePromptReq::of("model")
+    };
+    rt.prompt_with(&s.id, &switched).await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(last_assistant_text(&host), "model: gemini-4-argon-high");
+    assert_eq!(
+        host.prepared.lock().unwrap().len(),
+        1,
+        "agy model switch uses session/set_model without respawning"
+    );
+
+    rt.prompt(&s.id, "effort").await.unwrap();
+    host.wait_n(is_terminal, 3).await;
+    assert_eq!(last_assistant_text(&host), "effort: high");
+
+    // ACP v1 has no mid-turn steer RPC: `PromptDelivery::Steer` falls back to
+    // queueing instead of failing or corrupting the active turn.
+    rt.prompt(&s.id, "hang").await.unwrap();
+    host.wait(|e| {
+        matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
+            if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "working"))
+    })
+    .await;
+    let r = rt
+        .prompt_with(&s.id, &queued(PromptDelivery::Steer, "after hang"))
+        .await
+        .unwrap();
+    assert!(!r.steered);
+    assert!(r.queued_id.is_some());
+    rt.interrupt(&s.id).await.unwrap();
+    let stopped = host.wait_n(is_terminal, 4).await;
+    assert_eq!(terminal(&stopped), Some(TurnTerminalStatus::Interrupted));
+    let drained = host.wait_n(is_terminal, 5).await;
+    assert_eq!(terminal(&drained), Some(TurnTerminalStatus::Completed));
+    assert_eq!(last_assistant_text(&host), "echo: after hang");
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn multi_chunk_reasoning_and_message_preserve_started_at_across_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(
+        &pool,
+        &host,
+        RuntimeConfig {
+            stream_coalesce: Duration::from_secs(30),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = create(&rt, cwd).await;
+    host.wait(is_ready).await;
+
+    rt.prompt(&s.id, "timed-think").await.unwrap();
+    host.wait(is_terminal).await;
+
+    let items = host.items();
+    let reasoning = items
+        .iter()
+        .find(|i| matches!(i.kind, TurnItemKind::Reasoning { .. }))
+        .expect("reasoning item");
+    assert_eq!(reasoning.status, TurnItemStatus::Completed);
+    assert!(reasoning.completed_at.unwrap() > reasoning.started_at.unwrap());
+
+    let message = items
+        .iter()
+        .find(|i| matches!(i.kind, TurnItemKind::AssistantMessage { .. }))
+        .expect("assistant message item");
+    assert_eq!(message.status, TurnItemStatus::Completed);
+    assert!(message.completed_at.unwrap() > message.started_at.unwrap());
+    assert!(message.started_at.unwrap() >= reasoning.completed_at.unwrap());
+
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn replay_paged_returns_tail_and_older_pages_across_restarts() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    host.wait(is_ready).await;
+
+    for n in 1..=5 {
+        rt.prompt(&s.id, &format!("turn {n}")).await.unwrap();
+        host.wait_n(is_terminal, n).await;
+    }
+
+    let tail = match rt
+        .replay_paged(&s.id, 0, Some(2), None, None)
+        .await
+        .unwrap()
+    {
+        RuntimeReplay::Snapshot { snapshot, .. } => *snapshot,
+        other => panic!("expected paged snapshot, got {other:?}"),
+    };
+    assert!(tail.has_older);
+    assert_eq!(tail.older_turns, 3);
+    assert_eq!(tail.oldest_turn_ordinal, Some(4));
+    assert_eq!(tail.turns.len(), 2);
+
+    let older = match rt
+        .replay_paged(&s.id, 0, None, tail.oldest_turn_ordinal, Some(2))
+        .await
+        .unwrap()
+    {
+        RuntimeReplay::Snapshot { snapshot, .. } => *snapshot,
+        other => panic!("expected older page snapshot, got {other:?}"),
+    };
+    assert!(older.has_older);
+    assert_eq!(older.older_turns, 1);
+    assert_eq!(older.oldest_turn_ordinal, Some(2));
+    assert_eq!(older.turns.len(), 2);
+
+    let first = match rt
+        .replay_paged(&s.id, 0, None, older.oldest_turn_ordinal, Some(2))
+        .await
+        .unwrap()
+    {
+        RuntimeReplay::Snapshot { snapshot, .. } => *snapshot,
+        other => panic!("expected first page snapshot, got {other:?}"),
+    };
+    assert!(!first.has_older);
+    assert_eq!(first.older_turns, 0);
+    assert_eq!(first.turns.len(), 1);
+
+    rt.close(&s.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn get_item_returns_uncompacted_detail_and_reopen_fast_skips_live_and_revives_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Codex).await;
+    host.wait(is_ready).await;
+
+    rt.prompt(&s.id, "fail").await.unwrap();
+    host.wait(is_terminal).await;
+
+    let snap = match rt
+        .replay_paged_opts(&s.id, 0, Some(20), None, None, true, Some(10_000))
+        .await
+        .unwrap()
+    {
+        RuntimeReplay::Snapshot { snapshot, .. } => *snapshot,
+        other => panic!("expected compact snapshot, got {other:?}"),
+    };
+    let compact_cmd = snap
+        .turn_items
+        .iter()
+        .find(|i| matches!(i.kind, TurnItemKind::CommandExecution { .. }))
+        .expect("settled command execution item");
+    assert!(
+        compact_cmd.detail_omitted,
+        "compact snapshot omits settled command output"
+    );
+    if let TurnItemKind::CommandExecution { output, .. } = &compact_cmd.kind {
+        assert!(output.is_none());
+    }
+
+    let full_cmd = rt.get_item(&s.id, &compact_cmd.id).await.unwrap();
+    assert!(!full_cmd.detail_omitted);
+    match &full_cmd.kind {
+        TurnItemKind::CommandExecution { output, .. } => {
+            assert_eq!(output.as_deref(), Some("boom\n"));
+        }
+        other => panic!("expected CommandExecution, got {other:?}"),
+    }
+
+    assert!(matches!(
+        rt.get_item(&s.id, &"missing-item-id".into()).await,
+        Err(Error::NotFound(_))
+    ));
+
+    // Live process: reopen_fast is an instant no-op (no duplicate spawn).
+    assert_eq!(host.prepared.lock().unwrap().len(), 1);
+    let live_reopened = rt.reopen_fast(&s.id).await.unwrap();
+    assert_ne!(live_reopened.status, RuntimeSessionStatus::Closed);
+    assert_eq!(host.prepared.lock().unwrap().len(), 1);
+
+    // Closed session: reopen_fast transitions out of Closed and spawns a runner.
+    rt.close(&s.id).await.unwrap();
+    assert_eq!(
+        rt.get(&s.id).await.unwrap().status,
+        RuntimeSessionStatus::Closed
+    );
+    let reopened = rt.reopen_fast(&s.id).await.unwrap();
+    assert_ne!(reopened.status, RuntimeSessionStatus::Closed);
+    assert!(host.prepared.lock().unwrap().len() >= 2);
+    rt.prompt(&s.id, "after reopen").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert_eq!(last_assistant_text(&host), "echo: after reopen");
+
+    rt.close(&s.id).await.unwrap();
 }
 
 // ---- provider parity: commands, titles, cost, plan mode, tool images ----

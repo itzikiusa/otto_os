@@ -7,14 +7,11 @@
 // compartment once the pack resolves (CodeEditor guards the swap against a
 // rebuilt view / switched doc).
 //
-// SQL and Redis stay STATIC on purpose: the DB query editor is the hot path
-// (tab switches restore kept states, dialect switches re-tokenize live) and
-// must never flash unhighlighted; `lang-sql` is also already reached through
-// `sql-dialects.ts`, and Redis is a tiny local StreamLanguage.
+// SQL and Redis stay STATIC on purpose: they power the hot-path DB console.
 import type { Extension } from '@codemirror/state';
 import { sql } from '@codemirror/lang-sql';
-import { sqlDialect as dialectFor, type SqlDialectName } from '../sql-dialects';
-import { redisLang } from './redis-lang';
+import { sqlDialect as dialectFor, type SqlDialectName } from '../sql-dialects.ts';
+import { redisLang } from './redis-lang.ts';
 
 type Build = (dialect: SqlDialectName) => Extension;
 
@@ -24,6 +21,8 @@ const SYNC: Record<string, Build> = {
 };
 
 const js = () => import('@codemirror/lang-javascript');
+const extra = () => import('./cm-langs-extra.ts');
+
 const LOADERS: Record<string, () => Promise<Build>> = {
   js: () => js().then((m) => () => m.javascript()),
   jsx: () => js().then((m) => () => m.javascript({ jsx: true })),
@@ -31,11 +30,16 @@ const LOADERS: Record<string, () => Promise<Build>> = {
   tsx: () => js().then((m) => () => m.javascript({ jsx: true, typescript: true })),
   mjs: () => js().then((m) => () => m.javascript()),
   cjs: () => js().then((m) => () => m.javascript()),
+  mts: () => js().then((m) => () => m.javascript({ typescript: true })),
+  cts: () => js().then((m) => () => m.javascript({ typescript: true })),
   py: () => import('@codemirror/lang-python').then((m) => () => m.python()),
+  pyi: () => import('@codemirror/lang-python').then((m) => () => m.python()),
   go: () => import('@codemirror/lang-go').then((m) => () => m.go()),
   rs: () => import('@codemirror/lang-rust').then((m) => () => m.rust()),
   json: () => import('@codemirror/lang-json').then((m) => () => m.json()),
   jsonc: () => import('@codemirror/lang-json').then((m) => () => m.json()),
+  jsonl: () => import('@codemirror/lang-json').then((m) => () => m.json()),
+  ndjson: () => import('@codemirror/lang-json').then((m) => () => m.json()),
   html: () => import('@codemirror/lang-html').then((m) => () => m.html()),
   htm: () => import('@codemirror/lang-html').then((m) => () => m.html()),
   xml: () => import('@codemirror/lang-html').then((m) => () => m.html()),
@@ -45,6 +49,19 @@ const LOADERS: Record<string, () => Promise<Build>> = {
   md: () => import('@codemirror/lang-markdown').then((m) => () => m.markdown()),
   mdx: () => import('@codemirror/lang-markdown').then((m) => () => m.markdown()),
   java: () => import('@codemirror/lang-java').then((m) => () => m.java()),
+  class: () => import('@codemirror/lang-java').then((m) => () => m.java()),
+  gradle: () => import('@codemirror/lang-java').then((m) => () => m.java()),
+  kts: () => import('@codemirror/lang-java').then((m) => () => m.java()),
+  sh: () => extra().then((m) => () => m.shellLang()),
+  bash: () => extra().then((m) => () => m.shellLang()),
+  zsh: () => extra().then((m) => () => m.shellLang()),
+  bats: () => extra().then((m) => () => m.shellLang()),
+  shell: () => extra().then((m) => () => m.shellLang()),
+  shellscript: () => extra().then((m) => () => m.shellLang()),
+  mod: () => extra().then((m) => () => m.goModLang()),
+  sum: () => extra().then((m) => () => m.goModLang()),
+  work: () => extra().then((m) => () => m.goModLang()),
+  toml: () => extra().then((m) => () => m.tomlLang()),
 };
 
 /** Resolved builders, by extension (module-wide: every editor shares them). */

@@ -194,25 +194,22 @@
           if (mode === 'commands') inputEl?.focus();
           else {
             textareaEl?.focus();
-            // place caret at the end (after any prefill like "broadcast ")
             const len = englishText.length;
             textareaEl?.setSelectionRange(len, len);
           }
         });
-      } else {
-        const back = returnFocus;
-        returnFocus = null;
-        // Only if nothing else took focus meanwhile (a command that opened a
-        // sheet or moved to another page owns focus now).
-        queueMicrotask(() => {
-          if (back?.isConnected && (document.activeElement === document.body || document.activeElement === null)) back.focus();
-        });
-        // Palette closed — cancel any pending search so we don't waste a round-trip.
-        if (searchTimer !== null) { clearTimeout(searchTimer); searchTimer = null; }
-        searchAbort?.abort();
-        searchAbort = null;
       }
     });
+    return () => {
+      const back = returnFocus;
+      returnFocus = null;
+      queueMicrotask(() => {
+        if (back?.isConnected && (document.activeElement === document.body || document.activeElement === null)) back.focus();
+      });
+      if (searchTimer !== null) { clearTimeout(searchTimer); searchTimer = null; }
+      searchAbort?.abort();
+      searchAbort = null;
+    };
   });
 
   // Free text in commands mode is always offered as an orchestrator ask, so

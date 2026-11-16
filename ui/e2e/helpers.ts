@@ -39,6 +39,7 @@ export const PAGES = [
   'scheduled-tasks',
   'personal-agents',
   'workbench',
+  'ide',
 ] as const;
 
 export type PageId = (typeof PAGES)[number];

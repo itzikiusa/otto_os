@@ -48,6 +48,7 @@ const LOADERS: Record<string, Loader> = {
   },
   threads: () => import('../modules/threads/ThreadsPage.svelte'),
   home: () => import('../modules/home/HomePage.svelte'),
+  ide: () => import('../modules/ide/IdePage.svelte'),
   git: () => import('../modules/git/GitPage.svelte'),
   database: () => import('../modules/database/DatabasePage.svelte'),
   vault: () => import('../modules/vault/VaultPage.svelte'),
@@ -118,7 +119,7 @@ const NOT_SHELL = new Set(['s', 'bar', 'tray', 'room', 'room-host']);
  *  role / a disabled feature hides (the sidebar's own gate), is the route
  *  gate — never a silent Agents, never a page that only fails with 403s. */
 export function pageKeyOf(parts: readonly string[]): string | null {
-  const m = parts[0] ?? '';
+  const m = (parts[0] ?? '').split('?')[0] ?? '';
   if (NOT_SHELL.has(m)) return null;
   // The phone's light version (lib/lightMode.svelte.ts) lands on Threads and
   // gates every module it hides — so a hidden page's chunk never loads, not

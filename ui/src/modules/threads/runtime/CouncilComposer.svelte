@@ -9,14 +9,19 @@
   import { announceShown } from '../../../lib/announce.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { composerViewState } from '../../../lib/stores/runtimeDraftCursor';
   import { followUpBlocker, targetLabel } from './councilRounds';
+  import RuntimeMentionMenu, { type PickedFileMention } from './RuntimeMentionMenu.svelte';
 
   interface Props {
+    /** Stable key preserving caret and scroll state across remounts. */
+    draftKey?: string;
     /** The council's seat numbers. */
     seatNumbers: number[];
     /** Seats the next follow-up goes to (all of them = "All seats"). */
     targets: number[];
     text: string;
+    cwd?: string | null;
     rounds: number;
     maxRounds: number;
     sending: boolean;
@@ -29,9 +34,12 @@
     onsend: () => void;
     onstop: () => void;
   }
-  let { seatNumbers, targets, text, rounds, maxRounds, sending, error, working, stopping, ontargets, ontext, onsend, onstop }: Props = $props();
+  let { draftKey = 'council:default', seatNumbers, targets, text, cwd = null, rounds, maxRounds, sending, error, working, stopping, ontargets, ontext, onsend, onstop }: Props = $props();
 
   let chooserEl = $state<HTMLButtonElement | null>(null);
+  let boxEl = $state<HTMLDivElement | null>(null);
+  let textareaEl = $state<HTMLTextAreaElement | null>(null);
+  let mentionEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   const blocker = $derived(followUpBlocker(rounds, maxRounds, targets.length));
   const atCap = $derived(rounds >= maxRounds);
   const canSend = $derived(!blocker && !sending && !!text.trim());
@@ -55,6 +63,7 @@
   }
 
   function keydown(e: KeyboardEvent): void {
+    if (e.isComposing || mentionEl?.onKey(e)) return;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       if (canSend) onsend();
@@ -62,18 +71,34 @@
   }
 </script>
 
-<div class="cc" data-testid="council-composer">
+<div class="cc" bind:this={boxEl} data-testid="council-composer">
   {#if atCap}
     <p class="cc-cap" data-testid="council-round-cap" use:announceShown={blocker ?? ''}>
       <Icon name="info" size={12} /><span>{blocker}</span>
     </p>
   {:else}
+    <RuntimeMentionMenu
+      bind:this={mentionEl}
+      {text}
+      {cwd}
+      {textareaEl}
+      anchorEl={boxEl}
+      allowAgents={false}
+      onpickfile={(picked: PickedFileMention) => ontext(picked.nextText)}
+      ondrilldir={(nextText) => ontext(nextText)}
+    />
     <textarea
+      bind:this={textareaEl}
+      use:composerViewState={{ key: draftKey, hasText: text.length > 0 }}
       class="cc-text"
       rows={2}
       dir="auto"
+      spellcheck="false"
+      {...{ autocorrect: 'off' }}
+      autocapitalize="off"
+      autocomplete="off"
       value={text}
-      placeholder={`Ask ${label === 'All seats' ? 'the council' : label.toLowerCase()} a follow-up — each seat answers in its own thread`}
+      placeholder={`Ask ${label === 'All seats' ? 'the council' : label.toLowerCase()} a follow-up (@ files)`}
       aria-label="Follow-up for the council"
       data-testid="council-followup"
       oninput={(e) => ontext((e.currentTarget as HTMLTextAreaElement).value)}
@@ -125,6 +150,7 @@
 
 <style>
   .cc {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -145,6 +171,8 @@
     color: var(--text);
     font: inherit;
     font-size: var(--fs-m);
+    unicode-bidi: plaintext;
+    text-align: start;
   }
   .cc-row {
     display: flex;

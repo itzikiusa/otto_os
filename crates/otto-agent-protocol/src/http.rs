@@ -1,18 +1,8 @@
-//! `/runtime-sessions/*` REST router (contract: `docs/contracts/api.md`
-//! "Structured agent runtime"). Page-level authorization is the server's
-//! policy table (`Agents` View for reads, Edit for writes); the handlers add:
-//!
-//! * workspace `viewer`+ membership, then owner-or-admin on the session (the
-//!   same rule as PTY sessions' `require_session_owner_or_admin`);
-//! * every write requires a PERSON's credential — an agent session's token,
-//!   an MCP or share credential may not open sessions, drive them, or answer
-//!   permission prompts (an agent approving its own tool call is exactly
-//!   what the prompt exists to prevent);
-//! * the ONE agent-writable surface is linked threads (`/peers`): a thread's
-//!   own agent (its session-bound credential, `managed_session_id == {id}`)
-//!   or its owner may open threads linked to it and message / read them —
-//!   same owner, same workspace, never a wider access mode than the
-//!   opener's, every message visible in the receiving thread.
+//! `/runtime-sessions/*` REST router (contract: `docs/contracts/api.md`).
+//! Enforces workspace `viewer`+ / session owner-or-admin RBAC and requires a
+//! human credential for writes (except `/peers`, where a session's own agent
+//! token may open/message/read same-owner, same-workspace linked threads at no
+//! wider access mode).
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
@@ -23,7 +13,7 @@ use otto_core::agent_runtime::{
     AskChildReq, AskChildResp, CouncilResp, CreateCouncilReq, CreateRuntimeSessionBody,
     OpenPeerReq, PeerInfo, PeerMessageReq, PeerReply, QueuedDeliverReq, RuntimePromptReq,
     RuntimePromptResp, RuntimeReplay, RuntimeRequestRespondReq, RuntimeSession,
-    SynthesizeCouncilReq, UpdateRuntimeSessionReq,
+    SynthesizeCouncilReq, TurnItem, UnqueuePromptResp, UpdateRuntimeSessionReq,
 };
 use otto_core::api::Problem;
 use otto_core::auth::{AuthContext, AuthUser};
@@ -34,7 +24,7 @@ use serde::Deserialize;
 use crate::runtime::council::{CouncilFollowUpReq, CouncilRoundsResp};
 use crate::RuntimeCtx;
 
-mod drafts;
+pub(crate) mod drafts;
 
 pub(crate) struct ApiErr(pub Error);
 
@@ -57,9 +47,16 @@ impl IntoResponse for ApiErr {
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!(error = %self.0, "runtime-sessions internal error");
+        }
+        let message = match &self.0 {
+            Error::Internal(_) => "internal server error".to_string(),
+            other => other.to_string(),
+        };
         let problem = Problem {
             code: self.0.code().to_string(),
-            message: self.0.to_string(),
+            message,
         };
         (status, Json(problem)).into_response()
     }
@@ -117,6 +114,7 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
             post(deliver_queued::<S>).delete(unqueue::<S>),
         )
         .route("/runtime-sessions/{id}/events", get(events::<S>))
+        .route("/runtime-sessions/{id}/items/{item_id}", get(get_item::<S>))
         .route(
             "/runtime-sessions/{id}/attachments/{attachment_id}",
             get(attachment::<S>),
@@ -361,9 +359,7 @@ async fn list_all<S: RuntimeCtx>(
     Ok(Json(out))
 }
 
-/// POST /workspaces/{id}/runtime-sessions — create + spawn (editor+). The
-/// body may name an embedded `source` / `origin` (validated, the only
-/// client input that reaches the server-owned meta).
+/// POST /workspaces/{id}/runtime-sessions — create + spawn (editor+).
 async fn create<S: RuntimeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -373,8 +369,9 @@ async fn create<S: RuntimeCtx>(
 ) -> ApiResult<(StatusCode, Json<RuntimeSession>)> {
     require_human(&ctx, &auth)?;
     ctx.roles().check(&user, &ws, WorkspaceRole::Editor).await?;
-    let req = body.into_req()?;
-    let s = ctx.agent_runtime().create(&user.id, &ws, req).await?;
+    let rt = ctx.agent_runtime();
+    let req = body.into_req_with_resolver(|slug| rt.resolve_runtime_provider(slug))?;
+    let s = rt.create(&user.id, &ws, req).await?;
     Ok((StatusCode::CREATED, Json(s)))
 }
 
@@ -534,7 +531,7 @@ async fn close<S: RuntimeCtx>(
 }
 
 /// POST /runtime-sessions/{id}/reopen — a closed thread takes prompts again
-/// (its agent respawns, resuming the provider's thread).
+/// (its agent respawns immediately; MCP/resume readiness completes asynchronously).
 async fn reopen<S: RuntimeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -543,7 +540,7 @@ async fn reopen<S: RuntimeCtx>(
 ) -> ApiResult<Json<RuntimeSession>> {
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
-    Ok(Json(ctx.agent_runtime().reopen(&id).await?))
+    Ok(Json(ctx.agent_runtime().reopen_fast(&id).await?))
 }
 
 /// DELETE /runtime-sessions/{id} — stop its agent and remove it with its history.
@@ -577,17 +574,23 @@ async fn deliver_queued<S: RuntimeCtx>(
     Ok((StatusCode::ACCEPTED, Json(r)))
 }
 
-/// DELETE /runtime-sessions/{id}/queue/{queued_id} — drop a queued message.
+/// DELETE /runtime-sessions/{id}/queue/{queued_id} — drop a queued message
+/// and return its text + attachments so Edit can restore them into the composer.
 async fn unqueue<S: RuntimeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Extension(auth): Extension<AuthContext>,
     Path((id, queued_id)): Path<(Id, String)>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<Json<UnqueuePromptResp>> {
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
-    if ctx.agent_runtime().unqueue(&id, &queued_id).await? {
-        Ok(StatusCode::NO_CONTENT)
+    if let Some(req) = ctx.agent_runtime().unqueue_prompt(&id, &queued_id).await? {
+        Ok(Json(UnqueuePromptResp {
+            ok: true,
+            text: Some(req.text),
+            images: req.images,
+            files: req.files,
+        }))
     } else {
         Err(ApiErr(Error::NotFound(
             "that message is no longer queued".into(),
@@ -691,13 +694,23 @@ async fn swarm<S: RuntimeCtx>(
     .ok_or_else(gone)
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct EventsQuery {
     #[serde(default)]
     after_sequence: u64,
+    #[serde(default)]
+    tail_turns: Option<usize>,
+    #[serde(default)]
+    before_turn_ordinal: Option<u32>,
+    #[serde(default)]
+    limit_turns: Option<usize>,
+    #[serde(default)]
+    max_lines: Option<usize>,
+    #[serde(default)]
+    compact: Option<String>,
 }
 
-/// GET /runtime-sessions/{id}/events?after_sequence= — events or a snapshot.
+/// GET /runtime-sessions/{id}/events?after_sequence= — events, tail snapshot, or older turn page.
 async fn events<S: RuntimeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -705,7 +718,211 @@ async fn events<S: RuntimeCtx>(
     Query(q): Query<EventsQuery>,
 ) -> ApiResult<Json<RuntimeReplay>> {
     authorized(&ctx, &user, &id).await?;
+    let compact = q
+        .compact
+        .as_deref()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
     Ok(Json(
-        ctx.agent_runtime().replay(&id, q.after_sequence).await?,
+        ctx.agent_runtime()
+            .replay_paged_opts(
+                &id,
+                q.after_sequence,
+                q.tail_turns,
+                q.before_turn_ordinal,
+                q.limit_turns,
+                compact,
+                q.max_lines,
+            )
+            .await?,
     ))
+}
+
+/// GET /runtime-sessions/{id}/items/{item_id} — one full (uncompacted) TurnItem on demand.
+async fn get_item<S: RuntimeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path((id, item_id)): Path<(Id, Id)>,
+) -> ApiResult<Json<TurnItem>> {
+    authorized(&ctx, &user, &id).await?;
+    Ok(Json(ctx.agent_runtime().get_item(&id, &item_id).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{
+        AgentRuntime, DriverFactory, LaunchSpec, McpDelivery, McpServerDef, RuntimeConfig,
+        RuntimeHost,
+    };
+    use chrono::Utc;
+    use otto_core::agent_runtime::{RuntimeAccessMode, RuntimeEvent, RuntimeProvider};
+    use otto_core::auth::{BoxFuture, RoleChecker};
+    use otto_core::domain::Workspace;
+    use otto_state::{AgentRuntimeRepo, DbPool, NewRuntimeSession, UsersRepo, WorkspacesRepo};
+
+    struct MemberNotAdminRoles;
+    impl RoleChecker for MemberNotAdminRoles {
+        fn check<'a>(
+            &'a self,
+            _user: &'a User,
+            _ws: &'a Id,
+            min_role: WorkspaceRole,
+        ) -> BoxFuture<'a, otto_core::Result<()>> {
+            Box::pin(async move {
+                if min_role == WorkspaceRole::Admin {
+                    Err(Error::Forbidden("not a workspace admin".into()))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    struct DummyHost(String);
+    #[async_trait::async_trait]
+    impl RuntimeHost for DummyHost {
+        async fn workspace(&self, id: &Id) -> otto_core::Result<Workspace> {
+            Ok(Workspace {
+                id: id.clone(),
+                name: "W".into(),
+                root_path: self.0.clone(),
+                settings: serde_json::json!({}),
+                archived: false,
+                created_at: Utc::now(),
+            })
+        }
+        async fn sandboxed(&self, _s: &RuntimeSession) -> bool {
+            false
+        }
+        async fn prepare_spawn(
+            &self,
+            _ws: &Workspace,
+            _s: &RuntimeSession,
+            _spec: &mut LaunchSpec,
+            _mcp: McpDelivery,
+        ) -> otto_core::Result<Vec<McpServerDef>> {
+            Ok(Vec::new())
+        }
+        fn publish(&self, _s: &RuntimeSession, _event: Arc<RuntimeEvent>) {}
+    }
+
+    #[derive(Clone)]
+    struct TestRuntimeCtx {
+        rt: AgentRuntime,
+        roles: Arc<dyn RoleChecker>,
+    }
+
+    impl RuntimeCtx for TestRuntimeCtx {
+        fn agent_runtime(&self) -> &AgentRuntime {
+            &self.rt
+        }
+        fn roles(&self) -> &Arc<dyn RoleChecker> {
+            &self.roles
+        }
+        fn is_human(&self, _auth: &AuthContext) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn get_item_and_events_enforce_session_owner_or_admin() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap().to_string();
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let raw_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&raw_pool)
+            .await
+            .unwrap();
+        let pool: DbPool = raw_pool.into();
+        let users = UsersRepo::new(pool.clone());
+        let owner = users.create("owner", "Owner", "h", false).await.unwrap();
+        let other = users.create("other", "Other", "h", false).await.unwrap();
+        let ws = WorkspacesRepo::new(pool.clone())
+            .create("ws", &cwd, &owner.id)
+            .await
+            .unwrap();
+        let drivers: Arc<dyn DriverFactory> = Arc::new(|_| None);
+        let rt = AgentRuntime::new(
+            AgentRuntimeRepo::new(pool),
+            Arc::new(DummyHost(cwd.clone())),
+            drivers,
+            RuntimeConfig {
+                attachments_dir: dir.path().join("att"),
+                ..RuntimeConfig::default()
+            },
+        );
+        let s = rt
+            .repo()
+            .create(NewRuntimeSession {
+                id: otto_core::new_id(),
+                workspace_id: ws.id,
+                provider: RuntimeProvider::Claude,
+                title: "t".into(),
+                cwd,
+                model: None,
+                access_mode: RuntimeAccessMode::FullAccess,
+                created_by: owner.id.clone(),
+                parent_id: None,
+                meta: None,
+            })
+            .await
+            .unwrap()
+            .session;
+        let ctx = TestRuntimeCtx {
+            rt,
+            roles: Arc::new(MemberNotAdminRoles),
+        };
+
+        // Non-owner workspace member is rejected with 403 Forbidden before item lookup.
+        let err = match get_item(
+            State(ctx.clone()),
+            Extension(AuthUser(other.clone())),
+            Path((s.id.clone(), "any-item".into())),
+        )
+        .await
+        {
+            Ok(_) => panic!("expected Forbidden for non-owner"),
+            Err(e) => e,
+        };
+        assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+
+        let ev_err = match events(
+            State(ctx.clone()),
+            Extension(AuthUser(other)),
+            Path(s.id.clone()),
+            Query(EventsQuery {
+                compact: Some("1".into()),
+                max_lines: Some(10_000),
+                ..EventsQuery::default()
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("expected Forbidden for non-owner events"),
+            Err(e) => e,
+        };
+        assert_eq!(ev_err.into_response().status(), StatusCode::FORBIDDEN);
+
+        // Owner passes authz and receives 404 NotFound for an unknown item ID.
+        let miss = match get_item(
+            State(ctx),
+            Extension(AuthUser(owner)),
+            Path((s.id, "missing-item".into())),
+        )
+        .await
+        {
+            Ok(_) => panic!("expected NotFound for missing item"),
+            Err(e) => e,
+        };
+        assert_eq!(miss.into_response().status(), StatusCode::NOT_FOUND);
+    }
 }

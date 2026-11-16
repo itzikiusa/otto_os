@@ -83,6 +83,23 @@ fn result_interrupted() {
     );
 }
 
+fn wait_for_file(path: &std::path::Path) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+fn stream_delta(index: u64, chunk: &str) {
+    out(
+        json!({"type":"stream_event","event":{"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":chunk}},"parent_tool_use_id":null}),
+    );
+}
+
 fn user_text(msg: &Value) -> String {
     match msg.pointer("/message/content") {
         Some(Value::String(s)) => s.clone(),
@@ -262,6 +279,41 @@ fn main() {
                     if steerable {
                         text_message(&mid, &format!("steered: {text}"));
                     }
+                    continue;
+                }
+                if let Some(gate_dir) = text.strip_prefix("gated ").map(str::trim) {
+                    let gate = std::path::Path::new(gate_dir);
+                    let _ = std::fs::write(gate.join("pid_turn1"), std::process::id().to_string());
+                    out(
+                        json!({"type":"stream_event","event":{"type":"message_start","message":{"id":mid}},"parent_tool_use_id":null}),
+                    );
+                    out(
+                        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null}),
+                    );
+                    stream_delta(0, "alpha beta ");
+                    let _ = std::fs::write(gate.join("phase1_ready"), b"1");
+                    if !wait_for_file(&gate.join("emit_gap")) {
+                        std::process::exit(2);
+                    }
+                    stream_delta(0, "gamma ");
+                    let _ = std::fs::write(gate.join("gap_emitted"), b"1");
+                    if !wait_for_file(&gate.join("finish_turn")) {
+                        std::process::exit(2);
+                    }
+                    stream_delta(0, "delta");
+                    out(
+                        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}),
+                    );
+                    out(
+                        json!({"type":"assistant","message":{"id":mid,"content":[{"type":"text","text":"alpha beta gamma delta"}]},"parent_tool_use_id":null}),
+                    );
+                    result_ok();
+                    continue;
+                }
+                if let Some(pid_path) = text.strip_prefix("pid ").map(str::trim) {
+                    let _ = std::fs::write(pid_path, std::process::id().to_string());
+                    text_message(&mid, "second-turn-ok");
+                    result_ok();
                     continue;
                 }
                 let mut words = text.split_whitespace();

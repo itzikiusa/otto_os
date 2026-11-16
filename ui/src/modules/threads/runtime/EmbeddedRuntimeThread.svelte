@@ -1,11 +1,9 @@
 <!--
-  One structured-runtime thread hosted outside Threads (a personal agent's
-  chat; a pull request's or a connection's column), through
-  lib/runtimeThreadPort.ts — the contract (props, callbacks, host commands)
-  is documented there. Reads only its own row and its linked group, keeps
-  them live while mounted, and never takes focus unless asked. The
-  linked-thread chips switch this view between the lead and the agents it
-  delegated to; a bar then offers "Back" and "Open in Threads".
+  One structured-runtime thread hosted outside Threads (IDE AI Agent dock,
+  Personal Agents' chat, Pull Requests, Connections), through
+  lib/runtimeThreadPort.ts or direct IDE embed. Reads only its own row and its
+  linked group, keeps them live while mounted, and switches cleanly between the
+  lead thread and any delegated child threads.
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -13,11 +11,11 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../../lib/loadError';
   import { EMBED_DEFAULTS, openInThreads, type RuntimeThreadViewProps } from '../../../lib/runtimeThreadPort';
+  import { embedStatus } from './embedStatus';
   import RuntimeThread from './RuntimeThread.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import { isRunning } from './timeline';
-  import { embedStatus } from './embedStatus';
 
   let {
     sessionId,
@@ -28,22 +26,33 @@
     ondetach,
     onstatus,
     hostCommands,
+    accessModeOverride = null,
+    onaccessmodechange,
+    hideEmbedBarWhenUnlinked = false,
+    fallbackCwd = null,
+    hasExternalContext = false,
+    transformOutgoingText,
+    transformRestoredQueuedText,
+    onExternalContextConsumed,
+    onopenpath,
+    formatAssistantText,
+    assistantFooter,
+    composerTopSlot,
+    composerFootLeadSlot,
+    testIds,
   }: RuntimeThreadViewProps = $props();
 
-  /** The thread shown: the host's, or a linked one picked from the chips. */
   let picked = $state<string | null>(null);
   const shown = $derived(picked && runtimeThreads.group(sessionId).some((t) => t.id === picked) ? picked : sessionId);
   const current = $derived(runtimeThreads.get(shown));
   let rowError = $state<string | null>(null);
   let attempt = $state(0);
-  /** The bar: a linked thread is shown, or the host asked for embed chrome. */
   const linked = $derived(shown !== sessionId);
-  const chrome = $derived(linked || compact || !!onmaximize || !!ondetach);
+  const chrome = $derived(linked || (!hideEmbedBarWhenUnlinked && (compact || !!onmaximize || !!ondetach)));
   const detach = (): void => (ondetach ?? openInThreads)(shown);
 
   onMount(() => runtimeThreads.mount());
-  // The host's thread (not a linked one shown in its place), for `onstatus`:
-  // on mount and on every change.
+
   const status = $derived.by(() => {
     const row = runtimeThreads.get(sessionId);
     const p = runtimeViews.projections[sessionId] ?? null;
@@ -65,8 +74,6 @@
   $effect(() => {
     const id = sessionId;
     void attempt;
-    // Only this thread's row (a freshly created chat may not be held yet)
-    // and its linked group — never the workspace's whole thread list.
     untrack(() => {
       rowError = null;
       runtimeThreads.loadOne(id).then(
@@ -114,6 +121,19 @@
           focused={focusOnMount}
           {compact}
           {hostCommands}
+          {accessModeOverride}
+          {onaccessmodechange}
+          {fallbackCwd}
+          {hasExternalContext}
+          {transformOutgoingText}
+          {transformRestoredQueuedText}
+          {onExternalContextConsumed}
+          {onopenpath}
+          {formatAssistantText}
+          {assistantFooter}
+          {composerTopSlot}
+          {composerFootLeadSlot}
+          {testIds}
           agentChat={shown === sessionId ? agentName : undefined}
           onswitch={(id) => (picked = id === sessionId ? null : id)}
         />

@@ -24,6 +24,7 @@
   const pending = new Map<string, Promise<string | null>>();
 
   function load(a: MessageAttachment): Promise<string | null> {
+    if (a.preview_url) return Promise.resolve(a.preview_url);
     if (urls[a.id]) return Promise.resolve(urls[a.id]);
     let p = pending.get(a.id);
     if (!p) {
@@ -43,6 +44,7 @@
 
   /** Load a thumbnail once it is (nearly) on screen. */
   function lazy(node: HTMLElement, a: MessageAttachment) {
+    if (a.preview_url) return { destroy: () => {} };
     const io = new IntersectionObserver(
       (es) => {
         if (es.some((e) => e.isIntersecting)) {
@@ -69,8 +71,9 @@
 <div class="ratt" data-testid="runtime-attachments">
   {#each attachments as a (a.id)}
     {#if a.kind === 'image'}
-      <button type="button" class="ratt-thumb" class:loading={!urls[a.id]} use:lazy={a} aria-label="Open {a.name ?? 'image'}" title={a.name ?? 'Image'} onclick={() => void open(a)}>
-        {#if urls[a.id]}<img src={urls[a.id]} alt={a.name ?? ''} />{:else}<Icon name="image" size={16} />{/if}
+      {@const src = a.preview_url ?? urls[a.id]}
+      <button type="button" class="ratt-thumb" class:loading={!src} use:lazy={a} aria-label="Open {a.name ?? 'image'}" title={a.name ?? 'Image'} onclick={() => void open(a)}>
+        {#if src}<img {src} alt={a.name ?? ''} />{:else}<Icon name="image" size={16} />{/if}
       </button>
     {:else}
       <button type="button" class="ratt-file" title="Open {a.name ?? a.mime}" onclick={() => void open(a)}>
@@ -80,11 +83,11 @@
   {/each}
 </div>
 
-{#if opened && urls[opened.id] && opened.kind === 'image'}
-  <Lightbox src={urls[opened.id]} alt={opened.name ?? 'Image'} testid="runtime-attachment-full" onclose={() => (opened = null)} />
+{#if opened && opened.kind === 'image' && (opened.preview_url ?? urls[opened.id])}
+  <Lightbox src={opened.preview_url ?? urls[opened.id]} alt={opened.name ?? 'Image'} testid="runtime-attachment-full" onclose={() => (opened = null)} />
 {:else if opened && urls[opened.id]}
   <Modal title={opened.name ?? 'File'} width={900} onclose={() => (opened = null)}>
-    <iframe class="ratt-doc" src={urls[opened.id]} title={opened.name ?? 'File'}></iframe>
+    <iframe class="ratt-doc" sandbox="" src={urls[opened.id]} title={opened.name ?? 'File'}></iframe>
   </Modal>
 {/if}
 

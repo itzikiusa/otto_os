@@ -18,9 +18,12 @@
 //! agent stdio`, Antigravity `agy acp`, opencode `opencode acp`).
 
 pub mod acp;
+pub(crate) mod acp_sideband;
 pub mod claude;
 pub mod codex;
+pub(crate) mod diff_compact;
 pub mod driver;
+pub mod holder;
 pub mod host;
 mod http;
 mod native_work;
@@ -38,12 +41,14 @@ use std::sync::Arc;
 use axum::Router;
 use otto_core::auth::{AuthContext, RoleChecker};
 
+pub use acp_sideband::confinement::validate_confined_tail_path;
 pub use driver::{
-    ChildSignal, DriverError, DriverEvent, DriverFactory, DriverStep, LaunchContext, LaunchSpec,
-    McpDelivery, McpServerDef, StructuredDriver,
+    ActiveTailChunk, ActiveTailKind, ActiveTailSource, ChildSignal, DriverError, DriverEvent,
+    DriverFactory, DriverStep, LaunchContext, LaunchSpec, McpDelivery, McpServerDef,
+    SidebandPayload, SidebandPoll, SidebandResumeSeed, SidebandSource, StructuredDriver,
 };
 pub use host::{RuntimeHost, SessionManagerHost};
-pub use runtime::{AgentRuntime, RuntimeConfig};
+pub use runtime::{settle_archived_entity_json, AgentRuntime, RuntimeConfig};
 
 /// The daemon surface the `/runtime-sessions` router runs against
 /// (otto-server's impl: `modules/ctx_impls.rs`).
@@ -89,24 +94,10 @@ pub fn daemon_runtime(
     data_dir: &std::path::Path,
     publish: impl Fn(otto_core::event::Event) + Send + Sync + 'static,
 ) -> AgentRuntime {
-    // Structured children survive a restart in stdio holders: the PTY
-    // holders' launcher, their own directory.
-    let holders = manager.pty_holders().and_then(|pty| {
-        let mut cfg = otto_pty::HolderConfig::for_data_dir_named(
-            data_dir,
-            "rt-holders",
-            "otto-rth",
-            pty.launcher.clone(),
-        )?;
-        cfg.orphan_ttl = pty.orphan_ttl;
-        cfg.exit_linger = pty.exit_linger;
-        Some(cfg)
-    });
     let host = SessionManagerHost {
         manager,
         workspaces: otto_state::WorkspacesRepo::new(pool.clone()),
         publish: Box::new(publish),
-        holders,
     };
     AgentRuntime::new(
         otto_state::AgentRuntimeRepo::new(pool),
@@ -114,6 +105,7 @@ pub fn daemon_runtime(
         default_drivers(),
         RuntimeConfig {
             attachments_dir: data_dir.join("runtime-attachments"),
+            holders_dir: Some(data_dir.join("runtime-holders")),
             ..RuntimeConfig::default()
         },
     )

@@ -660,7 +660,7 @@ How it works (`crates/otto-pty/src/holder.rs`, `held.rs`):
   can always end any holder.
 
 Structured **Threads** (`/runtime-sessions`) are kept by the same setting,
-through stdio holders in `<data dir>/rt-holders/` — see
+through runtime holders in `<data dir>/runtime-holders/` — see
 [threads-structured-runtime.md §4](threads-structured-runtime.md#4-history-replay-and-restarts).
 
 What is **not** kept: engine-owned sessions (workflow steps, reviews, channel

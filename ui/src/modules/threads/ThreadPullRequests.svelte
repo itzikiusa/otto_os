@@ -5,7 +5,7 @@
   import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import { gitApi } from '../../lib/api/git';
-  import type { GitAccount, PrState, PrSummary, Repo } from '../../lib/api/types';
+  import type { GitAccount, GitProviderKind, PrState, PrSummary, Repo } from '../../lib/api/types';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -33,21 +33,59 @@
   let prState = $state<PrState | 'all'>('open');
   let mine = $state(false);
   let handles = $state<Set<string>>(new Set());
+  let accountProviders = $state<Set<GitProviderKind> | null>(null);
   let sortEl = $state<HTMLButtonElement | null>(null);
   let filterEl = $state<HTMLButtonElement | null>(null);
 
   const forge = $derived(forgeLabel(repo));
 
-  // Forge usernames power "Mine" (best-effort, as in Git's Focus view).
-  $effect(() => {
-    void api
+  // Forge usernames power "Mine", and configured account providers gate PR reads
+  // when a repository has no explicit `git_account_id`.
+  let accountsLoadPromise: Promise<Set<GitProviderKind>> | null = null;
+  function ensureAccounts(): Promise<Set<GitProviderKind>> {
+    if (accountProviders) return Promise.resolve(accountProviders);
+    if (accountsLoadPromise) return accountsLoadPromise;
+    accountsLoadPromise = api
       .get<GitAccount[]>('/git/accounts')
-      .then((accs) => (handles = new Set(accs.map((a) => a.username.toLowerCase()).filter(Boolean))))
-      .catch(() => {});
+      .then((accs) => {
+        handles = new Set(accs.map((a) => a.username.toLowerCase()).filter(Boolean));
+        const set = new Set<GitProviderKind>(accs.map((a) => a.provider).filter(Boolean));
+        accountProviders = set;
+        return set;
+      })
+      .finally(() => {
+        accountsLoadPromise = null;
+      });
+    return accountsLoadPromise;
+  }
+
+  $effect(() => {
+    void ensureAccounts().catch(() => {
+      // Handled per-load in `load()` so retry re-attempts `/git/accounts`.
+    });
   });
 
   async function load(reset: boolean): Promise<void> {
-    if (!repo || !forge) return;
+    if (!repo || !repo.provider || !forge) {
+      if (reset) items = [];
+      return;
+    }
+    if (!repo.git_account_id) {
+      let providers: Set<GitProviderKind>;
+      try {
+        providers = await ensureAccounts();
+      } catch (e) {
+        error = loadErrorText(e);
+        if (reset) items = [];
+        return;
+      }
+      if (!providers.has(repo.provider)) {
+        if (reset) items = [];
+        hasMore = false;
+        error = null;
+        return;
+      }
+    }
     const next = reset ? 1 : page + 1;
     loading = true;
     error = null;

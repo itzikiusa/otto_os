@@ -21,66 +21,6 @@ use crate::agy::{agy_cli_root, scan_agy_conversation};
 use crate::providers::ProviderRegistry;
 use crate::titles::{parse_claude_first_prompt, parse_codex_first_prompt};
 
-/// Removes provider flags a **read-only** session must not carry, from argv the
-/// provider registry built. Codex's `--search` (the model-side live web-search
-/// tool) is dropped: a read-only run has no business browsing, and on an
-/// untrusted checkout it is an exfiltration channel a prompt injection can
-/// steer. (codex keeps its approvals bypass: its own Seatbelt cannot nest
-/// inside Otto's forced read-only profile, which confines its whole process
-/// tree instead.)
-fn read_only_strip(provider: &str, meta: &serde_json::Value, args: &mut Vec<String>) {
-    if provider == "codex" && meta.get("read_only").and_then(|v| v.as_bool()) == Some(true) {
-        args.retain(|a| a != "--search");
-    }
-}
-
-/// Per-session creds file for the Codex `otto` MCP server: a daemon-private temp
-/// path (`<tmp>/otto-mcp/<session_id>.json`, mode 0600). Holds the per-session
-/// token so it never appears on Codex's argv; removed when the session is removed.
-fn codex_creds_path(session_id: &Id) -> std::path::PathBuf {
-    std::env::temp_dir()
-        .join("otto-mcp")
-        .join(format!("{session_id}.json"))
-}
-
-/// Per-session env file for one of the user's MCP servers on a Codex session
-/// (`<tmp>/otto-mcp/<session_id>.<server>.env`, mode 0600): its env values —
-/// Keychain secrets included — reach the server through this file instead of
-/// codex's argv. Server names are bare TOML keys, so the path segment is safe.
-/// Removed with the session's other credentials.
-fn codex_server_env_path(session_id: &Id, server: &str) -> std::path::PathBuf {
-    std::env::temp_dir()
-        .join("otto-mcp")
-        .join(format!("{session_id}.{server}.env"))
-}
-
-/// Per-session pi MCP extension (`<tmp>/otto-mcp/<session_id>.pi-mcp.js`,
-/// mode 0600; [`crate::mcp::pi_mcp_extension`]): loaded with `pi -e`, it
-/// carries the user servers' resolved env. Removed with the session's other
-/// credentials.
-fn pi_mcp_extension_path(session_id: &Id) -> std::path::PathBuf {
-    std::env::temp_dir()
-        .join("otto-mcp")
-        .join(format!("{session_id}.pi-mcp.js"))
-}
-
-/// Delete every per-server env file written for `session_id`
-/// ([`codex_server_env_path`]). Best-effort.
-async fn remove_codex_server_env_files(session_id: &Id) {
-    let dir = std::env::temp_dir().join("otto-mcp");
-    let prefix = format!("{session_id}.");
-    let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
-        return;
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(&prefix) && name.ends_with(".env") {
-            let _ = tokio::fs::remove_file(entry.path()).await;
-        }
-    }
-}
-
 #[derive(Default)]
 struct OttoToolsInjection {
     args: Vec<String>,
@@ -737,11 +677,18 @@ const PROVIDER_TITLE_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 /// not-user-and-not-already-provider `meta.title_source` are worth probing. The
 /// durable `title_source` marker is what keeps a resolved session from being
 /// re-probed after a daemon restart (the in-memory cache is empty then).
+#[cfg(test)]
 fn title_eligible(s: &Session) -> bool {
+    let inferred = crate::providers::infer_model_family(None, "", &s.provider);
+    let family = inferred.as_deref().unwrap_or(s.provider.as_str());
+    title_eligible_with_family(s, family)
+}
+
+fn title_eligible_with_family(s: &Session, cli_family: &str) -> bool {
     if s.archived
         || s.status == SessionStatus::Exited
         || !s.is_foreground_agent()
-        || !matches!(s.provider.as_str(), "claude" | "codex")
+        || !matches!(cli_family, "claude" | "codex")
         || s.provider_session_id.is_none()
     {
         return false;
@@ -1524,17 +1471,8 @@ impl SessionManager {
         self
     }
 
-    /// The PTY holder config (`None` = no holders this run).
-    pub fn pty_holders(&self) -> Option<&otto_pty::HolderConfig> {
-        self.holders.as_ref()
-    }
-
-    /// Is session persistence active right now? Needs a holder config AND the
-    /// [`SESSION_PERSISTENCE_SETTING`] (default on).
-    pub async fn persistence_enabled(&self) -> bool {
-        if self.holders.is_none() {
-            return false;
-        }
+    /// Whether the [`SESSION_PERSISTENCE_SETTING`] setting is enabled (default `true`).
+    pub async fn session_persistence_enabled(&self) -> bool {
         match &self.settings {
             Some(sr) => sr
                 .get(SESSION_PERSISTENCE_SETTING)
@@ -1545,6 +1483,12 @@ impl SessionManager {
                 .unwrap_or(true),
             None => true,
         }
+    }
+
+    /// Is session persistence active right now? Needs a holder config AND the
+    /// [`SESSION_PERSISTENCE_SETTING`] (default on).
+    pub async fn persistence_enabled(&self) -> bool {
+        self.holders.is_some() && self.session_persistence_enabled().await
     }
 
     /// Spawn a session's PTY. A session the user started goes into a PTY
@@ -1934,19 +1878,11 @@ impl SessionManager {
             extra.push(account_home);
         }
         let mut policy = sandbox_policy(&cwd, &home, &data_dir, &extra, network, forced);
-        // Codex runs with `CODEX_HOME` = the shadow home in its context bundle
-        // (`~/.otto/context/codex/<cwd>/codex-home`), which the profile
-        // otherwise write-denies with the rest of `~/.otto/context`: re-open
-        // that one home, minus its config / skills / instruction files.
-        if let Some(shadow) = spec
-            .env
-            .iter()
-            .rev()
-            .find(|(k, _)| k == "CODEX_HOME")
-            .map(|(_, v)| std::path::PathBuf::from(v))
-            .filter(|p| p.is_absolute() && !p.starts_with(&data_dir))
-        {
-            policy = policy.allow_provider_home(&shadow);
+        // Provider CLI homes outside `data_dir` (`CODEX_HOME` shadow bundle,
+        // custom `CLAUDE_CONFIG_DIR` like `~/.claude-work`, `GEMINI_CLI_HOME`):
+        // re-open each one minus its executable config / hook / skill files.
+        for dir in self.custom_provider_homes(session, spec, &home) {
+            policy = policy.allow_provider_home_safe(&dir, &home, &data_dir, forced);
         }
         // Package managers / build tools cache into a private per-session dir
         // (under temp, which is writable): the user's shared caches hold code
@@ -2051,16 +1987,20 @@ impl SessionManager {
         // `server` below). The session-specific token and routing values come
         // from the spawn env (agy passes it through to stdio MCP children).
         //
+        let cli_fam = self
+            .providers
+            .model_family_for(&session.provider)
+            .unwrap_or_else(|| session.provider.clone());
         // grok reads its own project-scoped `.grok/config.toml`, never
         // `.mcp.json` — without this a grok session has no otto tools.
-        if session.provider == "grok" {
+        if cli_fam == "grok" {
             if let Err(e) = crate::mcp::enable_otto_tools_grok(&session.cwd, &server) {
                 tracing::warn!("otto MCP tools: write .grok/config.toml failed: {e}");
             }
         }
         // Codex doesn't read `.mcp.json`: attach via per-spawn `-c` overrides that
         // point at a per-session creds file (the token never touches argv).
-        if session.provider == "codex" {
+        if cli_fam == "codex" {
             match write_codex_creds(
                 &session.id,
                 &token,
@@ -2366,19 +2306,23 @@ impl SessionManager {
                 let mut spec = self.providers.build_spec(&provider, &sid, &cwd, false)?;
                 // Append --add-dir args from req.meta.extra_dirs
                 let meta_val = req.meta.clone().unwrap_or(serde_json::json!({}));
-                spec.args.extend(add_dir_args(&provider, &meta_val));
+                let cli_prov = self
+                    .providers
+                    .model_family_for(&provider)
+                    .unwrap_or_else(|| provider.clone());
+                spec.args.extend(add_dir_args(&cli_prov, &meta_val));
                 spec.args.extend(model_args(
                     self.providers.model_args_template(&provider).as_deref(),
                     &meta_val,
                 ));
-                spec.args.extend(effort_args(&provider, &meta_val));
+                spec.args.extend(effort_args(&cli_prov, &meta_val));
                 let external_sandbox = self
                     .has_process_sandbox(SessionKind::Agent, &provider)
                     .await;
-                interaction_mode_apply(&provider, &meta_val, external_sandbox, &mut spec.args);
-                spec.args.extend(lean_turn_args(&provider, &meta_val));
-                read_only_strip(&provider, &meta_val, &mut spec.args);
-                spec.args.extend(read_only_args(&provider, &meta_val));
+                interaction_mode_apply(&cli_prov, &meta_val, external_sandbox, &mut spec.args);
+                spec.args.extend(lean_turn_args(&cli_prov, &meta_val));
+                read_only_strip(&cli_prov, &meta_val, &mut spec.args);
+                spec.args.extend(read_only_args(&cli_prov, &meta_val));
                 // Record the provider_session_id NOW only when Otto assigns it
                 // (claude, via `--session-id {sid}`). Providers that mint their
                 // own id (codex) start with None and have it captured from disk
@@ -2475,7 +2419,9 @@ impl SessionManager {
             // The legacy trust helper writes default CLI homes. Named profiles
             // let their native CLI/prompt guard persist trust in their own home.
             if account.is_none() {
-                crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
+                let fam = self.cli_family(&session.provider);
+                let cdir = self.claude_config_dir_for(&session.provider);
+                crate::trust::ensure_trusted_with_claude_dir_async(&fam, &session.cwd, cdir).await;
             }
             // Otto's first-party read-only tool server: when the workspace has
             // opted in (`otto_mcp_enabled`), mint a per-session token; the
@@ -2514,7 +2460,11 @@ impl SessionManager {
                 let hook = Arc::clone(hook);
                 let ws_owned = ws.clone();
                 let cwd = session.cwd.clone();
-                let (prov, persona) = (session.provider.clone(), runtime_spawn::persona(&session));
+                let prov = self
+                    .providers
+                    .model_family_for(&session.provider)
+                    .unwrap_or_else(|| session.provider.clone());
+                let persona = runtime_spawn::persona(&session);
                 let context = (account.is_some() || project_context.is_some()).then(|| {
                     otto_core::hooks::SessionSpawnContext {
                         namespace: session.id.clone(),
@@ -2659,7 +2609,7 @@ impl SessionManager {
         let cwd = std::fs::canonicalize(&session.cwd)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| session.cwd.clone());
-        let provider = session.provider.clone();
+        let provider = self.cli_family(&session.provider);
         let transcript_roots = self.transcript_roots_for(session);
         let codex_root = self.codex_root_for(session);
         let probe = CaptureProbe::default();
@@ -3176,7 +3126,7 @@ impl SessionManager {
         }
         let (turn_open, artifact_age) = match self.activity_artifact(id).await {
             Some(artifact) => {
-                let provider = session.provider.clone();
+                let provider = self.cli_family(&session.provider);
                 tokio::task::spawn_blocking(move || {
                     let age = std::fs::metadata(&artifact)
                         .and_then(|m| m.modified())
@@ -3309,7 +3259,7 @@ impl SessionManager {
             // conversation — the 2026-07-21 "duplicated sessions"). Refuse; the
             // session stays reconnectable and can be reopened once the other
             // process is done (or the claim is corrected).
-            if session.provider == "codex" {
+            if self.cli_family(&session.provider) == "codex" {
                 if let Some(psid) = &session.provider_session_id {
                     if rollout_actively_written(
                         &self.codex_root_for(&session),
@@ -3623,7 +3573,8 @@ impl SessionManager {
         let floor = std::time::SystemTime::from(session.created_at)
             .checked_sub(Duration::from_secs(2))
             .unwrap_or(std::time::UNIX_EPOCH);
-        let (provider, sid) = (session.provider.clone(), session.id.clone());
+        let family = self.cli_family(&session.provider);
+        let (provider, sid) = (family.clone(), session.id.clone());
         let (session_cwd, codex_root) = (session.cwd.clone(), self.codex_root_for(session));
         let probe_text =
             (self.capture_probes.get(&session.id)).map(|p| normalize_pty_input(&p.raw));
@@ -3673,7 +3624,7 @@ impl SessionManager {
                 persist_transcript_path(
                     &self.repo,
                     &session.id,
-                    &session.provider,
+                    &family,
                     &session.cwd,
                     &psid,
                     self.transcript_roots_for(session),
@@ -4234,19 +4185,23 @@ impl SessionManager {
         // Every lookup below is filesystem work (canonicalize, a rollout-tree
         // walk, stats) — resolve the inputs here, then run it off the runtime.
         let roots = self.transcript_roots_for(&session);
-        tokio::task::spawn_blocking(move || Self::locate_activity_artifact(&session, &psid, &roots))
-            .await
-            .ok()
-            .flatten()
+        let cli_family = self.cli_family(&session.provider);
+        tokio::task::spawn_blocking(move || {
+            Self::locate_activity_artifact(&session, &cli_family, &psid, &roots)
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     /// [`Self::activity_artifact`]'s filesystem half. Blocking.
     fn locate_activity_artifact(
         session: &Session,
+        cli_family: &str,
         psid: &str,
         roots: &otto_transcript::roots::TranscriptRoots,
     ) -> Option<std::path::PathBuf> {
-        let path = match session.provider.as_str() {
+        let path = match cli_family {
             // `<claude root>/<enc(cwd)>/<psid>.jsonl`
             // ([`otto_transcript::roots::TranscriptRoots::claude_session_file`]).
             // claude symlink-resolves the spawn cwd for its transcript dir, so
@@ -4624,7 +4579,7 @@ impl SessionManager {
     async fn turn_state(&self, session: &Session) -> (Option<bool>, Option<Duration>) {
         match self.activity_artifact(&session.id).await {
             Some(artifact) => {
-                let provider = session.provider.clone();
+                let provider = self.cli_family(&session.provider);
                 tokio::task::spawn_blocking(move || {
                     let age = std::fs::metadata(&artifact)
                         .and_then(|m| m.modified())
@@ -4766,8 +4721,12 @@ impl SessionManager {
             let Some(psid) = s.provider_session_id.as_deref() else {
                 continue;
             };
-            let verdict =
-                crate::lifecycle::check_resumability_async(home, &s.provider, &s.cwd, psid).await;
+            let family = self.cli_family(&s.provider);
+            let claude_dir = self.providers.claude_config_dir_for(&s.provider, home);
+            let verdict = crate::lifecycle::check_resumability_with_claude_dir_async(
+                home, &family, &s.cwd, psid, claude_dir,
+            )
+            .await;
             match verdict {
                 crate::lifecycle::Resumability::Gone => match self.remove(&s.id).await {
                     Ok(()) => {
@@ -5087,27 +5046,23 @@ impl SessionManager {
                     self.providers
                         .build_spec(&session.provider, &sid, &session.cwd, resume)?;
                 // Append --add-dir and --model args from session.meta.
-                spec.args
-                    .extend(add_dir_args(&session.provider, &session.meta));
+                let cli_prov = self
+                    .providers
+                    .model_family_for(&session.provider)
+                    .unwrap_or_else(|| session.provider.clone());
+                spec.args.extend(add_dir_args(&cli_prov, &session.meta));
                 spec.args.extend(model_args(
                     self.providers
                         .model_args_template(&session.provider)
                         .as_deref(),
                     &session.meta,
                 ));
-                spec.args
-                    .extend(effort_args(&session.provider, &session.meta));
+                spec.args.extend(effort_args(&cli_prov, &session.meta));
                 let external_sandbox = self
                     .has_process_sandbox(SessionKind::Agent, &session.provider)
                     .await;
-                interaction_mode_apply(
-                    &session.provider,
-                    &session.meta,
-                    external_sandbox,
-                    &mut spec.args,
-                );
-                spec.args
-                    .extend(lean_turn_args(&session.provider, &session.meta));
+                interaction_mode_apply(&cli_prov, &session.meta, external_sandbox, &mut spec.args);
+                spec.args.extend(lean_turn_args(&cli_prov, &session.meta));
                 // A fresh restart (e.g. a legacy row or an override-created
                 // session) must use and retain the same UUID contract as create.
                 // Commit it after spawn succeeds: otherwise a failed spawn
@@ -5118,9 +5073,8 @@ impl SessionManager {
                 {
                     assigned_provider_id = Some(sid);
                 }
-                read_only_strip(&session.provider, &session.meta, &mut spec.args);
-                spec.args
-                    .extend(read_only_args(&session.provider, &session.meta));
+                read_only_strip(&cli_prov, &session.meta, &mut spec.args);
+                spec.args.extend(read_only_args(&cli_prov, &session.meta));
                 spec
             }
         };
@@ -5131,7 +5085,11 @@ impl SessionManager {
         if let (Some(hook), Some(workspace)) = (&self.pre_spawn_hook, workspace) {
             let hook = Arc::clone(hook);
             let cwd = session.cwd.clone();
-            let (provider, persona) = (session.provider.clone(), runtime_spawn::persona(&session));
+            let provider = self
+                .providers
+                .model_family_for(&session.provider)
+                .unwrap_or_else(|| session.provider.clone());
+            let persona = runtime_spawn::persona(&session);
             let context = (account.is_some() || project_context.is_some()).then(|| {
                 otto_core::hooks::SessionSpawnContext {
                     namespace: session.id.clone(),
@@ -5175,7 +5133,9 @@ impl SessionManager {
         let _ = std::fs::create_dir_all(&session.cwd);
         if session.kind == SessionKind::Agent {
             if account.is_none() {
-                crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
+                let fam = self.cli_family(&session.provider);
+                let cdir = self.claude_config_dir_for(&session.provider);
+                crate::trust::ensure_trusted_with_claude_dir_async(&fam, &session.cwd, cdir).await;
             }
             let otto_tools = self.maybe_enable_otto_tools(&session).await;
             let codex_otto = !otto_tools.args.is_empty();
@@ -5626,14 +5586,26 @@ impl SessionManager {
     /// returned [`RestoreSummary`] feeds the UI's "Otto restarted" notice.
     pub async fn restore_all(
         &self,
+        fallback_cwd: &(dyn Fn(&Id) -> Option<String> + Send + Sync),
+    ) -> Result<RestoreSummary> {
+        self.restore_all_with_kept(fallback_cwd, &[]).await
+    }
+
+    /// Restore sessions at daemon boot while also preserving managed per-session
+    /// MCP credentials (`OTTO_MCP_TOKEN`) for `extra_keep` (such as live
+    /// structured-runtime sessions adopted from detached `runtime-holder`s).
+    pub async fn restore_all_with_kept(
+        &self,
         _fallback_cwd: &(dyn Fn(&Id) -> Option<String> + Send + Sync),
+        extra_keep: &[Id],
     ) -> Result<RestoreSummary> {
         let adopted = self.adopt_holders().await;
-        // Deferred holders (transient lookup error) still run their agent:
-        // neither revoke its credential nor mark its row dormant (review
-        // S1-09) — a dormant row's next open would resume a SECOND CLI.
+        // Deferred holders (transient lookup error) and adopted structured
+        // runtime holders still run their agent: neither revoke their per-session
+        // credentials nor mark matching session rows dormant (review S1-09).
         let mut keep = adopted.clone();
         keep.extend(self.deferred_holders.iter().map(|e| e.key().clone()));
+        keep.extend(extra_keep.iter().cloned());
         self.expire_orphaned_session_credentials(&keep).await;
         let at = chrono::Utc::now().to_rfc3339();
         let pass = self.repo.mark_dormant_except(&keep, &at).await?;
@@ -6181,8 +6153,12 @@ mod trail;
 mod transcript_roots;
 use cli_flags::{
     add_dir_args, effort_args, interaction_mode_apply, lean_turn_args, model_args, read_only_args,
+    read_only_strip,
 };
-use otto_tools_env::{otto_tools_env, session_mcp_profiles, write_codex_creds};
+use otto_tools_env::{
+    codex_creds_path, codex_server_env_path, otto_tools_env, pi_mcp_extension_path,
+    remove_codex_server_env_files, session_mcp_profiles, write_codex_creds,
+};
 use transcript_roots::persist_transcript_path;
 
 #[cfg(test)]

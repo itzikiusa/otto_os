@@ -22,7 +22,7 @@
   import { loadRuntimeThreadView, openInThreads } from '../../lib/runtimeThreadPort';
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { prDiffFileLoader } from './diff-load';
+  import { prDiffFileLoader } from '../../lib/diff/diff-load';
   import { prDetailCache, prKey } from './pr-cache';
   import { prAgentBridge, type PrAgentStatus } from './pr-agent-bridge.svelte';
   import { INLINE_CAP, buildAskMessage, repoSlugOf, type PrAgentAsk, type PrAgentSend } from './pr-agent-context';

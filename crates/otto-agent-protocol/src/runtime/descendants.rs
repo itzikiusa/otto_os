@@ -147,38 +147,59 @@ fn kill(row: &Row) {
 
 /// Track the Claude CLI `pid` of process life `epoch` until that life ends,
 /// then stop the jobs it left behind.
-pub(super) fn watch(live: Arc<Live>, epoch: u64, pid: u32) {
+pub(super) fn watch(
+    inner: Arc<super::Inner>,
+    live: Arc<Live>,
+    sid: otto_core::Id,
+    epoch: u64,
+    pid: u32,
+) {
     tokio::spawn(async move {
-        let mut tracker = Tracker::default();
-        let mut last_seq = None;
-        loop {
-            tokio::time::sleep(POLL).await;
-            let (alive, busy, seq, detached) = {
-                let st = live.lock();
-                let alive = st.proc.as_ref().is_some_and(|p| p.epoch == epoch);
-                let busy = st.turn.is_some() || !st.session.background_tasks.is_empty();
-                (alive, busy, st.next_seq, st.detached)
-            };
-            if detached {
-                return; // left running for the next daemon (held.rs)
+        let detaching = {
+            let mut tracker = Tracker::default();
+            let mut last_seq = None;
+            loop {
+                let ended = live.proc_ended.notified();
+                tokio::pin!(ended);
+                ended.as_mut().enable();
+                if live.lock().proc.as_ref().map(|p| p.epoch) != Some(epoch) {
+                    break;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(POLL) => {}
+                    _ = &mut ended => {}
+                }
+                let (alive, busy, seq) = {
+                    let st = live.lock();
+                    let alive = st.proc.as_ref().is_some_and(|p| p.epoch == epoch);
+                    let busy = st.turn.is_some() || !st.session.background_tasks.is_empty();
+                    (alive, busy, st.next_seq)
+                };
+                if !alive {
+                    break;
+                }
+                // Busy, or anything happened since the last tick (a turn that
+                // started and ended between two ticks may have left a job).
+                if busy || last_seq != Some(seq) {
+                    tracker.refresh(&read_table().await, pid);
+                }
+                last_seq = Some(seq);
             }
-            if !alive {
-                break;
+            let detaching = live
+                .detaching_for_restart
+                .load(std::sync::atomic::Ordering::Acquire);
+            drop(live);
+            if !detaching && !tracker.tracked.is_empty() {
+                let rows = read_table().await;
+                let running = tracker.refresh(&rows, pid);
+                for row in tracker.survivors(&running) {
+                    kill(&row);
+                }
             }
-            // Busy, or anything happened since the last tick (a turn that
-            // started and ended between two ticks may have left a job).
-            if busy || last_seq != Some(seq) {
-                tracker.refresh(&read_table().await, pid);
-            }
-            last_seq = Some(seq);
-        }
-        if tracker.tracked.is_empty() {
-            return; // nothing was ever recorded below it
-        }
-        let rows = read_table().await;
-        let running = tracker.refresh(&rows, pid);
-        for row in tracker.survivors(&running) {
-            kill(&row);
+            detaching
+        };
+        if !detaching {
+            super::evict_if_dead_after_flush(&inner, &sid).await;
         }
     });
 }

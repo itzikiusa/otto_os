@@ -18,7 +18,7 @@
       <li class="context-chip" title={item.text}>
         <button type="button" class="btn ghost context-open" aria-label="View context {item.label}" title="View context"
           onclick={() => (selectedId = item.id)}>
-          <Icon name={item.kind === 'diff' ? 'file' : 'comment'} size={12} />
+          <Icon name={item.id.startsWith('dir:') ? 'folder' : item.kind === 'diff' ? 'file' : 'comment'} size={12} />
           <span class="ellipsis">{item.label}</span>
         </button>
         <button type="button" class="icon-btn context-remove" aria-label="Remove {item.label}" title="Remove context"

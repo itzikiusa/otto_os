@@ -1,0 +1,85 @@
+{
+  "slug": "kotlin-ide",
+  "name": "Kotlin & Gradle IDE Pack",
+  "version": "1.0.0",
+  "description": "Kotlin (.kt, .kts) language support, kotlin-language-server LSP integration, kotlin-debug-adapter DAP debugger, JUnit/KotlinTest gutter runners, snippets, and Gradle tasks.",
+  "author": "Otto IDE",
+  "contributions": {
+    "languages": [
+      {
+        "id": "kotlin",
+        "display_name": "Kotlin",
+        "extensions": [".kt", ".kts"],
+        "line_comment": "//"
+      }
+    ],
+    "lsp_servers": [
+      {
+        "language": "kotlin",
+        "command": "kotlin-language-server",
+        "args": [],
+        "extensions": [".kt", ".kts"],
+        "install_hint": "brew install kotlin-language-server"
+      }
+    ],
+    "dap_adapters": [
+      {
+        "language": "kotlin",
+        "adapter_name": "kotlin-debug-adapter",
+        "command": "kotlin-debug-adapter",
+        "args": []
+      }
+    ],
+    "gutter_detectors": [
+      {
+        "language": "kotlin",
+        "extensions": [".kt", ".kts"],
+        "pattern": "^\\s*(?:suspend\\s+)?fun\\s+(main)\\s*\\(",
+        "kind": "main",
+        "runner": "gradle",
+        "command_template": "./gradlew",
+        "args_template": ["run"],
+        "label_prefix": "Run"
+      },
+      {
+        "language": "kotlin",
+        "extensions": [".kt"],
+        "pattern": "^\\s*fun\\s+`?(test[A-Za-z0-9_ ]+|should[A-Za-z0-9_ ]+)`?\\s*\\(",
+        "kind": "test",
+        "runner": "gradle",
+        "command_template": "./gradlew",
+        "args_template": ["test", "--tests", "*{name}*"],
+        "label_prefix": "Test"
+      }
+    ],
+    "keymaps": [
+      {
+        "key": "Mod-Shift-F10",
+        "action": "ide.runProjectTests",
+        "description": "Execute ./gradlew test in active workspace"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "kotlin",
+        "prefix": "funmain",
+        "body": "fun main(args: Array<String>) {\n    println(\"Hello, Otto!\")\n}",
+        "description": "Kotlin main entry point"
+      },
+      {
+        "language": "kotlin",
+        "prefix": "ktest",
+        "body": "@Test\nfun testExample() {\n    assertEquals(expected, actual)\n}",
+        "description": "Kotlin unit test function"
+      }
+    ],
+    "panels": [
+      {
+        "id": "gradle-tasks",
+        "title": "Gradle Tasks",
+        "icon": "layers",
+        "command": "./gradlew tasks --group=verification"
+      }
+    ]
+  }
+}

@@ -13,6 +13,7 @@ test('failed runtime list retains rows, exposes retryable error, and clears it a
     '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: () => {} },
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
     '../threadsStore.svelte': { threads: {} }, '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => {} } },
+    '../../../lib/providers': { isRuntimeProvider: (p: string) => ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'].includes(p), RUNTIME_PROVIDERS: ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'] },
   });
   runtimeThreads.byId = { old: oldRow };
   await assert.rejects(runtimeThreads.load('ws'), /offline/);
@@ -37,6 +38,7 @@ test('loadAll adds threads of every workspace (one started on the phone) without
     '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: () => {} },
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
     '../threadsStore.svelte': { threads: {} }, '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => {} } },
+    '../../../lib/providers': { isRuntimeProvider: (p: string) => ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'].includes(p), RUNTIME_PROVIDERS: ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'] },
   });
   runtimeThreads.byId = { here: held };
   await runtimeThreads.loadAll();

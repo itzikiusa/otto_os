@@ -656,10 +656,30 @@ fn sftp_params_for(conn: &Connection) -> Result<SftpParams, Error> {
     // imported ones) are re-checked here: a host / user / jump that starts with
     // `-` must never reach sftp's argv, where it would be read as an option.
     crate::builders::reject_option_like("sftp", "host", host)?;
-    for key in ["user", "jump"] {
-        if let Some(value) = conn_param(conn, key) {
-            crate::builders::reject_option_like("sftp", key, value)?;
+    if !otto_ssh::valid_ssh_host(host) {
+        return Err(Error::Invalid(format!(
+            "SSH host '{host}' is not a valid hostname or IP"
+        )));
+    }
+    let user = conn_param(conn, "user");
+    if let Some(u) = user {
+        crate::builders::reject_option_like("sftp", "user", u)?;
+        if !otto_ssh::valid_ssh_user(u) {
+            return Err(Error::Invalid(format!(
+                "SSH user '{u}' is not a valid username"
+            )));
         }
+    }
+    let jump = conn_param(conn, "jump").or_else(|| conn_param(conn, "proxy_jump"));
+    if let Some(j) = jump {
+        crate::builders::reject_option_like("sftp", "jump", j)?;
+        if !otto_ssh::valid_proxy_jump(j) {
+            return Err(Error::Invalid(format!("SSH proxy_jump '{j}' is invalid")));
+        }
+    }
+    let identity_file = conn_param(conn, "identity_file");
+    if let Some(id_file) = identity_file {
+        crate::builders::reject_option_like("sftp", "identity_file", id_file)?;
     }
     // Omission lets the system SSH configuration choose the port.
     let port = match conn.params.get("port") {
@@ -682,10 +702,29 @@ fn sftp_params_for(conn: &Connection) -> Result<SftpParams, Error> {
     Ok(SftpParams {
         host: host.to_string(),
         port,
-        user: conn_param(conn, "user").map(str::to_string),
-        identity_file: conn_param(conn, "identity_file").map(str::to_string),
-        jump: conn_param(conn, "jump").map(str::to_string),
+        user: user.map(str::to_string),
+        identity_file: identity_file.map(str::to_string),
+        jump: jump.map(str::to_string),
     })
+}
+
+/// Resolve an SSH connection profile, enforce workspace/global RBAC, owner-private
+/// mode, and operation policy, and return validated [`SftpParams`].
+pub async fn resolve_ssh_params_for<S: ConnectionsCtx>(
+    ctx: &S,
+    user: &User,
+    id: &Id,
+    min: WorkspaceRole,
+    operation: &str,
+) -> Result<(Connection, SftpParams), Error> {
+    let conn = ctx.connections().get(id).await?;
+    check_conn_role(ctx, user, &conn, min).await?;
+    if owner_private_enabled(ctx).await && !ctx.connections().is_enforced(&conn.id).await? {
+        require_conn_owner_or_root(user, &conn)?;
+    }
+    ctx.connections().authorize(id, &user.id, operation).await?;
+    let params = sftp_params_for(&conn)?;
+    Ok((conn, params))
 }
 
 /// Resolve the connection, enforce the workspace role, ensure it's SSH, and
@@ -709,13 +748,7 @@ pub(crate) async fn open_sftp_with_connection<S: ConnectionsCtx>(
     min: WorkspaceRole,
     operation: &str,
 ) -> Result<(Connection, Arc<SftpSession>), ApiErr> {
-    let conn = ctx.connections().get(id).await?;
-    check_conn_role(ctx, user, &conn, min).await?;
-    if owner_private_enabled(ctx).await && !ctx.connections().is_enforced(&conn.id).await? {
-        require_conn_owner_or_root(user, &conn)?;
-    }
-    ctx.connections().authorize(id, &user.id, operation).await?;
-    let params = sftp_params_for(&conn)?;
+    let (conn, params) = resolve_ssh_params_for(ctx, user, id, min, operation).await?;
     let session = ctx
         .connections()
         .sftp_pool

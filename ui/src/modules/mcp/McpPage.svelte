@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { plural } from '../../lib/plural';
@@ -15,7 +16,9 @@
   import { mcpCpApi } from '../../lib/api/mcp';
   import { liveQuery } from '../../lib/live';
   import { loadErrorText } from '../../lib/loadError';
+  import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import type { McpServerDetail } from '../../lib/api/types';
+  import { mcpUiState } from './mcpUiState.svelte';
   import ServersTab from './ServersTab.svelte';
   import ApprovalsTab from './ApprovalsTab.svelte';
   import AuditTab from './AuditTab.svelte';
@@ -54,18 +57,21 @@
       loadGeneration++;
       servers = [];
       loadError = null;
-      selectedServerId = null;
+      mcpUiState.loaded = false;
+      mcpUiState.selectedServerId = null;
+      mcpUiState.expandedServerId = null;
       void loadServers();
     }),
   );
-  let servers = $state<McpServerDetail[]>([]);
+  let servers = $state<McpServerDetail[]>(
+    untrack(() => (ws.currentId && mcpUiState.wsId === ws.currentId && mcpUiState.loaded ? mcpUiState.servers : [])),
+  );
   let loading = $state(false);
   /** Failed server-list load — ServersTab renders it inline with Retry. */
   let loadError = $state<string | null>(null);
-  let selectedServerId = $state<string | null>(null);
   let pending = $state(0);
 
-  async function loadServers(): Promise<void> {
+  async function loadServers(background = false): Promise<void> {
     const generation = ++loadGeneration;
     const id = wsId;
     if (!id) {
@@ -73,22 +79,25 @@
       loading = false;
       return;
     }
-    loading = true;
+    if (!background) loading = true;
     try {
       const result = await mcpCpApi.cpList(id);
-      if (generation !== loadGeneration) return;
+      if (generation !== loadGeneration || wsId !== id) return;
       servers = result;
       loadError = null;
-      if (selectedServerId && !servers.some((server) => server.id === selectedServerId)) {
-        selectedServerId = null;
-      }
-      if (!selectedServerId && servers.length > 0) selectedServerId = servers[0].id;
+      mcpUiState.setServers(result, (items) => initialSelection('mcp-servers', items, (s) => s.id));
     } catch (e) {
-      if (generation === loadGeneration) loadError = loadErrorText(e);
+      if (generation === loadGeneration && wsId === id && (!background || servers.length === 0)) {
+        loadError = loadErrorText(e);
+      }
     } finally {
-      if (generation === loadGeneration) loading = false;
+      if (!background && generation === loadGeneration && wsId === id) loading = false;
     }
   }
+
+  $effect(() => {
+    if (mcpUiState.selectedServerId) rememberSelection('mcp-servers', mcpUiState.selectedServerId);
+  });
 
   async function loadPending(): Promise<void> {
     try {
@@ -100,9 +109,21 @@
   }
 
   $effect(() => {
-    void wsId;
-    selectedServerId = null;
-    void loadServers();
+    const id = wsId;
+    const changed = untrack(() => mcpUiState.syncWorkspace(id));
+    if (!id) {
+      servers = [];
+      loading = false;
+      loadError = null;
+      return;
+    }
+    if (!changed && untrack(() => mcpUiState.loaded)) {
+      servers = untrack(() => mcpUiState.servers);
+      loading = false;
+      void loadServers(true);
+      return;
+    }
+    void loadServers(false);
   });
 
   // Pending-approvals badge: event-fed (`mcp_approval_changed`); the 15 s
@@ -114,6 +135,7 @@
 
   function patchServer(updated: McpServerDetail): void {
     servers = servers.map((server) => (server.id === updated.id ? updated : server));
+    mcpUiState.patchServer(updated);
   }
 
   function go(id: Section): void {
@@ -188,10 +210,10 @@
             {servers}
             {loading}
             error={loadError}
-            selectedServerId={null}
-            onReload={loadServers}
+            selectedServerId={mcpUiState.selectedServerId}
+            onReload={() => loadServers(false)}
             onPatch={patchServer}
-            onSelect={() => {}}
+            onSelect={(id) => (mcpUiState.selectedServerId = id)}
           />
         {/if}
       {:else}

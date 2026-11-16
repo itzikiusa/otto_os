@@ -126,7 +126,7 @@ pub struct ProviderSession {
 pub struct BackgroundTask {
     /// The provider's task id.
     pub id: String,
-    /// `command`, `agent`, or the provider's own task type.
+    /// `command`, `agent`, `timer`, or the provider's own task type.
     pub kind: String,
     /// What it is doing (the command, the subagent's description).
     pub label: String,
@@ -134,6 +134,21 @@ pub struct BackgroundTask {
     /// The turn item of the tool call that started it, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_id: Option<Id>,
+    /// Optional scheduled fire timestamp for one-shot timers (`schedule`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<DateTime<Utc>>,
+}
+
+/// Structured settlement metadata attached to a [`TurnItemKind::SystemNotice`]
+/// when background work (`command`, `agent`, `timer`) finishes, stops, or fails,
+/// eliminating English-prose regex coupling in the UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSettlement {
+    pub task_id: String,
+    pub kind: String,
+    /// `"completed"`, `"stopped"`, or `"failed"`.
+    pub status: String,
+    pub label: String,
 }
 
 /// Who started a turn: a person's prompt, or the agent itself (Claude Code
@@ -391,6 +406,8 @@ pub enum TurnItemKind {
     SessionBoundary,
     SystemNotice {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_settlement: Option<TaskSettlement>,
     },
     /// A subagent the agent launched (Claude's `Agent` / `Task` tool). Its
     /// own messages and tool calls are items whose `parent_item_id` is this
@@ -438,6 +455,11 @@ pub struct TurnItem {
     /// The `subagent` item this item belongs to (its activity), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_item_id: Option<Id>,
+    /// True when heavy tool/diff/output fields were omitted from a compact
+    /// snapshot (`GET /runtime-sessions/{id}/events?compact=1`); fetch the
+    /// full item on demand via `GET /runtime-sessions/{id}/items/{item_id}`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detail_omitted: bool,
     #[serde(flatten)]
     pub kind: TurnItemKind,
 }
@@ -469,6 +491,156 @@ impl TurnItem {
                 }
             )
     }
+
+    /// Return a lightweight snapshot clone omitting large tool payloads,
+    /// command outputs, and file patches on settled items (`detail_omitted = true`).
+    /// `UserMessage`, `AssistantMessage`, and all open/streaming items are
+    /// returned intact so conversation text and live rows render immediately.
+    pub fn compact_for_snapshot(&self) -> Self {
+        if self.status.is_open() || self.is_streaming() {
+            return self.clone();
+        }
+        let mut out = self.clone();
+        match &mut out.kind {
+            TurnItemKind::FileChange {
+                diff_str,
+                old_str,
+                new_str,
+                ..
+            } => {
+                if diff_str.is_some() || old_str.is_some() || new_str.is_some() {
+                    *diff_str = None;
+                    *old_str = None;
+                    *new_str = None;
+                    out.detail_omitted = true;
+                }
+            }
+            TurnItemKind::CommandExecution { input, output, .. } => {
+                let long_input = input.len() > 240;
+                if long_input {
+                    *input = truncate_compact_str(input, 240);
+                }
+                if output.is_some() || long_input {
+                    *output = None;
+                    out.detail_omitted = true;
+                }
+            }
+            TurnItemKind::DynamicTool {
+                tool_name,
+                input,
+                output,
+                images,
+                ..
+            } => {
+                if !is_thread_link_tool(tool_name)
+                    && (output.is_some() || !images.is_empty() || json_value_exceeds(input, 256))
+                {
+                    *input = Value::Null;
+                    *output = None;
+                    images.clear();
+                    out.detail_omitted = true;
+                }
+            }
+            TurnItemKind::Reasoning { text, .. } => {
+                if text.len() > 600 {
+                    *text = truncate_compact_markdown(text, 560);
+                    out.detail_omitted = true;
+                }
+            }
+            TurnItemKind::Subagent { prompt, output, .. } => {
+                let first_line = output
+                    .as_deref()
+                    .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
+                    .map(|l| truncate_compact_str(l.trim(), 200));
+                let had_large_output = output
+                    .as_deref()
+                    .is_some_and(|s| first_line.as_deref() != Some(s.trim()));
+                if prompt.is_some() || had_large_output {
+                    *prompt = None;
+                    *output = first_line;
+                    out.detail_omitted = true;
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
+fn is_thread_link_tool(name: &str) -> bool {
+    let bare = name.rsplit(['.', '_']).next().unwrap_or(name);
+    let tail = name
+        .rsplit_once("otto_")
+        .or_else(|| name.rsplit_once("otto."))
+        .map(|(_, t)| t)
+        .unwrap_or(bare);
+    matches!(
+        tail,
+        "thread_open" | "open_session" | "thread_message" | "thread_read"
+    )
+}
+
+fn json_value_exceeds(v: &Value, max_bytes: usize) -> bool {
+    fn walk(v: &Value, acc: &mut usize, max_bytes: usize) -> bool {
+        if *acc > max_bytes {
+            return true;
+        }
+        match v {
+            Value::Null | Value::Bool(_) => *acc += 5,
+            Value::Number(n) => *acc += n.to_string().len(),
+            Value::String(s) => *acc += s.len() + 2,
+            Value::Array(items) => {
+                *acc += 2;
+                for item in items {
+                    if walk(item, acc, max_bytes) {
+                        return true;
+                    }
+                }
+            }
+            Value::Object(map) => {
+                *acc += 2;
+                for (k, val) in map {
+                    *acc += k.len() + 3;
+                    if walk(val, acc, max_bytes) {
+                        return true;
+                    }
+                }
+            }
+        }
+        *acc > max_bytes
+    }
+    let mut acc = 0usize;
+    walk(v, &mut acc, max_bytes)
+}
+
+fn truncate_compact_str(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+fn truncate_compact_markdown(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut slice = s[..end].to_string();
+    let fences = slice
+        .lines()
+        .filter(|l| l.starts_with("```") || l.starts_with("~~~"))
+        .count();
+    if fences % 2 == 1 {
+        slice.push_str("\n```");
+    }
+    slice
 }
 
 /// `OrchestrationV2RuntimeRequest.status`.
@@ -638,6 +810,10 @@ pub struct RuntimeEvent {
     pub body: RuntimeEventBody,
 }
 
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
 /// Every entity's latest state — what a client starts from when the events
 /// since its `after_sequence` are no longer (or too many to be) replayable.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -655,6 +831,15 @@ pub struct RuntimeSnapshot {
     /// The agent's own slash commands (`commands.updated`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<ProviderCommand>,
+    /// Set when `tail_turns` / `before_turn_ordinal` omitted earlier turns.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_older: bool,
+    /// `ordinal` of the earliest turn included in this slice, when paginated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_turn_ordinal: Option<u32>,
+    /// Count of earlier turns omitted before `oldest_turn_ordinal`.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub older_turns: u32,
 }
 
 /// `GET /runtime-sessions/{id}/events` (T3 Code `subscribeThread` items).
@@ -840,6 +1025,10 @@ pub struct RuntimeSession {
     pub title_auto: bool,
 }
 
+/// Server-owned `RuntimeSession::meta` key storing a custom provider slug from
+/// `ProviderRegistry` (e.g. `"claudework"` mapped onto `RuntimeProvider::Claude`).
+pub const PROVIDER_SLUG_META_KEY: &str = "provider_slug";
+
 impl RuntimeSession {
     /// A boolean flag in [`Self::meta`] (`read_only`, …); absent = false.
     pub fn meta_flag(&self, key: &str) -> bool {
@@ -850,10 +1039,22 @@ impl RuntimeSession {
             == Some(true)
     }
 
+    /// Custom provider slug from `meta.provider_slug` when created from a
+    /// custom `ProviderRegistry` entry, or the built-in `RuntimeProvider` id.
+    pub fn provider_slug(&self) -> &str {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.get(PROVIDER_SLUG_META_KEY))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.provider.as_str())
+    }
+
     /// This thread in terminal-session shape, for surfaces keyed by session
     /// (agent UI control): `meta.runtime = "structured"`, its grant under
     /// `meta.ui_control`, no device pin (any of the owner's windows).
     pub fn into_session(self) -> crate::domain::Session {
+        let provider_slug = self.provider_slug().to_string();
         let mut meta = serde_json::json!({"runtime": "structured"});
         if let Some(serde_json::Value::Object(extra)) = self.meta {
             for (k, v) in extra {
@@ -869,7 +1070,7 @@ impl RuntimeSession {
             id: self.id,
             workspace_id: self.workspace_id,
             kind: crate::domain::SessionKind::Agent,
-            provider: self.provider.as_str().to_string(),
+            provider: provider_slug,
             title: self.title,
             status: crate::domain::SessionStatus::Running,
             cwd: self.cwd,
@@ -941,12 +1142,24 @@ pub struct EmbeddedOrigin {
 
 /// `POST /workspaces/{id}/runtime-sessions` body: the create fields plus the
 /// four a client may set on the server-owned meta (`source`, `origin`,
-/// `account_id`, `network_profile_id`). Nothing else in the body
-/// reaches `meta` (`CreateRuntimeSessionReq::meta` stays `serde(skip)`).
+/// `account_id`, `network_profile_id`), and a custom provider slug
+/// (`provider: "claudework"`). Nothing else in the body reaches `meta`
+/// (`CreateRuntimeSessionReq::meta` stays `serde(skip)`).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CreateRuntimeSessionBody {
-    #[serde(flatten)]
-    pub req: CreateRuntimeSessionReq,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub access_mode: Option<RuntimeAccessMode>,
+    /// See [`CreateRuntimeSessionReq::title_auto`].
+    #[serde(default)]
+    pub title_auto: bool,
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
@@ -962,26 +1175,69 @@ pub struct CreateRuntimeSessionBody {
 }
 
 impl CreateRuntimeSessionBody {
-    /// The create request, its meta `{source, origin}` when the body names an
-    /// embedded source. Refuses (400) a source outside
-    /// [`EMBEDDED_THREAD_SOURCES`], an `origin` without a `source`, an origin
-    /// kind that does not match the source, and an empty or over-long id /
-    /// over-long label.
+    /// Convert into [`CreateRuntimeSessionReq`] for built-in [`RuntimeProvider`]
+    /// names only (rejects unknown provider names with `400 Invalid`).
     pub fn into_req(self) -> crate::Result<CreateRuntimeSessionReq> {
-        let mut req = self.req;
-        req.meta = embedded_meta(self.source.as_deref(), self.origin)?;
+        self.into_req_with_resolver(RuntimeProvider::parse)
+    }
+
+    /// Convert into [`CreateRuntimeSessionReq`], resolving both built-in and
+    /// custom provider slugs (e.g. `"claudework"` -> `RuntimeProvider::Claude`)
+    /// via `resolve_custom` so disabled built-in providers (e.g. `"grok"`) are
+    /// rejected with `400 Invalid`, and storing `meta.provider_slug` only when
+    /// `raw` is a non-built-in custom slug.
+    pub fn into_req_with_resolver<F>(
+        self,
+        resolve_custom: F,
+    ) -> crate::Result<CreateRuntimeSessionReq>
+    where
+        F: FnOnce(&str) -> Option<RuntimeProvider>,
+    {
+        let mut meta = embedded_meta(self.source.as_deref(), self.origin)?;
+        let provider = match self
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            None => None,
+            Some(raw) => {
+                if let Some(mapped) = resolve_custom(raw) {
+                    if RuntimeProvider::parse(raw).is_none() {
+                        let obj = meta.get_or_insert_with(|| Value::Object(serde_json::Map::new()));
+                        if let Some(map) = obj.as_object_mut() {
+                            map.insert(
+                                PROVIDER_SLUG_META_KEY.into(),
+                                Value::String(raw.to_string()),
+                            );
+                        }
+                    }
+                    Some(mapped)
+                } else {
+                    return Err(crate::Error::Invalid(format!(
+                        "unknown or disabled runtime provider '{raw}'"
+                    )));
+                }
+            }
+        };
         for (key, v) in [
             ("account_id", self.account_id),
             ("network_profile_id", self.network_profile_id),
         ] {
             if let Some(v) = v.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
-                let meta = req
-                    .meta
-                    .get_or_insert_with(|| Value::Object(Default::default()));
-                meta[key] = Value::String(v);
+                meta.get_or_insert_with(|| Value::Object(Default::default()))[key] =
+                    Value::String(v);
             }
         }
-        Ok(req)
+        Ok(CreateRuntimeSessionReq {
+            provider,
+            cwd: self.cwd,
+            title: self.title,
+            model: self.model,
+            access_mode: self.access_mode,
+            title_auto: self.title_auto,
+            meta,
+        })
     }
 }
 
@@ -1058,28 +1314,122 @@ pub fn embedded_auto_close_hours(setting: Option<&Value>) -> u64 {
 
 /// `POST /runtime-sessions/{id}/peers` — an agent (or its owner) opens a
 /// linked thread: same workspace, cwd and access mode as `{id}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Accepts either a built-in [`RuntimeProvider`] (`"claude"`, `"codex"`, …) or
+/// a custom provider slug (`"claudework"`) on the wire (`provider: String`),
+/// while preserving `pub provider: RuntimeProvider` for internal Rust callers.
+#[derive(Debug, Clone)]
 pub struct OpenPeerReq {
     pub provider: RuntimeProvider,
     /// The new thread's opening message (framed with who sent it).
-    #[serde(default)]
     pub prompt: Option<String>,
-    #[serde(default)]
     pub title: Option<String>,
     /// Omitted = the provider's default model.
-    #[serde(default)]
     pub model: Option<String>,
     /// Reasoning effort for the opening turn (`low` … `max`); omitted = the
     /// model's default.
-    #[serde(default)]
     pub effort: Option<String>,
     /// Daemon-only (`serde(skip)`): the linked thread's own folder (default:
     /// the opener's) and its [`RuntimeSession::meta`] — a personal agent the
     /// main agent delegates to runs in ITS persona folder, as itself.
-    #[serde(skip)]
     pub cwd: Option<String>,
-    #[serde(skip)]
     pub meta: Option<serde_json::Value>,
+}
+
+impl OpenPeerReq {
+    /// Effective provider slug requested (custom `meta.provider_slug` when
+    /// present, otherwise `self.provider.as_str()`).
+    pub fn provider_slug(&self) -> &str {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.get(PROVIDER_SLUG_META_KEY))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.provider.as_str())
+    }
+
+    /// Construct a peer request targeting either a built-in provider or a
+    /// custom provider slug (e.g. `"claudework"`).
+    pub fn with_provider_slug(slug: impl Into<String>) -> Self {
+        let raw = slug.into();
+        let (provider, custom_slug) = parse_provider_and_slug(&raw, None);
+        let meta = custom_slug.map(|s| serde_json::json!({ PROVIDER_SLUG_META_KEY: s }));
+        Self {
+            provider,
+            prompt: None,
+            title: None,
+            model: None,
+            effort: None,
+            cwd: None,
+            meta,
+        }
+    }
+}
+
+impl Serialize for OpenPeerReq {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            provider: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            prompt: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            title: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            model: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            effort: &'a Option<String>,
+        }
+        Wire {
+            provider: self.provider_slug(),
+            prompt: &self.prompt,
+            title: &self.title,
+            model: &self.model,
+            effort: &self.effort,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OpenPeerReq {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            provider: String,
+            #[serde(default)]
+            provider_slug: Option<String>,
+            #[serde(default)]
+            prompt: Option<String>,
+            #[serde(default)]
+            title: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            effort: Option<String>,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        if w.provider.trim().is_empty() {
+            return Err(serde::de::Error::custom("provider must not be empty"));
+        }
+        let (provider, custom_slug) = parse_provider_and_slug(&w.provider, w.provider_slug);
+        let meta = custom_slug.map(|s| serde_json::json!({ PROVIDER_SLUG_META_KEY: s }));
+        Ok(Self {
+            provider,
+            prompt: w.prompt,
+            title: w.title,
+            model: w.model,
+            effort: w.effort,
+            cwd: None,
+            meta,
+        })
+    }
 }
 
 /// `POST /runtime-sessions/{id}/peers/{peer}/message`.
@@ -1153,14 +1503,64 @@ impl RuntimeSession {
     }
 }
 
+fn parse_provider_and_slug(
+    raw_provider: &str,
+    explicit_slug: Option<String>,
+) -> (RuntimeProvider, Option<String>) {
+    let trimmed = raw_provider.trim();
+    if let Some(p) = RuntimeProvider::parse(trimmed) {
+        let slug = explicit_slug
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != p.as_str());
+        (p, slug)
+    } else {
+        let slug = explicit_slug
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| trimmed.to_string());
+        (RuntimeProvider::Claude, Some(slug))
+    }
+}
+
 /// One agent of `POST /runtime-sessions/{id}/children`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AskChildTarget {
     pub provider: RuntimeProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_slug: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for AskChildTarget {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            provider: String,
+            #[serde(default)]
+            provider_slug: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            effort: Option<String>,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        if w.provider.trim().is_empty() {
+            return Err(serde::de::Error::custom("provider must not be empty"));
+        }
+        let (provider, provider_slug) = parse_provider_and_slug(&w.provider, w.provider_slug);
+        Ok(Self {
+            provider,
+            provider_slug,
+            model: w.model,
+            effort: w.effort,
+        })
+    }
 }
 
 /// `POST /runtime-sessions/{id}/children` — a person sends `prompt` to 1–4
@@ -1196,14 +1596,45 @@ pub const COUNCIL_META_KEY: &str = "council";
 
 /// One seat of `POST /workspaces/{id}/runtime-sessions/council`. The same
 /// provider may sit more than once (two efforts, two models).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CouncilSeatReq {
     pub provider: RuntimeProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_slug: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     /// Reasoning effort for the seat's first turn; omitted = the model's default.
     #[serde(default)]
     pub effort: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CouncilSeatReq {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            provider: String,
+            #[serde(default)]
+            provider_slug: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            effort: Option<String>,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        if w.provider.trim().is_empty() {
+            return Err(serde::de::Error::custom("provider must not be empty"));
+        }
+        let (provider, provider_slug) = parse_provider_and_slug(&w.provider, w.provider_slug);
+        Ok(Self {
+            provider,
+            provider_slug,
+            model: w.model,
+            effort: w.effort,
+        })
+    }
 }
 
 /// `POST /workspaces/{id}/runtime-sessions/council` — one prompt to 2–4 agents.
@@ -1227,13 +1658,44 @@ pub struct CouncilResp {
 }
 
 /// `POST /runtime-sessions/{id}/council/synthesize` — the judge.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SynthesizeCouncilReq {
     pub provider: RuntimeProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_slug: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for SynthesizeCouncilReq {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            provider: String,
+            #[serde(default)]
+            provider_slug: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            effort: Option<String>,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        if w.provider.trim().is_empty() {
+            return Err(serde::de::Error::custom("provider must not be empty"));
+        }
+        let (provider, provider_slug) = parse_provider_and_slug(&w.provider, w.provider_slug);
+        Ok(Self {
+            provider,
+            provider_slug,
+            model: w.model,
+            effort: w.effort,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1363,6 +1825,19 @@ pub struct QueuedDeliverReq {
     pub delivery: PromptDelivery,
 }
 
+/// `DELETE /runtime-sessions/{id}/queue/{queued_id}` — pop a queued message
+/// and return its original payload so "Edit" restores text and attachments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnqueuePromptResp {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<PromptImage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PromptFile>,
+}
+
 impl RuntimePromptReq {
     /// A text-only prompt.
     pub fn of(text: &str) -> Self {
@@ -1386,6 +1861,9 @@ pub struct ToolOutputImage {
 pub struct PromptImage {
     pub mime: String,
     pub data_base64: String,
+    /// Optional filename preserved across queue / unqueue (`Edit`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// A file attachment (`mime` is `application/pdf`).
@@ -1479,6 +1957,7 @@ mod tests {
             updated_at: ts(),
             error: None,
             parent_item_id: None,
+            detail_omitted: false,
             kind: TurnItemKind::AssistantMessage {
                 message_id: "m1".into(),
                 text: "Hel".into(),
@@ -1516,6 +1995,7 @@ mod tests {
                         label: "sleep 300".into(),
                         started_at: ts(),
                         item_id: None,
+                        due_at: None,
                     }],
                     capabilities: None,
                     title: None,
@@ -1635,6 +2115,7 @@ mod tests {
             updated_at: ts(),
             error: None,
             parent_item_id: None,
+            detail_omitted: false,
             kind: TurnItemKind::Subagent {
                 tool_name: "Agent".into(),
                 description: Some("PR sweep".into()),
@@ -1654,6 +2135,7 @@ mod tests {
             parent_item_id: Some(card.id.clone()),
             kind: TurnItemKind::SystemNotice {
                 message: "x".into(),
+                task_settlement: None,
             },
             ..card.clone()
         };
@@ -1853,11 +2335,34 @@ mod tests {
         let body: CreateCouncilReq = serde_json::from_value(json!({
             "prompt": "which cache?",
             "seats": [{"provider": "claude", "model": "opus", "effort": "high"},
-                      {"provider": "claude"}]
+                      {"provider": "claudework"}]
         }))
         .unwrap();
         assert_eq!(body.seats.len(), 2);
+        assert_eq!(body.seats[0].provider_slug, None);
+        assert_eq!(body.seats[1].provider_slug.as_deref(), Some("claudework"));
         assert_eq!(body.seats[1].model, None);
         assert!(body.images.is_empty() && body.title.is_none());
+
+        let custom_body: CreateRuntimeSessionBody = serde_json::from_value(json!({
+            "provider": "claudework",
+            "cwd": "/tmp/p",
+            "model": "opus",
+        }))
+        .unwrap();
+        assert!(custom_body.clone().into_req().is_err());
+        let resolved = custom_body
+            .into_req_with_resolver(|slug| {
+                (slug == "claudework").then_some(RuntimeProvider::Claude)
+            })
+            .unwrap();
+        assert_eq!(resolved.provider, Some(RuntimeProvider::Claude));
+        assert_eq!(
+            resolved
+                .meta
+                .as_ref()
+                .and_then(|m| m.get(PROVIDER_SLUG_META_KEY)),
+            Some(&json!("claudework"))
+        );
     }
 }

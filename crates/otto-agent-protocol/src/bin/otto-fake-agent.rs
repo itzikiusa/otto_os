@@ -96,6 +96,7 @@ fn main() {
         {"id": "default", "name": "Default"}, {"id": "autoEdit", "name": "Auto edit"},
         {"id": "accept-edits", "name": "Accept edits"}, {"id": "plan", "name": "Plan"}]});
     let mut model = "none".to_string();
+    let mut effort = "none".to_string();
     let mut system = "none".to_string();
     let system_of = |p: &Value| {
         p.pointer("/_meta/antigravity/systemPrompt/append")
@@ -123,6 +124,15 @@ fn main() {
             }
             "session/set_model" => {
                 model = params["modelId"].as_str().unwrap_or_default().to_string();
+                reply(&id, json!({}));
+            }
+            "session/set_config_option" => {
+                let value = params["value"].as_str().unwrap_or_default().to_string();
+                match params["configId"].as_str() {
+                    Some("model") => model = value,
+                    Some("thought_level") => effort = value,
+                    _ => {}
+                }
                 reply(&id, json!({}));
             }
             "session/set_mode" => {
@@ -204,6 +214,10 @@ fn main() {
                                 "cachedReadTokens":2,"outputTokens":3,"thoughtTokens":1}}),
                         );
                     }
+                    "effort" => {
+                        chunk(&sid, "agent_message_chunk", &format!("effort: {effort}"));
+                        done("end_turn");
+                    }
                     "system" => {
                         chunk(&sid, "agent_message_chunk", &format!("system: {system}"));
                         done("end_turn");
@@ -269,6 +283,48 @@ fn main() {
                         );
                         chunk(&sid, "agent_message_chunk", "counted");
                         done("end_turn");
+                    }
+                    "hold-chunk" => {
+                        chunk(&sid, "agent_message_chunk", "part1");
+                        chunk(&sid, "agent_message_chunk", "part2");
+                        loop {
+                            let Some(m) = next(&mut lines) else { return };
+                            if method(&m) == "session/cancel" {
+                                done("cancelled");
+                                break;
+                            }
+                        }
+                    }
+                    "timed-think" => {
+                        chunk(&sid, "agent_thought_chunk", "step 1 ");
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        chunk(&sid, "agent_thought_chunk", "step 2");
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        chunk(&sid, "agent_message_chunk", "answer 1 ");
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        chunk(&sid, "agent_message_chunk", "answer 2");
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        done("end_turn");
+                    }
+                    "schedule" => {
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"tool_call","toolCallId":"sc1","title":"schedule","kind":"other","status":"pending","rawInput":{"DurationSeconds":10,"Prompt":"check status"}}),
+                        );
+                        update(
+                            &sid,
+                            json!({"sessionUpdate":"tool_call_update","toolCallId":"sc1","status":"completed"}),
+                        );
+                        chunk(&sid, "agent_message_chunk", "scheduled");
+                        done("end_turn");
+                        let bg_sid = sid.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(40));
+                            chunk(&bg_sid, "agent_thought_chunk", "timer fired");
+                            chunk(&bg_sid, "agent_message_chunk", "autonomous report 1");
+                            std::thread::sleep(std::time::Duration::from_millis(180));
+                            chunk(&bg_sid, "agent_message_chunk", "autonomous report 2");
+                        });
                     }
                     "plan" => {
                         update(

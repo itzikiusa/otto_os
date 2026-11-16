@@ -21,6 +21,7 @@
 pub mod agy;
 pub mod agy_fold;
 pub mod claude;
+pub mod claude_config;
 pub mod codex;
 pub mod fold;
 pub mod grok_usage;

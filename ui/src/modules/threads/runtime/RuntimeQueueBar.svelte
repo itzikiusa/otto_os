@@ -10,6 +10,8 @@
   import { toastError } from '../../../lib/toastError';
   import { runtimeThreads } from './runtimeThreads.svelte';
 
+  import type { ComposerFile } from './runtimeComposer';
+
   interface Props {
     sessionId: string;
     /** Running background work (agentTasks.ts), oldest first. */
@@ -23,31 +25,34 @@
     dormant: boolean;
     reopening: boolean;
     onreopen: () => void;
-    /** Put a queued message back in the composer. */
-    onedit: (text: string) => void;
+    /** Put a queued message (and any attached screenshots/files) back in the composer. */
+    onedit: (text: string, attachments: ComposerFile[], targetSessionId: string) => void;
   }
   let { sessionId, background, onshowtasks, queued, running, canSteer, closed, dormant, reopening, onreopen, onedit }: Props = $props();
   const bgText = $derived(backgroundStripText(background));
   const bgTitle = $derived(background.map((b) => b.label).join('\n'));
 
   async function deliver(q: QueuedPrompt, delivery: PromptDelivery): Promise<void> {
+    const targetSessionId = sessionId;
     try {
-      await runtimeThreads.deliverQueued(sessionId, q.id, delivery);
+      await runtimeThreads.deliverQueued(targetSessionId, q.id, delivery);
     } catch (e) {
       toastError(delivery === 'steer' ? 'Couldn’t send it into the turn' : 'Couldn’t send it now', e);
     }
   }
   async function edit(q: QueuedPrompt): Promise<void> {
+    const targetSessionId = sessionId;
     try {
-      await runtimeThreads.unqueue(sessionId, q.id);
-      onedit(q.text);
+      const popped = await runtimeThreads.unqueue(targetSessionId, q.id);
+      onedit(popped.text ?? q.text, popped.attachments, targetSessionId);
     } catch (e) {
       toastError('Couldn’t edit the queued message', e);
     }
   }
   async function remove(q: QueuedPrompt): Promise<void> {
+    const targetSessionId = sessionId;
     try {
-      await runtimeThreads.unqueue(sessionId, q.id);
+      await runtimeThreads.unqueue(targetSessionId, q.id);
     } catch (e) {
       toastError('Couldn’t remove the queued message', e);
     }

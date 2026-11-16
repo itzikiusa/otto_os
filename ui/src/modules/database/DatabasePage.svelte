@@ -57,6 +57,7 @@
   import { registry } from '../../lib/commands.svelte';
   import { lsGet, lsSet } from '../../lib/storage';
   import { rel } from '../../lib/stores/now.svelte';
+  import { dbSidebarState } from './dbSidebarState.svelte';
   import type {
     BrokerCluster,
     Connection,
@@ -149,8 +150,6 @@
   const clusterMatchesKind = (): boolean => !filtering || filterKind === 'kafka';
 
   // ── Saved / History sidebar (search + inline rename) ──────────────────────
-  let savedSearch = $state('');
-  let historySearch = $state(''); let historyAll = $state(false); // History tab: this connection / all (HistoryAll.svelte)
   let renamingId = $state<string | null>(null);
   let renameDraft = $state('');
   // Lower-cased search text per row, memoized on the row's text — not
@@ -165,14 +164,14 @@
     return lower;
   }
   const filteredSaved = $derived.by(() => {
-    const s = savedSearch.trim().toLowerCase();
+    const s = dbSidebarState.savedSearch.trim().toLowerCase();
     if (!s) return database.savedQueries;
     return database.savedQueries.filter(
       (q) => q.name.toLowerCase().includes(s) || lowered(q, q.statement).includes(s),
     );
   });
   const filteredHistory = $derived.by(() => {
-    const s = historySearch.trim().toLowerCase();
+    const s = dbSidebarState.historySearch.trim().toLowerCase();
     if (!s) return database.history;
     return database.history.filter((h) =>
       lowered(h, h.error ? `${h.statement}\n${h.error}` : h.statement).includes(s),
@@ -1596,11 +1595,11 @@
       <input dir="ltr"
         class="list-search-input"
         placeholder="Filter saved queries…"
-        bind:value={savedSearch}
+        bind:value={dbSidebarState.savedSearch}
         aria-label="Filter saved queries"
       />
-      {#if savedSearch}
-        <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
+      {#if dbSidebarState.savedSearch}
+        <button class="icon-btn" onclick={() => (dbSidebarState.savedSearch = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
       {/if}
     </div>
     <LoadState what="saved queries" variant="compact" loading={database.savedQueriesLoading} error={database.savedQueriesError} empty={database.savedQueries.length === 0} onretry={() => database.loadSavedQueries()} />
@@ -1609,7 +1608,7 @@
     {:else if database.savedQueries.length === 0}
       <EmptyState icon="file" title="No saved queries" body="Save one from the Query tab." />
     {:else if filteredSaved.length === 0}
-      <EmptyState icon="search" title="No matches" body={`No saved queries match “${savedSearch}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (savedSearch = '')} />
+      <EmptyState icon="search" title="No matches" body={`No saved queries match “${dbSidebarState.savedSearch}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (dbSidebarState.savedSearch = '')} />
     {:else}
       {#each filteredSaved as q (q.id)}
         <div class="saved-row" role="presentation" oncontextmenu={(e) => { e.preventDefault(); savedMenu(e, q); }}>
@@ -1638,18 +1637,18 @@
   {:else if database.sideTab === 'history'}
     <div class="list-search">
       <Icon name="search" size={12} />
-      <input dir="ltr" class="list-search-input" placeholder="Filter history…" bind:value={historySearch} aria-label="Filter query history" />
-      {#if historySearch}<button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>{/if}
-      <select class="hist-scope" bind:value={historyAll} aria-label="Whose history" title="This connection’s history, or every connection’s"><option value={false}>This connection</option><option value={true}>All connections</option></select>
+      <input dir="ltr" class="list-search-input" placeholder="Filter history…" bind:value={dbSidebarState.historySearch} aria-label="Filter query history" />
+      {#if dbSidebarState.historySearch}<button class="icon-btn" onclick={() => (dbSidebarState.historySearch = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>{/if}
+      <select class="hist-scope" bind:value={dbSidebarState.historyAll} aria-label="Whose history" title="This connection’s history, or every connection’s"><option value={false}>This connection</option><option value={true}>All connections</option></select>
     </div>
-    {#if historyAll}<HistoryAll search={historySearch} />{:else}
+    {#if dbSidebarState.historyAll}<HistoryAll search={dbSidebarState.historySearch} />{:else}
     <LoadState what="query history" variant="compact" loading={database.historyLoading} error={database.historyError} empty={database.history.length === 0} onretry={() => database.loadHistory()} />
     {#if database.history.length === 0 && (database.historyLoading || database.historyError)}
       <!-- Loading and failed loads are rendered above, never as an empty list. -->
     {:else if database.history.length === 0}
       <EmptyState icon="clock" title="No query history yet" body="Queries you run show up here." />
     {:else if filteredHistory.length === 0}
-      <EmptyState icon="search" title="No matches" body={`No history matches “${historySearch}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (historySearch = '')} />
+      <EmptyState icon="search" title="No matches" body={`No history matches “${dbSidebarState.historySearch}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (dbSidebarState.historySearch = '')} />
     {:else}
       {#each filteredHistory as h (h.id)}
         <!-- Bounded previews: a history row can hold a whole pasted script. -->

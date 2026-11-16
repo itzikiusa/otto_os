@@ -11,6 +11,8 @@ import { toastError } from '../../lib/toastError';
 import { delegatedParentId, isPlainShellSession } from './threadsHelpers';
 import { threads } from './threadsStore.svelte';
 import { phoneHandoff } from '../../lib/stores/phoneHandoff.svelte';
+import { openProjectInIde } from './ideProjects.svelte';
+import { messageThread } from './relatedMessage';
 import { relatedPopover } from './relatedPopover.svelte';
 import { RELATED_LABEL } from './threadsPageMenu';
 
@@ -59,7 +61,11 @@ export function buildThreadMenu(s: Session): MenuItem[] {
   const id = s.id;
   const parentId = delegatedParentId(s);
   const shell = isPlainShellSession(s);
+  const cwd = (s.cwd ?? '').trim().replace(/\/+$/, '');
   return [
+    ...(cwd && cwd !== '~'
+      ? [{ label: 'Open in IDE', icon: 'ide' as const, action: () => openProjectInIde(cwd, id) }]
+      : []),
     ...(ws.myRole !== 'viewer' && canSwitchSessionSurface(s) ? [{ label: 'Open in Terminal', icon: 'terminal', title: 'Continue with the same agent in Agents', action: () => void openSessionSurface(s, 'agents') }] : []),
     { label: 'Rename thread…', icon: 'edit', action: () => void promptRenameThread(s) },
     { label: threads.isPinned(id) ? 'Unpin thread' : 'Pin thread', icon: 'star', action: () => threads.togglePin(id) },
@@ -98,6 +104,103 @@ export function buildThreadMenu(s: Session): MenuItem[] {
       action: () => {
         void ws.requestArchive(id).then((ok) => {
           if (ok) threads.closePane(id);
+        });
+      },
+    },
+  ];
+}
+
+export function buildSidebarLegacyThreadMenu(
+  s: Session,
+  opts: {
+    onreopen: (s: Session, beside: boolean) => void;
+    onstartroom: (sessionId: string) => void;
+    onselect?: () => void;
+  },
+): MenuItem[] {
+  const pinned = threads.isPinned(s.id);
+  const settled = threads.isSettled(s.id);
+  const cwd = (s.cwd ?? '').trim().replace(/\/+$/, '');
+  const canSendFromFocused =
+    Boolean(threads.focusedSessionId && threads.focusedSessionId !== s.id && !s.archived);
+  return [
+    {
+      label: pinned ? 'Unpin thread' : 'Pin thread',
+      icon: 'star',
+      action: () => threads.togglePin(s.id),
+    },
+    {
+      label: 'Open beside in Split',
+      icon: 'split',
+      action: () => {
+        if (s.archived) opts.onreopen(s, true);
+        else {
+          threads.openBeside(s.id);
+          opts.onselect?.();
+        }
+      },
+    },
+    ...(cwd && cwd !== '~'
+      ? [{ label: 'Open in IDE', icon: 'ide' as const, action: () => openProjectInIde(cwd, s.id) }]
+      : []),
+    ...(canSendFromFocused
+      ? [
+          {
+            label: 'Send message from active thread…',
+            icon: 'send' as const,
+            action: () => void messageThread(threads.focusedSessionId, s.id),
+          },
+        ]
+      : []),
+    ...(!s.archived ? legacyReviveItem(s) : []),
+    ...(!s.archived
+      ? [
+          {
+            label: 'Open Room…',
+            icon: 'people' as const,
+            action: () => opts.onstartroom(s.id),
+          },
+          {
+            label: settled ? 'Move back to Active' : 'Settle to History',
+            icon: 'check' as const,
+            action: () => threads.toggleSettle(s.id),
+          },
+        ]
+      : [
+          {
+            label: 'Revive thread',
+            icon: 'refresh' as const,
+            action: () => opts.onreopen(s, false),
+          },
+        ]),
+    { separator: true },
+    {
+      label: 'Rename…',
+      icon: 'edit',
+      action: () => void promptRenameThread(s),
+    },
+    ...(!s.archived
+      ? [
+          {
+            label: 'Archive',
+            icon: 'archive' as const,
+            action: () => {
+              void ws.requestArchive(s.id).then((ok) => {
+                if (ok && threads.paneIds.includes(s.id)) threads.closePane(s.id);
+              });
+            },
+          },
+        ]
+      : []),
+    {
+      label: 'Delete…',
+      icon: 'trash',
+      danger: true,
+      action: () => {
+        void ws.requestDeleteSession(s.id).then(() => {
+          if (!ws.getSession(s.id) && threads.paneIds.includes(s.id)) {
+            threads.closePane(s.id);
+          }
         });
       },
     },

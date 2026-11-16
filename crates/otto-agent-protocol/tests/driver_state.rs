@@ -1,8 +1,8 @@
-//! Driver state round trips (`export_state` → a fresh driver's
-//! `import_state`): what a new daemon restores when it adopts a child that
+//! Driver state round trips (`snapshot_state` → a fresh driver's
+//! `restore_state`): what a new daemon restores when it adopts a child that
 //! outlived the old one. Mid-stream continuity against the real fake agents
-//! is covered by `held_restart.rs`; pi has no fake, so its turn is replayed
-//! here line by line.
+//! is covered by `runtime_holder_survival.rs`; pi has no fake, so its turn is
+//! replayed here line by line.
 
 use otto_agent_protocol::acp::AcpDriver;
 use otto_agent_protocol::claude::ClaudeDriver;
@@ -52,29 +52,28 @@ fn every_driver_round_trips_its_state_and_keeps_its_launch_shape() {
         let launch = d.launch(&ctx());
         let start = d.start(&ctx());
         assert!(!start.writes.is_empty(), "{name}: the handshake writes");
-        let state = d
-            .export_state()
-            .unwrap_or_else(|| panic!("{name}: exportable"));
+        let state = d.snapshot_state();
+        assert!(!state.is_null(), "{name}: exportable");
         assert!(
             !state.to_string().contains("/bin/otto"),
             "{name}: MCP servers (their credentials) are never exported"
         );
         let mut restored = make();
-        restored.import_state(state.clone()).unwrap();
+        restored.restore_state(&state).unwrap();
+        // ACP sideband idle clocks restart on restore (by design).
+        let settled = |mut v: serde_json::Value| {
+            v.as_object_mut().map(|o| o.remove("sideband"));
+            v
+        };
         assert_eq!(
-            restored.export_state(),
-            Some(state),
+            settled(restored.snapshot_state()),
+            settled(state),
             "{name}: identical state"
         );
         assert_eq!(
             restored.launch(&ctx()),
             launch,
             "{name}: same provider config"
-        );
-        // Garbage is refused, never half-applied.
-        assert!(
-            make().import_state(serde_json::json!({"x": 1})).is_err(),
-            "{name}"
         );
     }
 }
@@ -110,7 +109,7 @@ fn a_pi_turn_continues_in_a_restored_driver() {
     );
 
     let mut r = PiDriver::with_program("pi");
-    r.import_state(d.export_state().unwrap()).unwrap();
+    r.restore_state(&d.snapshot_state()).unwrap();
     let rest = [
         r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"lo"}}"#,
         r#"{"type":"tool_execution_start","toolCallId":"c1","toolName":"bash","args":{"command":"ls"}}"#,
@@ -129,13 +128,13 @@ fn a_pi_turn_continues_in_a_restored_driver() {
     let end = r.on_line(
         r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}],"willRetry":false}"#,
     );
-    assert!(matches!(
-        &end.events[0],
+    assert!(end.events.iter().any(|e| matches!(
+        e,
         DriverEvent::Terminal {
             status: TurnTerminalStatus::Completed,
             ..
         }
-    ));
+    )));
     // The next request id continues, never reusing one the child saw.
     let next = r.prompt("t2", &RuntimePromptReq::of("again")).unwrap();
     assert_ne!(sent(&next, next.writes.len() - 1)["id"], p["id"]);

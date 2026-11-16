@@ -1,64 +1,24 @@
 //! Codex driver — `codex app-server` (JSON-RPC over stdio, one message per
-//! line, no `"jsonrpc"` member).
+//! line, no `"jsonrpc"` member), ported from T3 Code (`CodexAdapterV2.ts`, MIT,
+//! Copyright (c) 2026 T3 Tools Inc.) against `codex app-server` 0.166.0:
 //!
-//! Ported from T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.):
-//! `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts` with the
-//! wire shapes of `packages/effect-codex-app-server` (generated from
-//! `openai/codex` `codex-rs/app-server-protocol`). The crates.io
-//! `codex-app-server-protocol` (0.63.0, published from a fork) lags the
-//! installed codex-cli 0.166.0 by a hundred releases, so — like T3 Code's
-//! generated client — Otto keeps a minimal typed surface here, checked
-//! against `codex app-server generate-json-schema` of 0.166.0:
-//!
-//! * spawn `codex app-server` (`codexLaunchArgs.ts:12-15`); Otto's context
-//!   hook adds `--add-dir=…`, `-c developer_instructions=…` (before the
-//!   subcommand) and `CODEX_HOME`, exactly as for a PTY codex session.
-//! * `initialize {clientInfo, capabilities: {experimentalApi,
-//!   optOutNotificationMethods: ["turn/diff/updated"]}}` then the
-//!   `initialized` notification (`CodexAdapterV2.ts:1763-1801`, `:233-237`).
-//! * `thread/start {cwd, model, approvalPolicy, sandbox}` or, with a native
-//!   id, `thread/resume {threadId, excludeTurns: true, …}` (`:7061-7108`); a
-//!   failed resume starts a fresh thread.
-//! * `turn/start {threadId, input: [{type: text}], approvalPolicy,
-//!   sandboxPolicy}` (`buildCodexTurnStartParams`, `:744-818`) and
-//!   `turn/interrupt {threadId, turnId}` (`:7567`).
-//! * access mode, per turn (`codexRuntimeModeTurnDefaults`, `:703-742`):
-//!   approval-required → `approvalPolicy: "untrusted"` + `sandboxPolicy:
-//!   readOnly`; auto-accept-edits → `"on-request"` + `workspaceWrite`;
-//!   full-access → `"never"` + `dangerFullAccess`. Under Otto's Seatbelt the
-//!   inner sandbox is always `externalSandbox` (nested Seatbelt fails; the
-//!   PTY path drops codex's own sandbox the same way, `otto-sessions`
-//!   `interaction_mode_apply`). A failed item's error text (`error`, else
-//!   the command's output) rides the item. No file inputs: 0.166.0's
-//!   `UserInput` has none, so a PDF is refused.
-//! * notifications → entities (`:4364-4955`, `:6529`): `item/started` /
-//!   `item/completed` upsert one item per Codex item (`agentMessage` →
-//!   `assistant_message`, `reasoning`, `commandExecution` →
-//!   `command_execution`, `fileChange` → `file_change`, `mcpToolCall` /
-//!   `dynamicToolCall` → `dynamic_tool`, `webSearch` → `web_search`);
-//!   `item/agentMessage/delta` and `item/reasoning/*Delta` grow the text
-//!   (`streaming: true`); `item/commandExecution/outputDelta` →
-//!   `command_output.delta`; `turn/plan/updated` → the plan;
-//!   `thread/tokenUsage/updated` → usage; `turn/completed` → terminal
-//!   (`mapCodexTurnStatus`, `:359-372`); item status `codexItemStatus`
-//!   (`:392-414`).
-//! * approvals (`:5277-5420`): `item/commandExecution/requestApproval`,
-//!   `item/fileChange/requestApproval` answer `{decision: accept |
-//!   acceptForSession | decline | cancel}`; `item/permissions/requestApproval`
-//!   answers the requested profile with scope turn / session, or an empty
-//!   profile (`:609-621`). `serverRequest/resolved` closes a request Codex
-//!   settled. The v1 `execCommandApproval` / `applyPatchApproval` belong to
-//!   the conversation API Otto does not use.
-//! * `mcpServer/startupStatus/updated` with `status: "failed"` becomes a
-//!   `system_notice` in the running turn, or the next one when it arrives
-//!   between turns (T3 Code #34771); another status clears that server.
+//! * `initialize` + `initialized`, then `thread/start` or `thread/resume`.
+//! * `turn/start`, `turn/steer` mid-turn, and `turn/interrupt`, with per-turn
+//!   `approvalPolicy` + `sandboxPolicy` (`externalSandbox` under Otto Seatbelt).
+//! * `item/started`, `item/completed`, deltas, `turn/plan/updated`,
+//!   `thread/tokenUsage/updated`, approvals, and `collabAgentToolCall`
+//!   subagent tracking (`codex_subagent.rs`).
+
+#[path = "codex_subagent.rs"]
+mod subagent;
 
 use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, PlanStep, PlanStepStatus, ProviderCommand, ProviderFailure,
-    RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus,
-    ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, PlanStepStatus, ProviderCommand,
+    ProviderFailure, RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider,
+    RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus,
+    TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -76,7 +36,7 @@ enum ReqProto {
     Question,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Pending {
     rpc_id: Value,
     proto: ReqProto,
@@ -84,10 +44,21 @@ struct Pending {
 }
 
 /// Accumulated state of one Codex item.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
-struct Item {
-    text: String,
-    output: String,
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Item {
+    pub(crate) text: String,
+    pub(crate) output: String,
+    pub(crate) started_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl Default for Item {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            output: String::new(),
+            started_at: chrono::Utc::now(),
+        }
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -97,14 +68,16 @@ pub struct CodexDriver {
     init_id: u64,
     thread_req: Option<(u64, bool)>,
     turn_req: Option<u64>,
+    steer_reqs: Vec<u64>,
     ready: bool,
     cwd: String,
     model: Option<String>,
     resume: Option<String>,
     sandboxed: bool,
     access: RuntimeAccessMode,
-    thread_id: Option<String>,
-    turn_id: Option<String>,
+    pub(crate) thread_id: Option<String>,
+    pub(crate) turn_id: Option<String>,
+    auto_turns: u64,
     queued: Option<RuntimePromptReq>,
     codex_turn: Option<String>,
     interrupt_when_started: bool,
@@ -113,10 +86,14 @@ pub struct CodexDriver {
     failure: Option<ProviderFailure>,
     /// MCP servers that failed to start and are not shown yet: (name, error).
     mcp_failures: Vec<(String, String)>,
-    /// `turn/steer` requests in flight.
-    steers: Vec<u64>,
-    /// Sub-agent cards by the sub-agent's own Codex thread id.
-    agents: HashMap<String, TurnItem>,
+    #[serde(default)]
+    pub(crate) subagents: HashMap<String, subagent::CodexSubagent>,
+    #[serde(default)]
+    pub(crate) child_thread_to_key: HashMap<String, String>,
+    #[serde(default)]
+    pub(crate) child_items: HashMap<String, HashMap<String, Item>>,
+    #[serde(default)]
+    pub(crate) bg_tasks: Vec<BackgroundTask>,
     /// The model the thread runs (a plan-mode turn names it).
     #[serde(default)]
     thread_model: Option<String>,
@@ -143,6 +120,7 @@ impl CodexDriver {
             init_id: 0,
             thread_req: None,
             turn_req: None,
+            steer_reqs: Vec::new(),
             ready: false,
             cwd: String::new(),
             model: None,
@@ -151,6 +129,7 @@ impl CodexDriver {
             access: RuntimeAccessMode::default(),
             thread_id: None,
             turn_id: None,
+            auto_turns: 0,
             queued: None,
             codex_turn: None,
             interrupt_when_started: false,
@@ -158,8 +137,10 @@ impl CodexDriver {
             pending: HashMap::new(),
             failure: None,
             mcp_failures: Vec::new(),
-            steers: Vec::new(),
-            agents: HashMap::new(),
+            subagents: HashMap::new(),
+            child_thread_to_key: HashMap::new(),
+            child_items: HashMap::new(),
+            bg_tasks: Vec::new(),
             thread_model: None,
             plan: false,
             developer_instructions: None,
@@ -179,6 +160,22 @@ impl CodexDriver {
 
     fn turn(&self) -> String {
         self.turn_id.clone().unwrap_or_default()
+    }
+
+    fn ensure_autonomous_turn(&mut self, step: &mut DriverStep, native: Option<&str>) {
+        if !self.ready || self.turn_id.is_some() {
+            return;
+        }
+        self.auto_turns += 1;
+        let id = native
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("auto-{}", self.auto_turns));
+        self.turn_id = Some(id.clone());
+        self.failure = None;
+        self.items.clear();
+        step.push(DriverEvent::TurnStarted { turn_id: id });
     }
 
     /// The thread-level sandbox mode (`SandboxMode`).
@@ -239,7 +236,12 @@ impl CodexDriver {
         let mut input: Vec<Value> = req
             .images
             .iter()
-            .map(|i| json!({"type": "image", "url": format!("data:{};base64,{}", i.mime, i.data_base64)}))
+            .map(|i| {
+                json!({
+                    "type": "image",
+                    "url": format!("data:{};base64,{}", i.mime, i.data_base64),
+                })
+            })
             .collect();
         let mut text = req.text.clone();
         if let Some((name, rest)) = text
@@ -341,498 +343,22 @@ impl CodexDriver {
                 format!("{}:mcp-startup-failed:{name}", self.turn()),
                 TurnItemStatus::Completed,
                 Some(format!("MCP server {name} failed to start")),
-                TurnItemKind::SystemNotice { message: error },
+                TurnItemKind::SystemNotice {
+                    message: error,
+                    task_settlement: None,
+                },
             )));
         }
     }
 
-    fn item_id(&self, codex_id: &str) -> String {
+    pub(crate) fn item_id(&self, codex_id: &str) -> String {
         format!("{}:codex:{codex_id}", self.turn())
-    }
-
-    /// Codex sub-agents (`multi_agent`, on by default in 0.167): each runs
-    /// in its own Codex thread. A `collabAgentToolCall` `spawnAgent` is one
-    /// background subagent card for its receiver thread(s); later collab
-    /// calls (`wait`, `sendInput`, `closeAgent`, …) and `subAgentActivity`
-    /// only move the card's status (`agentsStates[thread]`); they are not
-    /// rows of their own (T3 Code `CodexAdapterV2` `registerSubagentThreads`
-    /// / `updateSubagentStates`).
-    fn on_collab(&mut self, step: &mut DriverStep, it: &Value) {
-        let s = |k: &str| it.get(k).and_then(Value::as_str).map(str::to_string);
-        let ty = s("type").unwrap_or_default();
-        if ty == "collabAgentToolCall" && s("tool").as_deref() == Some("spawnAgent") {
-            let receivers: Vec<String> = it
-                .get("receiverThreadIds")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let prompt = s("prompt").filter(|p| !p.trim().is_empty());
-            let name = prompt
-                .as_deref()
-                .and_then(|p| p.lines().find(|l| !l.trim().is_empty()))
-                .map(|l| {
-                    let l = l.trim();
-                    match l.char_indices().nth(60) {
-                        Some((i, _)) => format!("{}…", &l[..i]),
-                        None => l.to_string(),
-                    }
-                })
-                .unwrap_or_else(|| "Sub-agent".into());
-            let cid = s("id").unwrap_or_default();
-            let card_id = self.item_id(&cid);
-            let mut card = self
-                .agents
-                .values()
-                .find(|c| c.id == card_id)
-                .cloned()
-                .unwrap_or_else(|| {
-                    let mut c = item(
-                        card_id.clone(),
-                        TurnItemStatus::Running,
-                        Some(name.clone()),
-                        TurnItemKind::Subagent {
-                            tool_name: "spawnAgent".into(),
-                            description: Some(name.clone()),
-                            subagent_type: s("model"),
-                            prompt: prompt.clone(),
-                            output: None,
-                            background: true,
-                            last_tool: None,
-                            tool_uses: 0,
-                        },
-                    );
-                    c.turn_id = self.turn_id.clone();
-                    c
-                });
-            if s("status").as_deref() == Some("failed") && receivers.is_empty() {
-                card.status = TurnItemStatus::Failed;
-            }
-            for r in &receivers {
-                self.agents.insert(r.clone(), card.clone());
-            }
-            if receivers.is_empty() {
-                step.push(DriverEvent::TurnItem(card));
-                return;
-            }
-        }
-        if ty == "subAgentActivity" {
-            if let Some(thread) = s("agentThreadId") {
-                let status = match s("kind").as_deref() {
-                    Some("completed") => TurnItemStatus::Completed,
-                    Some("interrupted") => TurnItemStatus::Interrupted,
-                    _ => TurnItemStatus::Running,
-                };
-                let name = s("agentPath").unwrap_or_else(|| "Sub-agent".into());
-                self.child_card(&thread, &name);
-                self.set_agent(step, &thread, status, None);
-            }
-            return;
-        }
-        if let Some(states) = it.get("agentsStates").and_then(Value::as_object) {
-            for (thread, st) in states {
-                let status = match st.get("status").and_then(Value::as_str) {
-                    Some("completed") => TurnItemStatus::Completed,
-                    Some("errored") => TurnItemStatus::Failed,
-                    Some("interrupted" | "shutdown" | "notFound") => TurnItemStatus::Interrupted,
-                    _ => TurnItemStatus::Running,
-                };
-                let message = st
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                self.set_agent(step, thread, status, message);
-            }
-        }
-        // A spawn whose receivers carry no state yet: shown running.
-        for r in it
-            .get("receiverThreadIds")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            if it.pointer(&format!("/agentsStates/{r}")).is_none() {
-                if let Some(c) = self.agents.get(r).cloned() {
-                    step.push(DriverEvent::TurnItem(c));
-                }
-            }
-        }
-    }
-
-    fn on_output_delta(&mut self, step: &mut DriverStep, params: &Value) {
-        if let (Some(cid), Some(d)) = (
-            params.get("itemId").and_then(Value::as_str),
-            params.get("delta").and_then(Value::as_str),
-        ) {
-            self.items
-                .entry(cid.to_string())
-                .or_default()
-                .output
-                .push_str(d);
-            step.push(DriverEvent::CommandOutput {
-                item_id: self.item_id(cid),
-                chunk: d.to_string(),
-            });
-        }
-    }
-
-    /// A notification of a sub-agent's own thread: its turns move its card,
-    /// its items become the card's activity (`parent_item_id`), in the
-    /// card's turn. A thread with no card yet (no spawn seen) gets one.
-    fn on_child(&mut self, step: &mut DriverStep, thread: &str, m: &str, params: &Value) {
-        if !self.agents.contains_key(thread) {
-            if self.turn_id.is_none() || !(m.starts_with("item/") || m == "turn/started") {
-                return;
-            }
-            self.child_card(thread, "Sub-agent");
-        }
-        let (card_id, card_turn) = {
-            let c = &self.agents[thread];
-            (c.id.clone(), c.turn_id.clone())
-        };
-        match m {
-            "turn/started" => self.set_agent(step, thread, TurnItemStatus::Running, None),
-            "turn/completed" => {
-                let turn = &params["turn"];
-                let status = match turn.get("status").and_then(Value::as_str) {
-                    Some("completed") => TurnItemStatus::Completed,
-                    Some("failed") => TurnItemStatus::Failed,
-                    Some("interrupted") => TurnItemStatus::Interrupted,
-                    _ => return,
-                };
-                let error = turn
-                    .pointer("/error/message")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                self.set_agent(step, thread, status, error);
-            }
-            _ => {
-                let saved = std::mem::replace(&mut self.turn_id, card_turn.clone());
-                let mut sub = DriverStep::default();
-                match m {
-                    "item/started" | "item/completed" => {
-                        if let Some(it) = params.get("item") {
-                            let ty = it.get("type").and_then(Value::as_str).unwrap_or_default();
-                            if matches!(ty, "collabAgentToolCall" | "subAgentActivity") {
-                                self.on_collab(&mut sub, it);
-                            } else if let Some(i) = self.project(it, m == "item/completed") {
-                                if m == "item/started"
-                                    && !matches!(ty, "agentMessage" | "reasoning")
-                                {
-                                    if let Some(c) = self.agent_step(thread, i.title.clone()) {
-                                        sub.push(DriverEvent::TurnItem(c));
-                                    }
-                                }
-                                sub.push(DriverEvent::TurnItem(i));
-                            }
-                        }
-                    }
-                    "item/agentMessage/delta" => self.on_text_delta(&mut sub, params, false),
-                    "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
-                        self.on_text_delta(&mut sub, params, true)
-                    }
-                    "item/commandExecution/outputDelta" => self.on_output_delta(&mut sub, params),
-                    _ => {}
-                }
-                self.turn_id = saved;
-                for mut ev in sub.events {
-                    if let DriverEvent::TurnItem(i) = &mut ev {
-                        if i.id != card_id && i.parent_item_id.is_none() {
-                            i.parent_item_id = Some(card_id.clone());
-                        }
-                        if i.turn_id.is_none() {
-                            i.turn_id = card_turn.clone();
-                        }
-                    }
-                    step.push(ev);
-                }
-            }
-        }
-    }
-
-    /// The card of a sub-agent thread, made on first sight.
-    fn child_card(&mut self, thread: &str, name: &str) -> String {
-        if let Some(c) = self.agents.get(thread) {
-            return c.id.clone();
-        }
-        let mut c = item(
-            format!("{}:codex-agent:{thread}", self.turn()),
-            TurnItemStatus::Running,
-            Some(name.to_string()),
-            TurnItemKind::Subagent {
-                tool_name: "spawnAgent".into(),
-                description: Some(name.to_string()),
-                subagent_type: None,
-                prompt: None,
-                output: None,
-                background: true,
-                last_tool: None,
-                tool_uses: 0,
-            },
-        );
-        c.turn_id = self.turn_id.clone();
-        let id = c.id.clone();
-        self.agents.insert(thread.to_string(), c);
-        id
-    }
-
-    /// Move a sub-agent card (every thread sharing it) and re-emit it.
-    fn set_agent(
-        &mut self,
-        step: &mut DriverStep,
-        thread: &str,
-        status: TurnItemStatus,
-        message: Option<String>,
-    ) {
-        let Some(card) = self.agents.get(thread) else {
-            return;
-        };
-        let id = card.id.clone();
-        let now = chrono::Utc::now();
-        let mut out = None;
-        for c in self.agents.values_mut().filter(|c| c.id == id) {
-            c.status = status;
-            c.updated_at = now;
-            c.completed_at = (!status.is_open()).then_some(now);
-            if let (TurnItemKind::Subagent { output, .. }, Some(m)) = (&mut c.kind, &message) {
-                *output = Some(m.clone());
-            }
-            if status == TurnItemStatus::Failed {
-                c.error = message.as_deref().and_then(tool_error);
-            }
-            out = Some(c.clone());
-        }
-        if let Some(c) = out {
-            step.push(DriverEvent::TurnItem(c));
-        }
-    }
-
-    /// A sub-agent thread's own step: one more on its card.
-    fn agent_step(&mut self, thread: &str, title: Option<String>) -> Option<TurnItem> {
-        let id = self.agents.get(thread)?.id.clone();
-        let mut out = None;
-        for c in self.agents.values_mut().filter(|c| c.id == id) {
-            if let TurnItemKind::Subagent {
-                last_tool,
-                tool_uses,
-                ..
-            } = &mut c.kind
-            {
-                *tool_uses += 1;
-                *last_tool = title.clone();
-            }
-            c.updated_at = chrono::Utc::now();
-            out = Some(c.clone());
-        }
-        out
     }
 
     /// A Codex `ThreadItem` → an Otto item (`None` = not projected).
     fn project(&mut self, it: &Value, completed: bool) -> Option<TurnItem> {
-        let cid = it.get("id").and_then(Value::as_str)?.to_string();
-        let ty = it.get("type").and_then(Value::as_str)?;
-        let empty_text = it
-            .get("text")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty);
-        let streamed = self.items.get(&cid).is_some_and(|i| !i.text.is_empty());
-        let summary = it
-            .get("summary")
-            .and_then(Value::as_array)
-            .is_some_and(|a| !a.is_empty());
-        if matches!(ty, "agentMessage" | "reasoning") && empty_text && !streamed && !summary {
-            // Shown from its first delta, never as an empty bubble.
-            if completed {
-                self.items.remove(&cid);
-            }
-            return None;
-        }
-        let st = self.items.entry(cid.clone()).or_default();
-        let s = |k: &str| it.get(k).and_then(Value::as_str).map(str::to_string);
-        let status = match it.get("status").and_then(Value::as_str) {
-            Some("inProgress") => TurnItemStatus::Running,
-            Some("completed") => TurnItemStatus::Completed,
-            Some("failed") => TurnItemStatus::Failed,
-            Some("declined") => TurnItemStatus::Cancelled,
-            _ if completed => TurnItemStatus::Completed,
-            _ => TurnItemStatus::Running,
-        };
-        let (kind, title) = match ty {
-            "agentMessage" => {
-                if let Some(t) = s("text").filter(|t| !t.is_empty() || completed) {
-                    st.text = t;
-                }
-                (
-                    TurnItemKind::AssistantMessage {
-                        message_id: cid.clone(),
-                        text: st.text.clone(),
-                        streaming: !completed,
-                    },
-                    None,
-                )
-            }
-            "reasoning" => {
-                let joined = |k: &str| {
-                    it.get(k)
-                        .and_then(Value::as_array)
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join("\n\n")
-                        })
-                        .filter(|t| !t.is_empty())
-                };
-                if let Some(t) = joined("summary").or_else(|| joined("content")) {
-                    st.text = t;
-                }
-                (
-                    TurnItemKind::Reasoning {
-                        text: st.text.clone(),
-                        streaming: !completed,
-                    },
-                    None,
-                )
-            }
-            "commandExecution" => {
-                if let Some(o) = s("aggregatedOutput") {
-                    st.output = o;
-                }
-                (
-                    TurnItemKind::CommandExecution {
-                        input: s("command").unwrap_or_default(),
-                        output: (!st.output.is_empty()).then(|| st.output.clone()),
-                        exit_code: it.get("exitCode").and_then(Value::as_i64).map(|c| c as i32),
-                    },
-                    Some("Command".to_string()),
-                )
-            }
-            "fileChange" => {
-                let changes = it
-                    .get("changes")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                let paths: Vec<&str> = changes
-                    .iter()
-                    .filter_map(|c| c.get("path").and_then(Value::as_str))
-                    .collect();
-                let diff: Vec<&str> = changes
-                    .iter()
-                    .filter_map(|c| c.get("diff").and_then(Value::as_str))
-                    .collect();
-                let file_name = match paths.len() {
-                    0 => "files".to_string(),
-                    1 => paths[0].to_string(),
-                    n => format!("{} (+{} more)", paths[0], n - 1),
-                };
-                (
-                    TurnItemKind::FileChange {
-                        file_name,
-                        diff_str: (!diff.is_empty()).then(|| diff.join("\n")),
-                        old_str: None,
-                        new_str: None,
-                    },
-                    Some("Edit".to_string()),
-                )
-            }
-            "mcpToolCall" | "dynamicToolCall" => {
-                let tool = s("tool").unwrap_or_else(|| "tool".into());
-                let name = match s("server") {
-                    Some(server) => format!("{server}.{tool}"),
-                    None => tool,
-                };
-                let result = crate::tool_images::extract(
-                    it.get("result")
-                        .filter(|v| !v.is_null())
-                        .or_else(|| it.get("error").filter(|v| !v.is_null())),
-                );
-                let output = (!result.text.is_empty()).then_some(result.text);
-                (
-                    TurnItemKind::DynamicTool {
-                        tool_name: name.clone(),
-                        input: it.get("arguments").cloned().unwrap_or(Value::Null),
-                        output,
-                        images: result.images,
-                        image_files: Vec::new(),
-                    },
-                    Some(name),
-                )
-            }
-            "webSearch" => (
-                TurnItemKind::WebSearch {
-                    patterns: s("query").into_iter().collect(),
-                },
-                Some("Web search".to_string()),
-            ),
-            "contextCompaction" => (
-                TurnItemKind::SystemNotice {
-                    message: "Context compacted".into(),
-                },
-                None,
-            ),
-            // Images Codex looked at or made exist only as files: the item
-            // names them and the runtime serves them read-only.
-            "imageView" => (
-                TurnItemKind::DynamicTool {
-                    tool_name: "view_image".into(),
-                    input: json!({"path": s("path")}),
-                    output: None,
-                    images: Vec::new(),
-                    image_files: s("path").into_iter().collect(),
-                },
-                Some("View image".to_string()),
-            ),
-            "imageGeneration" => {
-                let failure = it.get("failure").filter(|f| !f.is_null()).map(|f| {
-                    f.get("message")
-                        .and_then(Value::as_str)
-                        .map_or_else(|| f.to_string(), str::to_string)
-                });
-                (
-                    TurnItemKind::DynamicTool {
-                        tool_name: "image_generation".into(),
-                        input: json!({"prompt": s("revisedPrompt")}),
-                        output: failure,
-                        images: Vec::new(),
-                        image_files: s("savedPath").into_iter().collect(),
-                    },
-                    Some("Generate image".to_string()),
-                )
-            }
-            _ => return None,
-        };
-        let status = match kind {
-            TurnItemKind::AssistantMessage { .. } | TurnItemKind::Reasoning { .. } => {
-                if completed {
-                    TurnItemStatus::Completed
-                } else {
-                    TurnItemStatus::Running
-                }
-            }
-            _ => status,
-        };
-        let error = (status == TurnItemStatus::Failed)
-            .then(|| match it.get("error") {
-                Some(Value::String(e)) => e.clone(),
-                Some(e @ Value::Object(_)) => e
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map_or_else(|| e.to_string(), str::to_string),
-                _ => st.output.clone(),
-            })
-            .and_then(|e| tool_error(&e));
-        if completed {
-            self.items.remove(&cid);
-        }
-        let mut out = item(self.item_id(&cid), status, title, kind);
-        out.error = error;
-        Some(out)
+        let prefix = format!("{}:codex", self.turn());
+        project_codex_item(&mut self.items, &prefix, it, completed)
     }
 
     /// Grow a streamed text item by `delta`.
@@ -845,6 +371,7 @@ impl CodexDriver {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let st = self.items.entry(cid.to_string()).or_default();
+        let started_at = st.started_at;
         st.text.push_str(delta);
         let text = st.text.clone();
         let kind = if reasoning {
@@ -859,7 +386,8 @@ impl CodexDriver {
                 streaming: true,
             }
         };
-        let item = item(self.item_id(cid), TurnItemStatus::Running, None, kind);
+        let mut item = item(self.item_id(cid), TurnItemStatus::Running, None, kind);
+        item.started_at = Some(started_at);
         step.push(DriverEvent::TurnItem(item));
     }
 
@@ -944,6 +472,12 @@ impl CodexDriver {
                     retryable: None,
                 })
         });
+        if matches!(
+            status,
+            TurnTerminalStatus::Failed | TurnTerminalStatus::Interrupted
+        ) {
+            self.settle_open_subagents_on_parent_abort(step, status);
+        }
         step.push(DriverEvent::Terminal {
             status,
             failure,
@@ -952,6 +486,7 @@ impl CodexDriver {
         self.turn_id = None;
         self.codex_turn = None;
         self.turn_req = None;
+        self.steer_reqs.clear();
         self.interrupt_when_started = false;
         self.failure = None;
         self.items.clear();
@@ -976,6 +511,10 @@ impl CodexDriver {
                             permissions: params.clone(),
                         },
                     );
+                    let req_tid = params
+                        .get("threadId")
+                        .or_else(|| params.get("thread_id"))
+                        .and_then(Value::as_str);
                     step.push(DriverEvent::Question {
                         id,
                         title: None,
@@ -983,7 +522,7 @@ impl CodexDriver {
                         tool_item_id: params
                             .get("itemId")
                             .and_then(Value::as_str)
-                            .map(|i| self.item_id(i)),
+                            .map(|i| self.item_id_for_thread(req_tid, i)),
                     });
                 }
                 Err(message) => step.write(
@@ -1046,6 +585,10 @@ impl CodexDriver {
                 permissions: params.get("permissions").cloned().unwrap_or(json!({})),
             },
         );
+        let req_tid = params
+            .get("threadId")
+            .or_else(|| params.get("thread_id"))
+            .and_then(Value::as_str);
         step.push(DriverEvent::Request {
             id: request_id,
             kind,
@@ -1053,7 +596,7 @@ impl CodexDriver {
             prompt,
             reason: s("reason"),
             options,
-            tool_item_id: s("itemId").map(|i| self.item_id(&i)),
+            tool_item_id: s("itemId").map(|i| self.item_id_for_thread(req_tid, &i)),
         });
     }
 
@@ -1182,23 +725,6 @@ impl CodexDriver {
                     .map(|(n, _, d)| ProviderCommand::new(n, d))
                     .collect(),
             ));
-        } else if let Some(n) = self.steers.iter().position(|s| *s == id) {
-            self.steers.remove(n);
-            // The turn ended (or moved on) before Codex took it.
-            if let (Some(e), Some(_)) = (error, &self.turn_id) {
-                let msg = e
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Codex refused it");
-                step.push(DriverEvent::TurnItem(item(
-                    format!("{}:steer-failed:{id}", self.turn()),
-                    TurnItemStatus::Failed,
-                    Some("Codex did not take the message".to_string()),
-                    TurnItemKind::SystemNotice {
-                        message: format!("Codex did not take the message: {msg}"),
-                    },
-                )));
-            }
         } else if Some(id) == self.turn_req {
             if let Some(e) = error {
                 self.turn_req = None;
@@ -1218,6 +744,11 @@ impl CodexDriver {
                 self.codex_turn = Some(t.to_string());
             }
             self.maybe_interrupt(step);
+        } else if let Some(pos) = self.steer_reqs.iter().position(|r| *r == id) {
+            self.steer_reqs.swap_remove(pos);
+            if let Some(e) = error {
+                step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
+            }
         }
     }
 
@@ -1234,6 +765,221 @@ impl CodexDriver {
     }
 }
 
+/// Project a Codex `ThreadItem` into an Otto [`TurnItem`], sharing accumulated
+/// stream state in `items` and formatting its ID as `{id_prefix}:{codex_id}`.
+pub(crate) fn project_codex_item(
+    items: &mut HashMap<String, Item>,
+    id_prefix: &str,
+    it: &Value,
+    completed: bool,
+) -> Option<TurnItem> {
+    let cid = it.get("id").and_then(Value::as_str)?.to_string();
+    let ty = it.get("type").and_then(Value::as_str)?;
+    let empty_text = it
+        .get("text")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty);
+    let streamed = items.get(&cid).is_some_and(|i| !i.text.is_empty());
+    let summary = it
+        .get("summary")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty());
+    if matches!(ty, "agentMessage" | "reasoning") && empty_text && !streamed && !summary {
+        // Shown from its first delta, never as an empty bubble; record its
+        // start timestamp now so summary-only reasoning keeps real duration.
+        if completed {
+            items.remove(&cid);
+        } else {
+            items.entry(cid).or_default();
+        }
+        return None;
+    }
+    let st = items.entry(cid.clone()).or_default();
+    let started_at = st.started_at;
+    let s = |k: &str| it.get(k).and_then(Value::as_str).map(str::to_string);
+    let status = match it.get("status").and_then(Value::as_str) {
+        Some("inProgress") => TurnItemStatus::Running,
+        Some("completed") => TurnItemStatus::Completed,
+        Some("failed") => TurnItemStatus::Failed,
+        Some("declined") => TurnItemStatus::Cancelled,
+        _ if completed => TurnItemStatus::Completed,
+        _ => TurnItemStatus::Running,
+    };
+    let (kind, title) = match ty {
+        "agentMessage" => {
+            if let Some(t) = s("text").filter(|t| !t.is_empty() || completed) {
+                st.text = t;
+            }
+            (
+                TurnItemKind::AssistantMessage {
+                    message_id: cid.clone(),
+                    text: st.text.clone(),
+                    streaming: !completed,
+                },
+                None,
+            )
+        }
+        "reasoning" => {
+            let joined = |k: &str| {
+                it.get(k)
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                    })
+                    .filter(|t| !t.is_empty())
+            };
+            if let Some(t) = joined("summary").or_else(|| joined("content")) {
+                st.text = t;
+            }
+            (
+                TurnItemKind::Reasoning {
+                    text: st.text.clone(),
+                    streaming: !completed,
+                },
+                None,
+            )
+        }
+        "commandExecution" => {
+            if let Some(o) = s("aggregatedOutput") {
+                st.output = o;
+            }
+            (
+                TurnItemKind::CommandExecution {
+                    input: s("command").unwrap_or_default(),
+                    output: (!st.output.is_empty()).then(|| st.output.clone()),
+                    exit_code: it.get("exitCode").and_then(Value::as_i64).map(|c| c as i32),
+                },
+                Some("Command".to_string()),
+            )
+        }
+        "fileChange" => {
+            let changes = it
+                .get("changes")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let paths: Vec<&str> = changes
+                .iter()
+                .filter_map(|c| c.get("path").and_then(Value::as_str))
+                .collect();
+            let diff: Vec<&str> = changes
+                .iter()
+                .filter_map(|c| c.get("diff").and_then(Value::as_str))
+                .collect();
+            let file_name = match paths.len() {
+                0 => "files".to_string(),
+                1 => paths[0].to_string(),
+                n => format!("{} (+{} more)", paths[0], n - 1),
+            };
+            (
+                TurnItemKind::FileChange {
+                    file_name,
+                    diff_str: (!diff.is_empty()).then(|| diff.join("\n")),
+                    old_str: None,
+                    new_str: None,
+                },
+                Some("Edit".to_string()),
+            )
+        }
+        "mcpToolCall" | "dynamicToolCall" => {
+            let tool = s("tool").unwrap_or_else(|| "tool".into());
+            let name = match s("server") {
+                Some(server) => format!("{server}.{tool}"),
+                None => tool,
+            };
+            let result = crate::tool_images::extract(
+                it.get("result")
+                    .filter(|v| !v.is_null())
+                    .or_else(|| it.get("error").filter(|v| !v.is_null())),
+            );
+            let output = (!result.text.is_empty()).then_some(result.text);
+            (
+                TurnItemKind::DynamicTool {
+                    tool_name: name.clone(),
+                    input: it.get("arguments").cloned().unwrap_or(Value::Null),
+                    output,
+                    images: result.images,
+                    image_files: Vec::new(),
+                },
+                Some(name),
+            )
+        }
+        "webSearch" => (
+            TurnItemKind::WebSearch {
+                patterns: s("query").into_iter().collect(),
+            },
+            Some("Web search".to_string()),
+        ),
+        "contextCompaction" => (
+            TurnItemKind::SystemNotice {
+                message: "Context compacted".into(),
+                task_settlement: None,
+            },
+            None,
+        ),
+        // Images Codex looked at or made exist only as files: the item
+        // names them and the runtime serves them read-only.
+        "imageView" => (
+            TurnItemKind::DynamicTool {
+                tool_name: "view_image".into(),
+                input: json!({"path": s("path")}),
+                output: None,
+                images: Vec::new(),
+                image_files: s("path").into_iter().collect(),
+            },
+            Some("View image".to_string()),
+        ),
+        "imageGeneration" => {
+            let failure = it.get("failure").filter(|f| !f.is_null()).map(|f| {
+                f.get("message")
+                    .and_then(Value::as_str)
+                    .map_or_else(|| f.to_string(), str::to_string)
+            });
+            (
+                TurnItemKind::DynamicTool {
+                    tool_name: "image_generation".into(),
+                    input: json!({"prompt": s("revisedPrompt")}),
+                    output: failure,
+                    images: Vec::new(),
+                    image_files: s("savedPath").into_iter().collect(),
+                },
+                Some("Generate image".to_string()),
+            )
+        }
+        _ => return None,
+    };
+    let status = match kind {
+        TurnItemKind::AssistantMessage { .. } | TurnItemKind::Reasoning { .. } => {
+            if completed {
+                TurnItemStatus::Completed
+            } else {
+                TurnItemStatus::Running
+            }
+        }
+        _ => status,
+    };
+    let error = (status == TurnItemStatus::Failed)
+        .then(|| match it.get("error") {
+            Some(Value::String(e)) => e.clone(),
+            Some(e @ Value::Object(_)) => e
+                .get("message")
+                .and_then(Value::as_str)
+                .map_or_else(|| e.to_string(), str::to_string),
+            _ => st.output.clone(),
+        })
+        .and_then(|e| tool_error(&e));
+    if completed {
+        items.remove(&cid);
+    }
+    let mut out = item(format!("{id_prefix}:{cid}"), status, title, kind);
+    out.started_at = Some(started_at);
+    out.error = error;
+    Some(out)
+}
+
 /// Codex's "another client owns this thread" resume refusal (`-32600`,
 /// "… already has an active writer").
 fn thread_in_use(e: &Value) -> bool {
@@ -1244,15 +990,6 @@ fn thread_in_use(e: &Value) -> bool {
 }
 
 impl StructuredDriver for CodexDriver {
-    fn export_state(&self) -> Option<Value> {
-        serde_json::to_value(self).ok()
-    }
-
-    fn import_state(&mut self, state: Value) -> Result<(), DriverError> {
-        *self = serde_json::from_value(state).map_err(|e| DriverError(e.to_string()))?;
-        Ok(())
-    }
-
     fn provider(&self) -> RuntimeProvider {
         RuntimeProvider::Codex
     }
@@ -1332,15 +1069,29 @@ impl StructuredDriver for CodexDriver {
     /// the turn (`turn/start`'s answer or `turn/started`); before that the
     /// message stays queued.
     fn steer(&mut self, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
-        let (Some(_), Some(thread), Some(turn)) =
-            (&self.turn_id, &self.thread_id, &self.codex_turn)
-        else {
-            return Err(DriverError("no Codex turn is running yet".into()));
+        if !self.ready || self.turn_id.is_none() || self.interrupt_when_started {
+            return Err(DriverError("no turn is running".into()));
+        }
+        let Some(thread_id) = self.thread_id.clone() else {
+            return Err(DriverError("no thread is open".into()));
         };
-        let params = json!({"threadId": thread, "expectedTurnId": turn, "input": self.input(req)});
-        let (id, line) = self.request("turn/steer", params);
-        self.steers.push(id);
+        let Some(expected_turn_id) = self.codex_turn.clone() else {
+            return Err(DriverError("turn has not started on the server yet".into()));
+        };
+        let input = self.input(req);
+        if input.is_empty() {
+            return Err(DriverError("empty steer input".into()));
+        }
         let mut step = DriverStep::default();
+        let (id, line) = self.request(
+            "turn/steer",
+            json!({
+                "threadId": thread_id,
+                "input": input,
+                "expectedTurnId": expected_turn_id,
+            }),
+        );
+        self.steer_reqs.push(id);
         step.write(line);
         Ok(step)
     }
@@ -1361,8 +1112,11 @@ impl StructuredDriver for CodexDriver {
         for (_, p) in open {
             step.write(Self::answer(&p, ApprovalDecision::Cancel));
         }
-        if self.queued.take().is_some() {
+        if self.queued.take().is_some()
+            || (self.turn_req.is_none() && self.codex_turn.is_none() && self.turn_id.is_some())
+        {
             self.turn_id = None;
+            self.items.clear();
             step.push(DriverEvent::Terminal {
                 status: TurnTerminalStatus::Interrupted,
                 failure: None,
@@ -1465,96 +1219,163 @@ impl StructuredDriver for CodexDriver {
                     self.on_response(&mut step, n, result, error);
                 }
             }
-            // A sub-agent's own thread: its items are its card's activity,
-            // its turns move the card — never this thread's turn.
-            (Some(m), None)
-                if params
+            (Some(m), None) => {
+                let notif_tid = params
                     .get("threadId")
-                    .and_then(Value::as_str)
-                    .is_some_and(|t| self.thread_id.as_deref().is_some_and(|me| me != t)) =>
-            {
-                let thread = params["threadId"].as_str().unwrap_or_default().to_string();
-                self.on_child(&mut step, &thread, &m, &params);
+                    .or_else(|| params.get("thread_id"))
+                    .and_then(Value::as_str);
+                if let Some(child_tid) = notif_tid.filter(|t| self.is_child_thread(t)) {
+                    match m.as_str() {
+                        "mcpServer/startupStatus/updated" => {
+                            self.on_mcp_startup(&mut step, &params);
+                        }
+                        "serverRequest/resolved" => {
+                            if let Some(rid) = params.get("requestId") {
+                                let request_id = format!("codex-{}", rpc_key(rid));
+                                if self.pending.remove(&request_id).is_some() {
+                                    step.push(DriverEvent::RequestClosed {
+                                        request_id,
+                                        status: RuntimeRequestStatus::Cancelled,
+                                    });
+                                }
+                            }
+                        }
+                        _ => self.on_child_notification(&mut step, child_tid, &m, &params),
+                    }
+                    return step;
+                }
+                match m.as_str() {
+                    "turn/started" => {
+                        let native = params.pointer("/turn/id").and_then(Value::as_str);
+                        self.ensure_autonomous_turn(&mut step, native);
+                        if let Some(t) = native {
+                            self.codex_turn = Some(t.to_string());
+                        }
+                        self.maybe_interrupt(&mut step);
+                    }
+                    "item/started" | "item/completed" => {
+                        self.ensure_autonomous_turn(&mut step, None);
+                        if self.turn_id.is_some() {
+                            if let Some(item) = params.get("item") {
+                                let ty = item.get("type").and_then(Value::as_str).unwrap_or("");
+                                if matches!(ty, "collabAgentToolCall" | "collabToolCall") {
+                                    self.on_collab_item(
+                                        &mut step,
+                                        item,
+                                        m == "item/completed",
+                                        None,
+                                    );
+                                } else if let Some(i) = self.project(item, m == "item/completed") {
+                                    step.push(DriverEvent::TurnItem(i));
+                                }
+                            }
+                        }
+                    }
+                    "subAgentActivity" | "subagent/activity" => {
+                        self.on_subagent_activity(&mut step, &params);
+                    }
+                    "item/agentMessage/delta" => {
+                        self.ensure_autonomous_turn(&mut step, None);
+                        if self.turn_id.is_some() {
+                            self.on_text_delta(&mut step, &params, false);
+                        }
+                    }
+                    "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                        self.ensure_autonomous_turn(&mut step, None);
+                        if self.turn_id.is_some() {
+                            self.on_text_delta(&mut step, &params, true);
+                        }
+                    }
+                    "item/commandExecution/outputDelta" => {
+                        self.ensure_autonomous_turn(&mut step, None);
+                        if self.turn_id.is_some() {
+                            if let (Some(cid), Some(d)) = (
+                                params.get("itemId").and_then(Value::as_str),
+                                params.get("delta").and_then(Value::as_str),
+                            ) {
+                                self.items
+                                    .entry(cid.to_string())
+                                    .or_default()
+                                    .output
+                                    .push_str(d);
+                                step.push(DriverEvent::CommandOutput {
+                                    item_id: self.item_id(cid),
+                                    chunk: d.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    "turn/plan/updated" => {
+                        self.ensure_autonomous_turn(&mut step, None);
+                        if self.turn_id.is_some() {
+                            self.on_plan(&mut step, &params);
+                        }
+                    }
+                    "thread/tokenUsage/updated" => self.on_usage(&mut step, &params),
+                    "thread/name/updated" => {
+                        if let Some(name) = params.get("threadName").and_then(Value::as_str) {
+                            step.push(DriverEvent::Title(name.to_string()));
+                        }
+                    }
+                    "skills/changed" => {
+                        let (id, line) = self.request(
+                            "skills/list",
+                            json!({"cwds": [self.cwd], "forceReload": true}),
+                        );
+                        self.skills_req = Some(id);
+                        step.write(line);
+                    }
+                    "mcpServer/startupStatus/updated" => self.on_mcp_startup(&mut step, &params),
+                    "error" => {
+                        if params.get("willRetry").and_then(Value::as_bool) != Some(true) {
+                            if let Some(e) = params.get("error") {
+                                self.failure = Some(rpc_failure("provider_error", e));
+                            }
+                        }
+                    }
+                    "serverRequest/resolved" => {
+                        if let Some(rid) = params.get("requestId") {
+                            let request_id = format!("codex-{}", rpc_key(rid));
+                            if self.pending.remove(&request_id).is_some() {
+                                step.push(DriverEvent::RequestClosed {
+                                    request_id,
+                                    status: RuntimeRequestStatus::Cancelled,
+                                });
+                            }
+                        }
+                    }
+                    "turn/completed" if self.turn_id.is_some() => {
+                        self.on_turn_completed(&mut step, &params)
+                    }
+                    _ => {}
+                }
             }
-            (Some(m), None) => match m.as_str() {
-                "turn/started" => {
-                    if let Some(t) = params.pointer("/turn/id").and_then(Value::as_str) {
-                        self.codex_turn = Some(t.to_string());
-                    }
-                    self.maybe_interrupt(&mut step);
-                }
-                "item/started" | "item/completed" if self.turn_id.is_some() => {
-                    if let Some(item) = params.get("item") {
-                        if matches!(
-                            item.get("type").and_then(Value::as_str),
-                            Some("collabAgentToolCall" | "subAgentActivity")
-                        ) {
-                            self.on_collab(&mut step, item);
-                        } else if let Some(i) = self.project(item, m == "item/completed") {
-                            step.push(DriverEvent::TurnItem(i));
-                        }
-                    }
-                }
-                "item/agentMessage/delta" if self.turn_id.is_some() => {
-                    self.on_text_delta(&mut step, &params, false)
-                }
-                "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta"
-                    if self.turn_id.is_some() =>
-                {
-                    self.on_text_delta(&mut step, &params, true)
-                }
-                "item/commandExecution/outputDelta" if self.turn_id.is_some() => {
-                    self.on_output_delta(&mut step, &params)
-                }
-                "turn/plan/updated" if self.turn_id.is_some() => self.on_plan(&mut step, &params),
-                "thread/tokenUsage/updated" => self.on_usage(&mut step, &params),
-                "thread/name/updated" => {
-                    if let Some(name) = params.get("threadName").and_then(Value::as_str) {
-                        step.push(DriverEvent::Title(name.to_string()));
-                    }
-                }
-                "skills/changed" => {
-                    let (id, line) = self.request(
-                        "skills/list",
-                        json!({"cwds": [self.cwd], "forceReload": true}),
-                    );
-                    self.skills_req = Some(id);
-                    step.write(line);
-                }
-                "mcpServer/startupStatus/updated" => self.on_mcp_startup(&mut step, &params),
-                "error" => {
-                    if params.get("willRetry").and_then(Value::as_bool) != Some(true) {
-                        if let Some(e) = params.get("error") {
-                            self.failure = Some(rpc_failure("provider_error", e));
-                        }
-                    }
-                }
-                "serverRequest/resolved" => {
-                    if let Some(rid) = params.get("requestId") {
-                        let request_id = format!("codex-{}", rpc_key(rid));
-                        if self.pending.remove(&request_id).is_some() {
-                            step.push(DriverEvent::RequestClosed {
-                                request_id,
-                                status: RuntimeRequestStatus::Cancelled,
-                            });
-                        }
-                    }
-                }
-                "turn/completed" if self.turn_id.is_some() => {
-                    self.on_turn_completed(&mut step, &params)
-                }
-                _ => {}
-            },
             (None, None) => {}
         }
         step
     }
 
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
-        self.agents.clear();
+        self.steer_reqs.clear();
         self.pending.clear();
         self.items.clear();
+        self.subagents.clear();
+        self.child_thread_to_key.clear();
+        self.child_items.clear();
+        self.bg_tasks.clear();
         DriverStep::default()
+    }
+
+    fn snapshot_state(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+
+    fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
+        if !state.is_null() {
+            *self =
+                serde_json::from_value(state.clone()).map_err(|e| DriverError(e.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -1738,110 +1559,6 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn steer_joins_the_running_codex_turn_once_it_has_an_id() {
-        let mut d = CodexDriver::with_program("codex");
-        ready(&mut d, false);
-        assert!(d.steer(&RuntimePromptReq::of("more")).is_err(), "idle");
-        let s = d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
-        let turn_req = parse(&s.writes[0]);
-        assert!(
-            d.steer(&RuntimePromptReq::of("more")).is_err(),
-            "turn not named yet"
-        );
-        feed(
-            &mut d,
-            json!({"id": turn_req["id"], "result": {"turn": {"id": "ct9", "items": [], "status": "inProgress"}}}),
-        );
-        let s = d.steer(&RuntimePromptReq::of("also b")).unwrap();
-        let st = parse(&s.writes[0]);
-        assert_eq!(st["method"], "turn/steer");
-        assert_eq!(st["params"]["threadId"], "th1");
-        assert_eq!(st["params"]["expectedTurnId"], "ct9");
-        assert_eq!(
-            st["params"]["input"],
-            json!([{"type": "text", "text": "also b"}])
-        );
-        // A refused steer (the turn moved on) shows instead of vanishing.
-        let s = feed(
-            &mut d,
-            json!({"id": st["id"], "error": {"code": -32600, "message": "no active turn"}}),
-        );
-        assert!(matches!(
-            &s.events[0],
-            DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message.contains("no active turn"))
-        ));
-    }
-
-    /// Codex 0.167 `multi_agent` (app-server schema v2): a spawn is a
-    /// background card; the child thread's items are its activity and its
-    /// turn never ends ours; `wait`'s `agentsStates` settle it.
-    #[test]
-    fn sub_agents_are_cards_with_their_threads_work() {
-        let mut d = CodexDriver::with_program("codex");
-        ready(&mut d, false);
-        let s = d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
-        let tr = parse(&s.writes[0]);
-        feed(
-            &mut d,
-            json!({"id": tr["id"], "result": {"turn": {"id": "ct1", "status": "inProgress"}}}),
-        );
-        let s = feed(
-            &mut d,
-            json!({"method": "item/completed", "params": {"threadId": "th1", "turnId": "ct1", "item": {"type": "collabAgentToolCall", "id": "sp1", "tool": "spawnAgent", "status": "completed", "senderThreadId": "th1", "receiverThreadIds": ["kid1"], "prompt": "Run echo sub-hello\nand report", "model": "gpt-5.5", "agentsStates": {"kid1": {"status": "running"}}}}}),
-        );
-        let card = match &s.events[0] {
-            DriverEvent::TurnItem(i) => i.clone(),
-            e => panic!("{e:?}"),
-        };
-        assert!(card.is_background_open());
-        assert!(
-            matches!(&card.kind, TurnItemKind::Subagent { description: Some(n), prompt: Some(p), .. } if n == "Run echo sub-hello" && p.ends_with("report"))
-        );
-        let s = feed(
-            &mut d,
-            json!({"method": "turn/started", "params": {"threadId": "kid1", "turn": {"id": "kt1", "status": "inProgress"}}}),
-        );
-        assert!(s
-            .events
-            .iter()
-            .all(|e| matches!(e, DriverEvent::TurnItem(i) if i.id == card.id)));
-        let s = feed(
-            &mut d,
-            json!({"method": "item/started", "params": {"threadId": "kid1", "turnId": "kt1", "item": {"type": "commandExecution", "id": "c9", "command": "echo sub-hello", "status": "inProgress"}}}),
-        );
-        let kid = s
-            .events
-            .iter()
-            .find_map(|e| match e {
-                DriverEvent::TurnItem(i) if i.id != card.id => Some(i.clone()),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(kid.parent_item_id.as_ref(), Some(&card.id));
-        assert!(s.events.iter().any(|e| matches!(e, DriverEvent::TurnItem(i) if i.id == card.id && matches!(i.kind, TurnItemKind::Subagent { tool_uses: 1, .. }))));
-        // The child's turn ends: its card, not our turn.
-        let s = feed(
-            &mut d,
-            json!({"method": "turn/completed", "params": {"threadId": "kid1", "turn": {"id": "kt1", "status": "completed"}}}),
-        );
-        assert!(!s
-            .events
-            .iter()
-            .any(|e| matches!(e, DriverEvent::Terminal { .. })));
-        assert!(
-            matches!(&s.events[0], DriverEvent::TurnItem(i) if i.id == card.id && i.status == TurnItemStatus::Completed)
-        );
-        let s = feed(
-            &mut d,
-            json!({"method": "item/completed", "params": {"threadId": "th1", "turnId": "ct1", "item": {"type": "collabAgentToolCall", "id": "w1", "tool": "wait", "status": "completed", "senderThreadId": "th1", "receiverThreadIds": ["kid1"], "agentsStates": {"kid1": {"status": "completed", "message": "sub-hello"}}}}}),
-        );
-        assert!(
-            matches!(&s.events[0], DriverEvent::TurnItem(i) if i.id == card.id && matches!(&i.kind, TurnItemKind::Subagent { output: Some(o), .. } if o == "sub-hello"))
-        );
-        assert!(d.turn_id.is_some(), "our turn still runs");
     }
 
     #[test]
@@ -2147,12 +1864,12 @@ mod tests {
             Some("MCP server jira failed to start")
         );
         assert!(
-            matches!(&notices[0].kind, TurnItemKind::SystemNotice { message } if message == "spawn jira-mcp: ENOENT")
+            matches!(&notices[0].kind, TurnItemKind::SystemNotice { message, .. } if message == "spawn jira-mcp: ENOENT")
         );
         // During a turn: shown at once, with a fallback text.
         let s = feed(&mut d, status("slack", "failed", json!("  ")));
         assert!(matches!(&s.events[0], DriverEvent::TurnItem(i)
-            if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message == "MCP server slack failed to start.")));
+            if matches!(&i.kind, TurnItemKind::SystemNotice { message, .. } if message == "MCP server slack failed to start.")));
         // Shown once: the next turn carries nothing.
         feed(
             &mut d,
@@ -2160,5 +1877,427 @@ mod tests {
         );
         let s = d.prompt("t2", &RuntimePromptReq::of("again")).unwrap();
         assert!(s.events.is_empty(), "{:?}", s.events);
+    }
+
+    #[test]
+    fn autonomous_server_turn_emits_turn_started_and_settles_on_completed() {
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        let started = feed(
+            &mut d,
+            json!({"method":"turn/started","params":{"turn":{"id":"bg-turn-1","status":"inProgress"}}}),
+        );
+        assert!(started
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::TurnStarted { turn_id } if turn_id == "bg-turn-1")));
+        let delta = feed(
+            &mut d,
+            json!({"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"background reply"}}),
+        );
+        assert!(delta.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if i.id.starts_with("bg-turn-1:")
+                    && matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "background reply")
+        )));
+        let done = feed(
+            &mut d,
+            json!({"method":"turn/completed","params":{"turn":{"id":"bg-turn-1","status":"completed"}}}),
+        );
+        assert!(done.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn steer_sends_turn_steer_with_expected_turn_id_and_keeps_turn_open_on_rpc_error() {
+        use otto_core::agent_runtime::PromptImage;
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        assert!(
+            d.steer(&RuntimePromptReq::of("too early")).is_err(),
+            "idle driver cannot steer"
+        );
+        let start = d.prompt("t1", &RuntimePromptReq::of("work")).unwrap();
+        let start_rpc = parse(&start.writes[0]);
+        assert!(
+            d.steer(&RuntimePromptReq::of("before server turn id"))
+                .is_err(),
+            "must wait until expectedTurnId is known"
+        );
+
+        feed(
+            &mut d,
+            json!({"id": start_rpc["id"], "result": {"turn": {"id": "ct-1", "items": [], "status": "inProgress"}}}),
+        );
+        assert!(
+            d.steer(&RuntimePromptReq::default()).is_err(),
+            "empty steer is refused"
+        );
+        let steer_req = RuntimePromptReq {
+            images: vec![PromptImage {
+                mime: "image/png".into(),
+                data_base64: "iVBORw0KGgo=".into(),
+                name: None,
+            }],
+            ..RuntimePromptReq::of("focus on tests")
+        };
+        let s = d.steer(&steer_req).unwrap();
+        let msg = parse(&s.writes[0]);
+        assert_eq!(msg["method"], "turn/steer");
+        assert!(msg.get("jsonrpc").is_none());
+        assert_eq!(msg["params"]["threadId"], "th1");
+        assert_eq!(msg["params"]["expectedTurnId"], "ct-1");
+        assert_eq!(
+            msg["params"]["input"],
+            json!([
+                {"type": "image", "url": "data:image/png;base64,iVBORw0KGgo="},
+                {"type": "text", "text": "focus on tests"},
+            ])
+        );
+
+        // An RPC error on `turn/steer` surfaces `DriverEvent::Error` without
+        // ending the active turn.
+        let err_step = feed(
+            &mut d,
+            json!({"id": msg["id"], "error": {"code": -32600, "message": "turn busy"}}),
+        );
+        assert!(
+            err_step
+                .events
+                .iter()
+                .any(|e| matches!(e, DriverEvent::Error(f) if f.message.contains("turn busy"))),
+            "{:?}",
+            err_step.events
+        );
+        assert!(
+            !err_step
+                .events
+                .iter()
+                .any(|e| matches!(e, DriverEvent::Terminal { .. })),
+            "active turn must remain running"
+        );
+
+        let done = feed(
+            &mut d,
+            json!({"method": "turn/completed", "params": {"turn": {"id": "ct-1", "status": "completed"}}}),
+        );
+        assert!(done.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn snapshot_and_restore_preserve_codex_turn_items_and_pending_rpc_state() {
+        let mut d1 = CodexDriver::with_program("codex");
+        d1.start(&ctx(None, false));
+        feed(&mut d1, json!({"id": 1, "result": {}}));
+        feed(
+            &mut d1,
+            json!({"id": 2, "result": {"thread": {"id": "th-live"}}}),
+        );
+        let p = d1.prompt("t1", &RuntimePromptReq::of("run")).unwrap();
+        let req_id = parse(&p.writes[0])["id"].clone();
+        feed(
+            &mut d1,
+            json!({"id": req_id, "result": {"turn": {"id": "ct-9"}}}),
+        );
+        feed(
+            &mut d1,
+            json!({"method": "item/agentMessage/delta", "params": {"itemId": "m1", "delta": "Part 1 "}}),
+        );
+        feed(
+            &mut d1,
+            json!({"id": 77, "method": "item/commandExecution/requestApproval", "params": {"itemId": "c1", "command": "cargo test"}}),
+        );
+
+        let snap = d1.snapshot_state();
+        let mut d2 = CodexDriver::with_program("codex");
+        d2.restore_state(&snap).unwrap();
+
+        let approval = d2.respond("codex-77", ApprovalDecision::Accept).unwrap();
+        assert_eq!(parse(&approval.writes[0])["id"], 77);
+        let delta2 = feed(
+            &mut d2,
+            json!({"method": "item/agentMessage/delta", "params": {"itemId": "m1", "delta": "Part 2"}}),
+        );
+        assert!(delta2.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "Part 1 Part 2")
+        )));
+        let fin = feed(
+            &mut d2,
+            json!({"method": "turn/completed", "params": {"turn": {"id": "ct-9", "status": "completed"}}}),
+        );
+        assert!(fin.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn collab_spawn_agent_routes_child_thread_items_and_settles_independently_of_root() {
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        let p = d
+            .prompt("t1", &RuntimePromptReq::of("parallel review"))
+            .unwrap();
+        let req_id = parse(&p.writes[0])["id"].clone();
+        feed(
+            &mut d,
+            json!({"id": req_id, "result": {"turn": {"id": "ct-root", "items": [], "status": "inProgress"}}}),
+        );
+
+        // 1. Spawn child subagent (`collabAgentToolCall` / `spawnAgent`).
+        let sp_start = feed(
+            &mut d,
+            json!({
+                "method": "item/started",
+                "params": {
+                    "threadId": "th1",
+                    "turnId": "ct-root",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "col-1",
+                        "tool": "spawnAgent",
+                        "role": "security-reviewer",
+                        "prompt": "Audit auth middleware\nCheck JWT validation",
+                        "status": "inProgress"
+                    }
+                }
+            }),
+        );
+        assert!(sp_start.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if i.id == "t1:codex:col-1"
+                    && i.status == TurnItemStatus::Running
+                    && matches!(
+                        &i.kind,
+                        TurnItemKind::Subagent {
+                            tool_name,
+                            description: Some(desc),
+                            subagent_type: Some(st),
+                            background: true,
+                            ..
+                        } if tool_name == "spawn_agent"
+                            && desc == "security-reviewer"
+                            && st == "security-reviewer"
+                    )
+        )));
+
+        let sp_done = feed(
+            &mut d,
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "th1",
+                    "turnId": "ct-root",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "col-1",
+                        "tool": "spawnAgent",
+                        "role": "security-reviewer",
+                        "prompt": "Audit auth middleware\nCheck JWT validation",
+                        "receiverThreadIds": ["th-sub-1"],
+                        "status": "completed"
+                    }
+                }
+            }),
+        );
+        assert!(
+            sp_done.events.iter().any(|e| matches!(
+                e,
+                DriverEvent::TurnItem(i)
+                    if i.id == "t1:codex:col-1" && i.status == TurnItemStatus::Running
+            )),
+            "spawnAgent completion must keep Subagent Running until child settles"
+        );
+        assert!(sp_done.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::BackgroundTasks(tasks)
+                if tasks.iter().any(|t| t.id == "th-sub-1" && t.kind == "agent")
+        )));
+
+        // 2. Child thread notifications route under `parent_item_id == Some("t1:codex:col-1")`.
+        feed(
+            &mut d,
+            json!({"method": "turn/started", "params": {"threadId": "th-sub-1", "turn": {"id": "ct-sub-1", "status": "inProgress"}}}),
+        );
+        let child_cmd = feed(
+            &mut d,
+            json!({
+                "method": "item/started",
+                "params": {
+                    "threadId": "th-sub-1",
+                    "turnId": "ct-sub-1",
+                    "item": {
+                        "type": "commandExecution",
+                        "id": "sub-c1",
+                        "command": "rg validate_jwt src/",
+                        "status": "inProgress"
+                    }
+                }
+            }),
+        );
+        assert!(child_cmd.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if i.id == "t1:codex:col-1:child:sub-c1"
+                    && i.parent_item_id.as_deref() == Some("t1:codex:col-1")
+        )));
+        assert!(child_cmd.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if i.id == "t1:codex:col-1"
+                    && matches!(
+                        &i.kind,
+                        TurnItemKind::Subagent {
+                            tool_uses: 1,
+                            last_tool: Some(lt),
+                            ..
+                        } if lt == "rg validate_jwt src/"
+                    )
+        )));
+
+        let out_delta = feed(
+            &mut d,
+            json!({
+                "method": "item/commandExecution/outputDelta",
+                "params": {"threadId": "th-sub-1", "itemId": "sub-c1", "delta": "src/auth.rs:42\n"}
+            }),
+        );
+        assert!(out_delta.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::CommandOutput { item_id, chunk }
+                if item_id == "t1:codex:col-1:child:sub-c1" && chunk == "src/auth.rs:42\n"
+        )));
+
+        let child_msg = feed(
+            &mut d,
+            json!({
+                "method": "item/agentMessage/delta",
+                "params": {"threadId": "th-sub-1", "itemId": "sub-m1", "delta": "JWT validation is strict."}
+            }),
+        );
+        assert!(child_msg.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if i.parent_item_id.as_deref() == Some("t1:codex:col-1")
+                    && matches!(&i.kind, TurnItemKind::AssistantMessage { text, .. } if text == "JWT validation is strict.")
+        )));
+
+        // Snapshot & restore while child is active!
+        let snap = d.snapshot_state();
+        let mut d = CodexDriver::with_program("codex");
+        d.restore_state(&snap).unwrap();
+
+        // 3. Child `turn/completed` settles ONLY the child subagent, NOT root turn `t1`!
+        let child_done = feed(
+            &mut d,
+            json!({
+                "method": "turn/completed",
+                "params": {"threadId": "th-sub-1", "turn": {"id": "ct-sub-1", "status": "completed"}}
+            }),
+        );
+        assert!(
+            !child_done
+                .events
+                .iter()
+                .any(|e| matches!(e, DriverEvent::Terminal { .. })),
+            "child turn/completed must NOT terminate root turn"
+        );
+        assert!(child_done.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if i.id == "t1:codex:col-1"
+                    && i.status == TurnItemStatus::Completed
+                    && matches!(
+                        &i.kind,
+                        TurnItemKind::Subagent { output: Some(o), .. } if o == "JWT validation is strict."
+                    )
+        )));
+        assert!(child_done.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if matches!(
+                    &i.kind,
+                    TurnItemKind::SystemNotice {
+                        message,
+                        task_settlement: Some(ts),
+                    } if message == "Background agent finished: security-reviewer"
+                        && ts.status == "completed"
+                )
+        )));
+        assert!(child_done.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::BackgroundTasks(tasks) if tasks.is_empty()
+        )));
+        // 4. Spawn a second child and close it via `closeAgent`.
+        feed(
+            &mut d,
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "th1",
+                    "turnId": "ct-root",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "col-2",
+                        "tool": "spawn_agent",
+                        "agent_role": "perf-helper",
+                        "new_thread_id": "th-sub-2",
+                        "status": "completed"
+                    }
+                }
+            }),
+        );
+        let closed = feed(
+            &mut d,
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "th1",
+                    "turnId": "ct-root",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "col-3",
+                        "tool": "closeAgent",
+                        "receiverThreadIds": ["th-sub-2"],
+                        "status": "completed"
+                    }
+                }
+            }),
+        );
+        assert!(closed.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if i.id == "t1:codex:col-2" && i.status == TurnItemStatus::Cancelled
+        )));
+        assert!(closed.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if matches!(
+                    &i.kind,
+                    TurnItemKind::SystemNotice {
+                        message,
+                        task_settlement: Some(ts),
+                    } if message == "Background agent stopped: perf-helper"
+                        && ts.status == "stopped"
+                )
+        )));
     }
 }

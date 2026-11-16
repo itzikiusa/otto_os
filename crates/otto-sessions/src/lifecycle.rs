@@ -58,22 +58,23 @@ fn file_resumability(path: &Path) -> Resumability {
     }
 }
 
-/// Does a claude transcript for `provider_session_id` exist under `home`?
-///
-/// Primary check: the exact cwd-encoded path. Fallback (covers cwd-encoding
-/// edge cases, e.g. the session was created from a slightly different cwd
-/// string): scan every immediate subdirectory of `~/.claude/projects` for a
-/// `<provider_session_id>.jsonl`. Returns `Unknown` on incomplete or failed filesystem inspection.
+/// Does a claude transcript for `provider_session_id` exist under `projects`?
 #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
-pub fn claude_transcript_exists(home: &Path, cwd: &str, provider_session_id: &str) -> Resumability {
-    let exact = file_resumability(&claude_transcript_path(home, cwd, provider_session_id));
+pub fn claude_transcript_exists_under(
+    projects: &Path,
+    cwd: &str,
+    provider_session_id: &str,
+) -> Resumability {
+    let exact_path = projects
+        .join(claude_project_dir_name(cwd))
+        .join(format!("{provider_session_id}.jsonl"));
+    let exact = file_resumability(&exact_path);
     if exact == Resumability::Exists {
         return exact;
     }
     let mut unknown = exact == Resumability::Unknown;
-    let projects = otto_transcript::roots::default_claude_root(home);
     let target = format!("{provider_session_id}.jsonl");
-    match std::fs::read_dir(&projects) {
+    match std::fs::read_dir(projects) {
         Ok(entries) => {
             for entry in entries {
                 let entry = match entry {
@@ -106,6 +107,20 @@ pub fn claude_transcript_exists(home: &Path, cwd: &str, provider_session_id: &st
     } else {
         Resumability::Gone
     }
+}
+
+/// Does a claude transcript for `provider_session_id` exist under `home`?
+///
+/// Primary check: the exact cwd-encoded path. Fallback (covers cwd-encoding
+/// edge cases, e.g. the session was created from a slightly different cwd
+/// string): scan every immediate subdirectory of `~/.claude/projects` for a
+/// `<provider_session_id>.jsonl`. Returns `Unknown` on incomplete or failed filesystem inspection.
+pub fn claude_transcript_exists(home: &Path, cwd: &str, provider_session_id: &str) -> Resumability {
+    claude_transcript_exists_under(
+        &otto_transcript::roots::default_claude_root(home),
+        cwd,
+        provider_session_id,
+    )
 }
 
 /// Resolve the on-disk transcript for an agent session (conversation view,
@@ -143,7 +158,13 @@ pub fn transcript_path_in(
     provider_session_id: Option<&str>,
 ) -> Result<PathBuf, otto_transcript::UnavailableReason> {
     use otto_transcript::UnavailableReason as R;
-    if provider == "agy" {
+    let family = if matches!(provider, "claude" | "codex" | "agy") {
+        provider.to_string()
+    } else {
+        crate::providers::infer_model_family(None, "", provider)
+            .unwrap_or_else(|| provider.to_string())
+    };
+    if family == "agy" {
         let Some(psid) = provider_session_id.filter(|s| !s.is_empty()) else {
             return Err(R::NoProviderSessionId);
         };
@@ -154,7 +175,7 @@ pub fn transcript_path_in(
         }
         return Err(R::TranscriptMissing);
     }
-    let dirs: Vec<&Path> = match provider {
+    let dirs: Vec<&Path> = match family.as_str() {
         "claude" => roots.claude_dirs().collect(),
         "codex" => roots.codex_dirs().collect(),
         _ => return Err(R::ProviderUnsupported),
@@ -162,7 +183,7 @@ pub fn transcript_path_in(
     let mut last = Err(R::TranscriptMissing);
     for dir in dirs {
         // Only the provider's own root is read, so `dir` fills both slots.
-        match transcript_path_in_roots(dir, dir, provider, cwd, provider_session_id) {
+        match transcript_path_in_roots(dir, dir, &family, cwd, provider_session_id) {
             Ok(path) => return Ok(path),
             Err(R::NoProviderSessionId) => return Err(R::NoProviderSessionId),
             Err(e) => last = Err(e),
@@ -255,8 +276,43 @@ pub fn check_resumability(
     cwd: &str,
     provider_session_id: &str,
 ) -> Resumability {
-    match provider {
-        "claude" => claude_transcript_exists(home, cwd, provider_session_id),
+    check_resumability_with_claude_dir(home, provider, cwd, provider_session_id, None)
+}
+
+pub fn check_resumability_with_claude_dir(
+    home: &Path,
+    provider: &str,
+    cwd: &str,
+    provider_session_id: &str,
+    claude_config_dir: Option<&Path>,
+) -> Resumability {
+    let family = if matches!(provider, "claude" | "codex" | "agy") {
+        provider.to_string()
+    } else {
+        crate::providers::infer_model_family(None, "", provider)
+            .unwrap_or_else(|| provider.to_string())
+    };
+    match family.as_str() {
+        "claude" => {
+            let mut unknown = false;
+            if let Some(custom) = claude_config_dir {
+                match claude_transcript_exists_under(
+                    &custom.join("projects"),
+                    cwd,
+                    provider_session_id,
+                ) {
+                    Resumability::Exists => return Resumability::Exists,
+                    Resumability::Unknown => unknown = true,
+                    Resumability::Gone => {}
+                }
+            }
+            match claude_transcript_exists(home, cwd, provider_session_id) {
+                Resumability::Exists => Resumability::Exists,
+                Resumability::Unknown => Resumability::Unknown,
+                Resumability::Gone if unknown => Resumability::Unknown,
+                Resumability::Gone => Resumability::Gone,
+            }
+        }
         "agy" => agy_conversation_exists(home, provider_session_id),
         _ => Resumability::Unknown,
     }
@@ -272,11 +328,29 @@ pub async fn check_resumability_async(
     cwd: &str,
     provider_session_id: &str,
 ) -> Resumability {
+    check_resumability_with_claude_dir_async(home, provider, cwd, provider_session_id, None).await
+}
+
+pub async fn check_resumability_with_claude_dir_async(
+    home: &Path,
+    provider: &str,
+    cwd: &str,
+    provider_session_id: &str,
+    claude_config_dir: Option<PathBuf>,
+) -> Resumability {
     let (home, provider) = (home.to_path_buf(), provider.to_string());
     let (cwd, sid) = (cwd.to_string(), provider_session_id.to_string());
-    tokio::task::spawn_blocking(move || check_resumability(&home, &provider, &cwd, &sid))
-        .await
-        .unwrap_or(Resumability::Unknown)
+    tokio::task::spawn_blocking(move || {
+        check_resumability_with_claude_dir(
+            &home,
+            &provider,
+            &cwd,
+            &sid,
+            claude_config_dir.as_deref(),
+        )
+    })
+    .await
+    .unwrap_or(Resumability::Unknown)
 }
 
 #[cfg(test)]

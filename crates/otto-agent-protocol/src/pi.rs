@@ -6,10 +6,11 @@
 //! against pi 1.5.0, still compatible with 0.75):
 //!
 //! * argv — `pi --mode rpc [--session <id>] [--model provider/id]
-//!   [--tools … --exclude-tools mcp__*]`. `--session` takes the id
+//!   [--tools … --exclude-tools mcp__<user server>__*]`. `--session` takes the id
 //!   `get_state` reported (`data.sessionId`, a UUID), which is the resume key.
 //! * stdin — strict JSONL commands with an optional `id`: `get_state`,
-//!   `prompt {message, images?}`, `set_thinking_level {level}`, `abort`.
+//!   `prompt {message, images?}`, `steer {message, images?}`,
+//!   `set_thinking_level {level}`, `abort`.
 //! * stdout — `response {id, command, success, data|error}` per command, and
 //!   session events: `message_update {assistantMessageEvent: {type:
 //!   text_delta|thinking_delta|toolcall_*, delta}}`, `message_end`,
@@ -28,7 +29,8 @@
 //!   tools, auto-accept-edits → + edit/write, full-access → everything
 //!   (bash included). MCP tools (`mcp__<server>__<tool>`, delivered by the
 //!   host's launcher as a per-session `-e` extension) can write too, so the
-//!   restricted modes exclude them. A switch respawns with `--session`.
+//!   restricted modes exclude the user's servers (Otto's own stay). A
+//!   switch respawns with `--session`.
 //! * `extension_ui_request` dialogs (T3 Code `provider-pi/adapter.ts`):
 //!   `confirm` is an approval (allow → `confirmed: true`), `select` a
 //!   single-choice question, `input` / `editor` a text question; each is
@@ -43,9 +45,10 @@
 use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, ProviderCommand, ProviderFailure, QuestionKind, QuestionOption, RequestKind,
-    RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeQuestion, ThreadTokenUsage,
-    TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, BackgroundTask, ProviderCommand, ProviderFailure, QuestionKind,
+    QuestionOption, RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider,
+    RuntimeQuestion, ThreadTokenUsage, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
+    TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
@@ -71,6 +74,9 @@ fn edit_hunks(path: &str, edits: &[(String, String)]) -> String {
     out
 }
 
+#[path = "pi_subagent.rs"]
+mod pi_subagent;
+
 /// pi's built-in tools per access mode (`--tools` allowlist; `None` = all).
 fn tools_for(mode: RuntimeAccessMode) -> Option<&'static str> {
     match mode {
@@ -95,10 +101,46 @@ fn thinking_level(effort: &str) -> Option<&'static str> {
     })
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Tool {
     name: String,
     args: Value,
+    #[serde(default)]
+    item_id: String,
+    #[serde(default)]
+    is_subagent: bool,
+    #[serde(default)]
+    parent_item_id: Option<String>,
+    #[serde(default)]
+    parent_key: Option<String>,
+    #[serde(default)]
+    turn_id: Option<String>,
+    #[serde(default = "chrono::Utc::now")]
+    started_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    streamed_output: String,
+    #[serde(default)]
+    tool_uses: u32,
+    #[serde(default)]
+    last_tool: Option<String>,
+    #[serde(default)]
+    bg_id: Option<String>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct PiBgEntry {
+    call_id: String,
+    item_id: String,
+    turn_id: Option<String>,
+    name: String,
+    args: Value,
+    kind: String,
+    label: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    tool_uses: u32,
+    #[serde(default)]
+    last_tool: Option<String>,
 }
 
 /// An open `extension_ui_request` dialog.
@@ -119,29 +161,39 @@ struct Spent {
     cost: f64,
 }
 
+/// Serialized whole for a daemon restart ([`StructuredDriver::snapshot_state`]):
+/// every field must stay serializable, new ones `#[serde(default)]`.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct PiDriver {
     program: String,
     next_id: u64,
     state_req: Option<String>,
     prompt_req: Option<String>,
+    steer_reqs: Vec<String>,
+    ready: bool,
     turn_id: Option<String>,
-    /// The streaming assistant message: its item id and text so far.
-    message: Option<(String, String)>,
+    auto_turns: u64,
+    /// The streaming assistant message: its item id, text so far, and start time.
+    message: Option<(String, String, chrono::DateTime<chrono::Utc>)>,
+    message_parent: Option<String>,
+    /// The streaming thinking/reasoning block: its item id, text so far, and start time.
+    thought: Option<(String, String, chrono::DateTime<chrono::Utc>)>,
+    thought_parent: Option<String>,
     messages: u32,
     tools: HashMap<String, Tool>,
+    subagent_order: Vec<String>,
     /// This pi sends `agent_settled` (1.x): a turn ends there, and a
     /// non-retrying `agent_end` only stashes its outcome in `ended`.
     settles: bool,
     ended: Option<(TurnTerminalStatus, Option<ProviderFailure>)>,
-    /// The streaming thinking block: its item id and text so far.
     #[serde(default)]
-    thinking: Option<(String, String)>,
+    in_agent_run: bool,
     #[serde(default)]
-    thoughts: u32,
-    /// Bytes of each running tool's streamed output already sent.
+    pending_abort: bool,
     #[serde(default)]
-    streamed: HashMap<String, usize>,
+    bg_tasks: Vec<BackgroundTask>,
+    #[serde(default)]
+    bg_entries: HashMap<String, PiBgEntry>,
     #[serde(default)]
     spent: Spent,
     /// The model's context window (`get_state` `model.contextWindow`).
@@ -165,15 +217,23 @@ impl PiDriver {
             next_id: 0,
             state_req: None,
             prompt_req: None,
+            steer_reqs: Vec::new(),
+            ready: false,
             turn_id: None,
+            auto_turns: 0,
             message: None,
+            message_parent: None,
+            thought: None,
+            thought_parent: None,
             messages: 0,
             tools: HashMap::new(),
+            subagent_order: Vec::new(),
             settles: false,
             ended: None,
-            thinking: None,
-            thoughts: 0,
-            streamed: HashMap::new(),
+            in_agent_run: false,
+            pending_abort: false,
+            bg_tasks: Vec::new(),
+            bg_entries: HashMap::new(),
             spent: Spent::default(),
             context_window: None,
             commands_req: None,
@@ -194,6 +254,21 @@ impl PiDriver {
         self.turn_id.as_deref().unwrap_or_default()
     }
 
+    fn ensure_autonomous_turn(&mut self, step: &mut DriverStep) {
+        if !self.ready || self.turn_id.is_some() {
+            return;
+        }
+        self.auto_turns += 1;
+        let id = format!("auto-{}", self.auto_turns);
+        self.turn_id = Some(id.clone());
+        self.messages = 0;
+        self.spent = Spent::default();
+        self.ended = None;
+        self.tools.retain(|_, t| t.bg_id.is_some());
+        self.subagent_order.retain(|c| self.tools.contains_key(c));
+        step.push(DriverEvent::TurnStarted { turn_id: id });
+    }
+
     fn finish(
         &mut self,
         step: &mut DriverStep,
@@ -203,14 +278,16 @@ impl PiDriver {
         if self.turn_id.is_none() {
             return;
         }
+        self.close_thought(step);
         self.close_message(step);
-        self.close_thinking(step);
         self.cancel_dialogs(step);
+        self.settle_foreground_tools_on_finish(step, status);
         self.turn_id = None;
         self.prompt_req = None;
+        self.steer_reqs.clear();
         self.ended = None;
-        self.tools.clear();
-        self.streamed.clear();
+        self.in_agent_run = false;
+        self.pending_abort = false;
         step.push(DriverEvent::Terminal {
             status,
             failure,
@@ -218,10 +295,32 @@ impl PiDriver {
         });
     }
 
-    fn close_message(&mut self, step: &mut DriverStep) {
-        if let Some((id, text)) = self.message.take() {
+    fn close_thought(&mut self, step: &mut DriverStep) {
+        let parent_item_id = self.thought_parent.take();
+        if let Some((id, text, started_at)) = self.thought.take() {
             if !text.is_empty() {
-                step.push(DriverEvent::TurnItem(item(
+                let mut it = item(
+                    id,
+                    TurnItemStatus::Completed,
+                    None,
+                    TurnItemKind::Reasoning {
+                        text,
+                        streaming: false,
+                    },
+                );
+                it.started_at = Some(started_at);
+                it.completed_at = Some(chrono::Utc::now());
+                it.parent_item_id = parent_item_id;
+                step.push(DriverEvent::TurnItem(it));
+            }
+        }
+    }
+
+    fn close_message(&mut self, step: &mut DriverStep) {
+        let parent_item_id = self.message_parent.take();
+        if let Some((id, text, started_at)) = self.message.take() {
+            if !text.is_empty() {
+                let mut it = item(
                     id.clone(),
                     TurnItemStatus::Completed,
                     None,
@@ -230,22 +329,68 @@ impl PiDriver {
                         text,
                         streaming: false,
                     },
-                )));
+                );
+                it.started_at = Some(started_at);
+                it.completed_at = Some(chrono::Utc::now());
+                it.parent_item_id = parent_item_id;
+                step.push(DriverEvent::TurnItem(it));
             }
         }
     }
 
-    fn on_text(&mut self, step: &mut DriverStep, delta: &str) {
+    fn on_thought(&mut self, step: &mut DriverStep, delta: &str, parent_item_id: Option<String>) {
+        if delta.is_empty() {
+            return;
+        }
+        self.close_message(step);
+        if self.thought.is_some() && self.thought_parent != parent_item_id {
+            self.close_thought(step);
+        }
+        if self.thought.is_none() {
+            self.messages += 1;
+            self.thought_parent = parent_item_id.clone();
+            self.thought = Some((
+                format!("{}:thought:{}", self.turn(), self.messages),
+                String::new(),
+                chrono::Utc::now(),
+            ));
+        }
+        let (id, text, started_at) = self.thought.as_mut().expect("set above");
+        text.push_str(delta);
+        let mut it = item(
+            id.clone(),
+            TurnItemStatus::Running,
+            None,
+            TurnItemKind::Reasoning {
+                text: text.clone(),
+                streaming: true,
+            },
+        );
+        it.started_at = Some(*started_at);
+        it.parent_item_id = self.thought_parent.clone();
+        step.push(DriverEvent::TurnItem(it));
+    }
+
+    fn on_text(&mut self, step: &mut DriverStep, delta: &str, parent_item_id: Option<String>) {
+        if delta.is_empty() {
+            return;
+        }
+        self.close_thought(step);
+        if self.message.is_some() && self.message_parent != parent_item_id {
+            self.close_message(step);
+        }
         if self.message.is_none() {
             self.messages += 1;
+            self.message_parent = parent_item_id.clone();
             self.message = Some((
                 format!("{}:msg:{}", self.turn(), self.messages),
                 String::new(),
+                chrono::Utc::now(),
             ));
         }
-        let (id, text) = self.message.as_mut().expect("set above");
+        let (id, text, started_at) = self.message.as_mut().expect("set above");
         text.push_str(delta);
-        step.push(DriverEvent::TurnItem(item(
+        let mut it = item(
             id.clone(),
             TurnItemStatus::Running,
             None,
@@ -254,46 +399,10 @@ impl PiDriver {
                 text: text.clone(),
                 streaming: true,
             },
-        )));
-    }
-
-    fn close_thinking(&mut self, step: &mut DriverStep) {
-        if let Some((id, text)) = self.thinking.take() {
-            if !text.is_empty() {
-                step.push(DriverEvent::TurnItem(item(
-                    id,
-                    TurnItemStatus::Completed,
-                    None,
-                    TurnItemKind::Reasoning {
-                        text,
-                        streaming: false,
-                    },
-                )));
-            }
-        }
-    }
-
-    /// pi's `thinking_delta`: the model's reasoning, as its own item.
-    fn on_thinking(&mut self, step: &mut DriverStep, delta: &str) {
-        self.close_message(step);
-        if self.thinking.is_none() {
-            self.thoughts += 1;
-            self.thinking = Some((
-                format!("{}:thinking:{}", self.turn(), self.thoughts),
-                String::new(),
-            ));
-        }
-        let (id, text) = self.thinking.as_mut().expect("set above");
-        text.push_str(delta);
-        step.push(DriverEvent::TurnItem(item(
-            id.clone(),
-            TurnItemStatus::Running,
-            None,
-            TurnItemKind::Reasoning {
-                text: text.clone(),
-                streaming: true,
-            },
-        )));
+        );
+        it.started_at = Some(*started_at);
+        it.parent_item_id = self.message_parent.clone();
+        step.push(DriverEvent::TurnItem(it));
     }
 
     /// An assistant `message_end`'s `usage`: the turn's sum so far, and the
@@ -428,8 +537,27 @@ impl PiDriver {
         }
     }
 
-    fn tool_kind(name: &str, args: &Value, output: Option<String>) -> TurnItemKind {
+    fn tool_kind(
+        name: &str,
+        args: &Value,
+        output: Option<String>,
+        tool_uses: u32,
+        last_tool: Option<String>,
+    ) -> TurnItemKind {
         let s = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
+        if Self::is_subagent_tool(name, args) {
+            let (description, subagent_type, prompt, background) = Self::subagent_fields(args);
+            return TurnItemKind::Subagent {
+                tool_name: name.to_string(),
+                description,
+                subagent_type,
+                prompt,
+                background,
+                tool_uses,
+                last_tool,
+                output,
+            };
+        }
         match name {
             "bash" => TurnItemKind::CommandExecution {
                 input: s("command").unwrap_or_default(),
@@ -437,9 +565,9 @@ impl PiDriver {
                 exit_code: None,
             },
             // pi's `edit` takes `edits: [{oldText, newText}]` (a lone
-            // top-level pair is the legacy shape): one hunk per edit.
+            // top-level pair is the legacy shape): several are one patch.
             "edit" | "write" => {
-                let file = s("path").or_else(|| s("file_path")).unwrap_or_default();
+                let file_name = s("path").or_else(|| s("file_path")).unwrap_or_default();
                 let mut edits: Vec<(String, String)> = args
                     .get("edits")
                     .and_then(Value::as_array)
@@ -451,32 +579,27 @@ impl PiDriver {
                         (t("oldText"), t("newText"))
                     })
                     .collect();
-                if let (true, Some(old), Some(new)) = (
-                    edits.is_empty(),
-                    s("oldText").or_else(|| s("old_string")),
-                    s("newText").or_else(|| s("new_string")),
-                ) {
-                    edits.push((old, new));
-                }
-                match edits.as_slice() {
-                    [] => TurnItemKind::FileChange {
-                        file_name: file,
-                        diff_str: None,
-                        old_str: None,
-                        new_str: s("content"),
-                    },
-                    [(old, new)] => TurnItemKind::FileChange {
-                        file_name: file,
-                        diff_str: None,
-                        old_str: Some(old.clone()),
-                        new_str: Some(new.clone()),
-                    },
-                    many => TurnItemKind::FileChange {
-                        diff_str: Some(edit_hunks(&file, many)),
-                        file_name: file,
-                        old_str: None,
-                        new_str: None,
-                    },
+                let (diff, old, new) = match edits.len() {
+                    0 => (
+                        None,
+                        s("oldText").or_else(|| s("old_string")),
+                        s("newText")
+                            .or_else(|| s("content"))
+                            .or_else(|| s("new_string")),
+                    ),
+                    1 => {
+                        let (o, n) = edits.remove(0);
+                        (None, Some(o), Some(n))
+                    }
+                    _ => (Some(edit_hunks(&file_name, &edits)), None, None),
+                };
+                let (diff_str, old_str, new_str) =
+                    crate::diff_compact::compact_file_change_fields(&file_name, diff, old, new);
+                TurnItemKind::FileChange {
+                    file_name,
+                    diff_str,
+                    old_str,
+                    new_str,
                 }
             }
             _ => TurnItemKind::DynamicTool {
@@ -487,6 +610,174 @@ impl PiDriver {
                 images: Vec::new(),
             },
         }
+    }
+
+    fn tool_title(name: &str, args: &Value) -> Option<String> {
+        if Self::is_subagent_tool(name, args) {
+            let (description, subagent_type, _, _) = Self::subagent_fields(args);
+            return description
+                .or(subagent_type)
+                .or_else(|| Some(name.to_string()));
+        }
+        Some(name.to_string())
+    }
+
+    fn extract_launched_bg_id(result: &Value, output: Option<&str>) -> Option<(String, bool)> {
+        let details = result.get("details");
+        if let Some(d) = details {
+            let id = Self::arg_str(
+                d,
+                &[
+                    "taskId",
+                    "task_id",
+                    "backgroundTaskId",
+                    "agentId",
+                    "agent_id",
+                    "shellId",
+                    "shell_id",
+                    "id",
+                ],
+            );
+            let status = d
+                .get("status")
+                .or_else(|| d.get("state"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let still_running = matches!(
+                status,
+                "running" | "started" | "in_progress" | "inProgress" | "background" | "pending"
+            ) || (id.is_some() && status.is_empty());
+            if let Some(id) = id {
+                return Some((id, still_running));
+            }
+            if still_running {
+                return Some((String::new(), true));
+            }
+        }
+        if let Some(text) = output {
+            let trimmed = text.trim();
+            for prefix in [
+                "Background task started:",
+                "Started background task:",
+                "Task ID:",
+                "Agent ID:",
+            ] {
+                if let Some(rest) = trimmed.strip_prefix(prefix) {
+                    let token: String = rest
+                        .trim()
+                        .chars()
+                        .take_while(|c| {
+                            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.')
+                        })
+                        .collect();
+                    if !token.is_empty() {
+                        return Some((token, true));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn settle_bg_entry(
+        &mut self,
+        step: &mut DriverStep,
+        bg_id: &str,
+        status: TurnItemStatus,
+        output: Option<String>,
+        emit_card: bool,
+    ) {
+        let Some(entry) = self.bg_entries.remove(bg_id) else {
+            return;
+        };
+        let before = self.bg_tasks.len();
+        self.bg_tasks
+            .retain(|t| t.id != bg_id && t.id != entry.call_id);
+        if self.bg_tasks.len() != before {
+            step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
+        }
+        Self::settle_bg_entry_inner(
+            entry,
+            bg_id,
+            status,
+            output,
+            emit_card,
+            self.turn_id.clone(),
+            step,
+        );
+    }
+
+    fn maybe_handle_bg_control_tool(
+        &mut self,
+        step: &mut DriverStep,
+        name: &str,
+        args: &Value,
+        result: &Value,
+        output: Option<&str>,
+        failed: bool,
+    ) {
+        let lower = name.trim().to_ascii_lowercase();
+        let bare = lower
+            .rsplit_once("__")
+            .map(|(_, tail)| tail)
+            .unwrap_or(lower.as_str());
+        let Some(target_id) = Self::arg_str(
+            args,
+            &[
+                "task_id", "taskId", "shell_id", "shellId", "agent_id", "agentId", "id",
+            ],
+        ) else {
+            return;
+        };
+        if matches!(
+            bare,
+            "kill_shell"
+                | "killshell"
+                | "task_stop"
+                | "stop_task"
+                | "cancel_subagent"
+                | "kill_task"
+        ) && !failed
+        {
+            self.settle_bg_entry(
+                step,
+                &target_id,
+                TurnItemStatus::Cancelled,
+                output.map(str::to_string),
+                true,
+            );
+        } else if matches!(
+            bare,
+            "task_output" | "bash_output" | "subagent_output" | "get_task_output"
+        ) && !failed
+        {
+            let still_running = result
+                .pointer("/details/status")
+                .and_then(Value::as_str)
+                .is_some_and(|s| matches!(s, "running" | "in_progress" | "pending"));
+            if !still_running {
+                self.settle_bg_entry(
+                    step,
+                    &target_id,
+                    TurnItemStatus::Completed,
+                    output.map(str::to_string),
+                    true,
+                );
+            }
+        }
+    }
+
+    fn result_text(result: &Value) -> Option<String> {
+        if let Some(s) = result.as_str().filter(|s| !s.is_empty()) {
+            return Some(s.to_string());
+        }
+        let text: Vec<&str> = result
+            .get("content")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(|c| c.get("text").and_then(Value::as_str))
+            .collect();
+        (!text.is_empty()).then(|| text.join("\n"))
     }
 
     /// An `agent_end`'s outcome, from its last message's `stopReason`.
@@ -519,111 +810,98 @@ impl PiDriver {
 
     fn on_event(&mut self, step: &mut DriverStep, v: &Value) {
         match v.get("type").and_then(Value::as_str) {
+            Some("agent_start") => {
+                if self.pending_abort {
+                    self.pending_abort = false;
+                    self.in_agent_run = false;
+                    self.command(step, json!({"type": "abort"}));
+                    return;
+                }
+                self.in_agent_run = true;
+                self.ensure_autonomous_turn(step);
+            }
+            Some("message_start") => {
+                self.in_agent_run = true;
+                self.ensure_autonomous_turn(step);
+                if self.turn_id.is_some() {
+                    self.close_thought(step);
+                    self.close_message(step);
+                }
+            }
             Some("message_update") => {
+                self.in_agent_run = true;
                 let ev = &v["assistantMessageEvent"];
-                let delta = ev.get("delta").and_then(Value::as_str).unwrap_or("");
+                let seg_parent = self
+                    .resolve_parent_subagent(v, None, None, false)
+                    .map(|(_, pid)| pid);
                 match ev.get("type").and_then(Value::as_str) {
-                    Some("text_delta") => {
-                        self.close_thinking(step);
-                        self.on_text(step, delta);
+                    Some("text_start") => {
+                        self.ensure_autonomous_turn(step);
+                        if self.turn_id.is_some() {
+                            self.close_thought(step);
+                            if self.message.is_some() && self.message_parent != seg_parent {
+                                self.close_message(step);
+                            }
+                            if self.message.is_none() {
+                                self.messages += 1;
+                                self.message_parent = seg_parent;
+                                self.message = Some((
+                                    format!("{}:msg:{}", self.turn(), self.messages),
+                                    String::new(),
+                                    chrono::Utc::now(),
+                                ));
+                            }
+                        }
                     }
-                    Some("thinking_delta") => self.on_thinking(step, delta),
+                    Some("thinking_start") => {
+                        self.ensure_autonomous_turn(step);
+                        if self.turn_id.is_some() {
+                            self.close_message(step);
+                            if self.thought.is_some() && self.thought_parent != seg_parent {
+                                self.close_thought(step);
+                            }
+                            if self.thought.is_none() {
+                                self.messages += 1;
+                                self.thought_parent = seg_parent;
+                                self.thought = Some((
+                                    format!("{}:thought:{}", self.turn(), self.messages),
+                                    String::new(),
+                                    chrono::Utc::now(),
+                                ));
+                            }
+                        }
+                    }
+                    Some("text_delta") => {
+                        let delta = ev.get("delta").and_then(Value::as_str).unwrap_or("");
+                        if !delta.is_empty() {
+                            self.ensure_autonomous_turn(step);
+                            if self.turn_id.is_some() {
+                                self.on_text(step, delta, seg_parent);
+                            }
+                        }
+                    }
+                    Some("thinking_delta") => {
+                        let delta = ev.get("delta").and_then(Value::as_str).unwrap_or("");
+                        if !delta.is_empty() {
+                            self.ensure_autonomous_turn(step);
+                            if self.turn_id.is_some() {
+                                self.on_thought(step, delta, seg_parent);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
-            Some("message_end") => {
-                self.close_thinking(step);
+            Some("message_end") if self.turn_id.is_some() => {
+                self.close_thought(step);
                 self.close_message(step);
                 if v.pointer("/message/role").and_then(Value::as_str) == Some("assistant") {
                     self.on_usage(step, &v["message"]);
                 }
             }
-            Some("tool_execution_update") => {
-                let call = v
-                    .get("toolCallId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool");
-                if v.get("toolName").and_then(Value::as_str) != Some("bash") {
-                    return;
-                }
-                let text: String = v
-                    .pointer("/partialResult/content")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| c.get("text").and_then(Value::as_str))
-                    .collect();
-                let sent = self.streamed.entry(call.to_string()).or_default();
-                if text.len() > *sent && text.is_char_boundary(*sent) {
-                    let chunk = text[*sent..].to_string();
-                    *sent = text.len();
-                    step.push(DriverEvent::CommandOutput {
-                        item_id: format!("{}:tool:{call}", self.turn()),
-                        chunk,
-                    });
-                } else if text.len() < *sent {
-                    // pi trimmed its window: only the end is kept now.
-                    *sent = text.len();
-                }
-            }
-            Some("tool_execution_start") => {
-                self.close_thinking(step);
-                self.close_message(step);
-                let call = v
-                    .get("toolCallId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool");
-                let name = v
-                    .get("toolName")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool")
-                    .to_string();
-                let args = v.get("args").cloned().unwrap_or(Value::Null);
-                let id = format!("{}:tool:{call}", self.turn());
-                step.push(DriverEvent::TurnItem(item(
-                    id,
-                    TurnItemStatus::Running,
-                    Some(name.clone()),
-                    Self::tool_kind(&name, &args, None),
-                )));
-                self.tools.insert(call.to_string(), Tool { name, args });
-            }
-            Some("tool_execution_end") => {
-                let call = v
-                    .get("toolCallId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool");
-                let tool = self.tools.remove(call).unwrap_or_else(|| Tool {
-                    name: v
-                        .get("toolName")
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool")
-                        .into(),
-                    args: v.get("args").cloned().unwrap_or(Value::Null),
-                });
-                // pi's `read` of an image file returns `{type: image, data, mimeType}`.
-                let media = crate::tool_images::extract(Some(&v["result"]));
-                let output = (!media.text.is_empty()).then_some(media.text);
-                let failed = v.get("isError").and_then(Value::as_bool) == Some(true);
-                let mut kind = Self::tool_kind(&tool.name, &tool.args, output.clone());
-                if let TurnItemKind::DynamicTool { images, .. } = &mut kind {
-                    *images = media.images;
-                }
-                let mut it = item(
-                    format!("{}:tool:{call}", self.turn()),
-                    if failed {
-                        TurnItemStatus::Failed
-                    } else {
-                        TurnItemStatus::Completed
-                    },
-                    Some(tool.name.clone()),
-                    kind,
-                );
-                if failed {
-                    it.error = output.as_deref().and_then(tool_error);
-                }
-                step.push(DriverEvent::TurnItem(it));
-            }
+            Some("tool_execution_start") => self.on_tool_start(step, v),
+            Some("tool_execution_update") => self.on_tool_update(step, v),
+            Some("tool_execution_end") => self.on_tool_end(step, v),
             // pi will not continue on its own: the turn is over, with the
             // last run's outcome (an abort wins).
             Some("agent_settled") => {
@@ -651,6 +929,337 @@ impl PiDriver {
         }
     }
 
+    fn on_tool_start(&mut self, step: &mut DriverStep, v: &Value) {
+        self.in_agent_run = true;
+        self.ensure_autonomous_turn(step);
+        if self.turn_id.is_none() {
+            return;
+        }
+        self.close_thought(step);
+        self.close_message(step);
+        let call = v
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .unwrap_or("tool");
+        let name = v
+            .get("toolName")
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+            .to_string();
+        let args = v.get("args").cloned().unwrap_or(Value::Null);
+        let is_subagent = Self::is_subagent_tool(&name, &args);
+        let parent = self.resolve_parent_subagent(v, Some(&args), Some(call), is_subagent);
+        let parent_key = parent.as_ref().map(|(k, _)| k.clone());
+        let parent_item_id = parent.as_ref().map(|(_, pid)| pid.clone());
+        let started_at = chrono::Utc::now();
+        let turn_id = self.turn_id.clone();
+        let id = format!("{}:tool:{call}", self.turn());
+        let mut ti = item(
+            id.clone(),
+            TurnItemStatus::Running,
+            Self::tool_title(&name, &args),
+            Self::tool_kind(&name, &args, None, 0, None),
+        );
+        ti.turn_id = turn_id.clone();
+        ti.started_at = Some(started_at);
+        ti.parent_item_id = parent_item_id.clone();
+        step.push(DriverEvent::TurnItem(ti));
+
+        if let Some(ref pkey) = parent_key {
+            self.record_child_tool_on_parent(step, pkey, &name);
+        }
+
+        let bg_id = if Self::is_background_call(&name, &args) {
+            let (kind, label) = Self::bg_kind_and_label(&name, &args);
+            let due_at = Self::extract_due_at(&name, &args, started_at);
+            let bg_id = call.to_string();
+            self.bg_tasks.push(BackgroundTask {
+                id: bg_id.clone(),
+                kind: kind.to_string(),
+                label: label.clone(),
+                started_at,
+                due_at,
+                item_id: Some(id.clone()),
+            });
+            self.bg_entries.insert(
+                bg_id.clone(),
+                PiBgEntry {
+                    call_id: call.to_string(),
+                    item_id: id.clone(),
+                    turn_id: turn_id.clone(),
+                    name: name.clone(),
+                    args: args.clone(),
+                    kind: kind.to_string(),
+                    label,
+                    started_at,
+                    tool_uses: 0,
+                    last_tool: None,
+                },
+            );
+            step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
+            Some(bg_id)
+        } else {
+            None
+        };
+
+        if is_subagent && bg_id.is_none() {
+            self.subagent_order.retain(|c| c != call);
+            self.subagent_order.push(call.to_string());
+        }
+
+        self.tools.insert(
+            call.to_string(),
+            Tool {
+                name,
+                args,
+                item_id: id,
+                is_subagent,
+                parent_item_id,
+                parent_key,
+                turn_id,
+                started_at,
+                streamed_output: String::new(),
+                tool_uses: 0,
+                last_tool: None,
+                bg_id,
+            },
+        );
+    }
+
+    fn on_tool_update(&mut self, step: &mut DriverStep, v: &Value) {
+        let Some(call) = v.get("toolCallId").and_then(Value::as_str) else {
+            return;
+        };
+        let partial = &v["partialResult"];
+        let partial_text = Self::result_text(partial);
+        let Some(tool) = self.tools.get_mut(call) else {
+            return;
+        };
+        let turn_str = tool
+            .turn_id
+            .as_deref()
+            .or(self.turn_id.as_deref())
+            .unwrap_or_default();
+        let item_id = if tool.item_id.is_empty() {
+            format!("{turn_str}:tool:{call}")
+        } else {
+            tool.item_id.clone()
+        };
+        if tool.name == "bash" {
+            if let Some(full) = partial_text {
+                if let Some(delta) = full.strip_prefix(tool.streamed_output.as_str()) {
+                    if !delta.is_empty() {
+                        let chunk = delta.to_string();
+                        tool.streamed_output = full;
+                        step.push(DriverEvent::CommandOutput { item_id, chunk });
+                    }
+                }
+            }
+        } else if Self::is_subagent_tool(&tool.name, &tool.args) {
+            let details = partial.get("details");
+            let uses = details
+                .and_then(|d| d.get("toolUses").or_else(|| d.get("tool_uses")))
+                .and_then(Value::as_u64)
+                .map(|n| n as u32);
+            let last = details
+                .and_then(|d| Self::arg_str(d, &["lastTool", "last_tool", "currentTool", "tool"]));
+            let mut dirty = false;
+            if let Some(u) = uses.filter(|u| *u != tool.tool_uses) {
+                tool.tool_uses = u;
+                dirty = true;
+            } else if last.is_some() && last != tool.last_tool {
+                tool.tool_uses = tool.tool_uses.saturating_add(1);
+                dirty = true;
+            }
+            if last.is_some() && last != tool.last_tool {
+                tool.last_tool = last;
+                dirty = true;
+            }
+            if dirty {
+                let mut ti = item(
+                    item_id,
+                    TurnItemStatus::Running,
+                    Self::tool_title(&tool.name, &tool.args),
+                    Self::tool_kind(
+                        &tool.name,
+                        &tool.args,
+                        partial_text,
+                        tool.tool_uses,
+                        tool.last_tool.clone(),
+                    ),
+                );
+                ti.turn_id = tool.turn_id.clone();
+                ti.started_at = Some(tool.started_at);
+                ti.parent_item_id = tool.parent_item_id.clone();
+                step.push(DriverEvent::TurnItem(ti));
+            }
+        }
+    }
+
+    fn on_tool_end(&mut self, step: &mut DriverStep, v: &Value) {
+        let call = v
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .unwrap_or("tool");
+        self.subagent_order.retain(|c| c != call);
+        let tool = self.tools.remove(call).unwrap_or_else(|| {
+            let name: String = v
+                .get("toolName")
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .into();
+            let args = v.get("args").cloned().unwrap_or(Value::Null);
+            let is_subagent = Self::is_subagent_tool(&name, &args);
+            let parent = self.resolve_parent_subagent(v, Some(&args), Some(call), is_subagent);
+            Tool {
+                name,
+                args,
+                item_id: String::new(),
+                is_subagent,
+                parent_item_id: parent.as_ref().map(|(_, pid)| pid.clone()),
+                parent_key: parent.map(|(k, _)| k),
+                turn_id: self.turn_id.clone(),
+                started_at: chrono::Utc::now(),
+                streamed_output: String::new(),
+                tool_uses: 0,
+                last_tool: None,
+                bg_id: None,
+            }
+        });
+        let result = &v["result"];
+        let output = Self::result_text(result)
+            .or_else(|| (!tool.streamed_output.is_empty()).then(|| tool.streamed_output.clone()));
+        // pi's `read` of an image file returns `{type: image, data, mimeType}`.
+        let images = crate::tool_images::extract(Some(result)).images;
+        let failed = v.get("isError").and_then(Value::as_bool) == Some(true);
+        let turn_str = tool
+            .turn_id
+            .clone()
+            .or_else(|| self.turn_id.clone())
+            .unwrap_or_default();
+        let item_id = if tool.item_id.is_empty() {
+            format!("{turn_str}:tool:{call}")
+        } else {
+            tool.item_id.clone()
+        };
+        if self.thought_parent.as_deref() == Some(item_id.as_str()) {
+            self.close_thought(step);
+        }
+        if self.message_parent.as_deref() == Some(item_id.as_str()) {
+            self.close_message(step);
+        }
+        let now = chrono::Utc::now();
+
+        if let Some(orig_bg_id) = tool.bg_id.clone() {
+            if !failed {
+                if let Some((launched_id, true)) =
+                    Self::extract_launched_bg_id(result, output.as_deref())
+                {
+                    let new_id = if launched_id.is_empty() {
+                        orig_bg_id.clone()
+                    } else {
+                        launched_id
+                    };
+                    if new_id != orig_bg_id {
+                        if let Some(mut entry) = self.bg_entries.remove(&orig_bg_id) {
+                            entry.tool_uses = tool.tool_uses;
+                            entry.last_tool = tool.last_tool.clone();
+                            self.bg_entries.insert(new_id.clone(), entry);
+                        }
+                        if let Some(bt) = self.bg_tasks.iter_mut().find(|t| t.id == orig_bg_id) {
+                            bt.id = new_id;
+                            step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
+                        }
+                    } else if let Some(entry) = self.bg_entries.get_mut(&orig_bg_id) {
+                        entry.tool_uses = tool.tool_uses;
+                        entry.last_tool = tool.last_tool.clone();
+                    }
+                    let mut it = item(
+                        item_id,
+                        TurnItemStatus::Running,
+                        Self::tool_title(&tool.name, &tool.args),
+                        Self::tool_kind(
+                            &tool.name,
+                            &tool.args,
+                            output,
+                            tool.tool_uses,
+                            tool.last_tool,
+                        ),
+                    );
+                    it.turn_id = tool.turn_id;
+                    it.started_at = Some(tool.started_at);
+                    it.parent_item_id = tool.parent_item_id;
+                    step.push(DriverEvent::TurnItem(it));
+                    return;
+                }
+            }
+
+            let status = if failed {
+                TurnItemStatus::Failed
+            } else {
+                TurnItemStatus::Completed
+            };
+            let mut it = item(
+                item_id,
+                status,
+                Self::tool_title(&tool.name, &tool.args),
+                Self::tool_kind(
+                    &tool.name,
+                    &tool.args,
+                    output.clone(),
+                    tool.tool_uses,
+                    tool.last_tool,
+                ),
+            );
+            it.turn_id = tool.turn_id;
+            it.started_at = Some(tool.started_at);
+            it.completed_at = Some(now);
+            it.parent_item_id = tool.parent_item_id;
+            if failed {
+                it.error = output.as_deref().and_then(tool_error);
+            }
+            step.push(DriverEvent::TurnItem(it));
+            self.settle_bg_entry(step, &orig_bg_id, status, output, false);
+            return;
+        }
+
+        let mut it = item(
+            item_id,
+            if failed {
+                TurnItemStatus::Failed
+            } else {
+                TurnItemStatus::Completed
+            },
+            Self::tool_title(&tool.name, &tool.args),
+            Self::tool_kind(
+                &tool.name,
+                &tool.args,
+                output.clone(),
+                tool.tool_uses,
+                tool.last_tool,
+            ),
+        );
+        it.turn_id = tool.turn_id;
+        it.started_at = Some(tool.started_at);
+        it.completed_at = Some(now);
+        it.parent_item_id = tool.parent_item_id;
+        if failed {
+            it.error = output.as_deref().and_then(tool_error);
+        }
+        if let TurnItemKind::DynamicTool { images: kept, .. } = &mut it.kind {
+            *kept = images;
+        }
+        step.push(DriverEvent::TurnItem(it));
+        self.maybe_handle_bg_control_tool(
+            step,
+            &tool.name,
+            &tool.args,
+            result,
+            output.as_deref(),
+            failed,
+        );
+    }
+
     fn on_response(&mut self, step: &mut DriverStep, v: &Value) {
         let id = v.get("id").and_then(Value::as_str);
         let ok = v.get("success").and_then(Value::as_bool) == Some(true);
@@ -672,6 +1281,7 @@ impl PiDriver {
         } else if id.is_some() && id == self.state_req.as_deref() {
             self.state_req = None;
             if ok {
+                self.ready = true;
                 self.context_window = v
                     .pointer("/data/model/contextWindow")
                     .and_then(Value::as_u64);
@@ -721,36 +1331,37 @@ impl PiDriver {
             } else if v.pointer("/data/disposition").and_then(Value::as_str) == Some("handled") {
                 self.finish(step, TurnTerminalStatus::Completed, None);
             }
-        } else if !ok
-            && v.get("command").and_then(Value::as_str) == Some("steer")
-            && self.turn_id.is_some()
-        {
-            let why = v
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("pi refused it");
-            step.push(DriverEvent::TurnItem(item(
-                format!("{}:steer-failed:{}", self.turn(), id.unwrap_or_default()),
-                TurnItemStatus::Failed,
-                Some("pi did not take the message".into()),
-                TurnItemKind::SystemNotice {
-                    message: format!("pi did not take the message: {why}"),
-                },
-            )));
+        } else if let Some(pos) = id.and_then(|id| self.steer_reqs.iter().position(|r| r == id)) {
+            self.steer_reqs.swap_remove(pos);
+            if !ok {
+                let message = v
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("pi refused the steer")
+                    .to_string();
+                step.push(DriverEvent::Error(ProviderFailure {
+                    class: "provider_error".into(),
+                    message,
+                    code: None,
+                    retryable: None,
+                }));
+            }
         }
+    }
+
+    fn prompt_images(req: &RuntimePromptReq) -> Option<Value> {
+        (!req.images.is_empty()).then(|| {
+            Value::Array(
+                req.images
+                    .iter()
+                    .map(|i| json!({"type": "image", "data": i.data_base64, "mimeType": i.mime}))
+                    .collect(),
+            )
+        })
     }
 }
 
 impl StructuredDriver for PiDriver {
-    fn export_state(&self) -> Option<Value> {
-        serde_json::to_value(self).ok()
-    }
-
-    fn import_state(&mut self, state: Value) -> Result<(), DriverError> {
-        *self = serde_json::from_value(state).map_err(|e| DriverError(e.to_string()))?;
-        Ok(())
-    }
-
     fn provider(&self) -> RuntimeProvider {
         RuntimeProvider::Pi
     }
@@ -764,6 +1375,8 @@ impl StructuredDriver for PiDriver {
             args.extend(["--model".into(), m.clone()]);
         }
         if let Some(t) = tools_for(ctx.access_mode) {
+            // `--tools` keeps MCP tools, which can write: `adopt_spec`
+            // drops the user's servers.
             args.extend(["--tools".into(), t.into()]);
         }
         LaunchSpec {
@@ -774,8 +1387,25 @@ impl StructuredDriver for PiDriver {
     }
 
     /// `get_state` reports the session id (the resume key) and the model.
-    fn start(&mut self, _ctx: &LaunchContext) -> DriverStep {
+    fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
         let mut step = DriverStep::default();
+        if ctx.resume.is_none() {
+            self.tools.clear();
+            self.subagent_order.clear();
+            self.message = None;
+            self.message_parent = None;
+            self.thought = None;
+            self.thought_parent = None;
+            self.turn_id = None;
+            self.ended = None;
+            self.in_agent_run = false;
+            self.pending_abort = false;
+            self.bg_entries.clear();
+            if !self.bg_tasks.is_empty() {
+                self.bg_tasks.clear();
+                step.push(DriverEvent::BackgroundTasks(Vec::new()));
+            }
+        }
         let id = self.command(&mut step, json!({"type": "get_state"}));
         self.state_req = Some(id);
         step
@@ -796,45 +1426,55 @@ impl StructuredDriver for PiDriver {
         }
         self.turn_id = Some(turn_id.to_string());
         self.messages = 0;
-        self.thoughts = 0;
+        self.in_agent_run = false;
+        self.pending_abort = false;
         self.spent = Spent::default();
         let mut cmd = json!({"type": "prompt", "message": with_file_paths(&req.text, &req.files)});
-        if !req.images.is_empty() {
-            cmd["images"] = Value::Array(
-                req.images
-                    .iter()
-                    .map(|i| json!({"type": "image", "data": i.data_base64, "mimeType": i.mime}))
-                    .collect(),
-            );
+        if let Some(images) = Self::prompt_images(req) {
+            cmd["images"] = images;
         }
         let id = self.command(&mut step, cmd);
         self.prompt_req = Some(id);
         Ok(step)
     }
 
-    /// pi's RPC `steer {message, images?}`: delivered after the current
-    /// assistant turn's tool calls, before its next model call.
     fn steer(&mut self, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
-        if self.turn_id.is_none() {
-            return Err(DriverError("no turn is running".into()));
+        if !self.ready || self.turn_id.is_none() {
+            return Err(DriverError("no prompt is running".into()));
         }
-        let mut cmd = json!({"type": "steer", "message": with_file_paths(&req.text, &req.files)});
-        if !req.images.is_empty() {
-            cmd["images"] = Value::Array(
-                req.images
-                    .iter()
-                    .map(|i| json!({"type": "image", "data": i.data_base64, "mimeType": i.mime}))
-                    .collect(),
+        if req.text.is_empty() && req.images.is_empty() && req.files.is_empty() {
+            return Err(DriverError("empty steer input".into()));
+        }
+        let level = match req.effort.as_deref().filter(|e| !e.trim().is_empty()) {
+            Some(e) => Some(
+                thinking_level(e)
+                    .ok_or_else(|| DriverError(format!("pi has no '{e}' thinking level")))?,
+            ),
+            None => None,
+        };
+        let mut step = DriverStep::default();
+        if let Some(level) = level {
+            self.command(
+                &mut step,
+                json!({"type": "set_thinking_level", "level": level}),
             );
         }
-        let mut step = DriverStep::default();
-        self.command(&mut step, cmd);
+        let mut cmd = json!({"type": "steer", "message": with_file_paths(&req.text, &req.files)});
+        if let Some(images) = Self::prompt_images(req) {
+            cmd["images"] = images;
+        }
+        let id = self.command(&mut step, cmd);
+        self.steer_reqs.push(id);
         Ok(step)
     }
 
     fn interrupt(&mut self) -> DriverStep {
         let mut step = DriverStep::default();
         self.command(&mut step, json!({"type": "abort"}));
+        if self.turn_id.is_some() && !self.in_agent_run {
+            self.finish(&mut step, TurnTerminalStatus::Interrupted, None);
+            self.pending_abort = true;
+        }
         step
     }
 
@@ -967,388 +1607,35 @@ impl StructuredDriver for PiDriver {
         if v.get("type").and_then(Value::as_str) == Some("response") {
             self.on_response(&mut step, &v);
         } else if self.turn_id.is_some()
+            || self.ready
             || v.get("type").and_then(Value::as_str) == Some("extension_ui_request")
         {
             self.on_event(&mut step, &v);
         }
         step
     }
+
+    fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
+        let mut step = DriverStep::default();
+        self.steer_reqs.clear();
+        self.subagent_order.clear();
+        self.clear_all_bg_on_session_close(&mut step);
+        step
+    }
+
+    fn snapshot_state(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+
+    fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
+        if !state.is_null() {
+            *self =
+                serde_json::from_value(state.clone()).map_err(|e| DriverError(e.to_string()))?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ctx(resume: Option<&str>, access_mode: RuntimeAccessMode) -> LaunchContext {
-        LaunchContext {
-            mcp_servers: Vec::new(),
-            session_id: "s".into(),
-            cwd: "/w".into(),
-            model: Some("openai-codex/gpt-5.5".into()),
-            resume: resume.map(str::to_string),
-            sandboxed: false,
-            access_mode,
-        }
-    }
-
-    fn sent(step: &DriverStep, i: usize) -> Value {
-        serde_json::from_str(&step.writes[i]).unwrap()
-    }
-
-    #[test]
-    fn launch_maps_resume_model_and_access_to_tools() {
-        let d = PiDriver::with_program("pi");
-        let a = d
-            .launch(&ctx(Some("abc"), RuntimeAccessMode::ApprovalRequired))
-            .args;
-        assert_eq!(
-            a,
-            [
-                "--mode",
-                "rpc",
-                "--session",
-                "abc",
-                "--model",
-                "openai-codex/gpt-5.5",
-                "--tools",
-                "read,grep,find,ls",
-            ]
-        );
-        let full = d.launch(&ctx(None, RuntimeAccessMode::FullAccess)).args;
-        assert!(!full.iter().any(|a| a == "--tools" || a == "--session"));
-    }
-
-    #[test]
-    fn restricted_modes_leave_out_the_users_mcp_servers_but_keep_ottos() {
-        let dir = std::env::temp_dir().join(format!("otto-pi-ext-{}", otto_core::new_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let ext = dir.join("mcp.ts");
-        std::fs::write(
-            &ext,
-            "// Otto-managed\nconst servers = {\"otto\":{},\"otto-browser\":{},\"git-hub\":{}};\nexport default function (pi) {}\n",
-        )
-        .unwrap();
-        let mut d = PiDriver::with_program("pi");
-        let mut spec = d.launch(&ctx(None, RuntimeAccessMode::AutoAcceptEdits));
-        spec.args.extend(["-e".into(), ext.display().to_string()]);
-        d.adopt_spec(&mut spec);
-        let at = spec
-            .args
-            .iter()
-            .position(|a| a == "--exclude-tools")
-            .unwrap();
-        assert_eq!(spec.args[at + 1], "mcp__git-hub__*,mcp__git_hub__*");
-        // Full access runs everything.
-        let mut full = d.launch(&ctx(None, RuntimeAccessMode::FullAccess));
-        full.args.extend(["-e".into(), ext.display().to_string()]);
-        d.adopt_spec(&mut full);
-        assert!(!full.args.iter().any(|a| a == "--exclude-tools"));
-        let _ = std::fs::remove_file(&ext);
-        let _ = std::fs::remove_dir(&dir);
-    }
-
-    #[test]
-    fn thinking_multi_edits_usage_and_commands() {
-        let mut d = PiDriver::with_program("pi");
-        let s = d.start(&ctx(None, RuntimeAccessMode::FullAccess));
-        let st = sent(&s, 0);
-        let s = d.on_line(&format!(
-            r#"{{"id":"{}","type":"response","command":"get_state","success":true,"data":{{"sessionId":"s1","model":{{"id":"m","provider":"p","contextWindow":200000}}}}}}"#,
-            st["id"].as_str().unwrap()
-        ));
-        let gc = sent(&s, 0);
-        assert_eq!(gc["type"], "get_commands");
-        let s = d.on_line(&format!(
-            r#"{{"id":"{}","type":"response","command":"get_commands","success":true,"data":{{"commands":[{{"name":"fix-tests","description":"Fix failing tests"}},{{"name":"skill:brave"}}]}}}}"#,
-            gc["id"].as_str().unwrap()
-        ));
-        let DriverEvent::Commands(c) = &s.events[0] else {
-            panic!("{:?}", s.events)
-        };
-        assert_eq!(
-            c.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
-            ["fix-tests", "skill:brave"]
-        );
-        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
-        let s = d.on_line(r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"hmm"}}"#);
-        assert!(
-            matches!(&s.events[0], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::Reasoning { text, streaming: true } if text == "hmm"))
-        );
-        let s = d.on_line(r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"ok"}}"#);
-        assert!(
-            matches!(&s.events[0], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::Reasoning { streaming: false, .. }))
-        );
-        let s = d.on_line(r#"{"type":"message_end","message":{"role":"assistant","usage":{"input":100,"output":50,"cacheRead":20,"cacheWrite":0,"cost":{"total":0.0105}}}}"#);
-        let usage = s
-            .events
-            .iter()
-            .find_map(|e| match e {
-                DriverEvent::Usage(u) => Some(u.clone()),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(
-            (usage.input_tokens, usage.output_tokens, usage.cost_usd),
-            (120, 50, Some(0.0105))
-        );
-        let ctxu = s
-            .events
-            .iter()
-            .find_map(|e| match e {
-                DriverEvent::ContextUsage(u) => Some(u.clone()),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!((ctxu.used_tokens, ctxu.max_tokens), (170, Some(200000)));
-        d.on_line(r#"{"type":"tool_execution_start","toolCallId":"e1","toolName":"edit","args":{"path":"/w/a.rs","edits":[{"oldText":"a","newText":"b"},{"oldText":"c","newText":"d"}]}}"#);
-        let s = d.on_line(r#"{"type":"tool_execution_end","toolCallId":"e1","toolName":"edit","result":{"content":[{"type":"text","text":"ok"}],"details":{"diff":"x"}},"isError":false}"#);
-        assert!(
-            matches!(&s.events[0], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::FileChange { diff_str: Some(p), .. } if p.contains("-a\n+b\n") && p.contains("-c\n+d\n")))
-        );
-        d.on_line(r#"{"type":"tool_execution_start","toolCallId":"b1","toolName":"bash","args":{"command":"ls"}}"#);
-        let s = d.on_line(r#"{"type":"tool_execution_update","toolCallId":"b1","toolName":"bash","partialResult":{"content":[{"type":"text","text":"a\nb"}]}}"#);
-        assert_eq!(
-            s.events,
-            vec![DriverEvent::CommandOutput {
-                item_id: "t1:tool:b1".into(),
-                chunk: "a\nb".into()
-            }]
-        );
-        let s = d.on_line(r#"{"type":"tool_execution_update","toolCallId":"b1","toolName":"bash","partialResult":{"content":[{"type":"text","text":"a\nbc"}]}}"#);
-        assert_eq!(
-            s.events,
-            vec![DriverEvent::CommandOutput {
-                item_id: "t1:tool:b1".into(),
-                chunk: "c".into()
-            }]
-        );
-    }
-
-    #[test]
-    fn handshake_turn_tools_and_settle() {
-        let mut d = PiDriver::with_program("pi");
-        let s = d.start(&ctx(None, RuntimeAccessMode::FullAccess));
-        let st = sent(&s, 0);
-        assert_eq!(st["type"], "get_state");
-        let s = d.on_line(&format!(
-            r#"{{"id":"{}","type":"response","command":"get_state","success":true,"data":{{"sessionId":"sess-1","model":{{"id":"gpt-5.5","provider":"openai-codex"}}}}}}"#,
-            st["id"].as_str().unwrap()
-        ));
-        assert!(
-            matches!(&s.events[0], DriverEvent::Ready { native_thread_id: Some(t), model: Some(m) } if t == "sess-1" && m == "openai-codex/gpt-5.5")
-        );
-
-        let mut req = RuntimePromptReq::of("hi");
-        req.effort = Some("max".into());
-        let s = d.prompt("t1", &req).unwrap();
-        assert_eq!(sent(&s, 0)["level"], "max");
-        let p = sent(&s, 1);
-        assert_eq!(
-            (p["type"].as_str(), p["message"].as_str()),
-            (Some("prompt"), Some("hi"))
-        );
-        d.on_line(&format!(
-            r#"{{"id":"{}","type":"response","command":"prompt","success":true,"data":{{"disposition":"started"}}}}"#,
-            p["id"].as_str().unwrap()
-        ));
-        let s = d.on_line(r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hel"}}"#);
-        assert!(
-            matches!(&s.events[0], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "Hel"))
-        );
-        d.on_line(r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"lo"}}"#);
-        let s = d.on_line(r#"{"type":"tool_execution_start","toolCallId":"c1","toolName":"bash","args":{"command":"ls"}}"#);
-        assert!(
-            matches!(&s.events[0], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: false, .. } if text == "Hello"))
-        );
-        assert!(
-            matches!(&s.events[1], DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::CommandExecution { input, .. } if input == "ls"))
-        );
-        let s = d.on_line(r#"{"type":"tool_execution_end","toolCallId":"c1","toolName":"bash","result":{"content":[{"type":"text","text":"a.rs"}]},"isError":false}"#);
-        assert!(
-            matches!(&s.events[0], DriverEvent::TurnItem(i) if i.status == TurnItemStatus::Completed && matches!(&i.kind, TurnItemKind::CommandExecution { output: Some(o), .. } if o == "a.rs"))
-        );
-        let s = d.on_line(r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}],"willRetry":false}"#);
-        assert!(matches!(
-            &s.events[0],
-            DriverEvent::Terminal {
-                status: TurnTerminalStatus::Completed,
-                ..
-            }
-        ));
-        // A later agent_settled finds no open turn.
-        assert!(d
-            .on_line(r#"{"type":"agent_settled","aborted":false}"#)
-            .events
-            .is_empty());
-    }
-
-    /// Once pi has sent `agent_settled` (1.x), `agent_end` no longer ends the
-    /// turn — `agent_settled` does, with the stashed outcome. The lines are
-    /// pi 1.5.0's for a provider whose OAuth refresh fails (trimmed).
-    #[test]
-    fn a_settling_pi_ends_turns_at_agent_settled_with_the_runs_outcome() {
-        let mut d = PiDriver::with_program("pi");
-        d.start(&ctx(None, RuntimeAccessMode::FullAccess));
-        d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
-        let s = d.on_line(r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}],"willRetry":false}"#);
-        assert!(matches!(
-            &s.events[0],
-            DriverEvent::Terminal {
-                status: TurnTerminalStatus::Completed,
-                ..
-            }
-        ));
-        // Learns that this pi settles; nothing is open any more.
-        assert!(d
-            .on_line(r#"{"type":"agent_settled","aborted":false}"#)
-            .events
-            .is_empty());
-
-        d.prompt("t2", &RuntimePromptReq::of("again")).unwrap();
-        let s = d.on_line(r#"{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"OAuth refresh failed for openai-codex"}}"#);
-        assert!(s.events.is_empty());
-        let s = d.on_line(r#"{"type":"agent_end","messages":[{"role":"system","content":""},{"role":"user","content":[]},{"role":"assistant","content":[],"stopReason":"error","errorMessage":"OAuth refresh failed for openai-codex"}],"willRetry":false}"#);
-        assert!(s.events.is_empty(), "agent_end must wait for agent_settled");
-        let s = d.on_line(r#"{"type":"agent_settled","aborted":false}"#);
-        assert!(
-            matches!(&s.events[0], DriverEvent::Terminal { status: TurnTerminalStatus::Failed, failure: Some(f), .. } if f.message == "OAuth refresh failed for openai-codex")
-        );
-
-        // An abort wins over the stashed outcome.
-        d.prompt("t3", &RuntimePromptReq::of("go")).unwrap();
-        d.on_line(r#"{"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}],"willRetry":false}"#);
-        let s = d.on_line(r#"{"type":"agent_settled","aborted":true}"#);
-        assert!(matches!(
-            &s.events[0],
-            DriverEvent::Terminal {
-                status: TurnTerminalStatus::Interrupted,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn a_refused_prompt_fails_and_dialogs_are_cancelled() {
-        let mut d = PiDriver::with_program("pi");
-        d.start(&ctx(None, RuntimeAccessMode::FullAccess));
-        let s = d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
-        let p = sent(&s, 0);
-        let s = d.on_line(&format!(
-            r#"{{"id":"{}","type":"response","command":"prompt","success":false,"error":"No model"}}"#,
-            p["id"].as_str().unwrap()
-        ));
-        assert!(
-            matches!(&s.events[0], DriverEvent::Terminal { status: TurnTerminalStatus::Failed, failure: Some(f), .. } if f.message == "No model")
-        );
-    }
-
-    #[test]
-    fn extension_dialogs_become_approvals_and_questions() {
-        use otto_core::agent_runtime::QuestionAnswer;
-        let mut d = PiDriver::with_program("pi");
-        d.start(&ctx(None, RuntimeAccessMode::FullAccess));
-        let s = d.on_line(
-            r#"{"type":"extension_ui_request","id":"u1","method":"confirm","title":"Sure?","message":"All gone"}"#,
-        );
-        let DriverEvent::Request { id, prompt, .. } = &s.events[0] else {
-            panic!("{:?}", s.events)
-        };
-        assert_eq!(prompt.as_deref(), Some("All gone"));
-        let r = sent(&d.respond(id, ApprovalDecision::Accept).unwrap(), 0);
-        assert_eq!(
-            (r["id"].as_str(), r["confirmed"].as_bool()),
-            (Some("u1"), Some(true))
-        );
-        let s = d.on_line(
-            r#"{"type":"extension_ui_request","id":"u2","method":"select","title":"Pick","options":["Allow","Block"]}"#,
-        );
-        let DriverEvent::Question { id, questions, .. } = &s.events[0] else {
-            panic!()
-        };
-        assert_eq!(questions[0].options.len(), 2);
-        assert!(d
-            .respond_question(
-                id,
-                &[QuestionAnswer::Single {
-                    question_id: "answer".into(),
-                    value: "Nope".into()
-                }]
-            )
-            .is_err());
-        let r = sent(
-            &d.respond_question(
-                id,
-                &[QuestionAnswer::Single {
-                    question_id: "answer".into(),
-                    value: "Block".into(),
-                }],
-            )
-            .unwrap(),
-            0,
-        );
-        assert_eq!(
-            (r["id"].as_str(), r["value"].as_str()),
-            (Some("u2"), Some("Block"))
-        );
-        let s = d.on_line(
-            r#"{"type":"extension_ui_request","id":"u3","method":"input","title":"Name?"}"#,
-        );
-        let DriverEvent::Question { id, .. } = &s.events[0] else {
-            panic!()
-        };
-        let r = sent(
-            &d.respond_question(
-                id,
-                &[QuestionAnswer::Text {
-                    question_id: "answer".into(),
-                    text: "otto".into(),
-                }],
-            )
-            .unwrap(),
-            0,
-        );
-        assert_eq!(r["value"], "otto");
-        // Fire-and-forget methods ask nothing.
-        assert!(d
-            .on_line(
-                r#"{"type":"extension_ui_request","id":"u4","method":"notify","message":"hi"}"#
-            )
-            .events
-            .is_empty());
-    }
-
-    #[test]
-    fn a_read_image_result_keeps_its_image() {
-        let mut d = PiDriver::with_program("pi");
-        d.start(&ctx(None, RuntimeAccessMode::FullAccess));
-        d.prompt("t1", &RuntimePromptReq::of("look")).unwrap();
-        d.on_line(r#"{"type":"tool_execution_start","toolCallId":"r1","toolName":"read","args":{"path":"a.png"}}"#);
-        let s = d.on_line(r#"{"type":"tool_execution_end","toolCallId":"r1","toolName":"read","result":{"content":[{"type":"text","text":"Read image file [image/png]"},{"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=","mimeType":"image/png"}]},"isError":false}"#);
-        assert!(matches!(
-            &s.events[0],
-            DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::DynamicTool { images, output: Some(o), .. } if images.len() == 1 && o == "Read image file [image/png]")
-        ));
-    }
-
-    #[test]
-    fn steer_sends_pis_steer_command_mid_turn_only() {
-        let mut d = PiDriver::with_program("pi");
-        d.start(&ctx(None, RuntimeAccessMode::FullAccess));
-        assert!(d.steer(&RuntimePromptReq::of("more")).is_err(), "idle");
-        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
-        let s = d.steer(&RuntimePromptReq::of("look at b")).unwrap();
-        let c = sent(&s, 0);
-        assert_eq!(
-            (c["type"].as_str(), c["message"].as_str()),
-            (Some("steer"), Some("look at b"))
-        );
-        let s = d.on_line(&format!(
-            r#"{{"id":"{}","type":"response","command":"steer","success":false,"error":"busy"}}"#,
-            c["id"].as_str().unwrap()
-        ));
-        assert!(matches!(
-            &s.events[0],
-            DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::SystemNotice { message } if message.ends_with("busy"))
-        ));
-    }
-}
+#[path = "pi_tests.rs"]
+mod tests;

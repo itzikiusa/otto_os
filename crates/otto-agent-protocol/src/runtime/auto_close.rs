@@ -98,14 +98,23 @@ impl AgentRuntime {
     /// and the session lock, so a prompt arriving now either lands first (and
     /// the thread stays) or finds it closed.
     async fn close_if_idle(&self, id: &Id, cutoff: DateTime<Utc>) -> Result<bool> {
-        let live = self.live(id).await?;
-        let _prompt = live.prompt_lock.lock().await;
-        let mut st = live.lock();
-        if !idle_enough(&st, cutoff) {
-            return Ok(false);
+        let closed = {
+            let live = self.live(id).await?;
+            let _prompt = live.prompt_lock.lock().await;
+            let mut st = live.lock();
+            if !idle_enough(&st, cutoff) {
+                false
+            } else {
+                close_locked(&self.inner, &live, &mut st);
+                true
+            }
+        };
+        if closed {
+            super::evict_if_dead_after_flush(&self.inner, id).await;
+        } else {
+            super::try_evict_dead(&self.inner, id);
         }
-        close_locked(&self.inner, &live, &mut st);
-        Ok(true)
+        Ok(closed)
     }
 
     /// The daemon's auto-close loop: a pass shortly after boot, then hourly,

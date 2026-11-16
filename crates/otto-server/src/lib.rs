@@ -5,6 +5,7 @@
 
 pub mod agent_refs;
 pub use otto_agent_run::agent_run;
+pub use otto_ide;
 pub mod agent_session;
 pub mod agent_tasks_nudge;
 pub mod api_helpers;
@@ -21,6 +22,7 @@ pub use otto_automation::cadence;
 pub use otto_automation::cancel_signal;
 pub mod canvas_refs;
 pub mod cli_update;
+pub mod compression;
 pub mod context_packet;
 pub mod database_changes;
 pub mod db_assist;
@@ -205,6 +207,7 @@ pub fn build_router_with_assets(
         events_tx,
         live_events::notify_access_changes,
     ))
+    .layer(axum::middleware::from_fn(compression::gzip_responses))
     .layer(axum::middleware::from_fn_with_state(
         telemetry_ctx,
         telemetry::middleware,

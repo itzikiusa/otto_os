@@ -285,9 +285,15 @@ pub const NATIVE_SESSION_WRITERS: &[&str] = &[
     "k8s_action",
     "k8s_pod_http",
     "aws_sqs_send",
+    "aws_sqs_peek",
     "api_execute",
     "api_upsert_request",
     "api_run_automation",
+    // Vault v3 doc writers: approval-gated + audited like `otto.vault_*`.
+    "vault_write",
+    "vault_write_file",
+    "vault_rename",
+    "vault_delete",
     // Not irreversible but billed per byte scanned: the bridge used to post
     // them straight to their routes, so they ride the governed path too.
     "aws_logs_insights",

@@ -333,9 +333,10 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
     // are already defaultPrevented, so the global map must not even touch
     // them — otherwise ⌘U in an editor launched "Update all CLIs".
     if (!term && editorOwnsChord(e, document.activeElement)) return;
-    // Page-scoped chords (e.g. the API client's ⌘D) win over the global map
-    // while that page is mounted — outside a terminal, which owns its keys.
-    if (!term && !e.altKey && keyContext.pageChords?.(e)) return;
+    // Page-scoped chords (e.g. the API client's ⌘D or the IDE's ⌥⌘R / ⌥⌘L /
+    // ⌥⌘O / ⌥⌘S) win over the global map while that page is mounted — outside
+    // a terminal, which owns its keys.
+    if (!term && keyContext.pageChords?.(e)) return;
     // No global chord uses ⌥ as a modifier — match exactly so an ⌥-augmented
     // combo never triggers the plain-⌘ action (e.g. ⌥⌘T must not fire ⌘T's
     // "new session"; the DB editor binds ⌥⌘T for a new query tab).
@@ -611,6 +612,7 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘M', label: 'Minimise the window' },
       { keys: '⌃⌘F', label: 'Enter or exit full screen' },
       { keys: '⌘A', label: 'Select all' },
+      { keys: '⌃⌘Space', label: 'Emoji & Symbols picker' },
     ],
   },
   {

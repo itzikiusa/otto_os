@@ -22,19 +22,18 @@ import type {
   RuntimeEvent,
   RuntimePromptReq,
   RuntimePromptResp,
-  RuntimeProvider,
+  RuntimeProviderOrSlug,
   RuntimeSession,
   RuntimeSessionStatus,
   Session,
+  UnqueuePromptResp,
 } from '../../../lib/api/types';
+import { isRuntimeProvider, RUNTIME_PROVIDERS, sessionProviderSlug } from '../../../lib/providers';
 import { threads } from '../threadsStore.svelte';
 
-const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok', 'agy', 'opencode', 'pi'];
+export { isRuntimeProvider, RUNTIME_PROVIDERS };
 
-/** Providers a new thread runs on the structured runtime (the rest stay PTY). */
-export function isRuntimeProvider(provider: string): provider is RuntimeProvider {
-  return RUNTIME_PROVIDERS.includes(provider);
-}
+type QueuedAttachment = { name: string; mime: string; data_base64: string };
 
 /** `set_session_status` in otto-agent-protocol's runtime.rs. */
 const SESSION_STATUS: Record<ProviderSessionStatus, RuntimeSessionStatus> = {
@@ -47,11 +46,13 @@ const SESSION_STATUS: Record<ProviderSessionStatus, RuntimeSessionStatus> = {
 };
 
 /** The server-owned meta keys a Threads row keeps: who a personal agent's
- *  thread belongs to and what started it (lib/personalAgentBadges.ts). The
- *  rest stays on the runtime row — a row never inherits keys that would
- *  change how other session code treats it. */
+ *  thread belongs to, what started it (lib/personalAgentBadges.ts), and any
+ *  configured custom provider slug (`provider_slug`). The rest stays on the
+ *  runtime row — a row never inherits keys that would change how other session
+ *  code treats it. */
 const ROW_META_KEYS = [
   'source',
+  'provider_slug',
   'personal_agent',
   'personal_agent_name',
   'personal_agent_chat',
@@ -64,16 +65,20 @@ const ROW_META_KEYS = [
   'delegated_by_name',
 ] as const;
 
+const threadSessionRowCache = new WeakMap<RuntimeSession, Session>();
+
 /** A runtime session as the Threads sidebar's row shape (never sent to the
  *  PTY session routes — `meta.runtime` marks it). */
 export function asThreadSession(r: RuntimeSession): Session {
+  const cached = threadSessionRowCache.get(r);
+  if (cached) return cached;
   const kept: Record<string, unknown> = {};
   for (const k of ROW_META_KEYS) if (r.meta && r.meta[k] !== undefined) kept[k] = r.meta[k];
-  return {
+  const mapped: Session = {
     id: r.id,
     workspace_id: r.workspace_id,
     kind: 'agent',
-    provider: r.provider,
+    provider: sessionProviderSlug(r),
     title: r.title,
     // Background work the agent started keeps the row working between turns.
     status: r.status === 'working' || r.status === 'starting' || (r.status !== 'closed' && (r.background_tasks?.length ?? 0) > 0) ? 'working' : 'idle',
@@ -88,6 +93,8 @@ export function asThreadSession(r: RuntimeSession): Session {
     // the sidebar (the delegated-worker rule, `delegatedParentId`).
     meta: { ...kept, surface: 'threads', runtime: 'structured', ...(r.parent_id ? { parent_session_id: r.parent_id } : {}) },
   };
+  threadSessionRowCache.set(r, mapped);
+  return mapped;
 }
 
 /** A Threads row backed by a runtime session (see `asThreadSession`). */
@@ -105,8 +112,31 @@ class RuntimeThreads {
   unread = $state<Record<string, true>>({});
   /** Threads shown by an embed outside Threads (a turn ending there is seen). */
   private embedded = new Map<string, number>();
+  /** Original composer attachments keyed by `queued_id` so Edit preserves filenames even before server hydration. */
+  private queuedAttachments = new Map<string, { name: string; mime: string; data_base64: string }[]>();
+  private seqListeners = new Set<(id: string, seq: number | null | undefined) => void>();
   private liveRefs = 0;
   private stopLive: (() => void) | null = null;
+
+  onSequence(fn: (id: string, seq: number | null | undefined) => void): () => void {
+    this.seqListeners.add(fn);
+    return () => this.seqListeners.delete(fn);
+  }
+
+  private emitSequence(id: string, seq: number | null | undefined): void {
+    for (const fn of this.seqListeners) fn(id, seq);
+  }
+
+  isActiveOrWaiting(id: string): boolean {
+    const s = this.byId[id];
+    if (!s || s.status === 'closed') return false;
+    return (
+      s.status === 'working' ||
+      s.status === 'starting' ||
+      s.status === 'awaiting_permission' ||
+      (s.background_tasks?.length ?? 0) > 0
+    );
+  }
 
   get(id: string | null | undefined): RuntimeSession | null {
     return id ? (this.byId[id] ?? null) : null;
@@ -134,6 +164,7 @@ class RuntimeThreads {
       for (const r of rows) {
         next[r.id] = r;
         noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
+        this.emitSequence(r.id, r.last_sequence);
       }
       this.byId = next;
       delete this.loadErrors[workspaceId];
@@ -155,6 +186,7 @@ class RuntimeThreads {
     for (const r of rows) {
       next[r.id] = r;
       noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
+      this.emitSequence(r.id, r.last_sequence);
     }
     this.byId = next;
   }
@@ -165,6 +197,7 @@ class RuntimeThreads {
     const r = await api.get<RuntimeSession>(`/runtime-sessions/${id}`);
     this.byId[r.id] = r;
     noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
+    this.emitSequence(r.id, r.last_sequence);
     return r;
   }
 
@@ -218,6 +251,7 @@ class RuntimeThreads {
       .get<RuntimeSession>(`/runtime-sessions/${id}`)
       .then((r) => {
         this.byId[r.id] = r;
+        this.emitSequence(r.id, r.last_sequence);
       })
       .catch(() => {
         /* not ours to see (another user's thread) */
@@ -257,7 +291,7 @@ class RuntimeThreads {
   async start(
     workspaceId: string,
     req: {
-      provider: RuntimeProvider;
+      provider: RuntimeProviderOrSlug;
       cwd: string | null;
       title: string;
       /** `title` is a placeholder the agent's own name for it replaces. */
@@ -282,16 +316,23 @@ class RuntimeThreads {
       // rule terminal sessions follow), else Approval required.
     });
     this.byId[created.id] = created;
+    this.emitSequence(created.id, created.last_sequence);
     const pics = (req.attachments ?? []).filter((f) => f.mime.startsWith('image/'));
     const docs = (req.attachments ?? []).filter((f) => !f.mime.startsWith('image/'));
     if (req.prompt || pics.length || docs.length) {
-      await this.prompt(created.id, {
-        text: req.prompt,
-        ...(req.effort ? { effort: req.effort } : {}),
-        ...(req.plan ? { plan: true } : {}),
-        ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
-        ...(docs.length ? { files: docs.map((d) => ({ ...d })) } : {}),
-      });
+      await this.prompt(
+        created.id,
+        {
+          text: req.prompt,
+          ...(req.effort ? { effort: req.effort } : {}),
+          ...(req.plan ? { plan: true } : {}),
+          ...(pics.length
+            ? { images: pics.map(({ name, mime, data_base64 }) => ({ ...(name ? { name } : {}), mime, data_base64 })) }
+            : {}),
+          ...(docs.length ? { files: docs.map((d) => ({ ...d })) } : {}),
+        },
+        req.attachments,
+      );
     }
     return created;
   }
@@ -300,17 +341,50 @@ class RuntimeThreads {
    *  each sent `req.prompt`; all or none. Their rows land before this resolves. */
   async askChildren(parentId: string, req: AskChildReq): Promise<RuntimeSession[]> {
     const { children } = await api.post<AskChildResp>(`/runtime-sessions/${parentId}/children`, req);
-    for (const c of children) this.byId[c.id] = c;
+    for (const c of children) {
+      this.byId[c.id] = c;
+      this.emitSequence(c.id, c.last_sequence);
+    }
     return children;
   }
 
-  async prompt(id: string, req: RuntimePromptReq): Promise<RuntimePromptResp> {
+  async prompt(id: string, req: RuntimePromptReq, localAttachments?: readonly QueuedAttachment[]): Promise<RuntimePromptResp> {
     const resp = await api.post<RuntimePromptResp>(`/runtime-sessions/${id}/prompt`, req);
-    const mode = req.access_mode;
-    if (mode) {
-      // Sticky on the session (new threads start in the daemon default).
-      const row = this.byId[id];
-      if (row && row.access_mode !== mode) this.byId[id] = { ...row, access_mode: mode };
+    if (resp.queued_id) {
+      const cached: QueuedAttachment[] = localAttachments?.length
+        ? localAttachments.map((a) => ({ ...a }))
+        : [
+            ...(req.images ?? []).map((img, i) => ({
+              name: img.name?.trim() || ((req.images?.length ?? 0) > 1 ? `Screenshot ${i + 1}` : 'Screenshot'),
+              mime: img.mime,
+              data_base64: img.data_base64,
+            })),
+            ...(req.files ?? []).map((f) => ({ ...f })),
+          ];
+      if (cached.length > 0) {
+        if (this.queuedAttachments.size >= 64) {
+          const oldest = this.queuedAttachments.keys().next().value;
+          if (oldest) this.queuedAttachments.delete(oldest);
+        }
+        this.queuedAttachments.set(resp.queued_id, cached);
+      }
+    }
+    this.emitSequence(id, resp.sequence);
+    let row = this.byId[id];
+    if (row) {
+      let changed = false;
+      if (req.access_mode && row.access_mode !== req.access_mode) {
+        row = { ...row, access_mode: req.access_mode };
+        changed = true;
+      }
+      if (req.model !== undefined) {
+        const nextModel = req.model.trim() || undefined;
+        if (row.model !== nextModel) {
+          row = { ...row, model: nextModel };
+          changed = true;
+        }
+      }
+      if (changed) this.byId[id] = row;
     }
     return resp;
   }
@@ -343,6 +417,7 @@ class RuntimeThreads {
   async reopen(id: string): Promise<RuntimeSession> {
     const r = await api.post<RuntimeSession>(`/runtime-sessions/${id}/reopen`);
     this.byId[id] = r;
+    this.emitSequence(id, r.last_sequence);
     return r;
   }
 
@@ -356,13 +431,36 @@ class RuntimeThreads {
     this.byId = next;
   }
 
-  /** Drop a queued message. */
-  async unqueue(id: string, queuedId: string): Promise<void> {
-    await api.del(`/runtime-sessions/${id}/queue/${queuedId}`);
+  /** Drop a queued message and return its text + attachments so Edit can restore them. */
+  async unqueue(
+    id: string,
+    queuedId: string,
+  ): Promise<{ text?: string; attachments: { name: string; mime: string; data_base64: string }[] }> {
+    const cached = this.queuedAttachments.get(queuedId);
+    const resp = await api.del<UnqueuePromptResp | void>(`/runtime-sessions/${id}/queue/${queuedId}`);
+    this.queuedAttachments.delete(queuedId);
+    if (cached && cached.length > 0) {
+      return { text: resp && typeof resp === 'object' ? resp.text : undefined, attachments: cached };
+    }
+    if (resp && typeof resp === 'object') {
+      const imgs = resp.images ?? [];
+      const docs = resp.files ?? [];
+      const reconstructed = [
+        ...imgs.map((img, idx) => ({
+          name: img.name?.trim() || (imgs.length > 1 ? `Screenshot ${idx + 1}` : 'Screenshot'),
+          mime: img.mime,
+          data_base64: img.data_base64,
+        })),
+        ...docs.map((f) => ({ name: f.name || 'Attachment', mime: f.mime, data_base64: f.data_base64 })),
+      ];
+      return { text: resp.text, attachments: reconstructed };
+    }
+    return { attachments: [] };
   }
 
   /** Deliver a queued message now: steer it in, or stop the turn and send it. */
   async deliverQueued(id: string, queuedId: string, delivery: PromptDelivery): Promise<RuntimePromptResp> {
+    this.queuedAttachments.delete(queuedId);
     return api.post<RuntimePromptResp>(`/runtime-sessions/${id}/queue/${queuedId}`, { delivery });
   }
 }
@@ -378,7 +476,9 @@ export const runtimeThreads = new RuntimeThreads();
 uiControl.addSource({
   get: (id) => {
     const r = runtimeThreads.get(id);
-    return r ? { id: r.id, provider: r.provider, title: r.title, meta: r.ui_control ? { ui_control: r.ui_control } : {} } : null;
+    return r
+      ? { id: r.id, provider: sessionProviderSlug(r), title: r.title, meta: r.ui_control ? { ui_control: r.ui_control } : {} }
+      : null;
   },
   patch: (id, grant) => {
     const r = runtimeThreads.byId[id];

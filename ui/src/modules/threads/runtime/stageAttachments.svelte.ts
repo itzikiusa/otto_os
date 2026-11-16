@@ -1,7 +1,8 @@
 // Images / PDFs on the new-thread stage: they ride a structured runtime
 // thread's first message. A harness switch hides what the new one can't take.
+import { toasts } from '../../../lib/toast.svelte';
 import { attachmentSupport, takesFile, type TakesCaps } from './attachmentSupport';
-import { readAttachments, type ComposerFile } from './runtimeComposer';
+import { MAX_DRAFT_IMAGES, readAttachments, type ComposerFile } from './runtimeComposer';
 
 export class StageAttachments {
   picked = $state<ComposerFile[]>([]);
@@ -21,7 +22,14 @@ export class StageAttachments {
   }
   async add(files: File[]): Promise<void> {
     const read = await readAttachments(files, (f) => takesFile(this.caps(), f));
-    this.picked = [...this.picked, ...read];
+    if (read.length === 0) return;
+    const combined = [...this.picked, ...read];
+    if (combined.length > MAX_DRAFT_IMAGES) {
+      toasts.error('Too many attachments', `At most ${MAX_DRAFT_IMAGES} images or PDFs per message.`);
+      this.picked = combined.slice(0, MAX_DRAFT_IMAGES);
+      return;
+    }
+    this.picked = combined;
   }
   paste(e: ClipboardEvent): void {
     const files = this.can.images ? [...(e.clipboardData?.files ?? [])].filter((f) => takesFile(this.caps(), f)) : [];

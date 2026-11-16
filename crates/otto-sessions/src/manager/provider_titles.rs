@@ -45,7 +45,8 @@ impl SessionManager {
         for session in sessions {
             // Live only (the doc's contract): the id list was live when read,
             // but a session can exit while an earlier one is probed.
-            if !title_eligible(&session) || !self.is_live(&session.id) {
+            let family = self.cli_family(&session.provider);
+            if !title_eligible_with_family(&session, &family) || !self.is_live(&session.id) {
                 continue;
             }
             match self.probe_and_apply_title(&session).await {
@@ -85,7 +86,7 @@ impl SessionManager {
                 return Ok(false);
             }
         }
-        let provider = s.provider.clone();
+        let provider = self.cli_family(&s.provider);
         let path_owned = path.clone();
         let read = tokio::task::spawn_blocking(move || read_provider_title(&provider, &path_owned))
             .await

@@ -24,7 +24,7 @@
   import { toastError } from '../../../lib/toastError';
   import { announce } from '../../../lib/announce.svelte';
   import { toasts } from '../../../lib/toast.svelte';
-  import { detectBlockDirection } from '../../../lib/textDirection';
+  import { composerViewState } from '../../../lib/stores/runtimeDraftCursor';
   import type { SessionStatus, SlashCommand } from '../../../lib/api/types';
   import { fetchSlashCommands, submitPrompt } from './api';
   import type { ToolCallBlock } from './format';
@@ -106,7 +106,6 @@
 
   const ownerId = untrack(() => sessionId);
   const text = $derived(transcript.draft(ownerId));
-  const draftDir = $derived(detectBlockDirection(text));
   const workspaceRoot = $derived(cwd || ws.current?.root_path || '');
   const sending = $derived(transcript.sending(ownerId));
   const uploading = $derived(pendingUploads.get(ownerId) ?? 0);
@@ -115,16 +114,26 @@
   let ta = $state<HTMLTextAreaElement | null>(null);
   let footerRef = $state<ReturnType<typeof ComposerFooter> | null>(null);
   let customReplyHint = $state(false);
-  let configBusy = $state(false);
+  let cfgPending = $state(0);
+  const configBusy = $derived(cfgPending > 0);
+  let cfgQueue: Promise<void> = Promise.resolve();
   let showStatusCard = $state(false);
 
   const sessionObj = $derived(ws.getSession(sessionId));
   const threadCfg = $derived(resolveSessionThreadConfig(sessionObj, model));
 
-  async function runCfg(fn: () => Promise<void>): Promise<void> {
-    if (configBusy) return;
-    configBusy = true;
-    try { await fn(); } finally { configBusy = false; restoreComposerFocus(); }
+  function runCfg(fn: () => Promise<void>): Promise<void> {
+    cfgPending += 1;
+    const run = async (): Promise<void> => {
+      try {
+        await fn();
+      } finally {
+        cfgPending = Math.max(0, cfgPending - 1);
+        if (cfgPending === 0) restoreComposerFocus();
+      }
+    };
+    cfgQueue = cfgQueue.then(run, run);
+    return cfgQueue;
   }
   const applyModelChange = (m: string | null) => runCfg(() => patchComposerModel(ownerId, provider, m));
   const applyEffortChange = (eff: EffortLevel | null) => runCfg(() => patchComposerEffort(ownerId, eff));
@@ -566,6 +575,7 @@
         <textarea
           bind:this={ta}
           bind:value={() => text, (value) => transcript.setDraft(ownerId, value)}
+          use:composerViewState={{ key: `pty:${ownerId}`, hasText: text.length > 0 }}
           rows="1"
           placeholder={placeholderText}
           aria-label="Message {agentName}"
@@ -573,7 +583,7 @@
           {...{ autocorrect: 'off' }}
           autocapitalize="off"
           autocomplete="off"
-          dir={draftDir}
+          dir="auto"
           oninput={syncCaret}
           onclick={syncCaret}
           onkeyup={syncCaret}

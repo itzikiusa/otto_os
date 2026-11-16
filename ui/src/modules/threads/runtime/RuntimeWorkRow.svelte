@@ -20,14 +20,18 @@
   import RuntimeChildNotice from './RuntimeChildNotice.svelte';
   import { threadNoticeOf } from './childThreads';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   const RuntimeToolImages = lazyComponent(() => import('./RuntimeToolImages.svelte'));
   import { errorText, openedTarget, runNoticeOf, toolError, type PendingApproval } from './timeline';
-  import { exitText, itemDuration, relativeToCwd, rowLabel } from './workLog';
+  import { exitText, formatDuration, itemDuration, relativeToCwd, rowLabel } from './workLog';
+  import { now } from '../../../lib/stores/now.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { threads } from '../threadsStore.svelte';
+  import { runtimeViews } from './runtimeView.svelte';
 
   interface Props {
+    sessionId?: string;
     item: TurnItem;
     /** Live `command_output.delta` text (command items). */
     output?: string;
@@ -43,7 +47,7 @@
     /** Opened from the start (Agents & tasks' drill-in). */
     startOpen?: boolean;
   }
-  let { item, output = '', pending, note = null, onrespond, agentId = null, cwd = null, startOpen = false }: Props = $props();
+  let { sessionId = '', item, output = '', pending, note = null, onrespond, agentId = null, cwd = null, startOpen = false }: Props = $props();
   const runNotice = $derived(item.type === 'system_notice' ? runNoticeOf(item.message) : null);
   /** Threads opened from this one: their live cards / "finished" line. */
   const childNotice = $derived(item.type === 'system_notice' ? threadNoticeOf(item.message) : null);
@@ -68,10 +72,54 @@
   const failed = $derived(item.status === 'failed' || item.type === 'error');
   const stopped = $derived(item.status === 'cancelled' || item.status === 'interrupted');
   const label = $derived(rowLabel(item, cwd));
-  const took = $derived(itemDuration(item));
+  const liveReasoningElapsed = $derived.by(() => {
+    if (!running || item.type !== 'reasoning' || !item.started_at) return null;
+    const startMs = Date.parse(item.started_at);
+    if (!Number.isFinite(startMs)) return null;
+    const elapsed = Math.max(0, now() - startMs);
+    return elapsed >= 1000 ? formatDuration(elapsed) : null;
+  });
+  const took = $derived(itemDuration(item) ?? liveReasoningElapsed);
+  function hasAtLeastNewlines(raw: string, minCount: number): boolean {
+    let found = 0;
+    for (let i = 0; i < raw.length; i++) {
+      if (raw.charCodeAt(i) === 10 && ++found >= minCount) return true;
+    }
+    return false;
+  }
+
+  function previewReasoningText(raw: string): string {
+    const MAX_CHARS = 520;
+    const MAX_LINES = 6;
+    let lines = 0;
+    let cut = raw.length;
+    for (let i = 0; i < raw.length; i++) {
+      if (i >= MAX_CHARS) {
+        cut = i;
+        break;
+      }
+      if (raw.charCodeAt(i) === 10 && ++lines >= MAX_LINES) {
+        cut = i;
+        break;
+      }
+    }
+    if (cut >= raw.length) return raw;
+    let slice = raw.slice(0, cut);
+    const fenceMatches = slice.match(/^(?:```|~~~)/gm);
+    if (fenceMatches && fenceMatches.length % 2 === 1) {
+      slice += `\n${fenceMatches[fenceMatches.length - 1]}`;
+    }
+    return slice;
+  }
+
   /** Thinking reads inline (T3): its text under a quiet line, clamped until opened. */
   const thinking = $derived(item.type === 'reasoning' && !!item.text);
-  const longThought = $derived(item.type === 'reasoning' && (item.text.length > 240 || item.text.split('\n').length > 3));
+  const longThought = $derived(
+    item.type === 'reasoning' && (Boolean(item.detail_omitted) || item.text.length > 240 || hasAtLeastNewlines(item.text, 3)),
+  );
+  const thinkingMd = $derived(
+    item.type !== 'reasoning' ? '' : open || !longThought ? item.text : previewReasoningText(item.text),
+  );
   /** The thread / session this call opened or spoke to — a one-click link. */
   const target = $derived(running ? null : openedTarget(item));
   function goTarget(e: MouseEvent): void {
@@ -85,8 +133,13 @@
   });
   const commandOut = $derived(item.type === 'command_execution' ? (item.output ?? output) : '');
   const tail = $derived(running && commandOut ? lastLine(commandOut) : '');
+  const detailLoading = $derived(Boolean(item.detail_omitted && sessionId && runtimeViews.loadingItem[`${sessionId}:${item.id}`]));
+  const itemDetailError = $derived(sessionId ? (runtimeViews.itemError[`${sessionId}:${item.id}`] ?? null) : null);
+  const hasFilePatch = $derived(
+    item.type === 'file_change' && Boolean(item.detail_omitted || item.diff_str || item.old_str != null || item.new_str != null),
+  );
   const patch = $derived.by(() => {
-    if (item.type !== 'file_change') return null;
+    if (!open || item.type !== 'file_change') return null;
     if (item.diff_str) return item.diff_str;
     if (item.old_str == null && item.new_str == null) return null;
     const oldL = (item.old_str ?? '').split('\n');
@@ -102,13 +155,19 @@
       : item.type === 'command_execution' || item.type === 'dynamic_tool' || item.type === 'todo_list'
         ? true
         : item.type === 'file_change'
-          ? patch !== null
+          ? hasFilePatch
           : item.type === 'web_search'
             ? (item.patterns?.length ?? 0) > 0
             : item.type === 'approval_request'
               ? !!item.reason
               : false,
   );
+
+  $effect(() => {
+    if (open && item.detail_omitted && sessionId) {
+      void runtimeViews.ensureItemDetail(sessionId, item.id);
+    }
+  });
 
   // Pin the output to its bottom while the reader follows it.
   $effect(() => {
@@ -145,7 +204,7 @@
   {/if}
   {#if thinking && item.type === 'reasoning'}
     <!-- Clamped to three lines until "More" (a long thought). -->
-    <div class="rw-think" class:all={open || !longThought}><Markdown md={item.text} small /></div>
+    <div class="rw-think" class:all={open || !longThought}><Markdown md={thinkingMd} small streaming={running} /></div>
     {#if longThought}
       <button type="button" class="rw-more" aria-expanded={open} onclick={() => (open = !open)}>{open ? 'Less' : 'More'}</button>
     {/if}
@@ -185,7 +244,20 @@
       {#if error}
         <pre class="rw-pre rw-failure" data-testid="runtime-item-error">{error}</pre>
       {/if}
-      {#if item.type === 'command_execution'}
+      {#if item.detail_omitted}
+        {#if itemDetailError && sessionId}
+          <LoadState
+            variant="compact"
+            what="item details"
+            loading={detailLoading}
+            error={itemDetailError}
+            empty
+            onretry={() => void runtimeViews.ensureItemDetail(sessionId, item.id)}
+          />
+        {:else}
+          <p class="rw-tail" data-testid="runtime-item-loading">{detailLoading ? 'Loading details…' : 'Details unavailable.'}</p>
+        {/if}
+      {:else if item.type === 'command_execution'}
         <pre class="rw-pre" bind:this={outEl} onscroll={onOutScroll}><span class="rw-cmd">$ {item.input}</span>
 {commandOut || (running ? '' : 'No output.')}</pre>
         {#if item.exit_code != null && item.exit_code !== 0}

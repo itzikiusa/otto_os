@@ -12,6 +12,7 @@
 import { api } from './client';
 import { plural } from '../plural';
 import type {
+  BlameResp,
   CheckoutReq,
   PrDetail,
   PrListResp,
@@ -22,6 +23,7 @@ import type {
   PushReq,
   PushTarget,
   RefsResp,
+  RepoFileAtRevResp,
   RepoStatusResp,
 } from './types';
 
@@ -76,7 +78,28 @@ export function pullReport(r: PullResp): { tone: 'warn' | 'success'; title: stri
 }
 
 export const gitApi = {
-  status: (repoId: string): Promise<RepoStatusResp> => api.get<RepoStatusResp>(`${repo(repoId)}/status`),
+  status: (repoId: string, opts?: { fresh?: boolean }): Promise<RepoStatusResp> =>
+    api.get<RepoStatusResp>(`${repo(repoId)}/status${opts?.fresh ? '?fresh=true' : ''}`),
+  fileAtRev: (
+    repoId: string,
+    path: string,
+    rev = 'HEAD',
+    signal?: AbortSignal,
+  ): Promise<RepoFileAtRevResp> =>
+    api.get<RepoFileAtRevResp>(
+      `${repo(repoId)}/file?path=${encodeURIComponent(path)}&rev=${encodeURIComponent(rev)}`,
+      signal,
+    ),
+  blame: (
+    repoId: string,
+    path: string,
+    rev?: string,
+    opts?: { signal?: AbortSignal; background?: boolean },
+  ): Promise<BlameResp> =>
+    (opts?.background ? api.bg : api).get<BlameResp>(
+      `${repo(repoId)}/blame?path=${encodeURIComponent(path)}${rev ? `&rev=${encodeURIComponent(rev)}` : ''}`,
+      opts?.signal,
+    ),
   refs: (repoId: string): Promise<RefsResp> => api.get<RefsResp>(`${repo(repoId)}/refs`),
   /** The one `/refs` loader with one error policy: never throws, a failure
    *  comes back as `error` (the raw cause — show it via `loadErrorText`), and

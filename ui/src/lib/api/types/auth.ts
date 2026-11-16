@@ -163,6 +163,8 @@ export interface MetaResp {
   /** Per runtime provider: what a new thread's agent takes before its
    *  session reports its own (`RuntimeSession.capabilities`). */
   runtime_capabilities?: Record<string, RuntimeCapabilities>;
+  /** Canonical CLI family per provider slug (e.g. `{ claudework: "claude" }`). */
+  provider_families?: Record<string, string>;
   /** Second LOOPBACK base for the same daemon (`http://localhost:<port>`; the
    *  daemon holds both 127.0.0.1 and [::1]) — a separate browser socket pool
    *  for background/slow calls. `null`/absent → single-host transport. */

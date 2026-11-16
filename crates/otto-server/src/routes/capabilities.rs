@@ -194,10 +194,21 @@ async fn cap_sessions(ctx: &ServerCtx) -> ModuleCapability {
     }
 
     for name in &names {
-        let binary = ctx.manager.providers().program_for(name);
-        let binary = binary.as_deref().unwrap_or(name.as_str());
-        let found = which_async(binary).await;
-        let path = which_sync(binary).map(|p| p.to_string());
+        let raw_cmd = ctx.manager.providers().program_for(name);
+        let raw_cmd = raw_cmd.as_deref().unwrap_or(name.as_str());
+        let binary = otto_sessions::tool_probe::extract_custom_cmd_executable(raw_cmd)
+            .unwrap_or_else(|| raw_cmd.to_string());
+        let mut found = which_async(&binary).await;
+        if !found {
+            let cmd_owned = raw_cmd.to_string();
+            found = tokio::task::spawn_blocking(move || {
+                otto_sessions::tool_probe::command_resolves_fast(&cmd_owned)
+            })
+            .await
+            .unwrap_or(false);
+        }
+        let path = which_sync(&binary)
+            .or_else(|| (found && std::path::Path::new(&binary).is_file()).then(|| binary.clone()));
         if !found {
             reasons.push(format!("Agent CLI '{name}' ({binary}) not found on PATH."));
             fixes.push(format!(
@@ -227,9 +238,11 @@ async fn cap_sessions(ctx: &ServerCtx) -> ModuleCapability {
     }
 }
 
-/// **LSP language servers** — sync PATH check only (no subprocess).
-fn cap_lsp() -> ModuleCapability {
-    let resolved = crate::lsp::servers::detect_all();
+/// **LSP language servers** — cached PATH check offloaded via `spawn_blocking`.
+async fn cap_lsp() -> ModuleCapability {
+    let resolved = tokio::task::spawn_blocking(crate::lsp::servers::detect_all)
+        .await
+        .unwrap_or_default();
     let mut reasons = Vec::new();
     let mut fixes = Vec::new();
     let mut deps: Vec<CapabilityDep> = Vec::new();
@@ -593,7 +606,7 @@ async fn build_capabilities(ctx: &ServerCtx) -> Vec<ModuleCapability> {
     // ctx across a `join!` macro boundary (ctx is &, not Arc inside the fut).
     // Sub-ms for config-presence checks; no live TCP probes.
     let sessions = cap_sessions(ctx).await;
-    let lsp = cap_lsp();
+    let lsp = cap_lsp().await;
     let mcp = cap_mcp(ctx).await;
     let channels = cap_channels(ctx).await;
     let git = cap_git(ctx).await;

@@ -33,13 +33,15 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use otto_core::agent_runtime::{BackgroundTask, TurnItem, TurnItemKind, TurnItemStatus};
+use otto_core::agent_runtime::{
+    BackgroundTask, TaskSettlement, TurnItem, TurnItemKind, TurnItemStatus,
+};
 use serde_json::Value;
 
 use super::{classify, ClaudeDriver, Tool, ToolType};
 use crate::driver::{item, tool_error, DriverEvent, DriverStep};
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct Task {
     kind: String,
     label: String,
@@ -49,7 +51,7 @@ pub(super) struct Task {
     background: bool,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct Agent {
     item_id: String,
     turn_id: String,
@@ -63,10 +65,14 @@ pub(super) struct Agent {
     last_tool: Option<String>,
     tool_uses: u32,
     status: TurnItemStatus,
+    #[serde(default = "Utc::now")]
+    started_at: DateTime<Utc>,
+    #[serde(default)]
+    completed_at: Option<DateTime<Utc>>,
 }
 
 /// A subagent's own tool call.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct SubTool {
     tool: Tool,
     parent: String,
@@ -127,6 +133,7 @@ impl ClaudeDriver {
                 label: t.label.clone(),
                 started_at: t.started_at,
                 item_id: t.item_id.clone(),
+                due_at: None,
             })
             .collect();
         v.sort_by(|a, b| a.started_at.cmp(&b.started_at).then(a.id.cmp(&b.id)));
@@ -163,6 +170,12 @@ impl ClaudeDriver {
             },
         );
         it.turn_id = Some(a.turn_id.clone());
+        it.started_at = Some(a.started_at);
+        it.completed_at = if a.status.is_open() {
+            None
+        } else {
+            Some(a.completed_at.unwrap_or_else(Utc::now))
+        };
         it.error = a.error.clone();
         it
     }
@@ -194,6 +207,8 @@ impl ClaudeDriver {
             last_tool: None,
             tool_uses: 0,
             status: TurnItemStatus::Running,
+            started_at: Utc::now(),
+            completed_at: None,
         };
         step.push(DriverEvent::TurnItem(Self::agent_item(&a)));
         self.agents.insert(id.to_string(), a);
@@ -250,6 +265,7 @@ impl ClaudeDriver {
             } else {
                 TurnItemStatus::Completed
             });
+            a.completed_at = Some(Utc::now());
             a.output = Some(text.to_string()).filter(|t| !t.trim().is_empty());
             a.error = (a.status == TurnItemStatus::Failed)
                 .then(|| tool_error(text))
@@ -445,6 +461,7 @@ impl ClaudeDriver {
             if let Some(a) = self.agents.get_mut(id) {
                 if a.status.is_open() {
                     a.status = item_status;
+                    a.completed_at = Some(Utc::now());
                     if a.output.is_none() {
                         a.output = summary.clone();
                     }
@@ -458,15 +475,15 @@ impl ClaudeDriver {
             self.bg_inputs.remove(id);
         }
         if let Some(t) = task.filter(|t| t.background) {
-            let what = if t.kind == "agent" {
-                "Background agent"
+            let (what, noun) = if t.kind == "agent" {
+                ("Background agent", "agent")
             } else {
-                "Background command"
+                ("Background command", "command")
             };
-            let verb = match item_status {
-                TurnItemStatus::Completed => "finished",
-                TurnItemStatus::Failed => "failed",
-                _ => "stopped",
+            let (verb, settlement_status) = match item_status {
+                TurnItemStatus::Completed => ("finished", "completed"),
+                TurnItemStatus::Failed => ("failed", "failed"),
+                _ => ("stopped", "stopped"),
             };
             let mut notice = item(
                 format!("bg:{task_id}"),
@@ -474,6 +491,12 @@ impl ClaudeDriver {
                 None,
                 TurnItemKind::SystemNotice {
                     message: format!("{what} {verb}: {}", t.label),
+                    task_settlement: Some(TaskSettlement {
+                        task_id: task_id.to_string(),
+                        kind: noun.to_string(),
+                        status: settlement_status.to_string(),
+                        label: t.label,
+                    }),
                 },
             );
             // Placed with the turn that is running, if any (the runtime fills it).

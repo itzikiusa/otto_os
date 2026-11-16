@@ -3899,6 +3899,7 @@ dependencies = [
  "otto-pty",
  "otto-sessions",
  "otto-state",
+ "otto-telemetry",
  "otto-usage",
  "serde",
  "serde_json",
@@ -4329,6 +4330,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-ide"
+version = "0.2.2"
+dependencies = [
+ "axum",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "dirs",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "ignore",
+ "otto-core",
+ "otto-git-cmd",
+ "otto-netguard",
+ "otto-rbac",
+ "otto-ssh",
+ "otto-state",
+ "otto-telemetry",
+ "rand 0.10.3",
+ "regex",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "shell-words",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "otto-improve"
 version = "0.2.2"
 dependencies = [
@@ -4647,6 +4684,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dirs",
+ "flate2",
  "futures-util",
  "hex",
  "http-body-util",
@@ -4668,6 +4706,7 @@ dependencies = [
  "otto-design",
  "otto-design-assist",
  "otto-git",
+ "otto-ide",
  "otto-improve",
  "otto-insights",
  "otto-issues",
@@ -4914,6 +4953,7 @@ dependencies = [
  "axum",
  "axum-server",
  "dirs",
+ "otto-agent-protocol",
  "otto-core",
  "otto-keychain",
  "otto-mcp",

@@ -7,6 +7,7 @@
   import { ensureHljs } from '../../../lib/hl';
   import { createMdCache } from './mdCache';
   import { renderChatMarkdown } from './chatMarkdown';
+  import { splitStreamingMarkdown } from './streamingMd';
 
   // Shared across every mounted block: a re-derived block with an unchanged
   // string is a Map lookup, not marked + hljs + DOMParser (mdCache.ts).
@@ -50,8 +51,10 @@
     md: string;
     /** Compact variant for tool-result text / notes. */
     small?: boolean;
+    /** Active streaming turn: cache completed paragraphs/fences without polluting `mdCache` on tail deltas. */
+    streaming?: boolean;
   }
-  let { md, small = false }: Props = $props();
+  let { md, small = false, streaming = false }: Props = $props();
   const ctx = getContext<ConvContext | undefined>(CONV_CTX);
   // File references resolve against the session's folders (lib/pathLinks): the
   // conversation view's session, or the Threads runtime thread hosting us.
@@ -77,8 +80,15 @@
   }
   const html = $derived.by(() => {
     const fenced = FENCE.test(md);
+    const cacheable = !fenced || hlReady;
+    if (streaming) {
+      const { settled, tail } = splitStreamingMarkdown(md);
+      const settledHtml = settled ? cache.get(settled, cacheable) : '';
+      const tailHtml = tail ? renderChatMarkdown(tail) : '';
+      return settledHtml + tailHtml;
+    }
     // Read hlReady only when it matters, so fence-free blocks never re-render.
-    return cache.get(md, !fenced || hlReady);
+    return cache.get(md, cacheable);
   });
 
   // Mermaid / D2 fences render as diagrams (lazy libs, like the vault's reading

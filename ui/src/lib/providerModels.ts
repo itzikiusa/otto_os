@@ -1,6 +1,12 @@
 // Provider model catalogs, reasoning-effort levels, and interaction modes
 // shared between NewThreadStage and the live thread Composer.
 import type { MetaResp, ProviderModelOption, Session } from './api/types';
+import {
+  inferProviderFamily,
+  KNOWN_AGENT_FAMILIES,
+  sessionProviderSlug,
+  type ProviderFamilyMeta,
+} from './providerRegistry.ts';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export type InteractionMode = 'full' | 'accept-edits' | 'plan';
@@ -77,57 +83,285 @@ export const FALLBACK_PROVIDER_MODELS: Record<string, ProviderModelOption[]> = {
   ],
   agy: [
     {
-      id: 'gemini-4-argon-high',
-      label: 'Gemini 4 Argon (High)',
-      description: 'High-reasoning Gemini model',
-      default_effort: 'high',
-      supported_efforts: [...STANDARD_EFFORTS],
-    },
-    {
-      id: 'gemini-4-argon-medium',
-      label: 'Gemini 4 Argon (Medium)',
-      description: 'Balanced Gemini model',
+      id: 'gemini-4-carbon',
+      label: 'Gemini 4 Carbon',
+      description: 'Balanced flagship Gemini model',
       default_effort: 'medium',
-      supported_efforts: [...STANDARD_EFFORTS],
+      supported_efforts: ['low', 'medium', 'high'],
     },
     {
-      id: 'claude-opus-5-5-high',
-      label: 'Claude Opus 5.5 (High)',
-      description: 'Anthropic Opus via Antigravity',
+      id: 'gemini-4-argon',
+      label: 'Gemini 4 Argon',
+      description: 'High-capability Gemini reasoning model',
+      default_effort: 'medium',
+      supported_efforts: ['low', 'medium', 'high'],
+    },
+    {
+      id: 'gemini-4-hydrogen',
+      label: 'Gemini 4 Hydrogen',
+      description: 'Deep-reasoning Gemini model',
       default_effort: 'high',
-      supported_efforts: [...STANDARD_EFFORTS],
+      supported_efforts: ['low', 'medium', 'high', 'xhigh'],
+    },
+    {
+      id: 'gemini-pro-orchestrator',
+      label: 'Orchestrator (Carbon)',
+      description: 'Multi-agent orchestrator on Gemini Carbon',
+      default_effort: null,
+      supported_efforts: [],
+    },
+    {
+      id: 'gemini-pro-orchestrator-argon',
+      label: 'Orchestrator (Argon)',
+      description: 'Multi-agent orchestrator on Gemini Argon',
+      default_effort: null,
+      supported_efforts: [],
+    },
+    {
+      id: 'gemini-3.8-flash',
+      label: 'Gemini 3.8 Flash',
+      description: 'Fast low-latency Gemini model',
+      default_effort: 'medium',
+      supported_efforts: ['low', 'medium', 'high'],
+    },
+    {
+      id: 'claude-opus-5-5',
+      label: 'Claude Opus 5.5',
+      description: 'Anthropic Opus via Antigravity',
+      default_effort: 'medium',
+      supported_efforts: ['low', 'medium', 'high'],
+    },
+    {
+      id: 'claude-sonnet-5-5',
+      label: 'Claude Sonnet 5.5',
+      description: 'Anthropic Sonnet via Antigravity',
+      default_effort: 'medium',
+      supported_efforts: ['low', 'medium', 'high'],
+    },
+    {
+      id: 'gpt-oss-120b-medium',
+      label: 'GPT-OSS 120B',
+      description: 'Open-weights 120B model via Antigravity',
+      default_effort: 'medium',
+      supported_efforts: ['medium'],
+    },
+  ],
+  gemini: [
+    {
+      id: 'gemini-2.5-pro',
+      label: 'Gemini 2.5 Pro',
+      description: 'Google Gemini flagship coding and reasoning model',
+      default_effort: 'medium',
+      supported_efforts: ['low', 'medium', 'high'],
+    },
+    {
+      id: 'gemini-2.5-flash',
+      label: 'Gemini 2.5 Flash',
+      description: 'Fast low-latency Gemini model',
+      default_effort: 'low',
+      supported_efforts: ['low', 'medium', 'high'],
     },
   ],
 };
 
 const VALID_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+const EFFORT_ORDER: readonly EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const ID_TIER_RE = /^(.+)-(minimal|low|medium|high|xhigh|max|ultra)$/;
+const LABEL_TIER_RE = /^(.*?)\s*\((minimal|low|medium|high|xhigh|x-high|extra high|extra|max|ultra)\)\s*$/i;
+const unifiedCatalogMemo = new WeakMap<readonly ProviderModelOption[], Map<string, ProviderModelOption[]>>();
+
+export function providerFamily(
+  provider: string,
+  meta?: ProviderFamilyMeta | null,
+): string {
+  return inferProviderFamily(provider, meta);
+}
+
+function mapRawTier(raw: string): EffortLevel {
+  const v = raw.trim().toLowerCase();
+  if (v === 'minimal') return 'low';
+  if (v === 'x-high' || v === 'extra high' || v === 'extra') return 'xhigh';
+  return (VALID_EFFORTS.has(v) ? v : 'medium') as EffortLevel;
+}
+
+export function stripEmbeddedEffortTier(
+  provider: string,
+  id: string,
+  label = id,
+): { baseId: string; cleanLabel: string; effort: EffortLevel } | null {
+  if (providerFamily(provider) !== 'agy') return null;
+  const idMatch = ID_TIER_RE.exec(id);
+  if (!idMatch) return null;
+  const baseId = idMatch[1];
+  const effort = mapRawTier(idMatch[2]);
+  if (label === id) {
+    return { baseId, cleanLabel: baseId, effort };
+  }
+  const labelMatch = LABEL_TIER_RE.exec(label);
+  if (!labelMatch) return null;
+  const cleanLabel = labelMatch[1].trim();
+  if (!cleanLabel) return null;
+  return { baseId, cleanLabel, effort };
+}
+
+/** Collapse tier-suffixed `agy` model rows (`gemini-4-carbon-{low,medium,high}`)
+ *  into one unified family row with exact `supported_efforts`, matching the
+ *  daemon's parser even when `/meta` holds an older cached list. Non-`agy`
+ *  providers return their catalog untouched so custom `-low`/`-high`/`-max`
+ *  model IDs are never rewritten. */
+export function unifyModelCatalog(
+  provider: string,
+  list: readonly ProviderModelOption[],
+  meta?: Pick<MetaResp, 'provider_models'> | null,
+): ProviderModelOption[] {
+  const fam = providerFamily(provider, meta);
+  let byProvider = unifiedCatalogMemo.get(list);
+  const cached = byProvider?.get(fam);
+  if (cached) return cached;
+
+  let result: ProviderModelOption[];
+  if (fam !== 'agy') {
+    result = [...list];
+  } else {
+    type Group = {
+      kind: 'family';
+      baseId: string;
+      firstFullId: string;
+      label: string;
+      description: string;
+      firstEffort: EffortLevel;
+      efforts: EffortLevel[];
+    };
+    const out: Array<{ kind: 'plain'; opt: ProviderModelOption } | Group> = [];
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
+      const split = stripEmbeddedEffortTier(fam, item.id, item.label);
+      if (!split) {
+        out.push({ kind: 'plain', opt: item });
+        continue;
+      }
+      const existing = out.find(
+        (g): g is Group => g.kind === 'family' && g.baseId === split.baseId,
+      );
+      if (existing) {
+        if (!existing.efforts.includes(split.effort)) existing.efforts.push(split.effort);
+      } else {
+        out.push({
+          kind: 'family',
+          baseId: split.baseId,
+          firstFullId: item.id,
+          label: split.cleanLabel,
+          description: item.description,
+          firstEffort: split.effort,
+          efforts: [split.effort],
+        });
+      }
+    }
+    result = out.map((entry) => {
+      if (entry.kind === 'plain') return entry.opt;
+      const sorted = [...entry.efforts].sort(
+        (a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b),
+      );
+      const defaultEffort =
+        entry.firstEffort !== 'low'
+          ? entry.firstEffort
+          : sorted.includes('medium')
+            ? 'medium'
+            : entry.firstEffort;
+      return {
+        id: sorted.length >= 2 ? entry.baseId : entry.firstFullId,
+        label: entry.label,
+        description: entry.description,
+        default_effort: defaultEffort,
+        supported_efforts: sorted,
+      };
+    });
+  }
+
+  if (!byProvider) {
+    byProvider = new Map();
+    unifiedCatalogMemo.set(list, byProvider);
+  }
+  byProvider.set(fam, result);
+  return result;
+}
 
 export function supportsModelSelection(
   provider: string,
-  meta?: Pick<MetaResp, 'model_flags'> | null,
+  meta?: (ProviderFamilyMeta & Partial<Pick<MetaResp, 'model_flags'>>) | null,
 ): boolean {
   if (!provider || provider === 'shell') return false;
   if (meta?.model_flags && provider in meta.model_flags) {
     return meta.model_flags[provider] === true;
   }
-  return provider === 'claude' || provider === 'codex' || provider === 'agy';
+  const fam = providerFamily(provider, meta);
+  return (KNOWN_AGENT_FAMILIES as readonly string[]).includes(fam);
 }
 
-export function supportsEffortSelection(provider: string): boolean {
-  return provider === 'claude' || provider === 'codex' || provider === 'agy';
+export function supportsEffortSelection(
+  provider: string,
+  meta?: ProviderFamilyMeta | null,
+): boolean {
+  const fam = providerFamily(provider, meta);
+  if (fam === 'claude' || fam === 'codex' || fam === 'agy' || fam === 'pi') {
+    return true;
+  }
+  return Boolean(
+    meta?.provider_models?.[provider]?.some((m) => (m.supported_efforts?.length ?? 0) > 0),
+  );
 }
 
-export function supportsInteractionMode(provider: string): boolean {
-  return provider === 'claude' || provider === 'codex' || provider === 'agy';
+export function supportsInteractionMode(
+  provider: string,
+  meta?: ProviderFamilyMeta | null,
+): boolean {
+  const fam = providerFamily(provider, meta);
+  return fam === 'claude' || fam === 'codex' || fam === 'agy';
 }
 
 export function modelsForProvider(
   provider: string,
-  meta?: Pick<MetaResp, 'provider_models'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): ProviderModelOption[] {
   const live = meta?.provider_models?.[provider];
-  if (live && live.length > 0) return live;
-  return FALLBACK_PROVIDER_MODELS[provider] ?? [];
+  if (live && live.length > 0) return unifyModelCatalog(provider, live, meta);
+  const fam = providerFamily(provider, meta);
+  return FALLBACK_PROVIDER_MODELS[provider] ?? FALLBACK_PROVIDER_MODELS[fam] ?? [];
+}
+
+/** Resolve a saved or legacy `agy` tier-suffixed model ID (`gemini-4-carbon-high`)
+ *  to its unified catalog entry ID (`gemini-4-carbon`) when that family exists. */
+export function canonicalModelId(
+  provider: string,
+  modelId: string | null | undefined,
+  meta?: ProviderFamilyMeta | null,
+): string | null {
+  const trimmed = (modelId ?? '').trim();
+  if (!trimmed) return null;
+  const catalog = modelsForProvider(provider, meta);
+  if (catalog.some((m) => m.id === trimmed)) return trimmed;
+  if (providerFamily(provider, meta) === 'agy') {
+    const m = ID_TIER_RE.exec(trimmed);
+    if (m && catalog.some((x) => x.id === m[1])) return m[1];
+  }
+  return trimmed;
+}
+
+export function canonicalizeModelSelection(
+  provider: string,
+  modelId: string | null | undefined,
+  effort: EffortLevel | null = null,
+  meta?: ProviderFamilyMeta | null,
+): { model: string | null; effort: EffortLevel | null } {
+  const trimmed = (modelId ?? '').trim();
+  if (!trimmed) return { model: null, effort };
+  const resolved = canonicalModelId(provider, trimmed, meta) ?? trimmed;
+  let nextEffort = effort;
+  if (!nextEffort && providerFamily(provider, meta) === 'agy' && resolved !== trimmed) {
+    const tier = ID_TIER_RE.exec(trimmed);
+    if (tier) nextEffort = mapRawTier(tier[2]);
+  }
+  return { model: resolved, effort: nextEffort };
 }
 
 export function normalizeEffort(raw: unknown): EffortLevel | null {
@@ -149,13 +383,14 @@ export function effortsForModel(
   modelId: string | null | undefined,
   meta?: Pick<MetaResp, 'provider_models'> | null,
 ): EffortLevel[] {
-  if (!supportsEffortSelection(provider)) return [];
+  if (!supportsEffortSelection(provider, meta)) return [];
   const catalog = modelsForProvider(provider, meta);
-  const match = modelId ? catalog.find((m) => m.id === modelId) : catalog[0];
-  const supported = (match?.supported_efforts ?? [])
+  const resolved = canonicalModelId(provider, modelId, meta);
+  const match = resolved ? catalog.find((m) => m.id === resolved) : catalog[0];
+  if (!match) return [...STANDARD_EFFORTS];
+  return (match.supported_efforts ?? [])
     .map((e) => normalizeEffort(e))
     .filter((e): e is EffortLevel => e !== null);
-  return supported.length > 0 ? supported : [...STANDARD_EFFORTS];
 }
 
 export function defaultEffortForModel(
@@ -164,7 +399,8 @@ export function defaultEffortForModel(
   meta?: Pick<MetaResp, 'provider_models'> | null,
 ): EffortLevel {
   const catalog = modelsForProvider(provider, meta);
-  const match = modelId ? catalog.find((m) => m.id === modelId) : catalog[0];
+  const resolved = canonicalModelId(provider, modelId, meta);
+  const match = resolved ? catalog.find((m) => m.id === resolved) : catalog[0];
   return normalizeEffort(match?.default_effort) ?? 'medium';
 }
 
@@ -209,17 +445,24 @@ export function formatEffortShort(effort: string | null | undefined): string {
 export function formatModelLabel(
   provider: string,
   modelId: string | null | undefined,
-  meta?: Pick<MetaResp, 'provider_models'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): string {
   const trimmed = (modelId ?? '').trim();
   if (!trimmed) return 'Default model';
+  const resolved = canonicalModelId(provider, trimmed, meta) ?? trimmed;
   // The live catalog first, then the built-in aliases ("opus" → "Claude Opus").
   const found =
-    modelsForProvider(provider, meta).find((m) => m.id === trimmed) ??
-    FALLBACK_PROVIDER_MODELS[provider]?.find((m) => m.id === trimmed);
+    modelsForProvider(provider, meta).find((m) => m.id === resolved) ??
+    FALLBACK_PROVIDER_MODELS[provider]?.find((m) => m.id === resolved);
   if (found) return found.label;
+  if (providerFamily(provider, meta) === 'agy') {
+    const labelTier = LABEL_TIER_RE.exec(trimmed);
+    if (labelTier && labelTier[1].trim()) return labelTier[1].trim();
+  }
   return trimmed;
 }
+
+export const formatModelChipLabel = formatModelLabel;
 
 export function formatInteractionModeLabel(mode: InteractionMode): string {
   return INTERACTION_MODES.find((m) => m.id === mode)?.shortLabel ?? 'Full access';
@@ -239,7 +482,7 @@ export interface SessionThreadConfig {
 }
 
 export function resolveSessionThreadConfig(
-  session: Pick<Session, 'meta'> | null | undefined,
+  session: (Pick<Session, 'meta'> & { provider?: string }) | null | undefined,
   transcriptModel?: string | null,
 ): SessionThreadConfig {
   const m = session?.meta ?? {};
@@ -248,6 +491,15 @@ export function resolveSessionThreadConfig(
     typeof transcriptModel === 'string' && transcriptModel.trim() !== ''
       ? transcriptModel.trim()
       : null;
+  const effectiveModel = pinned ?? fallback;
+  let effort = normalizeEffort(m.effort);
+  const effectiveProvider = session
+    ? sessionProviderSlug({ provider: session.provider ?? '', meta: m })
+    : '';
+  if (!effort && providerFamily(effectiveProvider) === 'agy' && pinned) {
+    const tier = ID_TIER_RE.exec(pinned);
+    if (tier) effort = mapRawTier(tier[2]);
+  }
   const rawMode =
     typeof m.interaction_mode === 'string'
       ? m.interaction_mode
@@ -256,8 +508,8 @@ export function resolveSessionThreadConfig(
         : 'full';
   return {
     pinnedModel: pinned,
-    effectiveModel: pinned ?? fallback,
-    effort: normalizeEffort(m.effort),
+    effectiveModel,
+    effort,
     interactionMode: normalizeInteractionMode(rawMode),
   };
 }

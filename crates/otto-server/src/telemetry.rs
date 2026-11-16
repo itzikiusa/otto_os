@@ -50,6 +50,7 @@ fn component(route: &str) -> &str {
     };
     match name {
         "sessions" => "agents",
+        "runtime-sessions" => "threads",
         "repos" => "git",
         "connections" | "db" => "database",
         "k8s" => "kubernetes",
@@ -67,7 +68,10 @@ fn component(route: &str) -> &str {
 /// 1 h fail span validation as a silent drop); and WebSocket upgrades (the
 /// span would only time the 101, not the socket's life).
 fn untimed(route: &str, headers: &axum::http::HeaderMap) -> bool {
-    const LONG_POLLS: &[&str] = &["/api/v1/sessions/{id}/wait"];
+    const LONG_POLLS: &[&str] = &[
+        "/api/v1/sessions/{id}/wait",
+        "/api/v1/runtime-sessions/{id}/peers/{peer}/reply",
+    ];
     route.contains("/telemetry/")
         || route.ends_with("/health")
         || LONG_POLLS.contains(&route)
@@ -98,7 +102,10 @@ impl UntimedMark {
 /// Whether an `otto.*` tool parks like a LONG_POLLS route (its self-call is
 /// `GET /sessions/{id}/wait`).
 pub fn long_poll_tool(tool: &str) -> bool {
-    tool.strip_prefix("otto.").unwrap_or(tool) == "wait_session"
+    matches!(
+        tool.strip_prefix("otto.").unwrap_or(tool),
+        "wait_session" | "thread_read"
+    )
 }
 
 /// Whether a JSON-RPC body (one message or a batch) calls a long-poll tool.
@@ -316,6 +323,10 @@ mod tests {
     fn long_polls_and_upgrades_are_not_timed() {
         let none = axum::http::HeaderMap::new();
         assert!(untimed("/api/v1/sessions/{id}/wait", &none));
+        assert!(untimed(
+            "/api/v1/runtime-sessions/{id}/peers/{peer}/reply",
+            &none
+        ));
         assert!(untimed("/api/v1/ws/events", &none));
         assert!(untimed("/api/v1/telemetry/overview", &none));
         assert!(untimed("/health", &none));
@@ -326,6 +337,7 @@ mod tests {
         assert!(!untimed("/api/v1/repos/{id}/fetch", &none));
         // S9-304: the MCP tool that self-calls the long-poll route.
         assert!(long_poll_tool("otto.wait_session") && long_poll_tool("wait_session"));
+        assert!(long_poll_tool("otto.thread_read") && long_poll_tool("thread_read"));
         assert!(!long_poll_tool("otto.get_session"));
         let call = |name: &str| {
             serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -348,6 +360,12 @@ mod tests {
             "vault"
         );
         assert_eq!(component("/api/v1/workspaces/{wid}/sessions"), "agents");
+        assert_eq!(
+            component("/api/v1/workspaces/{wid}/runtime-sessions"),
+            "threads"
+        );
+        assert_eq!(component("/api/v1/runtime-sessions/{id}/events"), "threads");
+        assert_eq!(component("/api/v1/ide/projects"), "ide");
         assert_eq!(component("/api/v1/repos/{rid}/status"), "git");
         assert_eq!(component("/api/v1/workspaces"), "workspaces");
         assert_eq!(component("/api/v1/{unknown}"), "server");

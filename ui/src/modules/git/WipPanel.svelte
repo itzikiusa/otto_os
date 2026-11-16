@@ -20,7 +20,7 @@
   import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import DiffViewer from './DiffViewer.svelte';
-  import { repoDiffFileLoader } from './diff-load';
+  import { repoDiffFileLoader } from '../../lib/diff/diff-load';
   import Icon from '../../lib/components/Icon.svelte';
   import { ListWindow } from '../../lib/listWindow.svelte';
   import { lsGet, lsSet } from '../../lib/storage';
@@ -409,6 +409,7 @@
       const req: DiscardReq = keepStaged ? { paths, keep_staged: true } : { paths };
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/discard`, req);
       onstatus(s);
+      if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('otto:git-worktree-discarded', { detail: { repoId, paths } }));
       // Trust the fresh status, not the 200: a discard that left a file
       // changed must never toast "Discarded". (Unstaged discard: a path may
       // stay listed for its STAGED half — only an unstaged remainder counts.)
@@ -451,13 +452,8 @@
     ]);
   }
 
-  /** Right-click a folder row: the same two actions a file row offers, applied
-   *  to every file under it (recursively — `files` carries the whole subtree). */
-  function folderMenu(
-    e: MouseEvent,
-    node: TFolder,
-    section: Section,
-  ): void {
+  /** Right-click a folder row: Stage/Unstage or Discard every file in its subtree. */
+  function folderMenu(e: MouseEvent, node: TFolder, section: Section): void {
     e.preventDefault();
     const paths = node.files.map((f) => f.path);
     const n = `${plural(paths.length, 'file')}`;

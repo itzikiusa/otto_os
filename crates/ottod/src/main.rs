@@ -40,6 +40,11 @@ fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("pty-holder") {
         return ExitCode::from(otto_sessions::pty_holder::run_from_stdin().clamp(0, 255) as u8);
     }
+    if std::env::args().nth(1).as_deref() == Some("runtime-holder") {
+        return ExitCode::from(
+            otto_agent_protocol::holder::run_from_args_and_stdin().clamp(0, 255) as u8,
+        );
+    }
     if std::env::args().nth(1).as_deref() == Some("room-ocr") {
         return if otto_server::run_room_ocr_helper() {
             ExitCode::SUCCESS
@@ -422,10 +427,16 @@ async fn run(cfg: Config) -> Result<(), String> {
         early_stop = stop_requested("recovery");
     }
     if let Some(signal_at) = early_stop {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            ctx.agent_runtime.shutdown_for_restart(),
+        )
+        .await;
         let telemetry = ctx.telemetry.clone();
         teardown(
             &ctx.manager,
             &ctx.browser,
+            &ctx.ide,
             telemetry.as_deref(),
             &ctx.usage,
             teardown_deadline(std::time::Instant::now(), Some(signal_at)),
@@ -453,7 +464,9 @@ async fn run(cfg: Config) -> Result<(), String> {
     let telemetry = ctx.telemetry.clone();
     // Shutdown stops the remote live browser's Chromium processes.
     let browser_handle = ctx.browser.clone();
-    // …and the structured agent runtime's children (no PTY holder keeps them).
+    // …and IDE LSP/DAP/network-bridge subprocesses.
+    let ide = Arc::clone(&ctx.ide);
+    // …and the structured agent runtime (detached into runtime-holders across restart).
     let agent_runtime = ctx.agent_runtime.clone();
     let (api_extras, root_extras) = module_routers(&ctx);
     #[cfg(feature = "embed-ui")]
@@ -498,15 +511,19 @@ async fn run(cfg: Config) -> Result<(), String> {
     }
 
     let signal_at = *shutdown_rx.borrow();
-    if tokio::time::timeout(std::time::Duration::from_secs(2), agent_runtime.shutdown())
-        .await
-        .is_err()
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        agent_runtime.shutdown_for_restart(),
+    )
+    .await
+    .is_err()
     {
-        tracing::warn!("agent runtime shutdown exceeded 2 s — continuing teardown");
+        tracing::warn!("agent runtime restart detach exceeded 2 s — continuing teardown");
     }
     teardown(
         &manager,
         &browser_handle,
+        &ide,
         telemetry.as_deref(),
         &usage,
         teardown_deadline(std::time::Instant::now(), signal_at),
@@ -764,6 +781,7 @@ async fn serve_loopback(
 async fn teardown(
     manager: &otto_sessions::SessionManager,
     browser: &otto_server::routes::browser::BrowserEngineHandle,
+    ide: &otto_server::otto_ide::IdeEngine,
     telemetry: Option<&otto_telemetry::TelemetryService>,
     usage: &otto_usage::UsageEngine,
     deadline: std::time::Instant,
@@ -803,6 +821,15 @@ async fn teardown(
     .is_err()
     {
         tracing::warn!("live browser shutdown exceeded its slot");
+    }
+    if tokio::time::timeout(
+        slot(Duration::from_secs(3), CLICKHOUSE_RESERVE),
+        ide.shutdown(),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("ide engine shutdown exceeded its slot");
     }
     if killed > 0 {
         tracing::info!("terminated {killed} live session(s) on shutdown");

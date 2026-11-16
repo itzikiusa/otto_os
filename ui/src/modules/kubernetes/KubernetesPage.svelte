@@ -18,7 +18,6 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
-  import InstallPanel from './InstallPanel.svelte';
   import ClustersOverview from './ClustersOverview.svelte';
   import ClusterWorkspace from './ClusterWorkspace.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -30,6 +29,7 @@
   // perf K8s R5: the Monitor views (and MonitorInsights → `marked`) load on
   // first use, so the console chunk stays small; LazyMount designs the
   // loading / failed-load (inline Retry) states.
+  const InstallPanelLazy = lazyComponent(() => import('./InstallPanel.svelte'));
   const MonitorOverviewLazy = lazyComponent(() => import('./monitor/MonitorOverview.svelte'));
   const MonitorClusterLazy = lazyComponent(() => import('./monitor/MonitorCluster.svelte'));
   const MonitorFleetLazy = lazyComponent(() => import('./monitor/MonitorFleet.svelte'));
@@ -136,7 +136,7 @@
     <div class="k8s-boot"><Skeleton rows={4} height={48} /></div>
   {:else if needsInstall}
     <PageHeader title="Kubernetes" />
-    <div class="k8s-scroll"><InstallPanel tool="kubectl" oncontinue={() => (skipInstall = true)} /></div>
+    <div class="k8s-scroll"><LazyMount lazy={InstallPanelLazy} what="the kubectl setup guide" props={{ tool: 'kubectl', oncontinue: () => (skipInstall = true) }} /></div>
   {:else if isFleet}
     <LazyMount lazy={MonitorFleetLazy} what="the Fleet dashboard" props={{ tab: fleetTab }} />
   {:else if isMonitor && monitorClusterId}

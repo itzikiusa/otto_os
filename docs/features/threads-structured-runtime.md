@@ -665,55 +665,26 @@ and still remembered the image.
   `orchestrationV2.ts:145-151`).
 - **Daemon restart: the agent keeps running.** With **Settings → Daemon →
   Sessions → "Keep sessions running when the daemon restarts"**
-  (`session_persistence`, default on — the setting terminal sessions use), a
-  structured child does not run as a direct child of `ottod`: it runs inside
-  a **stdio holder** (`crates/otto-pty/src/stdio_holder.rs`) — the same
-  detached `ottod pty-holder` process the terminal sessions use (own session
-  via `setsid`, a 0600 socket in `<data dir>/rt-holders/`, one client,
-  version handshake, 24 h orphan TTL, 10 min exit linger), started with its
-  child on pipes instead of a PTY. A deploy (`launchctl kickstart`), a crash
-  or an app relaunch therefore leaves the CLI, its tools, its subagents and
-  its background work running, for **every provider** (Claude, Codex, Gemini,
-  Grok, Antigravity, opencode, pi):
-  - **The holder logs lines.** Every stdout line gets a sequence number and
-    stays in the holder until the daemon acknowledges it; stdin lines and the
-    child's exit (code + stderr tail) go through it. At 64 MiB of
-    unacknowledged output the holder stops reading, so the child pauses on
-    its pipe — nothing is dropped.
-  - **The daemon checkpoints** (`runtime/held.rs`): the driver's protocol
-    state (`StructuredDriver::export_state` — session / request ids, open
-    items and requests, the text so far), the running turn, the process's
-    request-id generation and the last line processed, as the session's
-    `process` entity (ignored by the projection; no migration). It is
-    written through the session's ordered persister — never ahead of the
-    timeline rows its lines produced — before anything is sent to the child,
-    at most every 500 ms while lines stream, once they stop, and at
-    shutdown; it does not count as activity (`last_active_at` is untouched).
-    Only then is the holder told to drop the lines it covers. MCP servers
-    (their env carries the session credential) are never in it.
-  - **Shutdown detaches** (`AgentRuntime::shutdown`): the child and its
-    holder keep running. Closing, deleting, a model / access respawn, a
-    refused handshake and the child's own exit still end it (stdin EOF, then
-    TERM / KILL to its group) and release the holder.
-  - **Boot adopts** (`AgentRuntime::recover`, before serving): for each
-    checkpoint, re-attach with "replay after line N", restore a fresh
-    driver from the state, restore the running turn and the request ids, and
-    pump on. The turn continues and completes in the new daemon, each chunk
-    exactly once; a pending approval stays `pending` and answerable; a
-    queued message goes out after the turn; an idle thread is simply idle —
-    no **Revive**, no respawn. After a crash (no shutdown) the new daemon
-    replays from the last checkpoint: lines it had already shown are
-    processed again into the same items (their text is whole, so nothing
-    doubles in the timeline; a `command_output.delta` chunk of those last
-    ≤ 500 ms may repeat in a client that saw it).
-  - **Fallback.** A checkpoint that cannot be adopted — the holder is gone,
-    speaks another protocol major, already dropped lines the checkpoint
-    needs, runs another pid, or the state does not restore — ends that
-    holder (`holder::terminate`, any version) and the session recovers the
-    old way below. Holders no checkpoint leads to (the daemon died before
-    the first checkpoint, a deleted session) are ended at boot. If no
-    holder can be started the child runs unheld and the daemon logs
-    `stdio holder unavailable`.
+  (`session_persistence`, default on), a structured child runs inside a
+  detached **runtime holder** (`ottod runtime-holder`, `crates/otto-agent-protocol/src/holder/`;
+  own session via `setsid`, a 0600 socket in `<data dir>/runtime-holders/`)
+  instead of as a direct child of `ottod`, for **every provider**:
+  - **The holder buffers output.** Every stdout line gets a sequence number
+    and stays in a bounded ring (16 MiB) until the daemon acknowledges it.
+  - **The daemon checkpoints** into the holder (`runtime/held_proc.rs`): the
+    driver's protocol state (`StructuredDriver::snapshot_state` — the
+    driver struct serialized whole; MCP servers, whose env carries the
+    session credential, are never in it), the running turn, its streaming
+    items, the request-id generation and the last acknowledged line —
+    throttled to every 250 ms while lines stream, immediately on critical
+    transitions and at shutdown.
+  - **Shutdown detaches** (`AgentRuntime::shutdown_for_restart`): the child
+    and its holder keep running. Closing, deleting, a respawn and the
+    child's own exit still end it.
+  - **Boot adopts** (`runtime/held_adopt.rs`): the new daemon re-attaches to
+    each holder socket, restores a fresh driver from the checkpoint, and
+    replays the lines after the acknowledged one — the turn continues and
+    completes in the new daemon.
 - **Without holders** (the setting off, or an unadoptable child) a structured
   child dies with the daemon. At boot (`AgentRuntime::recover`, from
   `recover_before_serve`):
@@ -916,7 +887,7 @@ secret question forms are refused instead of being collected into history.
 | `crates/otto-agent-protocol/src/{claude,codex,acp,pi}.rs` | the drivers |
 | `crates/otto-agent-protocol/src/claude_tasks.rs` | Claude background tasks, subagent cards, their nested activity |
 | `crates/otto-agent-protocol/src/runtime.rs`, `runtime/{fresh,request_ids}.rs` | processes, turns, sequencing, coalescing, replay, recovery, fresh context and process-scoped request IDs |
-| `crates/otto-agent-protocol/src/runtime/held.rs`, `crates/otto-pty/src/stdio_holder.rs` | children that survive a daemon restart: checkpoints, adoption, the stdio holder |
+| `crates/otto-agent-protocol/src/holder/`, `runtime/held_proc.rs`, `runtime/held_adopt.rs` | children that survive a daemon restart: the runtime holder, checkpoints, adoption |
 | `crates/otto-agent-protocol/src/{questions,tool_images}.rs` | native question schema normalization and bounded tool image extraction |
 | `crates/otto-agent-protocol/src/http/drafts.rs`, `crates/otto-state/src/agent_runtime/drafts.rs` | draft validation, authorization, revision checks, quotas and expiry |
 | `crates/otto-agent-protocol/src/{host,process,ring,http}.rs` | safety host, child I/O, replay ring, `/runtime-sessions` router |

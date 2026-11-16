@@ -1,7 +1,8 @@
 //! Data-driven agent provider registry: claude / codex / shell built-ins,
 //! overridable from the `providers` settings JSON.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
@@ -18,6 +19,8 @@ pub struct ProviderSpec {
     pub cmd: String,
     pub args: Vec<String>,
     pub resume_args: Option<Vec<String>>,
+    /// Extra environment variables configured on a custom provider override.
+    pub env: BTreeMap<String, String>,
     /// Shell command to run to update this provider's CLI, e.g. `"claude update"`.
     /// `None` means "no update command" (built-in shell provider, or unset custom).
     pub update_command: Option<String>,
@@ -47,9 +50,28 @@ pub struct ProviderSpec {
     pub shell_fallback: bool,
 }
 
+impl ProviderSpec {
+    /// Resolve a Claude-family provider's effective `CLAUDE_CONFIG_DIR`
+    /// (explicit `env` / inline `cmd`, wrapper script / shell rc alias, or
+    /// conventional `~/.claude-<suffix>`). Returns `None` for non-Claude
+    /// providers or built-in `claude` without a custom config dir.
+    pub fn effective_claude_config_dir(&self, slug: &str, home: &Path) -> Option<PathBuf> {
+        if self.model_family.as_deref() != Some("claude") {
+            return None;
+        }
+        otto_transcript::claude_config::resolve_claude_config_dir(
+            slug,
+            &self.cmd,
+            &self.args,
+            self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+            home,
+        )
+    }
+}
+
 /// Shape accepted from the settings override JSON
-/// (`{"<name>": {"cmd": "...", "args": [...], "resume_args": [...], "update_command": "...",
-/// "model_args": ["-m", "{model}"]}}`).
+/// (`{"<name>": {"cmd": "...", "args": [...], "resume_args": [...], "env": {...},
+/// "update_command": "...", "model_args": ["-m", "{model}"]}}`).
 #[derive(Debug, Deserialize)]
 struct ProviderOverride {
     cmd: String,
@@ -57,6 +79,8 @@ struct ProviderOverride {
     args: Vec<String>,
     #[serde(default)]
     resume_args: Option<Vec<String>>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
     #[serde(default)]
     update_command: Option<String>,
     #[serde(default)]
@@ -66,18 +90,48 @@ struct ProviderOverride {
 }
 
 /// Families with a model catalog (`provider_models`) and a `--model` flag.
-pub const MODEL_FAMILIES: [&str; 6] = ["claude", "codex", "agy", "grok", "opencode", "pi"];
+pub const MODEL_FAMILIES: [&str; 7] =
+    ["claude", "codex", "agy", "gemini", "grok", "opencode", "pi"];
+
+fn matches_family_token(candidate: &str, fam: &str) -> bool {
+    let lower = candidate.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    if lower == fam
+        || lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|tok| tok == fam)
+    {
+        return true;
+    }
+    // Short 2-char names like `"pi"` must match on token/word boundaries only
+    // (`pi`, `pi-fast`, `my-pi`, `/usr/bin/pi`), never substrings/prefixes like
+    // `"api-agent"`, `"pipeline"`, or `"pilot"`.
+    if fam.len() <= 2 {
+        return false;
+    }
+    if fam.len() == 3 {
+        return lower.starts_with(fam)
+            && (lower.ends_with("work")
+                || lower
+                    .as_bytes()
+                    .get(fam.len())
+                    .is_some_and(|b| !b.is_ascii_alphabetic()));
+    }
+    lower.starts_with(fam)
+}
 
 /// The catalog family a custom provider belongs to: its explicit
 /// `model_family` when that names a known family, else the first known family
-/// that its command's basename or its own name starts with (`claude-work`,
-/// `/opt/bin/claude`, `claude-advisor` → `claude`).
-fn infer_model_family(explicit: Option<&str>, cmd: &str, name: &str) -> Option<String> {
+/// that its command's basename or its own name matches (`claude-work`,
+/// `claudework`, `/opt/bin/claude`, `claude-advisor` → `claude`).
+pub fn infer_model_family(explicit: Option<&str>, cmd: &str, name: &str) -> Option<String> {
     let known = |s: &str| {
         MODEL_FAMILIES
             .iter()
-            .find(|f| s == **f)
-            .map(|f| f.to_string())
+            .find(|f| s.eq_ignore_ascii_case(f))
+            .map(|f| (*f).to_string())
     };
     if let Some(f) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
         return known(f);
@@ -92,8 +146,8 @@ fn infer_model_family(explicit: Option<&str>, cmd: &str, name: &str) -> Option<S
     [base, name].into_iter().find_map(|s| {
         MODEL_FAMILIES
             .iter()
-            .find(|f| s.to_ascii_lowercase().starts_with(**f))
-            .map(|f| f.to_string())
+            .find(|f| matches_family_token(s, f))
+            .map(|f| (*f).to_string())
     })
 }
 
@@ -118,8 +172,12 @@ pub struct ProviderRegistry {
     disabled: RwLock<HashSet<String>>,
 }
 
-fn expand(template: &str, sid: &str, cwd: &str) -> String {
+pub fn expand_template(template: &str, sid: &str, cwd: &str) -> String {
     template.replace("{sid}", sid).replace("{cwd}", cwd)
+}
+
+fn expand(template: &str, sid: &str, cwd: &str) -> String {
+    expand_template(template, sid, cwd)
 }
 
 /// Whether `program` names an executable Otto can `exec` directly: a path
@@ -129,14 +187,91 @@ fn expand(template: &str, sid: &str, cwd: &str) -> String {
 /// an interactive shell.
 pub fn resolves_on_path(program: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    let is_exec = |p: &std::path::Path| {
+    let is_exec = |p: &Path| {
         std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     };
-    if program.contains('/') {
-        return is_exec(std::path::Path::new(program));
+    let expanded = crate::tool_probe::expand_tilde(program);
+    if expanded.contains('/') {
+        return is_exec(Path::new(&expanded));
     }
     std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| is_exec(&dir.join(program))))
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| is_exec(&dir.join(&expanded))))
+}
+
+fn normalize_override_command(
+    raw_cmd: &str,
+    raw_args: Vec<String>,
+    mut env: BTreeMap<String, String>,
+) -> (String, Vec<String>, Vec<String>, BTreeMap<String, String>) {
+    let trimmed = raw_cmd.trim();
+    if trimmed.is_empty() {
+        return (String::new(), Vec::new(), raw_args, env);
+    }
+    if !trimmed.chars().any(char::is_whitespace) {
+        let expanded = if trimmed.starts_with("~/") || trimmed == "~" {
+            crate::tool_probe::expand_tilde(trimmed)
+        } else {
+            trimmed.to_string()
+        };
+        return (expanded, Vec::new(), raw_args, env);
+    }
+    let whole = crate::tool_probe::expand_tilde(trimmed);
+    if !whole.contains("{cwd}") && !whole.contains("{sid}") && Path::new(&whole).is_file() {
+        return (whole, Vec::new(), raw_args, env);
+    }
+    let tokens = otto_transcript::claude_config::split_command_tokens(trimmed);
+    let mut cmd_bin: Option<String> = None;
+    let mut inline_args: Vec<String> = Vec::new();
+    for tok in tokens {
+        if cmd_bin.is_none() {
+            if tok == "env" {
+                continue;
+            }
+            if let Some((k, v)) = otto_transcript::claude_config::parse_env_assignment(&tok) {
+                env.entry(k.to_string()).or_insert_with(|| v.to_string());
+                continue;
+            }
+            let expanded_tok = if tok.starts_with("~/") || tok == "~" {
+                crate::tool_probe::expand_tilde(&tok)
+            } else {
+                tok
+            };
+            cmd_bin = Some(expanded_tok);
+        } else {
+            inline_args.push(tok);
+        }
+    }
+    let Some(bin) = cmd_bin else {
+        return (trimmed.to_string(), Vec::new(), raw_args, env);
+    };
+    let mut merged = inline_args.clone();
+    for a in raw_args {
+        let is_dup_skip = matches!(
+            a.as_str(),
+            "--dangerously-skip-permissions"
+                | "--dangerously-bypass-approvals-and-sandbox"
+                | "--yolo"
+                | "--always-approve"
+                | "--auto"
+        ) && merged.contains(&a);
+        if !is_dup_skip {
+            merged.push(a);
+        }
+    }
+    (bin, inline_args, merged, env)
+}
+
+fn prepend_missing_inline(inline: &[String], explicit: Vec<String>) -> Vec<String> {
+    if inline.is_empty() {
+        return explicit;
+    }
+    let mut out: Vec<String> = inline
+        .iter()
+        .filter(|a| !explicit.contains(a))
+        .cloned()
+        .collect();
+    out.extend(explicit);
+    out
 }
 
 /// Launch `program args…` through the user's interactive login shell
@@ -150,9 +285,20 @@ pub fn shell_wrapped(program: &str, args: Vec<String>) -> (String, Vec<String>) 
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "/bin/zsh".to_string());
+    // Keep bare command names unquoted so shell aliases expand, while quoting
+    // filesystem paths or names with whitespace/quotes safely.
+    let invoked = if program.contains('/')
+        || program
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '\'' | '"'))
+    {
+        format!("'{}'", program.replace('\'', "'\\''"))
+    } else {
+        program.to_string()
+    };
     let mut wrapped = vec![
         "-ilc".to_string(),
-        format!("{program} \"$@\""),
+        format!("{invoked} \"$@\""),
         program.to_string(),
     ];
     wrapped.extend(args);
@@ -299,6 +445,7 @@ impl ProviderRegistry {
                     a.extend(home_add_dir.iter().cloned());
                     a
                 }),
+                env: BTreeMap::new(),
                 update_command: Some("claude update".into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 model_family: Some("claude".into()),
@@ -330,6 +477,7 @@ impl ProviderRegistry {
                     a.push("{sid}".into());
                     a
                 }),
+                env: BTreeMap::new(),
                 update_command: Some("codex update".into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 model_family: Some("codex".into()),
@@ -362,6 +510,7 @@ impl ProviderRegistry {
                     a.extend(home_add_dir.iter().cloned());
                     a
                 }),
+                env: BTreeMap::new(),
                 update_command: Some("agy update".into()),
                 // Verified against the installed agy CLI: `agy --help` lists
                 // `--model  Model for the current CLI session`.
@@ -391,6 +540,7 @@ impl ProviderRegistry {
                     Vec::new()
                 },
                 resume_args: None,
+                env: BTreeMap::new(),
                 update_command: Some("opencode upgrade".into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 model_family: Some("opencode".into()),
@@ -410,6 +560,7 @@ impl ProviderRegistry {
                 cmd: "pi".into(),
                 args: pi_args.clone(),
                 resume_args: Some(pi_args),
+                env: BTreeMap::new(),
                 update_command: Some("pi update".into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 model_family: Some("pi".into()),
@@ -423,6 +574,7 @@ impl ProviderRegistry {
                 cmd: shell,
                 args: vec!["-l".into()],
                 resume_args: None,
+                env: BTreeMap::new(),
                 update_command: None,
                 model_args: None,
                 model_family: None,
@@ -436,9 +588,11 @@ impl ProviderRegistry {
                 serde_json::from_value::<HashMap<String, ProviderOverride>>(value.clone())
             {
                 for (name, o) in parsed {
+                    let (cmd, inline_args, base_args, env) =
+                        normalize_override_command(&o.cmd, o.args, o.env);
                     // Only keep a non-empty update_command string.
                     let update_command = o.update_command.filter(|s| !s.trim().is_empty());
-                    let model_family = infer_model_family(o.model_family.as_deref(), &o.cmd, &name);
+                    let model_family = infer_model_family(o.model_family.as_deref(), &cmd, &name);
                     // An explicit EMPTY template means "no model flag"; an
                     // unset one defaults to `--model {model}` for a provider of
                     // a known family (every one of them takes it — grok too).
@@ -449,18 +603,97 @@ impl ProviderRegistry {
                             .as_ref()
                             .map(|_| vec!["--model".into(), "{model}".into()]),
                     };
+                    let has_session_flag = base_args.iter().any(|a| {
+                        a == "--session-id"
+                            || a == "--resume"
+                            || a == "--conversation"
+                            || a.starts_with("--session-id=")
+                            || a.starts_with("--resume=")
+                            || a.starts_with("--conversation=")
+                    });
+                    let mut args = base_args.clone();
+                    if matches!(model_family.as_deref(), Some("claude" | "pi")) && !has_session_flag
+                    {
+                        args.push("--session-id".into());
+                        args.push("{sid}".into());
+                    }
+                    let explicit_resume = o
+                        .resume_args
+                        .map(|r| prepend_missing_inline(&inline_args, r));
+                    let resume_args = match (explicit_resume, model_family.as_deref()) {
+                        (Some(r), _) => Some(r),
+                        (None, Some("claude")) => {
+                            if !has_session_flag {
+                                let mut r = base_args;
+                                r.push("--resume".into());
+                                r.push("{sid}".into());
+                                Some(r)
+                            } else if base_args.iter().any(|a| a.contains("{sid}")) {
+                                Some(
+                                    base_args
+                                        .into_iter()
+                                        .map(|a| {
+                                            if a == "--session-id" {
+                                                "--resume".to_string()
+                                            } else if let Some(rest) =
+                                                a.strip_prefix("--session-id=")
+                                            {
+                                                format!("--resume={rest}")
+                                            } else {
+                                                a
+                                            }
+                                        })
+                                        .collect(),
+                                )
+                            } else {
+                                None
+                            }
+                        }
+                        (None, Some("pi")) => {
+                            if !has_session_flag || args.iter().any(|a| a.contains("{sid}")) {
+                                Some(args.clone())
+                            } else {
+                                None
+                            }
+                        }
+                        (None, Some("codex")) => {
+                            if !base_args.iter().any(|a| a.contains("{sid}")) {
+                                let mut r = vec!["resume".into()];
+                                r.extend(base_args);
+                                r.push("{sid}".into());
+                                Some(r)
+                            } else {
+                                None
+                            }
+                        }
+                        (None, Some("agy")) => {
+                            if !has_session_flag && !base_args.iter().any(|a| a.contains("{sid}")) {
+                                let mut r = vec!["--conversation".into(), "{sid}".into()];
+                                r.extend(base_args);
+                                Some(r)
+                            } else {
+                                None
+                            }
+                        }
+                        (None, _) => None,
+                    };
+                    let captures_session_id =
+                        matches!(model_family.as_deref(), Some("codex" | "agy"))
+                            && !args.iter().any(|a| a.contains("{sid}"))
+                            && resume_args
+                                .as_ref()
+                                .is_some_and(|r| r.iter().any(|a| a.contains("{sid}")));
                     map.insert(
                         name,
                         ProviderSpec {
-                            cmd: o.cmd,
-                            args: o.args,
-                            resume_args: o.resume_args,
+                            cmd,
+                            args,
+                            resume_args,
+                            env,
                             update_command,
                             model_args,
                             model_family,
-                            // Custom providers use Otto-assigned ids (the `{sid}`
-                            // template); rollout-style capture is built-in only.
-                            captures_session_id: false,
+                            captures_session_id,
                             shell_fallback: true,
                         },
                     );
@@ -494,11 +727,14 @@ impl ProviderRegistry {
     /// substituted at spawn — see `model_args` in manager.rs), or `None` when
     /// the CLI takes no model flag (shell, template-less custom providers).
     pub fn model_args_template(&self, name: &str) -> Option<Vec<String>> {
-        self.map
-            .read()
-            .expect("provider registry lock")
-            .get(name)
-            .and_then(|p| p.model_args.clone())
+        let map = self.map.read().expect("provider registry lock");
+        match map.get(name) {
+            Some(p) => p.model_args.clone(),
+            None if MODEL_FAMILIES.contains(&name) => {
+                Some(vec!["--model".into(), "{model}".into()])
+            }
+            None => None,
+        }
     }
 
     /// The catalog family of every ENABLED provider that has one, as
@@ -521,11 +757,11 @@ impl ProviderRegistry {
     /// `/meta.model_flags` payload, so pickers hide the model control for
     /// providers that would silently drop it.
     pub fn supports_model(&self, name: &str) -> bool {
-        self.map
-            .read()
-            .expect("provider registry lock")
-            .get(name)
-            .is_some_and(|p| p.model_args.is_some())
+        let map = self.map.read().expect("provider registry lock");
+        match map.get(name) {
+            Some(p) => p.model_args.is_some(),
+            None => MODEL_FAMILIES.contains(&name),
+        }
     }
 
     /// True when `name` exists and supports resume.
@@ -565,6 +801,114 @@ impl ProviderRegistry {
         names
     }
 
+    /// Return the full [`ProviderSpec`] for `name`, if registered.
+    pub fn get(&self, name: &str) -> Option<ProviderSpec> {
+        self.map
+            .read()
+            .expect("provider registry lock")
+            .get(name)
+            .cloned()
+    }
+
+    /// Return the model/CLI family for `name` (e.g. `"claude"` for `"claudework"`).
+    pub fn model_family_for(&self, name: &str) -> Option<String> {
+        self.map
+            .read()
+            .expect("provider registry lock")
+            .get(name)
+            .and_then(|p| p.model_family.clone())
+    }
+
+    /// Whether `slug` is an enabled built-in or registered custom provider.
+    pub fn is_enabled(&self, slug: &str) -> bool {
+        let slug = slug.trim();
+        if slug.is_empty() {
+            return false;
+        }
+        if self
+            .disabled
+            .read()
+            .expect("provider registry lock")
+            .contains(slug)
+        {
+            return false;
+        }
+        self.map
+            .read()
+            .expect("provider registry lock")
+            .contains_key(slug)
+            || otto_core::agent_runtime::RuntimeProvider::parse(slug).is_some()
+    }
+
+    /// Resolve a built-in or custom provider `slug` (e.g. `"claudework"`) to its
+    /// Structured Runtime wire protocol ([`otto_core::agent_runtime::RuntimeProvider`]).
+    /// Returns `None` when `slug` is disabled, unknown, or has no structured family.
+    pub fn runtime_provider_for(
+        &self,
+        slug: &str,
+    ) -> Option<otto_core::agent_runtime::RuntimeProvider> {
+        let slug = slug.trim();
+        if !self.is_enabled(slug) {
+            return None;
+        }
+        if let Some(builtin) = otto_core::agent_runtime::RuntimeProvider::parse(slug) {
+            return Some(builtin);
+        }
+        let family = self.model_family_for(slug)?;
+        otto_core::agent_runtime::RuntimeProvider::parse(&family)
+    }
+
+    /// Return `(slug, ProviderSpec)` for every ENABLED provider, sorted by slug.
+    pub fn enabled_specs(&self) -> Vec<(String, ProviderSpec)> {
+        let names = self.names();
+        let map = self.map.read().expect("provider registry lock");
+        names
+            .into_iter()
+            .filter_map(|n| Some((n.clone(), map.get(&n)?.clone())))
+            .collect()
+    }
+
+    /// Resolve a custom `CLAUDE_CONFIG_DIR` for `provider` (when it belongs to
+    /// the `"claude"` family), or `None` when it uses the default `~/.claude`.
+    pub fn claude_config_dir_for(&self, provider: &str, home: &Path) -> Option<PathBuf> {
+        let spec = self.get(provider)?;
+        spec.effective_claude_config_dir(provider, home)
+    }
+
+    /// All distinct custom `CLAUDE_CONFIG_DIR` roots across ENABLED providers.
+    pub fn active_claude_config_dirs(&self, home: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for (slug, spec) in self.enabled_specs() {
+            if let Some(dir) = spec.effective_claude_config_dir(&slug, home) {
+                if !out.contains(&dir) {
+                    out.push(dir);
+                }
+            }
+        }
+        out
+    }
+
+    /// Resolve an ENABLED and installed/aliased program for CLI `family`
+    /// (`"claude"`, `"codex"`, `"agy"`, `"grok"`, `"opencode"`, `"pi"`).
+    /// Prefers the exact slug `family` when enabled and runnable on `$PATH` /
+    /// filesystem / rc alias; falls back to any enabled custom provider of that
+    /// family whose command resolves; returns `None` when disabled or missing.
+    pub fn resolved_family_program(&self, family: &str) -> Option<String> {
+        let enabled = self.enabled_specs();
+        if let Some((_, spec)) = enabled.iter().find(|(slug, _)| slug == family) {
+            if crate::tool_probe::command_resolves_fast(&spec.cmd) {
+                return Some(spec.cmd.clone());
+            }
+        } else if self.is_enabled(family) && crate::tool_probe::command_resolves_fast(family) {
+            return Some(family.to_string());
+        }
+        enabled
+            .into_iter()
+            .filter(|(slug, spec)| slug != family && spec.model_family.as_deref() == Some(family))
+            .map(|(_, spec)| spec.cmd)
+            .find(|cmd| crate::tool_probe::command_resolves_fast(cmd))
+    }
+
     /// Return the resolved program binary name for `provider`, or `None` if
     /// the provider is not registered.
     pub fn program_for(&self, name: &str) -> Option<String> {
@@ -595,8 +939,27 @@ impl ProviderRegistry {
         } else {
             &spec.args
         };
-        let program = expand(&spec.cmd, sid, cwd);
+        let raw_program = expand(&spec.cmd, sid, cwd);
+        let program =
+            if spec.shell_fallback && (raw_program == "~" || raw_program.starts_with("~/")) {
+                crate::tool_probe::expand_tilde(&raw_program)
+            } else {
+                raw_program
+            };
         let args: Vec<String> = args.iter().map(|a| expand(a, sid, cwd)).collect();
+        let env: Vec<(String, String)> = spec
+            .env
+            .iter()
+            .map(|(k, v)| {
+                let expanded = expand(v, sid, cwd);
+                let val = if expanded == "~" || expanded.starts_with("~/") {
+                    crate::tool_probe::expand_tilde(&expanded)
+                } else {
+                    expanded
+                };
+                (k.clone(), val)
+            })
+            .collect();
         // A command that isn't an executable on PATH (a shell alias/function
         // from the user's rc files) can't be exec'd directly — run it through
         // the login shell instead of failing with "No such file or directory".
@@ -609,242 +972,11 @@ impl ProviderRegistry {
             program,
             args,
             cwd: Some(cwd.to_string()),
-            env: vec![],
+            env,
         })
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn args_for(reg: &ProviderRegistry, provider: &str, resume: bool) -> Vec<String> {
-        reg.build_spec(provider, "SID", "/tmp/cwd", resume)
-            .expect("build_spec")
-            .args
-    }
-
-    /// Custom providers wrapping a known CLI (an alias, a `--settings` variant,
-    /// grok) list that CLI's models and take `--model`; an explicit empty
-    /// template still opts out, and an unknown CLI gets no catalog.
-    #[test]
-    fn custom_providers_inherit_their_cli_family() {
-        let reg = ProviderRegistry::new(Some(&serde_json::json!({
-            "claude-advisor": {"cmd": "claude", "args": ["--settings", "x.json"]},
-            "claudework": {"cmd": "claude-work"},
-            "grok": {"cmd": "grok"},
-            "mine": {"cmd": "/opt/bin/aider"},
-            "pinned": {"cmd": "my-wrapper", "model_family": "codex"},
-            "noflag": {"cmd": "claude", "model_args": []}
-        })));
-        let fams: HashMap<_, _> = reg.model_families().into_iter().collect();
-        assert_eq!(fams["claude-advisor"], "claude");
-        assert_eq!(fams["claudework"], "claude");
-        assert_eq!(fams["grok"], "grok");
-        assert_eq!(fams["pinned"], "codex");
-        assert_eq!(fams["claude"], "claude");
-        assert!(!fams.contains_key("mine"));
-        assert!(!fams.contains_key("shell"));
-        assert!(reg.supports_model("claudework"));
-        assert!(reg.supports_model("grok"));
-        assert!(!reg.supports_model("mine"));
-        assert!(!reg.supports_model("noflag"));
-    }
-
-    #[test]
-    fn path_resolution_distinguishes_executables_from_aliases() {
-        assert!(resolves_on_path("/bin/sh"));
-        assert!(resolves_on_path("sh"));
-        assert!(!resolves_on_path("otto-no-such-alias-xyz"));
-        assert!(!resolves_on_path("/no/such/bin"));
-    }
-
-    /// A custom provider whose command is a shell alias (not on PATH) launches
-    /// through the user's interactive login shell, with its args (and anything
-    /// appended later) passed positionally rather than spliced into the script.
-    #[test]
-    fn unresolved_custom_command_runs_through_login_shell() {
-        let reg = ProviderRegistry::new(Some(&serde_json::json!({
-            "claudework": {"cmd": "otto-no-such-alias-xyz", "args": ["--session-id", "{sid}"]}
-        })));
-        let spec = reg
-            .build_spec("claudework", "SID", "/tmp/cwd", false)
-            .expect("build_spec");
-        assert_eq!(
-            &spec.args[..3],
-            &[
-                "-ilc",
-                "otto-no-such-alias-xyz \"$@\"",
-                "otto-no-such-alias-xyz"
-            ]
-        );
-        assert_eq!(&spec.args[3..], &["--session-id", "SID"]);
-        let resolvable = ProviderRegistry::new(Some(&serde_json::json!({
-            "plain": {"cmd": "/bin/sh", "args": ["-c", "true"]}
-        })));
-        let spec = resolvable.build_spec("plain", "S", "/tmp", false).unwrap();
-        assert_eq!(spec.program, "/bin/sh");
-        assert_eq!(spec.args, ["-c", "true"]);
-    }
-
-    /// Default (skip on): every built-in agent CLI carries its skip-permissions
-    /// flag on both launch and resume.
-    #[test]
-    fn skip_permissions_on_by_default() {
-        let reg = ProviderRegistry::new(None);
-        assert!(reg.skip_permissions());
-        assert!(args_for(&reg, "claude", false).contains(&"--dangerously-skip-permissions".into()));
-        assert!(args_for(&reg, "claude", true).contains(&"--dangerously-skip-permissions".into()));
-        assert!(args_for(&reg, "codex", false)
-            .contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
-        assert!(args_for(&reg, "codex", true)
-            .contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
-        assert!(args_for(&reg, "agy", false).contains(&"--dangerously-skip-permissions".into()));
-    }
-
-    /// Opted out: the skip/bypass flag is gone from every provider (launch + resume)
-    /// while the rest of the launch line is preserved.
-    #[test]
-    fn skip_permissions_off_drops_the_flag_only() {
-        let reg = ProviderRegistry::new(None);
-        reg.set_skip_permissions(false, None);
-        assert!(!reg.skip_permissions());
-
-        let claude = args_for(&reg, "claude", false);
-        assert!(!claude.iter().any(|a| a.contains("dangerously")));
-        assert!(claude.contains(&"--session-id".into())); // rest of the line intact
-        assert!(!args_for(&reg, "claude", true)
-            .iter()
-            .any(|a| a.contains("dangerously")));
-
-        let codex = args_for(&reg, "codex", false);
-        assert!(!codex.iter().any(|a| a.contains("dangerously")));
-        assert!(codex.contains(&"--search".into())); // search preserved
-        assert!(!args_for(&reg, "codex", true)
-            .iter()
-            .any(|a| a.contains("dangerously")));
-
-        let agy = args_for(&reg, "agy", false);
-        assert!(!agy.iter().any(|a| a.contains("dangerously")));
-        assert!(agy.iter().any(|a| a.starts_with("--add-dir="))); // add-dir preserved
-    }
-
-    /// Disabling a provider hides it from `names()` (the picker/meta list) but
-    /// keeps its launch spec, so an existing session on it still resumes. A
-    /// reload or skip-permissions change preserves the disabled set.
-    #[test]
-    fn disabled_providers_hidden_from_names_but_still_spawnable() {
-        let reg = ProviderRegistry::new(None);
-        assert!(reg.names().contains(&"agy".to_string()));
-
-        reg.set_disabled(&["agy"]);
-        assert!(!reg.names().contains(&"agy".to_string()));
-        assert!(reg.names().contains(&"claude".to_string()));
-        assert_eq!(reg.disabled_names(), vec!["agy".to_string()]);
-        // Still launchable (existing sessions keep resuming).
-        assert!(reg.build_spec("agy", "SID", "/tmp", false).is_ok());
-
-        // A providers reload / skip-permissions toggle must not clear it.
-        reg.reload(None);
-        assert!(!reg.names().contains(&"agy".to_string()));
-        reg.set_skip_permissions(false, None);
-        assert!(!reg.names().contains(&"agy".to_string()));
-
-        // Re-enable clears the exclusion.
-        reg.set_disabled::<String>(&[]);
-        assert!(reg.names().contains(&"agy".to_string()));
-    }
-
-    /// `resolve_default` never returns a DISABLED provider — a default that names
-    /// an excluded provider is skipped, matching the UI picker, so the daemon and
-    /// the label agree on what a new spawn actually runs.
-    #[test]
-    fn resolve_default_skips_disabled_providers() {
-        let reg = ProviderRegistry::new(None);
-        // Nothing disabled: the configured default wins, else claude.
-        assert_eq!(reg.resolve_default(&["", "codex"]), "codex");
-        assert_eq!(reg.resolve_default(&["", ""]), "claude");
-
-        // Disable the configured default (codex) → it is skipped, falls to claude.
-        reg.set_disabled(&["codex"]);
-        assert_eq!(reg.resolve_default(&["", "codex"]), "claude");
-
-        // Disable claude (the fallback) too → falls to the first ENABLED provider
-        // (sorted: agy), never a disabled name.
-        reg.set_disabled(&["codex", "claude"]);
-        let d = reg.resolve_default(&["", "codex"]);
-        assert!(d != "codex" && d != "claude", "got disabled provider: {d}");
-        assert!(reg.names().contains(&d));
-    }
-
-    /// Every built-in agent CLI carries the `--model {model}` template (agy's
-    /// `--model` verified against the installed CLI); shell takes none.
-    #[test]
-    fn builtin_model_templates() {
-        let reg = ProviderRegistry::new(None);
-        for p in ["claude", "codex", "agy"] {
-            assert_eq!(
-                reg.model_args_template(p),
-                Some(vec!["--model".to_string(), "{model}".to_string()]),
-                "{p} should carry the --model template"
-            );
-            assert!(reg.supports_model(p));
-        }
-        assert_eq!(reg.model_args_template("shell"), None);
-        assert!(!reg.supports_model("shell"));
-        assert!(
-            !reg.supports_model("nope"),
-            "unknown provider has no template"
-        );
-    }
-
-    /// A custom provider's `model_args` override is honored verbatim; one
-    /// without a template (or with an empty one) reports no model support.
-    #[test]
-    fn custom_model_template_from_override() {
-        let overrides = serde_json::json!({
-            "grok": { "cmd": "grok", "model_args": ["-m", "{model}"] },
-            "kilo": { "cmd": "kilo" },
-            "opencode": { "cmd": "opencode", "model_args": [] },
-        });
-        let reg = ProviderRegistry::new(Some(&overrides));
-        assert_eq!(
-            reg.model_args_template("grok"),
-            Some(vec!["-m".to_string(), "{model}".to_string()])
-        );
-        assert!(reg.supports_model("grok"));
-        assert_eq!(reg.model_args_template("kilo"), None);
-        assert!(!reg.supports_model("kilo"));
-        // Empty template normalizes to "no model flag".
-        assert_eq!(reg.model_args_template("opencode"), None);
-    }
-
-    /// A built-in override without a template keeps its family's `--model`
-    /// flag; an explicit empty template opts out.
-    #[test]
-    fn builtin_override_keeps_family_model_flag_unless_emptied() {
-        let reg = ProviderRegistry::new(Some(
-            &serde_json::json!({ "claude": { "cmd": "my-claude" } }),
-        ));
-        assert_eq!(
-            reg.model_args_template("claude"),
-            Some(vec!["--model".to_string(), "{model}".to_string()])
-        );
-        let reg = ProviderRegistry::new(Some(
-            &serde_json::json!({ "claude": { "cmd": "my-claude", "model_args": [] } }),
-        ));
-        assert_eq!(reg.model_args_template("claude"), None);
-    }
-
-    /// A providers reload preserves the current skip-permissions mode.
-    #[test]
-    fn reload_preserves_skip_mode() {
-        let reg = ProviderRegistry::new(None);
-        reg.set_skip_permissions(false, None);
-        reg.reload(None); // e.g. a `providers` settings change
-        assert!(!reg.skip_permissions());
-        assert!(!args_for(&reg, "claude", false)
-            .iter()
-            .any(|a| a.contains("dangerously")));
-    }
-}
+#[path = "providers_tests.rs"]
+mod tests;

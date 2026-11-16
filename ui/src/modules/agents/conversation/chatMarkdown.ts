@@ -11,10 +11,12 @@
 // block and the rendering stays unit-testable in node (no DOM).
 import type { MarkedExtension, Tokens } from 'marked';
 import { renderNote, type RenderCtx } from '../../../lib/render/markdown.ts';
-import { decorateCodeBlocks } from './codeBlocks';
+import { decorateCodeBlocks } from './codeBlocks.ts';
 import { escapeHtml } from '../../../lib/html.ts';
+import { fileUriToPath } from '../../../lib/fileUri.ts';
 import { applyHtmlBlockDirections } from '../../../lib/textDirection.ts';
 import { looksLikeNonPath } from '../../../lib/pathLinks/resolve.ts';
+import { resolveEmojiShortcode } from '../../../lib/emojiShortcodes.ts';
 
 const esc = escapeHtml;
 const LOCAL_IMG_EXT = /\.(?:png|jpe?g|gif|webp|svg|avif|bmp)$/i;
@@ -22,14 +24,20 @@ const LOCAL_IMG_EXT = /\.(?:png|jpe?g|gif|webp|svg|avif|bmp)$/i;
 function parseFileUrl(href: string): FileRef | null {
   const trimmed = href.trim();
   if (!/^file:\/\//i.test(trimmed)) return null;
-  let rawPath = trimmed.replace(/^file:\/\/(?:localhost)?/i, '');
-  if (!rawPath.startsWith('/')) return null;
-  try {
-    rawPath = decodeURIComponent(rawPath);
-  } catch {
-    /* keep rawPath as-is on malformed percent-encoding */
+  const hashMatch = /#L(\d+)(?::(\d+))?$/i.exec(trimmed);
+  const rawPath = fileUriToPath(trimmed);
+  if (!rawPath || (!rawPath.startsWith('/') && !/^[A-Za-z]:\//.test(rawPath))) return null;
+  const loc = splitLocation(rawPath);
+  if (loc.line == null && hashMatch) {
+    const ln = Number(hashMatch[1]);
+    const col = hashMatch[2] ? Number(hashMatch[2]) : null;
+    return {
+      path: loc.path,
+      line: Number.isFinite(ln) ? ln : null,
+      col: col != null && Number.isFinite(col) ? col : null,
+    };
   }
-  return splitLocation(rawPath);
+  return loc;
 }
 
 /** Extensions a bare file name (no directory) must have to count as a file
@@ -128,6 +136,25 @@ export const chatMarkedExtension: MarkedExtension = {
       renderer(token) {
         const n = String((token as unknown as { n: string }).n);
         return `<a class="ref-chip issue" data-raw="${n}" title="Pull request or issue #${n}">#${n}</a>`;
+      },
+    },
+    {
+      name: 'chatEmojiShortcode',
+      level: 'inline',
+      start(src: string) {
+        const m = /(?<![/\w]):[+-]?[a-z0-9_+-]{1,32}:(?![/\w])/i.exec(src);
+        return m ? m.index : undefined;
+      },
+      tokenizer(src: string) {
+        const m = /^:([+-]?[a-z0-9_+-]{1,32}):(?![/\w])/i.exec(src);
+        if (!m) return undefined;
+        const emoji = resolveEmojiShortcode(m[1]);
+        if (!emoji) return undefined;
+        return { type: 'chatEmojiShortcode', raw: m[0], emoji, shortcode: m[1] };
+      },
+      renderer(token) {
+        const { emoji, shortcode } = token as unknown as { emoji: string; shortcode: string };
+        return `<span class="chat-emoji" title=":${esc(shortcode)}:">${emoji}</span>`;
       },
     },
   ],

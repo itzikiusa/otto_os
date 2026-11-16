@@ -4,6 +4,24 @@
 //! `meta.model`, `meta.effort`, `meta.interaction_mode`, `meta.lean_turn`, and
 //! `meta.read_only` into provider-specific CLI argv flags.
 
+/// Normalize a provider slug (including custom aliases like `"claudework"` or
+/// `"codex-fast"`) to its CLI family when inferred, falling back to `provider`.
+pub(super) fn effective_cli_family(provider: &str) -> String {
+    crate::providers::infer_model_family(None, "", provider).unwrap_or_else(|| provider.to_string())
+}
+
+/// Removes provider flags a **read-only** session must not carry, from argv the
+/// provider registry built. Codex's `--search` (the model-side live web-search
+/// tool) is dropped: a read-only run has no business browsing, and on an
+/// untrusted checkout it is an exfiltration channel a prompt injection can
+/// steer.
+pub(super) fn read_only_strip(provider: &str, meta: &serde_json::Value, args: &mut Vec<String>) {
+    let fam = effective_cli_family(provider);
+    if fam == "codex" && meta.get("read_only").and_then(|v| v.as_bool()) == Some(true) {
+        args.retain(|a| a != "--search");
+    }
+}
+
 /// Build `["--add-dir", path, ...]` args for providers that support `--add-dir`
 /// (claude, codex, agy — NOT shell). Returns an empty vec for unknown/shell
 /// providers or when `meta` has no `extra_dirs` array.
@@ -59,7 +77,8 @@ pub(super) fn effort_args(provider: &str, meta: &serde_json::Value) -> Vec<Strin
     ) {
         return vec![];
     }
-    match provider {
+    let fam = effective_cli_family(provider);
+    match fam.as_str() {
         "claude" | "agy" => {
             let mapped = if effort == "ultra" {
                 "max"
@@ -106,29 +125,54 @@ pub(super) fn interaction_mode_apply(
     else {
         return;
     };
-    match (provider, mode) {
+    let strip_opt = |args: &mut Vec<String>, flag: &str| {
+        let eq = format!("{flag}=");
+        let mut out = Vec::with_capacity(args.len());
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == flag {
+                i += 2;
+                continue;
+            }
+            if args[i].starts_with(&eq) {
+                i += 1;
+                continue;
+            }
+            out.push(args[i].clone());
+            i += 1;
+        }
+        *args = out;
+    };
+    let fam = effective_cli_family(provider);
+    match (fam.as_str(), mode) {
         ("claude", "plan") => {
             args.retain(|a| a != "--dangerously-skip-permissions");
+            strip_opt(args, "--permission-mode");
             args.extend(["--permission-mode".to_string(), "plan".to_string()]);
         }
         ("claude", "accept-edits" | "standard") => {
             args.retain(|a| a != "--dangerously-skip-permissions");
+            strip_opt(args, "--permission-mode");
             args.extend(["--permission-mode".to_string(), "acceptEdits".to_string()]);
         }
         ("claude", "auto") => {
             args.retain(|a| a != "--dangerously-skip-permissions");
+            strip_opt(args, "--permission-mode");
             args.extend(["--permission-mode".to_string(), "auto".to_string()]);
         }
         ("agy", "plan") => {
             args.retain(|a| a != "--dangerously-skip-permissions");
+            strip_opt(args, "--mode");
             args.extend(["--mode".to_string(), "plan".to_string()]);
         }
         ("agy", "accept-edits" | "standard") => {
             args.retain(|a| a != "--dangerously-skip-permissions");
+            strip_opt(args, "--mode");
             args.extend(["--mode".to_string(), "accept-edits".to_string()]);
         }
         ("agy", "auto") => {
             args.retain(|a| a != "--dangerously-skip-permissions");
+            strip_opt(args, "--mode");
             args.extend(["--mode".to_string(), "auto".to_string()]);
         }
         ("codex", "plan") => {
@@ -163,7 +207,8 @@ pub(super) fn interaction_mode_apply(
 
 /// Extra argv for a **lean turn** (`meta.lean_turn = true`, Claude-only).
 pub(super) fn lean_turn_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
-    if provider != "claude" || meta.get("lean_turn").and_then(|v| v.as_bool()) != Some(true) {
+    let fam = effective_cli_family(provider);
+    if fam != "claude" || meta.get("lean_turn").and_then(|v| v.as_bool()) != Some(true) {
         return vec![];
     }
     vec![
@@ -179,7 +224,8 @@ pub(super) fn read_only_args(provider: &str, meta: &serde_json::Value) -> Vec<St
         return vec![];
     }
     let untrusted = meta.get("project_settings").and_then(|v| v.as_bool()) == Some(false);
-    match provider {
+    let fam = effective_cli_family(provider);
+    match fam.as_str() {
         "claude" => {
             let subagents = meta.get("allow_subagents").and_then(|v| v.as_bool()) == Some(true);
             let mut denied = vec!["Bash", "NotebookEdit"];
@@ -199,5 +245,45 @@ pub(super) fn read_only_args(provider: &str, meta: &serde_json::Value) -> Vec<St
         }
         "codex" if untrusted => vec!["-c".to_string(), "project_doc_max_bytes=0".to_string()],
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn claudework_expands_effort_interaction_lean_and_read_only_flags() {
+        let meta = json!({
+            "effort": "high",
+            "interaction_mode": "plan",
+            "lean_turn": true,
+        });
+        assert_eq!(effort_args("claudework", &meta), vec!["--effort", "high"]);
+
+        let mut args = vec!["--dangerously-skip-permissions".to_string()];
+        interaction_mode_apply("claudework", &meta, false, &mut args);
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args.windows(2).any(|w| w == ["--permission-mode", "plan"]));
+
+        let lean = lean_turn_args("claudework", &meta);
+        assert!(lean.contains(&"--strict-mcp-config".to_string()));
+        assert!(lean.contains(&"--disallowed-tools".to_string()));
+
+        let ro_meta = json!({
+            "read_only": true,
+            "project_settings": false,
+        });
+        let ro = read_only_args("claudework", &ro_meta);
+        assert!(ro.contains(&"--disallowed-tools".to_string()));
+        assert!(ro.contains(&"--strict-mcp-config".to_string()));
+    }
+
+    #[test]
+    fn codex_custom_alias_strips_search_when_read_only() {
+        let mut args = vec!["--search".to_string(), "--full-auto".to_string()];
+        read_only_strip("codex-work", &json!({"read_only": true}), &mut args);
+        assert_eq!(args, vec!["--full-auto".to_string()]);
     }
 }

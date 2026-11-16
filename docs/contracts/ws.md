@@ -431,6 +431,59 @@ a client that never acks gets one frame and then nothing.
   `take_over` first). The first input while `controller == "none"` makes this
   viewer's user the driver.
 
+## 1c. LSP WebSocket bridge — `WS /ws/lsp?lang=&root=&connection_id=&file=`
+
+Auth: `Sec-WebSocket-Protocol: otto-bearer, <token>` (echoed as `otto-bearer`;
+`?token=` → 401). Scoped share tokens, MCP-only tokens and agent-session
+credentials are refused with 403 (`RootRoute::Lsp`).
+
+- **Local target (`connection_id` omitted or empty):** Requires human root
+  authority (`root_authority`), and `root` must be an existing directory
+  outside Otto's data dir and secret directories (`~/.ssh`, key files). When optional `file` is
+  supplied inside an authorized directory, the bridge walks up from `file` to
+  the nearest module manifest (`go.mod`, `Cargo.toml`, `pom.xml`, `build.gradle*`,
+  `package.json`, `pyproject.toml`) so multi-repo workspaces always bind to the
+  active file's module root. Binary discovery checks
+  `<data_dir>/toolchains/**/bin` first (prepend to `PATH`, plus managed JDK
+  `JAVA_HOME`), then standard developer bin directories (`~/.cargo/bin`,
+  `~/go/bin`, `~/.local/bin`, Homebrew, …), and includes both the built-in
+  language servers (`gopls`, `typescript-language-server`, `jdtls`,
+  `rust-analyzer`, `pyright-langserver`, `bash-language-server`,
+  `vscode-json-language-server`, `vscode-css-language-server`,
+  `vscode-html-language-server`, `marksman`) and any enabled runtime IDE plugin
+  language servers (`IdePluginRegistry`, e.g. `kotlin-language-server` or
+  `clangd`). Local spawns inherit the cached user
+  login+interactive shell environment (`$SHELL -lic`, e.g. `GOPRIVATE`, plus
+  cold-start process `SSH_AUTH_SOCK`/`GOPRIVATE`/`GONOSUMDB`/`GOPATH`/`GOMODCACHE`) merged
+  with the project's SDK environment and enforce explicit child memory caps
+  (`gopls` `GOMEMLIMIT=512MiB`/`GOGC=75` + `-mod=mod`, `jdtls` `-Xms128m -Xmx768m` + G1 periodic heap return + persistent `-data` cache, `rust-analyzer`
+  `RA_LRU_CAP=128`, Node-based LSPs `--max-old-space-size=384`) in a dedicated
+  Unix process group (`process_group(0)`). Missing binary → HTTP 503
+  `server_unavailable`.
+- **Remote SSH target (`connection_id` set):** Resolves the saved SSH
+  `Connection` (`ConnectionKind::Ssh`) through the caller's workspace/global
+  `Connections` grants and resource access (`discover` + `shell`, plus
+  `owner_private_enabled` and SSH option-injection checks). `root` must be a
+  non-empty absolute POSIX path on the remote host (`400` otherwise). The
+  language server is spawned over `ssh -T` (`BatchMode=yes`, optional key /
+  port / ProxyJump) inside `cd <root>` with remote toolchain `PATH` discovery
+  (`~/.otto/toolchains/**/bin`, `~/.cargo/bin`, `~/go/bin`,
+  `~/.local/bin`, …).
+- **Multiplexing, multi-root & back-pressure:** Sockets share one language-server
+  process per `(user_id, lang, root, ssh_target)` — never across users — capped
+  at `MAX_SERVERS_PER_OWNER = 3` (`MAX_GLOBAL_SERVERS = 3`, `1.2 GiB` combined
+  LSP RSS budget, evicting `active_clients == 0` servers first) LRU per user, reaped after `450ms` once
+  detached with zero open documents (or immediately when switching workspace
+  roots, and `45s` otherwise) via `shutdown` → `exit` → process-group
+  `-SIGTERM`/`-SIGKILL`. JSON-RPC text frames carry bare LSP messages (the
+  daemon adds `Content-Length` stdio framing on the child pipe, caps inbound
+  headers at 8 KiB / body at 16 MiB, bounds stdin backlog at 8 MiB, rewrites
+  client request IDs per socket, enriches `initialize` with any attached
+  project folders (`additional_roots` → `workspaceFolders`) and caches the first
+  `initialize` result, ref-counts `textDocument/didOpen` + `didClose` per URI,
+  routes `textDocument/publishDiagnostics` to sockets holding that URI, and
+  pushes `workspace/didChangeWatchedFiles` on build-manifest writes).
+
 ## 2. Event stream — `WS /ws/events`
 
 Server → client only. Each message is one JSON-serialized `otto_core::event::Event`

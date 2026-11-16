@@ -55,6 +55,17 @@ pub struct RuntimeEntityRow {
     pub payload: serde_json::Value,
 }
 
+/// Unparsed entity row fetched directly from SQLite so callers can deserialize
+/// directly into typed structs on a blocking worker without an intermediate
+/// `serde_json::Value` allocation tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawRuntimeEntityRow {
+    pub kind: String,
+    pub entity_id: String,
+    pub sequence: u64,
+    pub payload_json: String,
+}
+
 /// Column list (a macro so the queries stay `&'static str`, as sqlx requires).
 macro_rules! session_cols {
     () => {
@@ -445,24 +456,25 @@ impl AgentRuntimeRepo {
         Ok(())
     }
 
-    /// Upsert one bookkeeping entity (the runtime's process checkpoint)
-    /// without touching the session row: it is not activity, and its
-    /// sequence is not one a client saw.
-    pub async fn put_entity(&self, session_id: &Id, r: &RuntimeEntityRow) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO agent_runtime_entities (session_id, kind, entity_id, sequence, \
-             payload_json) VALUES (?, ?, ?, ?, ?) ON CONFLICT (session_id, kind, entity_id) \
-             DO UPDATE SET sequence = excluded.sequence, payload_json = excluded.payload_json",
+    /// Every entity of a session as raw JSON text, oldest update first.
+    pub async fn raw_entities(&self, session_id: &Id) -> Result<Vec<RawRuntimeEntityRow>> {
+        let rows = sqlx::query(
+            "SELECT kind, entity_id, sequence, payload_json FROM agent_runtime_entities \
+             WHERE session_id = ? ORDER BY sequence ASC",
         )
         .bind(session_id)
-        .bind(&r.kind)
-        .bind(&r.entity_id)
-        .bind(i(r.sequence))
-        .bind(r.payload.to_string())
-        .execute(&self.pool)
+        .fetch_all(&self.pool)
         .await
-        .map_err(dberr("put runtime entity"))?;
-        Ok(())
+        .map_err(dberr("list runtime entities"))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| RawRuntimeEntityRow {
+                kind: r.get("kind"),
+                entity_id: r.get("entity_id"),
+                sequence: u(r.get("sequence")),
+                payload_json: r.get("payload_json"),
+            })
+            .collect())
     }
 
     /// Every entity of a session, oldest update first.

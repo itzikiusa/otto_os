@@ -52,10 +52,10 @@ const INBOX_CAP: usize = 10 * 1024 * 1024;
 // ── shared helpers ─────────────────────────────────────────────────────────
 
 use crate::transcript::fold::{image_store, store_key};
-pub(crate) use crate::transcript::resolve::effective_provider;
+pub(crate) use crate::transcript::resolve::effective_provider_in;
 use crate::transcript::resolve::resolve_transcript;
 #[cfg(test)]
-use crate::transcript::resolve::{resolve_transcript_sync, transcript_roots};
+use crate::transcript::resolve::{effective_provider, resolve_transcript_sync, transcript_roots};
 
 /// Fold a transcript file with the server's knobs: images written to the
 /// store, cost priced exactly like the Usage module, subagent tree attached
@@ -258,7 +258,7 @@ pub(crate) async fn transcript_page(
     let (ctx, id, session) = (ctx.clone(), id.clone(), session.clone());
     let before = parse_before(q.before.as_deref())?;
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let provider_name = effective_provider(&session);
+    let provider_name = effective_provider_in(ctx.manager.providers(), &session);
     let resolved = match resolve_transcript(&ctx, &session).await {
         Ok(r) => r,
         Err(why) => {
@@ -395,7 +395,7 @@ pub async fn touch_workspace_transcripts(
         {
             continue;
         }
-        let provider_name = effective_provider(&s);
+        let provider_name = effective_provider_in(ctx.manager.providers(), &s);
         if !matches!(provider_name.as_str(), "claude" | "codex" | "agy") {
             continue;
         }

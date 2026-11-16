@@ -1,5 +1,6 @@
-// TS mirror of crates/otto-core (domain.rs + api.rs). Keep in lockstep — the
-// Rust side is the source of truth (docs/contracts/api.md).
+// TS mirror of crates/otto-core (domain.rs + api.rs) and crates/otto-ide
+// (types*). Keep in lockstep — the Rust side is the source of truth
+// (docs/contracts/api.md).
 //
 // Barrel: the contract mirror is split by area under ./types/. Import from
 // `lib/api/types` as before; every name resolves through these re-exports.
@@ -21,11 +22,15 @@ export * from './types/events';
 export * from './types/git';
 export * from './types/git-merge';
 export * from './types/goal-loops';
+export * from './types/ide';
+export * from './types/ide-db-watch';
+export * from './types/ide-intelligence';
 export * from './types/insights-share';
 export * from './types/integrations';
 export * from './types/issue-update';
 export * from './types/k8s';
 export * from './types/k8s-monitor';
+export * from './types/machine';
 export * from './types/mcp';
 export * from './types/memory';
 export * from './types/notifications';
@@ -39,6 +44,7 @@ export * from './types/skills-eval';
 export * from './types/telemetry';
 export * from './types/transcript';
 export * from './types/ui-control';
+export * from './types/usage-limits';
 export * from './types/vault';
 export * from './types/workbench';
 export * from './types/workflows';

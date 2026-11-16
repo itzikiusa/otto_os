@@ -80,6 +80,14 @@ impl Drop for AbortOnDrop {
     }
 }
 
+struct IdeShutdownOnDrop(Arc<otto_ide::IdeEngine>);
+
+impl Drop for IdeShutdownOnDrop {
+    fn drop(&mut self) {
+        self.0.lsp_pool.shutdown();
+    }
+}
+
 /// Start every background task, in boot order. `root_user_id` gates the
 /// channel supervisor (none until onboarding).
 pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> Background {
@@ -105,6 +113,7 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     spawn_data_retention(ctx);
     spawn_workflow_run_retention(ctx);
     spawn_memory_fts_warmup(ctx);
+    spawn_boot_warmups(ctx);
 
     // Gated by OTTO_SELF_IMPROVE (enabled by default; 0/false/off disables it).
     // Computed here so the channel manager can decide whether to wire the
@@ -138,7 +147,12 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     start_model_catalog(ctx);
     start_usage_tracking(ctx);
     spawn_mcp_health_sweep(ctx);
+    spawn_ide_shutdown_watcher(ctx, &mut bg);
     bg
+}
+
+fn spawn_ide_shutdown_watcher(ctx: &ServerCtx, bg: &mut Background) {
+    bg.keep(IdeShutdownOnDrop(Arc::clone(&ctx.ide)));
 }
 
 /// Reconcile the memory FTS index off the request path: it used to run
@@ -154,6 +168,47 @@ fn spawn_memory_fts_warmup(ctx: &ServerCtx) {
             fts = ok,
             ms = t.elapsed().as_millis() as u64,
             "memory: FTS warmed"
+        );
+    });
+}
+
+/// Pre-hydrate recent structured runtime threads + cold CLI probes (`/meta`,
+/// `/usage/limits`) off the request path right after boot so the very first
+/// mobile/desktop navigation hits warm RAM instead of cold SQLite/CLI forks.
+fn spawn_boot_warmups(ctx: &ServerCtx) {
+    let runtime = ctx.agent_runtime.clone();
+    tokio::spawn(async move {
+        let t = std::time::Instant::now();
+        runtime.warm_recent(5).await;
+        tracing::debug!(
+            ms = t.elapsed().as_millis() as u64,
+            "agent-runtime: recent threads pre-warmed"
+        );
+    });
+
+    if std::env::var("OTTO_E2E_FAST_TIMERS").is_ok() {
+        return;
+    }
+    let manager = Arc::clone(&ctx.manager);
+    tokio::spawn(async move {
+        let providers = manager.providers().names();
+        let specs = otto_sessions::tool_probe::tool_specs(
+            providers
+                .iter()
+                .map(|name| (name.as_str(), manager.providers().program_for(name))),
+        );
+        let families = manager.providers().model_families();
+        let claude_dirs = manager
+            .providers()
+            .active_claude_config_dirs(&otto_transcript::roots::home_dir());
+        let probe = otto_sessions::provider_models::ModelProbe::from_tool_specs(families, &specs)
+            .with_claude_config_dirs(claude_dirs);
+        let agy = manager.providers().resolved_family_program("agy");
+        let grok = manager.providers().resolved_family_program("grok");
+        let _ = tokio::join!(
+            otto_sessions::tool_probe::probe_tools_cached(specs),
+            otto_sessions::provider_models::probe_provider_models_cached(&probe),
+            otto_usage::limits::refresh_cli_limits(agy, grok),
         );
     });
 }
@@ -394,6 +449,7 @@ fn spawn_data_retention(ctx: &ServerCtx) {
         let (pool, manager) = (ctx.pool.clone(), Arc::clone(&ctx.manager));
         let settings = SettingsRepo::new(pool.clone());
         let auth = otto_rbac::AuthRepo::with_cache(pool.clone(), ctx.auth_cache.clone());
+        let runtime_repo = otto_state::AgentRuntimeRepo::new(pool.clone());
         let maint_pool = pool.clone();
         let repo = otto_state::RetentionRepo::new(pool);
         let (mut compaction_logged, mut deferred) = (false, None);
@@ -436,6 +492,9 @@ fn spawn_data_retention(ctx: &ServerCtx) {
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!("expired auth-session purge failed: {e}"),
+            }
+            if let Err(e) = runtime_repo.expire_drafts().await {
+                tracing::warn!("runtime composer draft expiry failed: {e}");
             }
             // SQLite housekeeping (P3): planner stats, WAL truncate, and
             // incremental vacuum once the DB was compacted by an admin.
@@ -765,6 +824,7 @@ fn start_usage_tracking(ctx: &ServerCtx) {
     tokio::spawn(async move {
         if usage.wait_ready(Duration::from_secs(120)).await {
             tracing::info!("usage tracking started (embedded clickhouse)");
+            usage.warm_sidebar_session_totals().await;
         } else {
             tracing::info!(
                 "usage tracking idle (embedded clickhouse not available after 120 s — \
@@ -803,58 +863,5 @@ fn spawn_mcp_health_sweep(ctx: &ServerCtx) {
 }
 
 #[cfg(test)]
-mod background_shutdown_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn dropping_background_cancels_supervisors_and_aborts_owned_tasks() {
-        let signal = crate::cancel_signal::CancelSignal::new();
-        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel::<()>();
-        let task = tokio::spawn(async move {
-            let _finished_tx = finished_tx;
-            std::future::pending::<()>().await;
-        });
-        let mut background = Background::default();
-        background.keep(CancelOnDrop(signal.clone()));
-        background.keep(StopFlagOnDrop(flag.clone()));
-        background.keep(AbortOnDrop(task));
-        assert!(!signal.is_cancelled());
-        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
-        drop(background);
-        assert!(signal.is_cancelled());
-        assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(tokio::time::timeout(Duration::from_secs(1), finished_rx)
-            .await
-            .expect("owned task was aborted")
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn stop_watcher_drops_handles_before_teardown_even_without_signal() {
-        let signal = crate::cancel_signal::CancelSignal::new();
-        let mut background = Background::default();
-        background.keep(CancelOnDrop(signal.clone()));
-        // Mirrors the daemon's ownership: an early server exit must stop
-        // admission even if the shutdown watcher never received a signal.
-        let watcher = background.stop_on(std::future::pending());
-        watcher.abort();
-        let _ = watcher.await;
-        assert!(signal.is_cancelled(), "teardown sees cancelled admission");
-    }
-
-    #[tokio::test]
-    async fn stop_watcher_cancels_on_signal_before_it_returns() {
-        let signal = crate::cancel_signal::CancelSignal::new();
-        let mut background = Background::default();
-        background.keep(CancelOnDrop(signal.clone()));
-        let (stop, stopped) = tokio::sync::oneshot::channel();
-        let watcher = background.stop_on(async move {
-            let _ = stopped.await;
-        });
-        assert!(!signal.is_cancelled());
-        stop.send(()).unwrap();
-        watcher.await.unwrap();
-        assert!(signal.is_cancelled());
-    }
-}
+#[path = "tasks_tests.rs"]
+mod background_shutdown_tests;

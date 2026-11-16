@@ -713,6 +713,48 @@ impl SandboxPolicy {
         self
     }
 
+    /// Re-open a custom provider CLI home (e.g. `CLAUDE_CONFIG_DIR=~/.claude-work`)
+    /// only when it is an absolute path outside `data_dir` that does NOT cover
+    /// `home` or `/`. When `read_only` is true, also write-denies
+    /// `<root>/projects/*/memory` to match `~/.claude/projects/*/memory`.
+    pub fn allow_provider_home_safe(
+        self,
+        root: &Path,
+        home: &Path,
+        data_dir: &Path,
+        read_only: bool,
+    ) -> Self {
+        if !root.is_absolute() {
+            return self;
+        }
+        let canon_root = canonicalize_lenient(root);
+        let canon_home = canonicalize_lenient(home);
+        if canon_root.as_os_str().is_empty() || covers_home(&canon_root, &canon_home) {
+            return self;
+        }
+        if !data_dir.as_os_str().is_empty() {
+            let canon_data = canonicalize_lenient(data_dir);
+            if canon_root.starts_with(&canon_data) {
+                return self;
+            }
+        }
+        if !home.as_os_str().is_empty() && canon_root == canonicalize_lenient(&home.join(".claude"))
+        {
+            return self;
+        }
+        let mut pol = self.allow_provider_home(&canon_root);
+        if read_only {
+            let projects = canon_root.join("projects");
+            if let Some(d) = projects.to_str().filter(|d| !d.contains('"')) {
+                pol.trailing_rules.push(format!(
+                    "(deny file-write* (regex #\"^{}/[^/]+/memory(/|$)\"))",
+                    regex_escape(d)
+                ));
+            }
+        }
+        pol
+    }
+
     /// Build the policy for a **daemon-spawned tool** (today: a headless Blender
     /// render of a daemon-generated script — see `otto-server::design_blender`).
     /// Much tighter than `for_agent`: writes are confined to the job's `out_dir`,

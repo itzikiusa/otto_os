@@ -12,6 +12,7 @@
   // Thinking is its own violet, italic marker — never mistaken for the answer.
   // Per-turn system notes stay a chip that expands in place.
   import { copyTextOrThrow } from '../../../lib/clipboard';
+  import { fileUriToPath } from '../../../lib/fileUri';
   import { getContext } from 'svelte';
   import { toastError } from '../../../lib/toastError';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
@@ -82,7 +83,7 @@
   // The composer sends attached images as `[Image: <path>]` lines after the
   // text; standalone `file:///.../img.png` lines also render as inline image
   // thumbnails with click-to-zoom Modal lightbox.
-  const IMAGE_LINE = /^(?:\[Image:\s*(.+?)\]|file:\/\/(?:localhost)?(\/[^\s]+\.(?:png|jpe?g|gif|webp|svg|avif|bmp)))\s*$/gim;
+  const IMAGE_LINE = /^(?:\[Image:\s*(.+?)\]|(file:\/\/(?:localhost)?\/[^\s]+\.(?:png|jpe?g|gif|webp|svg|avif|bmp)(?:[?#][^\s]*)?))\s*$/gim;
   const PEER_MESSAGE_RE = /^\[Message from (?:session\s+)?([^\]]+)\]:?\s*([\s\S]*)$/i;
 
   interface ParsedUserText {
@@ -115,18 +116,10 @@
       working = pm[2] ?? '';
     }
     const images: string[] = [];
-    const rest = working.replace(IMAGE_LINE, (_m, bracketPath?: string, fileUrlPath?: string) => {
-      const raw = (bracketPath ?? fileUrlPath ?? '').trim();
+    const rest = working.replace(IMAGE_LINE, (_m, bracketPath?: string, fileUrl?: string) => {
+      const raw = (bracketPath ?? fileUrl ?? '').trim();
       if (raw) {
-        let decoded = raw;
-        if (fileUrlPath) {
-          try {
-            decoded = decodeURIComponent(raw);
-          } catch {
-            /* keep raw */
-          }
-        }
-        images.push(decoded);
+        images.push(/^file:\/\//i.test(raw) ? fileUriToPath(raw) : raw);
       }
       return '';
     });

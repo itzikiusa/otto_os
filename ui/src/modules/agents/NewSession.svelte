@@ -20,7 +20,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { allProviders, providerReadiness } from '../../lib/providers';
+  import { allProviders, inferProviderFamily, providerReadiness, providerSubtitle } from '../../lib/providers';
 
   /** Per-provider ceiling on one batch — a typo in the stepper shouldn't be able
    *  to fork 200 agent processes at once. */
@@ -109,12 +109,7 @@
   // require creating a workspace for it, or typing an absolute path by hand.
   let browsing: 'cwd' | 'extra' | null = $state(null);
 
-  // ── Per-device memory of the last sheet ──────────────────────────────────
-  // The sheet used to forget everything between opens: the Browser tools
-  // toggle and (when no default agent is configured) which agent was picked.
-  // Accounts are deliberately NOT remembered — a deleted account's id would
-  // be sent silently while the picker showed "Default CLI account". Settings stay authoritative — a
-  // configured default provider always wins over the remembered one.
+  // Per-device memory of the last sheet (Browser toggle + last picked agent; accounts stay ephemeral).
   const PREFS_KEY = 'otto_new_session_prefs';
   type Prefs = { provider?: string; browser?: boolean };
   function loadPrefs(): Prefs {
@@ -309,14 +304,15 @@
   // config (claude: .mcp.json, agy: .agents/mcp_config.json, codex: per-spawn
   // `-c` overrides). Other providers don't load it, so the toggle is hidden.
   const BROWSER_PROVIDERS = ['claude', 'codex', 'agy'];
-  const supportsBrowser = $derived(BROWSER_PROVIDERS.includes(provider));
+  const providerFamily = $derived(inferProviderFamily(provider, auth.meta));
+  const supportsBrowser = $derived(BROWSER_PROVIDERS.includes(providerFamily));
   /** A pinned model is provider-specific, so it only applies to a batch that
    *  targets ONE provider (any number of sessions of it). */
   const supportsModel = $derived(chosen.length <= 1);
 
-  // Context preview: only claude/codex materialize an Otto context; plain shells
-  // and custom providers get nothing, so there's nothing to preview for them.
-  const supportsContext = $derived(provider === 'claude' || provider === 'codex');
+  // Context preview: claude/codex families (including custom wrappers like
+  // `claudework`) materialize an Otto context; plain shells get nothing.
+  const supportsContext = $derived(providerFamily === 'claude' || providerFamily === 'codex');
   let showPreview = $state(false);
 
   $effect(() => {
@@ -373,7 +369,7 @@
       const meta: Record<string, unknown> = {};
       if (accountIds[p]) meta.account_id = accountIds[p];
       if (networkProfileId) meta.network_profile_id = networkProfileId;
-      if (browser && BROWSER_PROVIDERS.includes(p)) meta.browser = true;
+      if (browser && BROWSER_PROVIDERS.includes(inferProviderFamily(p, auth.meta))) meta.browser = true;
       if (dirs.length > 0) meta.extra_dirs = [...dirs];
       if (mcpProfileIds.length && p !== 'shell') meta.mcp_profiles = [...mcpProfileIds];
       const sessionTitle = base === '' ? null : spawns.length > 1 ? `${base} ${i + 1}` : base;
@@ -512,7 +508,7 @@
               {#if p === defaultProvider}<span class="default-badge">default</span>{/if}
             </span>
             <span class="provider-desc">
-              {p === 'claude' ? 'Claude Code CLI' : p === 'codex' ? 'Codex CLI' : p === 'shell' ? 'Plain shell' : 'Custom provider'}
+              {providerSubtitle(p)}
             </span>
           </button>
           <div class="count-ctl" role="group" id={`ns-steppers-${i}`} aria-label={`${p} sessions`}>

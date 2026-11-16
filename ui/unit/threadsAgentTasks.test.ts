@@ -1,5 +1,5 @@
-// Every subagent and background task of a runtime thread (agentTasks.ts):
-// the strip above the composer and Thread details' "Agents & tasks".
+// Every subagent, child thread, and background task of a runtime thread (agentTasks.ts):
+// the strip above the composer and Thread details' "Agents & tasks" drill-down.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { agentTasks, backgroundStripText, taskElapsed } from '../src/modules/threads/runtime/agentTasks.ts';
@@ -40,6 +40,79 @@ test('finished work is newest first: settled cards and background command notice
   ]);
 });
 
+test('drill-down surfaces live subagent child steps, streaming command output, child threads, and settles expired timers', () => {
+  const items = [
+    card('t1:sa:1', 'IDE Backend Fixer', 'running', '2026-11-13T10:00:00Z', {
+      subagent_type: 'self',
+      prompt: 'Fix gopls build tags',
+      tool_uses: 3,
+      last_tool: 'edit_file',
+    }),
+    {
+      ...base,
+      id: 't1:cmd:1',
+      ordinal: 2,
+      status: 'running',
+      started_at: '2026-11-13T10:00:02Z',
+      type: 'command_execution',
+      input: 'cargo nextest run -p otto-ide',
+      cwd: '/Users/dev/claude_ade-ide',
+      output: '',
+    } as never,
+    {
+      ...base,
+      id: 't2:msg:1',
+      turn_id: 't2',
+      ordinal: 3,
+      status: 'completed',
+      started_at: '2026-11-13T10:02:00Z',
+      updated_at: '2026-11-13T10:02:00Z',
+      type: 'user_message',
+      text: 'Status check',
+    } as never,
+  ];
+  const background = [
+    bg('sa-1', 'IDE Backend Fixer', '2026-11-13T10:00:00Z', 't1:sa:1'),
+    { id: 'task-9', kind: 'command', label: 'cargo nextest run -p otto-ide', started_at: '2026-11-13T10:00:02Z', item_id: 't1:cmd:1' },
+    { id: 'sched-1', kind: 'command', label: 'Timer (35s): Verify Post-Round-3 deploy receipt', started_at: '2026-11-13T10:00:05Z' },
+  ];
+  const t = agentTasks(items, background, {
+    output: { 't1:cmd:1': 'Compiling otto-ide v0.1.0\nPASS [ 0.42s] pool_tests::warm_reuse\n' },
+    childThreads: [
+      {
+        id: 'rt_child_1',
+        title: 'Security Reviewer',
+        provider: 'codex',
+        model: 'gpt-5.4',
+        status: 'working',
+        createdAt: '2026-11-13T10:00:10Z',
+        updatedAt: '2026-11-13T10:01:00Z',
+        stepSummary: 'Read 6 files',
+      },
+    ],
+  });
+
+  // One-shot 35s timer started at 10:00:05Z with activity at 10:02:00Z settles to finished!
+  assert.deepEqual(t.running.map((r) => r.label), [
+    'IDE Backend Fixer',
+    'cargo nextest run -p otto-ide',
+    'Security Reviewer',
+  ]);
+  assert.equal(t.running[0].sublabel, 'self');
+  assert.equal(t.running[0].stepSummary, '3 steps · last: edit_file');
+  assert.equal(t.running[0].prompt, 'Fix gopls build tags');
+  assert.equal(t.running[1].stepSummary, 'PASS [ 0.42s] pool_tests::warm_reuse');
+  assert.equal(t.running[1].output, 'Compiling otto-ide v0.1.0\nPASS [ 0.42s] pool_tests::warm_reuse\n');
+  assert.equal(t.running[2].childSessionId, 'rt_child_1');
+  assert.equal(t.running[2].sublabel, 'codex · gpt-5.4');
+  assert.equal(t.running[2].stepSummary, 'Read 6 files');
+  assert.equal(backgroundStripText([t.running[0]]), 'Running in the background: IDE Backend Fixer (3 steps · last: edit_file)');
+
+  assert.equal(t.finished.length, 1);
+  assert.equal(t.finished[0].kind, 'timer');
+  assert.equal(t.finished[0].status, 'done');
+});
+
 test('elapsed reads seconds, minutes and hours, live while running', () => {
   const now = Date.parse('2026-11-13T10:02:05Z');
   assert.equal(taskElapsed({ startedAt: '2026-11-13T10:00:00Z', endedAt: null }, now), '2m 5s');
@@ -56,7 +129,7 @@ test('a background command opens its launch call and output, running or finished
   } as never;
   const running = agentTasks([launch], [{ id: 'bbplg7ake', kind: 'command', label: 'Run three-tick loop', started_at: '2026-11-13T10:00:00Z' }]);
   assert.deepEqual(
-    [running.running[0].itemId, running.running[0].taskId, running.running[0].command],
+    [running.running[0].itemId, running.running[0].taskId, running.running[0].prompt],
     ['t1:tool:L', 'bbplg7ake', 'for i in 1 2 3; do echo tick $i; sleep 2; done'],
   );
   const notice = { ...base, id: 'bg:bbplg7ake', ordinal: 3, status: 'completed', started_at: null, type: 'system_notice', message: 'Background command finished: Run three-tick loop' } as never;
@@ -77,4 +150,74 @@ test('swarm members without a card join the list; carded ones are not repeated',
   ], [carded]);
   assert.deepEqual(t.running.map((r) => r.label), ['echoer', 'dap-lsp']);
   assert.deepEqual(t.finished.map((r) => [r.label, r.status, r.id]), [['monitor', 'stopped', 'swarm:monitor']]);
+});
+
+test('structured task_settlement, due_at deadlines, and top-level dynamic_tool subagents work across all providers', () => {
+  const items = [
+    {
+      ...base,
+      id: 't1:dyn:agy1',
+      ordinal: 1,
+      status: 'running',
+      started_at: '2026-11-13T10:00:00Z',
+      type: 'dynamic_tool',
+      tool_name: 'invoke_subagent',
+      input: { Role: 'Architecture Reviewer', TypeName: 'research', Prompt: 'Audit layer boundaries' },
+    } as never,
+    {
+      ...base,
+      id: 't1:dyn:done1',
+      ordinal: 2,
+      status: 'completed',
+      started_at: '2026-11-13T10:00:01Z',
+      completed_at: '2026-11-13T10:00:12Z',
+      type: 'dynamic_tool',
+      tool_name: 'otto_personal_agent_delegate',
+      input: { agent: 'qa-bot', task: 'Run smoke checks' },
+      output: 'All 14 smoke checks passed',
+    } as never,
+    {
+      ...base,
+      id: 'notice:settle:1',
+      ordinal: 3,
+      status: 'completed',
+      started_at: null,
+      updated_at: '2026-11-13T10:01:30Z',
+      type: 'system_notice',
+      message: 'Custom provider notice text',
+      task_settlement: {
+        task_id: 'cmd-42',
+        label: 'cargo test -p otto-ide',
+        kind: 'command',
+        status: 'failed',
+      },
+    } as never,
+  ];
+
+  const background = [
+    {
+      id: 'timer-due-1',
+      kind: 'timer',
+      label: 'Check deploy health',
+      started_at: '2026-11-13T10:00:05Z',
+      due_at: '2026-11-13T10:01:00Z',
+    },
+  ];
+
+  const t = agentTasks(items, background);
+  assert.equal(t.running.length, 1);
+  assert.equal(t.running[0].label, 'Architecture Reviewer');
+  assert.equal(t.running[0].sublabel, 'invoke_subagent');
+  assert.equal(t.running[0].prompt, 'Audit layer boundaries');
+
+  // Structured task_settlement + due_at-expired timer + completed dynamic_tool subagent all settle cleanly!
+  assert.deepEqual(
+    t.finished.map((f) => [f.label, f.kind, f.status]),
+    [
+      ['cargo test -p otto-ide', 'command', 'failed'],
+      ['Check deploy health', 'timer', 'done'],
+      ['qa-bot', 'agent', 'done'],
+    ],
+  );
+  assert.equal(t.finished[2].output, 'All 14 smoke checks passed');
 });

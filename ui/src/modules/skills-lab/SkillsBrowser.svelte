@@ -22,6 +22,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { recallSelection, rememberSelection } from '../../lib/lastSelection';
   import { router } from '../../lib/router.svelte';
+  import { skillsLabState } from '../../lib/stores/skillsLabState.svelte';
   import { installAllBundled as runInstallAll } from './bundledActions';
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
@@ -60,17 +61,15 @@
   }
   let { listCollapsed = false, onreview, onevaluate, onempty, onphonedetail, onopenrun, onopenreview }: Props = $props();
 
-  // ---- Data -----------------------------------------------------------------
-  let library = $state<LibrarySkill[]>([]);
-  let bundled = $state<BundledSkillView[]>([]);
-  let providerSkills = $state<ProviderSkillInfo[]>([]);
-  let loading = $state(true);
+  // ---- Data (restored from skillsLabState so switching tabs/pages preserves state) ----
+  const initialBrowser = skillsLabState.browser;
+  let library = $state<LibrarySkill[]>(initialBrowser.library);
+  let bundled = $state<BundledSkillView[]>(initialBrowser.bundled);
+  let providerSkills = $state<ProviderSkillInfo[]>(initialBrowser.providerSkills);
+  let loading = $state(!initialBrowser.loaded);
   let loadError = $state<string | null>(null);
-  // Some (not all) sources failed: the list still shows, with a note saying
-  // which copies are missing so they don't read as "not installed".
   let partialError = $state<string | null>(null);
-  // Only ever reassigned (never mutated): raw, no per-key proxy.
-  let bodies = $state.raw<Record<string, string>>({});
+  let bodies = $state.raw<Record<string, string>>(initialBrowser.bodies);
 
   async function loadAll(): Promise<void> {
     loadError = null;
@@ -91,6 +90,12 @@
     library = lib.status === 'fulfilled' ? lib.value : [];
     bundled = bun.status === 'fulfilled' ? bun.value : [];
     providerSkills = prov.status === 'fulfilled' ? prov.value : [];
+    if (!loadError) {
+      skillsLabState.browser.library = library;
+      skillsLabState.browser.bundled = bundled;
+      skillsLabState.browser.providerSkills = providerSkills;
+      skillsLabState.browser.loaded = true;
+    }
     loading = false;
   }
   let retrying = $state(false);
@@ -150,6 +155,7 @@
       const batch = pendingBodies;
       pendingBodies = {};
       bodies = { ...bodies, ...batch };
+      skillsLabState.browser.bodies = bodies;
     }, 150);
   }
   $effect(() => () => {
@@ -157,9 +163,9 @@
   });
 
   // ---- Filters ----------------------------------------------------------------
-  let query = $state('');
-  let category = $state<string | null>(null);
-  let source = $state<SourceFilter>('all');
+  let query = $state(initialBrowser.query);
+  let category = $state<string | null>(initialBrowser.category);
+  let source = $state<SourceFilter>(initialBrowser.source);
   // `#/skills-eval/bundled` (and the old `#/settings/skills`) opens on the
   // bundled catalogue: the Bundled filter, with its install state summary.
   $effect(() => {
@@ -172,7 +178,7 @@
     const cat = category && bundled.some((b) => b.category === category) ? category : null;
     if (await runInstallAll(cat)) await loadAll();
   }
-  let driftedOnly = $state(false);
+  let driftedOnly = $state(initialBrowser.driftedOnly);
   const cats = $derived(categoryCounts(groups));
   // The four biggest categories as chips; the rest in a (clamped) ctxMenu so
   // the filter block stays two or three rows however many categories exist.
@@ -213,9 +219,18 @@
   // ---- Selection -----------------------------------------------------------
   // The skills list's width — drag / ←→ on the divider, remembered across visits.
   let listW = $state(loadPaneWidth('skills.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
-  let selName = $state<string | null>(null);
-  let selSource = $state<VariantSource>('library');
-  let tab = $state<DetailTab>('overview');
+  let selName = $state<string | null>(initialBrowser.selName);
+  let selSource = $state<VariantSource>(initialBrowser.selSource);
+  let tab = $state<DetailTab>(initialBrowser.detailTab);
+  $effect(() => {
+    skillsLabState.browser.query = query;
+    skillsLabState.browser.category = category;
+    skillsLabState.browser.source = source;
+    skillsLabState.browser.driftedOnly = driftedOnly;
+    skillsLabState.browser.selName = selName;
+    skillsLabState.browser.selSource = selSource;
+    skillsLabState.browser.detailTab = tab;
+  });
   let phoneDetail = $state(false);
   const selected = $derived(groups.find((g) => g.name === selName) ?? null);
   $effect(() => onphonedetail?.(viewport.isPhone && phoneDetail));

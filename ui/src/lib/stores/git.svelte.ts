@@ -3,6 +3,7 @@
 // the Git module manages its own deeper state on top).
 
 import { api } from '../api/client';
+import { isBroadNonProjectRootClient } from '../fileUri';
 import { latestOnly } from '../latest';
 import { loadErrorText } from '../loadError';
 import { mergeTouched, touches, type TouchedPaths } from '../gitLivePaths';
@@ -54,8 +55,8 @@ const FETCH_STATUS_REUSE_MS = 2000;
 /** A status read younger than this is shared by a new caller (same burst). */
 const STATUS_SHARE_MS = 300;
 const DEFAULT_SUB: GitSubTab = 'graph';
-
 const INITIAL_AUTO_FETCH = readAutoFetchConfig();
+const isBroadRepo = (r: { path?: string | null }): boolean => Boolean(r.path) && isBroadNonProjectRootClient(r.path);
 
 class GitStore {
   repos: Repo[] = $state([]);
@@ -107,23 +108,11 @@ class GitStore {
    *  stale `statusById` entry stays in place alongside it. */
   statusErrorById: Record<string, string> = $state({});
 
-  // ── Auto-fetch: a quiet background `git fetch` for the OPEN tabs so each tab's
-  // ahead/behind chip stays live. Polls only the repos the user has open
-  // throughout the authenticated app, pausing in hidden/unfocused windows. The
-  // on/off toggle is persisted per-device. ──
+  // ── Auto-fetch: background `git fetch` for OPEN tabs (pauses when hidden) ──
   autoFetchEnabled = $state(INITIAL_AUTO_FETCH.enabled);
   autoFetchIntervalSec = $state(INITIAL_AUTO_FETCH.intervalSec);
-  /** Per-repo ref-refresh signal, bumped after EVERY successful fetch.
-   *  `setStatus` deliberately skips no-op status writes, and `statusEq` only
-   *  compares HEAD and its one tracking ref — so a fetch that advances
-   *  `origin/feature-x`, adds a remote branch, moves a tag, or `--prune`s a
-   *  branch the current HEAD doesn't track changes NO status field. A view
-   *  caching refs (GraphView) would stay stale until remount, so it gets the
-   *  signal unconditionally and decides for itself whether anything actually
-   *  moved: it re-reads the cheap `/refs` and only replays the expensive
-   *  `log --all -n 10000` + stashes + worktrees fan-out when the ref
-   *  fingerprint differs (investigation H4/WP3). A pruned ref disappears from
-   *  `/refs`, so that case is covered too. */
+  /** Per-repo ref-refresh signal, bumped after every fetch/commit/checkout/pull
+   *  so GraphView and IDE Git Log re-read `/refs` even when HEAD is unchanged. */
   refsRev: Record<string, number> = $state({});
 
   /** A mutation moved refs or history: every open graph of `repoId` re-syncs. */
@@ -163,50 +152,73 @@ class GitStore {
     })();
   }
 
-  /** All repos across every workspace the caller may view (root → all). Powers
-   *  the workspace-independent Git page; does NOT touch `loadedFor` so a later
-   *  per-workspace `loadRepos` (right-panel/status-bar) still runs. */
+  /** Register or update an already-resolved repo in memory immediately. */
+  upsertRepo(repo: Repo): void {
+    if (!repo?.id || isBroadRepo(repo)) return;
+    const idxAll = this.allRepos.findIndex((r) => r.id === repo.id);
+    this.allRepos = idxAll >= 0 ? this.allRepos.map((r, i) => (i === idxAll ? repo : r)) : [...this.allRepos, repo];
+    if (!this.loadedFor || repo.workspace_id === this.loadedFor) {
+      const idxWs = this.repos.findIndex((r) => r.id === repo.id);
+      this.repos = idxWs >= 0 ? this.repos.map((r, i) => (i === idxWs ? repo : r)) : [...this.repos, repo];
+    }
+  }
+
+  /** All repos across every workspace the caller may view (root → all). */
   async loadAllRepos(force = false): Promise<void> {
     if (this.allReposLoaded && !force) return;
     this.loading = true;
     try {
-      this.allRepos = await api.get<Repo[]>('/git/repos');
+      const fetched = (await api.get<Repo[]>('/git/repos')).filter((r) => !isBroadRepo(r));
+      const byId = new Map(fetched.map((r) => [r.id, r]));
+      for (const id of this.openRepoIds) {
+        const mem = this.allRepos.find((r) => r.id === id);
+        if (mem && !byId.has(id) && !isBroadRepo(mem)) byId.set(id, mem);
+      }
+      this.allRepos = [...byId.values()];
       this.allReposLoaded = true;
       this.allReposError = null;
     } catch (e) {
-      // Keep the last known list; the page shows the error with Retry.
       this.allReposError = loadErrorText(e);
     } finally {
       this.loading = false;
     }
   }
 
-  /** Restore open tabs from localStorage, dropping ids no longer present in the
-   *  live repo list. Call AFTER `loadAllRepos`. Defaults each restored repo's
-   *  sub-tab to 'graph' when absent. */
+  /** Restore open tabs from localStorage, preserving any tabs opened in memory
+   *  before bootstrap completed and dropping missing or broad non-project ids. */
   restoreOpenTabs(): void {
-    const live = new Set(this.allRepos.map((r) => r.id));
+    const live = new Set(this.allRepos.filter((r) => !isBroadRepo(r)).map((r) => r.id));
     const persisted = this.readOpenTabs();
-    const ids = (persisted?.openRepoIds ?? []).filter((id) => live.has(id));
+    const seen = new Set<string>();
+    const ids = [...(persisted?.openRepoIds ?? []), ...this.openRepoIds].filter(
+      (id) => live.has(id) && !seen.has(id) && (seen.add(id), true),
+    );
     const sub: Record<string, string> = {};
-    for (const id of ids) sub[id] = normSubTab(persisted?.sub?.[id]);
+    for (const id of ids) sub[id] = normSubTab(this.subTab[id] ?? persisted?.sub?.[id]);
+    const memActive = this.activeRepoId;
     this.openRepoIds = ids;
     this.subTab = sub;
-    const wanted = persisted?.activeRepoId;
+    const wanted = memActive && ids.includes(memActive) ? memActive : persisted?.activeRepoId;
     this.activeRepoId = wanted && ids.includes(wanted) ? wanted : (ids[0] ?? null);
-    // Re-persist the pruned set so stale ids don't linger.
     this.persistOpenTabs();
   }
 
-  /** Open `repoId` as a tab (or just activate it if already open). */
+  /** Open `repoId` as a tab (hydrating saved tabs first if bootstrap hasn't run). */
   openRepoTab(repoId: string, sub?: string): void {
+    if (!this.allReposLoaded && this.openRepoIds.length === 0) {
+      const persisted = this.readOpenTabs();
+      if (persisted) {
+        this.openRepoIds = persisted.openRepoIds;
+        this.subTab = { ...persisted.sub };
+      }
+    }
     if (!this.openRepoIds.includes(repoId)) {
       this.openRepoIds = [...this.openRepoIds, repoId];
     }
     if (this.subTab[repoId] == null) {
-      this.subTab = { ...this.subTab, [repoId]: sub ?? DEFAULT_SUB };
+      this.subTab = { ...this.subTab, [repoId]: normSubTab(sub) };
     } else if (sub) {
-      this.subTab = { ...this.subTab, [repoId]: sub };
+      this.subTab = { ...this.subTab, [repoId]: normSubTab(sub) };
     }
     this.activeRepoId = repoId;
     this.repoUsedAt[repoId] = Date.now();
@@ -298,14 +310,11 @@ class GitStore {
     this.loading = true;
     const t = this.reposGen.begin();
     try {
-      const repos = await api.get<Repo[]>(`/workspaces/${workspaceId}/repos`);
-      if (!t.current) return; // a newer workspace's load owns the panel
+      const rawRepos = await api.get<Repo[]>(`/workspaces/${workspaceId}/repos`);
+      if (!t.current) return;
+      const repos = rawRepos.filter((r) => !isBroadRepo(r));
       this.reposError = null;
-      // A detect for the focused session's cwd that resolved FIRST already
-      // picked the right primary (S13-305): keep it rather than snapping back
-      // to the workspace's first registered repo. The detect registers its
-      // repo, but this list may predate that — so add it if missing.
-      const kept = this.primary;
+      const kept = this.primary && !isBroadRepo(this.primary) ? this.primary : null;
       if (kept && kept.workspace_id === workspaceId && (kept.id === this.detectedRepoId || repos.some((r) => r.id === kept.id))) {
         this.repos = repos.some((r) => r.id === kept.id) ? repos : [...repos, kept];
         return;
@@ -349,14 +358,14 @@ class GitStore {
     }
   }
 
-  /**
-   * Detect (and register, idempotently) the git repo containing `cwd` and make
-   * it primary. Used by the right-panel Git tab so being inside a repo "just
-   * works" without manual registration. No-op if cwd unchanged. A newer
-   * detect (focus moved to another session) supersedes this one.
-   */
+  /** Detect (and register, idempotently) the git repo containing `cwd` and make it primary. */
   async detectFor(workspaceId: Id, cwd: string, force = false): Promise<void> {
     if (!cwd) return;
+    if (isBroadNonProjectRootClient(cwd)) {
+      this.detectedCwd = cwd;
+      this.notARepo = !this.primary;
+      return;
+    }
     if (!force && this.detectedCwd === cwd && this.primary) return;
     this.detectedCwd = cwd;
     this.detecting = true;
@@ -365,11 +374,14 @@ class GitStore {
     try {
       const repo = await api.post<Repo>(`/workspaces/${workspaceId}/repos/detect`, { path: cwd });
       if (!t.current) return;
+      if (isBroadRepo(repo)) {
+        this.notARepo = !this.primary;
+        return;
+      }
       this.detectedRepoId = repo.id;
       await this.selectPrimary(repo);
     } catch {
       if (!t.current) return;
-      // cwd isn't inside a git repo — fall back to any registered repo.
       this.notARepo = !this.primary;
     } finally {
       if (t.current) this.detecting = false;
@@ -398,13 +410,7 @@ class GitStore {
 
   // ── Per-repo status cache + auto-fetch ─────────────────────────────────────
 
-  /** Write a repo's status, but ONLY when it actually changed, so a no-op fetch
-   *  doesn't needlessly recompute the `$derived` status + re-render the toolbar
-   *  and tab chips. Keeps `primaryStatus` in sync when this repo is the
-   *  right-panel primary. Returns whether anything actually changed, so a caller
-   *  that wants to do more work only on a real change can ask. (The auto-fetch
-   *  loop deliberately does NOT gate `refsRev` on it — `statusEq` compares only
-   *  HEAD and its upstream, so it cannot see most ref movement; see `refsRev`.) */
+  /** Write a repo's status only when it changed; returns whether it changed. */
   setStatus(repoId: string, s: RepoStatusResp): boolean {
     const prev = this.statusById[repoId];
     if (prev && statusEq(prev, s)) return false;
@@ -426,32 +432,34 @@ class GitStore {
    *  `git status` walk on the daemon). */
   private statusFlights = new Map<string, { p: Promise<void>; at: number; next?: Promise<void> }>();
 
-  /** Fetch (cheap, local) status for a repo and store it. Callers within
-   *  STATUS_SHARE_MS of an in-flight read share it; a later caller (whose
-   *  change may postdate that read) shares ONE trailing read instead. */
-  refreshStatus(repoId: string): Promise<void> {
+  /** Fetch local status for a repo and store it (`force` bypasses client/server memo caches). */
+  refreshStatus(repoId: string, opts?: { force?: boolean }): Promise<void> {
+    const force = Boolean(opts?.force);
     const f = this.statusFlights.get(repoId);
-    if (f) {
+    if (f && !force) {
       if (Date.now() - f.at < STATUS_SHARE_MS) return f.p;
       return (f.next ??= f.p.then(() => this.refreshStatus(repoId)));
     }
-    const p: Promise<void> = this.readStatus(repoId).finally(() => {
+    const p: Promise<void> = this.readStatus(repoId, force).finally(() => {
       if (this.statusFlights.get(repoId)?.p === p) this.statusFlights.delete(repoId);
     });
     this.statusFlights.set(repoId, { p, at: Date.now() });
     return p;
   }
 
-  private async readStatus(repoId: string): Promise<void> {
+  private async readStatus(repoId: string, fresh = false): Promise<void> {
     try {
-      const s = await gitApi.status(repoId);
+      const s = await gitApi.status(repoId, fresh ? { fresh: true } : undefined);
       this.setStatus(repoId, s);
+      if (fresh) {
+        this.liveChanged = { ...this.liveChanged, [repoId]: null };
+        this.liveRev = { ...this.liveRev, [repoId]: (this.liveRev[repoId] ?? 0) + 1 };
+      }
       if (repoId in this.statusErrorById) {
         const { [repoId]: _cleared, ...rest } = this.statusErrorById;
         this.statusErrorById = rest;
       }
     } catch (e) {
-      // Keep the stale status on screen, but say it couldn't be refreshed.
       this.statusErrorById = { ...this.statusErrorById, [repoId]: loadErrorText(e) };
     }
   }
@@ -607,12 +615,7 @@ class GitStore {
     this.fetchOnArrival();
   }
 
-  /** Opening the Git page or a repo tab: with auto-fetch on, wake the loop
-   *  (it fetches what is due). PAUSED only stops the periodic rounds — the
-   *  selected repo is still fetched once on arrival, throttled to the active
-   *  cadence and the failure backoff, so the page never opens on stale refs.
-   *  A paused toggle persisted per device used to leave the Git page showing
-   *  whatever the last manual fetch saw (2026-11-03). */
+  /** Wake auto-fetch on arrival (or fetch once when periodic polling is paused). */
   private fetchOnArrival(): void {
     if (this.autoFetchEnabled) {
       this.requestAutoFetch();
@@ -691,14 +694,8 @@ class GitStore {
   }
 
   // ── Local merge + conflict resolution ─────────────────────────────────────
-  // Thin wrappers over the daemon's merge/conflict endpoints. Conflicts come
-  // back from `mergeBranch`/`completeMerge` as a NORMAL result (status:
-  // 'conflicts'), not an error — callers branch on `result.status`.
 
-  /** Pull the repo. `autoStash` wraps a dirty tree in stash → pull → pop (the
-   *  retry offered after a 409 "commit or stash first" refusal). */
-  /** Post-mutation contract (like `push` / `checkout`): the fresh status is
-   *  stored and `refsRev` bumped, whoever triggered the pull. */
+  /** Pull the repo, store fresh status, and bump `refsRev`. */
   async pull(repoId: Id, autoStash = false, mode?: PullMode): Promise<PullResp> {
     const body: PullReq = {};
     if (autoStash) body.auto_stash = true;
@@ -794,13 +791,7 @@ class GitStore {
     return s;
   }
 
-  // ── WIP-panel requests (agent UI control) ──────────────────────────────────
-  // The WIP panel's selection and commit composer are component state. An
-  // agent command asks for them through this one-slot mailbox: GraphView opens
-  // the WIP row for `repoId`, WipPanel then TAKES the request (selecting `path`,
-  // filling the composer). A request not taken within WIP_REQUEST_TTL_MS (the
-  // tree was clean, the tab closed) is dropped, never applied later.
-
+  // ── WIP-panel requests (agent UI control, TTL-bounded one-slot mailbox) ───
   wipRequest: WipRequest | null = $state(null);
 
   /** Ask the Git page to open `repoId`'s WIP panel (and select / prefill). */

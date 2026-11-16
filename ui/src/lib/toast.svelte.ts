@@ -44,6 +44,8 @@ interface Timer {
 
 class ToastStore {
   toasts: Toast[] = $state([]);
+  /** px the toast stack rises to clear the in-app floating command bar. */
+  lift = $state(0);
   private timers = new Map<number, Timer>();
 
   push(

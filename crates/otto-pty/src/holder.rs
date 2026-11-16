@@ -72,10 +72,8 @@ use crate::{CommandSpec, PtyHandle, EMULATOR_SCROLLBACK_LINES};
 /// Incompatible-layout version of the wire protocol (see the module docs).
 pub const PROTO_MAJOR: u32 = 1;
 /// Additive revision of the wire protocol.
-pub const PROTO_MINOR: u32 = 3;
+pub const PROTO_MINOR: u32 = 2;
 // 1.1: `HolderInfo::last_output_unix_ms` (additive; older holders send none).
-// 1.3: stdio holders (`HolderSpawn::stdio`, `HolderInfo::stdio`, the
-//      `crate::stdio_holder::kind` frames).
 
 /// Environment marker the launcher sets on the holder process. A holder entry
 /// point refuses to run without it; it never reaches the session's child.
@@ -252,10 +250,6 @@ pub struct HolderInfo {
     /// idle clock. `0` = unknown (a protocol 1.0 holder).
     #[serde(default)]
     pub last_output_unix_ms: u64,
-    /// A stdio holder's line log ([`crate::stdio_holder`]); `None` = a PTY
-    /// holder.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stdio: Option<crate::stdio_holder::StdioLog>,
 }
 
 /// [`frame::INPUT_ACK`] payload.
@@ -282,9 +276,6 @@ pub struct HolderSpawn {
     pub orphan_ttl_secs: Option<u64>,
     #[serde(default)]
     pub exit_linger_secs: Option<u64>,
-    /// Run the child on pipes instead of a PTY ([`crate::stdio_holder`]).
-    #[serde(default)]
-    pub stdio: bool,
 }
 
 /// How to start a holder process.
@@ -333,23 +324,11 @@ impl HolderConfig {
     /// bytes) — a per-data-dir directory under the per-user temp dir. `None`
     /// when neither fits (the caller then spawns PTYs locally).
     pub fn for_data_dir(data_dir: &Path, launcher: HolderLauncher) -> Option<Self> {
-        Self::for_data_dir_named(data_dir, "pty-holders", "otto-ptyh", launcher)
-    }
-
-    /// [`Self::for_data_dir`] for another kind of holder: `<data_dir>/<name>`,
-    /// else `<tmp>/<fallback>-<hash>` (the structured runtime's stdio holders
-    /// live apart, so neither adopter ever meets the other's sockets).
-    pub fn for_data_dir_named(
-        data_dir: &Path,
-        name: &str,
-        fallback: &str,
-        launcher: HolderLauncher,
-    ) -> Option<Self> {
-        let preferred = data_dir.join(name);
+        let preferred = data_dir.join("pty-holders");
         if socket_path_fits(&preferred) {
             return Some(Self::new(preferred, launcher));
         }
-        let fallback = std::env::temp_dir().join(format!("{fallback}-{:08x}", fnv32(data_dir)));
+        let fallback = std::env::temp_dir().join(format!("otto-ptyh-{:08x}", fnv32(data_dir)));
         socket_path_fits(&fallback).then(|| Self::new(fallback, launcher))
     }
 
@@ -425,7 +404,7 @@ fn random_u64() -> u64 {
     h.finish()
 }
 
-pub(crate) fn unix_ms() -> u64 {
+fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -459,30 +438,10 @@ pub(crate) fn spawn_and_attach(
     rows: u16,
     meta: serde_json::Value,
 ) -> Result<PtyHandle> {
-    let socket = launch(config, spec, Some((cols, rows)), meta)?;
-    match crate::held::adopt(&socket) {
-        Ok(handle) => Ok(handle),
-        Err(e) => {
-            // Running but unreachable: end it rather than leak its child.
-            let _ = terminate(&socket);
-            Err(Error::Internal(format!("attach to new pty holder: {e}")))
-        }
-    }
-}
-
-/// Start a holder process for `spec` and wait for its READY line; returns its
-/// socket. `grid` = a PTY holder of that size, `None` = a stdio holder.
-pub(crate) fn launch(
-    config: &HolderConfig,
-    spec: &CommandSpec,
-    grid: Option<(u16, u16)>,
-    meta: serde_json::Value,
-) -> Result<PathBuf> {
     config
         .ensure_dir()
         .map_err(|e| Error::Internal(format!("pty holder dir {}: {e}", config.dir.display())))?;
     let socket = config.new_socket_path();
-    let (cols, rows) = grid.unwrap_or((0, 0));
     let request = HolderSpawn {
         socket: socket.clone(),
         command: spec.clone(),
@@ -491,7 +450,6 @@ pub(crate) fn launch(
         meta,
         orphan_ttl_secs: Some(config.orphan_ttl.as_secs()),
         exit_linger_secs: Some(config.exit_linger.as_secs()),
-        stdio: grid.is_none(),
     };
     let payload = serde_json::to_vec(&request)
         .map_err(|e| Error::Internal(format!("pty holder request: {e}")))?;
@@ -595,7 +553,14 @@ pub(crate) fn launch(
             )));
         }
     }
-    Ok(socket)
+    match crate::held::adopt(&socket) {
+        Ok(handle) => Ok(handle),
+        Err(e) => {
+            // Running but unreachable: end it rather than leak its child.
+            let _ = terminate(&socket);
+            Err(Error::Internal(format!("attach to new pty holder: {e}")))
+        }
+    }
 }
 
 /// Why [`PtyHandle::adopt`] failed.
@@ -693,7 +658,7 @@ pub fn run_if_holder_process() {
     }
 }
 
-pub(crate) fn fail(socket: Option<&Path>, msg: &str) -> i32 {
+fn fail(socket: Option<&Path>, msg: &str) -> i32 {
     if let Some(s) = socket {
         let _ = std::fs::remove_file(s);
     }
@@ -703,34 +668,22 @@ pub(crate) fn fail(socket: Option<&Path>, msg: &str) -> i32 {
     1
 }
 
-/// Bind a holder's private (0600) socket, replacing a stale file.
-pub(crate) fn bind_private(
-    socket: &Path,
-) -> std::result::Result<std::os::unix::net::UnixListener, i32> {
+fn run(request: HolderSpawn) -> i32 {
     // Private by construction: the socket is created 0600.
     #[cfg(unix)]
     // SAFETY: plain syscall.
     unsafe {
         libc::umask(0o077);
     }
-    if socket.exists() {
-        let _ = std::fs::remove_file(socket);
-    }
-    let listener = std::os::unix::net::UnixListener::bind(socket)
-        .map_err(|e| fail(None, &format!("bind {}: {e}", socket.display())))?;
-    let _ = std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600));
-    Ok(listener)
-}
-
-fn run(request: HolderSpawn) -> i32 {
-    if request.stdio {
-        return crate::stdio_holder::run(request);
-    }
     let socket = request.socket.clone();
-    let listener = match bind_private(&socket) {
+    if socket.exists() {
+        let _ = std::fs::remove_file(&socket);
+    }
+    let listener = match std::os::unix::net::UnixListener::bind(&socket) {
         Ok(l) => l,
-        Err(code) => return code,
+        Err(e) => return fail(None, &format!("bind {}: {e}", socket.display())),
     };
+    let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
 
     // The holder never reads its raw ring (attach snapshots come from the
     // emulator; search is daemon-side), so it keeps none at all (N1).
@@ -796,7 +749,7 @@ fn run(request: HolderSpawn) -> i32 {
 
 /// Point stdin/stdout/stderr at /dev/null: the launcher's pipes close (it has
 /// its READY line) and nothing later can block on them.
-pub(crate) fn detach_stdio() {
+fn detach_stdio() {
     #[cfg(unix)]
     // SAFETY: plain fd syscalls on a freshly opened descriptor.
     unsafe {
@@ -837,7 +790,7 @@ struct Shared {
     exit_linger: Duration,
 }
 
-pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -861,7 +814,6 @@ impl Shared {
             meta: self.meta.clone(),
             last_output_unix_ms: unix_ms()
                 .saturating_sub(self.handle.last_output_at().elapsed().as_millis() as u64),
-            stdio: None,
         }
     }
 
