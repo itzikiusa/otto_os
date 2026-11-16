@@ -877,3 +877,52 @@ async fn live_shell_bridge_debugs_both_bash_and_zsh_with_midrun_breakpoints() {
         );
     }
 }
+
+#[tokio::test]
+async fn live_shell_bridge_stops_in_a_file_sourced_through_dotdot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("sh-src");
+    std::fs::create_dir_all(ws.join("scripts")).unwrap();
+    std::fs::create_dir_all(ws.join("lib")).unwrap();
+    let (_ctx, app) = build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
+    let ws_str = ws.to_string_lossy().into_owned();
+    // The macOS temp dir is itself behind a symlink (/var → /private/var), so this also covers
+    // a symlinked root.
+    let lib = ws.join("lib/x.sh");
+    std::fs::write(&lib, "greet() {\n  GREETED=1\n  echo \"GREET_DONE\"\n}\n").unwrap();
+    let lib_str = lib.to_string_lossy().into_owned();
+
+    for (fname, shebang, shell) in [
+        ("run.sh", "#!/bin/bash", "bash"),
+        ("run.zsh", "#!/bin/zsh", "zsh"),
+    ] {
+        if !ensure_bins_or_skip(&[shell]) {
+            continue;
+        }
+        let script = ws.join("scripts").join(fname);
+        std::fs::write(
+            &script,
+            format!("{shebang}\nsource \"{ws_str}/scripts/../lib/x.sh\"\ngreet\n"),
+        )
+        .unwrap();
+        let (st, start) = send_json(
+            &app,
+            Method::POST,
+            "/ide/debug/sessions",
+            Some(json!({
+                "target": { "kind": "local", "root": ws_str },
+                "language": "shell",
+                "launch": { "program": script.to_string_lossy(), "cwd": ws_str },
+                "breakpoints": [{ "path": lib_str, "line": 2 }],
+            })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{fname} start_debug failed: {start}");
+        let sid = start["session"]["id"].as_str().unwrap().to_string();
+        let snap = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
+        assert_eq!(snap["paused_line"], 2, "{fname} wrong bp: {}", brief(&snap));
+        send_cmd(&app, &sid, "continue").await;
+        let end = wait_until_terminated(&app, &sid, Duration::from_secs(10)).await;
+        assert!(joined_output(&end).contains("GREET_DONE"), "{fname}: {end}");
+    }
+}

@@ -249,6 +249,14 @@ How each item runs:
   filter is the module path from `<crate>/src/`, and an `#[ignore]` test runs with
   `--include-ignored`. Debug builds the same target, so it launches that target's
   executable.
+- **Shell:** `Run fn()` sources the script and calls the function, so it is
+  offered only when sourcing runs nothing else: the top level holds just function
+  definitions, assignments, `set`/`shopt`/`export`/`readonly`/`declare`,
+  `source`/`.` and comments, or the script guards its entry point with
+  `BASH_SOURCE[0]`. A script ending in `main "$@"` shows only `Run <script>`. The
+  shell debugger matches breakpoints by real path, so a file sourced through `..`
+  or a symlinked folder stops too (breakpoints inside a `$(…)` subshell still
+  don't stop).
 
 ### 6. Full DAP Debugger & Tabbed/Split Dock
 

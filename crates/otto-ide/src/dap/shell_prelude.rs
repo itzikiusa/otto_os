@@ -18,6 +18,8 @@ _otto_mode="step_in"
 _otto_target_depth=0
 _otto_bps="|"
 _otto_active=0
+_otto_raw_src=""
+_otto_real_src=""
 
 while IFS= read -r _otto_init_cmd <&8; do
   case "$_otto_init_cmd" in
@@ -42,6 +44,13 @@ _otto_trap_handler() {
     /*) ;;
     *) _src="$PWD/$_src" ;;
   esac
+  # Breakpoints are keyed by real path: resolve `..` and symlinked dirs, forking only when the
+  # source file changes (bash 3.2 has no associative arrays, so cache the last pair).
+  if [ "$_src" != "$_otto_raw_src" ]; then
+    _otto_raw_src="$_src"
+    _otto_real_src="$(cd -P "${_src%/*}" 2>/dev/null && pwd -P)/${_src##*/}" || _otto_real_src="$_src"
+  fi
+  _src="$_otto_real_src"
 
   if [ -r "$_otto_bps_file" ]; then
     IFS= read -r _otto_bps < "$_otto_bps_file" || true
@@ -167,10 +176,8 @@ TRAPDEBUG() {
   local _src="${_loc%:*}"
   local _ln="${_loc##*:}"
   [[ "$_src" == *"prelude.zsh" ]] && return 0
-  case "$_src" in
-    /*) ;;
-    *) _src="$PWD/$_src" ;;
-  esac
+  # Breakpoints are keyed by real path (`..` and symlinks resolved).
+  _src="${_src:A}"
   local _fn="${funcstack[2]:-main}"
   [[ "$_fn" == "$_otto_target" ]] && _fn="main"
 

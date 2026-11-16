@@ -427,6 +427,10 @@ pub(super) fn detect_shell(
         });
     }
 
+    // `Run fn()` sources the file first, so only offer it when that runs nothing else.
+    if !sourcing_only_defines(content, re_sh_fn) {
+        return;
+    }
     for (idx, line) in content.lines().enumerate() {
         let line_no = (idx + 1) as u32;
         let trimmed = line.trim();
@@ -459,6 +463,39 @@ pub(super) fn detect_shell(
             });
         }
     }
+}
+
+/// True when sourcing the script only defines things: its top level (outside function
+/// bodies) holds just function definitions, assignments, `set`/`shopt`/`export`/`readonly`/
+/// `declare`, `source`/`.` and comments, or it guards its entry point with `BASH_SOURCE[0]`.
+/// A script ending in `main "$@"` would run `main` before the chosen function.
+fn sourcing_only_defines(content: &str, re_sh_fn: &Regex) -> bool {
+    static RE_ASSIGN: OnceLock<Regex> = OnceLock::new();
+    let re_assign =
+        RE_ASSIGN.get_or_init(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=").unwrap());
+    if content.contains("BASH_SOURCE[0]") {
+        return true;
+    }
+    let mut depth = 0i32;
+    for line in content.lines() {
+        let t = line.trim();
+        let at_top = depth == 0;
+        depth += t.matches('{').count() as i32 - t.matches('}').count() as i32;
+        if !at_top || t.is_empty() || t.starts_with('#') || t.starts_with('{') {
+            continue;
+        }
+        let first = t.split_whitespace().next().unwrap_or("");
+        let defines = re_sh_fn.is_match(line)
+            || re_assign.is_match(t)
+            || matches!(
+                first,
+                "set" | "shopt" | "export" | "readonly" | "declare" | "typeset" | "source" | "."
+            );
+        if !defines {
+            return false;
+        }
+    }
+    true
 }
 
 fn infer_shell_interpreter(base_name: &str, content: &str) -> &'static str {

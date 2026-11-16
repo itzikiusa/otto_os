@@ -486,3 +486,25 @@ fn rust_discovery_main_config_names_the_package_bin_beside_src_bin() {
         .expect("main config");
     assert_eq!(main.args, ["run", "--bin", "app"]);
 }
+
+#[test]
+fn shell_function_items_only_when_sourcing_runs_nothing_else() {
+    let fn_labels = |src: &str| -> Vec<String> {
+        detect_gutter_items("/ws/scripts/tool.sh", src, &[])
+            .into_iter()
+            .filter(|i| i.label.ends_with("()"))
+            .map(|i| i.label)
+            .collect()
+    };
+    // Sourcing this would run `main` before the chosen function.
+    let script =
+        "#!/usr/bin/env bash\nset -e\ngreet() {\n  echo hi\n}\nmain() {\n  greet\n}\nmain \"$@\"\n";
+    assert!(fn_labels(script).is_empty());
+
+    let library = "#!/usr/bin/env bash\nNAME=x\nexport PATH\n. ./common.sh\ngreet() {\n  if true; then echo hi; fi\n}\n";
+    assert_eq!(fn_labels(library), ["Run greet()"]);
+
+    let guarded =
+        "greet() {\n  echo hi\n}\nif [[ \"${BASH_SOURCE[0]}\" == \"$0\" ]]; then\n  greet\nfi\n";
+    assert_eq!(fn_labels(guarded), ["Run greet()"]);
+}
