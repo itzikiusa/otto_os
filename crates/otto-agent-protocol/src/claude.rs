@@ -241,6 +241,15 @@ impl ClaudeDriver {
         self.turn_id.clone().unwrap_or_default()
     }
 
+    /// `system` `api_retry`, `compact_boundary`, or `status: compacting`.
+    fn is_retry_or_compaction(msg: &Value) -> bool {
+        match msg.get("subtype").and_then(Value::as_str) {
+            Some("api_retry" | "compact_boundary") => true,
+            Some("status") => msg.get("status").and_then(Value::as_str) == Some("compacting"),
+            _ => false,
+        }
+    }
+
     fn send_user(&mut self, step: &mut DriverStep, req: &RuntimePromptReq) {
         let mut content: Vec<Value> = req
             .images
@@ -1286,6 +1295,21 @@ impl StructuredDriver for ClaudeDriver {
                     model: msg.get("model").and_then(Value::as_str).map(str::to_string),
                 });
             }
+            // T3 Code #33151 / #24334: a retry or compaction is one quiet row.
+            "system" if self.turn_id.is_some() && Self::is_retry_or_compaction(&msg) => {
+                let turn = self.turn();
+                let n = |k: &str| msg.get(k).and_then(Value::as_u64);
+                step.push(DriverEvent::TurnItem(
+                    match msg.get("subtype").and_then(Value::as_str) {
+                        Some("api_retry") => {
+                            let why = msg.get("error").and_then(Value::as_str);
+                            crate::driver::retry_notice(&turn, n("attempt"), n("max_retries"), why)
+                        }
+                        Some("compact_boundary") => crate::driver::compaction_notice(&turn, true),
+                        _ => crate::driver::compaction_notice(&turn, false),
+                    },
+                ));
+            }
             "system" => {
                 self.on_task_frame(&mut step, &msg);
             }
@@ -1556,6 +1580,45 @@ mod tests {
             panic!()
         };
         assert_eq!(i.status, TurnItemStatus::Failed);
+    }
+
+    /// T3 Code #33151 / #24334: `api_retry` is the turn's one retry row,
+    /// compaction one row that settles at `compact_boundary`.
+    #[test]
+    fn api_retry_and_compaction_are_one_row_each() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        d.prompt("t1", &RuntimePromptReq::of("x")).unwrap();
+        let r1 = items(&feed(
+            &mut d,
+            json!({"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":500,"error_status":529,"error":"overloaded"}),
+        ));
+        let r2 = items(&feed(
+            &mut d,
+            json!({"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"error":"overloaded"}),
+        ));
+        assert_eq!(r1[0].id, r2[0].id, "updated in place");
+        assert!(r2[0].id.ends_with(crate::driver::RETRY_NOTICE_SUFFIX));
+        assert!(
+            matches!(&r2[0].kind, TurnItemKind::SystemNotice { message, .. }
+            if message == "Provider retry 2 of 10 · overloaded")
+        );
+        let c1 = items(&feed(
+            &mut d,
+            json!({"type":"system","subtype":"status","status":"compacting"}),
+        ));
+        assert_eq!(c1[0].status, TurnItemStatus::Running);
+        let c2 = items(&feed(
+            &mut d,
+            json!({"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":150000}}),
+        ));
+        assert_eq!(
+            (c1[0].id.as_str(), c2[0].status),
+            (c2[0].id.as_str(), TurnItemStatus::Completed)
+        );
+        assert!(
+            matches!(&c2[0].kind, TurnItemKind::SystemNotice { message, .. } if message == "Context compacted")
+        );
     }
 
     #[test]

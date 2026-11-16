@@ -615,6 +615,8 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // Agent UI control asks ONLY the session's owner (the one person who
         // can grant it) — not workspace admins, not root.
         Event::UiControlRequested { user_id, .. }
+        // A secret request is the thread owner's alone.
+        | Event::SecretRequestUpdated { user_id, .. }
         // A notice-list change (read/dismiss) cues only the actor's windows.
         | Event::NotificationsChanged { user_id } => Scope::Owner(user_id),
     }

@@ -419,12 +419,15 @@ async fn interrupt_ends_the_turn_and_cancels_pending_requests() {
     let rt = runtime(&pool, &host, RuntimeConfig::default());
     let s = create(&rt, dir.path().to_str().unwrap()).await;
 
+    assert!(!rt.any_turn_running(), "idle before the prompt");
     rt.prompt(&s.id, "hang").await.unwrap();
     host.wait(is_type("turn_item.updated")).await;
     host.wait_n(is_type("turn_item.updated"), 2).await; // user + streaming chunk
+    assert!(rt.any_turn_running(), "the keep-awake hold sees the turn");
     assert!(rt.interrupt(&s.id).await.unwrap());
     let fin = host.wait(is_terminal).await;
     assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Interrupted));
+    assert!(!rt.any_turn_running(), "released once the turn ends");
     assert!(
         !rt.interrupt(&s.id).await.unwrap(),
         "nothing left to interrupt"
@@ -4477,4 +4480,159 @@ async fn a_codex_generated_image_is_served_from_disk_and_nothing_else_is() {
         Err(Error::NotFound(_))
     ));
     rt.close(&c.id).await.unwrap();
+}
+
+/// T3 Code #32325 / #34934: an idle thread's agent process is released
+/// (the thread stays open, dormant) and its next message resumes it; a
+/// finished child thread is released sooner.
+#[tokio::test]
+async fn idle_agent_processes_are_released_and_the_next_prompt_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    let child = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                title_auto: false,
+                provider: Some(RuntimeProvider::Gemini),
+                cwd: Some(cwd.into()),
+                title: None,
+                model: None,
+                access_mode: None,
+                meta: Some(serde_json::json!({"child_of": {"id": s.id, "by": "agent"}})),
+            },
+        )
+        .await
+        .unwrap();
+    host.wait_n(is_ready, 2).await;
+    rt.prompt(&s.id, "hello").await.unwrap();
+    host.wait(is_terminal).await;
+
+    let now = Utc::now();
+    assert!(
+        rt.release_idle_processes(30, now).await.is_empty(),
+        "nothing is idle yet"
+    );
+    assert!(
+        rt.release_idle_processes(0, now + chrono::TimeDelta::days(9))
+            .await
+            .is_empty(),
+        "0 = never"
+    );
+    let soon = now + chrono::TimeDelta::minutes(6);
+    assert_eq!(
+        rt.release_idle_processes(30, soon).await,
+        vec![child.id.clone()],
+        "a finished child goes after 5 minutes"
+    );
+    let later = now + chrono::TimeDelta::minutes(31);
+    assert_eq!(
+        rt.release_idle_processes(30, later).await,
+        vec![s.id.clone()]
+    );
+    let got = rt.get(&s.id).await.unwrap();
+    assert_eq!(
+        got.status,
+        RuntimeSessionStatus::Dormant,
+        "open, not closed"
+    );
+
+    rt.prompt(&s.id, "after release").await.unwrap();
+    let fin = host.wait_n(is_terminal, 2).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    assert!(last_assistant_text(&host).contains("after release"));
+    assert_eq!(
+        host.prepared.lock().unwrap().len(),
+        3,
+        "the message respawned it"
+    );
+    let resumed = rt.get(&s.id).await.unwrap();
+    assert_eq!(
+        resumed.native_thread_id, got.native_thread_id,
+        "same conversation"
+    );
+    rt.close(&s.id).await.unwrap();
+    rt.close(&child.id).await.unwrap();
+}
+
+/// T3 Code #29208: provider retries show as one row but are not progress,
+/// so a turn stuck retrying is still stopped as stalled.
+#[tokio::test]
+async fn provider_retries_do_not_reset_the_stall_watchdog() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(
+        &pool,
+        &host,
+        RuntimeConfig {
+            stall_after: Duration::from_millis(1200),
+            stall_tool_after: Duration::from_millis(1200),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    host.wait(is_ready).await;
+    let started = std::time::Instant::now();
+    rt.prompt(&s.id, "retrying 6").await.unwrap();
+    let t = host.wait(is_terminal).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "stopped while the retries still came ({:?})",
+        started.elapsed()
+    );
+    assert!(
+        matches!(&t.body, RuntimeEventBody::TurnTerminal { reason: Some(r), .. } if r == "stalled")
+    );
+    let retry_rows: Vec<TurnItem> = host
+        .items()
+        .into_iter()
+        .filter(|i| i.id.ends_with(":provider-retry"))
+        .collect();
+    assert!(!retry_rows.is_empty(), "the retries were shown");
+    assert!(
+        retry_rows.iter().all(|i| i.id == retry_rows[0].id),
+        "as one row"
+    );
+    rt.close(&s.id).await.unwrap();
+}
+
+/// T3 Code #15907: a secret the person gave privately never reaches the
+/// timeline, the event stream or the persisted projection.
+#[tokio::test]
+async fn a_privately_given_secret_is_masked_everywhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    host.wait(is_ready).await;
+    rt.redact_value(&s.id, "hunter2-token").await.unwrap();
+    rt.redact_value(&s.id, "abc").await.unwrap(); // too short to mask
+    rt.prompt(&s.id, "use hunter2-token abc").await.unwrap();
+    host.wait(is_terminal).await;
+    rt.flush(&s.id).await;
+    let published =
+        serde_json::to_string(&host.all().iter().map(|e| &e.body).collect::<Vec<_>>()).unwrap();
+    assert!(!published.contains("hunter2-token"), "published events");
+    assert!(published.contains("use •••••• abc"));
+    let replay = serde_json::to_string(&rt.replay(&s.id, 0).await.unwrap()).unwrap();
+    assert!(!replay.contains("hunter2-token"), "replay / snapshot");
+    let rows: Vec<String> = sqlx::query_scalar("SELECT payload_json FROM agent_runtime_entities")
+        .fetch_all(pool.writer())
+        .await
+        .unwrap();
+    assert!(
+        rows.iter().all(|r| !r.contains("hunter2-token")),
+        "persisted rows"
+    );
+    assert!(rows.iter().any(|r| r.contains("••••••")));
+    rt.close(&s.id).await.unwrap();
 }

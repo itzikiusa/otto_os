@@ -360,7 +360,7 @@ export interface QueuedPrompt {
 }
 
 /** How a message sent while a turn runs is delivered: `queue` (after it),
- *  `steer` (into it now — Claude; queued elsewhere), `interrupt` (stop it
+ *  `steer` (into it now where `capabilities.steer`; queued elsewhere), `interrupt` (stop it
  *  and send this next). */
 export type PromptDelivery = 'queue' | 'steer' | 'interrupt';
 

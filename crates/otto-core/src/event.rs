@@ -647,6 +647,21 @@ pub enum Event {
         /// The catalog command name (`db_run_query`), no `ui_` prefix.
         command: String,
     },
+    /// A thread's agent asked its owner for a secret (`otto.request_secret`)
+    /// — `pending: true` shows the private card, `false` (answered, timed
+    /// out or the call ended) removes it. Never carries the value. Delivered
+    /// ONLY to the thread owner's connections.
+    SecretRequestUpdated {
+        user_id: Id,
+        workspace_id: Id,
+        session_id: Id,
+        request_id: Id,
+        pending: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
     /// An MCP approval row changed: created (`pending`), decided
     /// (`approved`/`denied`), `consumed`, or `expired`. An invalidation
     /// signal only — no title/tool/args ride it; clients refetch
@@ -781,6 +796,7 @@ impl Event {
             Event::AgentRuntimeEvent { .. } => "agent_runtime_event",
             Event::K8sMonitorCycle { .. } => "k8s_monitor_cycle",
             Event::UiControlRequested { .. } => "ui_control_requested",
+            Event::SecretRequestUpdated { .. } => "secret_request_updated",
             Event::McpApprovalChanged { .. } => "mcp_approval_changed",
             Event::ResourceAccessChanged { .. } => "resource_access_changed",
             Event::NotificationsChanged { .. } => "notifications_changed",

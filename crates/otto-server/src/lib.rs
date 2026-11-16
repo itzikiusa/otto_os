@@ -44,6 +44,7 @@ pub use otto_automation::goal_loop_workspace;
 pub mod host_guard;
 pub mod improve_channels;
 pub mod k8s_monitor_scheduler;
+pub mod keep_awake;
 pub mod live_events;
 pub mod login_throttle;
 pub mod lsp;
@@ -77,6 +78,7 @@ pub use otto_automation::scheduled_tasks_scheduler;
 #[cfg(test)]
 #[path = "../tests/unit/scheduled_tasks_engine.rs"]
 mod scheduled_tasks_engine_tests;
+pub mod secret_request;
 mod self_call;
 pub mod shutdown;
 pub mod skill_eval;

@@ -646,7 +646,7 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `workspace_id`; other **workspace-scoped events** (improvement,
 `api_history_appended`) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
-**owner-scoped events** (`ui_control_requested`,
+**owner-scoped events** (`ui_control_requested`, `secret_request_updated`,
 `notifications_changed`) reach only the user named by their `user_id` (not root);
 **broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
 `mcp_approval_changed`) reach every authenticated client. The sections below
@@ -1823,6 +1823,20 @@ proceeds on Allow and otherwise answers `pending_grant`.
 
 `module` is the paneKey the command targets (`shell` for navigation), `command`
 the bare catalog name. Emitted by `crates/otto-server/src/ui_bridge.rs`.
+
+### `secret_request_updated`
+
+A thread's agent called `otto.request_secret` (`api.md` UI5–UI6).
+**Owner-scoped** like `ui_control_requested`. `pending: true` (with `prompt`,
+optional `name`) shows the private card in that thread; `pending: false` (the
+call ended: answered, declined or timed out) removes it. It never carries the
+value.
+
+```json
+{"type":"secret_request_updated","user_id":"…","workspace_id":"…","session_id":"…","request_id":"…","pending":true,"prompt":"A GitHub token to push the release","name":"GH_TOKEN"}
+```
+
+Emitted by `crates/otto-server/src/secret_request.rs`.
 
 ### `mcp_approval_changed` / `resource_access_changed` / `notifications_changed`
 

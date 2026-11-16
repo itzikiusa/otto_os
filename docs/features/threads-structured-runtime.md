@@ -176,7 +176,13 @@ count that was interrupted after the first delta, then `close`.
    A model or effort picked with it switches first (`set_model` /
    `apply_flag_settings`), so the rest of the turn uses it (T3 Code #34564);
    the session's stored model follows on the next prompt.
-   The other drivers do not steer; such a message is queued instead.
+   Codex steers with `turn/steer`, pi with its RPC `steer`, and Grok with
+   `_x.ai/interject` (`{sessionId, text, content?: [image blocks]}`; the
+   running tool finishes and the model reads the message at its next step;
+   only a `{status: "queued"}` answer is a delivery, anything else shows as
+   a failed row — T3 Code #37335). The driver reports it as
+   `capabilities.steer`, which is all the UI's "Send now" reads. The other
+   ACP agents do not steer; such a message is queued instead.
 10. **Resume.** A resumed CLI (`--resume`) gets
    `MCP_CONNECTION_NONBLOCKING=0` unless the daemon's environment sets it:
    Claude Code then connects its MCP servers before the first request
@@ -283,7 +289,8 @@ plus `adapter.ts`.
    | `stopReason` | Turn status |
    |---|---|
    | `cancelled` | interrupted |
-   | `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` | completed (the last three also as `reason`) |
+   | `end_turn` | completed |
+   | `max_tokens`, `max_turn_requests`, `refusal` | failed, with a `provider_error` failure whose `code` (and the turn's `reason`) is the stop reason and whose message says why; a refusal also says the agent won't remember the message (T3 Code #28797) |
 
    T3 Code: `adapter.ts:8181-8230`.
 5. **Permission round-trip** (`adapter.ts:6353-6527`).
@@ -624,6 +631,23 @@ streaming upsert of an item to one per `RuntimeConfig::stream_coalesce`
 - the latest held text is flushed when the window ends, or before any other
   event;
 - text only grows.
+
+### Provider retries and compactions
+
+Every driver reports a provider retry and a context compaction the same way
+(T3 Code #33151, #29208, #24334): as `system_notice` work rows, so the
+person sees why a turn is waiting instead of a bare "Working".
+
+| Provider | Retry (one row per turn, `<turn>:provider-retry`, updated in place) | Compaction (one row, `<turn>:compaction`) |
+|---|---|---|
+| Claude | `system` `api_retry` → "Provider retry 2 of 10 · overloaded" | `system` `status: compacting` → "Compacting context…" (running), `compact_boundary` → "Context compacted" |
+| Codex | `error` with `willRetry: true` → "Provider retry · <message>" (a final `error` still fails the turn) | the `contextCompaction` item → "Context compacted" |
+| pi | `auto_retry_start` → "Provider retry 1 of 3 · <errorMessage>" | `auto_compaction_start` / `_end` |
+| ACP (Gemini, Grok, agy, opencode, Muse) | none reported by the protocol | none reported |
+
+A retry row is not progress: its updates do not reset the 15-minute stall
+watchdog, so a provider stuck retrying is still stopped as stalled
+(`RETRY_NOTICE_SUFFIX`, `runtime.rs` `emit`).
 
 ### Typed provider questions
 
@@ -1003,10 +1027,27 @@ secret question forms are refused instead of being collected into history.
   commands). The thread's terminal drawer is a plain shell in its folder
   (`meta.terminal_of`). The composer's model / effort pick and attached
   images ride `POST …/prompt` (`model`, `effort`, `images`).
-- **Idle live-entry eviction** remains a runtime lifecycle follow-up. Daemon
-  shutdown already calls `AgentRuntime::shutdown()`.
+- **Idle agent processes are released** (T3 Code #32325, #34934): every
+  minute, a loaded thread whose agent has been quiet for
+  `thread_idle_release_minutes` (daemon setting, `PUT /settings`; default
+  `30`, `0` = never) has its CLI process and MCP servers stopped the way a
+  Close stops them, and its spawn credential revoked. A finished child
+  thread goes after at most 5 minutes. The thread stays open (`dormant`;
+  "Agent stopped. Your next message resumes it.") and its next message
+  respawns the agent with the provider's resume (`--resume`,
+  `session/load`, …). Never while a turn, background work, an approval or
+  question, a starting prompt or a queued message is pending. A held child's
+  holder exits with it, so a daemon restart adopts nothing for it.
+  (`runtime/auto_close.rs`; evicting the in-memory projection itself
+  remains a follow-up.)
+- **Keeping the Mac awake** (T3 Code #34128): while any thread's turn runs
+  or starts, or any terminal agent session is `working`, the daemon holds one
+  `caffeinate -i -w <ottod pid>` and releases it 60 s after the last one ends
+  (polled every 15 s; `crates/otto-server/src/keep_awake.rs`). `-i` blocks
+  idle sleep only, so closing the lid still sleeps, and `-w` ends the hold
+  with the daemon.
 - **Features T3 Code has that Otto does not yet:** restart continuation
-  (Otto keeps the process instead, §4), steering for Codex (`turn/steer`) and ACP, Codex `thread/unarchive`,
+  (Otto keeps the process instead, §4), steering for ACP agents other than Grok, Codex `thread/unarchive`,
   Claude thinking summaries, subagent / background tracking for the other
   providers, ACP v2.
 - **Known limits.** A Claude resume key is persisted once the CLI answers its

@@ -128,6 +128,7 @@
     "otto_query_db",
     "otto_reject_improvement_edit",
     "otto_remove_personal_agent_schedule",
+    "otto_request_secret",
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
@@ -266,6 +267,7 @@
     "otto_product_story",
     "otto_query_db",
     "otto_reject_improvement_edit",
+    "otto_request_secret",
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
@@ -435,6 +437,7 @@
     "otto_query_db",
     "otto_reject_improvement_edit",
     "otto_remove_personal_agent_schedule",
+    "otto_request_secret",
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
@@ -547,6 +550,7 @@
     "otto_query_db",
     "otto_reject_improvement_edit",
     "otto_remove_personal_agent_schedule",
+    "otto_request_secret",
     "otto_rollback_improvement_edit",
     "otto_run_goal_loop",
     "otto_run_personal_agent",
@@ -662,6 +666,7 @@
     "otto_product_story",
     "otto_query_db",
     "otto_reject_improvement_edit",
+    "otto_request_secret",
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
@@ -2811,6 +2816,21 @@
         },
         "wait_seconds": {
           "type": "integer"
+        }
+      }
+    },
+    "otto_request_secret": {
+      "type": "object",
+      "required": [
+        "prompt"
+      ],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "description": "What it is for."
+        },
+        "name": {
+          "type": "string"
         }
       }
     },

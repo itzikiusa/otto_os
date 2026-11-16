@@ -1,6 +1,6 @@
 <script lang="ts">
   // Structured agent runtime thread view shared between Threads and IDE Agent dock.
-  import { setContext, untrack, type Snippet } from 'svelte';
+  import { setContext, tick, untrack, type Snippet } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import { ApiError } from '../../../lib/api/client';
   import type { ApprovalDecision, PromptDelivery, RuntimeAccessMode, RuntimeDraftContent, TurnItem } from '../../../lib/api/types';
@@ -45,11 +45,17 @@
   import RuntimeContextChips from './RuntimeContextChips.svelte';
   import RuntimeDraftStatus from './RuntimeDraftStatus.svelte';
   import RuntimeFollow from './RuntimeFollow.svelte';
+  import SelectionQuote from '../../../lib/components/SelectionQuote.svelte';
+  import { withQuote } from '../../../lib/quote/quote';
+  import { registerFindProvider } from '../../../lib/findProviders';
+  import { threadFindProvider } from './threadFind';
   import RuntimeHistoryBar from './RuntimeHistoryBar.svelte';
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimePlan from './RuntimePlan.svelte';
   import RuntimeQueueBar from './RuntimeQueueBar.svelte';
   import { linkedChildren } from './council';
+  import RuntimeSecretCard from './RuntimeSecretCard.svelte';
+  import { secretRequests } from '../../../lib/stores/secretRequests.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import RuntimeTimelineRows from './RuntimeTimelineRows.svelte';
   import RuntimeTurnStatus from './RuntimeTurnStatus.svelte';
@@ -134,10 +140,16 @@
   const sessionError = $derived(deriveSessionError(draft.startError, p));
   const plan = $derived(deriveActivePlan(p, turn));
   const uiAsk = $derived(!!session && !closed && !auth.isImpersonating && session.created_by === auth.me?.id && !!uiControl.promptFor(sessionId));
+  // The owner's own sign-in answers a private secret request.
+  const secretAsk = $derived(
+    session && !auth.isImpersonating && session.created_by === auth.me?.id ? (secretRequests.bySession[sessionId] ?? null) : null,
+  );
+  $effect(() => void secretRequests.load());
   const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || needsRevive);
   const banners = $derived(buildRuntimeBanners({
     sessionError,
     uiAsk,
+    secretAsk: !!secretAsk,
     hasQuestions: Boolean(p?.requests.some((r) => r.kind === 'question')),
     hasPlan: Boolean(plan),
     queueShown,
@@ -365,6 +377,22 @@
     composerEl?.focus({ preventScroll: true });
   };
 
+  // ⌘F finds in the whole loaded thread, not just its mounted rows.
+  $effect(() =>
+    registerFindProvider(
+      threadFindProvider({ root: () => streamEl, rows: () => rows, cap: () => rowCap, setCap: (n) => (rowCap = n) }),
+    ),
+  );
+
+  // Quote a passage of an answer: it lands in the composer, caret below it.
+  function quoteIntoComposer(text: string): void {
+    draft.text = withQuote(draft.text, text);
+    void tick().then(() => {
+      focusComposer();
+      composerEl?.setSelectionRange(draft.text.length, draft.text.length);
+    });
+  }
+
   $effect(() => {
     const el = composerEl;
     if (focused && el) untrack(() => el.focus({ preventScroll: true }));
@@ -431,6 +459,7 @@
     </div>
   </div>
   <RuntimeFollow bind:this={followRef} {scroller} seq={p?.lastSequence} {messageIds} />
+  <SelectionQuote root={streamEl} within=".rt-assistant" onquote={quoteIntoComposer} />
 
   <div class="rt-dock">
     <RuntimeBannerStack blocks={banners}>
@@ -439,6 +468,8 @@
           <p class="rt-banner" dir="auto" use:announceShown={{ text: sessionError, assertive: true }}><Icon name="warning" size={13} />{sessionError}</p>
         {:else if key === 'ui'}
           <RuntimeUiControl {sessionId} />
+        {:else if key === 'secret' && secretAsk}
+          <RuntimeSecretCard request={secretAsk} />
         {:else if key === 'questions' && p}
           <LazyMount lazy={RuntimeQuestions} what="the questions" variant="compact" props={{ requests: p.requests, sessionId, agent: agentName, onanswered: focusComposer }} />
         {:else if key === 'plan' && plan}

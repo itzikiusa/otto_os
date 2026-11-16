@@ -593,6 +593,14 @@ impl SessionsRepo {
             .collect())
     }
 
+    /// Whether any terminal session is `working` (an agent mid-turn).
+    pub async fn any_working(&self) -> Result<bool> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE status = 'working')")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("any working session"))
+    }
+
     pub async fn update_status(&self, id: &Id, status: SessionStatus) -> Result<()> {
         sqlx::query("UPDATE sessions SET status = ?, last_active_at = ? WHERE id = ?")
             .bind(status.as_str())
