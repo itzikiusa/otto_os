@@ -49,6 +49,15 @@ pub struct MetaResp {
     /// unauthenticated after onboarding.
     #[serde(default)]
     pub provider_families: std::collections::HashMap<String, String>,
+    /// Per enabled provider: whether a restart reopens its conversation (it
+    /// has resume args). False (Muse, opencode) ⇒ the UI asks before a
+    /// restart, which would start a new conversation.
+    #[serde(default)]
+    pub provider_resumable: std::collections::HashMap<String, bool>,
+    /// Per enabled provider: whether its TERMINAL session takes an effort
+    /// (the CLI has an effort flag). False ⇒ pickers hide effort there.
+    #[serde(default)]
+    pub provider_terminal_effort: std::collections::HashMap<String, bool>,
     /// A second LOOPBACK base for the same daemon (`http://localhost:<port>`
     /// — `ottod` holds both `127.0.0.1` and `[::1]` on the port), or `null`
     /// when it could not bind `[::1]` (IPv6 off / port taken). Browsers pool

@@ -1,6 +1,9 @@
 <script lang="ts">
   // Collapsible, height-resizable (120px..85vh), maximizable IDE Bottom Tool Dock
   // hosting Debug, Run & tests, Git, Problems, Usages, and Terminal.
+  // `stack` (the phone layout's Tools pane): always open, fills the pane, no
+  // resizer, Terminal first, and picking a tab never writes the workbench's
+  // persisted "dock open" preference.
   import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -14,11 +17,11 @@
     RESIZE_TITLE_VERTICAL,
     savePaneWidth,
   } from '../../lib/paneResizer';
-  import { viewport } from '../../lib/stores/viewport.svelte';
   import { ideDockPrefs } from './debug/ideDockPrefs.svelte';
   import { ideDbWatch } from './dbwatch/ideDbWatchState.svelte';
   import { ideGit } from './git/ideGitController.svelte';
   import { ide, type IdeBottomTab } from './ideStore.svelte';
+  import { dockMaxFor, stackDockOrder } from './shell/ideLayout.svelte';
 
   type DockTab = IdeBottomTab | 'git';
 
@@ -32,15 +35,31 @@
 
   interface Props {
     defaultHeight?: number;
+    stack?: boolean;
+    /** Stacked and the Tools pane is the one showing. */
+    stackShowing?: boolean;
   }
-  let { defaultHeight = 300 }: Props = $props();
+  let { defaultHeight = 300, stack = false, stackShowing = false }: Props = $props();
+  const open = $derived(stack || ide.bottomDockOpen);
 
   const LS_DOCK_H = 'otto_ide_dock_h';
   const DOCK_MIN = 120;
 
   let winH = $state(typeof window !== 'undefined' ? window.innerHeight : 900);
-  const dockMax = $derived(Math.max(520, Math.round(winH * 0.85)));
-  const maxTargetH = $derived(Math.max(460, Math.round(winH * 0.78)));
+  // The column the dock shares with the editor: the dock never takes more
+  // than it minus room for a few editor lines (a short window — a phone on
+  // its side — used to get a 300 px dock in a 230 px column, no editor left).
+  let colH = $state(0);
+  let shellEl: HTMLElement | undefined = $state();
+  $effect(() => {
+    const col = shellEl?.parentElement;
+    if (!col || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => (colH = col.clientHeight));
+    ro.observe(col);
+    return () => ro.disconnect();
+  });
+  const dockMax = $derived(dockMaxFor(colH, winH, DOCK_MIN));
+  const maxTargetH = $derived(Math.min(dockMax, Math.max(460, Math.round(winH * 0.78))));
 
   let dockHeight = $state(loadPaneWidth(LS_DOCK_H, 300, DOCK_MIN, 760));
   let maximized = $state(false);
@@ -144,12 +163,26 @@
   ]);
 
   const dockTabs = $derived(
-    allDockTabs.filter((t) => !ideDockPrefs.isDockTabHidden(t.id) || t.id === activeDockTab),
+    (stack ? stackDockOrder(allDockTabs) : allDockTabs).filter(
+      (t) => !ideDockPrefs.isDockTabHidden(t.id) || t.id === activeDockTab,
+    ),
   );
 
   function onTabSelect(tab: DockTab): void {
-    ide.openBottomTab(tab as IdeBottomTab);
+    if (stack) ide.activeBottomTab = tab as IdeBottomTab;
+    else ide.openBottomTab(tab as IdeBottomTab);
   }
+
+  // The stacked Tools pane opens on the terminal unless a run, debug session
+  // or problem list is what the person was last looking at.
+  let stackTabChosen = false;
+  $effect(() => {
+    if (!stackShowing || stackTabChosen) return;
+    stackTabChosen = true;
+    untrack(() => {
+      if (!ide.activeRun && !ide.activeDebug && ide.activeBottomTab === 'run') ide.activeBottomTab = 'terminal';
+    });
+  });
 
   function openDockViewMenu(e: MouseEvent): void {
     const allIds = allDockTabs.map((t) => t.id);
@@ -189,7 +222,7 @@
   }
 
   function onHeaderClickCapture(e: MouseEvent): void {
-    if (ide.bottomDockOpen) return;
+    if (open) return;
     const hitTab = (e.target as HTMLElement | null)?.closest('[role="tab"]');
     if (hitTab) ide.toggleBottomDock(true);
   }
@@ -198,13 +231,16 @@
 <svelte:window onresize={() => (winH = window.innerHeight)} />
 
 <section
+  bind:this={shellEl}
   class="dock-shell"
-  class:is-open={ide.bottomDockOpen}
+  class:is-open={open}
+  class:stack
+  class:stack-hidden={stack && !stackShowing}
   aria-label="IDE bottom tool dock"
   data-testid="ide-bottom-dock"
-  style:block-size={ide.bottomDockOpen && !viewport.isPhone ? `${effectiveHeight}px` : undefined}
+  style:block-size={open && !stack ? `${effectiveHeight}px` : undefined}
 >
-  {#if ide.bottomDockOpen && !viewport.isPhone}
+  {#if open && !stack}
     <div
       class="dock-resizer"
       role="separator"
@@ -231,7 +267,7 @@
       value={activeDockTab}
       onchange={onTabSelect}
       label="IDE tool panels"
-      idBase={ide.bottomDockOpen ? 'ide-dock' : undefined}
+      idBase={open ? 'ide-dock' : undefined}
       size="s"
       testid="ide-dock-tabs"
     >
@@ -246,7 +282,7 @@
         >
           <Icon name="more" size={12} />
         </button>
-        {#if ide.bottomDockOpen}
+        {#if open && !stack}
           <button
             type="button"
             class="icon-btn dock-act"
@@ -258,21 +294,23 @@
             <Icon name={maximized ? 'minimize' : 'maximize'} size={12} />
           </button>
         {/if}
-        <button
-          type="button"
-          class="icon-btn dock-act"
-          aria-expanded={ide.bottomDockOpen}
-          aria-label={ide.bottomDockOpen ? 'Collapse bottom dock' : 'Expand bottom dock'}
-          title={ide.bottomDockOpen ? 'Collapse bottom dock' : 'Expand bottom dock'}
-          onclick={() => ide.toggleBottomDock()}
-        >
-          <Icon name={ide.bottomDockOpen ? 'chevronDown' : 'chevronUp'} size={13} />
-        </button>
+        {#if !stack}
+          <button
+            type="button"
+            class="icon-btn dock-act"
+            aria-expanded={ide.bottomDockOpen}
+            aria-label={ide.bottomDockOpen ? 'Collapse bottom dock' : 'Expand bottom dock'}
+            title={ide.bottomDockOpen ? 'Collapse bottom dock' : 'Expand bottom dock'}
+            onclick={() => ide.toggleBottomDock()}
+          >
+            <Icon name={ide.bottomDockOpen ? 'chevronDown' : 'chevronUp'} size={13} />
+          </button>
+        {/if}
       {/snippet}
     </Tabs>
   </div>
 
-  {#if ide.bottomDockOpen}
+  {#if open}
     <div
       class="dock-body"
       role="tabpanel"
@@ -311,8 +349,8 @@
   .dock-header :global(.otabs) { block-size: 32px; min-block-size: 32px; }
   .dock-act { block-size: 22px; inline-size: 22px; }
   .dock-body { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; flex-direction: column; overflow: hidden; }
-  @media (max-width: 640px) {
-    .dock-shell.is-open { flex: 1; block-size: 100%; max-block-size: none; }
-    .dock-resizer { display: none; }
-  }
+  /* Stacked Tools pane: the dock IS the pane (hidden, still mounted, on the others). */
+  .dock-shell.stack-hidden { display: none; }
+  .dock-shell.stack.is-open { flex: 1; block-size: 100%; max-block-size: none; }
+  .dock-shell.stack .dock-header, .dock-shell.stack .dock-header :global(.otabs) { block-size: 44px; min-block-size: 44px; max-block-size: 44px; }
 </style>

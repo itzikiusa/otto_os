@@ -68,7 +68,7 @@ test('Agents & tasks rows open the subagent and the background command, desktop 
   const panel = page.getByTestId('thread-agents-tasks');
   await expect(panel).toBeVisible();
   const cmdRow = panel.getByTestId('agents-tasks-row').filter({ hasText: 'sleep 300' });
-  await cmdRow.getByRole('button').click();
+  await cmdRow.getByTestId('agents-tasks-toggle').click();
   const detail = panel.getByTestId('agents-tasks-detail');
   await expect(detail.getByTestId('runtime-task-output')).toContainText('tick 2', { timeout: 10_000 });
   await expect(detail).toContainText('sleep 300');
@@ -78,12 +78,14 @@ test('Agents & tasks rows open the subagent and the background command, desktop 
     await page.screenshot({ path: info.outputPath(`agents-tasks-command-${scheme}.png`), animations: 'disabled' });
   }
   await page.emulateMedia({ colorScheme: 'light' });
-  await panel.getByTestId('agents-tasks-back').click();
+  // The detail unfolds under its row; the same button folds it again.
+  await cmdRow.getByTestId('agents-tasks-toggle').click();
   await expect(panel.getByTestId('agents-tasks-detail')).toHaveCount(0);
   await expect(thread.getByText('Background done: ok')).toBeVisible({ timeout: 20_000 });
 
   // A background subagent: the same card as the timeline, opened in place.
-  await composer.fill('agent 3');
+  // Long enough to still be running while its row is read and opened.
+  await composer.fill('agent 8');
   await composer.press('Enter');
   await expect(thread.getByText("I'm waiting for the PR sweep to come back.")).toBeVisible({ timeout: 15_000 });
   const agentRow = panel.getByTestId('agents-tasks-row').filter({ hasText: 'PR sweep' });
@@ -98,7 +100,7 @@ test('Agents & tasks rows open the subagent and the background command, desktop 
   }
   await page.emulateMedia({ colorScheme: 'light' });
   await expect(detail).toContainText('Found 2 open PRs', { timeout: 20_000 });
-  await panel.getByTestId('agents-tasks-back').click();
+  await agentRow.getByRole('button', { name: /PR sweep/ }).click();
 
   // Phone width: the strip opens the drawer, its row a sheet that fits.
   await page.setViewportSize({ width: 390, height: 844 });
@@ -164,4 +166,32 @@ test('image previews are readable and open full size', async ({ page }, info) =>
   await expect(sentThumb.locator('img')).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: info.outputPath('image-previews-phone.png'), animations: 'disabled' });
+});
+
+test('a running background command is stopped from Agents & tasks, end to end', async ({ page }) => {
+  const id = await claudeThread('Stop a background task');
+  await page.goto(`/#/threads/${id}`);
+  const thread = page.getByTestId(`runtime-thread-${id}`);
+  await expect(thread).toBeVisible({ timeout: 30_000 });
+  const composer = thread.getByTestId('runtime-composer');
+  // Long enough that only a stop can end it inside this test.
+  await composer.fill('bg 600');
+  await composer.press('Enter');
+  await expect(thread.getByText('Waiting for it.')).toBeVisible({ timeout: 15_000 });
+  await thread.getByTestId('runtime-background').click();
+  const panel = page.getByTestId('thread-agents-tasks');
+  const row = panel.getByTestId('agents-tasks-row').filter({ hasText: 'sleep 300' });
+  await expect(row).toContainText('Running');
+
+  // The real route against the daemon: Claude's own stop, not a mock.
+  const stopped = page.waitForResponse(
+    (r) => r.request().method() === 'POST' && /\/runtime-sessions\/[^/]+\/tasks\/[^/]+\/stop$/.test(new URL(r.url()).pathname),
+  );
+  await row.getByTestId('agents-tasks-stop').click();
+  const resp = await stopped;
+  expect(resp.status()).toBe(200);
+  expect((await resp.json()).outcome).toBe('native');
+  // The task leaves the running list once the agent confirms it ended.
+  await expect(panel.getByTestId('agents-tasks-row').filter({ hasText: 'sleep 300' })).not.toContainText('Running', { timeout: 20_000 });
+  await expect(thread.getByTestId('runtime-background')).toHaveCount(0, { timeout: 20_000 });
 });

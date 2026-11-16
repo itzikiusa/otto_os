@@ -22,6 +22,10 @@ export interface FlatTreeNode {
   isPrimaryRoot?: boolean;
   defaultExpanded?: boolean;
   subtitle?: string;
+  /** A folder's failed listing, rendered as an inline row with Retry under it. */
+  loadError?: string;
+  /** For a `loadError` row: the folder to retry. */
+  errorDir?: string;
 }
 
 export function parentDirOfPath(fullPath: string): string {
@@ -79,9 +83,23 @@ export async function promptRenameTreeEntry(entry: IdeFsEntry): Promise<void> {
   );
 }
 
+/** The delete prompt. Open tabs under the deleted path that hold unsaved edits are
+ *  dropped with it, so the prompt names them instead of losing them silently. */
+export function deleteConfirmText(entryName: string, where: string, unsavedNames: readonly string[]): string {
+  const base = `Permanently delete “${entryName}” from ${where}?`;
+  if (unsavedNames.length === 0) return base;
+  const shown = unsavedNames.slice(0, 3).map((n) => `“${n}”`).join(', ');
+  const more = unsavedNames.length > 3 ? ` and ${unsavedNames.length - 3} more` : '';
+  const verb = unsavedNames.length === 1 ? 'has' : 'have';
+  return `${base} ${shown}${more} ${verb} unsaved changes that will be lost.`;
+}
+
 export async function confirmDeleteTreeEntry(entry: IdeFsEntry): Promise<void> {
+  const unsaved = ide.tabs
+    .filter((t) => (t.path === entry.path || t.path.startsWith(`${entry.path.replace(/\/+$/, '')}/`)) && ide.getBuffer(t.path) !== t.savedContent)
+    .map((t) => t.name);
   const ok = await confirmer.ask(
-    `Permanently delete “${entry.name}” from ${ide.target.kind === 'ssh' ? 'the remote host' : 'disk'}?`,
+    deleteConfirmText(entry.name, ide.target.kind === 'ssh' ? 'the remote host' : 'disk', unsaved),
     {
       title: `Delete ${entry.kind === 'dir' ? 'folder' : 'file'}`,
       confirmLabel: 'Delete',

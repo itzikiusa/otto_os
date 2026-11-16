@@ -1,140 +1,53 @@
 <script lang="ts">
   // The calm start state (T3 Code's draft hero): one heading that names the
-  // project, ONE composer — attach on the start, a single agent chip (harness ·
-  // model · effort) and a round send on the end — unified `@` file/folder &
-  // agent completion (`RuntimeMentionMenu`), `/` slash popup, Council picker,
-  // and `NewThreadMetaRow` beneath it.
-  import { untrack } from 'svelte';
-  import { announceShown } from '../../lib/announce.svelte';
+  // project, ONE composer (RuntimeStartComposer — the same one every embed's
+  // draft state uses) and `NewThreadMetaRow` beneath it. This host owns the
+  // project / workspace choice and what a start does in Threads.
   import { api } from '../../lib/api/client';
   import type { Repo } from '../../lib/api/types';
-  import Icon from '../../lib/components/Icon.svelte';
-  import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import { enterSends } from '../../lib/enterSends';
   import { checkFolder } from '../../lib/folderCheck';
-  import { lazyComponent } from '../../lib/lazy-component.svelte';
-  import {
-    formatEffortShort,
-    formatModelLabel,
-    nextInteractionModeToggle,
-    supportsEffortSelection,
-    supportsInteractionMode,
-    type EffortLevel,
-    type InteractionMode,
-  } from '../../lib/providerModels';
-  import { agentProviders, defaultAgentProvider, orderThreadHarnesses, providerReadiness, runtimeBaselineCaps } from '../../lib/providers';
-  import {
-    isImmediateSlashCommand,
-    parseInteractiveSlashInput,
-    type ComposerSlashCommand,
-  } from '../../lib/slashActions';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { composerViewState, getTransientComposerDraft, saveTransientComposerDraft } from '../../lib/stores/runtimeDraftCursor';
   import { git } from '../../lib/stores/git.svelte';
   import { transcript } from '../../lib/stores/transcript.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
-  import { buildFolderMenuItems, buildWorkspaceMenuItems, STAGE_SLASH_COMMANDS } from './newThreadMenus';
+  import { buildFolderMenuItems, buildWorkspaceMenuItems } from './newThreadMenus';
   import NewThreadMetaRow from './NewThreadMetaRow.svelte';
-  import { addComposerContext, assembleComposerMessage, fileMentionContext, type ComposerContext } from './runtime/composerContext';
-  import CouncilStagePicker from './runtime/CouncilStagePicker.svelte';
-  import { council, councilAgentLabel } from './runtime/councilStore.svelte';
-  import { handleSlashMenuKey } from './runtime/runtimeComposer';
-  import RuntimeContextChips from './runtime/RuntimeContextChips.svelte';
-  import type { PickedAgentMention, PickedFileMention } from './runtime/RuntimeMentionMenu.svelte';
+  import { council } from './runtime/councilStore.svelte';
   import { isRuntimeProvider, runtimeThreads } from './runtime/runtimeThreads.svelte';
-  import StageAttach from './runtime/StageAttach.svelte';
-  import { StageAttachments } from './runtime/stageAttachments.svelte';
-  import { capsOf } from './runtime/attachmentSupport';
+  import RuntimeStartComposer from './RuntimeStartComposer.svelte';
+  import type { StartLaunch } from './startComposer';
   import { placeholderTitle } from './threadTitle';
-  import { FolderPickerModal, MentionMenuView, ProjectCardView, StageSlashView } from './threadLazy.svelte';
-  import { buildModeMenu } from './threadPickerMenus';
+  import { FolderPickerModal, ProjectCardView } from './threadLazy.svelte';
   import { threadRepos } from './threadRepos.svelte';
-  import { harnessLabel, projectNameFromCwd, relToRoot } from './threadsHelpers';
+  import { harnessLabel, projectNameFromCwd } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
-
-  const ModelPicker = lazyComponent(() => import('../../lib/components/ModelPickerPopover.svelte'));
 
   interface Props {
     showCard?: boolean;
   }
   let { showCard = false }: Props = $props();
 
-  const harnesses = $derived(orderThreadHarnesses(agentProviders()));
-
-  let provider = $state('');
-  let selectedModel = $state<string | null>(null);
-  let selectedEffort = $state<EffortLevel | null>(null);
-  let interactionMode = $state<InteractionMode>('full');
   let cwd = $state('');
   let useScratch = $state(false);
-  let prompt = $state('');
-  let stageContext = $state<ComposerContext[]>([]);
   let cwdError = $state('');
-  let busy = $state(false);
-  let picker = $state<'none' | 'folder' | 'file'>('none');
+  let folderPicker = $state(false);
   let openInBeside = $state(false);
   let worktree = $state<{ path: string; branch: string | null; repo: Repo } | null>(null);
-  let composerBoxEl = $state<HTMLDivElement | null>(null);
-  let composerEl = $state<HTMLTextAreaElement | null>(null);
-  let agentEl = $state<HTMLButtonElement | null>(null);
   let projectEl = $state<HTMLButtonElement | null>(null);
-  let mentionEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
 
   const homePath = $derived(ws.scratch?.root_path ?? '~');
   const scratchActive = $derived(useScratch || ws.current === null);
   const targetWs = $derived(scratchActive ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
-  const runtime = $derived(isRuntimeProvider(provider, auth.meta));
-  // A runtime thread's attachments, plan mode and effort levels come from what
-  // its agent reports (`MetaResp.runtime_capabilities`), never from its name.
-  const stageCaps = $derived(capsOf(null, runtimeBaselineCaps(provider, auth.meta)));
-  const files = new StageAttachments(() => stageCaps, () => runtime && !council.on);
-  const modeSupported = $derived(supportsInteractionMode(provider, auth.meta) && !runtime);
-  const planSupported = $derived(runtime && !!stageCaps.plan);
-  const takesEffort = $derived(runtime ? (stageCaps.efforts?.length ?? 0) > 0 : supportsEffortSelection(provider, auth.meta));
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
   const stageDraftKey = $derived(`threads-stage:${cleanCwd || targetWs}`);
-  const stageViewStateArg = $derived({ key: stageDraftKey, hasText: prompt.length > 0 });
-  let hydratedStageKey = '';
-  $effect(() => {
-    const key = stageDraftKey;
-    if (key !== hydratedStageKey) {
-      hydratedStageKey = key;
-      const saved = getTransientComposerDraft(key);
-      if (saved && !prompt) {
-        prompt = saved;
-      }
-    }
-  });
-  $effect(() => {
-    const key = stageDraftKey;
-    const val = prompt;
-    if (key === hydratedStageKey) {
-      saveTransientComposerDraft(key, val);
-    }
-  });
   const onWorktree = $derived(worktree !== null && worktree.path.replace(/\/+$/, '') === cleanCwd);
   const repo = $derived(onWorktree ? worktree!.repo : threadRepos.repoFor(cleanCwd, scratchActive ? null : ws.currentId));
   const branch = $derived(onWorktree ? worktree!.branch : repo ? (git.statusById[repo.id]?.branch ?? null) : null);
   const projectName = $derived(
     !cleanCwd || cleanCwd === homePath || cleanCwd === '~' ? null : projectNameFromCwd(cleanCwd),
   );
-  const agentLabel = $derived.by(() => {
-    const meta = auth.meta;
-    if (council.on) return councilAgentLabel(meta);
-    const model = selectedModel ? formatModelLabel(provider, selectedModel, meta) : harnessLabel(provider);
-    return takesEffort && selectedEffort ? `${model} · ${formatEffortShort(selectedEffort)}` : model;
-  });
-
-  $effect(() => {
-    if (!provider || (harnesses.length > 0 && !harnesses.includes(provider))) {
-      const def = defaultAgentProvider();
-      const ready = harnesses.find((h) => providerReadiness(h).available);
-      provider = harnesses.includes(def) && providerReadiness(def).available ? def : (ready ?? harnesses[0] ?? def);
-    }
-  });
 
   $effect(() => {
     const seeded = threads.draftCwd;
@@ -154,47 +67,9 @@
     if (repo && !onWorktree) git.ensureStatus(repo.id);
   });
 
-  function selectProvider(next: string): void {
-    if (provider === next) return;
-    provider = next;
-    selectedModel = null;
-    selectedEffort = null;
-  }
-
   function setCwd(path: string): void {
     cwd = path;
     cwdError = '';
-  }
-
-  const SUPPORTS_FIELD_SIZING =
-    typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('field-sizing', 'content');
-
-  function autoGrow(el: HTMLTextAreaElement): void {
-    if (SUPPORTS_FIELD_SIZING) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(240, Math.max(56, el.scrollHeight))}px`;
-  }
-
-  function focusComposer(caretToEnd = false): void {
-    queueMicrotask(() => {
-      if (!composerEl) return;
-      autoGrow(composerEl);
-      composerEl.focus();
-      if (caretToEnd) composerEl.setSelectionRange(prompt.length, prompt.length);
-    });
-  }
-
-  let pickerOpen = $state(false);
-  function openModelMenu(): void {
-    if (agentEl) pickerOpen = true;
-  }
-  const openEffortMenu = openModelMenu;
-  $effect(() => (pickerOpen ? untrack(() => council.watchModifiers({ provider, model: selectedModel, effort: selectedEffort })) : undefined));
-
-  function openModeMenu(anchor?: HTMLElement): void {
-    const target = anchor ?? agentEl;
-    if (!target || !modeSupported) return;
-    ctxMenu.showAt(target, buildModeMenu(interactionMode, (m) => (interactionMode = m)), { align: 'end' });
   }
 
   function openProjectMenu(anchor: HTMLElement): void {
@@ -206,7 +81,7 @@
       cwd,
       homePath,
       onPickPath: setCwd,
-      onBrowse: () => (picker = 'folder'),
+      onBrowse: () => (folderPicker = true),
     });
     items.push(
       { separator: true },
@@ -241,55 +116,8 @@
     );
   }
 
-  async function launch(withPrompt: boolean, overridePrompt?: string, background = false): Promise<void> {
-    if (busy) return;
-    const readiness = providerReadiness(provider);
-    if (!readiness.available) {
-      toasts.error(`Couldn’t start ${harnessLabel(provider)}`, readiness.message);
-      return;
-    }
-    const rawPrompt = overridePrompt ?? (withPrompt ? prompt.trim() : '');
-    if (withPrompt && overridePrompt === undefined) {
-      const slash = parseInteractiveSlashInput(rawPrompt);
-      if (slash) {
-        prompt = '';
-        switch (slash.kind) {
-          case 'open-model-picker':
-            queueMicrotask(openModelMenu);
-            return;
-          case 'set-model':
-            selectedModel = slash.model;
-            return;
-          case 'open-effort-picker':
-            queueMicrotask(openEffortMenu);
-            return;
-          case 'set-effort':
-            selectedEffort = slash.effort;
-            return;
-          case 'open-mode-picker':
-            queueMicrotask(() => openModeMenu());
-            return;
-          case 'set-mode':
-            interactionMode = slash.mode;
-            if (slash.prompt) await launch(true, slash.prompt);
-            return;
-          case 'send-prompt':
-            await launch(true, slash.prompt);
-            return;
-          default:
-            break;
-        }
-      }
-    }
-    const rawTrimmed = rawPrompt.trim();
-    if (withPrompt && !rawTrimmed && files.list.length === 0 && stageContext.length === 0) {
-      composerEl?.focus();
-      return;
-    }
-    if (withPrompt && council.on && !council.ready) {
-      cwdError = 'Pick at least two agents to ask, or turn Ask several off.';
-      return;
-    }
+  async function launch(req: StartLaunch): Promise<boolean> {
+    const { provider } = req;
     let dir = cwd.trim();
     if (homePath !== '~' && (dir === '~' || dir.startsWith('~/'))) dir = homePath + dir.slice(1);
     if (dir !== '') {
@@ -297,157 +125,52 @@
       const check = await checkFolder(dir, (url) => api.get(url));
       if (!check.ok) {
         cwdError = check.message;
-        return;
+        return false;
       }
     }
-    const firstMsg = withPrompt ? assembleComposerMessage(rawTrimmed, stageContext) : '';
-    const titleSeed = rawTrimmed || stageContext[0]?.label || '';
-    busy = true;
+    const firstMsg = req.message;
     try {
       const meta: Record<string, unknown> = {
         surface: 'threads',
-        interaction_mode: interactionMode,
-        ...(selectedModel ? { model: selectedModel } : {}),
-        ...(selectedEffort ? { effort: selectedEffort } : {}),
+        interaction_mode: req.interactionMode,
+        ...(req.model ? { model: req.model } : {}),
+        ...(req.effort ? { effort: req.effort } : {}),
       };
-      const title = placeholderTitle(titleSeed, `${harnessLabel(provider)} thread`);
+      const title = placeholderTitle(req.titleSeed, `${harnessLabel(provider)} thread`);
       const opts = { scratch: scratchActive && ws.currentId !== SCRATCH_WORKSPACE_ID };
-      const asCouncil = withPrompt && council.ready;
-      const created = asCouncil
-        ? (await council.start(targetWs, { prompt: firstMsg, title, cwd: dir || null }, background ? 'background' : 'panes'))[0]
-        : runtime && isRuntimeProvider(provider, auth.meta)
+      const created = req.council
+        ? (await council.start(targetWs, { prompt: firstMsg, title, cwd: dir || null }, req.background ? 'background' : 'panes'))[0]
+        : req.runtime && isRuntimeProvider(provider, auth.meta)
           ? await runtimeThreads.start(targetWs, {
               provider,
               title,
-              titleAuto: !!titleSeed,
+              titleAuto: !!req.titleSeed,
               cwd: dir || null,
-              model: selectedModel,
-              effort: takesEffort ? (selectedEffort ?? undefined) : undefined,
-              plan: planSupported && interactionMode === 'plan',
+              model: req.model,
+              effort: req.effort ?? undefined,
+              plan: req.plan,
               prompt: firstMsg,
-              attachments: withPrompt ? files.list : [],
+              attachments: req.attachments,
             })
           : firstMsg
             ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
             : await ws.createSessionQuiet({ kind: 'agent', provider, title, cwd: dir || null, meta }, opts);
-      if (firstMsg && !runtime && !asCouncil) transcript.recordOptimisticPrompt(created.id, firstMsg);
-      saveTransientComposerDraft(stageDraftKey, '');
-      prompt = '';
-      stageContext = [];
-      files.picked = [];
+      if (firstMsg && !req.runtime && !req.council) transcript.recordOptimisticPrompt(created.id, firstMsg);
       threads.draftCwd = null;
       threads.rememberProject(dir || null);
-      if (openInBeside && threads.paneIds.length > 0 && !asCouncil) threads.openBeside(created.id);
-      else if (!asCouncil) threads.selectThread(created.id);
+      if (openInBeside && threads.paneIds.length > 0 && !req.council) threads.openBeside(created.id);
+      else if (!req.council) threads.selectThread(created.id);
+      return true;
     } catch (e) {
       toastError('Couldn’t start thread', e);
-    } finally {
-      busy = false;
+      return false;
     }
   }
 
-  let cmdIdx = $state(0);
-  let cmdDismissed = $state(false);
-  const slashPopId = $props.id();
-  const cmdPrefix = $derived.by(() => {
-    const m = /^\/([\w:-]*)$/.exec(prompt);
-    return m ? m[1].toLowerCase() : null;
-  });
-  const slashSuggestions = $derived.by(() => {
-    if (cmdPrefix == null || cmdDismissed) return [] as ComposerSlashCommand[];
-    return STAGE_SLASH_COMMANDS.filter((c) => c.name.toLowerCase().includes(cmdPrefix));
-  });
-  const cmdOpen = $derived(slashSuggestions.length > 0);
-  $effect(() => {
-    void slashSuggestions.length;
-    cmdIdx = 0;
-  });
-  $effect(() => {
-    void prompt;
-    cmdDismissed = false;
-  });
-
-  function acceptStageCmd(c: ComposerSlashCommand): void {
-    if (isImmediateSlashCommand(c.name)) {
-      prompt = `/${c.name}`;
-      cmdDismissed = true;
-      void launch(true);
-      return;
-    }
-    prompt = `/${c.name} `;
-    cmdDismissed = true;
-    focusComposer(true);
-  }
-
-  function handleMentionFile(picked: PickedFileMention): void {
-    prompt = picked.nextText;
-    stageContext = addComposerContext(
-      stageContext,
-      fileMentionContext({
-        path: picked.path,
-        label: picked.display,
-        isDir: picked.isDir,
-      }),
-    );
-    queueMicrotask(() => composerEl && autoGrow(composerEl));
-  }
-
-  function handleMentionAgent(picked: PickedAgentMention): void {
-    prompt = picked.nextText;
-    const o = picked.option;
-    if (council.on) {
-      council.pick({ provider: o.provider, model: o.model ?? null, effort: null });
-    } else {
-      provider = o.provider;
-      selectedModel = o.model || null;
-      if (!supportsEffortSelection(o.provider, auth.meta)) selectedEffort = null;
-    }
-  }
-
-  function onComposerKeydown(e: KeyboardEvent): void {
-    if (e.isComposing || mentionEl?.onKey(e)) return;
-    if (e.key === 'Tab' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !cmdOpen) {
-      if (modeSupported) {
-        e.preventDefault();
-        interactionMode = nextInteractionModeToggle(interactionMode);
-        return;
-      }
-      if (planSupported) {
-        e.preventDefault();
-        interactionMode = interactionMode === 'plan' ? 'full' : 'plan';
-        return;
-      }
-    }
-    if (
-      cmdOpen &&
-      handleSlashMenuKey(
-        e,
-        slashSuggestions,
-        cmdIdx,
-        (i) => (cmdIdx = i),
-        () => (cmdDismissed = true),
-        acceptStageCmd,
-      )
-    ) {
-      return;
-    }
-    if (e.key === 'Escape' && threads.paneIds.length > 0 && !prompt) {
-      e.preventDefault();
-      threads.newDraftMode = false;
-      return;
-    }
-    if (enterSends(e)) {
-      e.preventDefault();
-      void launch(!((e.metaKey || e.ctrlKey) && !prompt.trim() && stageContext.length === 0 && files.list.length === 0), undefined, e.metaKey || e.ctrlKey);
-    }
-  }
-
-  function attachPath(path: string): void {
-    const rel = relToRoot(path, cleanCwd);
-    const token = `@${/\s/.test(rel) ? `"${rel}"` : rel} `;
-    prompt = prompt && !/\s$/.test(prompt) ? `${prompt} ${token}` : `${prompt}${token}`;
-    stageContext = addComposerContext(stageContext, fileMentionContext({ path, label: rel, isDir: false }));
-    focusComposer(true);
+  function escape(): boolean {
+    if (threads.paneIds.length === 0) return false;
+    threads.newDraftMode = false;
+    return true;
   }
 </script>
 
@@ -474,177 +197,51 @@
       {/if}
     </h1>
 
-    <div class="nt-composer" class:plan={interactionMode === 'plan' && (modeSupported || planSupported)} bind:this={composerBoxEl}>
-      {#if cmdOpen && StageSlashView.component}
-        <StageSlashView.component
-          id={slashPopId}
-          items={slashSuggestions}
-          active={cmdIdx}
-          onaccept={acceptStageCmd}
-          onhover={(i) => (cmdIdx = i)}
+    <RuntimeStartComposer
+      cwd={cleanCwd}
+      pickerStart={homePath}
+      draftKey={stageDraftKey}
+      rememberScope="threads:{targetWs}"
+      error={cwdError}
+      onlaunch={launch}
+      onescape={escape}
+    >
+      {#snippet below(m)}
+        <NewThreadMetaRow
+          {repo}
+          {cleanCwd}
+          {onWorktree}
+          {scratchActive}
+          {projectName}
+          {openInBeside}
+          {branch}
+          modeSupported={m.modeSupported}
+          planSupported={m.planSupported}
+          interactionMode={m.interactionMode}
+          onPickWorktree={(path, br, r) => {
+            worktree = { path, branch: br, repo: r };
+            setCwd(path);
+          }}
+          onOpenProjectMenu={openProjectMenu}
+          onToggleBeside={() => (openInBeside = !openInBeside)}
+          onOpenModeMenu={(anchor) => m.openModeMenu(anchor)}
+          onTogglePlan={() => m.setMode(m.interactionMode === 'plan' ? 'full' : 'plan')}
         />
-      {/if}
-      {#if prompt.includes('@') && MentionMenuView.component}
-        <MentionMenuView.component
-          bind:this={mentionEl}
-          text={prompt}
-          cwd={cleanCwd || null}
-          textareaEl={composerEl}
-          anchorEl={composerBoxEl}
-          allowAgents={true}
-          agentSectionLabel={council.on ? 'Add council agent' : 'Switch agent'}
-          onpickfile={handleMentionFile}
-          onpickagent={handleMentionAgent}
-          ondrilldir={(nextText) => { prompt = nextText; }}
-        />
-      {/if}
-      <RuntimeContextChips
-        context={stageContext}
-        onremove={(id) => (stageContext = stageContext.filter((c) => c.id !== id))}
-        onfocus={() => focusComposer()}
-      />
-      <textarea
-        bind:this={composerEl}
-        bind:value={prompt}
-        use:composerViewState={stageViewStateArg}
-        dir="auto"
-        rows={2}
-        spellcheck="false"
-        {...{ autocorrect: 'off' }}
-        autocapitalize="off"
-        autocomplete="off"
-        placeholder={interactionMode === 'plan' && (modeSupported || planSupported)
-          ? 'Describe what to explore and plan. @ files, / commands, ⇧⇥ leaves Plan'
-          : 'Ask anything. @ files or agents, / commands'}
-        aria-label="Opening prompt for new thread"
-        aria-autocomplete="list"
-        aria-controls={cmdOpen ? `${slashPopId}-list` : undefined}
-        aria-activedescendant={cmdOpen ? `${slashPopId}-opt-${cmdIdx}` : undefined}
-        data-testid="new-thread-input"
-        disabled={busy}
-        onfocus={() => { MentionMenuView.prefetch(); StageSlashView.prefetch(); }}
-        oninput={(e) => {
-          if (e.currentTarget.value.includes('@')) MentionMenuView.prefetch();
-          if (e.currentTarget.value.startsWith('/')) StageSlashView.prefetch();
-          autoGrow(e.currentTarget);
-        }}
-        onkeydown={onComposerKeydown}
-        onpaste={(e) => files.paste(e)}
-      ></textarea>
-      <StageAttach part="list" {files} />
-
-      {#if cwdError}
-        <p class="nt-error" use:announceShown={{ text: cwdError, assertive: true }}>{cwdError}</p>
-      {/if}
-
-      <CouncilStagePicker part="seats" {provider} model={selectedModel} effort={selectedEffort} />
-      <div class="nt-foot">
-        <button
-          type="button"
-          class="icon-btn"
-          aria-label="Attach a file from the project"
-          title="Attach a file (@ mention)"
-          data-testid="new-thread-attach"
-          disabled={busy}
-          onclick={() => (picker = 'file')}
-        >
-          <Icon name="link" size={16} />
-        </button>
-        <StageAttach part="button" {files} disabled={busy} />
-        <span class="nt-spacer"></span>
-        <CouncilStagePicker part="toggle" {provider} model={selectedModel} effort={selectedEffort} disabled={busy} />
-        <button
-          bind:this={agentEl}
-          type="button"
-          class="nt-agent"
-          aria-haspopup="menu"
-          aria-label="Agent: {harnessLabel(provider)}, {agentLabel}"
-          title="Harness, model and effort (/model · /effort)"
-          data-testid="picker-agent"
-          onpointerenter={() => ModelPicker.prefetch()}
-          disabled={busy}
-          aria-expanded={pickerOpen}
-          onclick={openModelMenu}
-        >
-          {#if hasProviderIcon(provider)}
-            <ProviderIcon {provider} size={14} />
-          {:else}
-            <Icon name="terminal" size={14} />
-          {/if}
-          <span class="ellipsis">{agentLabel}</span>
-        </button>
-        <button
-          type="button"
-          class="nt-send"
-          class:ask={council.ready}
-          aria-label={busy ? 'Starting thread' : council.ready ? `Ask ${council.seats.length} agents` : 'Start thread'}
-          title={council.ready ? 'Ask every agent (↵) — ⌘↵ starts them in the background' : 'Start thread (↵) — ⌘↵ with no text opens an empty one'}
-          data-testid="new-thread-send-btn"
-          disabled={busy || (!prompt.trim() && stageContext.length === 0 && files.list.length === 0)}
-          onclick={() => void launch(true)}
-        >
-          {#if busy}
-            <span class="spinner" aria-hidden="true"></span>
-          {:else if council.ready}
-            Ask {council.seats.length}
-          {:else}
-            <Icon name="arrowUp" size={16} />
-          {/if}
-        </button>
-      </div>
-    </div>
-
-    <NewThreadMetaRow
-      {repo}
-      {cleanCwd}
-      {onWorktree}
-      {scratchActive}
-      {projectName}
-      {openInBeside}
-      {branch}
-      {modeSupported}
-      {planSupported}
-      {interactionMode}
-      onPickWorktree={(path, br, r) => {
-        worktree = { path, branch: br, repo: r };
-        setCwd(path);
-      }}
-      onOpenProjectMenu={openProjectMenu}
-      onToggleBeside={() => (openInBeside = !openInBeside)}
-      onOpenModeMenu={(anchor) => openModeMenu(anchor)}
-      onTogglePlan={() => (interactionMode = interactionMode === 'plan' ? 'full' : 'plan')}
-    />
+      {/snippet}
+    </RuntimeStartComposer>
   </div>
 </div>
 
-{#if pickerOpen && agentEl && ModelPicker.component}
-  <ModelPicker.component
-    anchor={agentEl}
-    providers={harnesses}
-    {provider}
-    model={selectedModel}
-    effort={selectedEffort}
-    mode={interactionMode}
-    onprovider={selectProvider}
-    onmodel={(m) => { council.pick({ provider, model: m, effort: selectedEffort }); selectedModel = m; }}
-    oneffort={takesEffort ? (e) => (selectedEffort = e) : undefined}
-    effortLevels={runtime ? (stageCaps.efforts ?? []) : undefined}
-    onmode={modeSupported ? (m) => (interactionMode = m) : undefined}
-    onclose={() => (pickerOpen = false)}
-  />
-{/if}
-
-{#if picker !== 'none' && FolderPickerModal.component}
+{#if folderPicker && FolderPickerModal.component}
   <FolderPickerModal.component
-    title={picker === 'file' ? 'Attach a file' : 'Choose project folder'}
-    files={picker === 'file'}
+    title="Choose project folder"
+    files={false}
     start={cleanCwd || homePath || ''}
     onpick={(picked) => {
-      if (picker === 'file') attachPath(picked);
-      else setCwd(picked);
-      picker = 'none';
+      setCwd(picked);
+      folderPicker = false;
     }}
-    onclose={() => (picker = 'none')}
+    onclose={() => (folderPicker = false)}
   />
 {/if}
 
@@ -698,98 +295,6 @@
   }
   .nt-project:hover {
     background: var(--hover);
-  }
-  .nt-composer {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 14px 14px 10px;
-    border-radius: var(--radius-l);
-    border: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .nt-composer:focus-within {
-    border-color: var(--border-strong);
-  }
-  .nt-composer.plan {
-    border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
-  }
-  .nt-composer textarea {
-    inline-size: 100%;
-    min-block-size: 56px;
-    max-block-size: 240px;
-    resize: none;
-    border: 0;
-    padding: 0;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-m);
-    line-height: 1.55;
-    unicode-bidi: plaintext;
-    text-align: start;
-    outline: none;
-    field-sizing: content;
-  }
-  .nt-error {
-    margin: 0;
-    font-size: var(--fs-xs);
-    color: var(--danger);
-  }
-  .nt-foot {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-inline-size: 0;
-  }
-  .nt-spacer {
-    flex: 1;
-  }
-  .nt-agent {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    min-inline-size: 0;
-    max-inline-size: 260px;
-    block-size: 30px;
-    padding-inline: 8px;
-    border: 0;
-    border-radius: var(--radius-m);
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-m);
-    cursor: pointer;
-  }
-  .nt-agent:hover:not(:disabled) {
-    background: var(--hover);
-  }
-  .nt-send {
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    inline-size: 32px;
-    block-size: 32px;
-    border: 0;
-    border-radius: 50%;
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-    cursor: pointer;
-  }
-  .nt-send:disabled {
-    background: var(--surface-3);
-    color: var(--text-dim);
-    cursor: default;
-  }
-  .nt-send.ask {
-    inline-size: auto;
-    padding-inline: 12px;
-    border-radius: 999px;
-    font-weight: 600;
-  }
-  .nt-send .spinner {
-    --spinner-size: 14px;
   }
   @media (max-width: 640px) {
     .nt-title {

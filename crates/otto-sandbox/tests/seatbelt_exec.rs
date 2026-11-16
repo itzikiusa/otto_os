@@ -10,6 +10,19 @@ use std::process::Command;
 
 use otto_sandbox::{NetworkPolicy, SandboxPolicy};
 
+/// `SandboxPolicy::for_agent` on the `$HOME` defaults: no test reads the
+/// real `$XDG_*` (a CI runner with `XDG_CONFIG_HOME` set must not differ).
+fn for_agent(
+    cwd: &Path,
+    home: &Path,
+    data_dir: &Path,
+    extra: &[std::path::PathBuf],
+    network: NetworkPolicy,
+) -> SandboxPolicy {
+    let bases = otto_sandbox::providers::Bases::defaults(home);
+    SandboxPolicy::for_agent_in(cwd, home, data_dir, extra, network, &bases)
+}
+
 /// Run `/bin/sh -c <script>` under the sandbox, returning (success, stderr).
 fn run_sandboxed(pol: &SandboxPolicy, script: &str) -> (bool, String) {
     let (prog, args) = pol.wrap("/bin/sh", &["-c".to_string(), script.to_string()]);
@@ -85,7 +98,7 @@ fn seatbelt_allows_git_commit_in_the_workspace() {
 
     // The agent's git dir lives under cwd here; for a non-worktree repo it is
     // exactly `<cwd>/.git`, which is inside the workspace writable root.
-    let pol = SandboxPolicy::for_agent(
+    let pol = for_agent(
         &repo_real,
         Path::new(&std::env::var("HOME").unwrap_or_default()),
         &repo_real.join(".otto-data"),
@@ -133,7 +146,7 @@ fn seatbelt_agent_profile_confines_otto_data_dir() {
     std::fs::write(data.join("otto.db.before-x.bak"), "bak").unwrap();
     std::fs::write(data.join("secrets.json"), "s").unwrap();
     let home = std::env::var("HOME").unwrap_or_default();
-    let pol = SandboxPolicy::for_agent(&cwd, Path::new(&home), &data, &[], NetworkPolicy::Full);
+    let pol = for_agent(&cwd, Path::new(&home), &data, &[], NetworkPolicy::Full);
 
     let (ok, _) = run_sandboxed(
         &pol,
@@ -207,7 +220,7 @@ fn seatbelt_agent_profile_opens_design_working_copies_only() {
         std::fs::create_dir_all(d).unwrap();
     }
     let home = std::env::var("HOME").unwrap_or_default();
-    let pol = SandboxPolicy::for_agent(&cwd, Path::new(&home), &data, &[], NetworkPolicy::Full);
+    let pol = for_agent(&cwd, Path::new(&home), &data, &[], NetworkPolicy::Full);
 
     let edit = cwd.join("index.html");
     let (ok, err) = run_sandboxed(&pol, &format!("echo '<h1>x</h1>' > {}", shell_quote(&edit)));
@@ -282,7 +295,7 @@ fn seatbelt_agent_commits_but_cannot_edit_git_config_or_hooks() {
             .unwrap();
     }
     let home = std::env::var("HOME").unwrap_or_default();
-    let pol = SandboxPolicy::for_agent(
+    let pol = for_agent(
         &repo,
         Path::new(&home),
         &repo.join(".otto-data"),
@@ -376,7 +389,7 @@ fn seatbelt_agent_cannot_plant_home_code_loading_configs() {
     }
     std::fs::write(home.join(".claude.json"), "{}").unwrap();
     std::fs::write(home.join(".gemini/settings.json"), "{}").unwrap();
-    let pol = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
+    let pol = for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
 
     for denied in [
         home.join(".claude.json"),
@@ -428,7 +441,7 @@ fn seatbelt_denies_follow_a_symlinked_claude_dir() {
     std::os::unix::fs::symlink(&real, home.join(".claude")).unwrap();
     let cwd = root.join("project");
     std::fs::create_dir_all(&cwd).unwrap();
-    let pol = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
+    let pol = for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
 
     for rel in [
         "hooks/x.sh",
@@ -462,7 +475,7 @@ fn seatbelt_account_home_carve_outs_and_other_accounts_hidden() {
     std::fs::write(own.join(".credentials.json"), "mine").unwrap();
     std::fs::write(other.join(".credentials.json"), "theirs").unwrap();
     std::fs::write(data.join("logs/ottod.log"), "log").unwrap();
-    let pol = SandboxPolicy::for_agent(
+    let pol = for_agent(
         &cwd,
         &root.join("home"),
         &data,
@@ -505,7 +518,7 @@ fn seatbelt_read_only_session_cannot_plant_project_claude_config() {
     let (_tmp, root) = scratch();
     let cwd = root.join("project");
     std::fs::create_dir_all(cwd.join(".claude")).unwrap();
-    let base = SandboxPolicy::for_agent(
+    let base = for_agent(
         &cwd,
         &root.join("home"),
         &root.join("Otto"),
@@ -546,7 +559,7 @@ fn seatbelt_agent_cannot_repoint_a_worktree_gitdir() {
     std::fs::create_dir_all(&admin).unwrap();
     std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::write(admin.join("gitdir"), "/real/w1/.git\n").unwrap();
-    let pol = SandboxPolicy::for_agent(
+    let pol = for_agent(
         &repo,
         &root.join("home"),
         &root.join("Otto"),
@@ -578,7 +591,7 @@ fn seatbelt_agent_cannot_write_otto_context_bundles() {
         std::fs::create_dir_all(d).unwrap();
     }
     std::fs::write(bundle.join("settings.json"), "{}").unwrap();
-    let base = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
+    let base = for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
     let ro = base.clone().harden_read_only(&cwd, &home);
     for pol in [&base, &ro] {
         assert!(!can_write(pol, &bundle.join("settings.json")));
@@ -614,7 +627,7 @@ fn seatbelt_agent_cli_homes_are_state_allow_lists() {
         std::fs::create_dir_all(d).unwrap();
     }
     std::fs::write(home.join(".claude/statusline-command.sh"), "echo hi").unwrap();
-    let pol = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
+    let pol = for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
 
     for denied in [
         ".claude/CLAUDE.md",
@@ -696,7 +709,7 @@ fn seatbelt_agent_cannot_poison_shared_package_caches() {
     ] {
         std::fs::create_dir_all(d).unwrap();
     }
-    let pol = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
+    let pol = for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
     for denied in [
         ".npm/_npx/abc/node_modules/@x/server/dist/index.js",
         ".cache/uv/archive-v0/x/pkg.py",
@@ -732,7 +745,7 @@ fn seatbelt_agent_at_home_cannot_write_dotfiles_or_launch_agents() {
     let home = root.join("home");
     std::fs::create_dir_all(home.join("Library/LaunchAgents")).unwrap();
     std::fs::write(home.join(".zshrc"), "# rc\n").unwrap();
-    let pol = SandboxPolicy::for_agent(
+    let pol = for_agent(
         &home,
         &home,
         &root.join("Otto"),
@@ -747,7 +760,7 @@ fn seatbelt_agent_at_home_cannot_write_dotfiles_or_launch_agents() {
         "# rc\n"
     );
     // A cwd at `/` is not granted either.
-    let pol = SandboxPolicy::for_agent(
+    let pol = for_agent(
         Path::new("/"),
         &home,
         &root.join("Otto"),
@@ -791,7 +804,7 @@ fn seatbelt_read_only_session_cannot_read_credentials_or_plant_instructions() {
         std::fs::write(home.join(f), "secret").unwrap();
     }
     std::fs::write(home.join("notes.txt"), "fine").unwrap();
-    let base = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
+    let base = for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
     // An ordinary session still reads them (git over ssh, gh, aws…).
     assert!(can_read(&base, &home.join(".ssh/id_ed25519")));
     let pol = base.harden_read_only(&cwd, &home);
@@ -833,7 +846,7 @@ fn seatbelt_codex_shadow_home_reopened_without_its_config() {
     for d in [shadow.clone(), cwd.clone()] {
         std::fs::create_dir_all(d).unwrap();
     }
-    let pol = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full)
+    let pol = for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full)
         .allow_provider_home(&shadow);
     assert!(can_write(&pol, &shadow.join("sessions/r.jsonl")));
     assert!(can_write(&pol, &shadow.join("auth.json")));

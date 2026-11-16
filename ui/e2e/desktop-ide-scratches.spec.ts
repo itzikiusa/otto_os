@@ -65,9 +65,9 @@ test('a Markdown scratch previews in the editor', async ({ page }) => {
   await expect(switcher(page)).toContainText('Scratches');
   await tree(page).getByText('preview-e2e.md').dblclick();
   const toggle = page.getByTestId('ide-preview-toggle');
-  await toggle.getByRole('button', { name: 'Preview' }).click();
-  await expect(page.getByTestId('wb-preview').getByRole('heading', { name: 'Hello scratches' })).toBeVisible();
-  await toggle.getByRole('button', { name: 'Code' }).click();
-  await expect(page.getByTestId('wb-preview')).toHaveCount(0);
+  await toggle.getByRole('button', { name: 'Preview', exact: true }).click();
+  await expect(page.getByTestId('file-preview').getByRole('heading', { name: 'Hello scratches' })).toBeVisible({ timeout: 15_000 });
+  await toggle.getByRole('button', { name: 'Editor', exact: true }).click();
+  await expect(page.getByTestId('file-preview')).toHaveCount(0);
   await expect(page.getByTestId('ide-send-to')).toBeVisible();
 });

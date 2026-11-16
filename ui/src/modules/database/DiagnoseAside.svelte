@@ -1,19 +1,25 @@
 <script lang="ts">
-  // "Diagnose with an agent": the consent dialog and the embedded thread,
+  // "Diagnose with an agent": the side panel with the embedded thread,
   // mounted ONCE beside the Connections page's main area so it works for DB
   // tabs, SSH tabs and the empty hub alike. On a phone it is a full-height
-  // sheet. The user never leaves the page; Detach moves the thread to Threads.
+  // sheet. Before a thread exists the panel is the Threads start composer
+  // (the embed's draft state) under the consent text: the person picks the
+  // agent, model, effort and access, then starts it. With a thread, the
+  // consent dialog offers to run the checks again in it. The user never
+  // leaves the page; Detach moves the thread to Threads.
   // State + rules: diagnose.svelte.ts, diagnose-prompt.ts.
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { api } from '../../lib/api/client';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
-  import { loadRuntimeThreadView, openInThreads } from '../../lib/runtimeThreadPort';
-  import type { Connection, TestConnectionResp } from '../../lib/api/types';
+  import { loadRuntimeThreadView, openInThreads, type RuntimeEmbedDraft, type RuntimeHostCommands } from '../../lib/runtimeThreadPort';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import type { Connection, RuntimeAccessMode, TestConnectionResp } from '../../lib/api/types';
   import { connDiagnose } from './diagnose.svelte';
-  import { diagnoseChecks, diagnoseConsent } from './diagnose-prompt';
+  import { DIAGNOSE_SOURCE, diagnoseChecks, diagnoseConsent, diagnosePrompt, originLabel } from './diagnose-prompt';
 
   interface Props {
     /** The page's edit permission rule: a handler when the viewer may edit. */
@@ -51,14 +57,57 @@
     openInThreads(id);
   }
 
+  const hostCommands: RuntimeHostCommands = { newThread: (id) => void connDiagnose.newThread(id) };
+
+  function confirmAccess(m: RuntimeAccessMode): Promise<boolean> {
+    return m === 'full-access'
+      ? Promise.resolve(true) // the chip asks for full access itself
+      : confirmer.ask('The agent may then change files without asking you first, beyond the read-only checks. It still asks before other commands.', { title: 'Let the agent change files?', confirmLabel: 'Allow edits' });
+  }
+
+  // No thread yet: what the start composer starts (approval-required by default).
+  const draft = $derived.by((): RuntimeEmbedDraft | undefined => {
+    if (!a || a.sessionId) return undefined;
+    const { conn, probe } = a;
+    return {
+      workspaceId: a.workspaceId,
+      cwd: ws.workspaces.find((w) => w.id === a.workspaceId)?.root_path ?? null,
+      title: `Diagnose ${conn.name}`,
+      source: DIAGNOSE_SOURCE,
+      origin: { kind: 'connection', id: conn.id, label: originLabel(conn.name) },
+      defaultAccess: 'approval-required',
+      confirmAccess,
+      suggestions: [{ label: 'Start the diagnosis', prompt: () => diagnosePrompt(conn, probe) }],
+      placeholder: 'Or describe what you see…',
+      lead: consentLead,
+      transformFirstPrompt: (text) => `${diagnosePrompt(conn, probe)}\n\nWhat I see: ${text}`,
+      onstarted: (s) => connDiagnose.started(s),
+    };
+  });
+
   const phaseText = (p: string): string =>
-    p === 'starting' ? 'Starting…' : p === 'running' ? 'Running' : p === 'finished' ? 'Finished' : 'Failed to start';
+    p === 'looking' ? 'Looking…' : p === 'running' ? 'Running' : p === 'finished' ? 'Finished' : p === 'failed' ? 'Failed' : '';
 </script>
 
-{#if consent}
-  <Modal title="Diagnose {consent.conn.name} with an agent" width={560} onclose={() => connDiagnose.cancel()}>
+{#snippet consentLead()}
+  {#if a}
     <div class="consent" data-testid="diagnose-consent">
+      <p>{diagnoseConsent(a.conn)}</p>
+      <details>
+        <summary>Show the checks</summary>
+        <ul class="checks">
+          {#each diagnoseChecks(a.conn) as cmd (cmd)}<li><code class="mono">{cmd}</code></li>{/each}
+        </ul>
+      </details>
+    </div>
+  {/if}
+{/snippet}
+
+{#if consent}
+  <Modal title="Diagnose {consent.conn.name} again" width={560} onclose={() => connDiagnose.cancel()}>
+    <div class="consent" data-testid="diagnose-again">
       <p>{diagnoseConsent(consent.conn)}</p>
+      <p class="again">The checks run in this connection’s diagnosis thread, beside what it found before.</p>
       <details>
         <summary>Show the checks</summary>
         <ul class="checks">
@@ -67,8 +116,8 @@
       </details>
     </div>
     {#snippet footer()}
-      <button class="btn" onclick={() => connDiagnose.cancel()}>Cancel</button>
-      <button class="btn primary" onclick={() => void connDiagnose.confirm()} data-testid="diagnose-start">Start</button>
+      <button class="btn" onclick={() => connDiagnose.cancel()}>Not now</button>
+      <button class="btn primary" onclick={() => void connDiagnose.confirm()} data-testid="diagnose-start">Run the checks</button>
     {/snippet}
   </Modal>
 {/if}
@@ -78,15 +127,15 @@
     <header class="diag-head">
       <Icon name="assistant" size={14} />
       <span class="diag-title ellipsis">Diagnosing {a.conn.name}</span>
-      <span class="diag-phase {a.phase}">{phaseText(a.phase)}</span>
+      {#if phaseText(a.phase)}<span class="diag-phase {a.phase}">{phaseText(a.phase)}</span>{/if}
       <button class="icon-btn" onclick={() => connDiagnose.close()} aria-label="Close — the thread is kept" title="Close — the thread is kept; Diagnose opens it again">
         <Icon name="x" size={14} />
       </button>
     </header>
     <div class="diag-body">
       {#if a.phase === 'failed'}
-        <LoadState what="the diagnosis" errorTitle="Couldn’t start the diagnosis" error={a.error ?? 'Unknown error'} empty onretry={() => void connDiagnose.retry()} variant="panel" />
-      {:else if a.phase === 'starting' || !a.sessionId}
+        <LoadState what="the diagnosis" errorTitle="Couldn’t run the diagnosis" error={a.error ?? 'Unknown error'} empty onretry={() => void connDiagnose.retry()} variant="panel" />
+      {:else if a.phase === 'looking'}
         <LoadState what="the diagnosis thread" loading empty variant="panel" />
       {:else if ThreadView.error}
         <LoadState what="the thread" error={ThreadView.error} empty onretry={() => ThreadView.retry()} variant="panel" />
@@ -94,7 +143,10 @@
         <ThreadView.component
           sessionId={a.sessionId}
           workspaceId={a.workspaceId}
+          {draft}
           compact
+          {hostCommands}
+          onstatus={(st) => connDiagnose.status(st)}
           onmaximize={() => (connDiagnose.maximized = !connDiagnose.maximized)}
           ondetach={detach}
         />
@@ -122,6 +174,9 @@
   .consent p {
     margin: 0 0 10px;
     line-height: 1.5;
+  }
+  .consent .again {
+    color: var(--text-dim);
   }
   .consent summary {
     cursor: pointer;

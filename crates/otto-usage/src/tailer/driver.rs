@@ -2764,6 +2764,38 @@ mod accounting_tests {
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 
+    /// A Codex thread (structured runtime) writes its usual rollout under its
+    /// native thread id: billed to the thread and its workspace, never as
+    /// external (and only once — the runtime itself records nothing for codex).
+    #[tokio::test]
+    async fn a_runtime_thread_rollout_bills_to_the_thread_not_external() {
+        let (root, pool, usage, mut tailer) = owner_fixture("thread").await;
+        sqlx::query("INSERT INTO agent_runtime_sessions(id,workspace_id,provider,title,cwd,native_thread_id,created_by,created_at,last_active_at) VALUES('thread-1','w','codex','t','/repo','psid-thread','u','2026-11-13T00:00:00Z','2026-11-13T00:00:00Z')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let file = write_rollout(&root, "psid-thread");
+        tailer
+            .scan_paths(HashSet::from([file.clone()]))
+            .await
+            .unwrap();
+        let rows = outbox(&root).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            (
+                rows[0].workspace_id.as_str(),
+                rows[0].session_id.as_str(),
+                rows[0].provider.as_str()
+            ),
+            ("w", "thread-1", "codex")
+        );
+        tailer.scan_once().await.unwrap();
+        assert_eq!(outbox(&root).await.len(), 1);
+        usage.shutdown().await;
+        pool.close().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
     /// A rollout no Otto session ever claims is external once the grace is
     /// over — still exactly once.
     #[tokio::test]

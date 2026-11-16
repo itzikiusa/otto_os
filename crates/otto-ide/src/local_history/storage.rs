@@ -345,6 +345,7 @@ impl LocalHistoryStore {
         if !is_root_user {
             enforce_non_root_path(&prospective)?;
         }
+        crate::target::enforce_control_path(&prospective, is_root_user)?;
 
         let existed_before = prospective.is_file();
         if existed_before {

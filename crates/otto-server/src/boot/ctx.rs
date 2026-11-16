@@ -103,6 +103,7 @@ impl ServerCtx {
             otto_agent_protocol::daemon_runtime(pool.clone(), manager.clone(), &data_dir, {
                 move |ev| crate::ws_fanout::publish_stream(&bus, ev)
             });
+        agent_runtime.set_usage_engine(usage.clone());
         let ide = Arc::new(otto_ide::IdeEngine::new(data_dir.clone()));
         let scratches_home = crate::routes::scratches::default_home();
         ServerCtx {

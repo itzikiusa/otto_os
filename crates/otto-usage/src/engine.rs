@@ -28,6 +28,8 @@ use crate::types::{
 mod health;
 #[path = "engine/recovery.rs"]
 mod recovery;
+#[path = "engine/runtime_turns.rs"]
+pub(crate) mod runtime_turns;
 
 /// Flush the usage buffer at least this often. Every non-empty flush is one
 /// INSERT = one new MergeTree part, and each part is later merged into the

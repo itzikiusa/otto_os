@@ -17,7 +17,7 @@ use std::time::Duration;
 use otto_core::{Error, Result};
 use otto_ssh::SshTunnel;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWrite, BufReader, DuplexStream};
+use tokio::io::{AsyncWrite, DuplexStream};
 use tokio::sync::mpsc;
 
 use self::jdwp::{
@@ -145,9 +145,10 @@ async fn spawn_jdwp_jvm(
     if let Some(jvm_err) = jvm.stderr.take() {
         let tx = out_tx.clone();
         let diag_ref = Arc::clone(&err_diag);
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(jvm_err).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
+        crate::line_reader::spawn_line_drain(
+            jvm_err,
+            crate::line_reader::MAX_OUTPUT_LINE_BYTES,
+            move |l| {
                 if let Ok(mut d) = diag_ref.lock() {
                     if d.len() < 2048 {
                         d.push_str(&l);
@@ -155,15 +156,16 @@ async fn spawn_jdwp_jvm(
                     }
                 }
                 let _ = tx.send(("stderr".into(), format!("{l}\n")));
-            }
-        });
+            },
+        );
     }
-    let mut out_lines = BufReader::new(jvm_out).lines();
+    let mut out_lines =
+        crate::line_reader::LossyLines::new(jvm_out, crate::line_reader::MAX_OUTPUT_LINE_BYTES);
     let mut bound_port: Option<u16> = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_secs(3), out_lines.next_line()).await {
-            Ok(Ok(Some(line))) => {
+            Ok(Some(line)) => {
                 if let Some(rest) = line.split("address:").nth(1) {
                     let p_str = rest.trim().rsplit(':').next().unwrap_or(rest.trim());
                     if let Ok(p) = p_str.parse::<u16>() {
@@ -172,8 +174,8 @@ async fn spawn_jdwp_jvm(
                     }
                 }
             }
-            Ok(Ok(None)) => break,
-            _ => {}
+            Ok(None) => break,
+            Err(_) => {}
         }
     }
     let Some(p) = bound_port else {
@@ -193,7 +195,7 @@ async fn spawn_jdwp_jvm(
     };
     let tx = out_tx.clone();
     tokio::spawn(async move {
-        while let Ok(Some(l)) = out_lines.next_line().await {
+        while let Some(l) = out_lines.next_line().await {
             let _ = tx.send(("stdout".into(), format!("{l}\n")));
         }
     });

@@ -22,6 +22,11 @@
 
   const NAV_W_KEY = 'otto.ide.settingsNavW';
   let navW = $state(loadPaneWidth(NAV_W_KEY, 250, 190, 380));
+  // Narrow (a phone): categories and the page are one screen each — list →
+  // page with a back button — instead of a 250 px list beside a 100 px page.
+  let modalW = $state(0);
+  const narrow = $derived(modalW > 0 && modalW < 600);
+  let showList = $state(false);
   let searchQuery = $state('');
   let expandedGroups = $state<Record<string, boolean>>({
     project: true,
@@ -86,6 +91,7 @@
 
   function selectSection(nextId: string, pushHistory = true): void {
     const clean = normalizeSectionId(nextId);
+    showList = false;
     activeId = clean;
     ide.settingsSection = clean;
     const hit = findSettingsNode(clean);
@@ -197,8 +203,8 @@
   onclose={() => ideSettings.cancel()}
   dismissable={!applying}
 >
-  <div class="st-modal" data-testid="ide-settings-modal">
-    <aside class="st-left" style:inline-size="{navW}px" aria-label="Settings categories">
+  <div class="st-modal" class:narrow class:list={narrow && showList} data-testid="ide-settings-modal" bind:clientWidth={modalW}>
+    <aside class="st-left" style:inline-size={narrow ? undefined : `${navW}px`} aria-label="Settings categories">
       <div class="st-search-box">
         <Icon name="search" size={13} />
         <input
@@ -274,18 +280,24 @@
       </div>
     </aside>
 
-    <PaneDivider
+    {#if !narrow}<PaneDivider
       bind:width={navW}
       storageKey={NAV_W_KEY}
       min={190}
       max={380}
       defaultWidth={250}
       label="Resize settings navigation"
-    />
+    />{/if}
 
     <section class="st-right" aria-label="Selected settings page">
       <header class="st-right-hdr">
-        <div class="st-nav-arrows">
+        {#if narrow}
+          <button type="button" class="btn small ghost st-list-btn" onclick={() => (showList = true)} data-testid="ide-settings-categories-btn">
+            <Icon name="chevronLeft" size={14} />
+            All settings
+          </button>
+        {/if}
+        <div class="st-nav-arrows" class:hidden-narrow={narrow}>
           <button
             type="button"
             class="icon-btn"
@@ -391,6 +403,11 @@
 
 <style>
   .st-modal { display: flex; block-size: 100%; min-block-size: 460px; min-inline-size: 0; margin: -16px; overflow: hidden; }
+  .st-modal.narrow { min-block-size: 0; }
+  .st-modal.narrow .st-left { flex: 1; }
+  .st-modal.narrow:not(.list) .st-left, .st-modal.narrow.list .st-right { display: none; }
+  .st-nav-arrows.hidden-narrow { display: none; }
+  .st-list-btn { min-block-size: 36px; flex-shrink: 0; }
   .st-left { flex-shrink: 0; display: flex; flex-direction: column; background: var(--surface-2); min-inline-size: 0; min-block-size: 0; }
   .st-search-box {
     display: flex; align-items: center; gap: 6px; margin: 10px 10px 6px; padding: 6px 8px;

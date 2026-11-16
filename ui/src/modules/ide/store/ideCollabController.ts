@@ -5,6 +5,7 @@ import { api, laneFetch } from '../../../lib/api/client';
 import { loadErrorText } from '../../../lib/loadError';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
+import { ideCollabNotices } from './ideCollabNotices.svelte';
 import {
   collabGuestPost,
   ideBasename,
@@ -48,6 +49,14 @@ export interface CollabHostState {
   applyDebugSnapshot(snap: IdeDebugSessionSnapshot): void;
 }
 
+/** Events carry the GUEST view of the room (no host ids, a bare target). A guest takes it
+ *  whole; the host keeps its own target/ids and only takes the live parts. */
+export function mergeEventRoom(store: Pick<CollabHostState, 'collabIsGuest' | 'collabRoom'>, room: IdeCollabRoom): IdeCollabRoom {
+  const cur = store.collabRoom;
+  if (store.collabIsGuest || !cur || cur.id !== room.id) return room;
+  return { ...cur, peers: room.peers ?? cur.peers, default_role: room.default_role ?? cur.default_role, title: room.title || cur.title };
+}
+
 export function attachCollabEventStream(
   store: CollabHostState,
   roomId: string,
@@ -67,7 +76,14 @@ export function attachCollabEventStream(
         ctl.abort();
         return;
       }
-      if (ev.room && typeof ev.room === 'object') store.collabRoom = ev.room as IdeCollabRoom;
+      if (ev.room && typeof ev.room === 'object') store.collabRoom = mergeEventRoom(store, ev.room as IdeCollabRoom);
+      if (ev.type === 'peer_left') {
+        // A guest left (or its seat was freed after 90 s without a stream): drop its cursor.
+        const gone = String(ev.peer_id ?? '');
+        store.peerCursors = store.peerCursors.filter((p) => p.peer_id !== gone);
+        if (store.followingPeerId === gone) store.followingPeerId = null;
+        return;
+      }
       if (ev.type === 'cursor_moved' || ev.kind === 'cursor' || ev.type === 'cursor') {
         const c = ev as unknown as IdePeerCursor;
         if (c.peer_id && c.peer_id !== store.collabPeerId) {
@@ -88,6 +104,7 @@ export function attachCollabEventStream(
             if (ev.saved) {
               tab.savedContent = content;
               tab.sha256 = typeof ev.sha256 === 'string' ? ev.sha256 : undefined;
+              tab.diskEols = undefined; // a peer's save: its per-line endings are unknown here
             }
             tab.dirty = content !== tab.savedContent;
           } else if (store.collabIsGuest && store.tabs.length === 0) {
@@ -170,6 +187,7 @@ export async function joinCollabSession(
   prevCtl: AbortController | null,
 ): Promise<AbortController | null> {
   store.collabIsGuest = true;
+  ideCollabNotices.reset();
   store.collabLoading = true;
   store.collabError = null;
   store.collabGuestToken = token;

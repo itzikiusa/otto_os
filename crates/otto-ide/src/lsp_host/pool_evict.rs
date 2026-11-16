@@ -8,7 +8,8 @@ use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 
 use super::pool::{
-    Ctl, Entry, LspPool, PoolKey, LSP_RSS_BUDGET_BYTES, MAX_GLOBAL_SERVERS, MAX_SERVERS_PER_OWNER,
+    Ctl, Entry, EvictReason, LspPool, PoolKey, LSP_RSS_BUDGET_BYTES, MAX_GLOBAL_SERVERS,
+    MAX_SERVERS_PER_OWNER,
 };
 #[cfg(unix)]
 use super::pool_spawn::kill_process_group_sync;
@@ -51,16 +52,16 @@ impl LspPool {
             let mut entries = self.lock();
             entries.drain().map(|(_, e)| e).collect()
         };
-        Self::finish_evicted_entries(evicted);
+        Self::finish_evicted_entries(evicted, EvictReason::Shutdown);
     }
 
-    pub(super) fn finish_evicted_entries(evicted: Vec<Entry>) {
+    pub(super) fn finish_evicted_entries(evicted: Vec<Entry>, reason: EvictReason) {
         for entry in evicted {
             #[cfg(unix)]
             if let Some(pid) = entry.child_pid {
                 kill_process_group_sync(pid);
             }
-            let _ = entry.ctl.send(Ctl::Evict);
+            let _ = entry.ctl.send(Ctl::Evict(reason));
         }
     }
 
@@ -98,7 +99,7 @@ impl LspPool {
                 }
             }
         }
-        Self::finish_evicted_entries(evicted);
+        Self::finish_evicted_entries(evicted, EvictReason::BuildTagsChanged);
     }
 
     fn cached_attached_roots(&self, root: &str) -> Vec<String> {
@@ -286,7 +287,7 @@ impl LspPool {
                 }
             }
         }
-        Self::finish_evicted_entries(evicted);
+        Self::finish_evicted_entries(evicted, EvictReason::WorkspaceSwitched);
     }
 
     pub(super) fn pick_victim(
@@ -356,8 +357,10 @@ impl LspPool {
         out
     }
 
-    /// Enforce [`LSP_RSS_BUDGET_BYTES`] (`1.2 GiB`), preferring `active_clients == 0`
-    /// servers first and never evicting `protected_key`.
+    /// Enforce [`LSP_RSS_BUDGET_BYTES`] (`1.2 GiB`) by evicting servers that no
+    /// socket is attached to, never `protected_key`. A server an editor is
+    /// using is never killed for memory: staying over budget is the lesser harm
+    /// (the count caps still bound how many servers exist).
     pub fn enforce_rss_budget(&self, protected_key: Option<&PoolKey>) {
         let pid_pairs: Vec<(PoolKey, Option<u32>)> = self
             .lock()
@@ -376,8 +379,7 @@ impl LspPool {
         {
             let mut entries = self.lock();
             while total > LSP_RSS_BUDGET_BYTES && entries.len() > 1 {
-                let victim = Self::pick_victim(&entries, protected_key, None, true)
-                    .or_else(|| Self::pick_victim(&entries, protected_key, None, false));
+                let victim = Self::pick_victim(&entries, protected_key, None, true);
                 let Some(vk) = victim else {
                     break;
                 };
@@ -389,6 +391,6 @@ impl LspPool {
                 }
             }
         }
-        Self::finish_evicted_entries(evicted_out);
+        Self::finish_evicted_entries(evicted_out, EvictReason::MemoryBudget);
     }
 }

@@ -7,7 +7,7 @@
 //! rollback. The only thing the current build does with them is copy each live
 //! doc into its owner's Scratches folder ONCE — [`WorkbenchArchive::unexported`]
 //! lists what is still to copy, [`WorkbenchArchive::mark_exported`] records
-//! where a doc went (migration 0218), so the copy is idempotent.
+//! where a doc went (migration 0219), so the copy is idempotent.
 
 use crate::DbPool;
 use otto_core::Result;

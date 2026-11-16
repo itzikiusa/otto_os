@@ -15,6 +15,9 @@
 //! newline as pasted content. `broadcast_message` uses paste + delay + `\r`,
 //! which a shell here turns into an executed command.
 
+#[path = "../src/test_tmp.rs"]
+mod test_tmp;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,7 +43,7 @@ async fn manager() -> (Arc<SessionManager>, Workspace, Id) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("test.db");
     let pool = otto_state::open(&db).await.unwrap();
-    std::mem::forget(dir); // keep the db file alive for the test's lifetime
+    test_tmp::keep_until_exit(dir); // the db outlives this fixture, not the process
 
     let user = new_id();
     let ws_id = new_id();

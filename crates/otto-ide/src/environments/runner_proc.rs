@@ -106,7 +106,31 @@ fn apply_scrubbed_local_env(cmd: &mut Command, env_map: &BTreeMap<String, String
     cmd.envs(env_map);
 }
 
-pub(super) async fn run_before_launch(
+/// Spawn a local `before_launch` hook in its own process group with piped
+/// output; [`super::runner_steps::run_local_before_launch`] owns its lifetime.
+pub(super) fn spawn_local_before_launch(
+    script: &str,
+    cwd: &str,
+    env_map: &BTreeMap<String, String>,
+) -> std::result::Result<tokio::process::Child, String> {
+    let wrapped = crate::netbridge::wrap_shell_script_for_interposer(script, env_map);
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", &wrapped])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    apply_scrubbed_local_env(&mut cmd, env_map);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd.spawn()
+        .map_err(|e| format!("before_launch: spawn sh: {e}"))
+}
+
+/// Run a `before_launch` hook on an SSH target. The caller races this against
+/// Stop; dropping it drops the `ssh` child.
+pub(super) async fn run_remote_before_launch(
     targets: &TargetManager,
     target: &IdeTargetSpec,
     ssh: Option<&IdeSshSpec>,
@@ -115,44 +139,18 @@ pub(super) async fn run_before_launch(
     cwd: &str,
     env_map: &BTreeMap<String, String>,
 ) -> std::result::Result<(), String> {
-    match target.kind {
-        IdeTargetKind::Local => {
-            let wrapped = crate::netbridge::wrap_shell_script_for_interposer(script, env_map);
-            let mut cmd = Command::new("sh");
-            cmd.args(["-c", &wrapped])
-                .current_dir(cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-            apply_scrubbed_local_env(&mut cmd, env_map);
-            #[cfg(unix)]
-            cmd.process_group(0);
-
-            let out = cmd.output().await.map_err(|e| e.to_string())?;
-            if !out.status.success() {
-                return Err(format!(
-                    "before_launch failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ));
-            }
-            Ok(())
-        }
-        IdeTargetKind::Ssh => {
-            let spec = ssh.ok_or("missing SSH spec for before_launch")?;
-            let res = targets
-                .resolve_with_ssh(target, actor_id, spec.clone())
-                .map_err(|e| e.to_string())?;
-            let out = targets
-                .exec_shell(&res, script, Some(cwd), env_map, Duration::from_secs(120))
-                .await
-                .map_err(|e| e.to_string())?;
-            if !out.success() {
-                return Err(format!("before_launch failed: {}", out.stderr.trim()));
-            }
-            Ok(())
-        }
+    let spec = ssh.ok_or("missing SSH spec for before_launch")?;
+    let res = targets
+        .resolve_with_ssh(target, actor_id, spec.clone())
+        .map_err(|e| e.to_string())?;
+    let out = targets
+        .exec_shell(&res, script, Some(cwd), env_map, Duration::from_secs(120))
+        .await
+        .map_err(|e| e.to_string())?;
+    if !out.success() {
+        return Err(format!("before_launch failed: {}", out.stderr.trim()));
     }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

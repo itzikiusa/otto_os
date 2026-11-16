@@ -684,6 +684,8 @@ mod tests {
                     completed_at: Some(Utc::now()),
                     turn_token_usage: None,
                     origin: TurnOrigin::User,
+                    model: None,
+                    effort: None,
                 },
             );
             let uid = format!("u-{ord}");
@@ -794,6 +796,8 @@ mod tests {
                     completed_at: Some(Utc::now()),
                     turn_token_usage: None,
                     origin: TurnOrigin::User,
+                    model: None,
+                    effort: None,
                 },
             );
             let uid = format!("u-{ord}");
@@ -930,6 +934,8 @@ mod tests {
                     completed_at: Some(Utc::now()),
                     turn_token_usage: None,
                     origin: TurnOrigin::User,
+                    model: None,
+                    effort: None,
                 },
             );
             let uid = format!("u-{ord}");
@@ -1017,6 +1023,8 @@ mod tests {
                     completed_at: Some(Utc::now()),
                     turn_token_usage: None,
                     origin: TurnOrigin::User,
+                    model: None,
+                    effort: None,
                 },
             );
             p.items.insert(

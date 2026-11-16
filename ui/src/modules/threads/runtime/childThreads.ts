@@ -34,7 +34,9 @@ export function childOf(s: RuntimeSession | null | undefined): ChildOf | null {
   return v && typeof v.id === 'string' && (v.by === 'person' || v.by === 'agent') ? { id: v.id, by: v.by } : null;
 }
 
-export type ChildTone = 'starting' | 'working' | 'needs-you' | 'done' | 'failed' | 'stopped';
+/** `background`: no turn runs, but work the child's agent started does — its
+ *  Stop stops that work (an interrupt would do nothing). */
+export type ChildTone = 'starting' | 'working' | 'background' | 'needs-you' | 'done' | 'failed' | 'stopped';
 
 export interface ChildState {
   tone: ChildTone;
@@ -44,6 +46,7 @@ export interface ChildState {
 const LABEL: Record<ChildTone, string> = {
   starting: 'Starting',
   working: 'Working',
+  background: 'Background task running',
   'needs-you': 'Needs you',
   done: 'Done',
   failed: 'Failed',
@@ -60,9 +63,8 @@ export function childState(s: RuntimeSession | null | undefined, p: RuntimeProje
   if (s.status === 'awaiting_permission' || p?.requests.some((r) => r.status === 'pending')) return state('needs-you');
   if (s.status === 'starting') return state('starting');
   const turn = p ? latestTurn(p) : null;
-  if (s.status === 'working' || turn?.status === 'running' || turn?.status === 'pending' || (s.background_tasks?.length ?? 0) > 0) {
-    return state('working');
-  }
+  if (s.status === 'working' || turn?.status === 'running' || turn?.status === 'pending') return state('working');
+  if ((s.background_tasks?.length ?? 0) > 0) return state('background');
   if (turn?.status === 'failed') return state('failed');
   if (turn?.status === 'interrupted' || turn?.status === 'cancelled') return state('stopped');
   if (turn?.status === 'completed' || answerOf(p) !== '') return state('done');
@@ -71,7 +73,7 @@ export function childState(s: RuntimeSession | null | undefined, p: RuntimeProje
 
 /** The tone RuntimeAgentRow draws. */
 export function rowTone(t: ChildTone): 'live' | 'done' | 'failed' | 'off' | 'ask' {
-  if (t === 'working' || t === 'starting') return 'live';
+  if (t === 'working' || t === 'starting' || t === 'background') return 'live';
   if (t === 'needs-you') return 'ask';
   if (t === 'done') return 'done';
   if (t === 'failed') return 'failed';

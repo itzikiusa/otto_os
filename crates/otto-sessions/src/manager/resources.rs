@@ -479,7 +479,7 @@ mod tests {
     async fn manager(settings: bool, load: f64) -> SessionManager {
         let dir = tempfile::tempdir().unwrap();
         let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
-        std::mem::forget(dir);
+        crate::test_tmp::keep_until_exit(dir);
         let (events, _rx) = broadcast::channel(16);
         let mut m = SessionManager::new(
             SessionsRepo::new(pool.clone()),

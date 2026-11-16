@@ -15,8 +15,13 @@
     seq: number | undefined;
     /** The timeline's message ids, oldest first. */
     messageIds: string[];
+    /** Key of the first rendered row (follow.ts `timelineRowKey`). */
+    firstRow?: string | null;
+    /** Set to `firstRow` while the reader is scrolled up, null at the end:
+     *  the host renders `renderWindow(rows, cap, holdFrom, …)`. */
+    holdFrom?: string | null;
   }
-  let { scroller, seq, messageIds }: Props = $props();
+  let { scroller, seq, messageIds, firstRow = null, holdFrom = $bindable(null) }: Props = $props();
 
   /** Pinned to the end. Only the reader's own scroll lets go (follow.ts). */
   let atBottom = $state(true);
@@ -28,6 +33,14 @@
   $effect(() => {
     if (atBottom) lastSeenId = messageIds[messageIds.length - 1] ?? null;
     if (scroller) scroller.dataset.atBottom = atBottom ? '1' : '0';
+  });
+  // Scrolled up: hold the render window's start where the reader left it.
+  $effect(() => {
+    const pinned = atBottom;
+    untrack(() => {
+      const next = pinned ? null : (holdFrom ?? firstRow);
+      if (next !== holdFrom) holdFrom = next;
+    });
   });
   const unread = $derived(atBottom ? 0 : unreadSince(messageIds, lastSeenId));
   const text = $derived(atBottom ? null : followPillText(unread, unseen, farUp));

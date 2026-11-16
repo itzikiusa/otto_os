@@ -168,6 +168,12 @@ export interface MetaResp {
   runtime_capabilities?: Record<string, RuntimeCapabilities>;
   /** Canonical CLI family per provider slug (e.g. `{ claudework: "claude" }`). */
   provider_families?: Record<string, string>;
+  /** Per enabled provider: whether a restart reopens its conversation
+   *  (false: Muse, opencode → ask first). Absent on an older daemon. */
+  provider_resumable?: Record<string, boolean>;
+  /** Per enabled provider: whether a TERMINAL session takes an effort (its
+   *  CLI has an effort flag). Absent on an older daemon. */
+  provider_terminal_effort?: Record<string, boolean>;
   /** Second LOOPBACK base for the same daemon (`http://localhost:<port>`; the
    *  daemon holds both 127.0.0.1 and [::1]) — a separate browser socket pool
    *  for background/slow calls. `null`/absent → single-host transport. */

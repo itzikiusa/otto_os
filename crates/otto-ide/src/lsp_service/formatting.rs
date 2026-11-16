@@ -7,9 +7,20 @@ use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 
+#[path = "prettier_config.rs"]
+mod prettier_config;
+
+use self::prettier_config::{
+    plan_prettier_args, prettier_was_refused, PrettierPlan, PRETTIER_PLAN_ROOT, PRETTIER_PLAN_USER,
+    PRETTIER_SKIPPED, PRETTIER_SKIP_CMD,
+};
 use super::{code_mask_for_line, symbols_data};
 use crate::target::ResolvedTarget;
 use crate::IdeCtx;
+
+/// Project environment variable through which root opts a project in to
+/// prettier loading a config that runs code (see `prettier_config.rs`).
+pub(super) const TRUST_FORMATTER_CONFIG_ENV: &str = "OTTO_IDE_TRUST_FORMATTER_CONFIG";
 
 pub(super) fn formatter_candidates(
     lang: &str,
@@ -53,13 +64,23 @@ pub(super) fn formatter_candidates(
         )],
         "javascript" | "typescript" | "json" | "jsonc" | "css" | "scss" | "html" | "markdown"
         | "yaml" | "graphql" | "svelte" => {
-            let mut prettier_args = Vec::new();
-            if !caller_is_root {
-                prettier_args.push("--no-config".into());
-            }
-            prettier_args.extend(["--stdin-filepath".into(), path.to_string()]);
+            // Prettier's argv is planned per request from the project's config
+            // (`prettier_config.rs`): data configs are honoured, a config that
+            // runs code is refused and the second candidate answers "skipped"
+            // instead of falling through to another formatter.
+            let plan = if caller_is_root {
+                PRETTIER_PLAN_ROOT
+            } else {
+                PRETTIER_PLAN_USER
+            };
+            let prettier_args = vec![plan.into(), "--stdin-filepath".into(), path.to_string()];
             vec![
                 ("prettier", "prettier".into(), prettier_args),
+                (
+                    PRETTIER_SKIPPED,
+                    PRETTIER_SKIP_CMD.into(),
+                    vec![path.to_string()],
+                ),
                 (
                     "biome",
                     "biome".into(),
@@ -214,10 +235,32 @@ pub(super) async fn run_stdin_formatter<S: IdeCtx>(
         ResolvedTarget::Local { root, .. } => Some(root.to_string_lossy().into_owned()),
         ResolvedTarget::Ssh { root, .. } => Some(root.clone()),
     };
+    let planned = cmd == "prettier"
+        && args
+            .first()
+            .is_some_and(|a| a == PRETTIER_PLAN_ROOT || a == PRETTIER_PLAN_USER);
+    if cmd == PRETTIER_SKIP_CMD {
+        let file = args.first().map(String::as_str).unwrap_or("");
+        let trusted = formatter_config_trusted(ctx, resolved, env_map);
+        // Unchanged buffer, labelled with the reason; otherwise not ours.
+        return prettier_was_refused(resolved, file, trusted).then(|| input.to_string());
+    }
+    let args = if planned {
+        match plan_prettier_args(
+            resolved,
+            args,
+            formatter_config_trusted(ctx, resolved, env_map),
+        ) {
+            PrettierPlan::Run(argv) => argv,
+            PrettierPlan::Refuse => return None,
+        }
+    } else {
+        args.to_vec()
+    };
     let mut child = ctx
         .ide()
         .targets
-        .spawn_piped(resolved, cmd, args, cwd.as_deref(), env_map)
+        .spawn_piped(resolved, cmd, &args, cwd.as_deref(), env_map)
         .await
         .ok()?;
     if let Some(mut stdin) = child.stdin.take() {
@@ -235,6 +278,38 @@ pub(super) async fn run_stdin_formatter<S: IdeCtx>(
         .success()
         .then(|| String::from_utf8(out.stdout).ok())
         .flatten()
+}
+
+/// The project opted in to formatter configs that run code: its stored
+/// project environment (`IdeProjectEnvironment::env_vars` — the probe env the
+/// formatter runs with does NOT carry project vars) or the run env sets
+/// [`TRUST_FORMATTER_CONFIG_ENV`]`=1`. Only root may change those vars, and
+/// the plan honours it for a root caller only.
+fn formatter_config_trusted<S: IdeCtx>(
+    ctx: &S,
+    resolved: &ResolvedTarget,
+    env_map: &BTreeMap<String, String>,
+) -> bool {
+    let is_one = |v: &str| v.trim() == "1";
+    if env_map
+        .get(TRUST_FORMATTER_CONFIG_ENV)
+        .is_some_and(|v| is_one(v))
+    {
+        return true;
+    }
+    let ResolvedTarget::Local { root, .. } = resolved else {
+        return false;
+    };
+    ctx.ide()
+        .environments
+        .cached_project_env(&root.to_string_lossy())
+        .is_some_and(|env| {
+            env.env_vars.iter().any(|v| {
+                v.key == TRUST_FORMATTER_CONFIG_ENV
+                    && !v.secret
+                    && v.value.as_deref().is_some_and(is_one)
+            })
+        })
 }
 
 pub(super) fn organize_imports_if_requested(lang: &str, content: &str) -> String {
@@ -394,5 +469,25 @@ fn format_shell_fallback(content: &str) -> String {
         String::new()
     } else {
         format!("{}\n", out_lines.join("\n"))
+    }
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    /// E5: prettier's argv is always planned (never a bare `prettier` that
+    /// discovers and runs the repo's JS config), and a refused prettier is
+    /// answered by the "skipped" candidate, not by the next formatter.
+    #[test]
+    fn prettier_candidates_are_planned_and_followed_by_the_skip_answer() {
+        for (is_root, marker) in [(true, PRETTIER_PLAN_ROOT), (false, PRETTIER_PLAN_USER)] {
+            let cands = formatter_candidates("typescript", "/w/a.ts", false, is_root);
+            assert_eq!(cands[0].0, "prettier");
+            assert_eq!(cands[0].2[0], marker);
+            assert_eq!(cands[1].0, PRETTIER_SKIPPED);
+            assert_eq!(cands[1].1, PRETTIER_SKIP_CMD);
+            assert_eq!(cands[2].0, "biome");
+        }
     }
 }

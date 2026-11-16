@@ -4347,6 +4347,7 @@ dependencies = [
  "otto-git-cmd",
  "otto-netguard",
  "otto-rbac",
+ "otto-sandbox",
  "otto-ssh",
  "otto-state",
  "otto-telemetry",

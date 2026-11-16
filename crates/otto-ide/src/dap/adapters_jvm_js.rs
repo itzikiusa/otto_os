@@ -3,7 +3,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use otto_core::{Error, Result};
 use serde_json::json;
@@ -280,8 +279,11 @@ pub(super) async fn resolve_java_adapter(
             .join("java")
             .join(format!("{cwd_hash:016x}"));
         let env_clone = env.clone();
+        // A Stop that cancels this debug start drops the guard, which kills javac.
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _cancel_on_drop = crate::proc_group::CancelOnDrop(std::sync::Arc::clone(&cancel));
         let plan = tokio::task::spawn_blocking(move || {
-            crate::java_workspace::prepare_java_execution(
+            crate::java_workspace::prepare_java_execution_cancellable(
                 &target_path,
                 explicit_main.as_deref(),
                 include_tests,
@@ -289,6 +291,7 @@ pub(super) async fn resolve_java_adapter(
                 &env_clone,
                 &javac_bin,
                 &out_base,
+                cancel,
             )
         })
         .await
@@ -338,7 +341,7 @@ pub(super) async fn resolve_java_adapter(
             &["-lc".into(), compile_cmd],
             cwd,
             &env,
-            Duration::from_secs(30),
+            crate::proc_group::BUILD_STEP_TIMEOUT,
         )
         .await?;
         if !out.status.success() {

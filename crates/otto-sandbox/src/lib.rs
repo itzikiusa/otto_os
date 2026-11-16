@@ -192,180 +192,12 @@ const PROVIDER_ROOT_DENY_WRITE_SUBPATH: &[&str] = &[
     "rules",
 ];
 
-/// A read-only session's own project folder: the project-scope claude config
-/// (hooks in `.claude/settings*.json`, project MCP servers in `.mcp.json`,
-/// subagents / slash commands) that the user's next unsandboxed `claude` in
-/// that folder runs without a prompt — Otto pre-trusts every session cwd.
-/// Only for `read_only` sessions: an ordinary agent session legitimately
-/// edits its repo's checked-in `.claude/` files.
-const PROJECT_DENY_WRITE_LITERAL: &[&str] = &[
-    ".claude/settings.json",
-    ".claude/settings.local.json",
-    ".mcp.json",
-    // Project instruction files the next agent in this folder obeys.
-    "CLAUDE.md",
-    "CLAUDE.local.md",
-    ".claude/CLAUDE.md",
-    "AGENTS.md",
-    "AGENTS.override.md",
-    "GEMINI.md",
-];
-const PROJECT_DENY_WRITE_SUBPATH: &[&str] = &[
-    ".claude/hooks",
-    ".claude/agents",
-    ".claude/commands",
-    ".claude/skills",
-    ".claude/output-styles",
-    ".agents/skills",
-    ".codex",
-    ".gemini",
-];
-
-/// Files under `$HOME` that make UNsandboxed programs run code the agent
-/// chose: claude hooks (`settings*.json`), claude's user/project-scope
-/// `mcpServers` (`~/.claude.json` — every later `claude` the user runs spawns
-/// them), codex `notify` (`config.toml`), gemini/agy `mcpServers`
-/// (`.gemini/settings.json`) and git's XDG config (hooks path, aliases,
-/// credential helpers). Write-denied even though their parent dirs stay
-/// writable for the CLIs' own state. (Claude Code tolerates a read-only
-/// `~/.claude.json`: it keeps running and only skips persisting its startup
-/// counters; Otto's trust pre-seeding is written by the daemon, unsandboxed.)
-const HOME_DENY_WRITE_LITERAL: &[&str] = &[
-    ".claude.json",
-    ".claude/settings.json",
-    ".claude/settings.local.json",
-    ".codex/config.toml",
-    ".gemini/settings.json",
-    // Instruction files every later session (sandboxed or not) loads; under
-    // the default skip-permissions / bypass flags an instruction is code.
-    ".claude/CLAUDE.md",
-    ".codex/AGENTS.md",
-    ".codex/AGENTS.override.md",
-    ".gemini/GEMINI.md",
-    // Muse Code: its settings (`mcpServers`, permission profiles, hooks) and
-    // its user rules. `auth.json` beside them stays writable (token refresh).
-    ".config/muse/settings.json",
-    ".config/muse/AGENTS.md",
-];
-const HOME_DENY_WRITE_SUBPATH: &[&str] = &[
-    ".config/git",
-    // gh aliases (`!shell` aliases run on the user's next `gh …`) + hosts.
-    ".config/gh",
-    // Claude Code extension points that load into EVERY claude session the
-    // user runs, sandboxed or not: plugins (with their hooks), hook scripts
-    // referenced from settings.json, subagent and slash-command definitions.
-    // The CLI's own state (projects/, todos/, statsig/, shell-snapshots/…)
-    // stays writable under the `.claude` grant.
-    ".claude/plugins",
-    ".claude/hooks",
-    ".claude/agents",
-    ".claude/commands",
-    ".claude/skills",
-    ".claude/output-styles",
-    // Codex prompts / skills / plugins / exec-policy rules / its own binaries.
-    ".codex/prompts",
-    ".codex/skills",
-    ".codex/plugins",
-    ".codex/rules",
-    ".codex/packages",
-    // Gemini CLI extensions declare `mcpServers` that every gemini/agy starts.
-    ".gemini/extensions",
-    ".gemini/skills",
-    // Muse Code's user skills, plugins and hooks.
-    ".config/muse/skills",
-    ".config/muse/plugins",
-    ".config/muse/hooks",
-    ".config/muse/rules",
-    ".local/share/muse/plugins",
-    ".local/share/muse/skills",
-    // Otto's own context bundles: every claude session is launched with
-    // `--settings ~/.otto/context/claude/<cwd>/settings.json` (hooks).
-    ".otto/context",
-];
-
-/// The agent CLIs' homes under `$HOME` and the state subdirectories each may
-/// write (transcripts, todos, session ids, logs, sqlite stores). An ALLOW-list:
-/// the CLIs' extension points (skills, plugins, hooks, prompts, rules, their
-/// own binaries) are not in it. Direct children of each root (top-level state
-/// files: `history.jsonl`, `*.sqlite*`, `auth.json` token refreshes…) are
-/// writable too, minus [`HOME_DENY_WRITE_LITERAL`] and [`SCRIPT_EXTENSIONS`].
-const CLI_STATE_DIRS: &[(&str, &[&str])] = &[
-    (
-        ".claude",
-        &[
-            "projects",
-            "todos",
-            "statsig",
-            "shell-snapshots",
-            "session-env",
-            "ide",
-            "file-history",
-            "sessions",
-            "logs",
-            "debug",
-            "plans",
-            "paste-cache",
-            "cache",
-            "backups",
-            "feedback",
-            "jobs",
-            "state",
-            "telemetry",
-            // The background-session daemon's control socket dir + key (a
-            // runtime handshake, never loaded as code; readable anyway).
-            "daemon",
-            // NOT `downloads`: the native installer stages the next claude
-            // binary there — code every later session runs.
-        ],
-    ),
-    (
-        ".codex",
-        &[
-            "sessions",
-            "archived_sessions",
-            "shell_snapshots",
-            "log",
-            "sqlite",
-            "tmp",
-            ".tmp",
-            "cache",
-            "ipc",
-            "node_repl",
-            "process_manager",
-            "thread-writer-locks",
-            "rollout-migrations",
-            "generated_images",
-            "ambient-suggestions",
-            // The curated-skills listing cache (JSON metadata; installing a
-            // skill still writes `skills/`, which stays denied).
-            "vendor_imports",
-            // NOT `packages` (codex's own standalone binaries) nor
-            // `computer-use` (ships the Computer Use .app bundle): code.
-        ],
-    ),
-    (
-        ".gemini",
-        &[
-            "antigravity-cli",
-            "tmp",
-            "history",
-            // Per-project state only — `config/` itself holds
-            // `mcp_config.json`, whose `mcpServers` every gemini/agy starts.
-            "config/projects",
-        ],
-    ),
-    // Muse Code keeps its config (`settings.json`, `auth.json`, `skills/`)
-    // under `$XDG_CONFIG_HOME/muse` and its state under `$XDG_DATA_HOME/muse`.
-    // The config home grants only its top-level files (a login's token
-    // refresh), minus the denied settings; the data home its session logs,
-    // index and runtime sockets — NOT `plugins/` or `skills/` (code every
-    // later session loads).
-    (".config/muse", &[]),
-    (
-        ".local/share/muse",
-        &["sessions", "session-server", "runtime", "local-tracing"],
-    ),
-];
+/// The per-provider path tables — CLI state homes, the home-level config and
+/// extension points no sandboxed session may write, and the project-level
+/// config a read-only session may not write — live in ONE place,
+/// [`providers::PROVIDERS`]; everything below derives from it.
+pub mod providers;
+use providers::TopFiles;
 
 /// Executable-script extensions never writable as a direct child of a CLI
 /// home: settings reference such files (claude's `statusline-command.sh`), so
@@ -466,6 +298,20 @@ impl SandboxPolicy {
         extra_writable: &[PathBuf],
         network: NetworkPolicy,
     ) -> Self {
+        let bases = providers::Bases::from_env(home);
+        Self::for_agent_in(cwd, home, data_dir, extra_writable, network, &bases)
+    }
+
+    /// [`Self::for_agent`] with the CLI homes' base dirs handed in (`$HOME`
+    /// and the `$XDG_*` homes), so a test never reads the real environment.
+    pub fn for_agent_in(
+        cwd: &Path,
+        home: &Path,
+        data_dir: &Path,
+        extra_writable: &[PathBuf],
+        network: NetworkPolicy,
+        bases: &providers::Bases,
+    ) -> Self {
         let data_dir = canonicalize_lenient(data_dir);
         let data_dir_set = !data_dir.as_os_str().is_empty();
         let mut roots: Vec<PathBuf> = Vec::new();
@@ -493,22 +339,30 @@ impl SandboxPolicy {
         push(PathBuf::from("/private/var/folders"));
 
         // The agent CLIs persist transcripts / session ids here; without these
-        // the CLIs can't resume. Only their STATE dirs ([`CLI_STATE_DIRS`]),
+        // the CLIs can't resume. Only their STATE dirs ([`providers::PROVIDERS`]),
         // never a whole CLI home (skills, plugins, instruction files, scripts
         // there load into every later session). `~/.claude.json` is
-        // deliberately NOT a root — see [`HOME_DENY_WRITE_LITERAL`]. Neither are
+        // deliberately NOT a root (a `home_deny_literal` entry). Neither are
         // `~/.otto` (Otto's context bundles — the daemon writes them, not the
         // CLIs) nor the shared package caches (`~/.npm`, `~/.cache`,
         // `~/Library/Caches`): see [`agent_cache_env`].
         let home_set = !home.as_os_str().is_empty();
+        let defaults = providers::Bases::defaults(home);
         let mut cli_roots: Vec<PathBuf> = Vec::new();
+        // Deny-by-default homes: only their named top-level files.
+        let mut named_files: Vec<String> = Vec::new();
         if home_set {
-            for (root, dirs) in CLI_STATE_DIRS {
-                let root = canonicalize_lenient(&home.join(root));
-                for d in *dirs {
+            for st in providers::all().flat_map(|p| p.state) {
+                let root = canonicalize_lenient(&bases.resolve(st.base, st.rel));
+                for d in st.dirs {
                     push(root.join(d));
                 }
-                cli_roots.push(root);
+                match st.top {
+                    TopFiles::Any => cli_roots.push(root),
+                    TopFiles::Only(names) => {
+                        named_files.extend(names.iter().filter_map(|n| named_file_regex(&root, n)))
+                    }
+                }
             }
             // Not the whole `~/.config`: it holds code-loading configs of
             // other tools (direnv, fish, nvim, zed tasks…). Only node CLIs'
@@ -544,16 +398,23 @@ impl SandboxPolicy {
                 trailing.push(format!("(deny file-write* {})", scripts.join(" ")));
             }
         }
+        if !named_files.is_empty() {
+            trailing.push(format!("(allow file-write* {})", named_files.join(" ")));
+        }
         if home_set {
-            let mut filters: Vec<String> = HOME_DENY_WRITE_LITERAL
-                .iter()
-                .map(|rel| filter("literal", &canonicalize_lenient(&home.join(rel))))
-                .collect();
-            filters.extend(
-                HOME_DENY_WRITE_SUBPATH
-                    .iter()
-                    .map(|rel| filter("subpath", &canonicalize_lenient(&home.join(rel)))),
-            );
+            let mut filters: Vec<String> = Vec::new();
+            for p in providers::all() {
+                for (kind, entries) in [
+                    ("literal", p.home_deny_literal),
+                    ("subpath", p.home_deny_subpath),
+                ] {
+                    filters.extend(
+                        providers::deny_paths(entries, bases, &defaults)
+                            .iter()
+                            .map(|path| filter(kind, &canonicalize_lenient(path))),
+                    );
+                }
+            }
             trailing.push(format!("(deny file-write* {})", filters.join(" ")));
         }
         if home_set {
@@ -698,19 +559,23 @@ impl SandboxPolicy {
     /// Harden an agent policy for a **read-only** session (`meta.read_only`,
     /// typically processing untrusted mail / chat input): its own project
     /// folder stays writable, but not the project-scope claude config there
-    /// ([`PROJECT_DENY_WRITE_LITERAL`] / [`PROJECT_DENY_WRITE_SUBPATH`]) that
+    /// (every [`providers::PROVIDERS`] entry's `project_deny_*`) that
     /// a later, unconfined `claude` in that folder would load. Appended last,
     /// so it wins over the cwd grant.
     pub fn deny_project_agent_config(mut self, cwd: &Path) -> Self {
-        let filters: Vec<String> = PROJECT_DENY_WRITE_LITERAL
-            .iter()
-            .map(|rel| filter("literal", &canonicalize_lenient(&cwd.join(rel))))
-            .chain(
-                PROJECT_DENY_WRITE_SUBPATH
-                    .iter()
-                    .map(|rel| filter("subpath", &canonicalize_lenient(&cwd.join(rel)))),
-            )
-            .collect();
+        let mut filters: Vec<String> = Vec::new();
+        for p in providers::all() {
+            for (kind, entries) in [
+                ("literal", p.project_deny_literal),
+                ("subpath", p.project_deny_subpath),
+            ] {
+                filters.extend(
+                    entries
+                        .iter()
+                        .map(|rel| filter(kind, &canonicalize_lenient(&cwd.join(rel)))),
+                );
+            }
+        }
         self.trailing_rules
             .push(format!("(deny file-write* {})", filters.join(" ")));
         self
@@ -755,7 +620,7 @@ impl SandboxPolicy {
     /// Re-open one provider CLI home OUTSIDE Otto's data dir that the caller
     /// points the CLI at — today the codex shadow `CODEX_HOME` inside the
     /// session's context bundle (`~/.otto/context/codex/<cwd>/codex-home`),
-    /// which [`HOME_DENY_WRITE_SUBPATH`] otherwise write-denies. Its state is
+    /// which the `~/.otto/context` home deny otherwise write-denies. Its state is
     /// writable; the configs, instruction files and extension points in it
     /// (the account-home carve-outs, re-rooted) stay denied. Appended last.
     pub fn allow_provider_home(mut self, root: &Path) -> Self {
@@ -1072,6 +937,18 @@ fn direct_child_regex(root: &Path) -> Option<String> {
     Some(format!("(regex #\"^{}/[^/]+$\")", regex_escape(d)))
 }
 
+/// `(regex …)` matching `root/<name>` and the temp siblings an atomic rewrite
+/// of it creates (`<name>.tmp…`, `.<name>.<random>`, `<name>~`) — the one
+/// file a deny-by-default home ([`TopFiles::Only`]) lets the CLI write.
+fn named_file_regex(root: &Path, name: &str) -> Option<String> {
+    let d = root.to_str().filter(|d| !d.contains('"'))?;
+    Some(format!(
+        "(regex #\"^{}/\\.?{}([.~-][^/]*)?$\")",
+        regex_escape(d),
+        regex_escape(name)
+    ))
+}
+
 /// `(regex …)` matching a direct child of `root` with a [`SCRIPT_EXTENSIONS`]
 /// extension.
 fn script_regex(root: &Path) -> Option<String> {
@@ -1219,6 +1096,18 @@ fn filter(kind: &str, p: &Path) -> String {
 mod tests {
     use super::*;
 
+    /// `for_agent` on the `$HOME` defaults: no test reads the real `$XDG_*`.
+    fn for_agent(
+        cwd: &Path,
+        home: &Path,
+        data_dir: &Path,
+        extra: &[PathBuf],
+        network: NetworkPolicy,
+    ) -> SandboxPolicy {
+        let bases = providers::Bases::defaults(home);
+        SandboxPolicy::for_agent_in(cwd, home, data_dir, extra, network, &bases)
+    }
+
     fn policy(roots: &[&str], net: NetworkPolicy) -> SandboxPolicy {
         SandboxPolicy {
             writable_roots: roots.iter().map(PathBuf::from).collect(),
@@ -1230,7 +1119,7 @@ mod tests {
     }
 
     fn agent_policy(data: &str) -> SandboxPolicy {
-        SandboxPolicy::for_agent(
+        for_agent(
             Path::new("/work/project"),
             Path::new("/nonexistent-otto-home/u"),
             Path::new(data),
@@ -1446,7 +1335,7 @@ mod tests {
         std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         let cwd = canonicalize_lenient(&cwd);
         let git = canonicalize_lenient(&git);
-        let pol = SandboxPolicy::for_agent(
+        let pol = for_agent(
             &cwd,
             Path::new("/nonexistent-otto-home/u"),
             Path::new("/nonexistent-otto-test/Otto"),
@@ -1544,7 +1433,7 @@ mod tests {
         let cwd = data.join("workflow-runs/r1");
         std::fs::create_dir_all(cwd.join(".git")).unwrap();
         std::fs::write(cwd.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-        let pol = SandboxPolicy::for_agent(
+        let pol = for_agent(
             &cwd,
             Path::new("/nonexistent-otto-home/u"),
             &data,
@@ -1681,7 +1570,7 @@ mod tests {
         let home = PathBuf::from("/nonexistent-otto-home/u");
         let data = PathBuf::from("/nonexistent-otto-home/u/.otto/data");
         let gitdir = PathBuf::from("/work/project/.git");
-        let pol = SandboxPolicy::for_agent(
+        let pol = for_agent(
             &cwd,
             &home,
             &data,
@@ -1745,9 +1634,15 @@ mod tests {
         let sbpl = pol.to_sbpl();
         // Muse: its top-level files (auth.json) yes, its settings, skills and
         // plugins never.
+        // I-06: Muse's config home is deny-by-default — `auth.json` (and its
+        // atomic-write temp siblings) only, never any other top-level file.
+        assert!(
+            !sbpl.contains("(regex #\"^/nonexistent-otto-home/u/\\.config/muse/[^/]+$\")"),
+            "every top-level file of ~/.config/muse must not be writable"
+        );
         let muse_top = at(
             &sbpl,
-            "(regex #\"^/nonexistent-otto-home/u/\\.config/muse/[^/]+$\")",
+            "(regex #\"^/nonexistent-otto-home/u/\\.config/muse/\\.?auth\\.json([.~-][^/]*)?$\")",
         );
         for deny in [
             "(literal \"/nonexistent-otto-home/u/.config/muse/settings.json\")",
@@ -1819,7 +1714,7 @@ mod tests {
     fn for_agent_never_grants_home_or_its_parents() {
         let home = Path::new("/nonexistent-otto-home/u");
         for cwd in ["/", "/nonexistent-otto-home", "/nonexistent-otto-home/u"] {
-            let pol = SandboxPolicy::for_agent(
+            let pol = for_agent(
                 Path::new(cwd),
                 home,
                 Path::new("/nonexistent-otto-test/Otto"),
@@ -1933,5 +1828,115 @@ mod tests {
                 .to_sbpl();
             assert_eq!(sbpl, base, "{d} must not be re-opened wholesale");
         }
+    }
+    /// I-05: sandboxed grok / opencode / pi sessions can write the state
+    /// they run and resume from — and nothing that configures a later session.
+    #[test]
+    fn for_agent_grants_grok_opencode_pi_state_but_not_their_config() {
+        let pol = agent_policy("/nonexistent-otto-test/Otto");
+        let h = Path::new("/nonexistent-otto-home/u");
+        for rel in [
+            ".grok/sessions",
+            ".pi/agent/sessions",
+            ".local/share/opencode/storage",
+            ".local/share/opencode/snapshot",
+        ] {
+            assert!(
+                pol.writable_roots.iter().any(|r| r == &h.join(rel)),
+                "{rel}"
+            );
+        }
+        for rel in [
+            ".grok",
+            ".pi/agent",
+            ".local/share/opencode",
+            ".config/opencode",
+        ] {
+            assert!(
+                !pol.writable_roots.iter().any(|r| r == &h.join(rel)),
+                "{rel} must not be a writable root"
+            );
+        }
+        let sbpl = pol.to_sbpl();
+        let grok_top = at(
+            &sbpl,
+            "(regex #\"^/nonexistent-otto-home/u/\\.grok/[^/]+$\")",
+        );
+        for deny in [
+            "(literal \"/nonexistent-otto-home/u/.grok/config.toml\")",
+            "(literal \"/nonexistent-otto-home/u/.grok/trusted_folders.toml\")",
+            "(literal \"/nonexistent-otto-home/u/.pi/agent/mcp.json\")",
+            "(literal \"/nonexistent-otto-home/u/.pi/agent/settings.json\")",
+            "(subpath \"/nonexistent-otto-home/u/.pi/agent/extensions\")",
+            "(subpath \"/nonexistent-otto-home/u/.config/opencode\")",
+            "(subpath \"/nonexistent-otto-home/u/.local/share/opencode/bin\")",
+        ] {
+            assert!(
+                at(&sbpl, deny) > grok_top,
+                "{deny} must follow the top-level allow"
+            );
+        }
+    }
+
+    /// I-04: a read-only session can't plant project config that ANY agent
+    /// CLI loads in the person's next session in that folder.
+    #[test]
+    fn read_only_denies_every_clis_project_config() {
+        let pol = agent_policy("/nonexistent-otto-test/Otto")
+            .deny_project_agent_config(Path::new("/work/project"));
+        let last = pol.trailing_rules.last().unwrap();
+        for lit in ["opencode.json", "opencode.jsonc", ".mcp.json", "AGENTS.md"] {
+            assert!(
+                last.contains(&format!("(literal \"/work/project/{lit}\")")),
+                "{lit}"
+            );
+        }
+        for sub in [
+            ".agents",
+            ".agent",
+            ".grok",
+            ".opencode",
+            ".pi",
+            ".muse",
+            ".codex",
+        ] {
+            assert!(
+                last.contains(&format!("(subpath \"/work/project/{sub}\")")),
+                "{sub}"
+            );
+        }
+    }
+
+    /// I-06: the XDG homes resolve from the environment the Skills Lab reads;
+    /// a relative value is invalid and ignored; a deny covers both the moved
+    /// home and the default one.
+    #[test]
+    fn xdg_bases_follow_the_environment() {
+        let home = Path::new("/h");
+        let env = |k: &'static str| match k {
+            "XDG_CONFIG_HOME" => Some(std::ffi::OsString::from("/xdg/config")),
+            "XDG_DATA_HOME" => Some(std::ffi::OsString::from("relative/data")),
+            _ => None,
+        };
+        let b = providers::Bases::with_env(home, env);
+        assert_eq!(b.config, PathBuf::from("/xdg/config"));
+        assert_eq!(b.data, PathBuf::from("/h/.local/share"));
+        assert_eq!(b.state, PathBuf::from("/h/.local/state"));
+        assert_eq!(
+            b.resolve(providers::Base::XdgConfig, "muse"),
+            PathBuf::from("/xdg/config/muse")
+        );
+        let d = providers::deny_paths(
+            &[(providers::Base::XdgConfig, "muse/settings.json")],
+            &b,
+            &providers::Bases::defaults(home),
+        );
+        assert_eq!(
+            d,
+            [
+                PathBuf::from("/xdg/config/muse/settings.json"),
+                PathBuf::from("/h/.config/muse/settings.json")
+            ]
+        );
     }
 }

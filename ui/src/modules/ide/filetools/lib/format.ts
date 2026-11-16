@@ -373,3 +373,12 @@ export async function formatContent(
     return { ok: false, error: msg.split('\n')[0], line: lc ? Number(lc[1]) : undefined, col: lc?.[2] ? Number(lc[2]) : undefined };
   }
 }
+
+/** The IDE's in-app formatter for the files the daemon has none for (SQL —
+ *  `sql-formatter` — and XML/SVG), shaped like the daemon's `/ide/lsp/format`
+ *  answer; a parse error throws with its line. */
+export async function formatForIde(lang: string, text: string): Promise<{ formatted: string; changed: boolean; formatter: string }> {
+  const res = await formatContent(lang, text);
+  if (!res.ok) throw new Error(res.line ? `Line ${res.line}: ${res.error}` : res.error);
+  return { formatted: res.text, changed: res.changed, formatter: lang === 'sql' ? 'sql-formatter' : 'the XML formatter' };
+}

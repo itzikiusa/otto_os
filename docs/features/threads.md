@@ -132,12 +132,16 @@ Draft limits are explicit, without silent truncation:
 | Limit | Value |
 |---|---|
 | Text | 1 MiB |
-| Attachments | 12; PNG, JPEG, GIF, WebP or PDF, up to 10 MiB decoded each |
+| Attachments | 20; PNG, JPEG, GIF, WebP or PDF, up to 10 MiB decoded each and 16 MiB decoded in total per message |
 | Review/diff context | 32 chips; up to 128 KiB text per chip |
 | Whole draft | 24 MiB serialized, including base64 attachments |
 | Per person, per workspace | 64 MiB and 128 drafts with unsent content |
 | Retention | 30 days since the last save; expiry also removes attachments and preferences |
 
+The composer refuses a file that would pass the per-file or per-message
+attachment limit and says which limit, under the composer; the files already
+attached stay. A draft the daemon refuses for its size shows the daemon's
+reason with **Retry**, and is not uploaded again until it gets smaller.
 Attachment support at send time still depends on the provider. To resolve a
 size error, remove an attachment, choose a smaller diff excerpt, or clear an
 older draft, then Retry. Preference-only drafts do not use a nonempty-draft

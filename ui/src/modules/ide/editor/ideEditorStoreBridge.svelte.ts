@@ -4,6 +4,9 @@
 import { idePreferences } from '../../../lib/idePreferences.svelte';
 import { ide, type IdeOpenTab } from '../ideStore.svelte';
 
+// The editor's Editor | Split | Preview mode, read by IdeEditorArea.
+export { idePreviewMode } from './idePreviewMode.svelte';
+
 export function getIdeProjectFolders(): string[] {
   const roots = ide.projectRoots.map((r) => r.path);
   const extra = ide.additionalRoots ?? ide.target.additional_roots ?? [];

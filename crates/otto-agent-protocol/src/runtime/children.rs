@@ -511,14 +511,16 @@ impl AgentRuntime {
                 Some(i) if st.proj.queue[i].wake.as_ref() == Some(&key) => return Ok(()),
                 Some(i) => {
                     let q = &mut st.proj.queue[i];
-                    q.req = RuntimePromptReq::of(&text);
+                    q.req = Arc::new(RuntimePromptReq::of(&text));
                     q.wake = Some(key);
+                    q.error = None;
                 }
                 None => st.proj.queue.push(QueuedRecord {
                     id: new_id(),
                     created_at: Utc::now(),
-                    req: RuntimePromptReq::of(&text),
+                    req: Arc::new(RuntimePromptReq::of(&text)),
                     wake: Some(key),
+                    error: None,
                 }),
             }
             emit_queue(&self.inner, &live, &mut st);
@@ -544,6 +546,7 @@ mod tests {
             title: "Check the tests".into(),
             cwd: "/tmp".into(),
             model: None,
+            effort: None,
             native_thread_id: None,
             status: RuntimeSessionStatus::Idle,
             access_mode: RuntimeAccessMode::ApprovalRequired,

@@ -13,6 +13,7 @@
   } from '../../../lib/providerModels';
   import { activity } from '../../../lib/stores/activity.svelte';
   import { auth } from '../../../lib/stores/auth.svelte';
+  import { terminalTakesEffort } from '../../../lib/providerRegistry';
   import type { sessionState } from '../../../lib/status';
   import StatusDot from '../../../lib/components/StatusDot.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
@@ -82,7 +83,7 @@
   const hasInteractiveControls = $derived(
     Boolean(onmodelchange && oneffortchange && onmodechange) &&
       (supportsModelSelection(provider, auth.meta) ||
-        supportsEffortSelection(provider) ||
+        terminalTakesEffort(provider, auth.meta, supportsEffortSelection(provider)) ||
         supportsInteractionMode(provider)),
   );
 

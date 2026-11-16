@@ -17,6 +17,11 @@
     pushIdeNavLocation,
     toggleIdeTabPinned,
   } from './ideEditorStoreBridge.svelte';
+  import { followIdeCompactLayout } from './ideEditorChrome.svelte';
+  import IdePreviewModeToggle from './IdePreviewModeToggle.svelte';
+
+  // Soft wrap + a narrow gutter whenever the IDE is stacked (phone / narrow window).
+  followIdeCompactLayout();
 
   interface Props {
     onsave: (path: string) => void;
@@ -122,6 +127,7 @@
   </div>
 
   <div class="ide-tabs-end">
+    <IdePreviewModeToggle />
     <button
       type="button"
       class="icon-btn"

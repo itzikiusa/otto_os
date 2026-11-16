@@ -57,7 +57,8 @@ pub struct UsageLabelRow {
     pub workspace_id: String,
     pub title: String,
     pub created_by: String,
-    /// `sessions.kind` (`agent` / `connection`).
+    /// `sessions.kind` (`agent` / `connection`), or `thread` for a row of
+    /// `agent_runtime_sessions` (a structured-runtime thread).
     pub kind: String,
     /// `meta.source` when it is a string (review / channel / product-…).
     pub source: Option<String>,
@@ -1011,11 +1012,11 @@ impl SessionsRepo {
                     END AS source \
              FROM sessions \
              UNION ALL \
-             SELECT id, workspace_id, title, created_by, 'thread', \
+             SELECT id, workspace_id, title, created_by, 'thread' AS kind, \
                     CASE WHEN json_valid(meta) THEN \
                       CASE WHEN json_type(meta, '$.source') = 'text' \
                            THEN json_extract(meta, '$.source') END \
-                    END \
+                    END AS source \
              FROM agent_runtime_sessions",
         )
         .fetch_all(&self.pool)
@@ -1037,14 +1038,17 @@ impl SessionsRepo {
     /// is ever looked up, so rows without one (most of a long install's
     /// history) are not read at all. Not filtered by status or `archived`
     /// (see [`UsageAttrRow`]). Threads sessions attribute by their native
-    /// thread id (the provider's own session id), closed ones too.
+    /// thread id (the provider's own session id), closed ones too. They come
+    /// first, so a terminal session holding the same id (a thread continued
+    /// in a terminal) wins the tailer's last-insert-wins index.
     pub async fn list_usage_attribution(&self) -> sqlx::Result<Vec<UsageAttrRow>> {
         let rows = sqlx::query(
-            "SELECT id, workspace_id, provider, cwd, provider_session_id FROM sessions \
-             WHERE provider_session_id IS NOT NULL AND provider_session_id <> '' \
+            "SELECT id, workspace_id, provider, cwd, native_thread_id AS provider_session_id \
+             FROM agent_runtime_sessions \
+             WHERE native_thread_id IS NOT NULL AND native_thread_id <> '' \
              UNION ALL \
-             SELECT id, workspace_id, provider, cwd, native_thread_id FROM agent_runtime_sessions \
-             WHERE native_thread_id IS NOT NULL AND native_thread_id <> ''",
+             SELECT id, workspace_id, provider, cwd, provider_session_id FROM sessions \
+             WHERE provider_session_id IS NOT NULL AND provider_session_id <> ''",
         )
         .fetch_all(&self.pool)
         .await?;

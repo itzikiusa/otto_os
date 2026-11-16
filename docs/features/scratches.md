@@ -16,11 +16,11 @@ run configurations, Local History, search and the agent dock.
   the IDE opens a non-root user's own folder and refuses anyone else's, even
   inside a workspace whose root contains it.
 - Code: UI `ui/src/modules/ide/shell/ideScratches.svelte.ts` (switcher entry,
-  new scratch), file tools `ui/src/modules/ide/filetools/` (format, preview,
-  Send to…), routes `crates/otto-server/src/routes/scratches.rs` over
+  new scratch), file tools `ui/src/modules/ide/filetools/` (format,
+  Send to…), preview: the IDE's (`docs/features/ide.md` §12), routes `crates/otto-server/src/routes/scratches.rs` over
   `crates/otto-ide/src/scratches.rs` (folder, export, path rules), archive
   reader `crates/otto-state/src/workbench.rs` (migration
-  `0218_workbench_docs_exported.sql`).
+  `0219_workbench_docs_exported.sql`).
 
 ## Walkthrough
 
@@ -35,14 +35,10 @@ run configurations, Local History, search and the agent dock.
    through the IDE's formatters; **SQL** (`sql-formatter`, `:name` / `{name}` /
    `{{name}}` placeholders survive) and **XML / SVG** (built-in pretty-printer)
    are formatted in the app.
-4. **Preview.** For Markdown, HTML, SVG, Mermaid (`.mmd`), D2 and JSON the
-   editor bar shows **Code | Preview**:
-   - Markdown: the Vault renderer, sanitised, including Mermaid/D2 fences.
-   - HTML: an iframe with an empty `sandbox` and a strict CSP, so no scripts run.
-   - SVG: rendered as an image, so no scripts run.
-   - Mermaid and D2: the Canvas renderers.
-   - JSON: a collapsible tree.
-   CSV/TSV/JSONL keep the IDE's **Table | Text** view.
+4. **Preview.** The IDE's **Editor | Editor and preview | Preview** control
+   (end of the tab strip) covers Markdown, HTML, SVG, images, JSON, Mermaid
+   (`.mmd`), D2 (`.d2`, Canvas' renderer) and CSV/TSV/JSONL — see the IDE
+   guide, §12.
 5. **Send to…** (share icon in the editor bar, any file):
    - **Database: Run on…** picks the connection (the selected one, the only
      one, or a choice), opens the DB Explorer with the script in a new query

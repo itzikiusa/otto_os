@@ -800,6 +800,12 @@ impl PtyHandle {
         self.mirror.echo.stats()
     }
 
+    /// When input (a keystroke, a paste, a terminal's own query reply) last
+    /// reached the PTY; `None` before the first write.
+    pub fn last_input_at(&self) -> Option<Instant> {
+        self.mirror.echo.last_input_at()
+    }
+
     /// Current emulator grid as `(cols, rows)`.
     pub fn size(&self) -> (u16, u16) {
         let parser = lock_unpoisoned(&self.mirror.parser);

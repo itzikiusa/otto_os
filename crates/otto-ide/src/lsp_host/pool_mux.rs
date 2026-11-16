@@ -18,7 +18,9 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::framing;
-use super::pool::{Ctl, Data, LspPool, PoolKey, ServerIo, POST_DOC_IDLE_GRACE, SERVER_CAPACITY};
+use super::pool::{
+    Ctl, Data, EvictReason, LspPool, PoolKey, ServerIo, POST_DOC_IDLE_GRACE, SERVER_CAPACITY,
+};
 #[cfg(unix)]
 use super::pool_spawn::{kill_process_group_sync, terminate_process_group};
 
@@ -80,10 +82,20 @@ pub(super) async fn run_actor(
     let reader_task = tokio::spawn(async move {
         let mut reader = reader;
         loop {
-            match framing::read_message(&mut reader).await {
-                Ok(Some(body)) => {
+            match crate::jsonrpc_framing::read_frame_or_skip(&mut reader).await {
+                Ok(Some(crate::jsonrpc_framing::Frame::Body(body))) => {
                     if r_tx.send(body).await.is_err() {
                         break;
+                    }
+                }
+                // One response over the 16 MiB cap fails that request for its
+                // editor; the shared server keeps serving every other socket.
+                Ok(Some(crate::jsonrpc_framing::Frame::Oversized { len, head })) => {
+                    tracing::warn!(len, "lsp: skipped an oversized server message");
+                    if let Some(err) = oversized_response_error(&head, len) {
+                        if r_tx.send(err).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 Ok(None) => {
@@ -110,7 +122,7 @@ pub(super) async fn run_actor(
     );
     let write_cap = pool.write_cap;
     let mut idle_at: Option<Instant> = None;
-    let mut was_evicted = false;
+    let mut evicted: Option<EvictReason> = None;
     let mut rss_tick = tokio::time::interval(Duration::from_secs(15));
     rss_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let _ = rss_tick.tick().await;
@@ -123,8 +135,8 @@ pub(super) async fn run_actor(
                 Some(Ctl::Attach { client, tx }) => mux.attach(client, tx),
                 Some(Ctl::Detach { client }) => mux.detach(client),
                 Some(Ctl::WatchedFile { uri, change_type }) => mux.on_watched_file(&uri, change_type),
-                Some(Ctl::Evict) => {
-                    was_evicted = true;
+                Some(Ctl::Evict(reason)) => {
+                    evicted = Some(reason);
                     break;
                 }
                 None => break,
@@ -177,9 +189,12 @@ pub(super) async fn run_actor(
     }
 
     pool.remove_if(&key, gen);
+    if let Some(reason) = evicted {
+        mux.notify_evicted(reason);
+    }
     mux.clients.clear();
     reader_task.abort();
-    if was_evicted {
+    if evicted.is_some() {
         writer_task.abort();
         drop(mux);
         if let Some(mut child) = child {
@@ -214,6 +229,31 @@ pub(super) async fn run_actor(
             }
         }
     }
+}
+
+/// A JSON-RPC error response standing in for a response too large to forward,
+/// when the head of the skipped body names its (pool-assigned) id: `id` must
+/// be the first member, or follow `"jsonrpc":"2.0"`, so a nested `id` inside a
+/// `result` is never mistaken for it.
+fn oversized_response_error(head: &[u8], len: usize) -> Option<Vec<u8>> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"^\s*\{\s*(?:"jsonrpc"\s*:\s*"2\.0"\s*,\s*)?"id"\s*:\s*(-?\d+|"(?:[^"\\]|\\.)*")\s*,\s*"(?:result|error)""#,
+        )
+        .expect("static LSP response id regex")
+    });
+    let text = String::from_utf8_lossy(head);
+    let id: Value = serde_json::from_str(re.captures(&text)?.get(1)?.as_str()).ok()?;
+    serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32603,
+            "message": format!("language server response too large ({len} bytes, over the 16 MiB cap)"),
+        },
+    }))
+    .ok()
 }
 
 struct Client {
@@ -396,6 +436,24 @@ impl Mux {
         }
     }
 
+    /// Tell every attached socket why its server is going away, so the editor
+    /// can reattach (and say so) instead of silently losing intelligence.
+    fn notify_evicted(&mut self, reason: EvictReason) {
+        let notice = json!({
+            "jsonrpc": "2.0",
+            "method": "otto/lspEvicted",
+            "params": {
+                "reason": reason.as_str(),
+                "lang": self.key.lang,
+                "root": self.key.root,
+            },
+        })
+        .to_string();
+        for c in self.clients.values() {
+            let _ = c.tx.try_send(notice.clone());
+        }
+    }
+
     fn on_watched_file(&mut self, uri: &str, change_type: u8) {
         if !matches!(self.init, Init::Done(_)) {
             return;
@@ -407,5 +465,30 @@ impl Mux {
                 "changes": [{ "uri": uri, "type": change_type }]
             }
         }));
+    }
+}
+
+#[cfg(test)]
+mod oversized_tests {
+    use super::oversized_response_error;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn oversized_response_becomes_an_error_for_its_own_id_only() {
+        let head = br#"{"jsonrpc":"2.0","id":42,"result":{"items":[{"id":7"#;
+        let err: Value =
+            serde_json::from_slice(&oversized_response_error(head, 20_000_000).unwrap()).unwrap();
+        assert_eq!(err["id"], json!(42));
+        assert_eq!(err["error"]["code"], json!(-32603));
+        let s_id = br#"{"id":"r-9","result":[1,2,3"#;
+        let err: Value =
+            serde_json::from_slice(&oversized_response_error(s_id, 1).unwrap()).unwrap();
+        assert_eq!(err["id"], json!("r-9"));
+        // `result` first: the only `id` visible is nested, so nothing is guessed.
+        assert!(oversized_response_error(br#"{"result":{"id":3},"id":1"#, 1).is_none());
+        // A notification has no id to answer.
+        assert!(
+            oversized_response_error(br#"{"jsonrpc":"2.0","method":"x","params":{"#, 1).is_none()
+        );
     }
 }

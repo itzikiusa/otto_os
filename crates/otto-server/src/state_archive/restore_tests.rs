@@ -363,6 +363,8 @@ fn archive_inert_settles_runtime_netbridge_and_rejects_plugin_state_spoofing() {
         completed_at: None,
         turn_token_usage: None,
         origin: otto_core::agent_runtime::TurnOrigin::User,
+        model: None,
+        effort: None,
     };
     let mut rt_ent: ArchiveRow = [
         ("kind".into(), json!("turn")),

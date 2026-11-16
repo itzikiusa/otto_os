@@ -163,7 +163,10 @@ struct Spent {
 
 /// Serialized whole for a daemon restart ([`StructuredDriver::snapshot_state`]):
 /// every field must stay serializable, new ones `#[serde(default)]`.
+/// Every field may be missing from a snapshot an older build wrote (a
+/// deploy must never kill a live thread over a new field).
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PiDriver {
     /// The factory's binary: kept across a restore, never snapshotted.
     #[serde(skip)]
@@ -210,6 +213,12 @@ pub struct PiDriver {
     /// restricted access modes leave them out, Otto's own tools stay.
     #[serde(default)]
     user_mcp: Vec<String>,
+}
+
+impl Default for PiDriver {
+    fn default() -> Self {
+        Self::with_program("pi")
+    }
 }
 
 impl PiDriver {
@@ -998,6 +1007,8 @@ impl PiDriver {
                 label: label.clone(),
                 started_at,
                 due_at,
+                stopping: false,
+                stop_error: None,
                 item_id: Some(id.clone()),
             });
             self.bg_entries.insert(

@@ -477,9 +477,12 @@ test.describe('Desktop IDE Workflows — Polyglot Debug, Settings, Git, History 
     await expect(settingsModal).toHaveCount(0);
 
     // 5b) Right-side Maven Build Tool window + `go.mod` Dependency Analyzer
-    const buildToggle = page.getByTestId('ide-toggle-build-tool');
-    await expect(buildToggle).toBeVisible({ timeout: 10_000 });
-    await buildToggle.click();
+    // The header is one toolbar row: the tool window toggles from ⋯.
+    const toggleBuildTool = async (): Promise<void> => {
+      await page.getByTestId('ide-more-btn').click();
+      await page.locator('.ctx-menu').getByRole('menuitem', { name: /^(Show|Hide) (Maven|Gradle) tool window/ }).first().click();
+    };
+    await toggleBuildTool();
     await expect(page.locator('body')).toContainText('otto-bonus-service');
 
     await openPolyglotFile(page, 'go.mod');
@@ -489,7 +492,7 @@ test.describe('Desktop IDE Workflows — Polyglot Debug, Settings, Git, History 
     await expect(depAnalyzer).toBeVisible({ timeout: 15_000 });
     await expect(depAnalyzer).toContainText('github.com/shopspring/decimal');
     await saveWorkflowShot(page, '11-ide-dependency-analyzer-maven.png');
-    await buildToggle.click();
+    await toggleBuildTool();
 
     // 6) Integrated Git view: modify tracked file -> `M` badge in tree -> Git dock DiffViewer -> Stage & Commit!
     await openPolyglotFile(page, 'notes', 'roadmap.md');
@@ -533,7 +536,7 @@ test.describe('Desktop IDE Workflows — Polyglot Debug, Settings, Git, History 
     expect(headSubject).toBe('docs: verify integrated git dock');
   });
 
-  test('7 & 8. Side-by-side `>>` hunk revert, Local History deleted-file recovery, IDE<->Threads durability, Go to Line (`⌘L`), EmbeddedRuntimeThread (`⇧⌘L`), `@`/`@~/` clamping & built-in `opencode`/`pi` providers', async ({
+  test('7 & 8. Side-by-side `>>` hunk revert, Local History deleted-file recovery, IDE<->Threads durability, Go to Line (`⌘G`), Add selection to agent (`⌘L`), `@`/`@~/` clamping & built-in `opencode`/`pi` providers', async ({
     page,
   }) => {
     test.setTimeout(120_000);
@@ -642,17 +645,20 @@ test.describe('Desktop IDE Workflows — Polyglot Debug, Settings, Git, History 
     await expect(clipModal).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');
 
-    // 8a) Verify `⌘L` opens Go to Line:Column dialog, then `⇧⌘L` opens AI Agent dock!
+    // 8a) `⌘G` opens the Go to Line:Column dialog; `⌘L` adds the selection to the AI
+    // Agent (opening its dock), as the editor context menu and docs/features/ide.md say.
     await editorContent(page).click();
-    await page.keyboard.press('Meta+l');
+    await page.keyboard.press('Meta+g');
     const gotoDialog = page.getByRole('dialog').filter({ hasText: /Go to Line/i }).first();
     await expect(gotoDialog).toBeVisible({ timeout: 5_000 });
     await page.keyboard.press('Escape');
     await expect(gotoDialog).toHaveCount(0);
 
     const agentPanel = page.getByTestId('ide-agent-panel');
-    await page.keyboard.press('Meta+Shift+L');
+    await editorContent(page).click();
+    await page.keyboard.press('Meta+l');
     await expect(agentPanel).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByRole('dialog').filter({ hasText: /Go to Line/i })).toHaveCount(0);
 
     const composer = page.getByTestId('ide-agent-composer');
     await composer.click();

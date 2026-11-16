@@ -39,6 +39,10 @@ pub const EXTERNAL_WORKSPACE: &str = "external";
 
 pub use budget_dedup::{BudgetCheckStamp, BudgetDedup, BudgetSignal};
 pub use clickhouse::{ClickHouse, ClickHouseLease};
+pub use engine::runtime_turns::{
+    runtime_turn_event, transcript_tailed, RuntimeTurnUsage, RUNTIME_TURN_ORIGIN,
+    TRANSCRIPT_TAILED_PROVIDERS,
+};
 pub use engine::{ReportOptions, UsageEngine, UsageScope};
 pub use metrics::{Metric, MetricsSampler};
 pub use pricing::{estimate_cost, estimate_cost_with_1h, is_priced, PRICED_AS_OF};

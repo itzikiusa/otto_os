@@ -14,7 +14,7 @@
   import { formatEffortShort, formatModelLabel, type EffortLevel } from '../../../lib/providerModels';
   import { agentProviders, harnessLabel, providerReadiness, runtimeBaselineCaps } from '../../../lib/providers';
   import { auth } from '../../../lib/stores/auth.svelte';
-  import { ASK_MAX_TARGETS, askableProviders } from './askAgents';
+  import { ASK_MAX_TARGETS, askableProviders, clampEffort } from './askAgents';
   import { askTargets } from './askTargets.svelte';
   import { fileMentionContext, type ComposerContext } from './composerContext';
   import RuntimeMentionMenu, { type PickedAgentMention, type PickedFileMention } from './RuntimeMentionMenu.svelte';
@@ -76,6 +76,8 @@
     'full-access': 'full access',
   };
   const accessText = $derived(readOnly ? 'read-only, like this thread' : `${ACCESS[access]}, like this thread`);
+  /** This thread's agent, by name (who does NOT get the other agent's answer). */
+  const ownAgent = $derived(harnessLabel(provider).replace(/ Code$/, ''));
 
   function openMenu(): void {
     pickProvider = allowedProviders.find((p) => p !== provider) ?? allowedProviders[0] ?? 'claude';
@@ -114,7 +116,7 @@
     aria-haspopup="dialog"
     aria-expanded={open}
     aria-label={targets.length ? 'Ask one more agent' : 'Ask another agent'}
-    title={full ? `At most ${ASK_MAX_TARGETS} agents at once` : 'Ask another agent: send this message to a new thread on another model (pick more to ask several; or type @)'}
+    title={full ? `At most ${ASK_MAX_TARGETS} agents at once` : 'Ask another agent: a new thread on another model gets this message and its images — not this conversation. Its answer comes back to you as a card (pick more to ask several; or type @)'}
     data-testid="runtime-ask-agent"
     disabled={disabled || full || allowedProviders.length === 0}
     onpointerenter={() => ModelPicker.prefetch()}
@@ -148,6 +150,7 @@
       {/each}
       <span class="aa-access" title="A thread you ask here works in this thread’s folder with this thread’s access (the access chip below narrows it)">· {accessText}</span>
       <button type="button" class="btn small ghost" onclick={() => askTargets.clear(sessionId)}>Cancel</button>
+      <span class="aa-what" data-testid="runtime-ask-what">Gets your message and attachments — not this conversation. The answer comes back to you as a card, not to {ownAgent}.</span>
     </div>
   {/if}
 {/if}
@@ -160,9 +163,14 @@
     model={null}
     effort={pickEffort}
     mode="full"
-    onprovider={(p: string) => (pickProvider = p)}
+    onprovider={(p: string) => {
+      // Another agent takes other levels: never carry the last one's pick over.
+      if (p !== pickProvider) pickEffort = null;
+      pickProvider = p;
+    }}
     onmodel={(m: string | null) => {
-      askTargets.add(sessionId, { provider: pickProvider, ...(m ? { model: m } : {}), ...(pickEffort ? { effort: pickEffort } : {}) });
+      const effort = clampEffort(pickEffort, pickEfforts);
+      askTargets.add(sessionId, { provider: pickProvider, ...(m ? { model: m } : {}), ...(effort ? { effort } : {}) });
       open = false;
     }}
     oneffort={pickEfforts.length ? (e: EffortLevel | null) => (pickEffort = e) : undefined}
@@ -201,6 +209,10 @@
     block-size: 20px;
   }
   .aa-access {
+    font-size: var(--fs-xs);
+  }
+  .aa-what {
+    flex-basis: 100%;
     font-size: var(--fs-xs);
   }
 </style>

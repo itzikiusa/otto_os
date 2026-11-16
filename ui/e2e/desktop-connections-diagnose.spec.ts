@@ -6,7 +6,8 @@ import { seedDiagnose } from './connections-diagnose-mocks';
 test.use({ serviceWorkers: 'block' });
 
 // "Diagnose with an agent": an ended SSH tab's failed Test → Diagnose → the
-// consent dialog → an approval-required thread embedded beside the terminal,
+// side panel with the consent text above the Threads start composer (agent,
+// model, access) → an approval-required thread embedded beside the terminal,
 // without leaving the page.
 test('a failed SSH connection opens an embedded, approval-required diagnosis thread after consent', async ({ page }) => {
   const f = await seedDiagnose(page);
@@ -27,9 +28,13 @@ test('a failed SSH connection opens an embedded, approval-required diagnosis thr
   await expect(consent).toContainText('nc -vz -w 5 fixture.invalid 2222');
   expect(f.created).toHaveLength(0);
 
-  await page.getByTestId('diagnose-start').click();
+  // Nothing runs until the person starts it — with the agent and access they pick.
   const aside = page.getByTestId('diagnose-aside');
   await expect(aside).toContainText(`Diagnosing ${f.name}`);
+  const draft = aside.getByTestId('embedded-runtime-draft');
+  await expect(draft.getByTestId('picker-agent')).toBeVisible();
+  await expect(draft.getByTestId('runtime-access')).toContainText('Supervised');
+  await draft.getByRole('button', { name: 'Start the diagnosis' }).click();
   await expect(aside.locator('[data-testid="runtime-thread-rt-diag-1"]')).toBeVisible({ timeout: 15_000 });
   expect(page.url()).toBe(before);
 
@@ -41,9 +46,9 @@ test('a failed SSH connection opens an embedded, approval-required diagnosis thr
   const text = String(f.prompts[0].text);
   expect(text).toContain('fixture.invalid');
   expect(text).toContain('Could not resolve hostname');
-  expect(f.prompts[0].access_mode).toBe('approval-required');
+  // The access mode rides on the create; the first message follows it.
 
-  // Close keeps the thread: Diagnose again shows it with no new consent or thread.
+  // Close keeps the thread: Diagnose again shows it with no new start or thread.
   await aside.getByRole('button', { name: 'Close — the thread is kept' }).click();
   await expect(aside).toHaveCount(0);
   await panel.getByTestId('conn-diagnose').click();

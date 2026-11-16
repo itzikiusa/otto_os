@@ -198,7 +198,7 @@ impl DapManager {
     ) -> Result<IdeDebugSessionSnapshot> {
         use futures_util::FutureExt;
 
-        let my_gen = entry.boot_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let my_gen = entry.bump_generation();
         entry.restarting.store(true, Ordering::SeqCst);
         teardown_connection(entry).await;
         let lifecycle_guard = entry.lifecycle_lock.lock().await;
@@ -265,14 +265,16 @@ impl DapManager {
         entry.restarting.store(false, Ordering::SeqCst);
         drop(lifecycle_guard);
 
-        let resolved = match resolve_dap_adapter_with_manager(
+        let resolve = resolve_dap_adapter_with_manager(
             &self.data_dir,
             &orig_req,
             &orig_ctx,
             Some(&self.environments),
-        )
-        .await
-        {
+        );
+        let Some(resolved) = entry.unless_superseded(my_gen, resolve).await else {
+            return Ok(entry.read_snapshot());
+        };
+        let resolved = match resolved {
             Ok(res) => res,
             Err(err) => {
                 let _guard = entry.lifecycle_lock.lock().await;
@@ -295,9 +297,8 @@ impl DapManager {
             snap.config_id = orig_req.config_id.clone();
             snap.launch = Some(orig_req.launch.clone());
         });
-        if let Err(err) =
-            boot_session_connection(&self.sessions, entry, resolved, &orig_req, &orig_ctx).await
-        {
+        let boot = boot_session_connection(&self.sessions, entry, resolved, &orig_req, &orig_ctx);
+        if let Some(Err(err)) = entry.unless_superseded(my_gen, boot).await {
             if entry.boot_generation.load(Ordering::SeqCst) == my_gen && !entry.is_terminal() {
                 entry.fail_and_evict(&self.sessions, err.to_string());
             }
@@ -406,9 +407,37 @@ async fn teardown_connection(entry: &SessionEntry) {
 }
 
 pub(super) async fn stop_entry(entry: &SessionEntry) {
-    entry.boot_generation.fetch_add(1, Ordering::SeqCst);
+    // Superseding the generation cancels a boot in flight (its build is killed
+    // and it lets go of the lifecycle lock), so the lock below is not held for
+    // the length of a compile or an adapter timeout.
+    entry.bump_generation();
     teardown_connection(entry).await;
     let _guard = entry.lifecycle_lock.lock().await;
     teardown_connection(entry).await;
     entry.mark_terminated();
+}
+
+/// Graceful `terminate`/`disconnect` allowed per session on daemon shutdown.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(1200);
+/// How long shutdown waits for a cancelled boot to let go of the session.
+const SHUTDOWN_BOOT_UNWIND: Duration = Duration::from_millis(500);
+
+/// Daemon-shutdown stop: bounded, and it never waits indefinitely on the
+/// lifecycle lock. Whatever is left is killed outright.
+pub(super) async fn shutdown_entry(entry: &SessionEntry) {
+    entry.bump_generation();
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE, teardown_connection(entry)).await;
+    force_disconnect(entry);
+    // A boot that was mid-handshake may have attached a connection before it
+    // saw the cancel; once it lets go of the lock, sweep again.
+    let _guard = tokio::time::timeout(SHUTDOWN_BOOT_UNWIND, entry.lifecycle_lock.lock()).await;
+    force_disconnect(entry);
+    entry.mark_terminated();
+}
+
+fn force_disconnect(entry: &SessionEntry) {
+    let conn = entry.conn.write().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(conn) = conn {
+        conn.shutdown_immediately();
+    }
 }

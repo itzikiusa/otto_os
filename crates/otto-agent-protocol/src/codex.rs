@@ -16,15 +16,16 @@ use std::collections::HashMap;
 
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, PlanStepStatus, ProviderCommand,
-    ProviderFailure, RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider,
-    RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus,
-    TurnTerminalStatus, TurnTokenUsage,
+    ProviderFailure, RequestKind, RuntimeAccessMode, RuntimeCapabilities, RuntimePromptReq,
+    RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind,
+    TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
 use crate::driver::{
-    item, restore_keeping_program, rpc_failure, rpc_key, tool_error, with_file_paths, DriverError,
-    DriverEvent, DriverStep, LaunchContext, LaunchSpec, StructuredDriver,
+    drop_unsupported_effort, item, restore_keeping_program, rpc_failure, rpc_key, tool_error,
+    with_file_paths, DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec,
+    StructuredDriver, TaskStop,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -61,7 +62,10 @@ impl Default for Item {
     }
 }
 
+/// Every field may be missing from a snapshot an older build wrote (a
+/// deploy must never kill a live thread over a new field).
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CodexDriver {
     /// The factory's binary: kept across a restore, never snapshotted.
     #[serde(skip)]
@@ -112,6 +116,19 @@ pub struct CodexDriver {
     skills: HashMap<String, String>,
     #[serde(default)]
     skills_req: Option<u64>,
+    /// The effort the running turn was started with (a steer at another
+    /// effort waits for the next turn).
+    #[serde(default)]
+    effort: Option<String>,
+    /// In-flight per-task stop requests: (rpc id, task id).
+    #[serde(default)]
+    task_stops: Vec<(u64, String)>,
+}
+
+impl Default for CodexDriver {
+    fn default() -> Self {
+        Self::with_program("codex")
+    }
 }
 
 impl CodexDriver {
@@ -148,6 +165,8 @@ impl CodexDriver {
             developer_instructions: None,
             skills: HashMap::new(),
             skills_req: None,
+            effort: None,
+            task_stops: Vec::new(),
         }
     }
 
@@ -277,6 +296,9 @@ impl CodexDriver {
         }
         if let Some(e) = &req.effort {
             params["effort"] = json!(e);
+        }
+        if req.effort.is_some() {
+            self.effort = req.effort.clone();
         }
         // Plan mode is a collaboration mode, sent while it is on and once
         // more to leave it (Codex keeps the last one). Its settings name the
@@ -751,6 +773,30 @@ impl CodexDriver {
             if let Some(e) = error {
                 step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
             }
+        } else if let Some(pos) = self.task_stops.iter().position(|(r, _)| *r == id) {
+            let (_, task_id) = self.task_stops.swap_remove(pos);
+            // The child's own `turn/completed` settles its card.
+            let error = error.map(|e| rpc_failure("provider_error", &e).message);
+            step.push(DriverEvent::TaskStopAnswered { task_id, error });
+        }
+    }
+
+    /// `turn/interrupt` on every spawned agent's running turn (Codex does
+    /// not promise to cascade a parent's interrupt to its child threads).
+    fn interrupt_children(&mut self, step: &mut DriverStep) {
+        let mut running: Vec<(String, String)> = self
+            .subagents
+            .values()
+            .filter(|c| c.status.is_open() && !c.settled)
+            .filter_map(|c| Some((c.child_thread_id.clone()?, c.child_turn_id.clone()?)))
+            .collect();
+        running.sort();
+        for (thread, turn) in running {
+            let (_, line) = self.request(
+                "turn/interrupt",
+                json!({"threadId": thread, "turnId": turn}),
+            );
+            step.write(line);
         }
     }
 
@@ -1057,11 +1103,19 @@ impl StructuredDriver for CodexDriver {
         self.turn_id = Some(turn_id.to_string());
         self.failure = None;
         let mut step = DriverStep::default();
+        let (req, dropped) = drop_unsupported_effort(
+            RuntimeProvider::Codex,
+            &RuntimeCapabilities::for_provider(RuntimeProvider::Codex).efforts,
+            req,
+        );
+        if let Some(n) = dropped {
+            step.push(DriverEvent::TurnItem(n));
+        }
         self.flush_mcp_failures(&mut step);
         if self.ready {
-            self.send_turn(&mut step, req);
+            self.send_turn(&mut step, &req);
         } else {
-            self.queued = Some(req.clone());
+            self.queued = Some(req);
         }
         Ok(step)
     }
@@ -1080,6 +1134,14 @@ impl StructuredDriver for CodexDriver {
         let Some(expected_turn_id) = self.codex_turn.clone() else {
             return Err(DriverError("turn has not started on the server yet".into()));
         };
+        // `turn/steer` carries no effort: a message at another effort waits
+        // for the next turn (the runtime queues it) instead of running at
+        // the old one.
+        if req.effort.is_some() && req.effort != self.effort {
+            return Err(DriverError(
+                "a different reasoning effort applies from the next turn".into(),
+            ));
+        }
         let input = self.input(req);
         if input.is_empty() {
             return Err(DriverError("empty steer input".into()));
@@ -1128,7 +1190,31 @@ impl StructuredDriver for CodexDriver {
         }
         self.interrupt_when_started = true;
         self.maybe_interrupt(&mut step);
+        self.interrupt_children(&mut step);
         step
+    }
+
+    /// A spawned agent's running turn: `turn/interrupt {threadId, turnId}`
+    /// on its child thread (shape checked against codex-cli 0.169.0's
+    /// app-server schema). Unknown task, or a child whose turn Codex has
+    /// not named: unsupported, so the runtime asks the agent.
+    fn stop_task(&mut self, task_id: &str) -> TaskStop {
+        let Some((thread, turn)) = self
+            .subagents
+            .values()
+            .find(|c| c.bg_id() == task_id && c.status.is_open() && !c.settled)
+            .and_then(|c| Some((c.child_thread_id.clone()?, c.child_turn_id.clone()?)))
+        else {
+            return TaskStop::Unsupported;
+        };
+        let (id, line) = self.request(
+            "turn/interrupt",
+            json!({"threadId": thread, "turnId": turn}),
+        );
+        self.task_stops.push((id, task_id.to_string()));
+        let mut step = DriverStep::default();
+        step.write(line);
+        TaskStop::Native(step)
     }
 
     fn respond(
@@ -2345,5 +2431,125 @@ mod tests {
                         && ts.status == "stopped"
                 )
         )));
+    }
+
+    /// A prompted turn whose spawned agent's child thread `th-sub-1` runs
+    /// turn `ct-sub-1`.
+    fn with_running_child(d: &mut CodexDriver) {
+        ready(d, false);
+        let p = d.prompt("t1", &RuntimePromptReq::of("fan out")).unwrap();
+        let req_id = parse(&p.writes[0])["id"].clone();
+        feed(
+            d,
+            json!({"id": req_id, "result": {"turn": {"id": "ct-root", "status": "inProgress"}}}),
+        );
+        feed(
+            d,
+            json!({"method": "item/completed", "params": {"threadId": "th1", "turnId": "ct-root", "item": {
+                "type": "collabAgentToolCall", "id": "col-1", "tool": "spawnAgent",
+                "prompt": "Audit auth", "receiverThreadIds": ["th-sub-1"], "status": "completed"}}}),
+        );
+        feed(
+            d,
+            json!({"method": "turn/started", "params": {"threadId": "th-sub-1", "turn": {"id": "ct-sub-1", "status": "inProgress"}}}),
+        );
+    }
+
+    #[test]
+    fn stop_task_interrupts_the_spawned_agents_own_turn_and_relays_the_answer() {
+        let mut d = CodexDriver::with_program("codex");
+        with_running_child(&mut d);
+        assert!(matches!(d.stop_task("unknown"), TaskStop::Unsupported));
+        let TaskStop::Native(step) = d.stop_task("th-sub-1") else {
+            panic!("a running child stops natively");
+        };
+        let req = parse(&step.writes[0]);
+        assert_eq!(req["method"], "turn/interrupt");
+        assert_eq!(
+            req["params"],
+            json!({"threadId": "th-sub-1", "turnId": "ct-sub-1"})
+        );
+        let s = feed(&mut d, json!({"id": req["id"], "result": {}}));
+        assert_eq!(
+            s.events,
+            vec![DriverEvent::TaskStopAnswered {
+                task_id: "th-sub-1".into(),
+                error: None
+            }]
+        );
+        // The child's own end settles the card and empties the list.
+        let s = feed(
+            &mut d,
+            json!({"method": "turn/completed", "params": {"threadId": "th-sub-1", "turn": {"id": "ct-sub-1", "status": "interrupted"}}}),
+        );
+        assert!(s.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::BackgroundTasks(l) if l.is_empty()
+        )));
+    }
+
+    /// The parent's Stop interrupts each running child thread too, and a
+    /// child that still runs is not called stopped until it says so.
+    #[test]
+    fn a_parent_interrupt_interrupts_children_and_keeps_them_listed_until_they_end() {
+        let mut d = CodexDriver::with_program("codex");
+        with_running_child(&mut d);
+        let step = d.interrupt();
+        let sent: Vec<Value> = step.writes.iter().map(|w| parse(w)).collect();
+        assert!(sent.iter().any(|m| m["method"] == "turn/interrupt"
+            && m["params"] == json!({"threadId": "th1", "turnId": "ct-root"})));
+        assert!(sent.iter().any(|m| m["method"] == "turn/interrupt"
+            && m["params"] == json!({"threadId": "th-sub-1", "turnId": "ct-sub-1"})));
+        let s = feed(
+            &mut d,
+            json!({"method": "turn/completed", "params": {"threadId": "th1", "turn": {"id": "ct-root", "status": "interrupted"}}}),
+        );
+        assert!(!s.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::BackgroundTasks(l) if l.is_empty()
+        )));
+        assert!(!s.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::SystemNotice { .. })
+        )));
+        assert_eq!(d.bg_tasks.len(), 1, "the child still runs");
+    }
+
+    #[test]
+    fn a_steer_at_another_effort_waits_and_an_unknown_effort_is_dropped_with_a_notice() {
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        let mut req = RuntimePromptReq::of("go");
+        req.effort = Some("high".into());
+        let p = d.prompt("t1", &req).unwrap();
+        let start = parse(&p.writes[0]);
+        assert_eq!(start["params"]["effort"], "high");
+        feed(
+            &mut d,
+            json!({"id": start["id"], "result": {"turn": {"id": "ct1", "status": "inProgress"}}}),
+        );
+        let mut same = RuntimePromptReq::of("and this");
+        same.effort = Some("high".into());
+        assert!(d.steer(&same).is_ok());
+        let mut other = RuntimePromptReq::of("think harder");
+        other.effort = Some("xhigh".into());
+        assert!(d.steer(&other).is_err(), "queued for the next turn");
+        feed(
+            &mut d,
+            json!({"method": "turn/completed", "params": {"turn": {"id": "ct1", "status": "completed"}}}),
+        );
+        let mut max = RuntimePromptReq::of("go");
+        max.effort = Some("max".into());
+        let p = d.prompt("t2", &max).expect("dropped, not refused");
+        assert!(p.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i) if matches!(
+                &i.kind,
+                TurnItemKind::SystemNotice { message, .. } if message.contains("max")
+            )
+        )));
+        let start = parse(p.writes.last().unwrap());
+        assert_eq!(start["method"], "turn/start");
+        assert!(start["params"].get("effort").is_none());
     }
 }

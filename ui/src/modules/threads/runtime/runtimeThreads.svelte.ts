@@ -7,7 +7,7 @@ import { loadErrorText } from '../../../lib/loadError';
 import { installRuntimeDraftRecovery } from '../../../lib/stores/runtimeDraftRecovery.svelte';
 import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
 import { api } from '../../../lib/api/client';
-import { onLive } from '../../../lib/live';
+import { appLive, onLive } from '../../../lib/live';
 import { router } from '../../../lib/router.svelte';
 import { noteRuntimeWaiting } from '../../../lib/stores/runtimeAttention.svelte';
 import { uiControl } from '../../../lib/stores/uiControl.svelte';
@@ -15,10 +15,15 @@ import type {
   ApprovalDecision,
   AskChildReq,
   AskChildResp,
+  EmbeddedOrigin,
+  EmbeddedThreadSource,
+  RuntimeAccessMode,
   PeerInfo,
   QuestionAnswer,
   PromptDelivery,
   ProviderSessionStatus,
+  QueuedPrompt,
+  RuntimeInterruptResp,
   RuntimeEvent,
   RuntimePromptReq,
   RuntimePromptResp,
@@ -80,8 +85,10 @@ export function asThreadSession(r: RuntimeSession): Session {
     kind: 'agent',
     provider: sessionProviderSlug(r),
     title: r.title,
-    // Background work the agent started keeps the row working between turns.
-    status: r.status === 'working' || r.status === 'starting' || (r.status !== 'closed' && (r.background_tasks?.length ?? 0) > 0) ? 'working' : 'idle',
+    // Background work the agent started keeps the row alive between turns,
+    // but calm: `running` ("Background task running"), never the working
+    // pulse of a turn — the agent itself is idle.
+    status: r.status === 'working' || r.status === 'starting' ? 'working' : r.status !== 'closed' && (r.background_tasks?.length ?? 0) > 0 ? 'running' : 'idle',
     cwd: r.cwd,
     provider_session_id: r.native_thread_id ?? null,
     connection_id: null,
@@ -114,6 +121,8 @@ class RuntimeThreads {
   private embedded = new Map<string, number>();
   /** Original composer attachments keyed by `queued_id` so Edit preserves filenames even before server hydration. */
   private queuedAttachments = new Map<string, { name: string; mime: string; data_base64: string }[]>();
+  /** The thread each cached `queued_id` belongs to (to release them per thread). */
+  private queuedOwner = new Map<string, string>();
   private seqListeners = new Set<(id: string, seq: number | null | undefined) => void>();
   private liveRefs = 0;
   private stopLive: (() => void) | null = null;
@@ -230,13 +239,39 @@ class RuntimeThreads {
 
   /** Listen while Threads is mounted; returns the unsubscribe. */
   mount(): () => void {
-    if (this.liveRefs++ === 0) this.stopLive = onLive(['agent_runtime_event'], (ev) => this.onEvent(ev.event as RuntimeEvent));
+    if (this.liveRefs++ === 0) {
+      const offEvent = onLive(['agent_runtime_event'], (ev) => this.onEvent(ev.event as RuntimeEvent));
+      // Events were lost (socket reconnect, lag, a daemon restart): re-read
+      // the rows, or one stays "working" until Threads is re-entered.
+      const offResync = appLive.onResync(() => void this.resync());
+      this.stopLive = () => {
+        offEvent();
+        offResync();
+      };
+    }
     return () => {
       if (--this.liveRefs === 0) {
         this.stopLive?.();
         this.stopLive = null;
       }
     };
+  }
+
+  /** Re-read every loaded workspace's rows and the cross-workspace list. */
+  async resync(): Promise<void> {
+    const loaded = Object.keys(this.loaded).filter((w) => this.loaded[w]);
+    await Promise.allSettled([...loaded.map((w) => this.load(w)), this.loadAll()]);
+  }
+
+  /** Release cached attachments of `id`'s queued messages that left its
+   *  queue (the daemon delivered them), or all of them (`keep` null). */
+  private releaseQueued(id: string, keep: readonly QueuedPrompt[] | null): void {
+    const still = new Set((keep ?? []).map((q) => q.id));
+    for (const [qid, owner] of this.queuedOwner) {
+      if (owner !== id || still.has(qid)) continue;
+      this.queuedOwner.delete(qid);
+      this.queuedAttachments.delete(qid);
+    }
   }
 
   /** Ids being fetched because an event named a thread we don't hold yet. */
@@ -272,6 +307,7 @@ class RuntimeThreads {
 
   private onEvent(ev: RuntimeEvent): void {
     if (!this.byId[ev.session_id]) this.adopt(ev.session_id);
+    if (ev.type === 'queue.updated') this.releaseQueued(ev.session_id, ev.queued_prompts ?? []);
     // A turn that ended (done or failed) off screen leaves an unread dot.
     if (ev.type === 'turn.terminal' && (ev.status === 'completed' || ev.status === 'failed') && !this.onScreen(ev.session_id)) {
       this.unread = { ...this.unread, [ev.session_id]: true };
@@ -303,18 +339,45 @@ class RuntimeThreads {
       prompt: string;
       /** Images / PDFs for the first message. */
       attachments?: readonly { name: string; mime: string; data_base64: string }[];
+      /** The thread's access mode from the first turn on. Left out, a new
+       *  thread starts in the daemon's default — Full access while Settings ›
+       *  Providers skips permission prompts (the same rule terminal sessions
+       *  follow), else Approval required. Embeds always name one. */
+      accessMode?: RuntimeAccessMode;
+      /** An embedded thread's tag and what it is about (`meta.source` /
+       *  `meta.origin`, docs/features/threads-structured-runtime.md). */
+      source?: EmbeddedThreadSource;
+      origin?: EmbeddedOrigin;
     },
   ): Promise<RuntimeSession> {
-    const created = await api.post<RuntimeSession>(`/workspaces/${workspaceId}/runtime-sessions`, {
+    const path = `/workspaces/${workspaceId}/runtime-sessions`;
+    const body = {
       provider: req.provider,
       cwd: req.cwd,
       title: req.title,
       ...(req.titleAuto ? { title_auto: true } : {}),
       model: req.model,
-      // No access mode: a new thread starts in the daemon's default — Full
-      // access while Settings › Providers skips permission prompts (the same
-      // rule terminal sessions follow), else Approval required.
-    });
+      ...(req.accessMode ? { access_mode: req.accessMode } : {}),
+    };
+    // The thread keeps its effort for later turns (the first prompt still
+    // names it), and an embed its tag.
+    const full = {
+      ...body,
+      ...(req.effort ? { effort: req.effort } : {}),
+      ...(req.source ? { source: req.source, ...(req.origin ? { origin: req.origin } : {}) } : {}),
+    };
+    let created: RuntimeSession;
+    try {
+      created = await api.post<RuntimeSession>(path, full);
+    } catch (e) {
+      // An older daemon refuses the newer fields (400 / 422): a plain thread
+      // still works — the host remembers its id, the prompt carries the effort.
+      const status = (e as { status?: unknown } | null)?.status;
+      const extra = !!req.source || !!req.effort;
+      const refused = extra && (status === 400 || status === 422) && /source|origin|effort|unknown field/i.test(String((e as Error)?.message ?? ''));
+      if (!refused) throw e;
+      created = await api.post<RuntimeSession>(path, body);
+    }
     this.byId[created.id] = created;
     this.emitSequence(created.id, created.last_sequence);
     const pics = (req.attachments ?? []).filter((f) => f.mime.startsWith('image/'));
@@ -335,6 +398,33 @@ class RuntimeThreads {
       );
     }
     return created;
+  }
+
+  /** The embedded thread a host started for `originId` (a PR, a connection):
+   *  `GET …/runtime-sessions?source=&origin_id=`, never a linked thread its
+   *  agent opened (those inherit the origin), an OPEN one before a closed
+   *  one, then the newest activity. `rememberedId` is the id the host kept
+   *  for a daemon that stores no origin. The pick lands in `byId`. */
+  async findByOrigin(
+    workspaceId: string,
+    source: string,
+    originId: string,
+    rememberedId: string | null = null,
+  ): Promise<RuntimeSession | null> {
+    const q = `source=${encodeURIComponent(source)}&origin_id=${encodeURIComponent(originId)}`;
+    const rows = await api.get<RuntimeSession[]>(`/workspaces/${workspaceId}/runtime-sessions?${q}`);
+    const originOf = (r: RuntimeSession): string | null => {
+      const o = r.meta?.origin as { id?: unknown } | undefined;
+      return typeof o?.id === 'string' ? o.id : null;
+    };
+    const mine = (Array.isArray(rows) ? rows : []).filter(
+      (r) => !r.parent_id && (r.id === rememberedId || (r.meta?.source === source && originOf(r) === originId)),
+    );
+    const closed = (r: RuntimeSession): number => (r.status === 'closed' ? 1 : 0);
+    mine.sort((a, b) => closed(a) - closed(b) || b.last_active_at.localeCompare(a.last_active_at));
+    const hit = mine[0] ?? null;
+    if (hit) this.byId[hit.id] = hit;
+    return hit;
   }
 
   /** "Ask another agent" (or several): new threads linked to `parentId`,
@@ -364,9 +454,13 @@ class RuntimeThreads {
       if (cached.length > 0) {
         if (this.queuedAttachments.size >= 64) {
           const oldest = this.queuedAttachments.keys().next().value;
-          if (oldest) this.queuedAttachments.delete(oldest);
+          if (oldest) {
+            this.queuedAttachments.delete(oldest);
+            this.queuedOwner.delete(oldest);
+          }
         }
         this.queuedAttachments.set(resp.queued_id, cached);
+        this.queuedOwner.set(resp.queued_id, id);
       }
     }
     this.emitSequence(id, resp.sequence);
@@ -389,8 +483,10 @@ class RuntimeThreads {
     return resp;
   }
 
-  async interrupt(id: string): Promise<void> {
-    await api.post(`/runtime-sessions/${id}/interrupt`);
+  /** Stop the running turn. `interrupted: false` = no turn ran (background
+   *  work, if any, keeps running — `background_tasks` counts it). */
+  async interrupt(id: string): Promise<RuntimeInterruptResp | undefined> {
+    return api.post<RuntimeInterruptResp | undefined>(`/runtime-sessions/${id}/interrupt`);
   }
 
   async respond(id: string, requestId: string, decision: ApprovalDecision): Promise<void> {
@@ -425,6 +521,7 @@ class RuntimeThreads {
   async remove(id: string): Promise<void> {
     await api.del(`/runtime-sessions/${id}`);
     runtimeDrafts.forget(id);
+    this.releaseQueued(id, null);
     this.markRead(id);
     const next = { ...this.byId };
     delete next[id];
@@ -439,6 +536,7 @@ class RuntimeThreads {
     const cached = this.queuedAttachments.get(queuedId);
     const resp = await api.del<UnqueuePromptResp | void>(`/runtime-sessions/${id}/queue/${queuedId}`);
     this.queuedAttachments.delete(queuedId);
+    this.queuedOwner.delete(queuedId);
     if (cached && cached.length > 0) {
       return { text: resp && typeof resp === 'object' ? resp.text : undefined, attachments: cached };
     }
@@ -458,9 +556,14 @@ class RuntimeThreads {
     return { attachments: [] };
   }
 
-  /** Deliver a queued message now: steer it in, or stop the turn and send it. */
+  /** Deliver a queued message now (steer it in, or stop the turn and send it), or retry a failed one (`queue`). */
   async deliverQueued(id: string, queuedId: string, delivery: PromptDelivery): Promise<RuntimePromptResp> {
-    this.queuedAttachments.delete(queuedId);
+    // A retry (`queue`) keeps the message queued: its attachments stay cached
+    // for Edit until the daemon delivers it (`queue.updated` releases them).
+    if (delivery !== 'queue') {
+      this.queuedAttachments.delete(queuedId);
+      this.queuedOwner.delete(queuedId);
+    }
     return api.post<RuntimePromptResp>(`/runtime-sessions/${id}/queue/${queuedId}`, { delivery });
   }
 }

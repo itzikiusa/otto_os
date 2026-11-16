@@ -235,7 +235,8 @@ pub(crate) async fn spawn_target_process(
     }
 }
 
-/// Execute a bounded probe/build command on the target and capture stdout/stderr.
+/// Execute a bounded probe/build command on the target and capture stdout/stderr
+/// (the last [`crate::proc_group::HELPER_OUTPUT_CAP`] bytes of each).
 pub(crate) async fn run_target_command(
     target: &IdeTargetSpec,
     ssh: Option<&IdeSshSpec>,
@@ -284,13 +285,18 @@ pub(crate) async fn run_target_command(
             c
         }
     };
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) => Ok(out),
-        Ok(Err(e)) => Err(Error::Upstream(format!("'{command}' failed: {e}"))),
-        Err(_) => Err(Error::Upstream(format!(
+    // Its own process group: a timeout, or this future being dropped by a Stop
+    // that cancels a debug start, kills the whole group (cargo's rustc
+    // children, `sh -lc`'s javac), and each stream is capped.
+    match crate::proc_group::wait_bounded(child, timeout, crate::proc_group::HELPER_OUTPUT_CAP)
+        .await
+    {
+        Ok(out) => Ok(out),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Err(Error::Upstream(format!(
             "'{command}' timed out after {}s",
             timeout.as_secs()
         ))),
+        Err(e) => Err(Error::Upstream(format!("'{command}' failed: {e}"))),
     }
 }
 

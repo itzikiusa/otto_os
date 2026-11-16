@@ -138,6 +138,10 @@
     </div>
   {:else if row.kind === 'day'}
     <div class="rt-day" role="separator" aria-label={row.label}><span>{row.label}</span></div>
+  {:else if row.kind === 'setting'}
+    <div class="rt-day rt-setting" class:refused={row.change.refused} role="note" aria-label={row.change.text} data-testid="runtime-setting-change" data-setting={row.change.setting}>
+      <Icon name={row.change.refused ? 'info' : 'gear'} size={12} /><span dir="auto">{row.change.text}</span>
+    </div>
   {:else if row.kind === 'message' && row.item.type === 'user_message' && isRunHandoff(row.item.text)}
     <!-- A routine's report handed to the agent: its result card and the agent's reply show it. -->
   {:else if row.kind === 'message' && row.item.type === 'user_message' && messageAttribution(row.item.text)}
@@ -309,6 +313,17 @@
     content: '';
     flex: 1;
     border-block-start: 1px solid var(--border);
+  }
+  .rt-setting {
+    font-size: var(--fs-xs);
+    text-align: center;
+  }
+  .rt-setting.refused {
+    color: var(--text);
+  }
+  .rt-setting span {
+    max-inline-size: 80%;
+    overflow-wrap: anywhere;
   }
   .rt-from {
     margin-block: 12px;

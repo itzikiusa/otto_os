@@ -18,9 +18,11 @@ test('the diagnosis thread is a full-height sheet on small screens', async ({ pa
   await expect(panel.getByTestId('ssh-exit-message')).toContainText('Could not resolve', { timeout: 20_000 });
   await panel.getByTestId('conn-diagnose').click();
   await expect(page.getByTestId('diagnose-consent')).toBeVisible();
-  await page.getByTestId('diagnose-start').click();
-
   const aside = page.getByTestId('diagnose-aside');
+  const draft = aside.getByTestId('embedded-runtime-draft');
+  for (const id of ['picker-agent', 'runtime-access', 'new-thread-send-btn']) await expectFullyInViewport(page, draft.getByTestId(id), id);
+  await draft.getByRole('button', { name: 'Start the diagnosis' }).click();
+
   await expect(aside.locator('[data-testid="runtime-thread-rt-diag-1"]')).toBeVisible({ timeout: 15_000 });
   const vw = page.viewportSize();
   const box = await aside.boundingBox();

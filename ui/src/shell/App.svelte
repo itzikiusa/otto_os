@@ -15,6 +15,7 @@
   import TabBar from './TabBar.svelte';
   import BottomNav from './BottomNav.svelte';
   import Drawer from './Drawer.svelte';
+  import ShortNavDrawer from './ShortNavDrawer.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import NavButtons from './NavButtons.svelte';
   import MobileActionBar from './MobileActionBar.svelte';
@@ -209,7 +210,7 @@
   });
   // Navigation and breakpoint changes dismiss compact overlays.
   $effect.pre(() => {
-    void router.parts.join('/');
+    void [router.parts.join('/'), viewport.mode, viewport.isShort]; // a rotation re-buckets the shell too
     ui.resetDrawers(compactShell);
   });
 
@@ -1044,7 +1045,7 @@
      browser we DON'T CSS-zoom — users scale crisply with the browser's own zoom
      (⌘+/−), which re-rasterizes everything (terminal included) and keeps
      coordinates correct. ui.zoom still drives native zoom inside Tauri. -->
-<div class="shell" class:vibrant class:embedded={isEmbedded} class:mobile={compactShell} class:tablet={compactShell && viewport.isTablet} class:page-titled={pageTitled}>
+<div class="shell" class:vibrant class:embedded={isEmbedded} class:mobile={compactShell} class:tablet={compactShell && viewport.isTablet} class:short={compactShell && viewport.isShort} class:page-titled={pageTitled}>
   {#if compactShell && !(viewport.isPhone && moduleName === 'threads')}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <header
@@ -1053,7 +1054,7 @@
     data-tauri-drag-region
     onmousedown={isTauri ? startWindowDrag : undefined}
   >
-    {#if viewport.isPhone}
+    {#if viewport.navDrawer}
       <button
         class="mtop-btn"
         onclick={() => (ui.navDrawerOpen = !ui.navDrawerOpen)}
@@ -1072,7 +1073,7 @@
     <span class="grow"></span>
     <!-- Desktop + tablet reach the bell in the Navigator/Rail; the phone's
          Navigator is a closed drawer, so the top bar carries it instead. -->
-    {#if viewport.isPhone}
+    {#if viewport.navDrawer}
       <NotificationBell placement="below" />
     {/if}
     {#if showRightPanel}
@@ -1115,7 +1116,7 @@
     </div>
   {/if}
   <div class="shell-main" class:mbody={compactShell}>
-    {#if !isPopout && !isEmbedded && !viewport.isPhone}
+    {#if !isPopout && !isEmbedded && !viewport.navDrawer}
     <div class="sidebar" class:msidebar={compactShell} class:tauri-top={isTauri && !compactShell}>
       <!-- Draggable titlebar strip over the overlaid traffic-lights inset, so the
            window can be moved by dragging the top-left (the native title bar is
@@ -1180,17 +1181,15 @@
   {#if compactShell && viewport.isPhone}
     <BottomNav />
   {/if}
-  {#if !isPopout && !isEmbedded && (!viewport.isPhone || events.state !== 'connected')}
+  {#if !isPopout && !isEmbedded && (!viewport.navDrawer || events.state !== 'connected')}
     <StatusBar />
   {/if}
 </div>
-<!-- Phone: Navigator lives in a LEFT drawer with its own open-state
-     (ui.navDrawerOpen — not persisted, closed on load, closed on navigation;
-     never the desktop sidebar's railExpanded preference). On tablet the
-     Navigator is persistent, so no left drawer. -->
-{#if compactShell && viewport.isPhone}
+<!-- Phone (and a phone on its side): Navigator in a LEFT drawer, ui.navDrawerOpen — not persisted,
+     closed on load/navigation/rotation. Tablet keeps the persistent Navigator. -->
+{#if compactShell && viewport.navDrawer}
   <Drawer bind:open={ui.navDrawerOpen} side="left" label="Navigator" width="min(86vw, 280px)">
-    <Navigator />
+    {#if viewport.isShort}<ShortNavDrawer />{:else}<Navigator />{/if}
   </Drawer>
 {/if}
 
@@ -1384,6 +1383,7 @@
     border-bottom: 1px solid var(--border);
     background: var(--bg-sidebar);
   }
+  .shell.short .mtopbar { height: 36px; } /* phone on its side: every row of height counts */
   .mtopbar.tauri-top {
     height: calc(var(--mobile-topbar-h) + 22px);
     padding-top: 22px;

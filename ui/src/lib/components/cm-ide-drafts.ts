@@ -8,6 +8,17 @@ export const IDE_CURSOR_POS_KEY = 'otto.ide.cursorPos.v1';
 export const MAX_JOURNAL_FILES = 24;
 export const MAX_DRAFT_FILES = 24;
 export const MAX_JOURNAL_ENTRY_CHARS = 160_000;
+/** WebKit gives an origin about 5 MB of localStorage, counted as UTF-16 (2 bytes a
+ *  character), and every Otto module shares it. Drafts and the undo journal each get a
+ *  bounded slice (~1.6 MB + ~1.2 MB worst case) so a dozen large unsaved files can never
+ *  starve prefs, dock state or saved tab lists; the oldest entries go first. */
+export const MAX_DRAFT_TOTAL_CHARS = 800_000;
+export const MAX_JOURNAL_TOTAL_CHARS = 600_000;
+
+/** True when a buffer this size gets no crash-recovery draft (the editor says so). */
+export function exceedsIdeDraftLimit(savedContent: string, draftContent: string): boolean {
+  return savedContent.length > MAX_JOURNAL_ENTRY_CHARS || draftContent.length > MAX_JOURNAL_ENTRY_CHARS;
+}
 
 const SECRET_EXACT_NAMES = new Set([
   'id_rsa',
@@ -249,14 +260,56 @@ export function writeJournalMap(map: UndoJournalMap, storage?: Pick<Storage, 'se
   if (!store) return;
   const entries = Object.entries(map).sort((a, b) => (b[1]?.updatedAt ?? 0) - (a[1]?.updatedAt ?? 0)).slice(0, MAX_JOURNAL_FILES);
   const trimmed: UndoJournalMap = {};
-  for (const [k, v] of entries) trimmed[k] = v;
+  // Newest first until the slice is spent: the oldest journals are the ones dropped.
+  let total = 0;
+  for (const [k, v] of entries) {
+    const size = journalEntryChars(v);
+    if (total > 0 && total + size > MAX_JOURNAL_TOTAL_CHARS) break;
+    total += size;
+    trimmed[k] = v;
+  }
   try {
     store.setItem(IDE_UNDO_JOURNAL_KEY, JSON.stringify(trimmed));
   } catch {
     const compact: UndoJournalMap = {};
-    for (const [k, v] of entries.slice(0, 8)) compact[k] = v;
+    for (const [k, v] of Object.entries(trimmed).slice(0, 8)) compact[k] = v;
     try { store.setItem(IDE_UNDO_JOURNAL_KEY, JSON.stringify(compact)); } catch { /* ignore */ }
   }
+}
+
+function journalEntryChars(e: IdeUndoJournalEntry | undefined): number {
+  if (!e) return 0;
+  const doc = typeof e.stateJson?.doc === 'string' ? e.stateJson.doc.length : 0;
+  // stateJson carries the doc plus its undo history; the saved/draft copies come on top.
+  return doc * 2 + (e.baseSavedContent?.length ?? 0) + (e.draftContent?.length ?? 0) + 256;
+}
+
+function draftRecordChars(raw: string | null): number {
+  return raw ? raw.length : 0;
+}
+
+/** Drop the oldest drafts (by index time) until `incoming` more characters fit the drafts
+ *  slice. Returns the index that is left. `keep` is never evicted. */
+function evictOldDrafts(
+  store: Pick<Storage, 'getItem' | 'removeItem'>,
+  idx: UndoDraftIndexMap,
+  keep: string,
+  incoming: number,
+): UndoDraftIndexMap {
+  const newestFirst = Object.entries(idx).filter(([p]) => p !== keep).sort((a, b) => b[1] - a[1]);
+  const next: UndoDraftIndexMap = {};
+  let total = incoming;
+  for (let i = 0; i < newestFirst.length; i++) {
+    const [p, ts] = newestFirst[i];
+    const size = draftRecordChars(store.getItem(`${IDE_UNDO_DRAFT_PREFIX}${p}`));
+    if (i + 1 < MAX_DRAFT_FILES && total + size <= MAX_DRAFT_TOTAL_CHARS) {
+      next[p] = ts;
+      total += size;
+    } else {
+      try { store.removeItem?.(`${IDE_UNDO_DRAFT_PREFIX}${p}`); } catch { /* ignore */ }
+    }
+  }
+  return next;
 }
 
 function readDraftIndex(storage?: Pick<Storage, 'getItem'> | null): UndoDraftIndexMap {
@@ -278,31 +331,35 @@ export function writeIdeUndoDraftImmediate(
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null,
 ): void {
   if (!filePath || isSecretIdePath(filePath)) return;
-  if (savedContent.length > MAX_JOURNAL_ENTRY_CHARS || draftContent.length > MAX_JOURNAL_ENTRY_CHARS) return;
   const store = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
   if (!store) return;
-  if (savedContent === draftContent) {
+  // Too large to keep: drop any older (now stale) draft of this file rather than leave it
+  // to resurrect an earlier version on the next open.
+  if (savedContent === draftContent || exceedsIdeDraftLimit(savedContent, draftContent)) {
     removeIdeUndoDraft(filePath, store);
     return;
   }
+  const key = `${IDE_UNDO_DRAFT_PREFIX}${filePath}`;
+  const now = Date.now();
+  const payload = JSON.stringify({ savedContent, draftContent, updatedAt: now } satisfies IdeUndoDraftRecord);
   try {
-    const now = Date.now();
-    const rec: IdeUndoDraftRecord = { savedContent, draftContent, updatedAt: now };
-    store.setItem(`${IDE_UNDO_DRAFT_PREFIX}${filePath}`, JSON.stringify(rec));
-    const idx = readDraftIndex(store);
-    idx[filePath] = now;
-    const sorted = Object.entries(idx).sort((a, b) => b[1] - a[1]);
-    const nextIdx: UndoDraftIndexMap = {};
-    for (let i = 0; i < sorted.length; i++) {
-      const [p, ts] = sorted[i];
-      if (i < MAX_DRAFT_FILES) {
-        nextIdx[p] = ts;
-      } else if (typeof store.removeItem === 'function') {
-        store.removeItem(`${IDE_UNDO_DRAFT_PREFIX}${p}`);
-      }
+    // Make room first (oldest drafts out), so this write does not push the shared origin
+    // quota over and make every other module's storage write fail.
+    const idx = evictOldDrafts(store, readDraftIndex(store), filePath, payload.length);
+    try {
+      store.setItem(key, payload);
+    } catch {
+      // Still over the quota (other modules' data): keep only this draft and retry once.
+      for (const p of Object.keys(idx)) { try { store.removeItem?.(`${IDE_UNDO_DRAFT_PREFIX}${p}`); } catch { /* ignore */ } }
+      for (const p of Object.keys(idx)) delete idx[p];
+      store.setItem(key, payload);
     }
-    store.setItem(IDE_UNDO_DRAFT_INDEX_KEY, JSON.stringify(nextIdx));
-  } catch { /* ignore quota */ }
+    idx[filePath] = now;
+    store.setItem(IDE_UNDO_DRAFT_INDEX_KEY, JSON.stringify(idx));
+  } catch {
+    // Never throw out of a draft write, and never leave a stale earlier draft behind.
+    try { store.removeItem?.(key); } catch { /* ignore */ }
+  }
 }
 
 export function readIdeUndoDraft(

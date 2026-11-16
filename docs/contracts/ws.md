@@ -473,7 +473,9 @@ credentials are refused with 403 (`RootRoute::Lsp`).
 - **Multiplexing, multi-root & back-pressure:** Sockets share one language-server
   process per `(user_id, lang, root, ssh_target)` — never across users — capped
   at `MAX_SERVERS_PER_OWNER = 3` (`MAX_GLOBAL_SERVERS = 3`, `1.2 GiB` combined
-  LSP RSS budget, evicting `active_clients == 0` servers first) LRU per user, reaped after `450ms` once
+  LSP RSS budget that only evicts servers with no socket attached; the count cap
+  evicts socket-less servers first and an in-use one only when every server is
+  in use, see `otto/lspEvicted` below) LRU per user, reaped after `450ms` once
   detached with zero open documents (or immediately when switching workspace
   roots, and `45s` otherwise) via `shutdown` → `exit` → process-group
   `-SIGTERM`/`-SIGKILL`. JSON-RPC text frames carry bare LSP messages (the
@@ -484,6 +486,21 @@ credentials are refused with 403 (`RootRoute::Lsp`).
   `initialize` result, ref-counts `textDocument/didOpen` + `didClose` per URI,
   routes `textDocument/publishDiagnostics` to sockets holding that URI, and
   pushes `workspace/didChangeWatchedFiles` on build-manifest writes).
+- **Server → client notifications from the daemon itself** (bare JSON-RPC
+  notifications, never from the language server):
+  - `otto/lspAttached` `{ root, lang }` — sent first, once the socket is bound
+    to a pooled server (`root` is the resolved module root).
+  - `otto/lspEvicted` `{ reason, lang, root }` — the pooled server behind this
+    socket is being stopped; the socket closes right after it. `reason`:
+    `server_cap` (a new server needed a slot and every server had an open
+    editor — the least recently used one went), `build_tags_changed` (the
+    project's Go build tags changed), `shutdown` (the daemon is stopping);
+    `memory_budget` / `workspace_switched` only ever stop servers with no
+    socket attached, so a client does not see them. The RSS budget never
+    stops a server a socket is attached to. A client whose editor is still
+    open should reconnect (with backoff; for `server_cap` that re-spawns the
+    server and evicts the next least recently used one) and show that
+    intelligence restarted; on `shutdown` it waits for the daemon.
 
 ## 2. Event stream — `WS /ws/events`
 
@@ -1647,7 +1664,14 @@ published on the streaming path, never through the internal bus.
   the same Otto thread. It has no additional fields; preceding history remains.
   Request IDs are opaque, scoped to one provider process, and never reused by
   a replacement process. A `subagent`'s own activity items carry
-  `parent_item_id` (the card). `provider_turn.origin: "agent"` marks a turn
+  `parent_item_id` (the card). A `system_notice` whose `title` is `Model`,
+  `Effort` or `Access` is a selection change that took effect there
+  (id `selection:<id>`, message e.g. `Model: opus → sonnet`; api.md
+  `POST …/prompt`). `provider_turn.model?` /
+  `provider_turn.effort?` are the model and effort the turn started with
+  (a refused switch rewrites `model` to the one kept).
+  `queue.updated`'s `queued_prompts[].error?` marks a message whose delivery
+  failed and that waits for a retry. `provider_turn.origin: "agent"` marks a turn
   the agent started on its own; `provider_session.background_tasks` lists
   pending background work (api.md "Background work and the agent's own
   turns"); `provider_session.capabilities` (`{steer, images, files,

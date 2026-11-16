@@ -15,8 +15,18 @@ test('the More sheet shows the machine row and opens its details', async ({ page
   await ctx.dispose();
   await page.addInitScript((id) => localStorage.setItem('otto_workspace', id), id);
   await page.goto('/#/home');
-  // A phone on its side is wide enough for the tablet layout: no bottom nav,
-  // and the status bar with its chip is on screen.
+  // A phone on its side (short touch screen): no bottom nav and no status
+  // bar — the Navigator drawer's footer carries the machine chip.
+  if (info.project.name === 'iphone-landscape') {
+    await page.getByRole('button', { name: 'Open navigator' }).click();
+    const chip = page.getByTestId('short-nav-extras').getByTestId('statusbar-machine');
+    await expect(chip).toBeVisible({ timeout: 20_000 });
+    await expectFullyInViewport(page, chip, 'the drawer machine chip');
+    await chip.click();
+    await expect(page.getByTestId('machine-details')).toBeVisible();
+    return;
+  }
+  // An iPad on its side is a tablet: the status bar with its chip is on screen.
   if (info.project.name.includes('landscape')) {
     const chip = page.getByTestId('statusbar-machine');
     await expect(chip).toBeVisible({ timeout: 20_000 });

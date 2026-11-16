@@ -78,6 +78,8 @@ pub async fn meta(
             provider_models_provisional: false,
             runtime_capabilities: Default::default(),
             provider_families: Default::default(),
+            provider_resumable: Default::default(),
+            provider_terminal_effort: Default::default(),
             alt_loopback_base: None,
         }));
     }
@@ -156,6 +158,8 @@ pub async fn meta(
             })
             .collect(),
         provider_families,
+        provider_resumable: ctx.manager.providers().resume_flags(),
+        provider_terminal_effort: ctx.manager.provider_terminal_effort(),
         alt_loopback_base: crate::transport::alt_loopback_base(),
     }))
 }

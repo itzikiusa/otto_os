@@ -27,6 +27,7 @@
   } from './agentTasks';
   import RuntimeSwarmWork from './RuntimeSwarmWork.svelte';
   import RuntimeTaskOutput from './RuntimeTaskOutput.svelte';
+  import RuntimeTaskStop from './RuntimeTaskStop.svelte';
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
   import { linkedChildren } from './council';
   import { runtimeThreads } from './runtimeThreads.svelte';
@@ -208,6 +209,7 @@
     data-status={t.status}
     data-kind={t.kind}
   >
+    <div class="tat-line">
     <button
       type="button"
       class="tat-row-btn"
@@ -234,6 +236,10 @@
         <span class="tat-sub ellipsis" dir="auto" title={subLine}>{subLine}</span>
       {/if}
     </button>
+    <!-- A sibling of the row's button (a button never nests in one). -->
+    <RuntimeTaskStop part="button" {sessionId} task={t} />
+    </div>
+    <RuntimeTaskStop part="note" {sessionId} task={t} />
 
     {#if open && swarmMember && !t.itemId}
       <div class="tat-detail" data-testid="agents-tasks-detail">
@@ -422,6 +428,17 @@
   .tat-item.expanded {
     background: var(--surface-2);
   }
+  .tat-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
+    min-inline-size: 0;
+  }
+  .tat-line > :global(.tst-btn),
+  .tat-line > :global(.tst-busy) {
+    margin-block-start: 2px;
+    margin-inline-end: 4px;
+  }
   .tat-row-btn {
     appearance: none;
     border: none;
@@ -436,6 +453,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+    flex: 1;
     inline-size: 100%;
     min-inline-size: 0;
   }

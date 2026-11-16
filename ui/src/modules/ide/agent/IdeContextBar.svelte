@@ -50,7 +50,7 @@
       {
         label: 'Mark current editor selection',
         icon: 'cursor',
-        hint: '⌘L',
+        hint: typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches ? undefined : '⌘L',
         pinned: true,
         disabled: !ide.activeTab,
         title: ide.activeTab ? undefined : 'Open a file in the editor first',

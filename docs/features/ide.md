@@ -4,8 +4,8 @@ A full multi-language development environment inside Otto (`#/ide`) uniting
 **Local** and **Remote SSH** workspaces, OS/architecture-aware **SDK &
 Toolchain installation**, per-project **Environments & Run Configurations**,
 inline **Gutter Run/Debug**, a full **Debug Adapter Protocol (DAP) debugger**,
-**LSP intelligence**, a side-by-side **AI Coding Agent dock (`⌘L`) & Inline
-Edit (`⌘I`)**, **Share with Friends** live collaborative editing, and
+**LSP intelligence**, a side-by-side **AI Coding Agent dock (`⇧⌘L`; `⌘L` adds
+the selection) & Inline Edit (`⌘I`)**, **Share with Friends** live collaborative editing, and
 zero-rebuild **runtime IDE plugins**.
 
 - Route: `#/ide`. The project switcher always lists **Scratches** first — the
@@ -32,6 +32,63 @@ zero-rebuild **runtime IDE plugins**.
   - Public guest routes (`/api/v1/ide/collab/guest/*`) sit outside the bearer
     chokepoint and authenticate each request with the room's capability share
     token (`viewer` vs `editor`).
+- Write safety (what the daemon writes for you, unsandboxed):
+  - **Roots.** A non-root caller's IDE root, extra root or project folder is
+    never `/`, `$HOME`, a folder that contains a protected dir (`~/Library`,
+    `~/.ssh`, Otto's data dir) or a hidden tool home (`~/.codex`, …) — the
+    vault's `subtree_root_denial` rule. A workspace rooted at such a folder
+    does not authorize anything under it for non-root users, and a non-root
+    user cannot create a workspace there or move one there
+    (`POST`/`PATCH /workspaces` → `403`). Root is unaffected.
+  - **Control paths.** For a non-root caller every local write — save, create,
+    mkdir, rename (source and destination), duplicate, delete, `/ide/replace`,
+    Local History restore — refuses, on the resolved path (symlinks followed,
+    case-insensitive): anything inside a git dir (`.git/**`, or a folder that
+    is a git dir by shape: `HEAD` + `objects/` + `refs/`), `.gitattributes`,
+    `.gitmodules`, and the project agent config otto-sandbox write-denies for
+    read-only sessions (`.claude/settings*.json`, `.claude/hooks/**`,
+    `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.codex/**`,
+    `.gemini/**`, `.agents/**`, …). Otto's own fetch/status and the owner's
+    next commit or agent session would run them. **Root** may write all of
+    them from its own session: editing `.gitattributes` or `CLAUDE.md` is
+    normal work.
+  - **Collab guests** always write with non-root rules, even in a root host's
+    room, and are additionally refused instruction files (`CLAUDE.local.md`,
+    …), `.envrc`, `.vscode/launch.json`/`tasks.json`, `.husky/**`, Maven/Gradle
+    wrappers, `.venv/bin/*` and `node_modules/.bin/*` — checked on the resolved
+    path (local) or the remote real path (SSH). A guest can never restart the
+    host's debug session ("only the host can restart"); a room acts with its
+    host's CURRENT account (a disabled host's rooms close).
+  - **SSH saves** resolve the real remote parent (`cd -P … && pwd -P`) and
+    refuse a parent outside the real root or a final component that is a
+    symlink; for a non-root caller the real path is also checked against the
+    control paths above (save and every mutate path). A host that can't run
+    the probe (SFTP-only account, no `sh`, exec refused) gets `502` "could not
+    verify the real path … nothing was written" — never an unverified write.
+    The read-only remote SDK allowlist is a path-prefix match.
+  - **Formatters.** Format-on-save resolves the nearest Prettier config from
+    the file up to the project root itself. A declarative config
+    (`.prettierrc` JSON/YAML, `.prettierrc.json|yaml|yml|json5|toml`, a
+    `package.json` `"prettier"` object) without `plugins` or a shared-config
+    string is passed explicitly (`--config <file>`) for every caller; no
+    config → Prettier defaults (`--no-config`, `.editorconfig` still applies).
+    A config that runs code (`prettier.config.*`, `.prettierrc.{js,cjs,mjs,ts}`,
+    `plugins`, a shared-config package) is not run: the buffer is left
+    untouched and the formatter reads "Formatting skipped: this project's
+    Prettier config runs code. Allow it in the project's environment settings
+    (OTTO_IDE_TRUST_FORMATTER_CONFIG=1)". Root opts a project in with that
+    variable in its project environment (non-root callers never). Ruff,
+    black, rustfmt, gofmt, shfmt, buf and biome read data-only configs and
+    are unchanged. On SSH targets root keeps Prettier's own discovery (it
+    runs on the remote host). Pyright only executes a venv interpreter
+    (`pyvenv.cfg` present) that resolves under a known interpreter home
+    (system, Xcode/CLT, python.org, Homebrew, pyenv/uv/mise/asdf/rye/conda,
+    Otto toolchains).
+  - **Network bridge host mappings** bind `127.0.0.1:<from_port>` without
+    authentication, like `kubectl port-forward`: any local process (including
+    a sandboxed agent session with loopback access) can reach the mapped
+    cluster/SSH service while the bridge is up. The SOCKS path is
+    token-authenticated; prefer it for production targets.
 - Code:
   - Engine & routers: `crates/otto-ide/` (`target.rs`, `target/fs_ops.rs`,
     `toolchains_catalog.rs`, `toolchains.rs`, `environments.rs`,
@@ -89,6 +146,12 @@ active:
   gutter breakpoint toggle, `⌘D` duplicate line/selection / compare files,
   `⌘⇧V` clipboard history, `⌘⌫` delete line) and **Standard** (`F12`, `⌘.`,
   `F2`, `⇧⌥F`, `F9`, `⌘D` next occurrence).
+- **Navigation & agent keys (both presets):** `⌘G` Go to Line[:Column] (while the
+  editor's find panel is open, `⌘G` is *find next* instead), `⌘L` add the selection
+  (or the current line) to the AI agent, `⇧⌘L` show/hide the agent dock. The bare
+  `⌃R` (Run) / `⌃D` (Debug) and F-key debugger keys act only outside text fields:
+  in the agent composer, the commit box or a search field they stay text editing
+  (`⌃D` is forward-delete on macOS).
 - **6 Color Schemes, Semantic Coloring & Rainbow Brackets:** Choose between
   **Follow Otto Dark/Light**, **JetBrains Islands Dark**, **JetBrains Darcula**,
   **JetBrains Islands Light**, **VS Code Dark Modern**, and **VS Code Light Modern**
@@ -151,6 +214,17 @@ secret environment variable values stored in the macOS Keychain via
   `python`, `shell`, `compound`, `custom`), launched in the **Run** bottom dock
   (`POST /ide/runs`) with live output and structured test-result trees, or
   stopped via `POST /ide/runs/{run_id}/stop`.
+- A config's `before_launch` hook runs before the program, in its own process
+  group, with its stdout/stderr streamed into the Run console. A non-zero exit
+  fails the run (`before_launch failed (exit N)`); a hook that never exits
+  fails after 30 min. When the hook's shell exits, anything it left running in
+  the background is killed too, so a hook must not be used to start a server
+  that should outlive it. **Stop** during the hook, or during the Go / Java
+  compile step that precedes `go_run` / `java_main`, kills that step's whole
+  process group at once and the program is never started.
+- Child output is read as lossy UTF-8 (invalid bytes show as `�`) with each
+  line capped at 16 KiB, so a program printing binary data or an endless line
+  keeps running and keeps streaming.
 
 ### 5. Gutter Run / Debug
 
@@ -228,8 +302,14 @@ target root with a chosen default guest role (`viewer` or `editor`) and copy a
 capability invite link (`#/ide?collab=<room_id>&token=<invite_token>`):
 
 - Guests join through `/api/v1/ide/collab/guest/{room_id}/join` without needing
-  an Otto user account, authenticating subsequent calls via `X-Ide-Collab-Token`
-  or `?token=`.
+  an Otto user account, authenticating subsequent calls via the
+  `X-Ide-Collab-Token` header (a `?token=` query is refused: a write-capable
+  token in a URL ends up in logs). Guest snapshots carry the shared root but
+  no host user id, workspace, connection id or extra roots.
+- Seats and streams are bounded: 32 peers, 40 open event streams per room; a
+  guest whose event stream has been closed for 90 s loses its seat (peers get
+  `peer_left`). Edits are refused (`409`) while slow readers hold more than
+  64 MiB of unread buffer events.
 - Live colored peer cursors, multi-range selections, active file indicators,
   **Follow peer**, real-time buffer edits, and shared debug session snapshots
   stream over `GET /api/v1/ide/collab/guest/{room_id}/events` (`text/event-stream`).
@@ -255,7 +335,7 @@ Install an `otto-ide-plugin.json` extension into `<data_dir>/ide-plugins/<slug>/
 - Enable, disable (`POST /ide/plugins/{slug}/toggle`), or uninstall
   (`DELETE /ide/plugins/{slug}`) at runtime.
 
-### 10. Unified Otto Threads AI Coding Agent (`⌘L`) & Inline Edit (`⌘I`)
+### 10. Unified Otto Threads AI Coding Agent (`⇧⌘L`, `⌘L` adds the selection) & Inline Edit (`⌘I`)
 
 `IdeAgentPanel.svelte` and `IdeInlinePromptBar.svelte` share the **exact same
 Otto Threads pool** as `#/threads` (`threadsSessionStore`), uniting structured
@@ -303,13 +383,74 @@ composer capability parity, the shared `ModelPicker`, and the thread switcher:
   `GET /ide/runs/{run_id}/events` SSE streaming, and optional
   `GET /ide/runs/{run_id}?tail_lines=`), finished runs (`MAX_FINISHED_RUNS = 8`),
   debug output (`400` entries / `256 KiB`), terminated DAP sessions (`4`),
-  external incremental Go/Java build caches outside user repositories, collab
+  external incremental Go/Java build caches outside user repositories (Go:
+  `≤ 64` binaries, `≤ 2 GiB`, `14`-day age limit, staleness taken from
+  `go list -deps`, so `//go:embed` assets, cgo sources and `replace`d modules
+  rebuild), collab
   rooms (`32` rooms, `2h` idle TTL, `32` buffers / `16 MiB` per room, zero buffer
   clones on cursor moves), and pooled module-scoped LSP servers
   (`MAX_SERVERS_PER_OWNER = 3`, `MAX_GLOBAL_SERVERS = 3`, `1.2 GiB` combined LSP
-  RSS budget with inactive-first `active_clients == 0` LRU eviction, observable
-  via `GET /ide/lsp/status`) are all strictly bounded with zero stale FS/tree
-  caches.
+  RSS budget, observable via `GET /ide/lsp/status`) are all strictly bounded
+  with zero stale FS/tree caches.
+- **LSP eviction rules:** the RSS budget only ever stops servers no editor
+  socket is attached to — a server an open editor uses is never killed for
+  memory. When a new server needs a slot over the count caps, a socket-less
+  server goes first; only when every server is in use does the least recently
+  used one go, and its sockets first receive `otto/lspEvicted { reason, lang,
+  root }` (`server_cap`, `build_tags_changed`, `shutdown`; see
+  `docs/contracts/ws.md` §1c) before the socket closes.
+
+### 12. Preview (Markdown, HTML, images, JSON, Mermaid, D2, tables)
+
+A previewable file gets three icon buttons at the end of the tab strip:
+**Editor**, **Editor and preview** (Split) and **Preview**. The pressed one is
+what the pane shows. In the stacked phone layout the control shows Editor and
+Preview (there is no room for Split); the tab strip's ▾ menu lists the same
+modes. The ⋯ menu and ⌘K add **IDE: Open Preview** and **IDE: Open Preview to
+the Side**. There is no keyboard shortcut: `⇧⌘V` is clipboard history in the
+IDE and `⌘K` opens the app's command bar, so a `⌘K V` chord can't exist.
+
+- **Formats:** Markdown (`.md .markdown .mdx`), HTML (`.html .htm`), SVG,
+  images (`png jpg jpeg gif webp avif ico bmp`), PDF, JSON (`.json
+  .geojson`), Mermaid (`.mmd .mermaid`), D2 (`.d2`, drawn by Canvas' D2
+  renderer in `ide/editor/IdeD2Preview.svelte`), CSV/TSV/JSONL. Code files have no
+  control; build manifests (`package.json`, `go.mod`, …) keep their own Text |
+  Dependency Analyzer switch.
+- **Defaults and memory:** text formats open in Editor; images, PDF, SVG and
+  CSV/TSV open in Preview. Images and PDF have no editable source, so they
+  always preview. The choice is remembered per file kind (all Markdown
+  files, all HTML files, …) in the browser's local storage.
+- **Live:** the preview renders the open buffer, unsaved edits included,
+  about 200 ms after typing settles, and does no work while the window is
+  hidden. Markdown, HTML, Mermaid or SVG over 1 MB renders when you press
+  **Render preview** (and **Render again** after edits), not on every pause.
+- **Markdown** uses the vault's renderer: GFM tables and task lists, fenced
+  code highlighted like the rest of the app, heading anchors, and
+  ` ```mermaid ` fences drawn as diagrams. Relative links and images resolve
+  against the file's folder (a leading `/` means the project root). A link to
+  another file opens it in the IDE, `#anchor` scrolls the preview, and web
+  links open in the system browser. Images load through the daemon's
+  authenticated `GET /fs/raw`, so they show for **local** projects only; on a
+  remote SSH project the preview says so. In Split the preview follows the
+  section the cursor is in.
+- **HTML sandbox:** the page renders in an `<iframe srcdoc>` that never gets
+  `allow-same-origin`, so it can't reach Otto's DOM, storage or API token and
+  can't navigate the app. A strict CSP blocks every network fetch except
+  `https:`/`data:` images, styles and fonts. Scripts are **off** by default;
+  **Enable for this file** adds `allow-scripts` for that file until the
+  window closes (inline scripts only; the CSP still blocks fetches). Relative
+  files (images, CSS, JS next to the page) aren't loaded, and the bar says
+  so. The frame keeps a white page in either theme, so a page's own colours
+  stay its author's.
+- **CSV/TSV/JSONL:** Preview is the editable table grid (it replaces the old
+  Table | Text switch). Split shows a read-only table beside the text.
+- **JSON** shows a collapsible tree. Invalid JSON shows the parse error and its
+  line and column, and the source stays editable.
+- Code: `ui/src/lib/components/FilePreview.svelte` (shared with the Threads
+  file viewer), `ui/src/lib/components/preview/`,
+  `ui/src/lib/components/filePreviewKind.ts`,
+  `ui/src/modules/ide/editor/IdePreviewPane.svelte`,
+  `IdePreviewModeToggle.svelte`, `idePreviewMode.svelte.ts`.
 
 ## API & WebSocket summary
 

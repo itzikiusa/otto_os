@@ -9,7 +9,7 @@ test('failed runtime list retains rows, exposes retryable error, and clears it a
   const { runtimeThreads } = loadSource(new URL('../src/modules/threads/runtime/runtimeThreads.svelte.ts', import.meta.url), {
     '../../../lib/api/client': { api: { get: async () => { if (fails) throw new Error('offline'); return [nextRow]; } } },
     '../../../lib/stores/runtimeDraftRecovery.svelte': { installRuntimeDraftRecovery: () => {} },
-    '../../../lib/live': { onLive: () => () => {} }, '../../../lib/router.svelte': { router: {} },
+    '../../../lib/live': { onLive: () => () => {}, appLive: { onResync: () => () => {} } }, '../../../lib/router.svelte': { router: {} },
     '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: () => {} },
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
     '../threadsStore.svelte': { threads: {} }, '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => {} } },
@@ -34,7 +34,7 @@ test('loadAll adds threads of every workspace (one started on the phone) without
   const { runtimeThreads } = loadSource(new URL('../src/modules/threads/runtime/runtimeThreads.svelte.ts', import.meta.url), {
     '../../../lib/api/client': { api: { get: async (p: string) => { paths.push(p); return [phone]; } } },
     '../../../lib/stores/runtimeDraftRecovery.svelte': { installRuntimeDraftRecovery: () => {} },
-    '../../../lib/live': { onLive: () => () => {} }, '../../../lib/router.svelte': { router: {} },
+    '../../../lib/live': { onLive: () => () => {}, appLive: { onResync: () => () => {} } }, '../../../lib/router.svelte': { router: {} },
     '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: () => {} },
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
     '../threadsStore.svelte': { threads: {} }, '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => {} } },

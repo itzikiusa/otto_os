@@ -308,13 +308,14 @@ class IdeAgentSharedState {
     this.appliedUndoByProposalId = {};
   }
 
+  /** Leaving the IDE page. Which proposals were applied (and their Undo) survives it: a
+   *  card that showed "Apply" again on return could be applied twice and corrupt the file.
+   *  Those maps are cleared only by a project switch (`resetTargetState`). */
   disposeState(): void {
     this.inlineReqSeq++;
     this.inlinePrompt = null;
     this.sending = false;
     this.proposalCache.clear();
-    this.appliedPathByProposalId.clear();
-    this.appliedUndoByProposalId = {};
   }
 }
 

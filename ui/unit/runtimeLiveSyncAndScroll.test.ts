@@ -1126,3 +1126,81 @@ test('Go LSP init/dedupe, Go unused-import QuickFix guard, inspection hover supp
   assert.equal(bridgeMod.isProdEnvironment('stg-m'), false);
   assert.equal(bridgeMod.isProdEnvironment(null), false);
 });
+
+/** Timers created by `act` (the chase timer, not the liveness poll). */
+async function newTimers(h: ReturnType<typeof makeRuntimeHarness>, act: () => void) {
+  const before = new Set(h.timers.keys());
+  act();
+  await flush();
+  return [...h.timers.entries()].filter(([id]) => !before.has(id)).map(([, t]) => t);
+}
+
+test('RuntimeViews catch-up: an announced sequence never delivered backs off, is bounded, then reloads one snapshot', async () => {
+  const h = makeRuntimeHarness();
+  const close = h.views.open('s-c');
+  h.gets[0].gate.resolve({ kind: 'events', events: [msgEvent('s-c', 1, 'm-1', 'a'), msgEvent('s-c', 2, 'm-2', 'b')], last_sequence: 2 });
+  await flush();
+  assert.equal(h.gets.length, 1);
+
+  // The session row announces 9; the events endpoint only ever has 2.
+  h.views.noteSessionSequence('s-c', 9);
+  await flush();
+  assert.equal(h.gets.length, 2);
+  const delays: number[] = [];
+  let pending = h.gets[1];
+  for (let i = 0; i < 6; i++) {
+    const made = await newTimers(h, () => pending.gate.resolve({ kind: 'events', events: [], last_sequence: 2 }));
+    assert.equal(made.length, 1, 'no immediate refetch: one backoff timer');
+    delays.push(made[0].ms);
+    const n: number = h.gets.length;
+    made[0].fn();
+    await flush();
+    assert.equal(h.gets.length, n + 1);
+    pending = h.gets[h.gets.length - 1];
+  }
+  assert.deepEqual(delays, [250, 500, 1_000, 2_000, 4_000, 4_000]);
+  const eventFetches = h.gets.slice(1).filter((g) => !g.path.includes('after_sequence=0'));
+  assert.equal(eventFetches.length, 6, 'bounded: the first catch-up plus five backoff attempts');
+  assert.match(pending.path, /after_sequence=0&/, 'then one snapshot reload');
+
+  // The snapshot is the daemon's truth: chasing stops.
+  const after = await newTimers(h, () =>
+    pending.gate.resolve({
+      kind: 'snapshot',
+      snapshot_sequence: 2,
+      snapshot: { provider_session: null, provider_thread: null, turns: [], turn_items: [], runtime_requests: [], plans: [], queued_prompts: [] },
+    } as unknown as RuntimeReplay),
+  );
+  assert.equal(after.length, 0);
+  const total = h.gets.length;
+  await flush();
+  assert.equal(h.gets.length, total, 'no further fetches');
+  close();
+  assert.equal(h.timers.size, 0);
+});
+
+test('RuntimeViews catch-up: progress resets the backoff and keeps paging at once', async () => {
+  const h = makeRuntimeHarness();
+  const close = h.views.open('s-p');
+  h.gets[0].gate.resolve({ kind: 'events', events: [msgEvent('s-p', 1, 'm-1', 'a')], last_sequence: 1 });
+  await flush();
+  h.views.noteSessionSequence('s-p', 9);
+  await flush();
+  let made = await newTimers(h, () => h.gets[1].gate.resolve({ kind: 'events', events: [], last_sequence: 1 }));
+  assert.deepEqual(made.map((t) => t.ms), [250]);
+  made[0].fn();
+  await flush();
+  made = await newTimers(h, () => h.gets[2].gate.resolve({ kind: 'events', events: [], last_sequence: 1 }));
+  assert.deepEqual(made.map((t) => t.ms), [500]);
+  made[0].fn();
+  await flush();
+  // A page arrives (progress): the next fetch goes out at once, no timer.
+  made = await newTimers(h, () => h.gets[3].gate.resolve({ kind: 'events', events: [msgEvent('s-p', 2, 'm-2', 'b')], last_sequence: 2 }));
+  assert.equal(made.length, 0);
+  assert.equal(h.gets.length, 5);
+  assert.match(h.gets[4].path, /after_sequence=2&/);
+  // Stuck again: the backoff starts over at 250 ms.
+  made = await newTimers(h, () => h.gets[4].gate.resolve({ kind: 'events', events: [], last_sequence: 2 }));
+  assert.deepEqual(made.map((t) => t.ms), [250]);
+  close();
+});

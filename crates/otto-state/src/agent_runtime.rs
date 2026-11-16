@@ -71,7 +71,7 @@ macro_rules! session_cols {
     () => {
         "id, workspace_id, provider, title, cwd, model, native_thread_id, closed, \
          created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id, ui_control, meta, \
-         title_auto"
+         title_auto, effort"
     };
 }
 
@@ -96,6 +96,7 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
             title: r.get("title"),
             cwd: r.get("cwd"),
             model: r.get("model"),
+            effort: r.get("effort"),
             native_thread_id: r.get("native_thread_id"),
             status: if closed {
                 RuntimeSessionStatus::Closed
@@ -325,7 +326,8 @@ impl AgentRuntimeRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("set native thread id"))?;
-        // The usage tailer attributes provider transcripts by this id.
+        // The usage tailer attributes a CLI transcript by this id: refresh its
+        // cached list now, or a new thread's first lines are billed "external".
         crate::sessions::bump_attribution_generation();
         Ok(())
     }
@@ -350,6 +352,28 @@ impl AgentRuntimeRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("set runtime session model"))?;
+        Ok(())
+    }
+
+    /// `None` = no pinned model: the next spawn runs the provider's default
+    /// ("Default model"; `set_model` cannot store NULL).
+    pub async fn clear_model(&self, id: &Id) -> Result<()> {
+        sqlx::query("UPDATE agent_runtime_sessions SET model = NULL WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("clear runtime session model"))?;
+        Ok(())
+    }
+
+    /// The reasoning effort every respawn re-applies (`None` = the provider's).
+    pub async fn set_effort(&self, id: &Id, effort: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE agent_runtime_sessions SET effort = ? WHERE id = ?")
+            .bind(effort)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set runtime session effort"))?;
         Ok(())
     }
 
@@ -814,5 +838,27 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// "Default model" must store NULL (the next spawn runs the provider's
+    /// default), and the effort is session state every respawn re-applies.
+    #[tokio::test]
+    async fn model_clears_to_null_and_effort_round_trips() {
+        let pool = mem_pool().await;
+        seed(&pool).await;
+        let repo = AgentRuntimeRepo::new(pool);
+        new_session(&repo, "m1", "u1", serde_json::Value::Null).await;
+        let id: Id = "m1".into();
+        assert_eq!(repo.get(&id).await.unwrap().session.effort, None);
+        repo.set_model(&id, "opus").await.unwrap();
+        repo.set_effort(&id, Some("high")).await.unwrap();
+        let s = repo.get(&id).await.unwrap().session;
+        assert_eq!(s.model.as_deref(), Some("opus"));
+        assert_eq!(s.effort.as_deref(), Some("high"));
+        repo.clear_model(&id).await.unwrap();
+        repo.set_effort(&id, None).await.unwrap();
+        let s = repo.get(&id).await.unwrap().session;
+        assert_eq!(s.model, None);
+        assert_eq!(s.effort, None);
     }
 }

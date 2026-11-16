@@ -1,9 +1,13 @@
 <script lang="ts">
-  // Locked 30px Editor Subbar (CLS = 0): path & symbol crumbs, CSV/JSON tools,
+  // Locked 30px Editor Subbar (CLS = 0): path & symbol crumbs, JSON tools (CSV/TSV/JSONL
+  // Table | Text is the tab strip's Editor | Preview control, IdePreviewModeToggle),
   // compact Selection Agent bar, Inspection Pill, Color Scheme Quick Picker, and Prefix/Suffix bar.
   import { copyWithToast } from '../../../lib/clipboard';
   import Badge from '../../../lib/components/Badge.svelte';
+  import { exceedsIdeDraftLimit } from '../../../lib/components/cm-ide-drafts';
+  import { IDE_LSP_LINK_EVENT, retryLspNow, type IdeLspLinkDetail } from '../../../lib/components/cm-ide-lsp-reconnect';
   import Icon from '../../../lib/components/Icon.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { extractGoBuildTagsFromSource } from '../../../lib/goBuildTags';
@@ -11,6 +15,9 @@
   import { toasts } from '../../../lib/toast.svelte';
   import { ide, type IdeOpenTab, type IdeSymbolNode } from '../ideStore.svelte';
   import { ideAgent } from '../store/ideAgentController.svelte';
+  import { ideLayout } from '../shell/ideLayout.svelte';
+  import { ideCollabNotices } from '../store/ideCollabNotices.svelte';
+  import { ideEditorChrome } from './ideEditorChrome.svelte';
   import { pushIdeNavLocation, revealInIdeProjectTree, toggleFormatOnSave } from './ideEditorStoreBridge.svelte';
   import type { IdeOutlineNode } from './ideLangAnalyzer';
   import SendToButton from '../filetools/send/SendToButton.svelte';
@@ -23,14 +30,11 @@
     activeJsonPath: string | null;
     sdkLabel: string | null;
     activeDocKind: string;
-    effectiveViewMode: 'table' | 'text' | 'preview';
-    /** The file has a rendered preview (Markdown, HTML, SVG, Mermaid, D2, JSON). */
-    canPreview: boolean;
+    effectiveViewMode: 'table' | 'text';
     hasNonEmptySelection: boolean;
     blameActive: boolean;
     errorCount: number;
     warnCount: number;
-    onsetviewmode: (mode: 'table' | 'text' | 'preview') => void;
     onapplyjson: (nextText: string) => void;
     onjumpsymbol: (delta: -1 | 1) => void;
     ongotoline: (line: number, col: number) => void;
@@ -43,10 +47,14 @@
 
   let {
     activeTab, pathSegments, enclosingSymbol, effectiveSymbols, activeJsonPath, sdkLabel,
-    activeDocKind, effectiveViewMode, canPreview, hasNonEmptySelection, blameActive, errorCount, warnCount,
-    onsetviewmode, onapplyjson, onjumpsymbol, ongotoline, onopenstructure, ontoggleblame,
+    activeDocKind, effectiveViewMode, hasNonEmptySelection, blameActive, errorCount, warnCount,
+    onapplyjson, onjumpsymbol, ongotoline, onopenstructure, ontoggleblame,
     onopenquickfix, oncyclediag, onfocusagent,
   }: Props = $props();
+
+  // Touch devices have no keyboard shortcuts to show: no "(⌘…)" hints there.
+  const coarsePointer = typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)').matches);
+  const kh = (keys: string, sep = ' ('): string => (coarsePointer ? '' : sep === ' (' ? ` (${keys})` : `${sep}${keys}`);
 
   let linePrefix = $state('');
   let lineSuffix = $state('');
@@ -55,6 +63,32 @@
   const repoGoTags = $derived(isGoTab ? ide.getRepoGoBuildTags(activeTab.path) : []);
   const fileGoTags = $derived(isGoTab ? extractGoBuildTagsFromSource(activeTab.content) : []);
   const missingGoTags = $derived(fileGoTags.filter((t) => !repoGoTags.includes(t)));
+  // The language-server socket dropped (daemon restart, server evicted): a quiet note while
+  // it reattaches, and a Retry once the attempts ran out, instead of features going silent.
+  let lspLink = $state<IdeLspLinkDetail | null>(null);
+  $effect(() => {
+    const onLink = (e: Event): void => {
+      const d = (e as CustomEvent<IdeLspLinkDetail>).detail;
+      if (!d?.rootPath) return;
+      if (d.state !== 'connected') lspLink = d;
+      else if (lspLink?.rootPath === d.rootPath) lspLink = null;
+    };
+    window.addEventListener(IDE_LSP_LINK_EVENT, onLink);
+    return () => window.removeEventListener(IDE_LSP_LINK_EVENT, onLink);
+  });
+  const lspLinkHere = $derived.by(() => {
+    const l = lspLink;
+    return l && (activeTab.path === l.rootPath || activeTab.path.startsWith(`${l.rootPath}/`)) ? l : null;
+  });
+  // Unsaved edits to a very large file get no crash-recovery draft: say so while it is dirty.
+  const noDraftKept = $derived(Boolean(activeTab.dirty) && exceedsIdeDraftLimit(activeTab.savedContent, activeTab.content));
+  // Stacked layout: the row is hidden (the code gets it back) unless the person asked for it
+  // from the tab strip's ▾ menu, or a notice they must see is up.
+  const hasNotice = $derived(
+    Boolean(lspLinkHere) || noDraftKept ||
+      (ide.collabIsGuest && (ideCollabNotices.roomSync !== null || Boolean(ideCollabNotices.saveRefusedByPath[activeTab.path]))),
+  );
+  const stackCollapsed = $derived(ideLayout.stack && !ideEditorChrome.subbarShown && !hasNotice);
 
   async function enableMissingGoTags(): Promise<void> {
     if (missingGoTags.length === 0) return;
@@ -111,7 +145,7 @@
         ongotoline(s.line, (s as IdeOutlineNode).column || 1);
       },
     }));
-    items.push({ separator: true }, { label: 'Search file structure…', icon: 'search', hint: '⌘F12', action: onopenstructure });
+    items.push({ separator: true }, { label: 'Search file structure…', icon: 'search', hint: coarsePointer ? undefined : '⌘F12', action: onopenstructure });
     ctxMenu.showAt(anchor, items, { align: 'start' });
   }
 
@@ -157,7 +191,7 @@
   }
 </script>
 
-<div class="ide-subbar">
+<div class="ide-subbar" class:stack-collapsed={stackCollapsed} data-testid="ide-editor-subbar">
   <div class="ide-crumbs" dir="ltr">
     {#each pathSegments as seg, idx (`${seg}:${idx}`)}
       {#if idx > 0}<span class="crumb-sep" aria-hidden="true"><Icon name="chevronRight" size={12} noflip /></span>{/if}
@@ -165,7 +199,7 @@
     {/each}
     {#if enclosingSymbol}
       <span class="crumb-sep" aria-hidden="true"><Icon name="chevronRight" size={12} noflip /></span>
-      <button type="button" class="crumb-sym-btn" onclick={openSymbolBreadcrumbMenu} title="Jump to symbol in file (⌘F12)">
+      <button type="button" class="crumb-sym-btn" onclick={openSymbolBreadcrumbMenu} title={`Jump to symbol in file${kh('⌘F12')}`}>
         <Icon name="function" size={12} /><span>{enclosingSymbol.name}</span>
       </button>
     {/if}
@@ -175,6 +209,14 @@
     {/if}
     {#if sdkLabel}<Badge variant="outline" tone="info" label={sdkLabel} />{/if}
     {#if activeTab.readOnly}<Badge variant="outline" tone="neutral" label="Read-only" />{/if}
+    {#if lspLinkHere?.state === 'reconnecting' || lspLinkHere?.state === 'waiting'}<Badge variant="outline" tone="neutral" label="Language features restarting…" title={lspLinkHere.state === 'waiting' ? 'Otto is restarting; the language server reconnects when it is back.' : 'The language server connection dropped; reconnecting.'} testid="ide-lsp-reconnecting" />{/if}
+    {#if lspLinkHere?.state === 'lost'}
+      <LoadState what="language features" variant="compact" error="The language server connection dropped." onretry={() => { if (lspLinkHere) retryLspNow(lspLinkHere.rootPath); }} />
+    {/if}
+    {#if ide.collabIsGuest && ideCollabNotices.roomSync === 'reconnecting'}<Badge variant="outline" tone="neutral" label="Reconnecting to the room…" title="The room fell behind on edits. Your text is kept and will be sent again." testid="ide-collab-reconnecting" />{/if}
+    {#if ide.collabIsGuest && ideCollabNotices.roomSync === 'failed'}<Badge variant="outline" tone="warn" label="Not synced with the room" title="Your text is still here. Keep typing or save (⌘S) to send it again." testid="ide-collab-sync-failed" />{/if}
+    {#if ide.collabIsGuest && ideCollabNotices.saveRefusedByPath[activeTab.path]}<Badge variant="outline" tone="warn" label="Not saved: {ideCollabNotices.saveRefusedByPath[activeTab.path]}" title="The host doesn’t let guests save this file: {ideCollabNotices.saveRefusedByPath[activeTab.path]}" testid="ide-collab-save-refused" />{/if}
+    {#if noDraftKept}<Badge variant="outline" tone="warn" label="Unsaved edits not kept on reload" title="This file is too large for a recovery draft. Save (⌘S) or turn on autosave so a reload or crash doesn’t lose your edits." testid="ide-no-draft-badge" />{/if}
   </div>
 
   <div class="ide-subbar-tools">
@@ -203,18 +245,6 @@
         <span>{repoGoTags.length > 0 ? repoGoTags.join(', ') : 'Tags'}</span>
       </button>
     {/if}
-    {#if activeDocKind === 'csv' || activeDocKind === 'jsonl'}
-      <div class="segmented" role="group" aria-label="Editor view mode" data-testid="ide-csv-mode-toggle">
-        <button type="button" aria-pressed={effectiveViewMode === 'table'} onclick={() => onsetviewmode('table')}>Table</button>
-        <button type="button" aria-pressed={effectiveViewMode === 'text'} onclick={() => onsetviewmode('text')}>Text</button>
-      </div>
-    {/if}
-    {#if canPreview}
-      <div class="segmented" role="group" aria-label="Editor view mode" data-testid="ide-preview-toggle">
-        <button type="button" aria-pressed={effectiveViewMode !== 'preview'} onclick={() => onsetviewmode('text')}>Code</button>
-        <button type="button" aria-pressed={effectiveViewMode === 'preview'} onclick={() => onsetviewmode('preview')}>Preview</button>
-      </div>
-    {/if}
     {#if (activeDocKind === 'json' || activeDocKind === 'jsonl') && !activeTab.readOnly && effectiveViewMode === 'text' && !hasNonEmptySelection}
       <button type="button" class="btn small ghost" onclick={() => applyJsonTransform('pretty')} title="Pretty-print JSON">Pretty</button>
       <button type="button" class="btn small ghost" onclick={() => applyJsonTransform('minify')} title="Minify JSON">Minify</button>
@@ -223,16 +253,16 @@
 
     {#if hasNonEmptySelection && effectiveViewMode === 'text'}
       <div class="ide-sel-bar" role="group" aria-label="Selection actions" data-testid="ide-selection-agent-bar">
-        <button type="button" class="btn small ghost ide-sel-accent" title="Add selection to AI Agent context (⇧⌘L)" onclick={() => { ideAgent.markSelectionFromEditor({ openPanel: true }); onfocusagent(); }} data-testid="ide-selection-add-agent">
-          <Icon name="assistant" size={12} />Agent ⇧⌘L
+        <button type="button" class="btn small ghost ide-sel-accent" title={`Add selection to AI Agent context${kh('⌘L')}`} onclick={() => { ideAgent.markSelectionFromEditor({ openPanel: true }); onfocusagent(); }} data-testid="ide-selection-add-agent">
+          <Icon name="assistant" size={12} />Agent{kh('⌘L', ' ')}
         </button>
-        <button type="button" class="btn small ghost" disabled={activeTab.readOnly || !ide.canEditCollab} title="Inline AI edit on selection (⌘I)" onclick={() => ideAgent.openInlineEdit()} data-testid="ide-selection-inline-edit">
-          <Icon name="sparkle" size={12} />Edit ⌘I
+        <button type="button" class="btn small ghost" disabled={activeTab.readOnly || !ide.canEditCollab} title={`Inline AI edit on selection${kh('⌘I')}`} onclick={() => ideAgent.openInlineEdit()} data-testid="ide-selection-inline-edit">
+          <Icon name="sparkle" size={12} />Edit{kh('⌘I', ' ')}
         </button>
         <button type="button" class="btn small ghost" aria-pressed={ide.prefixSuffixOpen} title="Add prefix or suffix to every selected line" onclick={() => (ide.prefixSuffixOpen = true)} data-testid="ide-prefix-suffix-toggle">
           Wrap
         </button>
-        <button type="button" class="icon-btn" aria-label="Split selection into multiple cursors (⌥⇧I)" title="Split selection into multiple cursors (⌥⇧I)" onclick={() => ide.splitSelectionToLines()}>
+        <button type="button" class="icon-btn" aria-label={`Split selection into multiple cursors${kh('⌥⇧I')}`} title={`Split selection into multiple cursors${kh('⌥⇧I')}`} onclick={() => ide.splitSelectionToLines()}>
           <Icon name="layers" size={12} />
         </button>
       </div>
@@ -263,22 +293,22 @@
     <button type="button" class="icon-btn" aria-label="Color Scheme & Editor Appearance" title="Color Scheme & Editor Appearance" onclick={openSchemePickerMenu} data-testid="ide-scheme-picker-btn">
       <Icon name="palette" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="Previous function (⌃↑)" title="Previous function (⌃↑)" disabled={effectiveSymbols.length === 0} onclick={() => onjumpsymbol(-1)}>
+    <button type="button" class="icon-btn" aria-label={`Previous function${kh('⌃↑')}`} title={`Previous function${kh('⌃↑')}`} disabled={effectiveSymbols.length === 0} onclick={() => onjumpsymbol(-1)}>
       <Icon name="arrowUp" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="Next function (⌃↓)" title="Next function (⌃↓)" disabled={effectiveSymbols.length === 0} onclick={() => onjumpsymbol(1)}>
+    <button type="button" class="icon-btn" aria-label={`Next function${kh('⌃↓')}`} title={`Next function${kh('⌃↓')}`} disabled={effectiveSymbols.length === 0} onclick={() => onjumpsymbol(1)}>
       <Icon name="arrowDown" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="File structure (⌘F12)" title="File structure (⌘F12)" onclick={onopenstructure} data-testid="ide-structure-btn">
+    <button type="button" class="icon-btn" aria-label={`File structure${kh('⌘F12')}`} title={`File structure${kh('⌘F12')}`} onclick={onopenstructure} data-testid="ide-structure-btn">
       <Icon name="layers" size={13} />
     </button>
     <button type="button" class="icon-btn" aria-label="Toggle git blame annotations" title="Toggle git blame annotations" aria-pressed={blameActive} onclick={ontoggleblame} data-testid="ide-blame-btn">
       <Icon name="commit" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="Show quick fixes and refactorings (⌥⏎)" title="Show quick fixes and refactorings (⌥⏎)" onclick={onopenquickfix} data-testid="ide-quickfix-btn">
+    <button type="button" class="icon-btn" aria-label={`Show quick fixes and refactorings${kh('⌥⏎')}`} title={`Show quick fixes and refactorings${kh('⌥⏎')}`} onclick={onopenquickfix} data-testid="ide-quickfix-btn">
       <Icon name="bulb" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="Reformat code (⌘⌥L)" title="Reformat code (⌘⌥L)" disabled={activeTab.readOnly} onclick={() => void ide.formatActiveFile()}>
+    <button type="button" class="icon-btn" aria-label={`Reformat code${kh('⌘⌥L')}`} title={`Reformat code${kh('⌘⌥L')}`} disabled={activeTab.readOnly} onclick={() => void ide.formatActiveFile()}>
       <Icon name="format" size={13} />
     </button>
   </div>
@@ -295,6 +325,7 @@
 {/if}
 
 <style>
+  .ide-subbar.stack-collapsed { display: none; }
   .ide-subbar {
     display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
     block-size: 30px; flex-shrink: 0; flex-wrap: nowrap; overflow: hidden;

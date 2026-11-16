@@ -90,7 +90,10 @@ pub(super) fn replace_local_sync(
             let in_roots = std::iter::once(root)
                 .chain(additional_roots.iter().map(PathBuf::as_path))
                 .any(|r| canon_p.starts_with(r));
-            if !in_roots || (restricted && super::fs_ops::enforce_non_root_path(&canon_p).is_err())
+            if !in_roots
+                || (restricted
+                    && (super::fs_ops::enforce_non_root_path(&canon_p).is_err()
+                        || super::control_paths::control_path_denial(&canon_p).is_some()))
             {
                 continue;
             }

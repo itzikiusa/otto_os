@@ -79,6 +79,39 @@ fn every_driver_round_trips_its_state_and_keeps_its_launch_shape() {
     }
 }
 
+/// A snapshot from an older build (any field missing) or a newer one (an
+/// unknown field) restores: a deploy must never kill a live thread because
+/// a driver gained or lost a field.
+#[test]
+fn every_driver_restores_a_snapshot_missing_fields_or_carrying_unknown_ones() {
+    for (name, make) in all() {
+        let mut d = make();
+        d.start(&ctx());
+        let mut state = d.snapshot_state();
+        let mut empty = make();
+        empty
+            .restore_state(&serde_json::json!({}))
+            .unwrap_or_else(|e| panic!("{name}: an all-missing snapshot restores: {e}"));
+        if let Some(o) = state.as_object_mut() {
+            o.insert(
+                "a_field_from_a_later_build".into(),
+                serde_json::json!({"x": 1}),
+            );
+            let some_key = o
+                .keys()
+                .find(|k| *k != "a_field_from_a_later_build")
+                .cloned();
+            if let Some(k) = some_key {
+                o.remove(&k);
+            }
+        }
+        let mut restored = make();
+        restored
+            .restore_state(&state)
+            .unwrap_or_else(|e| panic!("{name}: a partial + unknown-field snapshot restores: {e}"));
+    }
+}
+
 fn sent(step: &otto_agent_protocol::DriverStep, i: usize) -> serde_json::Value {
     serde_json::from_str(&step.writes[i]).unwrap()
 }

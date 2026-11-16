@@ -7,8 +7,11 @@
 //! - Lightweight formats (`markdown`, `csv`, `sql`, `json`, `yaml`) never spawn processes.
 //! - Concurrent servers are capped at [`MAX_SERVERS_PER_OWNER`] (`3`) and
 //!   [`MAX_GLOBAL_SERVERS`] (`3`), with total child RSS bounded by
-//!   [`LSP_RSS_BUDGET_BYTES`] (`1.2 GiB`), evicting `active_clients == 0` servers
-//!   first and never evicting the active/just-requested server.
+//!   [`LSP_RSS_BUDGET_BYTES`] (`1.2 GiB`). The RSS sweep only ever evicts servers
+//!   with no attached socket (going over budget beats killing an open editor's
+//!   server); a new spawn over the count cap evicts a socket-less server first
+//!   and an in-use one only when there is no other choice, telling its sockets
+//!   (`otto/lspEvicted`). The active/just-requested server is never evicted.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -119,7 +122,37 @@ pub(super) enum Ctl {
         uri: String,
         change_type: u8,
     },
-    Evict,
+    /// Stop the server; attached sockets get an `otto/lspEvicted` notice with
+    /// this reason (see [`EvictReason`]) before they close.
+    Evict(EvictReason),
+}
+
+/// Why a pooled server was stopped while sockets may still be attached; sent
+/// to them as `otto/lspEvicted { reason }` so the editor can reattach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvictReason {
+    /// A new server needed a slot and every server had an open editor.
+    ServerCap,
+    /// The project's Go build tags changed; reattach for a server with the new tags.
+    BuildTagsChanged,
+    /// The user switched workspace roots (only servers with no socket).
+    WorkspaceSwitched,
+    /// Over the RSS budget (only servers with no socket).
+    MemoryBudget,
+    /// The daemon is shutting down.
+    Shutdown,
+}
+
+impl EvictReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ServerCap => "server_cap",
+            Self::BuildTagsChanged => "build_tags_changed",
+            Self::WorkspaceSwitched => "workspace_switched",
+            Self::MemoryBudget => "memory_budget",
+            Self::Shutdown => "shutdown",
+        }
+    }
 }
 
 pub(super) struct Data {
@@ -516,7 +549,7 @@ impl LspPool {
             let mut entries = self.lock();
             Self::evict_count_excess(&mut entries, &key.owner, &key, 1)
         };
-        Self::finish_evicted_entries(evicted_pre);
+        Self::finish_evicted_entries(evicted_pre, EvictReason::ServerCap);
 
         let owner_is_root = self.owner_is_root(&key.owner);
 
@@ -549,7 +582,7 @@ impl LspPool {
             );
             ev
         };
-        Self::finish_evicted_entries(evicted_post);
+        Self::finish_evicted_entries(evicted_post, EvictReason::ServerCap);
         drop(_inflight_guard);
         self.enforce_rss_budget(Some(&key));
 

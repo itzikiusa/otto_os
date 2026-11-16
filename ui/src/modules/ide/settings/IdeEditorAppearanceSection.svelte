@@ -36,7 +36,7 @@
     { action: 'Duplicate Line / Selection', category: 'Editor', jetbrains: '⌘D', standard: '⇧⌥↓' },
     { action: 'Delete Line', category: 'Editor', jetbrains: '⌘⌫', standard: '⇧⌘K' },
     { action: 'File Structure Popup', category: 'Navigate', jetbrains: '⌘F12', standard: '⇧⌘O' },
-    { action: 'Go to Line : Column', category: 'Navigate', jetbrains: '⌘L / ⌘G / ⌃G', standard: '⌃G' },
+    { action: 'Go to Line : Column', category: 'Navigate', jetbrains: '⌘G', standard: '⌃G' },
     { action: 'Navigate Back / Forward', category: 'Navigate', jetbrains: '⌘[ / ⌘]', standard: '⌃- / ⌃⇧-' },
     { action: 'Toggle AI Agent Panel', category: 'Agent', jetbrains: '⇧⌘L', standard: '⇧⌘L' },
     { action: 'Close Active Editor Tab', category: 'Tabs', jetbrains: '⌘W', standard: '⌘W' },

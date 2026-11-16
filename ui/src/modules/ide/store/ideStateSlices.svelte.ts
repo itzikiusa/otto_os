@@ -206,7 +206,6 @@ export type { IdeInstalledSdk };
 import { api } from '../../../lib/api/client';
 import type { IdeQuickFix } from '../../../lib/api/types/ide-intelligence';
 import { loadErrorText } from '../../../lib/loadError';
-import { toastError } from '../../../lib/toastError';
 import {
   canonicalizeLocalProjectPath,
   canonicalRootKey,
@@ -223,8 +222,10 @@ import {
   type ProjectHelperHost,
 } from '../shell/ideProjectHelpers';
 import { saveWorkspaceOpenTabs, type IdeBufferPerfController } from './ideBufferPerf';
+import { ideTreeDirErrors } from './ideTreeDirErrors.svelte';
 import {
   ideBasename,
+  ideTargetKey,
   type IdeCodeAction,
   type IdeDiagnostic,
   type IdeFsTreeResp,
@@ -385,9 +386,14 @@ export async function fetchIdeWorkspaceTree(
     return;
   }
   const attachedParent = !isRoot ? findContainingRoot(normDir, host.projectRoots) : null;
+  // Two project switches can overlap (pills, switcher, `?root=`): a tree that answers after
+  // the target changed belongs to the old project and must not replace the new one.
+  const key = ideTargetKey(host.target);
+  const stale = (): boolean => ideTargetKey(host.target) !== key;
   if (isRoot) {
     host.treeLoading = true;
     host.treeError = null;
+    ideTreeDirErrors.reset();
   }
   try {
     const query =
@@ -395,6 +401,7 @@ export async function fetchIdeWorkspaceTree(
         ? new URLSearchParams({ kind: 'local', root: attachedParent.path, path: normDir, show_hidden: String(host.showHidden) }).toString()
         : host.targetQuery({ path: isRoot ? '' : normDir, show_hidden: host.showHidden });
     const resp = await api.get<IdeFsTreeResp>(`/ide/fs/tree?${query}`);
+    if (stale()) return;
     if (resp.target_os) host.targetOs = resp.target_os;
     if (resp.target_arch) host.targetArch = resp.target_arch;
     if (isRoot) {
@@ -427,12 +434,14 @@ export async function fetchIdeWorkspaceTree(
         ? rawEntries.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) }))
         : rawEntries;
       host.childrenByDir = { ...host.childrenByDir, [normDir]: entries };
+      ideTreeDirErrors.clear(normDir);
     }
   } catch (e) {
+    if (stale()) return;
     if (isRoot) host.treeError = loadErrorText(e);
-    else toastError('Couldn’t open folder', e);
+    else if (normDir) ideTreeDirErrors.set(normDir, loadErrorText(e));
   } finally {
-    if (isRoot) host.treeLoading = false;
+    if (isRoot && !stale()) host.treeLoading = false;
   }
 }
 

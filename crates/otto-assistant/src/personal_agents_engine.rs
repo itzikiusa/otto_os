@@ -515,6 +515,21 @@ pub fn persona_provider(provider: &str) -> Result<&str> {
     )))
 }
 
+/// A personal agent's provider, checked when the agent is SAVED (create and
+/// update, REST and the MCP tools that call it) instead of failing every run
+/// later: refused when the person turned it off in Settings › Providers, or
+/// when its CLI family can't be handed a persona for one launch
+/// ([`persona_provider`]). Empty = Claude, the default.
+pub fn check_agent_provider(providers: &otto_sessions::ProviderRegistry, slug: &str) -> Result<()> {
+    let slug = match slug.trim() {
+        "" => "claude",
+        s => s,
+    };
+    providers.ensure_enabled(slug)?;
+    let family = providers.model_family_for(slug);
+    persona_provider(family.as_deref().unwrap_or(slug)).map(|_| ())
+}
+
 /// Did provisioning land the persona's instructions file? A provider Otto
 /// materializes nothing for reports `skipped` (nothing to go stale); every
 /// other result must list its context file (`CONTEXT.md`, or `AGENTS.md`
@@ -1916,6 +1931,28 @@ mod cwd_tests {
                 other => panic!("{p}: expected Invalid, got {other:?}"),
             }
         }
+    }
+
+    /// I-07/I-08: an agent on Muse (no per-launch persona) or on a provider
+    /// the person turned off is refused when it is saved, with the reason; a
+    /// custom slug rides its CLI family.
+    #[test]
+    fn a_saved_agent_needs_an_enabled_persona_provider() {
+        let reg = otto_sessions::ProviderRegistry::new(Some(&serde_json::json!({
+            "claudework": {"cmd": "claude-work"}
+        })));
+        for ok in ["", "claude", "codex", "claudework", "pi"] {
+            assert!(super::check_agent_provider(&reg, ok).is_ok(), "{ok}");
+        }
+        let err = super::check_agent_provider(&reg, "muse").expect_err("muse");
+        assert!(err.to_string().contains("can't load a persona"), "{err}");
+        reg.set_disabled(&["codex"]);
+        let err = super::check_agent_provider(&reg, "codex").expect_err("off");
+        assert!(
+            err.to_string()
+                .contains("codex is turned off in Settings › Providers"),
+            "{err}"
+        );
     }
 
     #[test]

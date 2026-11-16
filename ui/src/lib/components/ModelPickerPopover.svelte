@@ -152,13 +152,16 @@
     if (p !== provider) {
       onprovider?.(p);
     }
-    onmodel(id);
+    // Drop an effort the new pick can't take BEFORE the model lands: a host
+    // that acts on `onmodel` at once (Ask another agent adds its chip there)
+    // must not send the previous provider's level.
     if (effort !== null && oneffort) {
       const nextEfforts = supportsEffortSelection(p, meta) ? effortsForModel(p, id, meta) : [];
       if (!nextEfforts.includes(effort)) {
         oneffort(null);
       }
     }
+    onmodel(id);
   }
 
   function pickEffort(lvl: EffortLevel | null): void {
@@ -363,7 +366,7 @@
               <span class="mp-check">{#if isCur}<Icon name="check" size={12} />{/if}</span>
               <span class="mp-name ellipsis">{r.m.label}</span>
               {#if view === '★'}<span class="mp-hint">{harnessLabel(r.p)}</span>{/if}
-              {#if i < 4}<span class="mp-hint mono">⌘{i + 1}</span>{/if}
+              {#if i < 4}<span class="mp-hint mono mp-kbd">⌘{i + 1}</span>{/if}
             </button>
             <button
               type="button"
@@ -580,6 +583,12 @@
   .mp-name {
     flex: 1;
     min-width: 0;
+  }
+  /* A touch screen has no ⌘ key: no shortcut hints there. */
+  @media (pointer: coarse) {
+    .mp-kbd {
+      display: none;
+    }
   }
   .mp-hint {
     font-size: var(--fs-xs);

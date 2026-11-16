@@ -107,7 +107,9 @@ pub async fn create(
     if req.root_path.trim().is_empty() {
         return Err(Error::Invalid("workspace root_path must not be empty".into()).into());
     }
-    let root_path = root_dir(&req.root_path)?.to_string_lossy().into_owned();
+    let root = root_dir(&req.root_path)?;
+    refuse_broad_root(&user, &root)?;
+    let root_path = root.to_string_lossy().into_owned();
     std::fs::create_dir_all(&root_path)
         .map_err(|e| Error::Invalid(format!("cannot create workspace directory: {e}")))?;
     let ws = repo(&ctx)
@@ -139,6 +141,9 @@ pub async fn update(
     if let Some(p) = root.as_ref().filter(|p| !p.is_dir()) {
         return Err(Error::Invalid(format!("{} does not exist", p.display())).into());
     }
+    if let Some(p) = &root {
+        refuse_broad_root(&user, p)?;
+    }
     let ws = repo(&ctx)
         .update(
             &id,
@@ -157,6 +162,23 @@ pub async fn update(
 /// `~`-expanded workspace folder: sessions run in it (a missing one falls back to $HOME).
 fn root_dir(p: &str) -> Result<std::path::PathBuf, Error> {
     otto_core::paths::expand_home_strict(p.trim()).map_err(Error::Invalid)
+}
+
+/// A workspace root is an IDE/LSP root its members write through, unsandboxed:
+/// for a caller without root authority it is never `/`, `$HOME`, an ancestor
+/// of a protected dir or a hidden tool home (the vault's subtree rule).
+fn refuse_broad_root(user: &otto_core::domain::User, p: &std::path::Path) -> Result<(), Error> {
+    if otto_core::auth::root_authority(user) {
+        return Ok(());
+    }
+    let canon = otto_core::secret_paths::canonicalize_prospective(p)
+        .ok_or_else(|| Error::Invalid(format!("invalid workspace root {}", p.display())))?;
+    match otto_core::secret_paths::subtree_root_denial(&canon) {
+        Some(why) => Err(Error::Forbidden(format!(
+            "{why}; only the root user can use it"
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// `DELETE /api/v1/workspaces/{id}` — archives (soft delete).
@@ -383,6 +405,45 @@ mod tests {
             // Opt-in keeps the archived row reachable (restore / audit).
             assert!(ids(Some(true)).await.contains(&gone.id));
         }
+    }
+
+    /// E1: a workspace root is an IDE root its members write through, so a
+    /// non-root user can't root one at `/` or `$HOME` (and then save
+    /// `~/.zshrc`), by create or by moving an existing one; root still can.
+    #[tokio::test]
+    async fn non_root_cannot_root_a_workspace_at_home_or_slash() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let root = users.create("ws-root", "x", "Root", true).await.unwrap();
+        let member = users.create("ws-member", "x", "M", false).await.unwrap();
+        let create_as = |user: &otto_core::domain::User, root_path: &str| {
+            let req = CreateWorkspaceReq {
+                name: "w".into(),
+                root_path: root_path.into(),
+            };
+            create(State(ctx.clone()), CurrentUser(user.clone()), Json(req))
+        };
+        for broad in ["~", "/"] {
+            let err = create_as(&member, broad).await.unwrap_err();
+            assert!(matches!(err.0, Error::Forbidden(_)), "{broad}: {:?}", err.0);
+        }
+        let own = tmp.path().join("projects/app");
+        let Json(ws) = create_as(&member, &own.to_string_lossy()).await.unwrap();
+        let req = serde_json::from_value(serde_json::json!({"root_path": "~"})).unwrap();
+        let err = update(
+            Path(ws.id),
+            State(ctx.clone()),
+            CurrentUser(member),
+            Json(req),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err.0, Error::Forbidden(_)), "{:?}", err.0);
+        let Json(_) = create_as(&root, "~")
+            .await
+            .expect("root keeps its own choice");
     }
 
     #[test]

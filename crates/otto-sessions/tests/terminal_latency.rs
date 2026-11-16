@@ -22,6 +22,9 @@
 //! the injection hook is wired to `get` and that `input`'s own code path never
 //! touches the repo.
 
+#[path = "../src/test_tmp.rs"]
+mod test_tmp;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -53,7 +56,7 @@ async fn manager() -> (Arc<SessionManager>, Workspace, Id) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("test.db");
     let pool = otto_state::open(&db).await.unwrap();
-    std::mem::forget(dir); // keep the db file alive for the test's lifetime
+    test_tmp::keep_until_exit(dir); // the db outlives this fixture, not the process
 
     let user = new_id();
     let ws_id = new_id();

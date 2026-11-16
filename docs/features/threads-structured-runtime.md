@@ -493,14 +493,21 @@ How Otto launches it: `muse acp --trust-workspace [--model <id>]
   thread and a terminal session alike) only when Otto's Seatbelt confines the
   process (macOS refuses a nested sandbox); otherwise it stays on. `--trust-workspace` loads the folder's skills and rules, as every other
   CLI's pre-trusted cwd does.
-- **Seatbelt home rules** (`otto-sandbox`, terminal and thread alike): Muse
-  may write its session logs, index and runtime sockets
-  (`~/.local/share/muse/{sessions,session-server,runtime,local-tracing}` and
-  that folder's top-level files) and the top-level files of `~/.config/muse`
-  (a login's `auth.json` refresh) — never `~/.config/muse/{settings.json,
-  AGENTS.md}`, its `skills/`, `plugins/`, `hooks/`, `rules/`, or
-  `~/.local/share/muse/{plugins,skills}` (code every later session loads).
-  Verified: `muse acp` runs a turn under the generated agent profile.
+- **Seatbelt home rules** (`otto-sandbox`, terminal and thread alike; the
+  per-provider table is `otto_sandbox::providers::PROVIDERS`): Muse may
+  write its session logs, index and runtime sockets
+  (`$XDG_DATA_HOME/muse/{sessions,session-server,runtime,local-tracing}` and
+  that folder's top-level files). Its config home `$XDG_CONFIG_HOME/muse` is
+  deny-by-default: only `auth.json` (a login's token refresh, plus the temp
+  siblings of its atomic rewrite) is writable — never `settings.json`,
+  `AGENTS.md`, `skills/`, `plugins/`, `hooks/`, `rules/`, or
+  `$XDG_DATA_HOME/muse/{plugins,skills}` (code every later session loads).
+  The `$XDG_*` homes come from the daemon's environment (default
+  `~/.config` / `~/.local/share`, as the Skills Lab reads them); the denies
+  cover both the moved and the default home. A read-only session also can't
+  write the project's `.muse/` (unverified as Muse's project folder).
+  Verified before the narrowing: `muse acp` runs a turn under the generated
+  agent profile; the `auth.json`-only config home is not re-verified.
 - **Updates:** `MUSE_NO_AUTO_UPDATE=1` keeps the launcher from checking for a
   new binary on every spawn (T3 Code does the same). Otto's update pass runs
   the launcher's synchronous refresh: `MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1
@@ -520,7 +527,13 @@ How Otto launches it: `muse acp --trust-workspace [--model <id>]
 - **Terminal sessions:** `muse --trust-workspace [--yolo] [--model id]`.
   Muse mints its own session ids and `muse resume --last` would cross-wire
   sessions that share a folder, so terminal Muse starts fresh on every
-  respawn, like opencode; the ACP path resumes exactly.
+  respawn, like opencode; the ACP path resumes exactly. A restart Otto makes
+  for a settings change (model, folders, MCP tools) therefore asks first
+  (`/meta.provider_resumable`), the nightly CLI update leaves the session on
+  the old binary, and the effort control is hidden (no terminal effort flag;
+  `/meta.provider_terminal_effort`). Otto's MCP tools reach a terminal Muse
+  session only if Muse reads the workspace `.mcp.json` (unverified); a thread
+  gets them through ACP `mcpServers`.
 - **Not delivered:** Otto's context bundle (no system-prompt flag or setting —
   Muse reads the tree's and the user's own rules, `~/.claude/skills` and
   `~/.codex/skills` included), so a persona-carrying run refuses Muse as it
@@ -717,13 +730,52 @@ Otto takes the cheapest correct path per provider:
 | Provider | Model switch | Effort | Images |
 |---|---|---|---|
 | Claude | live: `control_request {subtype:"set_model"}` (the SDK's `setModel`) | live: `apply_flag_settings {effortLevel}` | `image` blocks, `source: {type:"base64"}` (`ClaudeAdapterV2.ts:2410-2414`) |
-| Codex | `turn/start {model}` (this turn and later ones) | `turn/start {effort}` | `{type:"image", url:"data:<mime>;base64,…"}` inputs (`CodexAdapterV2.ts:3268-3269`) |
-| Gemini, Grok (ACP) | restart with `--model` / `-m`, then `session/load` | 400 | `image` blocks when `promptCapabilities.image`, else 400 (`adapter.ts:7035`, `:7777`) |
-| Antigravity (ACP) | restart, `session/load`, then `session/set_model` | 400 | `image` blocks |
+| Codex | `turn/start {model}` (this turn and later ones) | `turn/start {effort}` (`minimal`…`xhigh`); a steered message at another effort waits for the next turn (`turn/steer` carries none) | `{type:"image", url:"data:<mime>;base64,…"}` inputs (`CodexAdapterV2.ts:3268-3269`) |
+| Gemini, Grok, Muse (ACP) | restart with `--model` / `-m`, then `session/load` | Grok / Muse: the advertised config option; Gemini: none | `image` blocks when `promptCapabilities.image` (`adapter.ts:7035`, `:7777`) |
+| Antigravity, opencode (ACP) | live: `session/set_model` / the model config option | Antigravity: `thought_level`; opencode: none | `image` blocks |
+| Pi | restart with `--session <id>` | the RPC's thinking level | images |
+
+An effort the agent does not take is **dropped with a notice** ("… this turn
+runs at its default effort"), never a refused prompt: an "Ask another agent"
+create carrying the previous provider's level still starts every child.
+
+When a restart cannot reload the conversation (the agent has no
+`loadSession`, or `session/load` fails), the ACP driver starts a new session
+and the thread says so: a session boundary plus the notice "<Provider> could
+not reload this conversation — it starts fresh from here and does not
+remember the messages above". It never continues silently on a blank
+context.
 
 The model sticks: it becomes the session's `model`, so a later respawn
 launches on it. A refused Claude switch arrives as an `error` event; the turn
 still runs.
+
+### Stopping background work
+
+The turn's Stop (`POST …/interrupt`) never stops background work (a
+`run_in_background` command, a background subagent, a timer): its answer
+says how many tasks still run (`{interrupted, background_tasks}`). A person
+stops them with `POST …/tasks/{task_id}/stop` (one) or `POST …/tasks/stop`
+(all), owner-or-admin, person only (`runtime/task_stop.rs`,
+`http/tasks.rs`):
+
+| Provider | How | Outcome |
+|---|---|---|
+| Claude | control request `stop_task {task_id}` (the SDK's `stopTask`); the CLI ends the task with `task_updated` / `task_notification` `killed` | `native`; a refusal ("callback not registered") falls back to asking |
+| Codex | a spawned agent: `turn/interrupt {threadId, turnId}` on its child thread (shape from codex-cli 0.169.0's app-server schema) | `native`, or `asked` while Codex has not named the child's turn |
+| ACP (Gemini, Grok, Antigravity, opencode, Muse), Pi | no per-task protocol call | `asked`: a steered message (queued where the agent cannot steer, or a turn of its own when idle) naming each task, asking the agent to stop it with its own task-stop tool |
+
+The task is marked `stopping` and leaves the list only when the provider
+settles it (a `task_settlement` `stopped` notice). Unconfirmed after 30 s
+(native) or 180 s (asked) the mark clears and `stop_error` says it still
+runs. Otto kills a process (`signal`) only when it knows for certain it is
+the task's own; no driver knows a task's pid today, so that outcome is
+reserved. On a parent Stop, Codex also interrupts each running child
+thread, and a child keeps its card open until its own `turn/completed`.
+
+Close and Delete still stop everything in the thread's process group (and,
+for Claude, the descendants that left it). Linked child threads outlive a
+closed parent by design.
 
 Live check (same isolated daemon): a 16 px red PNG, then a switch, then a
 follow-up. Claude (haiku → `sonnet` + `low`) and Codex (`gpt-6.1-sol` →
@@ -883,7 +935,7 @@ text. An accepted prompt or queue operation acknowledges only the submitted
 snapshot, retaining later edits and model/effort/access preferences. Failed
 sends retain the draft; recovery never sends it automatically.
 
-Limits: 1 MiB text, 12 attachments at 10 MiB decoded each, 32 context chips at
+Limits: 1 MiB text, 20 attachments at 10 MiB decoded each, 32 context chips at
 128 KiB text each, and 24 MiB total serialized draft/request size. Attachment
 MIME types are PNG, JPEG, GIF, WebP and PDF, validated against base64 bytes and
 file signatures; prompt-time provider restrictions still apply. Each
@@ -1319,7 +1371,10 @@ bound by the shell at boot) and renders it with these props:
 | `onmaximize()` | — | The host grows the embed. The maximise button renders only when given. |
 | `ondetach(id)` | — | The host moves the thread out (a window, a tab). The detach button renders only when given; without it a compact embed (or a linked thread shown in place) offers **Open in Threads** (`openInThreads`). |
 | `onstatus(status)` | — | Called on mount with the host's thread state and on every change: `'idle'`, `'working'` (a turn, a starting session or background work), `'needs-you'` (an approval or question waits; outranks working) or `'closed'`. Lets a folded host header show a dot without reading the Threads stores. |
-| `hostCommands` | — | The view-level slash commands the host carries out (`RuntimeHostCommands`). |
+| `hostCommands` | — | The view-level slash commands the host carries out (`RuntimeHostCommands`). With `newThread`, a compact embed's bar also shows a **New thread** (+) button. |
+| `draft` | — | With `sessionId: null`: no thread yet. The embed renders the Threads start composer (`RuntimeStartComposer`, the same one the new-thread stage uses: agent · model · effort through the model picker, the access chip, attach, `@`, `/`) under the host's `lead` and suggestion chips, and starts the thread through the Threads store (see below). |
+| `onhandle(handle)` | — | The embed's send for the host's own asks (a menu, a file, a line pick): `handle.send(text, { accessMode })`. Before a thread it starts one with the composer's picks; after, it reopens a closed thread and queues behind a running turn, through the store, so the access chip, the closed state and the working dot stay true. |
+| `contextOnFresh()` | — | Text put before the first message after `/clear` (fresh context), so the agent knows again what it is looking at (a PR's context block). |
 
 `hostCommands` handlers (all optional): `openDiff(id)` for `/diff`,
 `openFiles(id)` for `/files`, `openTerminal(id)` for `/terminal`,
@@ -1329,6 +1384,29 @@ the slash popup, and typed by hand it goes to the agent like any other
 `/command` — never a silent no-op. `/clear` (fresh context) and `/review` (a
 prompt) belong to the thread and always work. Threads is just another host
 (`ui/src/modules/threads/runtime/threadsHost.ts`).
+
+`draft` (`RuntimeEmbedDraft`): `workspaceId`, `cwd` (fixed; null = the
+workspace root), `title`, `source` / `origin` (below), `defaultAccess` (the
+chip's first value; PR questions and diagnoses use `approval-required`),
+`confirmAccess(mode)` (asked when the person picks a more permissive mode),
+`suggestions` (`{label, prompt()}`, each a whole first message),
+`placeholder`, `lead` (a snippet above the composer), `transformFirstPrompt`
+(wraps a TYPED first message, e.g. with the PR's context) and
+`onstarted(session)` (the host keeps the id; the embed then shows the
+thread). The draft composer offers only agents that run a structured thread
+and are installed (`isRuntimeProvider(p, auth.meta)`, custom providers
+included), and says in words what the picked access mode allows. Hosts never
+call the runtime routes themselves: the session port
+(`loadIdeRuntimeSessionPort()`) carries `runtimeThreads.start` (with
+`accessMode`, `source`, `origin`, `titleAuto`, `plan`; a daemon that refuses
+the embed fields gets a plain thread), `findByOrigin(workspaceId, source,
+originId, rememberedId?)` (no linked threads, an OPEN thread before a closed
+one, then the newest), `reopen`, `close` and `prompt`. A pull request's
+**New thread** closes its thread (it stays in History) and returns to the
+draft, where another agent can be picked; the lookup then finds the new one.
+Connections' Diagnose works the same way: the consent text is the draft's
+lead, "Start the diagnosis" its suggestion; an existing thread is offered to
+run the checks again (reopened if closed, queued behind a running turn).
 
 Threads an embed starts should carry a `meta.source` from
 `EMBEDDED_THREAD_SOURCES` (`ui/src/modules/threads/threadOrigins.ts`:

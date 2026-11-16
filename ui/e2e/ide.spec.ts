@@ -2351,12 +2351,12 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
     await page.getByTestId('ide-csv-add-col').click();
     await expect(csvGrid).toContainText('51 rows · 5 cols');
 
-    // Switch to `Text` mode -> verify CodeMirror Rainbow Column Highlighting (`.cm-ide-csv-col-0..2`)!
-    await page.getByTestId('ide-csv-mode-toggle').getByRole('button', { name: 'Text' }).click();
+    // Switch to the editor (the tab strip's Editor | Preview control; Preview is the table) -> verify CodeMirror Rainbow Column Highlighting (`.cm-ide-csv-col-0..2`)!
+    await page.getByTestId('ide-preview-mode-source').click();
     await expect(page.locator('.cm-ide-csv-col-0').first()).toBeVisible({ timeout: 10_000 });
     await expect(page.locator('.cm-ide-csv-col-1').first()).toBeVisible();
     await expect(page.locator('.cm-ide-csv-col-2').first()).toBeVisible();
-    await page.getByTestId('ide-csv-mode-toggle').getByRole('button', { name: 'Table' }).click();
+    await page.getByTestId('ide-preview-mode-preview').click();
     await expect(csvGrid).toBeVisible();
 
     // D. JS/TS `node_modules` `.d.ts` Dive-In (`node_modules` + `Read-only` badges) & Python stdlib resolution!

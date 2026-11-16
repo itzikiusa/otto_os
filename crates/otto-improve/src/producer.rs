@@ -30,14 +30,13 @@ pub trait ProposalProducer: Send + Sync {
 /// session transcript), so it is handled separately in `run_one`.
 ///
 /// codex has a first-class `exec` subcommand; agy is a claude-compatible fork
-/// so it uses claude's `-p` print mode. For ANY OTHER provider — including a
-/// user's CUSTOM provider (e.g. `grok`) — we BEST-EFFORT the claude-compatible
-/// `-p` print convention (most agent CLIs, and every claude fork, accept it).
-/// A provider that doesn't support it simply exits non-zero; the engine logs
-/// and skips it, never aborting the others — so a custom provider is offered
-/// consistently and works whenever its CLI has a print mode.
-fn headless_exec(provider: &str) -> (String, Vec<String>, PromptArg<'static>) {
-    match provider {
+/// so it uses claude's `-p` print mode. ANY OTHER provider (Muse, opencode,
+/// pi, a custom slug) is refused: running an unknown CLI unsandboxed with a
+/// permission-skipping flag it may not understand — or that means something
+/// else to it — is not a best effort Otto makes on the person's behalf. The
+/// engine logs the refusal and skips that provider, never aborting the others.
+fn headless_exec(provider: &str) -> Result<(String, Vec<String>, PromptArg<'static>)> {
+    Ok(match provider {
         "codex" => (
             "codex".into(),
             vec![
@@ -55,13 +54,13 @@ fn headless_exec(provider: &str) -> (String, Vec<String>, PromptArg<'static>) {
             vec!["--dangerously-skip-permissions".into()],
             PromptArg::Flag("--print"),
         ),
-        // Every other (custom) provider: the claude-style print switch.
-        other => (
-            other.to_string(),
-            vec!["-p".into(), "--dangerously-skip-permissions".into()],
-            PromptArg::Positional,
-        ),
-    }
+        other => {
+            return Err(Error::Invalid(format!(
+                "self-improvement can't run {other}: its analysis turn runs on Claude, Codex \
+                 or agy only"
+            )))
+        }
+    })
 }
 
 /// The admission label of a self-improvement analysis turn (one of
@@ -94,7 +93,7 @@ impl RealProposalProducer {
         } else {
             // codex/agy/custom → headless CLI exec (best-effort print mode for
             // custom providers; a non-supporting CLI errors and is skipped).
-            let (program, args, prompt_arg) = headless_exec(provider);
+            let (program, args, prompt_arg) = headless_exec(provider)?;
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
             otto_orchestrator::run_cli_exec_with(
                 &program,
@@ -153,6 +152,20 @@ mod tests {
 
     /// The producer's label is one the daemon's gate holds back — otherwise
     /// the hook would admit it at once and the turn would skip the gate.
+    /// I-09: only CLIs whose headless argv Otto knows run; anything else is
+    /// refused with the reason instead of being handed claude's flags.
+    #[test]
+    fn unknown_clis_are_refused_not_run_with_claude_flags() {
+        let (prog, args, _) = headless_exec("codex").unwrap();
+        assert_eq!(prog, "codex");
+        assert_eq!(args[0], "exec");
+        assert_eq!(headless_exec("agy").unwrap().0, "agy");
+        for p in ["muse", "opencode", "pi", "claudework", "museum-cli"] {
+            let err = headless_exec(p).expect_err(p);
+            assert!(err.to_string().contains("can't run"), "{p}: {err}");
+        }
+    }
+
     #[test]
     fn the_analysis_turn_is_admission_gated() {
         assert!(otto_sessions::admission::is_gated_source(ADMISSION_SOURCE));

@@ -57,6 +57,8 @@ import {
   type IdeDiveCallbacks,
   type IdeLspJumpTarget,
 } from './cm-ide-lsp-dive.ts';
+import { appLive } from '../live.ts';
+import { cancelLspReconnects, isLspReconnecting, noteLspDaemonShutdown, noteLspSessionReady, noteLspSocketClosed } from './cm-ide-lsp-reconnect.ts';
 
 export {
   buildLspCompletionChangeSpec,
@@ -258,6 +260,8 @@ export function disposePooledLspClients(opts?: {
   exceptKey?: string;
 }): void {
   const normFilter = opts?.rootPath ? opts.rootPath.replace(/\\/g, '/').replace(/\/+$/, '') : '';
+  // Everything torn down (project switch, IDE closed): no reattach is wanted any more.
+  if (!normFilter && opts?.forceAll) cancelLspReconnects();
   if (normFilter && opts?.forceAll) {
     for (const [dirKey, canon] of [...canonicalModuleRootByDir.entries()]) {
       if (canon === normFilter || canon.startsWith(`${normFilter}/`) || dirKey.endsWith(`::${normFilter}`) || dirKey.includes(`::${normFilter}/`)) {
@@ -341,6 +345,7 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
       try {
         await super.initialize();
         unavailableLangUntil.delete(langProbeKey);
+        if (this.ready) noteLspSessionReady(resolvedRoot);
       } catch {
         const self = this as unknown as { isClosed?: boolean };
         self.isClosed = true;
@@ -439,22 +444,34 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
     disposed: false,
   };
   entry.evictFn = () => disposePooledEntry(entry);
-  onHandshakeAborted = () => {
-    if (!entry.disposed) {
-      unavailableLangUntil.set(langProbeKey, Date.now() + 30_000);
-    }
+  // A dropped socket (any close: plain, with a reason, or after an eviction notice) evicts
+  // the entry; a working session with editors attached then reattaches with backoff, and
+  // a failed reattach attempt continues that sequence instead of cooling the language off.
+  // `daemonShutdown` (eviction reason `shutdown`): no backoff against a daemon going
+  // down; reattach once the app's own event socket is connected again.
+  const onSocketGone = (handshakeFailed: boolean, daemonShutdown = false): void => {
+    if (entry.disposed) return;
+    const hadSession = !handshakeFailed && Boolean(client.ready) && entry.refCount > 0;
+    if (!hadSession && !daemonShutdown && !isLspReconnecting(entry.rootPath)) unavailableLangUntil.set(langProbeKey, Date.now() + 30_000);
+    const root = entry.rootPath;
     entry.evictFn();
+    if (daemonShutdown) noteLspDaemonShutdown(root, hadSession, (resume) => appLive.onConnection((up) => { if (up) resume(); }));
+    else noteLspSocketClosed(root, hadSession);
   };
-  entry.offTransportClose = transport.onClose?.(() => {
-    if (!entry.disposed && !client.ready) {
-      unavailableLangUntil.set(langProbeKey, Date.now() + 30_000);
-    }
-    entry.evictFn();
-  }) ?? null;
+  onHandshakeAborted = () => onSocketGone(true);
+  entry.offTransportClose = transport.onClose?.(() => onSocketGone(false)) ?? null;
 
   client.onNotification((n) => {
     if (entry.disposed) return;
     const rawNotif = n as unknown as { method?: string; params?: Record<string, unknown> };
+    // `otto/lspEvicted {reason, lang, root}` (docs/contracts/ws.md): the daemon is stopping
+    // this server and closes the socket next. Treat it as that close so editors reattach
+    // (`server_cap`, `build_tags_changed`, any future reason) — except `shutdown`, which
+    // waits for the daemon instead of retrying against it.
+    if (typeof rawNotif.method === 'string' && /^otto\/.*evict/i.test(rawNotif.method)) {
+      onSocketGone(false, rawNotif.params?.reason === 'shutdown');
+      return;
+    }
     if (rawNotif.method === 'otto/lspAttached' && typeof rawNotif.params?.root === 'string' && rawNotif.params.root) {
       const canonRoot = rawNotif.params.root.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
       entry.rootPath = canonRoot;
@@ -514,7 +531,7 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
   const serverLang = normalizeIdeLspLanguage(opts.languageId) ?? opts.languageId;
   const langProbeKey = `${serverLang}::${opts.connId ?? 'local'}`;
   const cooldownUntil = unavailableLangUntil.get(langProbeKey) ?? 0;
-  if (cooldownUntil > Date.now()) return [];
+  if (cooldownUntil > Date.now() && !isLspReconnecting(opts.rootPath)) return [];
   if (cooldownUntil > 0) unavailableLangUntil.delete(langProbeKey);
   const resolvedRoot = resolveIdeLspModuleRoot(opts.rootPath, opts.filePath, opts.projectFolders);
   const absFile = toAbsoluteIdeFilePath(resolvedRoot, opts.filePath);

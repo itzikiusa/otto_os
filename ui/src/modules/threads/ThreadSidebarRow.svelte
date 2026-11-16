@@ -17,6 +17,7 @@
   import { runtimeThreads } from './runtime/runtimeThreads.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import { councilOf } from './runtime/council';
+  import { withBackgroundState } from './runtime/taskStop';
 
   interface Props {
     session: Session;
@@ -33,7 +34,12 @@
   let { session: s, variant, child = false, onrowclick, onreopen, onmenu, onselect, family }: Props = $props();
 
   const needs = $derived(ws.needsYou[s.id] === true);
-  const st = $derived(sessionState(s, ws.statusMap[s.id] ?? s.status, needs, { stale: events.state !== 'connected' }));
+  const st = $derived(
+    withBackgroundState(
+      sessionState(s, ws.statusMap[s.id] ?? s.status, needs, { stale: events.state !== 'connected' }),
+      runtimeThreads.get(s.id)?.background_tasks?.length ?? 0,
+    ),
+  );
   const pinned = $derived(threads.isPinned(s.id));
   const selected = $derived(threads.focusedSessionId === s.id && !threads.newDraftMode);
   const inPane = $derived(threads.paneIds.includes(s.id) && !threads.newDraftMode);

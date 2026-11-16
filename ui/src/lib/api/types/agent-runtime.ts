@@ -96,6 +96,27 @@ export interface BackgroundTask {
   item_id?: Id;
   /** Optional scheduled fire timestamp for one-shot timers (`schedule`). */
   due_at?: string;
+  /** A stop was asked for and the provider has not settled the task yet
+   *  (absent on a daemon without per-task stop). */
+  stopping?: boolean;
+  /** Why the last stop did not take (the task is still listed). */
+  stop_error?: string | null;
+}
+
+/** How `POST …/tasks/{task_id}/stop` stopped it: the provider's own stop,
+ *  an OS signal, or Otto only ASKED the agent to stop it (the task stays
+ *  listed until the agent's own settlement). */
+export type RuntimeTaskStopOutcome = 'native' | 'signal' | 'asked';
+
+/** Response of POST /runtime-sessions/{id}/tasks/{task_id}/stop. */
+export interface RuntimeTaskStopResp {
+  task_id: string;
+  outcome: RuntimeTaskStopOutcome;
+}
+
+/** Response of POST /runtime-sessions/{id}/tasks/stop (every running task). */
+export interface RuntimeTasksStopResp {
+  results: ({ task_id: string; outcome: RuntimeTaskStopOutcome } | { task_id: string; error: string })[];
 }
 
 /** Structured settlement metadata on `system_notice` when background work finishes. */
@@ -145,6 +166,9 @@ export interface ProviderTurn {
   completed_at: string | null;
   turn_token_usage?: TurnTokenUsage;
   origin?: TurnOrigin;
+  /** The model / effort this turn actually ran on (absent on older daemons). */
+  model?: string | null;
+  effort?: string | null;
 }
 
 export type TurnItemStatus =
@@ -357,6 +381,9 @@ export interface QueuedPrompt {
   /** Images / files riding with it. */
   attachments: number;
   created_at: string;
+  /** Its last delivery failed: kept, skipped by the automatic drain until a
+   *  person retries (`POST …/queue/{id}` `{delivery: "queue"}`), edits or removes it. */
+  error?: string;
 }
 
 /** How a message sent while a turn runs is delivered: `queue` (after it),
@@ -396,6 +423,8 @@ export interface RuntimeSession {
   title: string;
   cwd: string;
   model?: string;
+  /** The stored reasoning effort later turns run on (absent = the agent's default). */
+  effort?: string | null;
   native_thread_id?: string;
   status: RuntimeSessionStatus;
   access_mode: RuntimeAccessMode;
@@ -515,6 +544,8 @@ export interface SynthesizeCouncilReq {
   provider_slug?: string;
   model?: string;
   effort?: string;
+  /** Stop a seat's leftover background work instead of a 409. */
+  stop_background?: boolean;
 }
 
 /** One member of a linked group (`GET /runtime-sessions/{id}/peers`). */
@@ -562,6 +593,8 @@ export interface CreateRuntimeSessionReq {
   /** `title` is a placeholder the agent's own name for it replaces. */
   title_auto?: boolean;
   model?: string | null;
+  /** One of the provider's `capabilities.efforts`; stored as `RuntimeSession.effort`. */
+  effort?: string | null;
   access_mode?: RuntimeAccessMode;
   /** A named provider account (`meta.account_id`), applied at every spawn. */
   account_id?: string;
@@ -596,6 +629,9 @@ export interface UpdateRuntimeSessionReq {
 export interface RuntimePromptReq {
   /** Start a fresh provider conversation in the same thread; refuses outstanding work. */
   fresh_context?: boolean;
+  /** With `fresh_context`: stop the thread's background tasks first instead
+   *  of refusing (an older daemon ignores it and still answers 409). */
+  stop_background?: boolean;
   text: string;
   model?: string;
   effort?: string;
@@ -637,6 +673,8 @@ export interface RuntimePromptResp {
 /** Response of POST /runtime-sessions/{id}/interrupt. */
 export interface RuntimeInterruptResp {
   interrupted: boolean;
+  /** Background tasks still running (no turn ran, so nothing was stopped). */
+  background_tasks?: number;
 }
 
 /** Body of POST /runtime-sessions/{id}/requests/{request_id}. */

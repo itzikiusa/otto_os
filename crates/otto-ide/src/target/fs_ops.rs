@@ -65,13 +65,19 @@ pub(crate) fn resolve_local_entry_in_roots(
     let is_link = std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.file_type().is_symlink());
     let (true, Some(parent), Some(name)) = (is_link, candidate.parent(), candidate.file_name())
     else {
-        return canonical_in_roots(&candidate, root, additional_roots, is_root_user);
+        // Delete/Rename source: moving `.git` aside (then editing it) is a
+        // write to git's own files too.
+        let (entry, matched_root) =
+            canonical_in_roots(&candidate, root, additional_roots, is_root_user)?;
+        super::control_paths::enforce_control_path(&entry, is_root_user)?;
+        return Ok((entry, matched_root));
     };
     let (parent, matched_root) = canonical_in_roots(parent, root, additional_roots, is_root_user)?;
     let entry = parent.join(name);
     if !is_root_user {
         enforce_non_root_path(&entry)?;
     }
+    super::control_paths::enforce_control_path(&entry, is_root_user)?;
     Ok((entry, matched_root))
 }
 

@@ -24,14 +24,14 @@
   import { ide, type IdeCodeAction, type IdeEditorHandle, type IdeOpenTab, type IdeSymbolNode } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
   import { matchesPausedDebugPath as matchesPausedPath } from './editor/idePausedPath';
-  import { previewLangOf } from './filetools/preview/kinds';
   import { subscribeIdeBufferEvictions, subscribeIdeFileSaved } from './store/ideBufferPerf';
   import IdeBreadcrumbsBar from './editor/IdeBreadcrumbsBar.svelte';
   import IdeTabBar from './editor/IdeTabBar.svelte';
+  import IdePreviewPane from './editor/IdePreviewPane.svelte';
   import {
     areIdeBreakpointsMuted, classifyIdeFile, evictPersistedIdeGitBase, fetchIdeGitBlame,
     flushAutoLocalHistorySnapshot, getIdeProjectFolders, getPersistedIdeGitBaseDigest,
-    getPersistedIdeGitBaseSnapshot, ideEditorPrefs, navigateIdeBack, navigateIdeForward,
+    getPersistedIdeGitBaseSnapshot, ideEditorPrefs, idePreviewMode, navigateIdeBack, navigateIdeForward,
     performIdeDive, pushIdeNavLocation, putIdeLocalHistoryLabel, resolveIdeGitBaseContent,
     setPersistedIdeGitBase,
   } from './editor/ideEditorStoreBridge.svelte';
@@ -57,7 +57,6 @@
   IdeEditorSubbarLazy.prefetch();
   const IdeInlinePromptBarLazy = lazyComponent(() => import('./IdeInlinePromptBar.svelte'));
   const IdeCsvViewLazy = lazyComponent(() => import('./editor/IdeCsvView.svelte'));
-  const FilePreviewLazy = lazyComponent(() => import('./filetools/preview/Preview.svelte'));
   const IdeBreakpointPopoverLazy = lazyComponent(() => import('./editor/IdeBreakpointPopover.svelte'));
   const IdeFileStructureModalLazy = lazyComponent(() => import('./editor/IdeFileStructureModal.svelte'));
   const IdeRenameModalLazy = lazyComponent(() => import('./editor/IdeRenameModal.svelte'));
@@ -101,7 +100,6 @@
     manifestDep: CmIdeDepsMod.IdeDepItem | null;
     serverActions: IdeCodeAction[];
   } | null>(null);
-  let tableModeByPath = $state<Record<string, 'table' | 'text' | 'preview'>>({});
   let manifestModeByPath = $state<Record<string, 'text' | 'analyzer'>>({});
   let manifestDepsByPath = $state<Record<string, CmIdeDepsMod.IdeDepItem[]>>({});
   let blameEnabledByPath = $state<Record<string, boolean>>({});
@@ -285,20 +283,20 @@
     if (pathList === 'all') {
       for (const ctl of gitBaseCtlByPath.values()) ctl.abort();
       gitBaseCtlByPath.clear(); evictPersistedIdeGitBase('all'); gitBaseByPath = {};
-      blameEnabledByPath = {}; blameByPath = {}; tableModeByPath = {}; manifestModeByPath = {}; manifestDepsByPath = {};
+      blameEnabledByPath = {}; blameByPath = {}; manifestModeByPath = {}; manifestDepsByPath = {};
       bpEditor = null; intentionState = null; disposeAllPooledLsp(); return;
     }
     evictPersistedIdeGitBase(pathList);
     const nextBlame = { ...blameByPath }, nextBlameOn = { ...blameEnabledByPath }, nextGitBase = { ...gitBaseByPath };
-    const nextMode = { ...tableModeByPath }, nextManMode = { ...manifestModeByPath }, nextManDeps = { ...manifestDepsByPath };
+    const nextManMode = { ...manifestModeByPath }, nextManDeps = { ...manifestDepsByPath };
     for (const p of pathList) {
       gitBaseCtlByPath.get(p)?.abort(); gitBaseCtlByPath.delete(p); delete nextGitBase[p];
-      delete nextBlame[p]; delete nextBlameOn[p]; delete nextMode[p]; delete nextManMode[p]; delete nextManDeps[p];
+      delete nextBlame[p]; delete nextBlameOn[p]; delete nextManMode[p]; delete nextManDeps[p];
       if (bpEditor?.path === p) bpEditor = null;
       if (intentionState?.path === p) intentionState = null;
     }
     blameByPath = nextBlame; blameEnabledByPath = nextBlameOn; gitBaseByPath = nextGitBase;
-    tableModeByPath = nextMode; manifestModeByPath = nextManMode; manifestDepsByPath = nextManDeps;
+    manifestModeByPath = nextManMode; manifestDepsByPath = nextManDeps;
     if (ide.tabs.length === 0) disposeAllPooledLsp();
   });
 
@@ -325,10 +323,9 @@
   const activeIsManifest = $derived(ide.activeTab ? isIdeManifestPath(ide.activeTab.path) : false);
   const effectiveManifestMode = $derived(ide.activeTab ? (manifestModeByPath[ide.activeTab.path] ?? 'text') : 'text');
   const activeFileMeta = $derived(ide.activeTab ? classifyIdeFile(ide.activeTab, ide.target.root, projectFolders.slice(1)) : { external: false, sdkLabel: null });
-  const previewLang = $derived(ide.activeTab ? previewLangOf(ide.activeTab.path) : null);
-  const effectiveViewMode = $derived.by((): 'table' | 'text' | 'preview' => {
+  const effectiveViewMode = $derived.by((): 'table' | 'text' => {
     const t = ide.activeTab;
-    return !t ? 'text' : (tableModeByPath[t.path] ?? (activeDocKind === 'csv' ? 'table' : 'text'));
+    return t && idePreviewMode.layoutFor(t.path) === 'table' ? 'table' : 'text';
   });
   const effectiveSymbols = $derived.by((): IdeSymbolNode[] => {
     const t = ide.activeTab;
@@ -468,9 +465,7 @@
 </script>
 
 <section class="ide-editor-area" aria-label="Code editor" data-testid="ide-editor-area">
-  {#if ide.tabs.length > 0}
-    <IdeTabBar onsave={(p) => void saveWithOptionalFormat(p)} />
-  {/if}
+  {#if ide.tabs.length > 0}<IdeTabBar onsave={(p) => void saveWithOptionalFormat(p)} />{/if}
 
   {#if ide.activeTab}
     {@const activeTab = ide.activeTab}
@@ -484,12 +479,10 @@
         sdkLabel={activeFileMeta.sdkLabel}
         {activeDocKind}
         {effectiveViewMode}
-        canPreview={previewLang !== null}
         {hasNonEmptySelection}
         blameActive={Boolean(blameEnabledByPath[activeTab.path])}
         {errorCount}
         {warnCount}
-        onsetviewmode={(m) => (tableModeByPath = { ...tableModeByPath, [activeTab.path]: m })}
         onapplyjson={(txt) => { if (!primaryEditorRef?.applyAgentEdit?.(txt)) ide.updateBuffer(activeTab.path, txt); }}
         onjumpsymbol={jumpAdjacentSymbol}
         ongotoline={(ln, col) => primaryEditorRef?.goToLine(ln, col)}
@@ -510,7 +503,7 @@
     {/if}
 
     <div class="ide-panes" class:split-down={ide.splitDirection === 'down'} bind:this={panesEl}>
-      <div class="ide-pane" style:flex={ide.splitTab ? `0 0 calc(${(splitRatio * 100).toFixed(1)}% - 3px)` : '1 1 0%'}>
+      <div class="ide-pane {idePreviewMode.paneClass(stagedPrimaryTab?.path === activeTab.path ? stagedPrimaryTab : null)}" style:flex={ide.splitTab ? `0 0 calc(${(splitRatio * 100).toFixed(1)}% - 3px)` : '1 1 0%'}>
         {#if activeTab.error || !stagedPrimaryTab}
           <LoadState what={activeTab.name} variant="panel" loading={activeTab.loading} error={activeTab.error} empty={!stagedPrimaryTab} onretry={() => void ide.openFile(activeTab.path)} />
         {:else if activeIsManifest && effectiveManifestMode === 'analyzer' && stagedPrimaryTab.path === activeTab.path}
@@ -528,8 +521,6 @@
               onswitchtext: (ln: number) => { manifestModeByPath = { ...manifestModeByPath, [stagedPrimaryTab!.path]: 'text' }; requestAnimationFrame(() => primaryEditorRef?.goToLine(ln, 1)); },
             }}
           />
-        {:else if effectiveViewMode === 'preview' && stagedPrimaryTab.path === activeTab.path}
-          <LazyMount lazy={FilePreviewLazy} what="preview" variant="panel" props={{ lang: previewLang ?? '', content: stagedPrimaryTab.content, name: stagedPrimaryTab.name }} />
         {:else if effectiveViewMode === 'table' && (activeDocKind === 'csv' || activeDocKind === 'jsonl') && stagedPrimaryTab.path === activeTab.path}
           <LazyMount
             lazy={IdeCsvViewLazy}
@@ -539,7 +530,7 @@
               path: stagedPrimaryTab.path, content: stagedPrimaryTab.content,
               readOnly: stagedPrimaryTab.readOnly || !ide.canEditCollab, isJsonl: activeDocKind === 'jsonl',
               onchange: (val: string) => { ide.updateBuffer(stagedPrimaryTab!.path, val); },
-              onswitchtext: (ln: number) => { tableModeByPath = { ...tableModeByPath, [stagedPrimaryTab!.path]: 'text' }; requestAnimationFrame(() => primaryEditorRef?.goToLine(ln, 1)); },
+              onswitchtext: (ln: number) => { idePreviewMode.set(stagedPrimaryTab!.path, 'source'); requestAnimationFrame(() => primaryEditorRef?.goToLine(ln, 1)); },
             }}
           />
         {:else}
@@ -595,6 +586,7 @@
           />
         {/if}
 
+        {#if stagedPrimaryTab?.path === activeTab.path}<IdePreviewPane tab={stagedPrimaryTab} />{/if}
         {#if activeIsManifest}
           <div class="ide-manifest-tabs" role="group" aria-label="Manifest editor mode" data-testid="ide-dep-mode-switcher">
             <button type="button" class="ide-man-tab" class:active={effectiveManifestMode === 'text'} aria-pressed={effectiveManifestMode === 'text'} onclick={() => (manifestModeByPath = { ...manifestModeByPath, [activeTab.path]: 'text' })}>Text</button>
@@ -734,7 +726,7 @@
       open: structureOpen, fileName: ide.activeTab?.name ?? '', symbols: effectiveSymbols, currentLine: ide.cursorInfo.line,
       onjump: (line: number, col: number) => {
         if (ide.activePath) pushIdeNavLocation(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col);
-        if (effectiveViewMode === 'table' && ide.activePath) tableModeByPath = { ...tableModeByPath, [ide.activePath]: 'text' };
+        if (effectiveViewMode === 'table' && ide.activePath) idePreviewMode.set(ide.activePath, 'source');
         requestAnimationFrame(() => primaryEditorRef?.goToLine(line, col));
       },
       onclose: () => (structureOpen = false),

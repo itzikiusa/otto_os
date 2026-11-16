@@ -14,9 +14,7 @@
   import { loadPaneWidth } from '../../lib/paneResizer';
   import { plural } from '../../lib/plural';
   import { router } from '../../lib/router.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
   import { ui } from '../../lib/stores/ui.svelte';
-  import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { idePreferences } from '../../lib/idePreferences.svelte';
   import { ideWorkspacePort } from '../../lib/ideWorkspacePort.svelte';
@@ -25,6 +23,9 @@
   import { ide } from './ideStore.svelte';
   import IdeWorkspaceSwitcher from './shell/IdeWorkspaceSwitcher.svelte';
   import { loadScratchesRoot, newScratchFile, openScratches } from './shell/ideScratches.svelte';
+  import IdeHeaderActions from './shell/IdeHeaderActions.svelte';
+  import IdeStackSwitcher from './shell/IdeStackSwitcher.svelte';
+  import { ideLayout, paneAfterFileOpen, STACK_MAX_H, type IdeStackPane } from './shell/ideLayout.svelte';
   import {
     handleIdeChord,
     handleIdeWindowKeyDown,
@@ -36,7 +37,6 @@
   const loadShellMenus = () => import('./shell/ideShellMenus');
 
   const IdeProjectTreeLazy = lazyComponent(() => import('./IdeProjectTree.svelte'));
-  const IdeRunToolbarLazy = lazyComponent(() => import('./shell/IdeRunToolbar.svelte'));
   const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
   const IdeBottomDockLazy = lazyComponent(() => import('./IdeBottomDock.svelte'));
   const IdeAgentPanelLazy = lazyComponent(() => import('./IdeAgentPanel.svelte'));
@@ -60,7 +60,20 @@
   let buildToolW = $state(loadPaneWidth(BUILD_TOOL_W_KEY, 310, 240, 720));
   let agentW = $state(loadPaneWidth(AGENT_W_KEY, 360, 260, 760));
   let explorerVisible = $state(true);
-  let mobileView = $state<'files' | 'editor' | 'tools' | 'agent'>('editor');
+  // Stacked layout (phone, phone on its side, a narrow window): one pane at a
+  // time, decided by this page's own size (shell/ideLayout.svelte.ts).
+  const stack = $derived(ideLayout.stack);
+  const pane = $derived(ideLayout.pane);
+  // Workbench below 1000 px wide: at most ONE side panel next to the editor —
+  // an open agent / build-tool dock hides the explorer rail instead of
+  // squeezing the editor to a sliver.
+  const treeShown = $derived(
+    stack ? pane === 'files' : explorerVisible && !(ideLayout.width < 1000 && (ideAgent.panelOpen || ide.buildToolOpen)),
+  );
+  const agentShown = $derived(stack ? pane === 'agent' : ideAgent.panelOpen);
+  // Typing in a stacked editor squeezed by the on-screen keyboard: the page
+  // header steps aside so the code keeps its lines (class:typing below).
+  let typing = $state(false);
   let folderPickerMode = $state<'open' | 'attach' | null>(null);
   let compareTarget = $state<{
     mode: IdeCompareMode;
@@ -183,11 +196,46 @@
     ideWorkspacePort.setAgentDockOpen(open);
     if (open !== lastAgentOpen) {
       lastAgentOpen = open;
-      if (viewport.isPhone) {
-        if (open) mobileView = 'agent';
-        else if (mobileView === 'agent') mobileView = 'editor';
-      }
+      untrack(() => {
+        if (!ideLayout.stack) return;
+        if (open) ideLayout.pane = 'agent';
+        else if (ideLayout.pane === 'agent') ideLayout.pane = 'editor';
+      });
     }
+  });
+
+  // Entering the stack remembers the workbench's agent dock; leaving it puts
+  // that back, so a phone pane never opens (or closes) a desktop dock.
+  let deskAgentOpen: boolean | null = null;
+  $effect(() => {
+    const isStack = stack;
+    untrack(() => {
+      if (isStack && deskAgentOpen === null) {
+        deskAgentOpen = ideAgent.panelOpen;
+        ideAgent.togglePanel(ideLayout.pane === 'agent');
+      } else if (!isStack && deskAgentOpen !== null) {
+        const restore = deskAgentOpen;
+        deskAgentOpen = null;
+        ideAgent.togglePanel(restore);
+      }
+    });
+  });
+
+  function showPane(next: IdeStackPane): void {
+    ideLayout.pane = next;
+    // The agent panel's subscriptions follow its open flag.
+    if ((next === 'agent') !== ideAgent.panelOpen) ideAgent.togglePanel(next === 'agent');
+  }
+
+  // A file opened from the Files pane (a tap in the tree) shows the editor.
+  let lastActivePath = ide.activePath;
+  $effect(() => {
+    const p = ide.activePath;
+    if (p === lastActivePath) return;
+    lastActivePath = p;
+    untrack(() => {
+      if (p && ideLayout.stack) ideLayout.pane = paneAfterFileOpen(ideLayout.pane);
+    });
   });
 
   $effect(() => {
@@ -240,7 +288,7 @@
           else ide.attachDefaultWorkspace();
           if (fileParam) {
             await ide.openFile(fileParam, { line: lineParam, preview: false });
-            mobileView = 'editor';
+            ideLayout.pane = 'editor';
           }
         } finally {
           if (window.location.hash.endsWith(`?${rawQuery}`)) {
@@ -335,155 +383,46 @@
   }
 </script>
 
-<div class="ide-page" data-testid="ide-page" data-ide-density={idePreferences.current.uiDensity}>
-  <PageHeader title="IDE (Beta)">
+<div
+  class="ide-page"
+  class:stack
+  class:short-stack={stack && ideLayout.height > 0 && ideLayout.height < STACK_MAX_H}
+  class:typing={stack && typing && ideLayout.height > 0 && ideLayout.height < 360}
+  onfocusin={(e) => (typing = e.target instanceof Element && !!e.target.closest('.cm-editor'))}
+  onfocusout={() => (typing = false)}
+  data-pane={stack ? pane : undefined}
+  data-testid="ide-page"
+  data-ide-density={idePreferences.current.uiDensity}
+  bind:clientWidth={ideLayout.width}
+  bind:clientHeight={ideLayout.height}
+>
+  <!-- One toolbar row (G13). Stacked: the pane switcher takes the tabs slot
+       (below the bar when the page is tall, inline when it is short). -->
+  {#snippet stackTabs()}<IdeStackSwitcher onshow={showPane} />{/snippet}
+  <PageHeader
+    title={stack ? 'IDE' : 'IDE (Beta)'}
+    tabs={stack && ide.hasTarget ? stackTabs : undefined}
+    tabsPlacement={stack && ideLayout.height >= STACK_MAX_H ? 'below' : 'inline'}
+  >
     {#snippet badge()}
       <IdeWorkspaceSwitcher onpickfolder={(m) => (folderPickerMode = m)} />
     {/snippet}
 
     {#snippet actions()}
-      {#if ide.hasTarget}
-        {#if !viewport.isPhone}
-          <button
-            type="button"
-            class="icon-btn"
-            data-overflow="1"
-            data-icon="search"
-            aria-label="Search everywhere"
-            title="Search everywhere (⇧⇧)"
-            onclick={() => {
-              ide.searchScopePath = null; ide.searchReplaceMode = false; ide.searchInitialTab = 'all'; ide.searchEverywhereOpen = true;
-            }}
-          >
-            <Icon name="search" size={14} />
-          </button>
-        {/if}
-
-        <LazyMount lazy={IdeRunToolbarLazy} what="launch controls" quiet />
-
-        {#if !viewport.isPhone}
-          <button
-            type="button"
-            class="btn small ghost ide-tool-toggle"
-            data-overflow="4"
-            data-icon="branch"
-            aria-pressed={ide.bottomDockOpen && ide.activeBottomTab === 'git'}
-            title="Open Git Changes (⌘9)"
-            onclick={() => ide.openBottomTab('git')}
-            data-testid="ide-git-btn"
-          >
-            <Icon name="branch" size={13} />
-            Git
-          </button>
-
-          {#if ide.buildToolKind}
-            {@const btTitle = ide.buildToolKind === 'gradle' ? 'Gradle' : 'Maven'}
-            <button
-              type="button"
-              class="btn small ghost ide-tool-toggle"
-              data-overflow="4"
-              data-icon="layers"
-              aria-pressed={ide.buildToolOpen}
-              title={`Toggle ${btTitle} projects & profiles`}
-              onclick={() => ide.toggleBuildTool()}
-              data-testid="ide-toggle-build-tool"
-            >
-              <span class="ide-bt-mark">{ide.buildToolKind === 'gradle' ? 'G' : 'm'}</span>
-              {btTitle}
-            </button>
-          {/if}
-
-          <button
-            type="button"
-            class="btn small ghost ide-tool-toggle"
-            data-overflow="5"
-            data-icon="assistant"
-            data-label="Toggle AI Agent"
-            aria-pressed={ideAgent.panelOpen}
-            title="Toggle AI Agent (⇧⌘L)"
-            onclick={() => { ideAgent.togglePanel(); if (ideAgent.panelOpen) focusAgentComposer(); }}
-            data-testid="ide-toggle-agent"
-          >
-            <Icon name="assistant" size={13} />
-            Agent
-            {#if ideAgent.contexts.length > 0}
-              <Badge tone="accent" label={String(ideAgent.contexts.length)} />
-            {/if}
-          </button>
-
-          <button
-            type="button"
-            class="btn small ghost"
-            data-overflow="2"
-            data-icon="share"
-            onclick={() => (ide.shareOpen = true)}
-            title="Share live IDE session with teammates"
-            data-testid="ide-share-btn"
-          >
-            <Icon name="share" size={13} />
-            Share
-          </button>
-
-          <button
-            type="button"
-            class="icon-btn"
-            data-overflow="2"
-            data-icon="palette"
-            aria-label="Color scheme"
-            title="Color scheme & rainbow brackets"
-            aria-haspopup="menu"
-            onclick={(e) => {
-              const anchor = e.currentTarget instanceof HTMLElement ? e.currentTarget : e;
-              void loadShellMenus().then((m) => m.showIdeSchemeMenu(anchor, quickPrefs, (next) => (quickPrefs = next)));
-            }}
-            data-testid="ide-scheme-btn"
-          >
-            <Icon name="palette" size={14} />
-          </button>
-        {/if}
-      {/if}
-
-      <button
-        type="button"
-        class="icon-btn"
-        data-overflow="3"
-        data-icon="gear"
-        aria-label="IDE settings"
-        title="Settings & Project Structure (⌘,)"
-        onclick={() => ide.openSettings()}
-        data-testid="ide-settings-btn"
-      >
-        <Icon name="gear" size={14} />
-      </button>
-
-      <button
-        type="button"
-        class="icon-btn"
-        data-keep
-        data-icon="more"
-        data-label="More actions…"
-        aria-label="More actions"
-        title="More actions"
-        aria-haspopup="menu"
-        onclick={(e) => {
-          const anchor = e.currentTarget instanceof HTMLElement ? e.currentTarget : e;
-          void loadShellMenus().then((m) =>
-            m.showIdeMoreMenu(anchor, {
-              explorerVisible,
-              onToggleExplorer: () => (explorerVisible = !explorerVisible),
-              onTriggerAgent: () => triggerAgentShortcut(),
-              onAttachFolder: () => (folderPickerMode = 'attach'),
-            }),
-          );
-        }}
-        data-testid="ide-more-btn"
-      >
-        <Icon name="more" size={14} />
-      </button>
+      <IdeHeaderActions
+        {stack}
+        bind:quickPrefs
+        {explorerVisible}
+        onToggleExplorer={() => (explorerVisible = !explorerVisible)}
+        onTriggerAgent={() => triggerAgentShortcut()}
+        onAttachFolder={() => (folderPickerMode = 'attach')}
+        onShowPane={showPane}
+        onOpenScratches={() => void openScratches()}
+        onToggleAgentDock={() => { ideAgent.togglePanel(); if (ideAgent.panelOpen) focusAgentComposer(); }}
+      />
     {/snippet}
   </PageHeader>
 
-  <IdeWorkspaceSwitcher mode="pills-bar" />
 
   {#if ide.collabRoom}
     <div class="ide-collab-banner" role="region" aria-label="Live collaboration session">
@@ -545,53 +484,32 @@
           Open Scratches
         </button>
       </EmptyState>
-    {:else if viewport.isPhone}
-      <div class="ide-mobile-bar">
-        <div class="segmented" role="group" aria-label="IDE mobile pane">
-          <button type="button" class:active={mobileView === 'files'} aria-pressed={mobileView === 'files'} onkeydown={onTabKey} onclick={() => { mobileView = 'files'; if (ideAgent.panelOpen) ideAgent.togglePanel(false); }}>Files</button>
-          <button type="button" class:active={mobileView === 'editor'} aria-pressed={mobileView === 'editor'} onkeydown={onTabKey} onclick={() => { mobileView = 'editor'; if (ideAgent.panelOpen) ideAgent.togglePanel(false); }}>Editor</button>
-          <button type="button" class:active={mobileView === 'tools'} aria-pressed={mobileView === 'tools'} onkeydown={onTabKey} onclick={() => { mobileView = 'tools'; ide.toggleBottomDock(true); if (ideAgent.panelOpen) ideAgent.togglePanel(false); }}>Tools</button>
-          <button type="button" class:active={mobileView === 'agent'} aria-pressed={mobileView === 'agent'} onkeydown={onTabKey} onclick={() => { mobileView = 'agent'; ideAgent.togglePanel(true); }} data-testid="ide-mobile-tab-agent">
-            Agent{#if ideAgent.contexts.length > 0} ({ideAgent.contexts.length}){/if}
-          </button>
-        </div>
-      </div>
-
-      <div class="ide-mobile-body">
-        {#if mobileView === 'files'}
-          <LazyMount lazy={IdeProjectTreeLazy} what="project explorer" variant="panel" props={{ onOpenCompare: openCompareModal }} />
-        {:else if mobileView === 'tools'}
-          <LazyMount lazy={IdeBottomDockLazy} what="bottom tool dock" variant="panel" />
-        {:else if mobileView === 'agent'}
-          <LazyMount lazy={IdeAgentPanelLazy} what="AI agent" variant="panel" />
-        {:else}
-          <IdeEditorArea />
-        {/if}
-      </div>
     {:else}
-      <div class="ide-workbench">
-        {#if explorerVisible}
-          <div class="ide-rail-wrap" style:inline-size="{treeW}px">
+      <!-- ONE tree for every layout: the stack only hides panes, so rotating a
+           phone (or resizing) never remounts the editor, terminal or agent. -->
+      <div class="ide-workbench" class:stack>
+        {#if treeShown}
+          <div class="ide-rail-wrap" style:inline-size={stack ? undefined : `${treeW}px`}>
             <LazyMount lazy={IdeProjectTreeLazy} what="project explorer" variant="panel" props={{ onOpenCompare: openCompareModal }} />
           </div>
-          <PaneDivider bind:width={treeW} storageKey={TREE_W_KEY} min={180} max={620} defaultWidth={270} label="Resize project explorer" />
+          {#if !stack}<PaneDivider bind:width={treeW} storageKey={TREE_W_KEY} min={180} max={620} defaultWidth={270} label="Resize project explorer" />{/if}
         {/if}
 
-        <div class="ide-center-col">
+        <div class="ide-center-col" class:pane-off={stack && pane !== 'editor' && pane !== 'tools'} class:tools-only={stack && pane === 'tools'}>
           <IdeEditorArea />
-          <LazyMount lazy={IdeBottomDockLazy} what="bottom tool dock" quiet />
+          <LazyMount lazy={IdeBottomDockLazy} what="bottom tool dock" quiet props={{ stack, stackShowing: stack && pane === 'tools' }} />
         </div>
 
-        {#if ide.buildToolOpen}
+        {#if ide.buildToolOpen && !stack}
           <PaneDivider bind:width={buildToolW} storageKey={BUILD_TOOL_W_KEY} min={240} max={720} defaultWidth={310} invert label="Resize build tool window" />
           <div class="ide-bt-wrap" style:inline-size="{buildToolW}px">
             <LazyMount lazy={IdeBuildToolWindowLazy} what="build tool window" variant="panel" />
           </div>
         {/if}
 
-        {#if ideAgent.panelOpen}
-          <PaneDivider bind:width={agentW} storageKey={AGENT_W_KEY} min={260} max={760} defaultWidth={360} invert label="Resize AI agent dock" />
-          <div class="ide-agent-wrap" style:inline-size="{agentW}px">
+        {#if agentShown}
+          {#if !stack}<PaneDivider bind:width={agentW} storageKey={AGENT_W_KEY} min={260} max={760} defaultWidth={360} invert label="Resize AI agent dock" />{/if}
+          <div class="ide-agent-wrap" style:inline-size={stack ? undefined : `${agentW}px`}>
             <LazyMount lazy={IdeAgentPanelLazy} what="AI agent" variant="panel" />
           </div>
         {/if}
@@ -683,8 +601,6 @@
   .ide-page { display: flex; flex-direction: column; flex: 1; min-inline-size: 0; min-block-size: 0; block-size: 100%; --ide-row-py: 4px; --ide-row-px: 8px; --ide-tab-h: 32px; --ide-bar-py: 6px; }
   .ide-page[data-ide-density='compact'] { --ide-row-py: 2px; --ide-row-px: 6px; --ide-tab-h: 28px; --ide-bar-py: 4px; }
   .ide-page[data-ide-density='comfortable'] { --ide-row-py: 6px; --ide-row-px: 10px; --ide-tab-h: 34px; --ide-bar-py: 8px; }
-  .ide-tool-toggle[aria-pressed='true'] { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
-  .ide-bt-mark { display: inline-flex; align-items: center; justify-content: center; inline-size: 14px; block-size: 14px; border-radius: var(--radius-s); background: var(--accent-soft); color: var(--accent-text); font-size: var(--fs-xs); font-weight: 600; }
   .ide-collab-banner { display: flex; align-items: center; gap: 8px; padding-block: var(--ide-bar-py); padding-inline: 14px; background: var(--surface); border-block-end: 1px solid var(--border); font-size: var(--fs-xs); flex-wrap: wrap; }
   .collab-title { font-weight: 500; color: var(--text); }
   .collab-count { color: var(--text-dim); }
@@ -693,12 +609,19 @@
   .ide-workbench { display: flex; flex: 1; min-inline-size: 0; min-block-size: 0; }
   .ide-rail-wrap, .ide-bt-wrap, .ide-agent-wrap { flex-shrink: 0; min-inline-size: 0; min-block-size: 0; block-size: 100%; display: flex; flex-direction: column; }
   .ide-center-col { flex: 1; min-inline-size: 0; min-block-size: 0; display: flex; flex-direction: column; }
-  .ide-mobile-bar { display: flex; justify-content: center; padding-block: var(--ide-bar-py); padding-inline: 10px; background: var(--surface); border-block-end: 1px solid var(--border); }
-  .ide-mobile-bar .segmented { max-inline-size: 100%; }
-  .ide-mobile-bar .segmented > button { padding-inline: 8px; }
-  .ide-mobile-body { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; flex-direction: column; }
+  /* Stacked: the visible pane fills the page; the others are hidden, not unmounted. */
+  .ide-workbench.stack > .ide-rail-wrap, .ide-workbench.stack > .ide-agent-wrap { flex: 1; min-inline-size: 0; }
+  .ide-center-col.pane-off { display: none; }
+  .ide-center-col.tools-only :global(.ide-editor-area) { display: none; }
+  /* Stacked chrome: no second breadcrumb under the code, no fold column; on a
+     short page (phone on its side) no sub-bar. */
+  /* CodeMirror's base theme declares `.cm-gutter { display: flex !important }`. */
+  .ide-page.stack :global(.ide-breadcrumbs-bar) { display: none; }
+  .ide-page.stack :global(.cm-gutter.cm-foldGutter) { display: none !important; }
+  .ide-page.short-stack :global(.ide-subbar) { display: none; }
+  .ide-page.typing :global(.page-header-bar) { display: none; }
   @media (max-width: 1024px) {
-    .ide-rail-wrap { max-inline-size: 32%; }
-    .ide-bt-wrap, .ide-agent-wrap { max-inline-size: 38%; }
+    .ide-workbench:not(.stack) > .ide-rail-wrap { max-inline-size: 32%; }
+    .ide-bt-wrap, .ide-workbench:not(.stack) > .ide-agent-wrap { max-inline-size: 38%; }
   }
 </style>

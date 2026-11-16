@@ -151,6 +151,12 @@ simply not Otto's (external) never re-queries. Indexes:
 
 Shared working directories do not establish ownership.
 
+**Threads (structured runtime).** A thread's CLI still writes its usual
+transcript / store under its own id, the thread's `native_thread_id`
+(`agent_runtime_sessions`). The index also holds those ids, so a Claude, Codex,
+Grok, Antigravity or Muse thread's turns bill to the thread and its workspace instead
+of `external`. A terminal session that holds the same id keeps it.
+
 Custom Claude sessions keep the provider name stored on their Otto session, such
 as `claude-work`. Unmatched transcripts in `~/.claude-work/projects` use the
 `claude-work` label and are visible in the **All** view.
@@ -170,6 +176,38 @@ to **180 seconds** from the file's birth (`OWNER_GRACE`,
 session that started it (and to the `review` bucket for review agents) instead of
 landing in `external`. A transcript nobody claims within that window is external
 as before; nothing is read twice.
+
+### 3.3.1 Threads on providers without a readable record (gemini, opencode, pi)
+
+Nothing on disk is tailed for these CLIs. Their **Threads** turns are recorded
+from the runtime instead: when a turn settles, its `turn_token_usage` (the
+agent's own counts — an ACP prompt response's `usage`, pi's summed
+`message_end`s, an ACP `usage_update` cost) becomes one row
+(`crates/otto-usage/src/engine/runtime_turns.rs`, called from
+`crates/otto-agent-protocol/src/runtime/usage_hook.rs`):
+
+| Column | Value |
+|---|---|
+| `session_id` / `workspace_id` | the thread's id and workspace |
+| `provider` / `model` | the thread's provider; the model the turn ran on (else the thread's) |
+| `input_tokens` / `cache_read_tokens` | fresh input / cached input (the runtime's input includes the cache) |
+| `output_tokens` | output **plus** reported thinking tokens (billed as output; the agents report them apart) |
+| `cost_usd` | the agent's reported cost; else the rate card for a priced model; else 0 (no Opus-tier fallback for a model Otto cannot price) |
+| `origin` | `thread` |
+| `ts` | the turn's settle time |
+
+The row goes through the durable outbox under the id
+`runtime-turn:<thread>:<turn>`: a repeated hand-over is ignored while the row
+is queued, and one after delivery lands on the same `usage_events_durable` key,
+which the FINAL read counts once. Turns of Claude, Codex, Grok, Antigravity and Muse
+threads are never recorded this way — their transcripts are (§3.3); both would
+count the turn twice. A turn that reports no tokens and no cost (an agent that
+sends neither) records nothing. A turn cut off by a daemon restart is not
+recorded.
+
+**Terminal sessions** on gemini, opencode and pi are **not measured**: the
+Usage page's *By provider* panel names those providers (when used or installed)
+instead of letting a missing bar read as zero.
 
 ### 3.4 No double-counting, true-time stamping
 
@@ -699,8 +737,9 @@ last fetch) so sparklines update in near-real-time without blind polling.
 
 **Capabilities**
 
-- Real per-turn token capture for Claude Code, custom Claude accounts, Codex, Grok, and Antigravity with **zero manual
-  instrumentation** — survives resumes, channel sessions, and restarts.
+- Real per-turn token capture for Claude Code, custom Claude accounts, Codex, Grok, Antigravity and Muse with **zero manual
+  instrumentation** — survives resumes, channel sessions, and restarts — and for
+  Threads on gemini, opencode and pi from the turn usage the agent reports.
 - Four-class token breakdown + per-model USD cost estimate; attribution by provider,
   day, session, feature, and nine work-graph dimensions; pre-launch cost forecast.
 - Live retention changes, live system-metrics sparklines, and opt-in spend budgets
@@ -716,6 +755,10 @@ last fetch) so sparklines update in near-real-time without blind polling.
 - **No backfill.** Only turns that occur after the engine is up are counted; pre-existing
   transcript history is seeded out.
 - Legacy Antigravity `.pb` archives are not imported; SQLite conversation histories are supported.
+- **gemini / opencode / pi terminal sessions are not measured** (only their
+  Threads are, §3.3.1). Threads rows are not in a non-root person's *own* view yet:
+  that view, the session titles and the per-kind rollup read the terminal
+  `sessions` table only, so a thread's row shows untitled and under `external`.
 - **Codex attribution is cwd-based** — ambiguous when two Codex sessions share a
   directory (those turns become `external`).
 - **Macro-level only** — the dashboard is root-only and aggregates all workspaces;

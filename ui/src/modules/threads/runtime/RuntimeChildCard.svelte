@@ -7,7 +7,10 @@
   the agent opened (`otto.thread_open`), on every runtime provider. It
   follows the child's own session events (runtimeViews keeps its projection
   live while the card is mounted; no polling). Clicking the row shows the
-  child's last answer here, read-only.
+  child's last answer here, read-only. Stop stops what the child actually
+  runs (its turn, else its background work) and says what happened. A child
+  a PERSON asked hands its answer to them, not to this thread's agent: once
+  it answered, "Send the answer to <agent>" passes it on in one click.
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
@@ -18,7 +21,10 @@
   import { now } from '../../../lib/stores/now.svelte';
   import { toastError } from '../../../lib/toastError';
   import { formatDuration } from './workLog';
-  import { activityOf, answerOf, childState, elapsedMs, firstLine, rowTone } from './childThreads';
+  import { toasts } from '../../../lib/toast.svelte';
+  import { activityOf, answerOf, childOf, childState, elapsedMs, firstLine, rowTone } from './childThreads';
+  import { answerHandoff } from './askAgents';
+  import { stopThreadWork } from './taskStops.svelte';
   import { openChildThread } from './childNav';
   import RuntimeAgentRow from './RuntimeAgentRow.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
@@ -56,7 +62,13 @@
   const sub = $derived([model, hint.effort ? formatEffortShort(hint.effort) : null].filter(Boolean).join(' · ') || null);
   const name = $derived(s?.title ?? hint.title ?? (provider ? harnessLabel(provider) : 'Thread'));
   const answer = $derived(answerOf(p));
-  const live = $derived(st.tone === 'working' || st.tone === 'starting' || st.tone === 'needs-you');
+  const live = $derived(st.tone === 'working' || st.tone === 'starting' || st.tone === 'background' || st.tone === 'needs-you');
+  /** Asked by a person: its answer is the person's to pass on (the agent path wakes the parent itself). */
+  const parent = $derived(childOf(s));
+  const parentRow = $derived(parent?.by === 'person' ? runtimeThreads.get(parent.id) : null);
+  const parentAgent = $derived(parentRow ? harnessLabel(parentRow.provider).replace(/ Code$/, '') : null);
+  let handing = $state(false);
+  let handed = $state(false);
   const line = $derived(gone ? 'This thread was deleted' : live ? activityOf(p) : firstLine(answer) || null);
   const elapsed = $derived.by(() => {
     const ms = elapsedMs(p, now());
@@ -67,11 +79,26 @@
     if (stopping) return;
     stopping = true;
     try {
-      await runtimeThreads.interrupt(id);
+      // A child busy only on background work has no turn to interrupt.
+      await stopThreadWork(id, { turnRunning: st.tone !== 'background', taskIds: (s?.background_tasks ?? []).map((b) => b.id) });
     } catch (e) {
       toastError('Couldn’t stop that thread', e);
     } finally {
       stopping = false;
+    }
+  }
+
+  async function handOver(): Promise<void> {
+    if (!parentRow || handing || !answer) return;
+    handing = true;
+    try {
+      await runtimeThreads.prompt(parentRow.id, { text: answerHandoff(name, answer), delivery: 'queue' });
+      handed = true;
+      toasts.success(`Sent the answer to ${parentAgent}`);
+    } catch (e) {
+      toastError(`Couldn’t send the answer to ${parentAgent}`, e);
+    } finally {
+      handing = false;
     }
   }
 </script>
@@ -93,6 +120,18 @@
     openLabel="Open"
     testid="runtime-child-row-{id}"
   />
+  {#if parentRow && parentRow.status !== 'closed' && answer && !live && !gone}
+    <button
+      type="button"
+      class="btn small ghost rc-hand"
+      disabled={handing || handed}
+      title="This answer came back to you, not to {parentAgent}. Send it to {parentAgent} as your next message."
+      data-testid="runtime-child-handover-{id}"
+      onclick={() => void handOver()}
+    >
+      {handed ? `Sent to ${parentAgent}` : handing ? 'Sending…' : `Send the answer to ${parentAgent}`}
+    </button>
+  {/if}
   {#if open && answer}
     <div class="rc-answer" dir="auto" aria-label="{name}: last answer" data-testid="runtime-child-answer-{id}">
       <Markdown md={answer} />
@@ -106,6 +145,9 @@
     flex-direction: column;
     gap: 4px;
     min-inline-size: 0;
+  }
+  .rc-hand {
+    align-self: flex-start;
   }
   .rc-answer {
     max-block-size: 320px;

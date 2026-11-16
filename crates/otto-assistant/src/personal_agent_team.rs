@@ -238,6 +238,9 @@ pub async fn create_member<C: AssistantCtx>(
             accepted.join(", ")
         )));
     }
+    // A provider the person turned off in Settings › Providers is refused here,
+    // when the member is saved, not on its first run.
+    pa_engine::check_agent_provider(ctx.manager().providers(), &provider)?;
     let repo = pa_engine::repo(ctx);
     let taken = repo
         .list_by_workspace(&lead.workspace_id)

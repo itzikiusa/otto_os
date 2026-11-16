@@ -643,7 +643,7 @@ pub async fn create_task(
     Json(req): Json<CreateAgentTaskReq>,
 ) -> ApiResult<Json<AgentTask>> {
     let session = session_gate(&ctx, &user, &id, WorkspaceRole::Editor).await?;
-    if !crate::agent_tasks_nudge::nudgeable(&session) {
+    if !crate::agent_tasks_nudge::nudgeable_in(ctx.manager.providers(), &session) {
         return Err(ApiError(Error::Invalid(
             "board tasks can only be added to claude/codex agent sessions".into(),
         )));

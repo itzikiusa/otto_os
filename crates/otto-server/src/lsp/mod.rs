@@ -24,7 +24,9 @@ use axum::{Json, Router};
 use otto_core::api::{CreateSessionReq, Problem};
 use otto_core::auth::TokenAuthenticator;
 use otto_core::domain::{SessionKind, WorkspaceRole};
+use otto_core::secret_paths::subtree_root_denial;
 use otto_core::Id;
+use otto_ide::lsp_host::ws_bridge::canonical_of;
 use otto_ide::lsp_host::ws_bridge::{
     attach_lsp_ws_session, canonical_or_ancestor, detect_lsp_capabilities,
     plan_lsp_install_compound, prepare_lsp_ws_session, root_under_any, secret_root_denial,
@@ -188,7 +190,10 @@ pub async fn ide_local_root_authorized(
     {
         return Ok(true);
     }
-    if secret_root_denial(&canon_root).is_some() {
+    // `/`, `$HOME` or an ancestor of a protected dir is never a non-root IDE
+    // root, nor does a workspace rooted there (any user can create one)
+    // authorize what lies under it — `~/.zshrc` would be one save away.
+    if secret_root_denial(&canon_root).is_some() || subtree_root_denial(&canon_root).is_some() {
         return Ok(false);
     }
 
@@ -210,9 +215,12 @@ pub async fn ide_local_root_authorized(
         }
         member_roots.push(w.root_path);
     }
-    tokio::task::spawn_blocking(move || root_under_any(&canon_root, &member_roots))
-        .await
-        .map_err(|e| otto_core::Error::Internal(format!("ide root check: {e}")))
+    tokio::task::spawn_blocking(move || {
+        member_roots.retain(|r| canonical_of(r).is_some_and(|c| subtree_root_denial(&c).is_none()));
+        root_under_any(&canon_root, &member_roots)
+    })
+    .await
+    .map_err(|e| otto_core::Error::Internal(format!("ide root check: {e}")))
 }
 
 async fn serve_lsp(mut socket: WebSocket, pool: Arc<pool::LspPool>, prepared: PreparedLspSession) {

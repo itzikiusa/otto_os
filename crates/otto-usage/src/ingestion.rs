@@ -122,6 +122,30 @@ impl IngestionJournal {
         Ok(())
     }
 
+    /// Queue one event under a caller-chosen, deterministic id, with no source
+    /// checkpoint (the runtime's settled turns: the turn IS the checkpoint).
+    /// A second call with the same id while the first is undelivered is a
+    /// no-op; one after delivery re-sends the same id, which the
+    /// `ReplacingMergeTree` FINAL read counts once. Returns whether a row was
+    /// added.
+    pub async fn enqueue_once(&self, row: &DurableEvent) -> Result<bool, sqlx::Error> {
+        let payload = serde_json::to_string(row).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+        let mut tx = self.pool.begin().await?;
+        let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox")
+            .fetch_one(&mut *tx)
+            .await?;
+        if pending >= OUTBOX_MAX as i64 {
+            return Err(sqlx::Error::Protocol("usage outbox full".into()));
+        }
+        let done = sqlx::query("INSERT OR IGNORE INTO outbox(event_id,payload) VALUES(?,?)")
+            .bind(&row.event_id)
+            .bind(payload)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(done.rows_affected() == 1)
+    }
+
     pub async fn pending_count(&self) -> Result<u64, sqlx::Error> {
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox")
             .fetch_one(&self.pool)
@@ -291,6 +315,28 @@ mod tests {
         assert_eq!(
             recovered.checkpoint().await.unwrap(),
             Some(json!({"offset": 123}))
+        );
+    }
+
+    #[tokio::test]
+    async fn keyed_usage_enqueue_is_idempotent_and_leaves_the_checkpoint_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = IngestionJournal::open(&dir.path().join("journal.sqlite3"))
+            .await
+            .unwrap();
+        journal.commit(&json!({"offset": 7}), &[]).await.unwrap();
+        let row = DurableEvent {
+            event_id: "runtime-turn:s:t".into(),
+            event: event(),
+        };
+        assert!(journal.enqueue_once(&row).await.unwrap());
+        assert!(!journal.enqueue_once(&row).await.unwrap());
+        let pending = journal.pending(100).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].event_id, "runtime-turn:s:t");
+        assert_eq!(
+            journal.checkpoint().await.unwrap(),
+            Some(json!({"offset": 7}))
         );
     }
 

@@ -438,14 +438,22 @@ impl AgentRuntime {
                 Some(m) if m.role == CouncilRole::Seat => format!("seat {}", m.seat),
                 _ => "the last synthesis".to_string(),
             };
-            let busy = self
-                .inner
-                .live
-                .get(&s.id)
-                .is_some_and(|l| is_busy(&l.lock()));
+            let live = self.inner.live.get(&s.id).map(|l| Arc::clone(l.value()));
+            let mut busy = live.as_ref().is_some_and(|l| is_busy(&l.lock()));
+            let bg_only = live
+                .as_ref()
+                .is_some_and(|l| fresh::only_background(&l.lock()));
+            if busy && bg_only && req.stop_background {
+                busy = !self.stop_background_only(&s.id).await?;
+            }
             if busy {
+                let hint = if bg_only {
+                    " (only background work: synthesize with `stop_background: true` to stop it)"
+                } else {
+                    ""
+                };
                 return Err(Error::Conflict(format!(
-                    "{what} is still working — wait for it or stop it, then synthesize"
+                    "{what} is still working — wait for it or stop it, then synthesize{hint}"
                 )));
             }
         }
