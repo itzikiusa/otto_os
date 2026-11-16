@@ -162,7 +162,11 @@ pub(in crate::deps_inspector) async fn enrich_osv_vulnerabilities(
             .and_then(Value::as_str)
             .unwrap_or("Known security vulnerability reported in OSV database")
             .to_string();
-        let fixed_version = extract_osv_fixed_version(&detail, osv_ecosystem == "Go");
+        let fixed_version = extract_osv_fixed_version(
+            &detail,
+            &items[item_idx].current_version,
+            osv_ecosystem == "Go",
+        );
         items[item_idx].vulnerabilities.push(IdeDepVulnerability {
             id: vid,
             cve,
@@ -173,26 +177,49 @@ pub(in crate::deps_inspector) async fn enrich_osv_vulnerabilities(
     }
 }
 
-fn extract_osv_fixed_version(detail: &Value, prefix_v: bool) -> Option<String> {
+/// The `fixed` version of the range that covers `current`: the first `fixed`
+/// after an `introduced` <= `current` that is above `current` (advisories list
+/// one range per release line). Falls back to the first `fixed` when no range
+/// can be matched (e.g. a non-semver ecosystem version).
+fn extract_osv_fixed_version(detail: &Value, current: &str, prefix_v: bool) -> Option<String> {
+    let mut first = None;
+    let mut covering: Option<&str> = None;
     let affected = detail.get("affected")?.as_array()?;
     for aff in affected {
-        if let Some(ranges) = aff.get("ranges").and_then(Value::as_array) {
-            for r in ranges {
-                if let Some(events) = r.get("events").and_then(Value::as_array) {
-                    for ev in events {
-                        if let Some(f) = ev.get("fixed").and_then(Value::as_str) {
-                            return Some(if prefix_v && !f.starts_with('v') {
-                                format!("v{f}")
-                            } else {
-                                f.to_string()
-                            });
-                        }
+        let ranges = aff
+            .get("ranges")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        for r in ranges {
+            let events = r
+                .get("events")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten();
+            let mut introduced_le_current = false;
+            for ev in events {
+                if let Some(i) = ev.get("introduced").and_then(Value::as_str) {
+                    introduced_le_current = i == "0" || compare_semver(i, current).is_le();
+                } else if let Some(f) = ev.get("fixed").and_then(Value::as_str) {
+                    first.get_or_insert(f);
+                    if introduced_le_current
+                        && compare_semver(f, current).is_gt()
+                        && covering.is_none_or(|c| compare_semver(f, c).is_lt())
+                    {
+                        covering = Some(f);
                     }
+                    introduced_le_current = false;
                 }
             }
         }
     }
-    None
+    let f = covering.or(first)?;
+    Some(if prefix_v && !f.starts_with('v') {
+        format!("v{f}")
+    } else {
+        f.to_string()
+    })
 }
 
 pub(crate) fn apply_best_newer_versions(item: &mut IdeDepItem, candidates: &[String]) {
@@ -290,6 +317,31 @@ mod tests {
         assert!(
             cache_get("npm", "__test_cached_pkg__", now + Duration::from_secs(61)).is_none(),
             "expired cache entry must not be returned"
+        );
+    }
+
+    #[test]
+    fn osv_fixed_version_comes_from_the_range_covering_the_current_version() {
+        // RUSTSEC-2021-0003 (smallvec): two release lines, each with its own fix.
+        let detail = json!({"affected": [{"ranges": [
+            {"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "0.6.14"}]},
+            {"type": "SEMVER", "events": [{"introduced": "1.0.0"}, {"fixed": "1.6.1"}]}
+        ]}]});
+        assert_eq!(
+            extract_osv_fixed_version(&detail, "1.6.0", false).as_deref(),
+            Some("1.6.1")
+        );
+        assert_eq!(
+            extract_osv_fixed_version(&detail, "0.6.10", false).as_deref(),
+            Some("0.6.14")
+        );
+        // Events of several lines inside ONE range.
+        let one = json!({"affected": [{"ranges": [{"events": [
+            {"introduced": "0"}, {"fixed": "1.2.0"}, {"introduced": "1.5.0"}, {"fixed": "1.6.1"}
+        ]}]}]});
+        assert_eq!(
+            extract_osv_fixed_version(&one, "1.5.3", true).as_deref(),
+            Some("v1.6.1")
         );
     }
 }

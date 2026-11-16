@@ -287,7 +287,10 @@ Combines live LSP multiplexing with zero-roundtrip editor intelligence:
   with Maven & Spring Boot profile activation, and inline **Dependency &
   Vulnerability Intelligence** (`/ide/deps/*`) with `[Text | Dependency Analyzer]`
   tabs on `go.mod`, `pom.xml`, `build.gradle*`, `Cargo.toml`, `package.json`,
-  and `pyproject.toml`.
+  and `pyproject.toml`. For Cargo the inspector reads `[target.*.dependencies]`
+  and `[dependencies.<name>]` tables too, and checks the version resolved in the
+  nearest `Cargo.lock` (not the `Cargo.toml` requirement) against OSV; the
+  suggested fix is the one from the advisory range that covers that version.
 - **Interactive Comparison Tool & Backend Local History (`/ide/history/*`):**
   Side-by-side diff modal (`IdeComparisonModal`) with per-hunk `>>` / `<<`
   apply/revert arrows and an editable right-hand buffer, backed by a content-addressed
