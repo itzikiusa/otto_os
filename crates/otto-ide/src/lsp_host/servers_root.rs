@@ -124,6 +124,17 @@ pub fn is_multi_repo_umbrella_dir(dir: &Path) -> bool {
     false
 }
 
+/// A toolchain or package-manager copy of someone else's code: the Go module cache
+/// (`…/pkg/mod/…`), a Go SDK's `src` (GOROOT), or a Python `site-packages`.
+fn is_dependency_dir(dir: &Path) -> bool {
+    let parts: Vec<&str> = dir.iter().filter_map(|c| c.to_str()).collect();
+    parts.windows(2).any(|w| w == ["pkg", "mod"])
+        || parts.iter().any(|c| matches!(*c, "site-packages" | "dist-packages"))
+        // Homebrew's GOROOT is `…/go/<ver>/libexec`, the official one `/usr/local/go`.
+        || parts.windows(2).any(|w| w == ["libexec", "src"])
+        || parts.windows(3).any(|w| w == ["local", "go", "src"])
+}
+
 #[allow(clippy::disallowed_methods)]
 fn canonical_or_existing_ancestor(path: &Path) -> PathBuf {
     if let Ok(c) = std::fs::canonicalize(path) {
@@ -264,6 +275,15 @@ pub fn resolve_lsp_module_root_with_markers(
         canon_root.clone()
     };
 
+    // A dependency file reached by go-to-definition (GOMODCACHE, GOROOT, site-packages)
+    // is served by the workspace's own server: rooting at the dependency's go.mod
+    // started one ~300 MB gopls per module visited.
+    let start_dir = if !start_dir.starts_with(&canon_root) && is_dependency_dir(&start_dir) {
+        canon_root.clone()
+    } else {
+        start_dir
+    };
+
     if otto_core::paths::is_broad_non_project_root(&start_dir) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -380,6 +400,38 @@ mod tests {
             );
             assert!(resolve_remote_lang(non_lsp, &reg).is_none(), "{non_lsp}");
         }
+    }
+
+    #[test]
+    fn a_go_module_cache_file_keeps_the_workspace_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        let dep = tmp.path().join("go/pkg/mod/github.com/x/ttlmap@v1.6.0");
+        for d in [&ws, &dep] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("go.mod"), "module m\n").unwrap();
+        }
+        std::fs::write(dep.join("map.go"), "package ttlmap\n").unwrap();
+        let ws_canon = std::fs::canonicalize(&ws).unwrap();
+        let root = resolve_lsp_module_root(
+            "go",
+            &ws.to_string_lossy(),
+            Some(&dep.join("map.go").to_string_lossy()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(root, ws_canon.to_string_lossy());
+        // A file of the workspace itself still roots at its own module.
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        std::fs::write(ws.join("sub/go.mod"), "module s\n").unwrap();
+        let sub = resolve_lsp_module_root(
+            "go",
+            &ws.to_string_lossy(),
+            Some(&ws.join("sub/a.go").to_string_lossy()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(sub, ws_canon.join("sub").to_string_lossy());
     }
 
     #[test]
