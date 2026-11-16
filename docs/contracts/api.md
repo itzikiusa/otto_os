@@ -291,7 +291,7 @@ Notes:
   Read-only / set an environment other than Production in the connection's settings`. On an
   access-enforced connection the `403` refusals carry the same hint (`read-only connection
   '<name>' cannot perform database mutations; turn off Read-only …`, `review_required: on
-  production connection '<name>', … submit one in Database Explorer → Changes, or set an
+  production connection '<name>', … submit one in Database Explorer → ⋯ → Database changes, or set an
   environment other than Production in the connection's settings`).
 - `QueryRequest.read_only` (bool, default `false`): the same endpoint runs the statement
   read-only on ANY connection. The statement is classified first (the MCP gate's classifier;

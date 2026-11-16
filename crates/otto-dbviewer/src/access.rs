@@ -309,6 +309,17 @@ impl Visitor for SafeExpressions {
                     | "integer"
                     | "bigint"
                     | "smallint"
+                    | "int2"
+                    | "int4"
+                    | "int8"
+                    | "float4"
+                    | "float8"
+                    | "timestamptz"
+                    | "timetz"
+                    | "interval"
+                    | "inet"
+                    | "cidr"
+                    | "money"
                     | "numeric"
                     | "decimal"
                     | "float"
@@ -921,16 +932,7 @@ pub(crate) fn operations(engine: Engine, sql: &str) -> Result<Vec<&'static str>>
         // can't tell them apart); a read is `db_query`, and the caller
         // additionally requires `db_data` for any non-parser-proven read
         // (see [`unparsed_read_requires`]) so viewer-level trust is unchanged.
-        _ => {
-            if sql.trim().is_empty() {
-                return Err(Error::Invalid("empty statement".into()));
-            }
-            return Ok(if crate::types::statement_is_write(engine, sql) {
-                vec!["db_query", "db_data", "db_schema"]
-            } else {
-                vec!["db_query"]
-            });
-        }
+        _ => return lexer_operations(engine, sql),
     }
     .map_err(|_| {
         Error::Forbidden("restricted execution requires a fully parsed supported SQL script".into())
@@ -1019,6 +1021,22 @@ pub(crate) fn operations(engine: Engine, sql: &str) -> Result<Vec<&'static str>>
     Ok(ops)
 }
 
+/// The engine lexer's conservative classification (unknown counts as a
+/// write): a write needs data AND schema rights, a read is `db_query`. Used
+/// for engines without an AST parser, and for a statement the parser refuses
+/// when the caller executes with unrestricted native rights anyway (root, or
+/// the owner on the connection's own account — see `execution_access_snap`).
+pub(crate) fn lexer_operations(engine: Engine, sql: &str) -> Result<Vec<&'static str>> {
+    if sql.trim().is_empty() {
+        return Err(Error::Invalid("empty statement".into()));
+    }
+    Ok(if crate::types::statement_is_write(engine, sql) {
+        vec!["db_query", "db_data", "db_schema"]
+    } else {
+        vec!["db_query"]
+    })
+}
+
 /// Every operation in `ops` only reads (`db_query`, or a metadata /
 /// system-catalog read — `db_catalog`).
 pub(crate) fn only_reads(ops: &[&str]) -> bool {
@@ -1053,6 +1071,22 @@ pub(crate) fn unparsed_read_requires(engine: Engine) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn common_postgres_casts_are_allowed() {
+        for sql in [
+            "select 1::int8",
+            "select 1::int4, 2::int2, 1.5::float8, 1.5::float4",
+            "select now()::timestamptz, '1 day'::interval",
+            "select '10.0.0.1'::inet, '10.0.0.0/8'::cidr, 1::money",
+        ] {
+            assert_eq!(
+                operations(Engine::Postgres, sql).unwrap(),
+                vec!["db_query"],
+                "{sql}"
+            );
+        }
+    }
 
     #[test]
     fn unparsed_engines_classify_reads_and_writes_instead_of_refusing() {
