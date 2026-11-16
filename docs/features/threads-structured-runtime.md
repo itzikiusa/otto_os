@@ -1004,8 +1004,19 @@ secret question forms are refused instead of being collected into history.
   commands). The thread's terminal drawer is a plain shell in its folder
   (`meta.terminal_of`). The composer's model / effort pick and attached
   images ride `POST …/prompt` (`model`, `effort`, `images`).
-- **Idle live-entry eviction** remains a runtime lifecycle follow-up. Daemon
-  shutdown already calls `AgentRuntime::shutdown()`.
+- **Idle agent processes are released** (T3 Code #32325, #34934): every
+  minute, a loaded thread whose agent has been quiet for
+  `thread_idle_release_minutes` (daemon setting, `PUT /settings`; default
+  `30`, `0` = never) has its CLI process and MCP servers stopped the way a
+  Close stops them, and its spawn credential revoked. A finished child
+  thread goes after at most 5 minutes. The thread stays open (`dormant`;
+  "Agent stopped. Your next message resumes it.") and its next message
+  respawns the agent with the provider's resume (`--resume`,
+  `session/load`, …). Never while a turn, background work, an approval or
+  question, a starting prompt or a queued message is pending. A held child's
+  holder exits with it, so a daemon restart adopts nothing for it.
+  (`runtime/auto_close.rs`; evicting the in-memory projection itself
+  remains a follow-up.)
 - **Keeping the Mac awake** (T3 Code #34128): while any thread's turn runs
   or starts, or any terminal agent session is `working`, the daemon holds one
   `caffeinate -i -w <ottod pid>` and releases it 60 s after the last one ends

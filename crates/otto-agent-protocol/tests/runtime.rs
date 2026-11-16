@@ -4767,3 +4767,81 @@ async fn a_codex_generated_image_is_served_from_disk_and_nothing_else_is() {
     ));
     rt.close(&c.id).await.unwrap();
 }
+
+/// T3 Code #32325 / #34934: an idle thread's agent process is released
+/// (the thread stays open, dormant) and its next message resumes it; a
+/// finished child thread is released sooner.
+#[tokio::test]
+async fn idle_agent_processes_are_released_and_the_next_prompt_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    let child = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                title_auto: false,
+                provider: Some(RuntimeProvider::Gemini),
+                cwd: Some(cwd.into()),
+                title: None,
+                model: None,
+                access_mode: None,
+                meta: Some(serde_json::json!({"child_of": {"id": s.id, "by": "agent"}})),
+            },
+        )
+        .await
+        .unwrap();
+    host.wait_n(is_ready, 2).await;
+    rt.prompt(&s.id, "hello").await.unwrap();
+    host.wait(is_terminal).await;
+
+    let now = Utc::now();
+    assert!(
+        rt.release_idle_processes(30, now).await.is_empty(),
+        "nothing is idle yet"
+    );
+    assert!(
+        rt.release_idle_processes(0, now + chrono::TimeDelta::days(9))
+            .await
+            .is_empty(),
+        "0 = never"
+    );
+    let soon = now + chrono::TimeDelta::minutes(6);
+    assert_eq!(
+        rt.release_idle_processes(30, soon).await,
+        vec![child.id.clone()],
+        "a finished child goes after 5 minutes"
+    );
+    let later = now + chrono::TimeDelta::minutes(31);
+    assert_eq!(
+        rt.release_idle_processes(30, later).await,
+        vec![s.id.clone()]
+    );
+    let got = rt.get(&s.id).await.unwrap();
+    assert_eq!(
+        got.status,
+        RuntimeSessionStatus::Dormant,
+        "open, not closed"
+    );
+
+    rt.prompt(&s.id, "after release").await.unwrap();
+    let fin = host.wait_n(is_terminal, 2).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    assert!(last_assistant_text(&host).contains("after release"));
+    assert_eq!(
+        host.prepared.lock().unwrap().len(),
+        3,
+        "the message respawned it"
+    );
+    let resumed = rt.get(&s.id).await.unwrap();
+    assert_eq!(
+        resumed.native_thread_id, got.native_thread_id,
+        "same conversation"
+    );
+    rt.close(&s.id).await.unwrap();
+    rt.close(&child.id).await.unwrap();
+}

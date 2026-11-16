@@ -43,7 +43,10 @@ pub fn spawn(ctx: &ServerCtx) {
                 last_busy = Some(now);
             }
             // A caffeinate that exited on its own is gone; take a new one.
-            if hold.as_mut().is_some_and(|c| !matches!(c.try_wait(), Ok(None))) {
+            if hold
+                .as_mut()
+                .is_some_and(|c| !matches!(c.try_wait(), Ok(None)))
+            {
                 hold = None;
             }
             match (want_hold(last_busy, now), hold.is_some()) {
