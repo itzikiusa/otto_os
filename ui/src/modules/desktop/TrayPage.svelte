@@ -106,6 +106,8 @@
 
   function sessionIdOf(n: Notice): string | null {
     if (n.action?.type === 'open_session') return n.action.session_id;
+    // A thread's waiting notice opens its route, `threads/<id>`.
+    if (n.action?.type === 'open_route' && n.action.route.startsWith('threads/')) return n.action.route.split('/')[1] || null;
     const key = n.source_key ?? '';
     return key.startsWith('session:') ? (key.split(':')[1] ?? null) : null;
   }

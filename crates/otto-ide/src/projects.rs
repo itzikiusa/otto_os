@@ -7,7 +7,7 @@ pub use self::scanner::scan_parent_repos;
 use self::scanner::{
     build_stored_project, legacy_project_authorized, load_projects_from_db,
     migrate_legacy_projects_atomic, normalize_lookup_fast, normalize_upsert_req,
-    stored_project_matches, NormalizedUpsertProject, StoredProject,
+    stored_project_primary_matches, NormalizedUpsertProject, StoredProject,
 };
 
 use std::fs;
@@ -182,8 +182,9 @@ impl ProjectStore {
     }
 
     /// Return attached sibling folders configured for any Named Project owned by `user`
-    /// whose `primary_root` or any member entry in `folders` matches `root`, using pure
-    /// in-memory string comparisons (zero `realpath` syscalls on Tokio workers).
+    /// whose `primary_root` matches `root` (a member folder opened on its own stays one
+    /// folder), using pure in-memory string comparisons (zero `realpath` syscalls on Tokio
+    /// workers).
     pub fn folders_for_root_for_user(&self, root: &str, user: &User) -> Vec<String> {
         let Some(lookup) = normalize_lookup_fast(root) else {
             return Vec::new();
@@ -194,7 +195,7 @@ impl ProjectStore {
             if !can_access_owned_project(entry, &user.id, has_root_auth) {
                 continue;
             }
-            if stored_project_matches(entry, &lookup) {
+            if stored_project_primary_matches(entry, &lookup) {
                 if let Some(proj) = project_for_caller(entry, has_root_auth) {
                     return proj.folders;
                 }
@@ -214,7 +215,7 @@ impl ProjectStore {
             if !entry.owner_user_id.is_empty() {
                 continue;
             }
-            if stored_project_matches(entry, &lookup) {
+            if stored_project_primary_matches(entry, &lookup) {
                 if let Some(proj) = project_for_caller(entry, is_root) {
                     return proj.folders;
                 }
@@ -223,14 +224,14 @@ impl ProjectStore {
         Vec::new()
     }
 
-    /// Root-level lookup matching `primary_root` and every member entry in `folders`.
+    /// Root-level lookup matching a project's `primary_root` (not its member folders).
     pub fn folders_for_root(&self, root: &str) -> Vec<String> {
         let Some(lookup) = normalize_lookup_fast(root) else {
             return Vec::new();
         };
         let guard = self.cache.read().unwrap_or_else(|e| e.into_inner());
         for entry in &guard.items {
-            if stored_project_matches(entry, &lookup) {
+            if stored_project_primary_matches(entry, &lookup) {
                 return entry.project.folders.clone();
             }
         }
@@ -486,4 +487,74 @@ fn sort_projects(items: &mut [IdeNamedProject]) {
             .then_with(|| b.updated_at.cmp(&a.updated_at))
             .then_with(|| a.name.cmp(&b.name))
     });
+}
+
+#[cfg(test)]
+mod primary_root_tests {
+    use super::*;
+
+    fn write_legacy(dir: &std::path::Path, primary: &str, folders: &[&str]) {
+        let proj = IdeNamedProject {
+            id: "ideproj_1".into(),
+            name: "Payments platform".into(),
+            primary_root: primary.into(),
+            folders: folders.iter().map(|s| s.to_string()).collect(),
+            pinned: true,
+            updated_at: String::new(),
+        };
+        fs::write(
+            dir.join("ide-projects.json"),
+            serde_json::to_string(&vec![proj]).expect("json"),
+        )
+        .expect("write legacy projects");
+    }
+
+    /// I3-02: opening ONE member repo of a multi-repo project opens that repo only;
+    /// the project's folders come with its primary root (the project itself).
+    #[test]
+    fn member_root_does_not_inherit_the_projects_folders() {
+        let data = tempfile::tempdir().expect("data dir");
+        let ws = tempfile::tempdir().expect("ws dir");
+        let core = ws.path().join("core");
+        let api_a = ws.path().join("team-a/api");
+        let api_b = ws.path().join("team-b/api");
+        for d in [&core, &api_a, &api_b] {
+            fs::create_dir_all(d).expect("mkdir repo");
+        }
+        let s = |p: &std::path::Path| p.to_string_lossy().to_string();
+        write_legacy(data.path(), &s(&core), &[&s(&core), &s(&api_a), &s(&api_b)]);
+        let store = ProjectStore::new(data.path().to_path_buf());
+
+        assert!(
+            store.folders_for_root(&s(&api_a)).is_empty(),
+            "a member folder opened on its own stays one folder"
+        );
+        assert!(store.folders_for_root(&s(&api_b)).is_empty());
+        let from_primary = store.folders_for_root(&s(&core));
+        assert_eq!(
+            from_primary.len(),
+            3,
+            "the project's own primary root still brings every folder: {from_primary:?}"
+        );
+        // A trailing slash is the same root.
+        assert_eq!(store.folders_for_root(&format!("{}/", s(&core))).len(), 3);
+    }
+
+    /// The fix changes lookups only: the saved project keeps every folder.
+    #[test]
+    fn saved_project_folders_are_untouched() {
+        let data = tempfile::tempdir().expect("data dir");
+        let ws = tempfile::tempdir().expect("ws dir");
+        let core = ws.path().join("core");
+        let api = ws.path().join("api");
+        fs::create_dir_all(&core).expect("mkdir");
+        fs::create_dir_all(&api).expect("mkdir");
+        let s = |p: &std::path::Path| p.to_string_lossy().to_string();
+        write_legacy(data.path(), &s(&core), &[&s(&core), &s(&api)]);
+        let store = ProjectStore::new(data.path().to_path_buf());
+        let _ = store.folders_for_root(&s(&api));
+        let guard = store.cache.read().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(guard.items.len(), 1);
+        assert_eq!(guard.items[0].project.folders.len(), 2);
+    }
 }

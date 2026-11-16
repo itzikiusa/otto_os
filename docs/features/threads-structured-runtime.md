@@ -1315,8 +1315,9 @@ thing on screen:
 - **Toolbar: four controls** — sidebar, the breadcrumb (project / thread),
   right panel, ⋯. The ⋯ holds the thread's own actions, then **New thread**
   (also the sidebar's New button and ⌘K "New thread"), **Related threads…**,
-  **Project card**, **Terminal drawer** (also `/terminal` and ⌘K) and the
-  layout (Single / Split / Grid, also in ⌘K). Back and Forward are the
+  **Terminal drawer** (also `/terminal` and ⌘K) and **View ▸** — the layout
+  (Single / Split / Grid, also in ⌘K) and the Project card; a phone gets no
+  View. Back and Forward are the
   shell's own (⌘⇧← / ⌘⇧→, ⌘K "Go back" / "Go forward"). Continue on phone is
   a ⋯ item, in the toolbar and in a split pane's header alike.
 - **Related threads**: one chip beside the title, shown only while the thread
@@ -1328,7 +1329,7 @@ thing on screen:
   replaced the Peers tab, the pane's "To:" relay bar and the ⋯ items "Send
   message to peer…" / "Session room…". A sidebar row's "Send message from
   active thread…" opens the same message sheet directly.
-- **Right panel**: Browser, Files, Diff, Pull request and Side chat; the
+- **Right panel**: Browser, Files, Changes (key C), Pull request and Side chat; the
   terminal is the drawer (no Terminal surface); **Connections** joins the +
   menu once the thread has database activity (or its tab is open).
 - **Work log**: a finished stretch of tool calls and thinking folds into one
@@ -1341,10 +1342,16 @@ thing on screen:
 - **Other agents**: a subagent and the agent's `thread_open` /
   `thread_message` calls share one compact row — provider, name, model ·
   effort, status, elapsed time, a one-line result and Open (⇧-click: beside).
-- **Above the composer**: one stack in one order — error, then a question
-  or a UI-control request, then the plan, the queue (or Revive), then the
-  fresh-context notice. Errors, questions and approvals always show; the rest
-  fill up to two and fold into "N more: …".
+- **Above the composer**: one stack in one order — error, then a UI-control
+  request, then the plan, the queue (or Revive), then the fresh-context
+  notice; the rest fill up to two and fold into "N more: …". What the agent
+  waits on — an approval, a question, a secret — is the **attention dock**
+  right above the composer, never folded (⌘↵ approves, ⌘⌫ declines from an
+  empty composer). On phones and short windows the plan is one line and
+  queued messages fold. On a phone with the keyboard up the page folds more
+  (see [Threads › On a phone and a tablet](./threads.md#on-a-phone-and-a-tablet)).
+- **Stop**: next to Send while a turn runs; Esc (twice with text in the
+  composer) or ⌘. stop it.
 - **Composer**: the draft's save state shows only when saving failed (with
   Retry). One model chip; effort is picked inside its popover.
 
@@ -1353,6 +1360,39 @@ thing on screen:
 A stopped agent shows **Revive** above the composer and **Revive thread** in its menu. This starts the agent again without sending a message, keeps the same Otto thread and history, and resumes the provider conversation when available. A live agent is left alone. Closed threads in History have the same action; sending a message also revives them. If the provider has lost its conversation, Otto keeps the visible history and explicitly says the provider started fresh.
 
 The conversation and composer use the available pane width with matching, responsive gutters. Wide screens can show wider answers and code; split panes and phones size themselves independently.
+
+### Daemon additions (2026-11)
+
+- **`RuntimeSession.last_turn_status`** — `"completed" | "failed" |
+  "interrupted"`, absent otherwise. It describes the latest turn; a cancel,
+  a Stop, a stall stop and a turn cut by a restart all read `"interrupted"`.
+  Absent before any turn ends and while a turn is pending or running; a
+  failure stays on the row until the next turn starts, and survives a
+  restart. **`last_error_class`** — only with `"failed"`: `"usage_limit"`,
+  `"auth"` or `"provider"` (treat an unknown value as `"provider"`). A child
+  card reads its state from the row alone: `status: awaiting_permission` →
+  needs you, `working` → running, then `last_turn_status`.
+- **Council meta** — `meta.council {id, seat, role: "seat" | "synthesis",
+  effort?, provider?, model?}`; `seat` is 1-based, the synthesis is `0`;
+  `provider` is the custom slug picked, else the built-in id. Seat titles read
+  `<council> · Seat <n> · <Provider>[ <model>][ <Effort>]` and the judge's
+  `<council> · synthesis` — read the meta, never parse the title.
+- **Loop guard** — per linked group, since the last person's prompt, the
+  daemon counts agent-to-agent messages (`…/peers/{peer}/message`, `…/peers`
+  with a prompt, a child's reply wake). After **16** the next is refused with
+  409; a held wake stays queued with `Held: these linked threads exchanged 16
+  agent-to-agent messages without you. Send it to continue.`, and ONE
+  `system_notice` goes into the root's timeline ("Linked threads paused after
+  16 agent-to-agent messages. Send a message in any of them to continue.").
+  A person's prompt in any member, or a daemon restart, resets it.
+- **Waiting notice** — a structured thread waiting on an approval, a question
+  or a secret raises one notification per waiting episode: `{kind: "session",
+  severity: "warn", title: "Agent needs attention", source_key:
+  "session:<id>:waiting", action: {type: "open_route", route: "threads/<id>"}}`
+  with the body `<thread title> · wants approval: … | asks: … | asks for a
+  secret: …`; it is marked read when the episode ends. Background-source
+  threads raise none. The bell labels its action **Open thread**, and the
+  menu-bar tray opens the thread from it.
 
 ### Embedding a thread in another module
 

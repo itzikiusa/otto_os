@@ -28,6 +28,8 @@
   }
 
   let { repo, status, oncommitted }: Props = $props();
+  // Touch devices have no ⌘ to press: no shortcut hint in the commit box there.
+  const coarsePointer = typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)').matches);
 
   const LS_GIT_LEFT_W = 'otto.ide.gitChangesW';
   let leftW = $state(loadPaneWidth(LS_GIT_LEFT_W, 320, 220, 560));
@@ -323,7 +325,7 @@
         rows={2}
         dir="auto"
         aria-label="Commit message"
-        placeholder="Commit message (⌘Enter to commit)…"
+        placeholder={coarsePointer ? 'Commit message…' : 'Commit message (⌘Enter to commit)…'}
         bind:value={commitMessage}
         onkeydown={onComposerKeydown}
         data-testid="ide-git-commit-input"
@@ -362,11 +364,6 @@
         <span class="mono gc-diff-path ellipsis" dir="ltr" title={selectedPath}>{selectedPath}</span>
         <span class="gc-target-label dim">{selTarget === 'staged' ? 'staged' : 'working tree'}</span>
         <span class="grow"></span>
-        <button
-          type="button"
-          class="btn small ghost gc-mini-btn"
-          onclick={() => selectedPath && window.dispatchEvent(new CustomEvent('otto:ide-open-compare', { detail: { mode: 'git-revision', path: `${repo.path.replace(/\/+$/, '')}/${selectedPath.replace(/^\/+/, '')}`, ref: 'HEAD' } }))}
-        ><Icon name="columns" size={12} /><span>Side-by-side</span></button>
         <button type="button" class="btn small ghost gc-mini-btn" onclick={() => selectedPath && openInEditor(selectedPath)}>
           <Icon name="external" size={12} /><span>Open in editor</span>
         </button>
@@ -413,7 +410,7 @@
 <style>
   .gc-split { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; background: var(--surface); }
   .gc-left { display: flex; flex-direction: column; flex-shrink: 0; min-block-size: 0; min-inline-size: 220px; border-inline-end: 1px solid var(--border); }
-  .gc-lists { flex: 1; min-block-size: 0; overflow-y: auto; padding-block: 4px; }
+  .gc-lists { flex: 1; min-block-size: 0; overflow-y: auto; overflow-x: hidden; padding-block: 4px; }
   .gc-pad { padding: 12px; }
   .gc-empty { flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; font-size: var(--fs-xs); }
   .gc-sec-head {
@@ -436,7 +433,7 @@
   .gc-status.is-add, .gc-name.is-add { color: var(--success); }
   .gc-status.is-del, .gc-name.is-del { color: var(--danger); }
   .gc-status.is-untracked, .gc-name.is-untracked { color: var(--warning); }
-  .gc-name { flex-shrink: 0; max-inline-size: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gc-name { flex-shrink: 1; min-inline-size: 0; max-inline-size: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .gc-dir { flex: 1; min-inline-size: 0; font-size: var(--fs-xs); }
   .gc-row-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
   .gc-composer { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-block-start: 1px solid var(--border); background: var(--surface-2); flex-shrink: 0; }
@@ -451,6 +448,10 @@
   .gc-diff-path { font-size: var(--fs-xs); font-weight: 500; }
   .gc-target-label { font-size: var(--fs-xs); flex-shrink: 0; }
   .gc-diff-scroll { flex: 1; min-block-size: 0; min-inline-size: 0; overflow: auto; }
+  /* The one layout control is the diff's own Unified | Side by side. A narrow dock scrolls
+     the diff sideways rather than wrapping a hunk header (`@@ -1,6 +1,3 @@`) over 4 lines. */
+  .gc-diff-scroll :global(.hunk-header) { white-space: nowrap; }
+  .gc-diff-bar .gc-mini-btn { flex-shrink: 0; white-space: nowrap; }
   @media (max-width: 640px) {
     .gc-split { flex-direction: column; overflow-y: auto; }
     .gc-left { inline-size: 100%; border-inline-end: 0; border-block-end: 1px solid var(--border); max-block-size: 260px; }

@@ -65,10 +65,23 @@ export function childState(s: RuntimeSession | null | undefined, p: RuntimeProje
   const turn = p ? latestTurn(p) : null;
   if (s.status === 'working' || turn?.status === 'running' || turn?.status === 'pending') return state('working');
   if ((s.background_tasks?.length ?? 0) > 0) return state('background');
-  if (turn?.status === 'failed') return state('failed');
-  if (turn?.status === 'interrupted' || turn?.status === 'cancelled') return state('stopped');
-  if (turn?.status === 'completed' || answerOf(p) !== '') return state('done');
+  // No projection loaded: the row says how its last turn ended (newer daemons).
+  const ended = turn?.status ?? s.last_turn_status ?? null;
+  if (ended === 'failed') return state('failed');
+  if (ended === 'interrupted' || ended === 'cancelled') return state('stopped');
+  if (ended === 'completed' || answerOf(p) !== '') return state('done');
   return state(s.status === 'dormant' ? 'stopped' : 'starting');
+}
+
+/** How a child's latest turn ended: its loaded projection's latest turn,
+ *  else the row's `last_turn_status`; null while one runs or when unknown. */
+export function turnOutcome(s: RuntimeSession, p: RuntimeProjection | null | undefined): RuntimeSession['last_turn_status'] {
+  const t = p ? latestTurn(p) : null;
+  if (!t) return s.last_turn_status ?? null;
+  if (t.status === 'failed') return 'failed';
+  if (t.status === 'interrupted' || t.status === 'cancelled') return 'interrupted';
+  if (t.status === 'completed') return 'completed';
+  return null;
 }
 
 /** The tone RuntimeAgentRow draws. */

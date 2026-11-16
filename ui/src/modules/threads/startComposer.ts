@@ -39,6 +39,8 @@ export interface StartLaunch {
 /** What the composer's `below` snippet gets (Threads' meta row). */
 export interface StartMeta {
   modeSupported: boolean;
+  /** The access chip is on the composer (a structured agent, not a council). */
+  accessShown: boolean;
   planSupported: boolean;
   interactionMode: InteractionMode;
   setMode: (m: InteractionMode) => void;
@@ -82,7 +84,8 @@ export const ACCESS_RANK: Readonly<Record<RuntimeAccessMode, number>> = {
 /** The agent a start composer opened on last time, per scope (Threads: per
  *  workspace; an embed: per host kind — a PR's pick never leaks into
  *  Threads, or Threads' into a PR). Access is NOT remembered: an embed always
- *  starts from its host's default, and Threads from the daemon's. */
+ *  starts from its host's default, and Threads from the saved one (Settings ›
+ *  Providers), shown on the chip before the first send. */
 export interface StartPick {
   provider: string;
   model: string | null;

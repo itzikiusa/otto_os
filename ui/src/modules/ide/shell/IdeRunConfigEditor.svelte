@@ -1,4 +1,7 @@
 <script module lang="ts">
+  import { ide, type IdeRunConfig } from '../ideStore.svelte';
+  import { draftDefaultsForTab, targetFieldCopy, visibleRunConfigFields, type RunConfigField } from './ideRunConfigForm';
+
   export interface ConfigDraft {
     id: string;
     name: string;
@@ -40,9 +43,11 @@
     { value: 'custom', label: 'Shell · Custom command', short: 'Shell', eco: 'shell' },
   ];
 
-  export function emptyConfigDraft(): ConfigDraft {
+  /** A new configuration starts from the active tab: its runner, name and file. */
+  export function emptyConfigDraft(tab: Parameters<typeof draftDefaultsForTab>[0] = ide.activeTab): ConfigDraft {
+    const start = draftDefaultsForTab(tab);
     return {
-      id: '', name: '', runner: 'go_test', target_path: '', command: '',
+      id: '', name: start.name, runner: start.runner, target_path: start.target_path, command: '',
       test_filter: '', buildFlagsText: '', argsText: '', cwd: '', env_file: '',
       sdk_path: '', inherit_shell_env: true, before_launch: '',
       maven_profiles: [], spring_profiles: [], skip_tests: false, offline: false,
@@ -59,7 +64,6 @@
   import Switch from '../../../lib/components/Switch.svelte';
   import { plural } from '../../../lib/plural';
   import { toasts } from '../../../lib/toast.svelte';
-  import { ide, type IdeRunConfig } from '../ideStore.svelte';
   import { parseDotenvBlock } from './IdeShellEnvCard.svelte';
 
   interface Props {
@@ -86,6 +90,9 @@
 
   let cfgPasteOpen = $state(false);
   let cfgPasteRaw = $state('');
+  // null = follow the draft (open when an advanced field has a value); a click pins it.
+  let advancedPinned = $state<boolean | null>(null);
+  let advancedFor = $state('');
 
   const savedConfigs = $derived(ide.runConfigs.filter((c) => !c.auto_detected));
   const detectedConfigs = $derived(ide.runConfigs.filter((c) => c.auto_detected));
@@ -98,6 +105,18 @@
       value: cfgRunnerEco === 'rust' ? sdk.version : sdk.path,
     }));
   });
+
+  const fields = $derived(visibleRunConfigFields(cfgDraft.runner, cfgDraft));
+  const targetCopy = $derived(targetFieldCopy(cfgDraft.runner));
+  // "Advanced" opens by itself when something in it is set (also when a runner
+  // switch moves a value there) and stays open while it is edited or cleared.
+  $effect(() => {
+    const key = `${cfgDraft.id}|${isNewDraft}`;
+    const auto = fields.advancedOpen;
+    if (key !== advancedFor) { advancedFor = key; advancedPinned = auto ? true : null; return; }
+    if (auto && advancedPinned === null) advancedPinned = true;
+  });
+  const advancedOpen = $derived(advancedPinned ?? fields.advancedOpen);
 
   function runnerShortLabel(runner: string): string {
     return RUNNER_OPTIONS.find((r) => r.value === runner)?.short ?? runner;
@@ -192,86 +211,104 @@
       </div>
       <div class="field">
         <label for="cfg-runner">Runner</label>
-        <select id="cfg-runner" class="input" bind:value={cfgDraft.runner}>
+        <select id="cfg-runner" class="input" bind:value={cfgDraft.runner} data-testid="ide-cfg-runner">
           {#each RUNNER_OPTIONS as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
         </select>
       </div>
     </div>
 
-    <div class="env-sdk-grid">
-      <div class="field">
-        <label for="cfg-target">Target file / package / script</label>
-        <input id="cfg-target" class="input" type="text" dir="ltr" placeholder="./cmd/server or ./..." bind:value={cfgDraft.target_path} />
-      </div>
-      <div class="field">
-        <label for="cfg-filter">Test filter / pattern</label>
-        <input id="cfg-filter" class="input" type="text" dir="ltr" placeholder="TestAdd or -k test_auth" bind:value={cfgDraft.test_filter} />
-      </div>
-    </div>
-
-    <div class="env-sdk-grid">
-      <div class="field">
-        <label for="cfg-build-flags">Build / tool flags</label>
-        <input id="cfg-build-flags" class="input" type="text" dir="ltr" placeholder="-race -v or --release" bind:value={cfgDraft.buildFlagsText} />
-      </div>
-      <div class="field">
-        <label for="cfg-args">Program arguments</label>
-        <input id="cfg-args" class="input" type="text" dir="ltr" placeholder="--verbose --port 8080" bind:value={cfgDraft.argsText} />
-      </div>
-    </div>
-
-    <div class="env-sdk-grid">
-      <div class="field">
-        <label for="cfg-cwd">Working directory</label>
-        <PathField bind:value={cfgDraft.cwd} start={ide.target.root} disabled={ide.target.kind === 'ssh'}>
-          <input id="cfg-cwd" class="input" type="text" dir="ltr" placeholder={ide.target.root || 'Workspace root'} bind:value={cfgDraft.cwd} />
-        </PathField>
-      </div>
-      <div class="field">
-        <label for="cfg-sdk-path">SDK / Toolchain override</label>
-        <div class="env-inline-bar">
-          <input id="cfg-sdk-path" class="input" type="text" dir="ltr" list="cfg-sdk-datalist" placeholder="Project default SDK" bind:value={cfgDraft.sdk_path} />
-          <button type="button" class="btn small" title="Download or manage SDK versions" onclick={onopentoolchains} data-testid="ide-cfg-open-toolchains">
-            <Icon name="download" size={12} />
-            SDKs…
-          </button>
+    {#snippet fieldFor(f: RunConfigField)}
+      {#if f === 'target'}
+        <div class="field" data-testid="ide-cfg-field-target">
+          <label for="cfg-target">{targetCopy.label}</label>
+          <input id="cfg-target" class="input" type="text" dir="ltr" placeholder={targetCopy.placeholder} bind:value={cfgDraft.target_path} />
         </div>
-        <datalist id="cfg-sdk-datalist">
-          {#each cfgSdkOptions as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
-        </datalist>
-      </div>
-    </div>
+      {:else if f === 'command'}
+        <div class="field" data-testid="ide-cfg-field-command">
+          <label for="cfg-cmd">Command</label>
+          <input id="cfg-cmd" class="input" type="text" dir="ltr" placeholder="make integration-test" bind:value={cfgDraft.command} />
+        </div>
+      {:else if f === 'test_filter'}
+        <div class="field" data-testid="ide-cfg-field-test_filter">
+          <label for="cfg-filter">Test filter / pattern</label>
+          <input id="cfg-filter" class="input" type="text" dir="ltr" placeholder="TestAdd or -k test_auth" bind:value={cfgDraft.test_filter} />
+        </div>
+      {:else if f === 'args'}
+        <div class="field" data-testid="ide-cfg-field-args">
+          <label for="cfg-args">Program arguments</label>
+          <input id="cfg-args" class="input" type="text" dir="ltr" placeholder="--verbose --port 8080" bind:value={cfgDraft.argsText} />
+        </div>
+      {:else if f === 'cwd'}
+        <div class="field" data-testid="ide-cfg-field-cwd">
+          <label for="cfg-cwd">Working directory</label>
+          <PathField bind:value={cfgDraft.cwd} start={ide.target.root} disabled={ide.target.kind === 'ssh'}>
+            <input id="cfg-cwd" class="input" type="text" dir="ltr" placeholder={ide.target.root || 'Workspace root'} bind:value={cfgDraft.cwd} />
+          </PathField>
+        </div>
+      {:else if f === 'build_flags'}
+        <div class="field" data-testid="ide-cfg-field-build_flags">
+          <label for="cfg-build-flags">Build / tool flags</label>
+          <input id="cfg-build-flags" class="input" type="text" dir="ltr" placeholder="-race -v or --release" bind:value={cfgDraft.buildFlagsText} />
+        </div>
+      {:else if f === 'sdk'}
+        <div class="field" data-testid="ide-cfg-field-sdk">
+          <label for="cfg-sdk-path">SDK / toolchain override</label>
+          <div class="env-inline-bar">
+            <input id="cfg-sdk-path" class="input" type="text" dir="ltr" list="cfg-sdk-datalist" placeholder="Project default SDK" bind:value={cfgDraft.sdk_path} />
+            <button type="button" class="btn small" title="Download or manage SDK versions" onclick={onopentoolchains} data-testid="ide-cfg-open-toolchains">
+              <Icon name="download" size={12} />
+              SDKs…
+            </button>
+          </div>
+          <datalist id="cfg-sdk-datalist">
+            {#each cfgSdkOptions as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
+          </datalist>
+        </div>
+      {:else if f === 'env_file'}
+        <div class="field" data-testid="ide-cfg-field-env_file">
+          <label for="cfg-env-file">.env file</label>
+          <input id="cfg-env-file" class="input" type="text" dir="ltr" list="cfg-dotenv-datalist" placeholder={dotenvPath || '.env'} bind:value={cfgDraft.env_file} />
+          <datalist id="cfg-dotenv-datalist">
+            {#each ide.dotenvFiles as df (df)}<option value={df}>{df}</option>{/each}
+          </datalist>
+        </div>
+      {:else if f === 'before_launch'}
+        <div class="field" data-testid="ide-cfg-field-before_launch">
+          <label for="cfg-before">Before launch command</label>
+          <input id="cfg-before" class="input" type="text" dir="ltr" placeholder="go generate ./..." bind:value={cfgDraft.before_launch} />
+        </div>
+      {:else if f === 'inherit_shell_env'}
+        <div class="env-shell-switch env-span" data-testid="ide-cfg-field-inherit_shell_env">
+          <Switch
+            checked={cfgDraft.inherit_shell_env}
+            label="Inherit login shell environment (~/.zshrc, ~/.zshenv)"
+            onchange={(next) => (cfgDraft.inherit_shell_env = next)}
+          />
+        </div>
+      {/if}
+    {/snippet}
 
     <div class="env-sdk-grid">
-      <div class="field">
-        <label for="cfg-env-file">.env file (optional)</label>
-        <input id="cfg-env-file" class="input" type="text" dir="ltr" list="cfg-dotenv-datalist" placeholder={dotenvPath || '.env'} bind:value={cfgDraft.env_file} />
-        <datalist id="cfg-dotenv-datalist">
-          {#each ide.dotenvFiles as df (df)}<option value={df}>{df}</option>{/each}
-        </datalist>
-      </div>
-      <div class="field">
-        <label for="cfg-before">Before launch command</label>
-        <input id="cfg-before" class="input" type="text" dir="ltr" placeholder="go generate ./..." bind:value={cfgDraft.before_launch} />
-      </div>
+      {#each fields.primary as f (f)}{@render fieldFor(f)}{/each}
     </div>
 
-    {#if cfgDraft.runner === 'custom' || cfgDraft.command}
-      <div class="field">
-        <label for="cfg-cmd">Custom command</label>
-        <input id="cfg-cmd" class="input" type="text" dir="ltr" placeholder="make integration-test" bind:value={cfgDraft.command} />
-      </div>
-    {/if}
-
-    <div class="env-shell-switch">
-      <Switch
-        checked={cfgDraft.inherit_shell_env}
-        label="Inherit login shell environment (~/.zshrc, ~/.zshenv)"
-        onchange={(next) => (cfgDraft.inherit_shell_env = next)}
-      />
-      <span class="env-sec-sub">
-        Inherit login shell variables (<code>GO_DEBUGGING_*</code>, <code>GOPRIVATE</code>, <code>PATH</code>) from <code>~/.zshrc</code> / <code>~/.zshenv</code>
-      </span>
+    <div class="env-adv">
+      <button
+        type="button"
+        class="env-adv-toggle"
+        aria-expanded={advancedOpen}
+        aria-controls="ide-cfg-advanced"
+        onclick={() => (advancedPinned = !advancedOpen)}
+        data-testid="ide-cfg-advanced-toggle"
+      >
+        <Icon name={advancedOpen ? 'chevronDown' : 'chevronRight'} size={12} noflip />
+        Advanced
+      </button>
+      {#if advancedOpen}
+        <div id="ide-cfg-advanced" class="env-sdk-grid" data-testid="ide-cfg-advanced">
+          {#each fields.advanced as f (f)}{@render fieldFor(f)}{/each}
+        </div>
+      {/if}
     </div>
 
     <div class="env-ovr-box">
@@ -336,8 +373,7 @@
   .env-rail-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
   .env-vars-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .env-sec-title { margin: 0; font-size: var(--fs-s); font-weight: 600; color: var(--text); }
-  .env-sec-sub, .env-empty-note { margin: 0; font-size: var(--fs-xs); color: var(--text-dim); }
-  .env-sec-sub code { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text); }
+  .env-empty-note { margin: 0; font-size: var(--fs-xs); color: var(--text-dim); }
   .env-rail-divider {
     padding-block-start: 6px; margin-block-start: 4px; border-block-start: 1px solid var(--separator);
     font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim);
@@ -357,6 +393,14 @@
   .env-inline-bar { display: flex; align-items: center; gap: 8px; }
   .env-inline-bar input { flex: 1; min-inline-size: 0; }
   .env-shell-switch { display: flex; align-items: center; gap: 8px; padding-block: 4px; }
+  .env-span { grid-column: 1 / -1; }
+  .env-adv { display: flex; flex-direction: column; gap: 6px; }
+  .env-adv-toggle {
+    display: inline-flex; align-items: center; gap: 4px; align-self: flex-start; padding-block: 4px; padding-inline: 2px;
+    border: 0; background: transparent; color: var(--text-dim); font-size: var(--fs-xs); font-weight: 600; cursor: pointer;
+  }
+  .env-adv-toggle:hover { color: var(--text); }
+  .env-adv-toggle:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: var(--radius-s); }
   .env-ovr-box {
     display: flex; flex-direction: column; gap: 8px; padding: 12px;
     border-radius: var(--radius-m); background: var(--surface-2); border: 1px solid var(--border);
@@ -371,7 +415,10 @@
   .env-err { font-size: var(--fs-xs); color: var(--danger); }
 
   @media (max-width: 640px) {
-    .env-sdk-grid, .env-cfg-layout { grid-template-columns: 1fr; }
+    /* minmax(0, …): a 1fr track's floor is its widest child, and the runner
+       select's longest option pushed the form 28 px past a 320 px phone. */
+    .env-sdk-grid, .env-cfg-layout { grid-template-columns: minmax(0, 1fr); }
+    .env-cfg-editor :is(.field, select, input) { min-inline-size: 0; max-inline-size: 100%; }
     .env-ovr-row { flex-wrap: wrap; }
   }
 </style>

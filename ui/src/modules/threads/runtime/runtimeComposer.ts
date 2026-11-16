@@ -393,8 +393,7 @@ export function deriveActivePlan(p: RuntimeProjection | null, turn: ProviderTurn
 export function buildRuntimeBanners(opts: {
   sessionError: string | null;
   uiAsk: boolean;
-  /** A private secret request waits on the owner. */
-  secretAsk?: boolean;
+  /** Questions that were asked and settled: their record, not a form. */
   hasQuestions: boolean;
   hasPlan: boolean;
   queueShown: boolean;
@@ -404,11 +403,11 @@ export function buildRuntimeBanners(opts: {
   return [
     ...(opts.sessionError ? [{ key: 'error', label: 'error', urgent: true }] : []),
     ...(opts.uiAsk ? [{ key: 'ui', label: 'UI control request', urgent: true }] : []),
-    ...(opts.secretAsk ? [{ key: 'secret', label: 'secret request', urgent: true }] : []),
-    ...(opts.hasQuestions ? [{ key: 'questions', label: 'questions', urgent: true }] : []),
     ...(opts.hasPlan ? [{ key: 'plan', label: 'plan' }] : []),
     ...(opts.queueShown ? [{ key: 'queue', label: opts.needsRevive ? 'revive' : 'queue' }] : []),
     ...(opts.freshContext ? [{ key: 'fresh', label: 'fresh context' }] : []),
+    // The record of settled questions is the least pressing notice.
+    ...(opts.hasQuestions ? [{ key: 'questions', label: 'previous questions' }] : []),
   ];
 }
 
@@ -422,6 +421,7 @@ export function mapChildThreadSummaries(children: readonly RuntimeSession[]): Li
       provider: sessionProviderSlug(s),
       model: s.model ?? null,
       status: s.status,
+      lastTurnStatus: s.last_turn_status ?? null,
       createdAt: s.created_at,
       updatedAt: s.last_active_at,
     });

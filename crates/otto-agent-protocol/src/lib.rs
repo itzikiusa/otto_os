@@ -19,6 +19,7 @@
 
 pub mod acp;
 pub(crate) mod acp_sideband;
+pub mod attention;
 pub mod claude;
 pub mod codex;
 pub(crate) mod diff_compact;
@@ -90,7 +91,8 @@ pub fn default_drivers() -> Arc<dyn DriverFactory> {
 }
 
 /// The daemon's runtime: SessionManager safety, `publish` for WS delivery
-/// (otto-server passes its streaming-path `publish_stream`).
+/// (otto-server passes its `publish_stream`: streaming events to the sockets,
+/// anything else — the attention notices — onto the bus).
 /// Attachments live under `<data_dir>/runtime-attachments`.
 pub fn daemon_runtime(
     pool: otto_state::DbPool,
@@ -98,10 +100,18 @@ pub fn daemon_runtime(
     data_dir: &std::path::Path,
     publish: impl Fn(otto_core::event::Event) + Send + Sync + 'static,
 ) -> AgentRuntime {
+    let publish: attention::Publish = Arc::new(publish);
     let host = SessionManagerHost {
         manager,
         workspaces: otto_state::WorkspacesRepo::new(pool.clone()),
-        publish: Box::new(publish),
+        publish: Box::new({
+            let publish = Arc::clone(&publish);
+            move |e| publish(e)
+        }),
+        notices: attention::AttentionNotices::new(
+            otto_state::NotificationsRepo::new(pool.clone()),
+            publish,
+        ),
     };
     AgentRuntime::new(
         otto_state::AgentRuntimeRepo::new(pool),

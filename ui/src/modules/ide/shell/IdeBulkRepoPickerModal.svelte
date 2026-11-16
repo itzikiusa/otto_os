@@ -8,7 +8,6 @@
   import LazyMount from '../../../lib/components/LazyMount.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
-  import Switch from '../../../lib/components/Switch.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { loadErrorText } from '../../../lib/loadError';
   import { plural } from '../../../lib/plural';
@@ -41,7 +40,9 @@
   }
 
   let projectName = $state('');
-  let pinned = $state(true);
+  // New projects keep `pinned: true` — the data the tabbed projects view reads as "always
+  // shown"; the header pills it used to drive are gone, so there is no switch for it (I3-11).
+  const pinned = true;
   let parentInput = $state(initialParentDir());
   let resolvedParent = $state('');
   let parentOfParent = $state<string | null>(null);
@@ -265,10 +266,6 @@
             data-testid="ide-bulk-project-name"
           />
         </div>
-        <div class="bulk-pin-row">
-          <Switch checked={pinned} label="Pin project in IDE header bar" onchange={(v) => (pinned = v)} />
-          <span class="bulk-pin-copy">Show 1-click pill in IDE header</span>
-        </div>
       </div>
     {/if}
 
@@ -445,8 +442,6 @@
   .bulk-meta-grid { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
   .bulk-field { flex: 1; min-inline-size: 220px; display: flex; flex-direction: column; gap: 4px; }
   .bulk-label { font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); }
-  .bulk-pin-row { display: inline-flex; align-items: center; gap: 8px; padding-block-end: 6px; }
-  .bulk-pin-copy { font-size: var(--fs-xs); color: var(--text); }
   .bulk-parent-bar { display: flex; flex-direction: column; gap: 4px; }
   .bulk-parent-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .bulk-mono { flex: 1; min-inline-size: 200px; font-family: var(--font-mono); font-size: var(--fs-xs); }

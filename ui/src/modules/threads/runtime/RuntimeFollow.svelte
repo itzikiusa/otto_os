@@ -4,7 +4,9 @@
   // into a "N new messages" pill that jumps back down — the terminal
   // conversation view's pill (agents/conversation/ConversationView.svelte),
   // ported for the runtime timeline. Rendered between the scroller and the
-  // composer: the pill floats over the scroller's bottom edge.
+  // composer, in the flow: it takes its own short row at the timeline's
+  // bottom edge instead of floating over the text it would cover. A request
+  // waiting on the person names itself ("Approval needed").
   import { tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { didScrollUpByUser, END_BAND, followAfterScroll, followPillText, unreadSince } from './follow';
@@ -20,8 +22,10 @@
     /** Set to `firstRow` while the reader is scrolled up, null at the end:
      *  the host renders `renderWindow(rows, cap, holdFrom, …)`. */
     holdFrom?: string | null;
+    /** Something waits on the person (attentionDock.ts `attentionPillText`). */
+    needs?: string | null;
   }
-  let { scroller, seq, messageIds, firstRow = null, holdFrom = $bindable(null) }: Props = $props();
+  let { scroller, seq, messageIds, firstRow = null, holdFrom = $bindable(null), needs = null }: Props = $props();
 
   /** Pinned to the end. Only the reader's own scroll lets go (follow.ts). */
   let atBottom = $state(true);
@@ -43,7 +47,7 @@
     });
   });
   const unread = $derived(atBottom ? 0 : unreadSince(messageIds, lastSeenId));
-  const text = $derived(atBottom ? null : followPillText(unread, unseen, farUp));
+  const text = $derived(atBottom ? null : followPillText(unread, unseen, farUp, needs));
 
   function pin(): void {
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
@@ -131,7 +135,7 @@
 
 {#if text}
   <div class="rt-follow">
-    <button type="button" class="rt-pill" data-testid="runtime-new-pill" data-unread={unread} title="Jump to the latest message" onclick={jump}>
+    <button type="button" class="rt-pill" class:needs data-testid="runtime-new-pill" data-unread={unread} title="Jump to the latest message" onclick={jump}>
       <Icon name="arrowDown" size={12} />
       {text}
     </button>
@@ -140,15 +144,13 @@
 
 <style>
   .rt-follow {
-    position: relative;
-    block-size: 0;
+    display: flex;
+    justify-content: center;
     flex: none;
+    padding-block: 4px;
+    padding-inline: 12px;
   }
   .rt-pill {
-    position: absolute;
-    inset-block-end: 10px;
-    inset-inline: 0;
-    margin-inline: auto;
     inline-size: max-content;
     max-inline-size: calc(100% - 24px);
     display: inline-flex;
@@ -169,6 +171,16 @@
   }
   .rt-pill:hover {
     background: var(--hover);
+  }
+  .rt-pill.needs {
+    border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
+  @media (pointer: coarse) {
+    .rt-pill {
+      min-block-size: var(--hit-min);
+    }
   }
   .rt-pill:focus-visible {
     outline: 2px solid var(--accent-text);

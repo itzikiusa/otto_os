@@ -1,5 +1,5 @@
 // The Threads sidebar's inbox order inside a project: needs-you first, then
-// working, then most recent — and threads that belong to a thread (a linked
+// working, then failed, then most recent (a family by its most urgent member) — and threads that belong to a thread (a linked
 // child, a delegated worker, a council's seats) nested under it, foldable.
 // A child whose parent is not in the list (closed, archived, filtered out)
 // still shows at the top level, marked detached. Pure
@@ -33,6 +33,19 @@ export function inboxOrder(
       childrenOf.set(parentId, [...(childrenOf.get(parentId) ?? []), s]);
     } else roots.push({ s, detached: !!parentId && parentId !== s.id });
   }
+  // A family sorts by its most urgent member: a parent whose child waits on
+  // you rises with it (ties keep the order above — urgency, then recency).
+  const scoreOf = new Map(sorted.map((s) => [s.id, score(s)] as const));
+  const famScore = (id: string, seen = new Set<string>()): number => {
+    if (seen.has(id)) return Number.POSITIVE_INFINITY;
+    seen.add(id);
+    let best = scoreOf.get(id) ?? Number.POSITIVE_INFINITY;
+    for (const kid of childrenOf.get(id) ?? []) best = Math.min(best, famScore(kid.id, seen));
+    return best;
+  };
+  const rank = new Map(roots.map((r, i) => [r.s.id, i] as const));
+  const fam = new Map(roots.map((r) => [r.s.id, famScore(r.s.id)] as const));
+  roots.sort((a, b) => fam.get(a.s.id)! - fam.get(b.s.id)! || rank.get(a.s.id)! - rank.get(b.s.id)!);
   const out: FamilyRow[] = [];
   const visit = (s: Session, child: boolean, detached: boolean): void => {
     const kids = childrenOf.get(s.id) ?? [];

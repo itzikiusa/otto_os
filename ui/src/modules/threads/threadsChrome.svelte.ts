@@ -13,6 +13,7 @@ interface Persisted {
   terminalOpen?: boolean;
   terminalIds?: string[];
   terminalSplit?: boolean;
+  lastProjectByWs?: Record<string, string>;
 }
 
 const SURFACES: readonly ThreadsInspectorTab[] = ['files', 'changes', 'pr', 'side', 'connections', 'browser'];
@@ -42,6 +43,9 @@ class ThreadsChrome {
   terminalIds = $state<string[]>([]);
   terminalActive = $state<string | null>(null);
   terminalSplit = $state(false);
+  /** Folder of the last thread started per workspace (Scratch included): the
+   *  new-thread stage opens there until the person picks another. */
+  lastProjectByWs = $state<Record<string, string>>({});
 
   constructor() {
     const p = read();
@@ -50,6 +54,7 @@ class ThreadsChrome {
     if (typeof p.terminalOpen === 'boolean') this.terminalOpen = p.terminalOpen;
     if (Array.isArray(p.terminalIds)) this.terminalIds = p.terminalIds.filter((x) => typeof x === 'string');
     if (typeof p.terminalSplit === 'boolean') this.terminalSplit = p.terminalSplit;
+    if (p.lastProjectByWs && typeof p.lastProjectByWs === 'object') this.lastProjectByWs = p.lastProjectByWs;
     this.terminalActive = this.terminalIds[0] ?? null;
   }
 
@@ -61,11 +66,19 @@ class ThreadsChrome {
         terminalOpen: this.terminalOpen,
         terminalIds: this.terminalIds,
         terminalSplit: this.terminalSplit,
+        lastProjectByWs: this.lastProjectByWs,
       };
       localStorage.setItem(KEY, JSON.stringify(v));
     } catch {
       /* private mode */
     }
+  }
+
+  rememberProject(wsKey: string, path: string | null): void {
+    const p = (path ?? '').trim().replace(/\/+$/, '');
+    if (!p || this.lastProjectByWs[wsKey] === p) return;
+    this.lastProjectByWs = { ...this.lastProjectByWs, [wsKey]: p };
+    this.save();
   }
 
   addSurface(tab: ThreadsInspectorTab): void {

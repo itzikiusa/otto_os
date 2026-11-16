@@ -3,8 +3,9 @@
   // project, ONE composer (RuntimeStartComposer — the same one every embed's
   // draft state uses) and `NewThreadMetaRow` beneath it. This host owns the
   // project / workspace choice and what a start does in Threads.
+  import { onMount, untrack } from 'svelte';
   import { api } from '../../lib/api/client';
-  import type { Repo } from '../../lib/api/types';
+  import type { Repo, RuntimeAccessMode } from '../../lib/api/types';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { checkFolder } from '../../lib/folderCheck';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -12,6 +13,7 @@
   import { transcript } from '../../lib/stores/transcript.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
+  import { accessCaution, canonicalPath, defaultStageFolder, folderLabel, stageAccess, threadsInCheckout } from './newThreadDefaults';
   import { buildFolderMenuItems, buildWorkspaceMenuItems } from './newThreadMenus';
   import NewThreadMetaRow from './NewThreadMetaRow.svelte';
   import { council } from './runtime/councilStore.svelte';
@@ -20,8 +22,11 @@
   import type { StartLaunch } from './startComposer';
   import { placeholderTitle } from './threadTitle';
   import { FolderPickerModal, ProjectCardView } from './threadLazy.svelte';
+  import { threadAccessDefault } from './threadAccessDefault.svelte';
+  import { startNewWorktree } from './threadGitMenus';
   import { threadRepos } from './threadRepos.svelte';
-  import { harnessLabel, projectNameFromCwd } from './threadsHelpers';
+  import { threadsChrome } from './threadsChrome.svelte';
+  import { harnessLabel, isThreadSession } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -29,7 +34,11 @@
   }
   let { showCard = false }: Props = $props();
 
-  let cwd = $state('');
+  // Null until the person picks: the folder then follows the workspace as it
+  // loads (newThreadDefaults.ts), so a late workspace never leaves the stage
+  // silently in the home folder.
+  let pickedCwd = $state<string | null>(null);
+  let pickedAccess = $state<RuntimeAccessMode | null>(null);
   let useScratch = $state(false);
   let cwdError = $state('');
   let folderPicker = $state(false);
@@ -40,23 +49,55 @@
   const homePath = $derived(ws.scratch?.root_path ?? '~');
   const scratchActive = $derived(useScratch || ws.current === null);
   const targetWs = $derived(scratchActive ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
+  const wsRepos = $derived(scratchActive ? [] : git.repos.filter((r) => r.workspace_id === ws.currentId));
+  const recentCwds = $derived(
+    [...Object.values(runtimeThreads.byId), ...ws.sessions.filter((s) => isThreadSession(s))]
+      .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at))
+      .map((s) => s.cwd ?? '')
+      .filter(Boolean),
+  );
+  const fallback = $derived(
+    defaultStageFolder({
+      workspace: scratchActive ? null : ws.current,
+      repos: wsRepos,
+      recentCwds,
+      lastProject: threadsChrome.lastProjectByWs[targetWs] ?? (scratchActive ? null : threads.lastProject),
+      homePath,
+    }),
+  );
+  const cwd = $derived(pickedCwd ?? fallback.path);
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
   const stageDraftKey = $derived(`threads-stage:${cleanCwd || targetWs}`);
   const onWorktree = $derived(worktree !== null && worktree.path.replace(/\/+$/, '') === cleanCwd);
   const repo = $derived(onWorktree ? worktree!.repo : threadRepos.repoFor(cleanCwd, scratchActive ? null : ws.currentId));
   const branch = $derived(onWorktree ? worktree!.branch : repo ? (git.statusById[repo.id]?.branch ?? null) : null);
-  const projectName = $derived(
-    !cleanCwd || cleanCwd === homePath || cleanCwd === '~' ? null : projectNameFromCwd(cleanCwd),
-  );
+  const isHome = $derived(!cleanCwd || cleanCwd === '~' || canonicalPath(cleanCwd) === canonicalPath(homePath));
+  const folderName = $derived(folderLabel(cleanCwd, { homePath, repos: [...wsRepos, ...(repo ? [repo] : [])], workspaces: ws.workspaces }));
+  const projectName = $derived(isHome ? null : folderName);
+  // What the first turn runs with, shown on the chip and sent with the start.
+  const accessMode = $derived(stageAccess(pickedAccess, threadAccessDefault.skipPermissions));
+  const caution = $derived(accessCaution(accessMode, { home: isHome, repo: repo ? true : threadRepos.checked(cleanCwd) ? false : null }));
+  // Another live, writable thread in this checkout (T2-17).
+  const checkoutRoot = $derived(onWorktree ? worktree!.path : (repo?.path ?? cleanCwd));
+  const busyHere = $derived(isHome ? [] : threadsInCheckout(runtimeThreads.live(), checkoutRoot));
+  const threadsHere = (path: string): number => threadsInCheckout(runtimeThreads.live(), path).length;
+
+  onMount(() => threadAccessDefault.ensure());
 
   $effect(() => {
     const seeded = threads.draftCwd;
     if (seeded) {
-      cwd = seeded;
+      pickedCwd = seeded;
       useScratch = false;
-    } else if (!cwd) {
-      cwd = threads.lastProject ?? (scratchActive ? homePath : (ws.current?.root_path ?? homePath));
     }
+  });
+
+  // Another workspace opened (the shell's switcher): its own default applies.
+  let seenWs: string | null = null;
+  $effect(() => {
+    const id = ws.currentId;
+    if (seenWs !== null && id !== seenWs) untrack(() => (pickedCwd = threads.draftCwd));
+    seenWs = id;
   });
 
   $effect(() => {
@@ -68,18 +109,24 @@
   });
 
   function setCwd(path: string): void {
-    cwd = path;
+    pickedCwd = path;
     cwdError = '';
+  }
+
+  function pickWorktree(path: string, br: string | null, r: Repo): void {
+    worktree = { path, branch: br, repo: r };
+    setCwd(path);
   }
 
   function openProjectMenu(anchor: HTMLElement): void {
     const items = buildFolderMenuItems({
       scratchActive,
       currentWorkspace: ws.current,
-      repos: git.repos,
+      repos: wsRepos,
       sessions: ws.sessions,
       cwd,
       homePath,
+      recentCwds,
       onPickPath: setCwd,
       onBrowse: () => (folderPicker = true),
     });
@@ -103,14 +150,17 @@
         currentId: ws.currentId,
         scratchActive,
         homePath,
+        // The chosen workspace's default (its last project or repo) applies.
         onSelectWorkspace: (w) => {
           useScratch = false;
-          setCwd(w.root_path);
+          pickedCwd = null;
+          cwdError = '';
           void ws.select(w.id);
         },
         onSelectScratch: () => {
           useScratch = true;
-          setCwd(homePath);
+          pickedCwd = null;
+          cwdError = '';
         },
       }),
     );
@@ -149,6 +199,7 @@
               model: req.model,
               effort: req.effort ?? undefined,
               plan: req.plan,
+              accessMode: req.accessMode ?? undefined,
               prompt: firstMsg,
               attachments: req.attachments,
             })
@@ -158,6 +209,7 @@
       if (firstMsg && !req.runtime && !req.council) transcript.recordOptimisticPrompt(created.id, firstMsg);
       threads.draftCwd = null;
       threads.rememberProject(dir || null);
+      threadsChrome.rememberProject(targetWs, dir || null);
       if (openInBeside && threads.paneIds.length > 0 && !req.council) threads.openBeside(created.id);
       else if (!req.council) threads.selectThread(created.id);
       return true;
@@ -203,30 +255,40 @@
       draftKey={stageDraftKey}
       rememberScope="threads:{targetWs}"
       error={cwdError}
+      {accessMode}
+      onaccess={(m) => (pickedAccess = m)}
       onlaunch={launch}
       onescape={escape}
+      prefill={threads.draftText}
+      onprefilled={() => (threads.draftText = null)}
     >
       {#snippet below(m)}
         <NewThreadMetaRow
           {repo}
           {cleanCwd}
           {onWorktree}
-          {scratchActive}
-          {projectName}
+          {folderName}
+          {isHome}
+          {threadsHere}
           {openInBeside}
           {branch}
           modeSupported={m.modeSupported}
           planSupported={m.planSupported}
           interactionMode={m.interactionMode}
-          onPickWorktree={(path, br, r) => {
-            worktree = { path, branch: br, repo: r };
-            setCwd(path);
-          }}
+          onPickWorktree={pickWorktree}
           onOpenProjectMenu={openProjectMenu}
           onToggleBeside={() => (openInBeside = !openInBeside)}
           onOpenModeMenu={(anchor) => m.openModeMenu(anchor)}
           onTogglePlan={() => m.setMode(m.interactionMode === 'plan' ? 'full' : 'plan')}
         />
+        {#if caution && m.accessShown}
+          <p class="nt-note" data-testid="new-thread-access-caution">{caution}</p>
+        {/if}
+        {#if busyHere.length > 0}
+          <p class="nt-note" data-testid="new-thread-same-checkout">
+            {busyHere.length === 1 ? 'Another thread is' : `${busyHere.length} threads are`} working in this {repo ? 'checkout' : 'folder'}{#if repo}{' · '}<button type="button" class="nt-link" onclick={() => void startNewWorktree(repo, (path, br) => pickWorktree(path, br, repo))}>Use a new worktree</button>{/if}
+          </p>
+        {/if}
       {/snippet}
     </RuntimeStartComposer>
   </div>
@@ -295,6 +357,23 @@
   }
   .nt-project:hover {
     background: var(--hover);
+  }
+  .nt-note {
+    margin: -8px 0 0;
+    padding-inline: 12px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .nt-link {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent-text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .nt-link:hover {
+    text-decoration: underline;
   }
   @media (max-width: 640px) {
     .nt-title {

@@ -128,6 +128,40 @@ Every IDE subsystem operates over a unified `IdeTargetSpec`:
   all run transparently over SSH (`otto_ssh` SFTP + POSIX-escaped `ssh -T`
   remote commands).
 
+### 1b. Projects: opening, switching, and what is kept per project
+
+- **Opening.** The switcher in the header (or ⌘K **IDE: Switch project…**) lists
+  Scratches, multi-repo projects, and folders: your registered workspaces plus
+  every folder you opened with **Open local folder…** or a `#/ide?root=` link
+  (Threads → **Open in IDE** opens the project and nothing else). Each opened local
+  folder or SSH target is recorded in a bounded recent list (`otto.ide.recentTargets`,
+  20 entries, ids and paths only — an SSH target is reopened through its saved
+  connection, never a stored secret). ⌘K also has one **IDE: Open project <name>**
+  row per project you can reopen (named, folder, recent, SSH).
+- **Opening one repo opens that repo.** A repo that is a member of a multi-repo
+  project stays a single folder when opened on its own; the project's other folders
+  come only when you open the project itself (its primary root, or by name).
+- **Names.** Two folders with the same name read `api — team-a` / `api — team-b`
+  (the shortest distinguishing parent) in the switcher, the header and the tree.
+  The window title names the project: `<project> — IDE — Otto`.
+- **Switching.** With unsaved edits the switch asks first (**Discard & switch**);
+  the switcher closes before it asks. Paths are compared in one spelling
+  (`/private/var` ≡ `/var`).
+- **What follows you back, per project:** open tabs, the active tab and split,
+  breakpoints, the selected run target (`otto.ide.launchTarget:<target>`), the
+  tree's expanded folders, the agent thread, the terminal's selected shell, and
+  which agent proposals were already applied. Kept for the 12 most recent projects
+  (`otto.ide.projectMemory`); the agent draft and applied-proposal Undo stay in
+  memory only, and a draft never carries into another project.
+- **Runs and debug on a switch.** A run you leave keeps running and is *parked*
+  with its project (sessionStorage, so a reload keeps it). Coming back re-attaches
+  the Run panel — output, status and Stop. If it ends while you are elsewhere, one
+  toast names the project with **Show** to switch back. A live debug session is
+  stopped when you leave its project.
+- **A missing folder or unreachable host.** The tree says what is wrong (the full
+  path, wrapped) with next steps: **Choose another folder…**, **Remove from
+  recents** (when listed there), and **Retry** only for an SSH host.
+
 ### 2. Multi-cursor editor, prefix/suffix & JetBrains/Standard keymaps
 
 `CodeEditor.svelte` lazy-loads `cm-ide-extensions.ts` when IDE features are
@@ -146,6 +180,18 @@ active:
   gutter breakpoint toggle, `⌘D` duplicate line/selection / compare files,
   `⌘⇧V` clipboard history, `⌘⌫` delete line) and **Standard** (`F12`, `⌘.`,
   `F2`, `⇧⌥F`, `F9`, `⌘D` next occurrence).
+- **Quick open (one panel, ⇧⇧ Search Everywhere):** `⌘P` files (both presets), `⌘E`
+  recent files (Standard `⌃R`), and `⌘G` (Standard `⌃G`) opens it in `:line[:column]`
+  mode. Settings › Keymap lists every key for the active preset (`shell/ideShortcuts.ts`
+  is the one table).
+- **Standard preset window & debug keys:** `⌘B` project explorer, `⌘J` tool dock,
+  `` ⌃` `` terminal, `⇧⌘H` replace in path; `F5` debug / continue, `⌃F5` run, `⇧F5`
+  stop, `⇧⌘F5` restart, `F9` breakpoint, `F10` / `F11` / `⇧F11` step over / into / out.
+- **Status strip & run target:** a 22 px strip under the dock (desktop) shows the
+  branch, problem counts, `Ln, Col` (opens Go to line), language, line endings and
+  the language-server state. **Current file** is the default run/debug target; a
+  configuration wins once you pick it. The breakpoint list is the project tree's
+  **Breakpoints** tab (the debugger's ⋯ › Breakpoints opens it).
 - **Navigation & agent keys (both presets):** `⌘G` Go to Line[:Column] (while the
   editor's find panel is open, `⌘G` is *find next* instead), `⌘L` add the selection
   (or the current line) to the AI agent, `⇧⌘L` show/hide the agent dock. The bare

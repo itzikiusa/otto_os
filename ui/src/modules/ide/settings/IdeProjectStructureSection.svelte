@@ -93,8 +93,7 @@
     const anchor = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
     const items: MenuItem[] = [
       {
-        label: '<No SDK>',
-        danger: true,
+        label: 'No SDK',
         checked: !activePrimarySdkPath,
         action: () => ideSettings.patchEnv({ go_root: '', java_home: '', python_interpreter: '', node_home: '', rust_toolchain: '' }),
       },
@@ -170,7 +169,7 @@
       <span class="st-lbl" id="st-proj-sdk-lbl">SDK:</span>
       <div class="sdk-drop-wrap">
         <button type="button" class="sdk-drop-trigger" aria-labelledby="st-proj-sdk-lbl" aria-haspopup="menu" onclick={openProjectSdkMenu} data-testid="ide-project-sdk-picker">
-          {#if activePrimarySdkLabel}<span class="sdk-val" dir="ltr">{activePrimarySdkLabel}</span>{:else}<span class="sdk-no-val">&lt;No SDK&gt;</span>{/if}
+          {#if activePrimarySdkLabel}<span class="sdk-val" dir="ltr">{activePrimarySdkLabel}</span>{:else}<span class="sdk-no-val">No SDK</span>{/if}
           <Icon name="chevronDown" size={12} />
         </button>
       </div>
@@ -336,7 +335,7 @@
   .st-count { font-size: var(--fs-xs); color: var(--text-dim); font-weight: 500; }
   .sdk-drop-wrap { position: relative; }
   .sdk-drop-trigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; inline-size: 100%; padding-block: 6px; padding-inline: 10px; border: 1px solid var(--control-border); border-radius: var(--radius-s); background: var(--surface-2); color: var(--text); font-size: var(--fs-s); cursor: pointer; text-align: start; }
-  .sdk-no-val { color: var(--danger); font-weight: 500; }
+  .sdk-no-val { color: var(--text-dim); }
   .sdk-val { font-family: var(--font-mono); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mod-list, .st-card { border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface); padding: 10px; display: flex; flex-direction: column; gap: 8px; }
   .st-card-title { font-size: var(--fs-s); font-weight: 600; color: var(--text); }

@@ -23,11 +23,12 @@
   import { toasts } from '../../lib/toast.svelte';
   import { ide, type IdeCodeAction, type IdeEditorHandle, type IdeOpenTab, type IdeSymbolNode } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
-  import { matchesPausedDebugPath as matchesPausedPath } from './editor/idePausedPath';
+  import { ideEditorDebugProps } from './editor/ideEditorDebugBridge';
   import { subscribeIdeBufferEvictions, subscribeIdeFileSaved } from './store/ideBufferPerf';
-  import IdeBreadcrumbsBar from './editor/IdeBreadcrumbsBar.svelte';
   import IdeTabBar from './editor/IdeTabBar.svelte';
   import IdePreviewPane from './editor/IdePreviewPane.svelte';
+  import IdeDiskChangedBanner from './editor/IdeDiskChangedBanner.svelte';
+  import IdeTouchDebugBar from './editor/IdeTouchDebugBar.svelte';
   import {
     areIdeBreakpointsMuted, classifyIdeFile, evictPersistedIdeGitBase, fetchIdeGitBlame,
     flushAutoLocalHistorySnapshot, getIdeProjectFolders, getPersistedIdeGitBaseDigest,
@@ -333,30 +334,12 @@
     if (ide.activeSymbols.length > 0) return ide.activeSymbols;
     return langAnalyzerMod ? langAnalyzerMod.extractInstantSymbols(t.path, t.language, t.content) : [];
   });
-  const enclosingSymbol = $derived.by((): IdeSymbolNode | null => {
-    const ln = ide.cursorInfo.line;
-    let best: IdeSymbolNode | null = null;
-    const walk = (nodes: IdeSymbolNode[]): void => {
-      for (let i = 0; i < nodes.length; i++) {
-        const s = nodes[i];
-        if (ln >= s.line && ln <= Math.max(s.line, s.end_line)) { best = s; if (s.children?.length) walk(s.children); }
-      }
-    };
-    walk(effectiveSymbols);
-    return best;
-  });
   const activeJsonPath = $derived(
     activeDocKind === 'json' && ide.activeTab && langAnalyzerMod
       ? langAnalyzerMod.computeJsonPathAt(ide.activeTab.content, ide.cursorInfo.line, ide.cursorInfo.col)
       : null,
   );
   const pathSegments = $derived(ide.activeTab ? ide.relativePath(ide.activeTab.path).split('/').filter(Boolean) : []);
-  const activeDiags = $derived(ide.activeTab ? ide.problems.filter((d) => d.path === ide.activeTab?.path) : []);
-  const errorCount = $derived(activeDiags.filter((d) => d.severity === 'error').length);
-  const warnCount = $derived(activeDiags.filter((d) => d.severity === 'warning').length);
-
-  const matchesPausedDebugPath = (pausedFile: string | null | undefined, tabPath: string): boolean =>
-    matchesPausedPath(pausedFile, tabPath, [ide.target.root, ...ide.additionalRoots]);
 
   function toEditorHandle(ref: ExtendedEditorRef): IdeEditorHandle {
     const h: IdeEditorHandle & { applyQuickFixEdits?: (edits: CmIdeMod.IdeConcreteTextEdit[]) => boolean } = {
@@ -417,15 +400,7 @@
     }
   }
 
-  function cycleNextDiagnostic(e: MouseEvent): void {
-    if (e.shiftKey || activeDiags.length === 0) { ide.openBottomTab('problems'); return; }
-    const sorted = [...activeDiags].sort((a, b) => a.line - b.line);
-    const next = sorted.find((d) => d.line > ide.cursorInfo.line) ?? sorted[0];
-    if (next) primaryEditorRef?.goToLine(next.line, next.column || 1);
-  }
-
   function openBreakpointPopover(filePath: string, line: number, ev?: MouseEvent): void {
-    if (!(ide.breakpointsByPath[filePath] ?? []).some((b) => b.line === line)) ide.toggleBreakpoint(filePath, line);
     bpEditor = { path: filePath, line, x: ev?.clientX ?? 240, y: ev?.clientY ?? 180 };
   }
 
@@ -433,7 +408,7 @@
     filePath: string, line: number, col: number,
     opts?: { x?: number; y?: number; symbol?: string; manifestDep?: CmIdeDepsMod.IdeDepItem | null },
   ): void {
-    const rect = document.querySelector<HTMLElement>('[data-testid="ide-quickfix-btn"]')?.getBoundingClientRect();
+    const rect = document.querySelector<HTMLElement>('[data-testid="ide-editor-more-btn"]')?.getBoundingClientRect();
     const x = opts?.x ?? (rect ? rect.left - 180 : 280);
     const y = opts?.y ?? (rect ? rect.bottom + 6 : 160);
     const dep = opts?.manifestDep ?? (manifestDepsByPath[filePath] ?? []).find((d) => line >= (d.block_start_line ?? d.line) && line <= (d.end_line ?? d.block_end_line ?? d.line)) ?? null;
@@ -473,7 +448,6 @@
       <IdeEditorSubbarLazy.component
         {activeTab}
         {pathSegments}
-        {enclosingSymbol}
         {effectiveSymbols}
         {activeJsonPath}
         sdkLabel={activeFileMeta.sdkLabel}
@@ -481,15 +455,12 @@
         {effectiveViewMode}
         {hasNonEmptySelection}
         blameActive={Boolean(blameEnabledByPath[activeTab.path])}
-        {errorCount}
-        {warnCount}
         onapplyjson={(txt) => { if (!primaryEditorRef?.applyAgentEdit?.(txt)) ide.updateBuffer(activeTab.path, txt); }}
         onjumpsymbol={jumpAdjacentSymbol}
         ongotoline={(ln, col) => primaryEditorRef?.goToLine(ln, col)}
         onopenstructure={() => (structureOpen = true)}
         ontoggleblame={() => toggleBlameFor(activeTab.path)}
         onopenquickfix={(e) => openIntentionPopoverAt(activeTab.path, ide.cursorInfo.line, ide.cursorInfo.col, { x: e.clientX - 200, y: e.clientY + 10 })}
-        oncyclediag={cycleNextDiagnostic}
         onfocusagent={focusAgentComposer}
       />
     {:else if IdeEditorSubbarLazy.error}
@@ -498,9 +469,8 @@
       <div class="ide-subbar-slot" aria-hidden="true"></div>
     {/if}
 
-    {#if ideAgent.inlinePrompt?.open}
-      <LazyMount lazy={IdeInlinePromptBarLazy} what="inline prompt" variant="compact" />
-    {/if}
+    {#if ideAgent.inlinePrompt?.open}<LazyMount lazy={IdeInlinePromptBarLazy} what="inline prompt" variant="compact" />{/if}
+    <IdeDiskChangedBanner tab={activeTab} />
 
     <div class="ide-panes" class:split-down={ide.splitDirection === 'down'} bind:this={panesEl}>
       <div class="ide-pane {idePreviewMode.paneClass(stagedPrimaryTab?.path === activeTab.path ? stagedPrimaryTab : null)}" style:flex={ide.splitTab ? `0 0 calc(${(splitRatio * 100).toFixed(1)}% - 3px)` : '1 1 0%'}>
@@ -547,8 +517,7 @@
             onEditBreakpoint={(ln, ev) => openBreakpointPopover(pTab.path, ln, ev)}
             gutterItems={ide.gutterByPath[pTab.path] ?? []}
             onGutterAction={(item, mode) => ide.runFromGutter(item, mode)}
-            pausedLine={ide.activeDebug?.state === 'paused' && matchesPausedDebugPath(ide.activeDebug.paused_file, pTab.path) ? (ide.activeDebug.paused_line ?? null) : null}
-            inlineValues={ide.activeDebug?.state === 'paused' && matchesPausedDebugPath(ide.activeDebug.paused_file, pTab.path) ? ide.activeDebug.inline_values : []}
+            {...ideEditorDebugProps(pTab.path)}
             peerCursors={ide.peerCursors.filter((p) => p.path === pTab.path)}
             keymapPreset={ide.keymapPreset}
             fontLigatures={prefs.fontLigatures}
@@ -587,6 +556,7 @@
         {/if}
 
         {#if stagedPrimaryTab?.path === activeTab.path}<IdePreviewPane tab={stagedPrimaryTab} />{/if}
+        <IdeTouchDebugBar />
         {#if activeIsManifest}
           <div class="ide-manifest-tabs" role="group" aria-label="Manifest editor mode" data-testid="ide-dep-mode-switcher">
             <button type="button" class="ide-man-tab" class:active={effectiveManifestMode === 'text'} aria-pressed={effectiveManifestMode === 'text'} onclick={() => (manifestModeByPath = { ...manifestModeByPath, [activeTab.path]: 'text' })}>Text</button>
@@ -633,8 +603,7 @@
                 onEditBreakpoint={(ln, ev) => openBreakpointPopover(sTab.path, ln, ev)}
                 gutterItems={ide.gutterByPath[sTab.path] ?? []}
                 onGutterAction={(item, mode) => ide.runFromGutter(item, mode)}
-                pausedLine={ide.activeDebug?.state === 'paused' && matchesPausedDebugPath(ide.activeDebug.paused_file, sTab.path) ? (ide.activeDebug.paused_line ?? null) : null}
-                inlineValues={ide.activeDebug?.state === 'paused' && matchesPausedDebugPath(ide.activeDebug.paused_file, sTab.path) ? ide.activeDebug.inline_values : []}
+                {...ideEditorDebugProps(sTab.path)}
                 keymapPreset={ide.keymapPreset}
                 fontLigatures={prefs.fontLigatures}
                 onchange={(val) => { ide.updateBuffer(sTab.path, val); }}
@@ -655,12 +624,6 @@
         </div>
       {/if}
     </div>
-
-    <IdeBreadcrumbsBar
-      filePath={activeTab.path} {pathSegments} symbols={effectiveSymbols} cursorLine={ide.cursorInfo.line}
-      onjumpsymbol={(ln, col) => { pushIdeNavLocation(activeTab.path, ide.cursorInfo.line, ide.cursorInfo.col); primaryEditorRef?.goToLine(ln, col); }}
-      onopenstructure={() => (structureOpen = true)}
-    />
   {:else}
     <div class="ide-empty-editor">
       <EmptyState

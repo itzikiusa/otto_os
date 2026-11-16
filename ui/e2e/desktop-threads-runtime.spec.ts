@@ -7,10 +7,11 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 import type { Locator } from '@playwright/test';
 
 /** Relative luminance (0 dark … 1 light) of an element's computed background. */
-/** The project card lives in the toolbar's ⋯ (threadsPageMenu.ts). */
+/** The project card lives in the toolbar's ⋯ › View (threadsPageMenu.ts). */
 async function toggleProjectCard(page: Page): Promise<void> {
   await page.getByTestId('threads-thread-menu').click();
-  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Project card' }).click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'View' }).click();
+  await page.locator('.ctx-submenu').getByRole('menuitemcheckbox', { name: 'Project card' }).click();
 }
 
 async function bgLuminance(el: Locator): Promise<number> {
@@ -89,13 +90,17 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   // The placeholder title drops the polite lead-in ("hello"): threadTitle.ts.
   await expect(page.getByTestId('threads-sidebar').getByText('Runtime', { exact: true }).first()).toBeVisible();
 
-  // An approval shows inline where the agent asked; Approve runs the command.
+  // An approval: the timeline marks where the agent asked, the attention dock
+  // above the composer holds the one set of answers; Approve runs the command.
   const composer = thread.getByTestId('runtime-composer');
   await composer.fill('ask');
   await composer.press('Enter');
-  const approval = thread.locator('[data-testid^="runtime-approval-"]');
+  const approval = thread.getByTestId('runtime-attention');
   await expect(approval).toBeVisible({ timeout: 15_000 });
-  await expect(approval.getByText('Waiting for approval')).toBeVisible();
+  await expect(approval).toContainText('Codex wants to run');
+  await expect(approval).toContainText('make clean');
+  await expect(thread.locator('[data-item-type="command_execution"]').getByText('Waiting for your approval')).toBeVisible();
+  await expect(thread.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(1);
   await page.screenshot({ path: info.outputPath('runtime-approval-light.png'), animations: 'disabled' });
   // Dark: the secondary actions are dark buttons (once the theme transition settles).
   await page.emulateMedia({ colorScheme: 'dark' });
@@ -172,12 +177,12 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
 
   // The thread's terminal drawer: a shell in the thread's folder.
   await page.getByTestId('threads-thread-menu').click();
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Open terminal drawer' }).click();
+  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Terminal drawer' }).click();
   await expect(page.locator('[data-testid^="thread-terminal-drawer-"]')).toBeVisible({ timeout: 15_000 });
   await page.screenshot({ path: info.outputPath('runtime-terminal-light.png'), animations: 'disabled' });
 
   // Rename, then close: the thread moves to History; opening it from
-  // History reopens it (its agent resumes the conversation).
+  // History shows it read-only, and Revive brings its agent back.
   await page.getByTestId('threads-thread-menu').click();
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Rename…' }).click();
   await page.locator('[role="dialog"] input').first().fill('Renamed runtime');
@@ -189,6 +194,8 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   const sidebar = page.getByTestId('threads-sidebar');
   await sidebar.locator('.th-history').click();
   await sidebar.locator('[data-testid^="thread-history-"]', { hasText: 'Renamed runtime' }).getByRole('button').first().click();
+  await expect(thread.getByTestId('runtime-closed')).toBeVisible();
+  await thread.getByTestId('runtime-reopen').click();
   await expect(thread.getByTestId('runtime-closed')).toHaveCount(0, { timeout: 15_000 });
   await expect(thread.getByTestId('runtime-composer')).toBeEnabled();
   await expect(thread.getByText('echo: hello runtime')).toBeVisible();
@@ -293,7 +300,7 @@ test('a Claude thread: background work, its own turn, a subagent card, reopen an
   await expect(thread.getByTestId('runtime-closed')).toBeVisible({ timeout: 15_000 });
   await expect(composer).toBeEnabled();
   await page.getByTestId('threads-thread-menu').click();
-  await expect(page.locator('.ctx-menu').getByRole('menuitem', { name: 'Revive thread' })).toBeVisible();
+  await expect(page.locator('.ctx-menu').getByRole('menuitem', { name: 'Reopen thread' })).toBeVisible();
   await page.keyboard.press('Escape');
   // Explicit revival does not send the unfinished draft or erase prior answers.
   await composer.fill('unfinished after close');
@@ -523,7 +530,8 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
   await expect(thread.getByTestId('runtime-item-f2').getByTestId('runtime-item-error')).toHaveText(/HTTP 403 Forbidden/);
 
   // Two pending approvals at once (parallel commands: their group opens by
-  // itself), each inline on its command and each answerable.
+  // itself): each command row is marked, the dock steps "1 of 2", and a
+  // row's Answer brings that request up in the dock.
   await expect(thread.getByTestId('runtime-group-group:c1')).toHaveAttribute('open', '');
   for (const [tool, req] of [
     ['c1', 'r4'],
@@ -532,8 +540,16 @@ test('runtime polish: RTL, project card, grouped tools, folded approvals, access
     const row = thread.getByTestId(`runtime-item-${tool}`);
     await expect(row.getByTestId(`runtime-approval-${req}`)).toBeVisible();
   }
-  await thread.getByTestId('runtime-item-c2').getByRole('button', { name: 'Approve', exact: true }).click();
-  await thread.getByTestId('runtime-item-c1').getByRole('button', { name: 'Decline', exact: true }).click();
+  const dock = thread.getByTestId('runtime-attention');
+  await expect(dock.getByTestId('runtime-attention-count')).toHaveText('1 of 2');
+  await expect(dock).toContainText('git status');
+  await thread.getByTestId('runtime-item-c2').getByTestId('runtime-approval-answer').click();
+  await expect(dock.getByTestId('runtime-attention-count')).toHaveText('2 of 2');
+  await expect(dock).toContainText('git log -1');
+  await dock.getByRole('button', { name: 'Approve', exact: true }).click();
+  await thread.getByTestId('runtime-item-c1').getByTestId('runtime-approval-answer').click();
+  await expect(dock).toContainText('git status');
+  await dock.getByRole('button', { name: 'Decline', exact: true }).click();
   await expect.poll(() => answered.sort()).toEqual(['r4', 'r5']);
   await page.screenshot({ path: info.outputPath('runtime-polish-work-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });
@@ -639,6 +655,10 @@ test('native Codex question forms answer near the composer on phone and desktop'
   await page.screenshot({ path: info.outputPath('runtime-questions-dark.png'), animations: 'disabled' });
   await page.setViewportSize({ width: 390, height: 844 });
   await expectNoHorizontalOverflow(page);
+  // The form lives once, in the attention dock, with its Send in view.
+  await expect(thread.getByTestId('runtime-attention')).toHaveAttribute('data-kind', 'question');
+  await expect(thread.getByTestId('runtime-question-send')).toHaveCount(1);
+  await expectFullyInViewport(page, card.getByTestId('runtime-question-send'), 'Send answer');
   await page.screenshot({ path: info.outputPath('runtime-questions-phone.png'), animations: 'disabled' });
   // A failed HTTP answer must keep form input, never fall through to ordinary chat.
   let fail = true;

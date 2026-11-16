@@ -204,7 +204,7 @@
       case 'reauth':
         return 'Re-authenticate';
       case 'open_route':
-        return notice.title.includes('waiting for your approval') ? 'Review' : 'Open';
+        return notice.title.includes('waiting for your approval') ? 'Review' : (notice.source_key ?? '').startsWith('session:') && notice.action.route.startsWith('threads/') ? 'Open thread' : 'Open';
       default:
         return null;
     }

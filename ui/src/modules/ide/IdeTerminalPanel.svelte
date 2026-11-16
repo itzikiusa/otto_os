@@ -8,7 +8,8 @@
   }
 
   let savedTabs = $state<IdeTermTab[]>([]);
-  let savedActiveId = $state<string | null>(null);
+  // The selected shell per project (I3-19): coming back to A selects A's shell, not its first.
+  let savedActiveByTarget = $state<Record<string, string | null>>({});
   let savedSplit = $state(false);
   let handledTerminalSeq = 0;
   const autoAttemptedTargets = new Set<string>();
@@ -81,7 +82,7 @@
 
   const targetTabs = $derived(savedTabs.filter((t) => t.targetKey === targetKey));
   const activeTab = $derived(
-    targetTabs.find((t) => t.id === savedActiveId) ?? targetTabs[0] ?? null,
+    targetTabs.find((t) => t.id === savedActiveByTarget[targetKey]) ?? targetTabs[0] ?? null,
   );
   const secondTab = $derived(
     savedSplit ? (targetTabs.find((t) => t.id !== activeTab?.id) ?? null) : null,
@@ -97,7 +98,7 @@
     autoAttemptedTargets.add(targetKey);
     const existing = targetTabs.find((t) => t.cwd === req.cwd);
     if (existing) {
-      savedActiveId = existing.id;
+      savedActiveByTarget[targetKey] = existing.id;
       return;
     }
     void spawnTerminal(req.cwd);
@@ -135,7 +136,7 @@
           cwd: launchCwd,
         };
         savedTabs = [...savedTabs.filter((t) => t.id !== s.id), entry];
-        savedActiveId = s.id;
+        savedActiveByTarget[targetKey] = s.id;
       } else {
         const s = await ws.createSessionQuiet(
           {
@@ -156,7 +157,7 @@
           cwd: launchCwd,
         };
         savedTabs = [...savedTabs.filter((t) => t.id !== s.id), entry];
-        savedActiveId = s.id;
+        savedActiveByTarget[targetKey] = s.id;
       }
     } catch (e) {
       const cause = loadErrorText(e);
@@ -171,8 +172,8 @@
     try {
       await ws.killSession(id);
       savedTabs = savedTabs.filter((t) => t.id !== id);
-      if (savedActiveId === id) {
-        savedActiveId = savedTabs.find((t) => t.targetKey === targetKey)?.id ?? null;
+      if (savedActiveByTarget[targetKey] === id) {
+        savedActiveByTarget[targetKey] = savedTabs.find((t) => t.targetKey === targetKey)?.id ?? null;
       }
     } catch (e) {
       toastError('Couldn’t close terminal', e);
@@ -198,7 +199,7 @@
             class:is-split-peer={t.id === secondTab?.id}
             aria-pressed={t.id === activeTab?.id}
             title={t.id === secondTab?.id ? `${t.cwd} (split pane)` : t.cwd}
-            onclick={() => (savedActiveId = t.id)}
+            onclick={() => (savedActiveByTarget[targetKey] = t.id)}
           >
             <Icon name="terminal" size={12} />
             <span>{t.label}</span>
@@ -290,16 +291,17 @@
       </LoadState>
     </div>
   {:else}
+    <!-- No floating zoom/copy pill over the output: ⌘+ / ⌘− size the text, right-click or ⌘C copies. -->
     <div class="iterm-stage otto-force-dark" class:is-split={!!secondTab}>
       {#key activeTab.id}
         <div class="iterm-pane">
-          <LazyTerminal bind:this={primaryRef} sessionId={activeTab.id} forceDark autoFocus resumeOnOpen />
+          <LazyTerminal bind:this={primaryRef} sessionId={activeTab.id} forceDark autoFocus resumeOnOpen showToolbar={false} />
         </div>
       {/key}
       {#if secondTab}
         {#key secondTab.id}
           <div class="iterm-pane">
-            <LazyTerminal sessionId={secondTab.id} forceDark resumeOnOpen />
+            <LazyTerminal sessionId={secondTab.id} forceDark resumeOnOpen showToolbar={false} />
           </div>
         {/key}
       {/if}

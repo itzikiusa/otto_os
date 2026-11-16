@@ -191,11 +191,15 @@ test('a thread deep link from another workspace opens the thread at phone width'
   }
   expect(await page.evaluate(() => window.scrollY + document.scrollingElement!.scrollTop)).toBe(0);
 
-  // An inline approval: its buttons are real tap targets.
+  // An approval is answered in the attention dock above the composer (the
+  // timeline keeps a "Waiting for your approval" marker): its buttons are
+  // real tap targets, in view, and the only Approve on screen.
   await composer.fill('ask');
   await sendBtn.click();
-  const approval = thread.locator('[data-testid^="runtime-approval-"]');
+  const approval = thread.getByTestId('runtime-attention');
   await expect(approval).toBeVisible({ timeout: 20_000 });
+  await expect(thread.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(1);
+  await expectFullyInViewport(page, approval.getByRole('button', { name: 'Approve', exact: true }), 'Approve in the dock');
   for (const name of ['Approve', 'Decline']) {
     const btn = approval.getByRole('button', { name, exact: true });
     const box = await btn.boundingBox();
@@ -241,8 +245,13 @@ test('Continue on phone (desktop credential) offers the thread QR when Phone acc
   await mock(page, '**/api/v1/phone/devices', () => [{ id: 'd', name: 'iPhone', user_agent: null, created_at: '', last_seen_at: '', last_ip: null, idle_expires_at: '', expires_at: '', current: false }]);
   await page.goto(`/#/threads/${threadId}`);
   await expect(page.getByTestId(`runtime-thread-${threadId}`)).toBeVisible({ timeout: 30_000 });
-  // The handoff is a ⋯ item (the toolbar keeps sidebar, title, right panel, ⋯).
+  // The handoff is a ⋯ item (the toolbar keeps sidebar, title, right panel, ⋯);
+  // a phone-width screen never offers handing a thread to a phone.
   await page.getByTestId('threads-thread-menu').click();
+  if ((page.viewportSize()?.width ?? 0) <= 640) {
+    await expect(page.getByRole('menuitem', { name: /Continue on phone/ })).toHaveCount(0);
+    return;
+  }
   await page.getByRole('menuitem', { name: /Continue on phone/ }).click();
   const sheet = page.getByRole('dialog', { name: 'Continue on phone' });
   await expectFullyInViewport(page, sheet, 'Continue on phone sheet');

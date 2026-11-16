@@ -145,11 +145,13 @@ const councilRoutes: MockRoute[] = [
       const id = `cnc_mock${n + 1}`;
       const out: RuntimeSession[] = [];
       seats.forEach((x, i) => {
-        const label = x.model ? `${x.provider} ${x.model}` : x.provider;
+        // council.rs `SeatPick::title`: "<title> · Seat N · Claude [model] [Effort]".
+        const who = [String(x.provider).charAt(0).toUpperCase() + String(x.provider).slice(1), x.model,
+          x.effort ? String(x.effort).charAt(0).toUpperCase() + String(x.effort).slice(1) : null].filter(Boolean).join(' ');
         out.push(addThread(m[1], {
-          provider: x.provider, model: x.model, title: `${b?.title ?? 'Council'} · ${label}`, cwd: b?.cwd ?? '/Users/dev/otto',
+          provider: x.provider, model: x.model, title: `${b?.title ?? 'Council'} · Seat ${i + 1} · ${who}`, cwd: b?.cwd ?? '/Users/dev/otto',
           parent_id: out[0]?.id ?? null,
-          meta: { council: { id, seat: i + 1, role: 'seat', ...(x.effort ? { effort: x.effort } : {}) }, read_only: true },
+          meta: { council: { id, seat: i + 1, role: 'seat', provider: x.provider, ...(x.model ? { model: x.model } : {}), ...(x.effort ? { effort: x.effort } : {}) }, read_only: true },
         }, String(b?.prompt ?? ''), `Mock ${x.provider} (seat ${i + 1}): my answer.`));
       });
       return { status: 201, json: { seats: out } };
@@ -165,10 +167,11 @@ const councilRoutes: MockRoute[] = [
       const members = threads.filter((t) => (t.id === root || t.parent_id === root) && councilOf(t)?.id === c.id);
       const busy = members.find((t) => t.status === 'working');
       if (busy) return { status: 409, json: { code: 'conflict', message: `conflict: seat ${councilOf(busy)?.seat} is still working` } };
-      const base = (find(root)?.title ?? 'Council').replace(/ · [^·]*$/, '');
+      const t1 = find(root)?.title ?? 'Council';
+      const base = / · Seat \d+ · /.test(t1) ? t1.replace(/ · Seat \d+ · .*$/, '') : t1.replace(/ · [^·]*$/, '');
       const judge = addThread(me.workspace_id, {
         provider: b?.provider ?? 'claude', title: `${base} · synthesis`, parent_id: root,
-        meta: { council: { id: c.id, seat: 0, role: 'synthesis' }, read_only: true },
+        meta: { council: { id: c.id, seat: 0, role: 'synthesis', provider: b?.provider ?? 'claude' }, read_only: true },
       }, judgePrompt(councilSeats(me.id)), 'Mock synthesis: they agree on the approach.');
       return { status: 201, json: judge };
     },

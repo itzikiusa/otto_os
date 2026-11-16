@@ -11,6 +11,7 @@
   interface Props {
     mode: IdeCompareMode;
     isDir: boolean;
+    /** The desktop list width; 0 = the stacked (phone) list step, which fills the sheet. */
     widthPx: number;
     entries: IdeLocalHistoryEntry[];
     filteredEntries: IdeLocalHistoryEntry[];
@@ -88,7 +89,7 @@
   }
 </script>
 
-<aside class="ics-left" style:inline-size="{widthPx}px" data-testid="ide-local-history-modal">
+<aside class="ics-left" class:fill={widthPx <= 0} style:inline-size={widthPx > 0 ? `${widthPx}px` : undefined} data-testid="ide-local-history-modal">
   {#if mode === 'local-history'}
     <div class="ics-controls">
       <div class="ics-top-row">
@@ -220,6 +221,11 @@
     color: var(--text); text-align: start; cursor: pointer;
   }
   .ics-row:hover { background: var(--hover); }
+  .ics-left.fill { flex: 1; min-inline-size: 0; border-inline-end: 0; }
+  /* Phone list step: rows and the filter are touch-sized. */
+  .ics-left.fill .ics-row { min-block-size: 44px; padding-block: 8px; }
+  .ics-left.fill .ics-search { block-size: 36px; }
+  .ics-left.fill .ics-seg button, .ics-left.fill .ics-label-btn { block-size: 32px; }
   .ics-row.active { background: var(--accent-soft); }
   .ics-row-top { display: flex; align-items: center; gap: 6px; min-inline-size: 0; font-size: var(--fs-xs); }
   .ics-path { flex: 1; font-size: var(--fs-xs); font-weight: 500; }

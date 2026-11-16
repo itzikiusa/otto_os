@@ -21,7 +21,7 @@
     runInShell,
     showScriptMenu,
   } from './threadGitMenus';
-  import { compactPath, forgeLabel } from './threadsHelpers';
+  import { compactPath, forgeLabel, projectNameFromCwd } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
 
@@ -34,8 +34,10 @@
     floating?: boolean;
     /** When set, the folder row opens this (the stage's project menu). */
     onpickfolder?: (anchor: HTMLElement) => void;
+    /** One line — the folder's name and Open in… (the phone's details drawer). */
+    compact?: boolean;
   }
-  let { cwd, floating = false, onpickfolder }: Props = $props();
+  let { cwd, floating = false, onpickfolder, compact = false }: Props = $props();
 
   let openInEl = $state<HTMLButtonElement | null>(null);
   let branchEl = $state<HTMLButtonElement | null>(null);
@@ -154,7 +156,7 @@
   const fmt = (n: number): string => (n >= 10_000 ? compactFmt.format(n) : n.toLocaleString());
 </script>
 
-<section class="pc-card" class:floating aria-label="Project" data-testid="threads-project-card">
+<section class="pc-card" class:floating class:compact aria-label="Project" data-testid="threads-project-card">
   <div class="pc-group">
     {#if onpickfolder}
       <button
@@ -172,7 +174,11 @@
     {:else}
       <div class="pc-row pc-static" title={project}>
         <Icon name="folder" size={14} />
-        <span class="pc-label mono ellipsis" dir="ltr">{compactPath(project, homePath)}</span>
+        {#if compact}
+          <span class="pc-label ellipsis" dir="auto">{projectNameFromCwd(project, 'Project')}</span>
+        {:else}
+          <span class="pc-label mono ellipsis" dir="ltr">{compactPath(project, homePath)}</span>
+        {/if}
       </div>
     {/if}
     <button
@@ -187,6 +193,7 @@
       <span class="pc-label">Open in…</span>
       <Icon name="chevronDown" size={12} />
     </button>
+    {#if !compact}
     {#each scripts as s (s.name)}
       <button
         type="button"
@@ -209,8 +216,10 @@
       <Icon name="plus" size={14} />
       <span class="pc-label">Add project script</span>
     </button>
+    {/if}
   </div>
 
+  {#if !compact}
   <div class="pc-group">
     {#if repo}
       <button
@@ -273,6 +282,7 @@
       <p class="pc-note">{!project ? 'Pick a project folder' : repoChecked ? 'Not a git repository' : 'Looking for a git repository…'}</p>
     {/if}
   </div>
+  {/if}
 </section>
 
 {#if prOpen && repo && CreatePrLazy.component}
@@ -305,6 +315,12 @@
     display: flex;
     flex-direction: column;
     padding: 4px;
+  }
+  .compact .pc-group {
+    flex-direction: row;
+  }
+  .compact .pc-group > :first-child {
+    flex: 1;
   }
   .pc-group + .pc-group {
     border-block-start: 1px solid var(--border);

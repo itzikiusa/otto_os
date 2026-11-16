@@ -41,8 +41,27 @@
   let navIdx = $state(0);
   let applying = $state(false);
 
+  // Open where the person left off (else Editor › General & Font). `project.project` is the
+  // store's "nothing asked for" default, so only another section is a real deep link.
+  const LS_SECTION = 'otto.ide.settingsSection';
+  function rememberedSection(): string {
+    try {
+      return localStorage.getItem(LS_SECTION) || 'editor.font';
+    } catch {
+      return 'editor.font';
+    }
+  }
+  function rememberSection(id: string): void {
+    try {
+      localStorage.setItem(LS_SECTION, id);
+    } catch {
+      /* private window: the default next time */
+    }
+  }
+
   $effect(() => {
-    const requested = normalizeSectionId(ide.settingsSection);
+    const raw = ide.settingsSection;
+    const requested = normalizeSectionId(raw && raw !== 'project.project' ? raw : rememberedSection());
     untrack(() => {
       ideSettings.syncOnOpen();
       activeId = requested;
@@ -93,6 +112,7 @@
     const clean = normalizeSectionId(nextId);
     showList = false;
     activeId = clean;
+    rememberSection(clean);
     ide.settingsSection = clean;
     const hit = findSettingsNode(clean);
     if (hit?.parent) expandedGroups = { ...expandedGroups, [hit.parent.id]: true };
@@ -111,6 +131,7 @@
     const target = navHistory[navIdx];
     if (target) {
       activeId = target;
+      rememberSection(target);
       ide.settingsSection = target;
     }
   }
@@ -121,6 +142,7 @@
     const target = navHistory[navIdx];
     if (target) {
       activeId = target;
+      rememberSection(target);
       ide.settingsSection = target;
     }
   }
@@ -402,7 +424,9 @@
 </Modal>
 
 <style>
-  .st-modal { display: flex; block-size: 100%; min-block-size: 460px; min-inline-size: 0; margin: -16px; overflow: hidden; }
+  /* Bleed over the Modal body's padding (4 px top, 16 px sides and bottom) exactly: a flat
+     −16 px clipped the search field at the top and left a 32 px band above the footer. */
+  .st-modal { display: flex; block-size: calc(100% + 20px); min-block-size: 460px; min-inline-size: 0; margin: -4px -16px -16px; overflow: hidden; }
   .st-modal.narrow { min-block-size: 0; }
   .st-modal.narrow .st-left { flex: 1; }
   .st-modal.narrow:not(.list) .st-left, .st-modal.narrow.list .st-right { display: none; }

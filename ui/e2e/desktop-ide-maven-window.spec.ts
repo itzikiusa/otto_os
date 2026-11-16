@@ -91,7 +91,10 @@ async function bootMavenWindow(page: Page, seed: Seed): Promise<void> {
   );
   await page.goto('/#/ide');
   await expect(page.getByTestId('ide-project-tree')).toBeVisible({ timeout: 20_000 });
-  await page.getByTestId('ide-toggle-build-tool').click();
+  // The build tool window opens from the header ⋯ › Tool windows (one short menu, no header toggle).
+  await page.getByTestId('ide-more-btn').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Tool windows' }).first().click();
+  await page.locator('.ctx-submenu').getByRole('menuitem', { name: /^(Show|Hide) (Maven|Gradle) tool window/ }).first().click();
   const win = page.getByTestId('ide-build-tool-window');
   await expect(win).toBeVisible({ timeout: 15_000 });
   await expect(win).toContainText('Invoices', { timeout: 15_000 });

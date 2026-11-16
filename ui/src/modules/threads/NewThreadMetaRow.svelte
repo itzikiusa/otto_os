@@ -3,8 +3,9 @@
   // in `NewThreadStage.svelte`.
   import type { Repo } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
-  import { formatInteractionModeLabel, type InteractionMode } from '../../lib/providerModels';
+  import type { InteractionMode } from '../../lib/providerModels';
   import { openBranchMenu, openCheckoutMenu } from './threadGitMenus';
+  import { modeLabel } from './threadPickerMenus';
   import { projectNameFromCwd } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
 
@@ -12,8 +13,11 @@
     repo: Repo | null;
     cleanCwd: string;
     onWorktree: boolean;
-    scratchActive: boolean;
-    projectName: string | null;
+    /** The chosen folder's name ("Home" for the home folder). */
+    folderName: string;
+    isHome: boolean;
+    /** Open threads already working in a checkout (the checkout menu's hint). */
+    threadsHere?: (path: string) => number;
     openInBeside: boolean;
     branch: string | null;
     modeSupported: boolean;
@@ -31,8 +35,9 @@
     repo,
     cleanCwd,
     onWorktree,
-    scratchActive,
-    projectName,
+    folderName,
+    isHome,
+    threadsHere,
     openInBeside,
     branch,
     modeSupported,
@@ -55,7 +60,7 @@
       title="Run in the current checkout or another worktree"
       data-testid="new-thread-checkout"
       onclick={(e) =>
-        void openCheckoutMenu(e.currentTarget, repo, cleanCwd, (path, br) => onPickWorktree(path, br, repo))}
+        void openCheckoutMenu(e.currentTarget, repo, cleanCwd, (path, br) => onPickWorktree(path, br, repo), threadsHere)}
     >
       <Icon name={onWorktree && !cleanCwd.startsWith(repo.path) ? 'worktree' : 'folder'} size={13} />
       <span class="ellipsis">{onWorktree && !cleanCwd.startsWith(repo.path) ? projectNameFromCwd(cleanCwd) : 'Current checkout'}</span>
@@ -65,11 +70,12 @@
       type="button"
       class="nt-meta-btn"
       aria-haspopup="menu"
-      title={cleanCwd || 'Choose a folder'}
+      title={isHome ? `Your home folder (${cleanCwd}), not a project. Choose a folder` : cleanCwd || 'Choose a folder'}
+      data-testid="new-thread-folder"
       onclick={(e) => onOpenProjectMenu(e.currentTarget)}
     >
-      <Icon name="folder" size={13} />
-      <span class="ellipsis">{scratchActive && !projectName ? 'Scratch' : 'Choose folder'}</span>
+      <Icon name={isHome ? 'home' : 'folder'} size={13} />
+      <span class="ellipsis">{folderName || 'Choose folder'}</span>
     </button>
   {/if}
 
@@ -111,13 +117,13 @@
       class="nt-meta-btn"
       class:warn={interactionMode === 'plan'}
       aria-haspopup="menu"
-      aria-label="Access mode: {formatInteractionModeLabel(interactionMode)}"
+      aria-label="Access mode: {modeLabel(interactionMode)}"
       title="Access mode (/mode · ⇧⇥ toggles Plan)"
       data-testid="picker-mode"
       onclick={(e) => onOpenModeMenu(e.currentTarget)}
     >
       <Icon name={interactionMode === 'plan' ? 'compass' : interactionMode === 'accept-edits' ? 'shield' : 'unlock'} size={13} />
-      <span>{formatInteractionModeLabel(interactionMode)}</span>
+      <span>{modeLabel(interactionMode)}</span>
     </button>
   {:else if planSupported}
     <!-- A runtime thread's access is the daemon default; Plan is the one

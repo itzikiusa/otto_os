@@ -4,6 +4,8 @@
   // Personal Agents). Strips `<ide_context>` and file-context envelopes into
   // clickable badges so user bubbles stay clean in every surface.
   import type { Snippet } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
+  import { copyWithToast } from '../../../lib/clipboard';
   import type { ApprovalDecision, ProviderTurn, RuntimeRequest, TurnItem } from '../../../lib/api/types';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import { activatePathLink } from '../../../lib/pathLinks/open';
@@ -34,6 +36,7 @@
     type WorkEntry,
   } from './timeline';
   import { formatDuration, shouldFold } from './workLog';
+  import { turnUsageText } from './turnUsage';
 
   interface Props {
     sessionId: string;
@@ -44,6 +47,11 @@
     cwd?: string | null;
     workspaceId?: string | null;
     onrespond: (requestId: string, decision: ApprovalDecision) => Promise<void>;
+    /** A failed turn's error row while its failure block (RuntimeTurnStatus) says it. */
+    hideItemId?: string | null;
+    /** "Edit as new message": put a past message of the person's back in the
+     *  composer. Sending it starts a NEW turn; history is never rewritten. */
+    onedituser?: (item: Extract<TurnItem, { type: 'user_message' }>) => void;
     onopenpath?: (path: string, line?: number) => void;
     formatAssistantText?: (item: Extract<TurnItem, { type: 'assistant_message' }>) => string;
     assistantFooter?: Snippet<[Extract<TurnItem, { type: 'assistant_message' }>]>;
@@ -58,10 +66,42 @@
     cwd = null,
     workspaceId = null,
     onrespond,
+    hideItemId = null,
+    onedituser,
     onopenpath,
     formatAssistantText,
     assistantFooter,
   }: Props = $props();
+
+  /** Edit as new message: only on the person's latest message (less chrome). */
+  const lastUserId = $derived.by(() => {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (r.kind === 'message' && r.item.type === 'user_message' && !messageAttribution(r.item.text)) return r.item.id;
+    }
+    return null;
+  });
+  /** "From …" rows the reader opened past their first three lines. */
+  const openedFrom = new SvelteSet<string>();
+  const longBody = (t: string): boolean => t.length > 280 || t.split('\n', 5).length > 3;
+  /** The last work stretch of each finished turn carries its token count in
+   *  its "Worked for …" line (the latest turn says it on its own status line). */
+  const tokensByRow = $derived.by(() => {
+    const lastRow = new Map<string, string>();
+    for (const r of rows) {
+      if (r.kind !== 'work') continue;
+      const tid = workRowEntries(r)[0]?.item.turn_id;
+      if (tid) lastRow.set(tid, r.id);
+    }
+    const latest = turns.reduce<ProviderTurn | null>((b, t) => (!b || t.ordinal > b.ordinal ? t : b), null);
+    const out = new Map<string, string>();
+    for (const [tid, rowId] of lastRow) {
+      const t = turnById.get(tid);
+      const text = t && t !== latest ? turnUsageText(t) : '';
+      if (text) out.set(rowId, text);
+    }
+    return out;
+  });
 
   const BADGE_ICONS: Record<ParsedContextBadge['kind'], IconName> = {
     selection: 'cursor',
@@ -107,7 +147,9 @@
 {#snippet entryRow({ item, approval }: WorkEntry)}
   {@const pending = item.type === 'approval_request' ? approvals.get(item.request_id) : undefined}
   {@const call = item.type === 'dynamic_tool' && !item.error && !approval ? threadCall(item) : null}
-  {#if item.type === 'subagent'}
+  {#if item.id === hideItemId}
+    <!-- Said once, by the failed turn's block under the timeline. -->
+  {:else if item.type === 'subagent'}
     <RuntimeSubagentCard {sessionId} {item} activity={children.get(item.id) ?? EMPTY_ACTIVITY} output={outputMap} />
   {:else if call}
     <RuntimeThreadCallRow {item} {call} />
@@ -148,14 +190,19 @@
     {@const a = messageAttribution(row.item.text)!}
     {@const peerIso = row.item.started_at ?? row.item.updated_at}
     {@const peerClock = formatMessageClock(peerIso)}
-    <div class="rt-from" data-testid="rt-from" data-rt-msg={row.item.id}>
+    {@const foldable = longBody(a.body)}
+    {@const folded = foldable && !openedFrom.has(row.item.id)}
+    <div class="rt-from" class:reply={a.reply} data-testid="rt-from" data-reply={a.reply ? 'true' : undefined} data-rt-msg={row.item.id}>
       <span class="rt-from-h">
-        <Icon name="send" size={12} /> From {a.from}
+        <Icon name="send" size={12} /> {a.reply ? 'Reply from' : 'From'} {a.from}
         {#if peerClock && peerIso}
           <time class="rt-msg-time" datetime={peerIso} title={formatMessageTooltip(peerIso)}>{peerClock}</time>
         {/if}
       </span>
-      <Markdown md={a.body} />
+      <div class="rt-from-body" class:folded><Markdown md={a.body} /></div>
+      {#if foldable}
+        <button type="button" class="rt-more" aria-expanded={!folded} onclick={() => (folded ? openedFrom.add(row.item.id) : openedFrom.delete(row.item.id))}>{folded ? 'More' : 'Less'}</button>
+      {/if}
     </div>
   {:else if row.kind === 'message' && row.item.type === 'user_message'}
     {@const parsed = parseUserMessageItemWithBadges(row.item)}
@@ -189,14 +236,22 @@
       {#if parsed.prose || (parsed.badges.length === 0 && row.item.text)}
         <div class="rt-bubble" dir="auto">{replaceEmojiShortcodes(parsed.badges.length > 0 ? parsed.prose : row.item.text)}</div>
       {/if}
-      {#if userClock && userIso}
-        <time
-          class="rt-msg-time"
-          datetime={userIso}
-          title={formatMessageTooltip(userIso)}
-          data-testid="runtime-user-time"
-        >{userClock}</time>
-      {/if}
+      <div class="rt-msg-foot">
+        {#if onedituser && row.item.id === lastUserId && (row.item.text || row.item.attachments?.length)}
+          {@const userItem = row.item}
+          <button type="button" class="rt-msg-act" title="Put this message back in the composer — sending it starts a new message; the conversation above stays as it is" data-testid="runtime-user-edit" onclick={() => onedituser?.(userItem)}>
+            <Icon name="edit" size={12} /><span>Edit as new message</span>
+          </button>
+        {/if}
+        {#if userClock && userIso}
+          <time
+            class="rt-msg-time"
+            datetime={userIso}
+            title={formatMessageTooltip(userIso)}
+            data-testid="runtime-user-time"
+          >{userClock}</time>
+        {/if}
+      </div>
     </div>
   {:else if row.kind === 'message' && row.item.type === 'assistant_message'}
     {@const mdText = formatAssistantText ? formatAssistantText(row.item) : row.item.text}
@@ -208,19 +263,27 @@
     <div class="rt-assistant" class:streaming={row.item.streaming} dir="auto" data-rt-msg={row.item.id}>
       {#if mdText || !assistantFooter}<Markdown md={mdText} streaming={row.item.streaming} />{/if}
       {#if assistantFooter}{@render assistantFooter(row.item)}{/if}
-      {#if assistantClock && activeIso}
-        <time
-          class="rt-msg-time"
-          datetime={activeIso}
-          title={formatMessageTooltip(startIso, row.item.completed_at ?? (row.item.streaming ? null : row.item.updated_at), row.item.streaming)}
-          data-testid="runtime-assistant-time"
-        >{row.item.streaming ? `Started ${assistantClock}` : elapsedMs >= 1000 ? `${assistantClock} · ${formatDuration(elapsedMs)}` : assistantClock}</time>
-      {/if}
+      <div class="rt-msg-foot">
+        {#if assistantClock && activeIso}
+          <time
+            class="rt-msg-time"
+            datetime={activeIso}
+            title={formatMessageTooltip(startIso, row.item.completed_at ?? (row.item.streaming ? null : row.item.updated_at), row.item.streaming)}
+            data-testid="runtime-assistant-time"
+          >{row.item.streaming ? `Started ${assistantClock}` : elapsedMs >= 1000 ? `${assistantClock} · ${formatDuration(elapsedMs)}` : assistantClock}</time>
+        {/if}
+        {#if !row.item.streaming && mdText}
+          {@const copyText = mdText}
+          <button type="button" class="rt-msg-act" aria-label="Copy reply" title="Copy reply" data-testid="runtime-copy-reply" onclick={() => void copyWithToast(copyText, 'reply')}>
+            <Icon name="copy" size={12} /><span>Copy</span>
+          </button>
+        {/if}
+      </div>
     </div>
   {:else if row.kind === 'work'}
     {@const flat = workRowEntries(row)}
     <div class="rt-work">
-      <RuntimeWorkFold id={row.id} entries={flat} fold={shouldFold(flat, turns, pendingIds, turnById)}>
+      <RuntimeWorkFold id={row.id} entries={flat} fold={shouldFold(flat, turns, pendingIds, turnById)} tokens={tokensByRow.get(row.id) ?? ''}>
         {#each row.parts as part (part.kind === 'group' ? part.id : part.entry.item.id)}
           {#if part.kind === 'item'}
             {@render entryRow(part.entry)}
@@ -349,13 +412,70 @@
     font-variant-numeric: tabular-nums;
     align-self: flex-start;
   }
-  .rt-user > .rt-msg-time {
-    align-self: flex-end;
+  .rt-msg-foot > .rt-msg-time {
+    align-self: center;
     padding-inline: 4px;
   }
   .rt-from-h > .rt-msg-time {
     align-self: center;
     margin-inline-start: 4px;
+  }
+  .rt-from-body.folded {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
+  }
+  .rt-more,
+  .rt-msg-act {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: var(--fs-xs);
+    cursor: pointer;
+  }
+  .rt-more:hover,
+  .rt-msg-act:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .rt-more:focus-visible,
+  .rt-msg-act:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
+  }
+  .rt-msg-foot {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-block-size: 20px;
+  }
+  .rt-user > .rt-msg-foot {
+    align-self: flex-end;
+  }
+  /* Message actions show on hover / focus with a pointer, always on touch. */
+  @media (hover: hover) {
+    .rt-msg-act {
+      opacity: 0;
+    }
+    :is(.rt-user, .rt-assistant):is(:hover, :focus-within) .rt-msg-act,
+    .rt-msg-act:focus-visible {
+      opacity: 1;
+    }
+  }
+  @media (pointer: coarse) {
+    .rt-more,
+    .rt-msg-act {
+      min-block-size: var(--hit-min);
+      padding-inline: 10px;
+    }
   }
   .rt-work {
     display: flex;

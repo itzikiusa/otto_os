@@ -460,6 +460,7 @@ fn resolve_go_test_pkg_dir(
         notes.push(IdeDebugOutputEntry {
             category: "console".into(),
             text: format!("Delve Go test debugger attached to package: {pkg_dir}\n"),
+            seq: 0,
         });
     }
     (pkg_dir, notes)

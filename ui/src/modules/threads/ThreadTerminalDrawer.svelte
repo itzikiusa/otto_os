@@ -55,6 +55,8 @@
     display: flex;
     flex-direction: column;
     block-size: 220px;
+    /* Never more than ~half a short column (a phone on its side: 380 px). */
+    max-block-size: 45%;
     flex-shrink: 0;
     border-block-start: 1px solid var(--border);
     background: var(--term-bg);

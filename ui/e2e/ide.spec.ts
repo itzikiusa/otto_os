@@ -510,7 +510,21 @@ async function clickHeaderAction(page: Page, labelPattern: RegExp): Promise<void
   await moreBtn.click();
   const menu = page.locator('.ctx-menu');
   await expectFullyInViewport(page, menu, 'IDE header overflow menu');
-  await menu.getByRole('menuitem', { name: labelPattern }).first().click();
+  const item = menu.getByRole('menuitem', { name: labelPattern }).first();
+  if (await item.count()) {
+    await item.click();
+    return;
+  }
+  // Not in the short ⋯ (it keeps only what has no other home): every IDE command is in
+  // the quick-open's Actions tab.
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await page.keyboard.press('Shift');
+  await page.keyboard.press('Shift');
+  const quickOpen = page.getByTestId('ide-quick-open');
+  await expect(quickOpen).toBeVisible({ timeout: 5_000 });
+  await quickOpen.getByTestId('ide-se-tab-actions').click();
+  await quickOpen.getByRole('option', { name: labelPattern }).first().click();
 }
 
 /** Expand directory segments in the IDE project tree and open a file tab. */
@@ -669,7 +683,7 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
     // `⇧⇧` Double-Shift opens Search Everywhere modal directly
     await page.keyboard.press('Shift');
     await page.keyboard.press('Shift');
-    const searchDialog = page.locator('.sheet[role="dialog"]').last();
+    const searchDialog = page.getByTestId('ide-quick-open');
     await expect(searchDialog).toBeVisible({ timeout: 5_000 });
     await expectFullyInViewport(page, searchDialog, 'Search Everywhere modal');
 
@@ -1082,7 +1096,15 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
   }) => {
     test.setTimeout(60_000);
     await bootIdePage(page);
-    await clickHeaderAction(page, /Toolchain|SDK/i);
+    // SDKs & toolchains live in Settings › SDKs; the quick-open's Actions tab opens it
+    // (the same action as ⌘K "IDE: Open SDKs & toolchains…").
+    await page.keyboard.press('Shift');
+    await page.keyboard.press('Shift');
+    const quickOpen = page.getByTestId('ide-quick-open');
+    await expect(quickOpen).toBeVisible({ timeout: 5_000 });
+    await quickOpen.getByTestId('ide-se-tab-actions').click();
+    await quickOpen.getByTestId('ide-search-input').fill('SDKs & toolchains');
+    await quickOpen.getByTestId('ide-search-input').press('Enter');
 
     const modal = page.locator('.sheet[role="dialog"]').last();
     await expectFullyInViewport(page, modal, 'Toolchains & SDK Downloader modal');
@@ -1459,7 +1481,8 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
     const sourceInput = modal.locator('#pl-source-input');
     await expect(sourceInput).toBeVisible();
     await sourceInput.fill(KOTLIN_PLUGIN_DIR);
-    await modal.getByRole('button', { name: /^Install$/i }).click();
+    // The Install button of the source row (language-server rows have their own Install).
+    await sourceInput.locator('xpath=ancestor::*[.//button][1]').getByRole('button', { name: /^Install$/i }).first().click();
 
     // Wait for `IdePluginsModal` to switch to Installed tab and render the Kotlin IDE Pack card!
     await expect(modal.locator('.pl-item').first()).toContainText(/Kotlin/i, { timeout: 15_000 });
@@ -1876,6 +1899,7 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
       await envModal.locator('#cfg-runner').selectOption('go_run');
       await envModal.locator('#cfg-target').fill('./cmd/server');
       await envModal.locator('#cfg-cwd').fill(admRoot);
+      { const adv = envModal.getByTestId('ide-cfg-advanced-toggle'); if ((await adv.getAttribute('aria-expanded')) !== 'true') await adv.click(); } // SDK / .env live under Advanced
       await envModal.locator('#cfg-env-file').fill('.env');
       await envModal.getByRole('button', { name: /Add override/i }).click();
       await envModal.getByLabel('Override variable name').last().fill('CUSTOM_CFG_VAR');
@@ -2220,7 +2244,8 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
 
     // A. Shell (`.sh`): `Cmd+F12` Move-to-Function, `source ./lib.sh` Dive-In, Gutter Run & Real Bash DAP Debug!
     await openFileFromTree(page, 'scripts', 'lib.sh');
-    await page.getByTestId('ide-structure-btn').click();
+    await page.getByTestId('ide-editor-more-btn').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: /File structure/ }).click();
     const structModal = page.getByTestId('ide-file-structure-modal');
     await expect(structModal).toBeVisible();
     await expect(structModal).toContainText('validate_env');
@@ -2283,7 +2308,8 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
     // B. JSON (`.json`): `Cmd+F12` key outline, live JSONPath breadcrumb, Pretty/Minify/Sort keys & `$ref` Dive-In!
     await openFileFromTree(page, 'schemas', 'admission.json');
     await expect(activeEditorContent(page)).toContainText('"nested"');
-    await page.getByTestId('ide-structure-btn').click();
+    await page.getByTestId('ide-editor-more-btn').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: /File structure/ }).click();
     await expect(page.getByTestId('ide-file-structure-modal')).toContainText('alpha');
     await expect(page.getByTestId('ide-file-structure-modal')).toContainText('nested');
     await page.getByTestId('ide-file-structure-modal').getByRole('option', { name: /nested/i }).first().click();
@@ -2469,6 +2495,7 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
       }
 
       // (d) SDK Version Downloader modal opened directly from `SDKs…` inside `Environments & run configurations`
+      { const adv = envModal.getByTestId('ide-cfg-advanced-toggle'); if ((await adv.getAttribute('aria-expanded')) !== 'true') await adv.click(); } // SDK / .env live under Advanced
       await envModal.getByTestId('ide-cfg-open-toolchains').click();
       const tcModal = page.locator('.sheet[role="dialog"]').last();
       await expect(tcModal.getByTestId('ide-sdk-version-select')).toBeVisible({ timeout: 10_000 });
@@ -2503,7 +2530,7 @@ test.describe('Desktop IDE — Full End-to-End Workflows', () => {
       const agentPanel = page.getByTestId('ide-agent-panel');
       await expect(agentPanel).toBeVisible({ timeout: 15_000 });
       await page.getByTestId('ide-agent-new').click();
-      await agentPanel.getByRole('button', { name: /Include active file|Attach active file/i }).first().click();
+      // The active file is attached as a context chip by default (no separate button).
       for (const vp of viewports) {
         await page.setViewportSize({ width: vp.w, height: vp.h });
         for (const sc of ['dark', 'light'] as const) {

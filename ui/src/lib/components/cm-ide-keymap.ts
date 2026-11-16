@@ -317,6 +317,15 @@ export function buildIdeKeymapSpecs(
     return false;
   };
 
+  const runQuickFix = (v: EditorView): boolean => {
+    const cb = getCallbacks().onQuickFix;
+    if (!cb) return applyFirstFix(v);
+    const i = wordAtCursor(v.state);
+    const c = v.coordsAtPos(v.state.selection.main.head);
+    cb({ line: i.line, column: i.column, symbol: i.word || undefined, clientX: c?.left, clientY: c?.bottom });
+    return true;
+  };
+
   return [
     { key: 'Mod-Alt-ArrowUp', run: addCursorAbove },
     { key: 'Mod-Alt-ArrowDown', run: addCursorBelow },
@@ -341,18 +350,7 @@ export function buildIdeKeymapSpecs(
     { key: 'Alt-ArrowUp', run: smartExpandSelection },
     { key: 'Alt-ArrowDown', run: simplifySelection },
     { key: 'Shift-Enter', run: startNewLineBelow },
-    { key: 'Ctrl-g', run: selectNextOccurrence },
     { key: 'Ctrl-Mod-g', run: selectAllOccurrences },
-    {
-      key: 'Mod-g',
-      run: (v) => {
-        // Find panel open: leave ⌘G to the search keymap's "find next".
-        if (searchPanelOpen(v.state)) return false;
-        const cb = getCallbacks().onGoToLine;
-        if (cb) { cb(); return true; }
-        return cmGotoLine(v);
-      },
-    },
     { key: 'Alt-Shift-i', run: splitSelectionIntoLines },
     { key: 'Alt-Shift-I', run: splitSelectionIntoLines },
     { key: 'Mod-/', run: toggleLineComment },
@@ -364,7 +362,6 @@ export function buildIdeKeymapSpecs(
     { key: 'Cmd-Shift-v', run: runPasteFromHistory },
     { key: 'Cmd-Shift-V', run: runPasteFromHistory },
     { key: 'F12', run: (v) => runDive(v, 'definition') },
-    { key: 'Mod-b', run: (v) => runDive(v, 'definition') },
     { key: 'Mod-Alt-b', run: (v) => runDive(v, 'implementation') },
     {
       key: 'Alt-F7',
@@ -403,17 +400,7 @@ export function buildIdeKeymapSpecs(
         return true;
       },
     },
-    {
-      key: 'Alt-Enter',
-      run: (v) => {
-        const cb = getCallbacks().onQuickFix;
-        if (!cb) return applyFirstFix(v);
-        const i = wordAtCursor(v.state);
-        const c = v.coordsAtPos(v.state.selection.main.head);
-        cb({ line: i.line, column: i.column, symbol: i.word || undefined, clientX: c?.left, clientY: c?.bottom });
-        return true;
-      },
-    },
+    { key: 'Alt-Enter', run: runQuickFix },
     { key: 'Alt-Shift-Enter', run: applyFirstFix },
     {
       key: 'Shift-F6',
@@ -443,8 +430,23 @@ export function buildIdeKeymapSpecs(
         return true;
       },
     },
+    // The keys each preset means differently. Shell/window keys of the same presets
+    // live in `modules/ide/shell/ideShortcuts.ts` (Standard's ⌘B / ⌃G / ⌘G belong to
+    // the window there: explorer, Go to Line, find next).
     ...(preset === 'jetbrains'
       ? [
+          { key: 'Ctrl-g', run: selectNextOccurrence },
+          {
+            key: 'Mod-g',
+            run: (v: EditorView) => {
+              // Find panel open: leave ⌘G to the search keymap's "find next".
+              if (searchPanelOpen(v.state)) return false;
+              const cb = getCallbacks().onGoToLine;
+              if (cb) { cb(); return true; }
+              return cmGotoLine(v);
+            },
+          },
+          { key: 'Mod-b', run: (v: EditorView) => runDive(v, 'definition') },
           {
             key: 'Mod-[',
             run: () => {
@@ -470,6 +472,7 @@ export function buildIdeKeymapSpecs(
           { key: 'Mod-d', run: selectNextOccurrence },
           { key: 'Shift-Mod-d', run: duplicateLineOrSelection },
           { key: 'Shift-Mod-k', run: deleteLine },
+          { key: 'Mod-.', run: runQuickFix },
         ]),
   ];
 }

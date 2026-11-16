@@ -29,16 +29,21 @@ const noop = () => {};
 const acts = { newThread: noop, related: noop, toggleCard: noop, layout: noop, toggleTerminal: noop };
 const labels = (items: { label?: string; separator?: boolean }[]) => items.map((i) => (i.separator ? '—' : i.label));
 
-test('toolbar ⋯ holds what left the toolbar: new, related, card, terminal, layout', () => {
-  const items = threadsPageMenu({ threadItems: [{ label: 'Rename…' }], layout: 'split', terminalOpen: true, cardOn: false, threadId: 'x' }, acts);
-  assert.deepEqual(labels(items), ['Rename…', '—', 'New thread', RELATED_LABEL, '—', 'Project card', 'Terminal drawer', '—', 'Single thread', 'Split', 'Grid']);
-  assert.equal(items.find((i) => i.label === 'Split')?.checked, true);
+test('toolbar ⋯ holds what left the toolbar: related, terminal, a View flyout for layout and card', () => {
+  const items = threadsPageMenu({ threadItems: [{ label: 'Rename…' }], layout: 'split', terminalOpen: true, cardOn: false, threadId: 'x', sidebarVisible: true }, acts);
+  assert.deepEqual(labels(items), ['Rename…', '—', RELATED_LABEL, 'Terminal drawer', 'View']);
+  const view = items.find((i) => i.label === 'View')?.children ?? [];
+  assert.deepEqual(labels(view), ['Single thread', 'Split', 'Grid', '—', 'Project card']);
+  assert.equal(view.find((i) => i.label === 'Split')?.checked, true);
   assert.equal(items.find((i) => i.label === 'Terminal drawer')?.checked, true);
 });
 
 test('toolbar ⋯ on the stage and on a phone; Related appears once', () => {
-  const stage = threadsPageMenu({ threadItems: [], layout: 'single', terminalOpen: false, cardOn: null, threadId: null }, acts);
-  assert.deepEqual(labels(stage), ['New thread', '—', 'Terminal drawer', '—', 'Single thread', 'Split', 'Grid']);
+  // The sidebar's pencil (and ⌘T) start a thread while it shows.
+  const stage = threadsPageMenu({ threadItems: [], layout: 'single', terminalOpen: false, cardOn: null, threadId: null, sidebarVisible: true }, acts);
+  assert.deepEqual(labels(stage), ['Terminal drawer', 'View']);
+  const phone = threadsPageMenu({ threadItems: [], layout: 'single', terminalOpen: false, cardOn: null, threadId: null, compact: true }, acts);
+  assert.deepEqual(labels(phone), ['New thread', 'Terminal drawer']);
   const legacy = threadsPageMenu({ threadItems: [{ label: RELATED_LABEL }], layout: 'single', terminalOpen: false, cardOn: true, threadId: 'x' }, acts);
   assert.equal(legacy.filter((i) => i.label === RELATED_LABEL).length, 1);
 });

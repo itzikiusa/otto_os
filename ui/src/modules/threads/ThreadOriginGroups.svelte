@@ -3,9 +3,13 @@
   // here (threadOrigins.ts): "Agent runs" (a personal agent's routine runs)
   // and the helpers other modules embed ("Pull requests", "Connections", …).
   // Folded by default with a count; open, the newest 20, then "Show more".
+  // A member that needs you opens its group (once: a person who folds it
+  // again keeps it folded) and a folded group says so beside its count.
   import Icon from '../../lib/components/Icon.svelte';
   import type { Session } from '../../lib/api/types';
+  import ThreadGroupNote from './ThreadGroupNote.svelte';
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
+  import { threadNeedsYou } from './threadNav.svelte';
   import type { OriginGroup } from './threadOrigins';
 
   interface Props {
@@ -18,17 +22,20 @@
   let { groups, onrowclick, onreopen, onmenu, onselect }: Props = $props();
 
   const PAGE = 20;
+  /** The person's own choice per group; unset = folded unless a member needs you. */
   let open = $state<Record<string, boolean>>({});
+  const isOpen = (g: OriginGroup): boolean => open[g.key] ?? g.items.some((s) => !s.archived && threadNeedsYou(s.id));
   let limit = $state<Record<string, number>>({});
 </script>
 
 {#each groups as g (g.key)}
-  {@const expanded = open[g.key] === true}
+  {@const expanded = isOpen(g)}
   {@const max = limit[g.key] ?? PAGE}
   <section class="og" aria-label={g.label} data-testid="threads-group-{g.key}">
     <button type="button" class="og-toggle" aria-expanded={expanded} onclick={() => (open = { ...open, [g.key]: !expanded })}>
       <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} />
       <span class="ellipsis">{g.label}</span>
+      {#if !expanded}<ThreadGroupNote items={g.items} testid="threads-group-note-{g.key}" />{/if}
       <span class="og-count" aria-label="{g.items.length} threads">{g.items.length}</span>
     </button>
     {#if expanded}

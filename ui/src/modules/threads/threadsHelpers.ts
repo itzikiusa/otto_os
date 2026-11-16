@@ -33,11 +33,13 @@ export function sideChatOf(s: Session | null | undefined): string | null {
 /** Parent session ID when this session was delegated or handed over from another thread. */
 export { delegatedParentId };
 
-/** Short human project folder label from a working directory or workspace name. */
+/** Short human project folder label from a working directory or workspace name.
+ *  The home folder is "Home" (written `~` or as the daemon's `$HOME`), never
+ *  the macOS user name. */
 export function projectNameFromCwd(cwd: string | null | undefined, fallback = 'Workspace'): string {
   const clean = (cwd ?? '').trim().replace(/\/+$/, '');
   if (!clean) return fallback;
-  if (clean === '~') return 'Home';
+  if (clean === '~' || clean === (ws.scratch?.root_path ?? '').replace(/\/+$/, '')) return 'Home';
   const parts = clean.split('/').filter(Boolean);
   return parts[parts.length - 1] ?? fallback;
 }

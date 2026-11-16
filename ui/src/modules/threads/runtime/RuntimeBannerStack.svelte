@@ -1,7 +1,9 @@
 <script lang="ts">
-  // Everything that waits above the composer, in one stack with one order
-  // (error > question / approval > plan > queue > notices): at most two show
-  // in full, the rest fold into "2 more: plan, queued message · Show".
+  // The notices above the composer, in one stack with one order (error > UI
+  // control > plan > queue > notices): at most two show in full, the rest
+  // fold into "2 more: plan, queued message · Show". What the agent waits on
+  // the person for (approval, question, secret) is the attention dock below
+  // this stack, never folded.
   // T3 Code's ComposerBannerStack (docs/internals/web-ui.md).
   import type { Snippet } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';

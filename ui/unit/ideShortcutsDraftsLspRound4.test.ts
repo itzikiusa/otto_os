@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { deferred, loadSource } from './sourceHarness.ts';
+import * as shortcutsModule from '../src/modules/ide/shell/ideShortcuts.ts';
 import {
   IDE_UNDO_DRAFT_INDEX_KEY,
   IDE_UNDO_DRAFT_PREFIX,
@@ -93,11 +94,18 @@ function shellModule() {
     startRun: async () => { calls.push('run'); }, startDebug: async () => { calls.push('debug'); },
     goToLineOpen: false, jumpTo: () => {}, openSettings: () => {}, saveFile: async () => true,
   };
+  // Go to Line is the quick-open's `:` mode (search/ideQuickOpen.svelte.ts); which key
+  // runs what comes from the real shortcut table.
   const mod = loadSource(new URL('../src/modules/ide/shell/ideShellCommands.ts', import.meta.url), {
-    '../../../lib/confirm.svelte': { confirmer: { promptText: async () => { calls.push('goToLine'); return null; } } },
-    '../../../lib/contextmenu.svelte': { ctxMenu: { showAt: () => {} } },
     '../../../lib/idePreferences.svelte': { readIdePreferences: () => ({}), writeIdePreferences: () => {} },
     '../ideStore.svelte': { ide, ideBasename: (p: string) => p },
+    '../search/ideQuickOpen.svelte': {
+      openGoToLine: () => { calls.push('goToLine'); },
+      openGoToFile: () => { calls.push('goToFile'); },
+      openGoToSymbol: () => { calls.push('goToSymbol'); },
+      openRecentFiles: () => { calls.push('recentFiles'); },
+    },
+    './ideShortcuts': shortcutsModule,
     '../store/ideAgentController.svelte': { ideAgent: { markSelectionFromEditor: () => { calls.push('agent'); return null; }, openInlineEdit: () => {} } },
   }, { Element: FakeEl, window: { location: { reload() {} }, dispatchEvent() {} }, CustomEvent: class {} });
   return { mod, calls };
@@ -214,6 +222,7 @@ function gitModule(get: () => Promise<unknown>) {
     '../ideStore.svelte': { ide, ideBasename: (p: string) => p },
     '../store/ideStateSlices.svelte': { onIdeTargetReset: () => {} },
     '../store/ideTypes': { detectTextEol: () => '\n', diskEolsOf: () => undefined, normalizeEditorLf: (s: string) => s },
+    './ideGitTreeOverlay': loadSource(new URL('../src/modules/ide/git/ideGitTreeOverlay.ts', import.meta.url), {}),
   });
   return { ideGit: mod.ideGit, tabs, live, replaced };
 }

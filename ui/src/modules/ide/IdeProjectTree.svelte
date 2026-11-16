@@ -8,15 +8,20 @@
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { scrollBehavior } from '../../lib/motion';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { ideDockPrefs } from './debug/ideDockPrefs.svelte';
-  import type { ideGit as IdeGitSingleton, IdeGitLetter } from './git/ideGitController.svelte';
+  import type { ideGit as IdeGitSingleton } from './git/ideGitController.svelte';
+  import { ideTreeDirIsDirty, ideTreeGitLetter, type IdeGitLetter } from './git/ideGitTreeOverlay';
   import type { IdeCompareMode } from './history/ideComparisonLoader';
   import type { FlatSymbolNode } from './history/IdeTreeSecondaryTabs.svelte';
   import type { FlatTreeNode } from './history/ideTreeNodeMenus';
-  import { treeFilterMatches, treeNavAction, treeRowHeight } from './history/ideTreeNav';
+  import { treeFilterMatches, treeNavAction, treeRevealScrollTop, treeRowHeight } from './history/ideTreeNav';
   import { ide, ideBasename, type IdeFsEntry, type IdeSymbolNode } from './ideStore.svelte';
   import { ideTreeDirErrors } from './store/ideTreeDirErrors.svelte';
+  import { ideProjectHealth } from './store/ideProjectHealth.svelte';
+  import { ideBreakpointsNav } from './debug/ideBreakpointsNav.svelte';
+  import IdeProjectMissingState from './shell/IdeProjectMissingState.svelte';
   import { newScratchFile, onScratches } from './shell/ideScratches.svelte';
 
   const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
@@ -49,6 +54,9 @@
   const OVERSCAN = 20;
 
   let activeTab = $state<ExplorerTab>('files');
+  // "Breakpoints (n)…" in the debugger's ⋯ asks for this tab (`ideBreakpointsNav.seq` bumps).
+  let seenBpSeq = ideBreakpointsNav.seq;
+  $effect(() => { const seq = ideBreakpointsNav.seq; if (seq !== seenBpSeq) { seenBpSeq = seq; activeTab = 'breakpoints'; } });
   let treeScrollEl = $state<HTMLDivElement | undefined>(undefined);
   let scrollTop = $state(0);
   let clientHeight = $state(720);
@@ -80,7 +88,6 @@
   });
 
   const normPath = (p: string): string => p.replace(/\/+$/, '') || '/';
-  const shortenHome = (p: string): string => p.replace(/^\/(?:Users|home)\/[^/]+/, '~');
   const parentDirOfPath = (fullPath: string): string => {
     const idx = fullPath.lastIndexOf('/');
     return idx > 0 ? fullPath.slice(0, idx) : ide.target.root;
@@ -177,7 +184,6 @@
         isProjectRoot: true,
         isPrimaryRoot: root.isPrimary,
         defaultExpanded,
-        subtitle: shortenHome(root.path),
       });
       if (isExpanded || Boolean(q)) walk(rootKids, 1);
       if (isExpanded && !root.isPrimary && !ide.childrenByDir[root.path]) pushDirError(root.path, 1);
@@ -241,36 +247,55 @@
     return { virtual: true, items: visibleNodes.slice(start, end), topPx: start * ROW_H, bottomPx: Math.max(0, (total - end) * ROW_H) };
   });
 
+  /** Scroll `path`'s row into view if it is not already (never moves focus). */
+  async function scrollRowIntoView(path: string): Promise<void> {
+    await tick();
+    const el = treeScrollEl;
+    const idx = visibleNodes.findIndex((n) => !n.isProjectRoot && n.entry.path === path);
+    if (idx < 0 || !el) return;
+    const row = el.querySelector<HTMLElement>(`[data-tree-key="${CSS.escape(path)}"]`);
+    const rowTop = row ? row.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop : idx * ROW_H;
+    const top = treeRevealScrollTop(rowTop, row?.offsetHeight || ROW_H, el.scrollTop, clientHeight);
+    if (top !== null) el.scrollTo({ top, behavior: scrollBehavior() });
+  }
+
   let lastRevealSeq = 0;
   $effect(() => {
     const req = ide.treeRevealRequest;
     if (!req || req.seq === lastRevealSeq) return;
     lastRevealSeq = req.seq;
     activeTab = 'files';
-    void (async () => {
-      await tick();
-      const idx = visibleNodes.findIndex((n) => n.entry.path === req.path);
-      if (idx >= 0 && treeScrollEl) {
-        treeScrollEl.scrollTo({ top: Math.max(0, idx * ROW_H - clientHeight / 3), behavior: scrollBehavior() });
-      }
-    })();
+    void scrollRowIntoView(req.path);
   });
 
+  // Reveal the active file (VS Code's autoReveal): when the open tab changes while the Files
+  // view shows, open its folders and bring its row into view — without taking focus.
+  let lastAutoReveal: string | null = null;
+  $effect(() => {
+    const p = ide.activePath;
+    if (!p || activeTab !== 'files' || p === lastAutoReveal) return;
+    lastAutoReveal = p;
+    // Already on screen in the flattened tree: just scroll; else the store opens its folders
+    // (loading them) and sends a reveal request the effect above scrolls to.
+    untrack(() => {
+      if (visibleNodes.some((n) => !n.isProjectRoot && n.entry.path === p)) void scrollRowIntoView(p);
+      else void ide.revealInProjectTree(p);
+    });
+  });
+
+  // One key normaliser for the overlay and the rows (`gitTreeKey`): a loaded repo status is the
+  // truth (a clean file shows nothing), the listing's own mark only covers repos not loaded yet.
   function resolveGitLetter(node: FlatTreeNode): IdeGitLetter | null {
     if (!ideDockPrefs.gitStatusInTree || node.entry.kind === 'dir') return null;
-    const norm = normPath(node.entry.path);
-    if (liveGit?.isRepoStatusLoaded(norm)) {
-      return liveGit.treeGitOverlay.files.get(norm) ?? null;
-    }
-    const live = liveGit?.treeGitOverlay.files.get(norm);
-    if (live) return live;
+    const live = liveGit ? ideTreeGitLetter(liveGit.treeGitOverlay, node.entry.path) : undefined;
+    if (live !== undefined) return live;
     const raw = node.entry.git_status;
     if (raw === 'M' || raw === 'A' || raw === 'D' || raw === 'U' || raw === 'R' || raw === 'C') return raw;
     return raw === '?' ? 'U' : null;
   }
 
   function isDirtyFolder(node: FlatTreeNode): boolean {
-    return Boolean(ideDockPrefs.gitStatusInTree && node.entry.kind === 'dir' && liveGit?.treeGitOverlay.dirtyDirs.has(normPath(node.entry.path)));
+    return Boolean(ideDockPrefs.gitStatusInTree && node.entry.kind === 'dir' && liveGit && ideTreeDirIsDirty(liveGit.treeGitOverlay, node.entry.path));
   }
 
   function onNodeClick(node: FlatTreeNode): void {
@@ -315,6 +340,24 @@
     void import('./history/ideTreeNodeMenus').then((m) => m.showTreeNodeContextMenu(savedAnchor, node, menuCallbacks));
   }
 
+  /** The explorer's one ⋯: what used to be five icon buttons. */
+  function openExplorerMenu(e: MouseEvent): void {
+    const local = ide.target.kind === 'local';
+    const items: MenuItem[] = [
+      ...(local
+        ? [
+            { label: 'Add folder to project…', icon: 'worktree', action: () => (addFolderPickerOpen = true) },
+            { label: 'Local history and deleted files…', icon: 'clock', action: () => openCompareModal({ mode: 'local-history', path: ide.target.root || selectedDirPath || '', isDir: true, filter: 'all' }) },
+          ]
+        : []),
+      { label: 'Show dotfiles', checked: ide.showHidden, action: () => { ide.showHidden = !ide.showHidden; void ide.loadTree(); } },
+      { separator: true },
+      { label: 'Collapse all folders', icon: 'fold', action: () => ide.collapseAllDirs() },
+      { label: 'Refresh', icon: 'refresh', action: () => void ide.loadTree() },
+    ];
+    ctxMenu.show(e, items);
+  }
+
   const menuCallbacks = {
     openCompare: openCompareModal,
     onOpenFolderPicker: () => (addFolderPickerOpen = true),
@@ -332,29 +375,13 @@
         <button type="button" class="tree-act" aria-label={onScratches() ? 'New scratch file…' : 'New file…'} title={onScratches() ? 'New scratch file…' : 'New file…'} onclick={() => (onScratches() ? void newScratchFile() : triggerNewTreeEntry(ide.target.root || selectedDirPath || '', 'create_file'))} data-testid="ide-tree-new-file">
           <Icon name="plus" size={12} />
         </button>
-        {#if ide.target.kind === 'local'}
-          <button type="button" class="tree-act" aria-label="Add folder to project…" title="Add folder to project…" onclick={() => (addFolderPickerOpen = true)} data-testid="ide-add-folder-btn">
-            <Icon name="worktree" size={12} />
-          </button>
-          <button type="button" class="tree-act" aria-label="Show project local history and deleted files" title="Show project local history and deleted files" onclick={() => openCompareModal({ mode: 'local-history', path: ide.target.root || selectedDirPath || '', isDir: true, filter: 'all' })} data-testid="ide-tree-local-history-btn">
-            <Icon name="clock" size={12} />
-          </button>
-        {/if}
-        <button type="button" class="tree-act" aria-label="Select opened file in tree" title="Select opened file in tree" disabled={!ide.activePath} onclick={() => void ide.revealInProjectTree()} data-testid="ide-select-opened-file">
-          <Icon name="target" size={12} />
-        </button>
-        <button type="button" class="tree-act" aria-label="Collapse all folders" title="Collapse all folders" onclick={() => ide.collapseAllDirs()} data-testid="ide-collapse-all">
-          <Icon name="fold" size={12} />
-        </button>
-        <button type="button" class="tree-act" aria-label={ide.showHidden ? 'Hide dotfiles' : 'Show dotfiles'} title={ide.showHidden ? 'Hide dotfiles' : 'Show dotfiles'} aria-pressed={ide.showHidden} onclick={() => { ide.showHidden = !ide.showHidden; void ide.loadTree(); }}>
-          <Icon name={ide.showHidden ? 'eye' : 'eyeOff'} size={12} />
-        </button>
-        <button type="button" class="tree-act" aria-label="Refresh project tree" title="Refresh project tree" onclick={() => void ide.loadTree()}>
-          <Icon name="refresh" size={12} />
+        <button type="button" class="tree-act" aria-label="Explorer options" title="Explorer options" aria-haspopup="menu" onclick={openExplorerMenu} data-testid="ide-tree-more-btn">
+          <Icon name="more" size={12} />
         </button>
       </div>
 
       <div class="tree-scroll" bind:this={treeScrollEl} onscroll={(e) => { const el = e.currentTarget as HTMLDivElement; scrollTop = el.scrollTop; clientHeight = el.clientHeight || 720; }}>
+        {#if ideProjectHealth.issue && ide.treeError}<IdeProjectMissingState issue={ideProjectHealth.issue} />{:else}
         <LoadState what="project files" variant="compact" loading={ide.treeLoading} error={ide.treeError} empty={visibleNodes.length === 0} onretry={() => void ide.loadTree()}>
           {#snippet emptyView()}
             <EmptyState
@@ -415,7 +442,6 @@
                     <Icon name={node.isProjectRoot && !node.isPrimaryRoot ? 'worktree' : node.entry.kind === 'dir' ? 'folder' : 'file'} size={13} />
                   </span>
                   <span class="tree-name" class:is-root-name={Boolean(node.isProjectRoot)} data-git={gitLetter ?? undefined}>{node.entry.name}</span>
-                  {#if node.subtitle}<span class="tree-root-sub">{node.subtitle}</span>{/if}
                   {#if dirtyDir}<span class="tree-dirty-dot" title="Contains uncommitted Git changes" aria-hidden="true"></span>{/if}
                   {#if gitLetter}<span class="tree-git-mark mono" data-git={gitLetter} data-testid="ide-tree-git-status">{gitLetter === 'U' ? '?' : gitLetter}</span>{/if}
                 </button>
@@ -428,6 +454,7 @@
             {#if treeWin.bottomPx > 0}<div style:block-size="{treeWin.bottomPx}px" aria-hidden="true"></div>{/if}
           </div>
         </LoadState>
+        {/if}
       </div>
     </div>
   {:else}
@@ -476,7 +503,7 @@
   .tree-act:hover:not(:disabled) { background: var(--hover); color: var(--text); }
   .tree-act:disabled { opacity: var(--disabled-opacity); cursor: default; }
   .tree-filter {
-    flex: 1; min-inline-size: 40px; block-size: 22px; padding-inline: 6px; font-size: var(--fs-xs);
+    flex: 1; min-inline-size: 96px; block-size: 22px; padding-inline: 6px; font-size: var(--fs-xs);
     background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-s);
   }
   .tree-scroll { flex: 1; min-block-size: 0; overflow-y: auto; overflow-x: hidden; padding-block: 4px; }
@@ -505,7 +532,6 @@
   .tree-row.active .tree-name { font-weight: 600; }
   .tree-dirty-dot { inline-size: 6px; block-size: 6px; border-radius: 50%; background: var(--info); flex-shrink: 0; }
   .tree-git-mark { font-size: var(--fs-xs); font-weight: 600; flex-shrink: 0; }
-  .tree-root-sub { flex: 1; min-inline-size: 0; font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tree-more { opacity: 0; block-size: 20px; inline-size: 20px; }
   .tree-item:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; border-radius: var(--radius-s); }
   .tree-err-row { padding-inline-end: 6px; }

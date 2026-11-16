@@ -654,6 +654,7 @@ export async function runEvaluateDebug(
 ): Promise<string> {
   const expr = expression.trim();
   if (!expr || !host.activeDebug) return '';
+  const afterSeq = host.activeDebug.output?.[host.activeDebug.output.length - 1]?.seq; // console position (daemons that send `seq`)
   try {
     const resp = await api.post<{ result: string; var_type?: string; variables_reference: number }>(
       `/ide/debug/sessions/${encodeURIComponent(host.activeDebug.id)}/evaluate`,
@@ -662,17 +663,14 @@ export async function runEvaluateDebug(
     if (context === 'repl') {
       host.replEntries = [
         ...host.replEntries,
-        { id: `${Date.now()}-${host.replEntries.length}`, expression: expr, result: resp.result, var_type: resp.var_type },
+        { id: `${Date.now()}-${host.replEntries.length}`, expression: expr, result: resp.result, var_type: resp.var_type, variables_reference: resp.variables_reference ?? 0, afterSeq },
       ].slice(-100);
     }
     return resp.result;
   } catch (e) {
     const msg = loadErrorText(e);
     if (context === 'repl') {
-      host.replEntries = [
-        ...host.replEntries,
-        { id: `${Date.now()}-${host.replEntries.length}`, expression: expr, result: msg, isError: true },
-      ].slice(-100);
+      host.replEntries = [...host.replEntries, { id: `${Date.now()}-${host.replEntries.length}`, expression: expr, result: msg, isError: true, afterSeq }].slice(-100);
     }
     return msg;
   }

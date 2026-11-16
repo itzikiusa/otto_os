@@ -1,43 +1,43 @@
 <script lang="ts">
-  // Search Everywhere (⇧⇧ All, ⌘⇧O Files, ⌘O Symbols, Actions) +
-  // Find & Replace in Path (⌘⇧F / ⌘⇧R: Match Case, Whole Word, Regex, File Mask,
-  // Scope Directory, grouped match preview, per-file Replace, and Replace All).
-  import { onDestroy } from 'svelte';
+  // The IDE quick-open: ⇧⇧ All, ⌘P Files (an empty query lists recent files), ⌘E
+  // recent files, ⌘G `:line` in the active file, ⌘O Symbols, the Actions tab (from
+  // shell/ideActions.ts) and Find & Replace in Path (⌘⇧F / ⌘⇧R: Match Case, Whole
+  // Word, Regex, File Mask, Scope, grouped matches, per-file Replace, Replace All).
+  //
+  // A top-anchored panel, not a centred Modal: its top edge never moves while results
+  // arrive, and on a phone it is a full-width sheet under the status bar that keeps
+  // above the keyboard. Focus handling is the shared `dialogFocus` (trap, Esc, return).
+  import { onDestroy, untrack } from 'svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import Modal from '../../lib/components/Modal.svelte';
   import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { dialogFocus } from '../../lib/dialogFocus';
   import { plural } from '../../lib/plural';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { ide, ideBasename, type IdeSearchItem } from './ideStore.svelte';
+  import { pushIdeNavLocation } from './editor/ideEditorStoreBridge.svelte';
+  import { quickOpenRequest } from './search/ideQuickOpen.svelte';
   import {
-    areIdeBreakpointsMuted,
-    closeAllIdeTabs,
-    closeUnmodifiedIdeTabs,
-    navigateIdeBack,
-    navigateIdeForward,
-    pushIdeNavLocation,
-    toggleFormatOnSave,
-    toggleIdeBreakpointsMuted,
-  } from './editor/ideEditorStoreBridge.svelte';
-
-  type SearchTab = 'all' | 'files' | 'symbols' | 'text' | 'actions';
-
-  interface IdeQuickAction {
-    id: string;
-    label: string;
-    shortcut?: string;
-    icon: IconName;
-    run: () => void;
-  }
+    dropTextHitsShownAsSymbols,
+    matchesFileMask,
+    parentFolderOf,
+    parseQuickOpenQuery,
+    recentFileRows,
+    type QuickOpenTab,
+  } from './search/ideQuickOpenModel';
+  import { currentIdeShellCtx, ideActionHint, ideActionsFor, type IdeAction } from './shell/ideActions';
+  import { ideLayout } from './shell/ideLayout.svelte';
 
   type NavRow =
-    | { kind: 'action'; action: IdeQuickAction }
-    | { kind: 'hit'; item: IdeSearchItem; groupStart: boolean };
+    | { kind: 'action'; action: IdeAction }
+    | { kind: 'hit'; item: IdeSearchItem; groupStart: boolean }
+    | { kind: 'recent'; path: string; groupStart: string | null }
+    | { kind: 'line'; line: number | null; col: number | null };
 
-  const SEARCH_TABS: readonly TabItem<SearchTab>[] = [
+  const SEARCH_TABS: readonly TabItem<QuickOpenTab>[] = [
     { id: 'all', label: 'All', testid: 'ide-se-tab-all' },
     { id: 'files', label: 'Files', testid: 'ide-se-tab-files' },
     { id: 'symbols', label: 'Symbols', testid: 'ide-se-tab-symbols' },
@@ -46,8 +46,9 @@
   ];
 
   const ROW_CAP = 120;
+  const uid = $props.id();
 
-  let tab = $state<SearchTab>('all');
+  let tab = $state<QuickOpenTab>('all');
   let query = $state('');
   let replacement = $state('');
   let caseSensitive = $state(false);
@@ -61,12 +62,15 @@
   let selectedIdx = $state(0);
   let showAllRows = $state(false);
   let resultsEl = $state<HTMLDivElement | undefined>(undefined);
+  let inputEl = $state<HTMLInputElement | undefined>(undefined);
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let downOnBackdrop = false;
   let wasOpen = false;
-  let syncedInitTab: SearchTab = 'all';
+  let syncedInitTab: QuickOpenTab = 'all';
   let syncedReplaceMode = false;
+  let syncedSeq = -1;
 
-  function hasActiveQuery(t: SearchTab, q: string): boolean {
+  function hasActiveQuery(t: QuickOpenTab, q: string): boolean {
     return t === 'text' ? q.length > 0 : q.trim().length > 0;
   }
 
@@ -83,37 +87,48 @@
     return undefined;
   });
 
-  // Parse `file.go:42` or `file.go:42:8` syntax on All / Files tabs.
-  const parsedFileLineQuery = $derived.by((): { cleanQuery: string; line: number | null; col: number | null } => {
-    if (tab !== 'all' && tab !== 'files') return { cleanQuery: query, line: null, col: null };
-    const m = /^(.+?):(\d+)(?::(\d+))?$/.exec(query.trim());
-    if (!m) return { cleanQuery: query, line: null, col: null };
-    return {
-      cleanQuery: m[1].trim(),
-      line: Number(m[2]) || null,
-      col: m[3] ? Number(m[3]) || null : null,
-    };
+  const parsed = $derived(parseQuickOpenQuery(tab, query));
+
+  // Register as an open overlay: the native browser webview hides, and the IDE's own
+  // window keys stand down (except the ones that retarget this picker).
+  $effect(() => {
+    untrack(() => ui.pushModal());
+    return () => untrack(() => ui.popModal());
   });
 
   $effect(() => {
     const open = ide.searchEverywhereOpen;
     const nextInitTab = ide.searchInitialTab;
     const nextReplace = Boolean(ide.searchReplaceMode);
-    if (open && (!wasOpen || nextInitTab !== syncedInitTab || nextReplace !== syncedReplaceMode)) {
-      tab = nextInitTab;
-      replaceOpen = nextReplace;
-      syncedInitTab = nextInitTab;
-      syncedReplaceMode = nextReplace;
-      if (ide.searchScopePath) {
-        customScopePath = ide.searchScopePath;
-        scopeMode = 'custom';
-      } else if (!wasOpen) {
-        scopeMode = 'project';
-      }
-      selectedIdx = 0;
-      showAllRows = false;
-      ide.replacePreview = null;
-      if (hasActiveQuery(tab, query) && tab !== 'actions') triggerSearch(0);
+    const seq = quickOpenRequest.seq;
+    if (open && (!wasOpen || nextInitTab !== syncedInitTab || nextReplace !== syncedReplaceMode || seq !== syncedSeq)) {
+      untrack(() => {
+        tab = nextInitTab;
+        replaceOpen = nextReplace;
+        syncedInitTab = nextInitTab;
+        syncedReplaceMode = nextReplace;
+        // A request's starting query (`:` for Go to Line, '' for ⌘P / ⌘E) is taken once.
+        if (!wasOpen || seq !== syncedSeq) {
+          query = quickOpenRequest.query;
+          quickOpenRequest.query = '';
+          syncedSeq = seq;
+        }
+        if (ide.searchScopePath) {
+          customScopePath = ide.searchScopePath;
+          scopeMode = 'custom';
+        } else if (!wasOpen) {
+          scopeMode = 'project';
+        }
+        selectedIdx = 0;
+        showAllRows = false;
+        ide.replacePreview = null;
+        if (hasActiveQuery(tab, query) && tab !== 'actions') triggerSearch(0);
+        queueMicrotask(() => {
+          inputEl?.focus();
+          const end = inputEl?.value.length ?? 0;
+          inputEl?.setSelectionRange(end, end);
+        });
+      });
     }
     wasOpen = open;
   });
@@ -122,115 +137,68 @@
     if (debounceTimer) clearTimeout(debounceTimer);
   });
 
-  const ACTIONS = $derived<IdeQuickAction[]>([
-    { id: 'run', label: 'Run active configuration', shortcut: '⌃R', icon: 'play', run: () => void ide.startRun() },
-    { id: 'debug', label: 'Debug active configuration', shortcut: '⌃D', icon: 'bug', run: () => void ide.startDebug() },
-    { id: 'save', label: 'Save active file', shortcut: '⌘S', icon: 'download', run: () => void ide.saveFile() },
-    { id: 'format', label: 'Reformat code', shortcut: '⌘⌥L', icon: 'format', run: () => void ide.formatActiveFile() },
-    { id: 'optimize-imports', label: 'Optimize imports', shortcut: '⌃⌥O', icon: 'layers', run: () => void ide.organizeImportsActiveFile() },
-    { id: 'format-save', label: 'Toggle format on save', icon: 'check', run: () => toggleFormatOnSave() },
-    { id: 'back', label: 'Navigate back', shortcut: '⌘[', icon: 'chevronLeft', run: () => void navigateIdeBack() },
-    { id: 'forward', label: 'Navigate forward', shortcut: '⌘]', icon: 'chevronRight', run: () => void navigateIdeForward() },
-    { id: 'mute-bp', label: areIdeBreakpointsMuted() ? 'Unmute breakpoints' : 'Mute all breakpoints', icon: 'shield', run: () => toggleIdeBreakpointsMuted() },
-    { id: 'prefix-suffix', label: 'Multi-line edit (prefix / suffix)', icon: 'edit', run: () => (ide.prefixSuffixOpen = !ide.prefixSuffixOpen) },
-    { id: 'split-lines', label: 'Split selection into multiple cursors', shortcut: '⌥⇧I', icon: 'layers', run: () => ide.splitSelectionToLines() },
-    {
-      id: 'rename',
-      label: 'Rename symbol across workspace…',
-      shortcut: '⇧F6',
-      icon: 'edit',
-      run: () => { if (ide.activePath) void ide.openRenameModal(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col); },
-    },
-    {
-      id: 'usages',
-      label: 'Find usages at cursor',
-      shortcut: '⌥F7',
-      icon: 'search',
-      run: () => { if (ide.activePath) void ide.findReferences(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col); },
-    },
-    { id: 'close-unmod', label: 'Close unmodified tabs', icon: 'x', run: () => void closeUnmodifiedIdeTabs() },
-    { id: 'close-all', label: 'Close all tabs', icon: 'x', run: () => void closeAllIdeTabs() },
-    { id: 'toolchains', label: 'Toolchains & SDKs…', icon: 'box', run: () => (ide.toolchainsOpen = true) },
-    { id: 'envs', label: 'Environments & run configurations…', icon: 'gear', run: () => (ide.environmentsOpen = true) },
-    { id: 'ssh', label: 'Connect remote SSH project…', icon: 'server', run: () => (ide.sshOpen = true) },
-    { id: 'share', label: 'Share live IDE session…', icon: 'share', run: () => (ide.shareOpen = true) },
-    { id: 'plugins', label: 'Manage IDE plugins…', icon: 'plug', run: () => (ide.pluginsOpen = true) },
-    {
-      id: 'keymap',
-      label: ide.keymapPreset === 'jetbrains' ? 'Switch keymap to Standard' : 'Switch keymap to JetBrains',
-      icon: 'command',
-      run: () => ide.setKeymapPreset(ide.keymapPreset === 'jetbrains' ? 'standard' : 'jetbrains'),
-    },
-  ]);
+  const actionCtx = $derived({ ...currentIdeShellCtx(), stack: ideLayout.stack });
 
-  function matchesGlobMask(filePath: string, rawMask: string): boolean {
-    const mask = rawMask.trim();
-    if (!mask) return true;
-    const base = ideBasename(filePath);
-    const patterns = mask.split(',').map((p) => p.trim()).filter(Boolean);
-    if (patterns.length === 0) return true;
-    let included = false;
-    let hasPositive = false;
-    for (const pat of patterns) {
-      const neg = pat.startsWith('!');
-      const clean = neg ? pat.slice(1).trim() : pat;
-      if (!clean) continue;
-      if (!neg) hasPositive = true;
-      const escaped = clean.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
-      const re = new RegExp(`^${escaped}$`, 'i');
-      const target = clean.includes('/') ? ide.relativePath(ide.resolvePath(filePath)) : base;
-      const ok = re.test(target);
-      if (neg && ok) return false;
-      if (!neg && ok) included = true;
-    }
-    return !hasPositive || included;
-  }
-
-  const filteredActions = $derived.by((): IdeQuickAction[] => {
+  const filteredActions = $derived.by((): IdeAction[] => {
     if (tab !== 'all' && tab !== 'actions') return [];
     const q = query.trim().toLowerCase();
-    if (!q) return tab === 'actions' ? ACTIONS : ACTIONS.slice(0, 5);
-    return ACTIONS.filter((a) => a.label.toLowerCase().includes(q) || a.id.includes(q));
+    if (!q) return tab === 'actions' ? ideActionsFor('search', actionCtx) : [];
+    return ideActionsFor('search', actionCtx).filter((a) =>
+      `${a.title} ${a.label?.(actionCtx) ?? ''} ${a.keywords ?? ''} ${a.id}`.toLowerCase().includes(q),
+    );
   });
 
   const rows = $derived.by((): NavRow[] => {
     const out: NavRow[] = [];
     if (tab === 'actions') {
-      for (let i = 0; i < filteredActions.length; i++) out.push({ kind: 'action', action: filteredActions[i] });
+      for (const action of filteredActions) out.push({ kind: 'action', action });
       return out;
     }
-    if (tab === 'all' && !query.trim()) {
-      for (let i = 0; i < filteredActions.length; i++) out.push({ kind: 'action', action: filteredActions[i] });
+    if (parsed.lineOnly) {
+      if (ide.activePath) out.push({ kind: 'line', line: parsed.line, col: parsed.col });
       return out;
     }
+    if ((tab === 'all' || tab === 'files') && !query.trim()) {
+      let prev: string | null = null;
+      for (const r of recentFileRows(ide.recentPaths, ide.tabs.map((t) => t.path), ide.activePath)) {
+        out.push({ kind: 'recent', path: r.path, groupStart: r.source !== prev ? r.source : null });
+        prev = r.source;
+      }
+      return out;
+    }
+    const hits = tab === 'all' ? dropTextHitsShownAsSymbols(ide.searchResults) : ide.searchResults;
     let prevPath = '';
-    for (let i = 0; i < ide.searchResults.length; i++) {
-      const item = ide.searchResults[i];
-      if (!matchesGlobMask(item.path, fileGlob)) continue;
+    for (const item of hits) {
+      if (tab === 'text' && !matchesFileMask(ideBasename(item.path), ide.relativePath(ide.resolvePath(item.path)), fileGlob)) continue;
       const groupStart = tab === 'text' && item.path !== prevPath;
       prevPath = item.path;
       out.push({ kind: 'hit', item, groupStart });
     }
-    if (tab === 'all') {
-      for (let i = 0; i < filteredActions.length; i++) out.push({ kind: 'action', action: filteredActions[i] });
-    }
+    for (const action of filteredActions) out.push({ kind: 'action', action });
     return out;
   });
 
   const visibleRows = $derived(!showAllRows && rows.length > ROW_CAP ? rows.slice(0, ROW_CAP) : rows);
 
+  const dialogLabel = $derived(
+    parsed.lineOnly ? 'Go to line' : replaceOpen ? 'Replace in path' : tab === 'text' ? 'Find in path' : tab === 'files' ? 'Go to file' : 'Search everywhere',
+  );
+
   function buildSearchOpts() {
-    ide.searchScopePath = effectiveScopePath ?? null;
+    // The match options belong to Find in path; Files / Symbols / All search the name as typed.
+    const text = tab === 'text';
+    ide.searchScopePath = text ? (effectiveScopePath ?? null) : null;
     return {
-      caseSensitive,
-      regex,
-      wholeWord,
-      fileGlob: fileGlob.trim() || undefined,
-      scopePath: effectiveScopePath ?? null,
+      caseSensitive: text && caseSensitive,
+      regex: text && regex,
+      wholeWord: text && wholeWord,
+      fileGlob: text ? fileGlob.trim() || undefined : undefined,
+      scopePath: text ? (effectiveScopePath ?? null) : null,
     };
   }
 
   function close(): void {
+    if (ide.replaceLoading) return;
     if (debounceTimer) clearTimeout(debounceTimer);
     ide.searchReplaceMode = false;
     ide.searchScopePath = null;
@@ -239,7 +207,7 @@
 
   function triggerSearch(delayMs = 120): void {
     if (debounceTimer) clearTimeout(debounceTimer);
-    const effectiveQ = tab === 'text' ? query : parsedFileLineQuery.cleanQuery.trim();
+    const effectiveQ = tab === 'text' ? query : parsed.cleanQuery.trim();
     if (tab === 'actions' || effectiveQ.length === 0) {
       ide.searchResults = [];
       return;
@@ -259,14 +227,23 @@
 
   function activateRow(row: NavRow | undefined): void {
     if (!row) return;
+    if (row.kind === 'line' && row.line === null) return;
     close();
     if (row.kind === 'action') {
-      row.action.run();
+      if (!row.action.disabled?.(actionCtx)) row.action.run(actionCtx);
       return;
     }
     if (ide.activePath) pushIdeNavLocation(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col);
-    const jumpLn = parsedFileLineQuery.line ?? row.item.line ?? undefined;
-    const jumpCol = parsedFileLineQuery.col ?? row.item.column ?? undefined;
+    if (row.kind === 'line') {
+      if (ide.activePath && row.line) ide.jumpTo(ide.activePath, row.line, row.col ?? 1);
+      return;
+    }
+    if (row.kind === 'recent') {
+      void ide.openFile(row.path, { preview: false });
+      return;
+    }
+    const jumpLn = parsed.line ?? row.item.line ?? undefined;
+    const jumpCol = parsed.col ?? row.item.column ?? undefined;
     void ide.openFile(row.item.path, { line: jumpLn, col: jumpCol, preview: false });
   }
 
@@ -342,160 +319,106 @@
     }
   }
 
-  function placeholderFor(t: SearchTab): string {
-    if (t === 'files') return 'Search files by name or file.go:42…';
-    if (t === 'symbols') return 'Search functions, structs, classes, types…';
-    if (t === 'text') return 'Find in path across workspace…';
+  function placeholderFor(t: QuickOpenTab): string {
+    if (t === 'files') return 'File name, file.go:42, or :42 for a line…';
+    if (t === 'symbols') return 'Functions, structs, classes, types…';
+    if (t === 'text') return 'Find in path across the project…';
     if (t === 'actions') return 'Type an IDE command…';
-    return 'Search files (file:line), symbols, text, or actions…';
+    return 'Files (file:line), symbols, text, or actions…';
+  }
+
+  function rowKey(row: NavRow, idx: number): string {
+    if (row.kind === 'action') return `act:${row.action.id}`;
+    if (row.kind === 'recent') return `rec:${row.path}`;
+    if (row.kind === 'line') return 'line';
+    return `hit:${row.item.kind}:${row.item.path}:${row.item.line ?? 0}:${idx}`;
   }
 </script>
 
-{#if ide.searchEverywhereOpen}
-  <Modal
-    title={replaceOpen ? 'Replace in path' : tab === 'text' ? 'Find in path' : 'Search everywhere'}
-    width={720}
-    dismissable={!ide.replaceLoading}
-    onclose={close}
-  >
-    <div class="se-wrap">
-      <Tabs
-        size="s"
-        label="Search scope"
-        idBase="ide-se"
-        tabs={SEARCH_TABS}
-        value={tab}
-        onchange={(id) => {
-          tab = id;
-          selectedIdx = 0;
-          showAllRows = false;
-          triggerSearch(0);
-        }}
+<div
+  class="qo-backdrop"
+  role="presentation"
+  onpointerdown={(e) => (downOnBackdrop = e.target === e.currentTarget)}
+  onclick={(e) => {
+    if (downOnBackdrop && e.target === e.currentTarget) close();
+    downOnBackdrop = false;
+  }}
+>
+  <div class="qo-panel" role="dialog" aria-modal="true" aria-label={dialogLabel} use:dialogFocus={close} data-testid="ide-quick-open">
+    <Tabs
+      size="s"
+      label="Search scope"
+      idBase="ide-se"
+      tabs={SEARCH_TABS}
+      value={tab}
+      onchange={(id) => {
+        tab = id;
+        selectedIdx = 0;
+        showAllRows = false;
+        if (id !== 'text') replaceOpen = false;
+        triggerSearch(0);
+      }}
+    />
+
+    <div class="se-input-row">
+      <span class="se-lead-icon"><Icon name="search" size={14} /></span>
+      <input
+        bind:this={inputEl}
+        class="se-input"
+        type="search"
+        dir="ltr"
+        role="combobox"
+        aria-expanded="true"
+        aria-autocomplete="list"
+        aria-controls="{uid}-list"
+        aria-activedescendant={visibleRows.length ? `${uid}-opt-${selectedIdx}` : undefined}
+        aria-label={dialogLabel}
+        placeholder={placeholderFor(tab)}
+        bind:value={query}
+        oninput={onQueryInput}
+        onkeydown={onKeydown}
+        data-testid="ide-search-input"
       />
-
-      <div class="se-input-row">
-        <span class="se-lead-icon"><Icon name="search" size={14} /></span>
-        <input
-          class="se-input"
-          type="search"
-          dir="ltr"
-          data-autofocus
-          aria-label="Search query"
-          placeholder={placeholderFor(tab)}
-          bind:value={query}
-          oninput={onQueryInput}
-          onkeydown={onKeydown}
-          data-testid="ide-search-input"
-        />
-        {#if tab !== 'actions'}
-          <button
-            type="button"
-            class="btn small ghost se-opt"
-            aria-label="Match case"
-            title="Match case"
-            aria-pressed={caseSensitive}
-            onclick={() => { caseSensitive = !caseSensitive; triggerSearch(0); }}
-            data-testid="ide-se-case-btn"
-          >Aa</button>
-          <button
-            type="button"
-            class="btn small ghost se-opt"
-            aria-label="Whole word"
-            title="Match whole word"
-            aria-pressed={wholeWord}
-            onclick={() => { wholeWord = !wholeWord; triggerSearch(0); }}
-            data-testid="ide-se-word-btn"
-          >W</button>
-          <button
-            type="button"
-            class="btn small ghost se-opt"
-            aria-label="Regular expression"
-            title="Use regular expression"
-            aria-pressed={regex}
-            onclick={() => { regex = !regex; triggerSearch(0); }}
-            data-testid="ide-se-regex-btn"
-          >.*</button>
-          <button
-            type="button"
-            class="btn small ghost"
-            aria-pressed={replaceOpen}
-            onclick={() => {
-              replaceOpen = !replaceOpen;
-              if (replaceOpen && tab !== 'text') {
-                tab = 'text';
-                triggerSearch(0);
-              }
-            }}
-            data-testid="ide-se-replace-toggle"
-          >Replace…</button>
-        {/if}
-      </div>
-
-      {#if tab !== 'actions'}
-        <div class="se-filter-row">
-          <div class="segmented" role="group" aria-label="Directory scope">
-            <button
-              type="button"
-              aria-pressed={scopeMode === 'project'}
-              onclick={() => { scopeMode = 'project'; triggerSearch(0); }}
-            >In project</button>
-            {#if ide.activePath}
-              <button
-                type="button"
-                aria-pressed={scopeMode === 'folder'}
-                onclick={() => { scopeMode = 'folder'; triggerSearch(0); }}
-                title={activeDirPath}
-              >Current dir</button>
-            {/if}
-            {#if customScopePath}
-              <button
-                type="button"
-                aria-pressed={scopeMode === 'custom'}
-                onclick={() => { scopeMode = 'custom'; triggerSearch(0); }}
-                title={customScopePath}
-              >Directory</button>
-            {/if}
-          </div>
-
-          <input
-            class="se-mask-input mono"
-            type="text"
-            dir="ltr"
-            aria-label="File mask filter"
-            placeholder="File mask: *.go, *.ts, !*_test.go"
-            bind:value={fileGlob}
-            oninput={() => triggerSearch(150)}
-            data-testid="ide-se-mask-input"
-          />
+      {#if tab === 'text'}
+        <div class="se-opts" data-testid="ide-se-find-options">
+          <button type="button" class="btn small ghost se-opt" aria-label="Match case" title="Match case" aria-pressed={caseSensitive} onclick={() => { caseSensitive = !caseSensitive; triggerSearch(0); }} data-testid="ide-se-case-btn">Aa</button>
+          <button type="button" class="btn small ghost se-opt" aria-label="Whole word" title="Match whole word" aria-pressed={wholeWord} onclick={() => { wholeWord = !wholeWord; triggerSearch(0); }} data-testid="ide-se-word-btn">W</button>
+          <button type="button" class="btn small ghost se-opt" aria-label="Regular expression" title="Use regular expression" aria-pressed={regex} onclick={() => { regex = !regex; triggerSearch(0); }} data-testid="ide-se-regex-btn">.*</button>
+          <button type="button" class="btn small ghost" aria-pressed={replaceOpen} onclick={() => (replaceOpen = !replaceOpen)} data-testid="ide-se-replace-toggle">Replace…</button>
         </div>
       {/if}
+    </div>
 
-      {#if replaceOpen && tab !== 'actions'}
+    {#if tab === 'text'}
+      <div class="se-filter-row">
+        <div class="segmented" role="group" aria-label="Directory scope">
+          <button type="button" aria-pressed={scopeMode === 'project'} onclick={() => { scopeMode = 'project'; triggerSearch(0); }}>In project</button>
+          {#if ide.activePath}
+            <button type="button" aria-pressed={scopeMode === 'folder'} onclick={() => { scopeMode = 'folder'; triggerSearch(0); }} title={activeDirPath}>Current dir</button>
+          {/if}
+          {#if customScopePath}
+            <button type="button" aria-pressed={scopeMode === 'custom'} onclick={() => { scopeMode = 'custom'; triggerSearch(0); }} title={customScopePath}>Directory</button>
+          {/if}
+        </div>
+        <input
+          class="se-mask-input mono"
+          type="text"
+          dir="ltr"
+          aria-label="File mask filter"
+          placeholder="File mask: *.go, *.ts, !*_test.go"
+          bind:value={fileGlob}
+          oninput={() => triggerSearch(150)}
+          data-testid="ide-se-mask-input"
+        />
+      </div>
+
+      {#if replaceOpen}
         <div class="se-replace-row">
-          <input
-            class="se-input"
-            type="text"
-            dir="ltr"
-            aria-label="Replacement text"
-            placeholder="Replace with…"
-            bind:value={replacement}
-            data-testid="ide-replace-input"
-          />
-          <button
-            type="button"
-            class="btn small"
-            disabled={query.length === 0 || ide.replaceLoading}
-            onclick={() => void previewReplace()}
-          >
+          <input class="se-input" type="text" dir="ltr" aria-label="Replacement text" placeholder="Replace with…" bind:value={replacement} data-testid="ide-replace-input" />
+          <button type="button" class="btn small" disabled={query.length === 0 || ide.replaceLoading} onclick={() => void previewReplace()}>
             {ide.replaceLoading && replaceMode === 'preview' ? 'Previewing…' : 'Preview'}
           </button>
-          <button
-            type="button"
-            class="btn small primary"
-            disabled={query.length === 0 || ide.replaceLoading}
-            onclick={() => void confirmAndReplaceAll()}
-            data-testid="ide-replace-all-btn"
-          >
+          <button type="button" class="btn small primary" disabled={query.length === 0 || ide.replaceLoading} onclick={() => void confirmAndReplaceAll()} data-testid="ide-replace-all-btn">
             {ide.replaceLoading && replaceMode === 'apply' ? 'Replacing…' : 'Replace all'}
           </button>
         </div>
@@ -509,12 +432,7 @@
               <div class="se-preview-item" dir="ltr">
                 <div class="se-preview-top">
                   <span class="se-preview-file">{ide.relativePath(ide.resolvePath(p.path))} ({plural(p.count, 'match')})</span>
-                  <button
-                    type="button"
-                    class="btn small ghost"
-                    disabled={ide.replaceLoading}
-                    onclick={() => void replaceSingleFile(p.path)}
-                  >Replace file</button>
+                  <button type="button" class="btn small ghost" disabled={ide.replaceLoading} onclick={() => void replaceSingleFile(p.path)}>Replace file</button>
                 </div>
                 <div class="se-diff-before">- {p.sample_before}</div>
                 <div class="se-diff-after">+ {p.sample_after}</div>
@@ -523,82 +441,123 @@
           </div>
         {/if}
       {/if}
+    {/if}
 
-      <div class="se-results" bind:this={resultsEl}>
-        <LoadState
-          what="search results"
-          variant="compact"
-          loading={ide.searchLoading && rows.length === 0}
-          error={ide.searchError}
-          empty={rows.length === 0 && hasActiveQuery(tab, query)}
-          onretry={() => triggerSearch(0)}
-        >
-          {#snippet emptyView()}
-            <EmptyState
-              icon="search"
-              title="No matches found"
-              body="Try broadening your query, clearing the file mask, or switching to All."
-            />
-          {/snippet}
+    <div class="se-results" bind:this={resultsEl}>
+      <LoadState
+        what="search results"
+        variant="compact"
+        loading={ide.searchLoading && rows.length === 0 && hasActiveQuery(tab, query) && !parsed.lineOnly}
+        error={hasActiveQuery(tab, query) && !parsed.lineOnly ? ide.searchError : null}
+        empty={rows.length === 0 && hasActiveQuery(tab, query)}
+        onretry={() => triggerSearch(0)}
+      >
+        {#snippet emptyView()}
+          <EmptyState
+            icon="search"
+            title={parsed.lineOnly ? 'Open a file first' : 'No matches found'}
+            body={parsed.lineOnly ? 'Go to line moves the cursor in the file you are editing.' : 'Try a shorter query, or switch to All.'}
+          />
+        {/snippet}
 
-          <div class="se-list" role="listbox" aria-label="Search results">
-            {#each visibleRows as row, idx (row.kind === 'action' ? `act:${row.action.id}` : `hit:${row.item.kind}:${row.item.path}:${row.item.line ?? 0}:${idx}`)}
-              {#if row.kind === 'hit' && row.groupStart}
-                <div class="se-group-head mono" dir="ltr">
-                  <Icon name="file" size={12} />
-                  <span>{ide.relativePath(row.item.path)}</span>
-                </div>
-              {/if}
-              <button
-                type="button"
-                class="se-row"
-                class:selected={idx === selectedIdx}
-                role="option"
-                aria-selected={idx === selectedIdx}
-                onmouseenter={() => (selectedIdx = idx)}
-                onclick={() => activateRow(row)}
-              >
-                {#if row.kind === 'action'}
-                  <Icon name={row.action.icon} size={13} />
-                  <span class="se-main">{row.action.label}</span>
-                  <Badge variant="outline" tone="accent" label="Action" />
-                  {#if row.action.shortcut}<kbd class="se-kbd">{row.action.shortcut}</kbd>{/if}
-                {:else}
-                  <Icon
-                    name={row.item.kind === 'file' ? 'file' : row.item.kind === 'symbol' ? 'layers' : 'search'}
-                    size={13}
-                  />
-                  <span class="se-hit-body" dir="ltr">
-                    <span class="se-main mono">
-                      {row.item.kind === 'file' ? ideBasename(row.item.path) : row.item.preview}
-                    </span>
-                    <span class="se-sub">
-                      {ide.relativePath(row.item.path)}{row.item.line ? `:${row.item.line}` : ''}
-                    </span>
-                  </span>
-                  <Badge
-                    variant="outline"
-                    tone={row.item.kind === 'symbol' ? 'info' : 'neutral'}
-                    label={row.item.symbol_kind || row.item.kind}
-                  />
-                {/if}
-              </button>
-            {/each}
-            {#if !showAllRows && rows.length > ROW_CAP}
-              <button type="button" class="btn small ghost" onclick={() => (showAllRows = true)}>
-                Show all {rows.length} matches ({rows.length - ROW_CAP} more)
-              </button>
+        {#if rows.length === 0 && !hasActiveQuery(tab, query)}
+          <p class="se-hint">{tab === 'symbols' ? 'Type a function, type or class name.' : tab === 'text' ? 'Type text to find across the project.' : 'No recent files yet. Type to search the project.'}</p>
+        {/if}
+        <div class="se-list" role="listbox" id="{uid}-list" aria-label="Results">
+          {#each visibleRows as row, idx (rowKey(row, idx))}
+            {#if row.kind === 'hit' && row.groupStart}
+              <div class="se-group-head mono" dir="ltr" role="presentation">
+                <Icon name="file" size={12} />
+                <span>{ide.relativePath(row.item.path)}</span>
+              </div>
+            {:else if row.kind === 'recent' && row.groupStart}
+              <div class="se-section-head" role="presentation">{row.groupStart === 'recent' ? 'Recent files' : 'Open tabs'}</div>
             {/if}
-          </div>
-        </LoadState>
-      </div>
+            <button
+              type="button"
+              id="{uid}-opt-{idx}"
+              class="se-row"
+              class:selected={idx === selectedIdx}
+              role="option"
+              tabindex="-1"
+              aria-selected={idx === selectedIdx}
+              onmouseenter={() => (selectedIdx = idx)}
+              onclick={() => activateRow(row)}
+              data-testid="ide-qo-row"
+              data-kind={row.kind}
+            >
+              {#if row.kind === 'action'}
+                {@const hint = ideActionHint(row.action)}
+                <Icon name={row.action.icon} size={13} />
+                <span class="se-main">{row.action.label?.(actionCtx) ?? row.action.title}</span>
+                {#if tab === 'all'}<Badge variant="outline" tone="accent" label="Action" />{/if}
+                {#if hint}<kbd class="se-kbd">{hint}</kbd>{/if}
+              {:else if row.kind === 'recent'}
+                {@const rel = ide.relativePath(row.path)}
+                <Icon name="file" size={13} />
+                <span class="se-hit-body se-hit-inline" dir="ltr">
+                  <span class="se-name mono">{ideBasename(row.path)}</span>
+                  <span class="se-sub">{parentFolderOf(rel)}</span>
+                </span>
+              {:else if row.kind === 'line'}
+                <Icon name="step" size={13} />
+                <span class="se-hit-body" dir="ltr">
+                  <span class="se-main">{row.line ? `Go to line ${row.line}${row.col ? `, column ${row.col}` : ''}` : 'Type a line number, or line:column'}</span>
+                  <span class="se-sub">{ide.activePath ? ide.relativePath(ide.activePath) : ''}</span>
+                </span>
+              {:else}
+                <Icon name={row.item.kind === 'file' ? 'file' : row.item.kind === 'symbol' ? 'function' : 'search'} size={13} />
+                <span class="se-hit-body" dir="ltr">
+                  <span class="se-main mono">{row.item.kind === 'file' ? ideBasename(row.item.path) : row.item.preview}</span>
+                  <span class="se-sub">{ide.relativePath(row.item.path)}{row.item.line ? `:${row.item.line}` : ''}</span>
+                </span>
+                <Badge variant="outline" tone={row.item.kind === 'symbol' ? 'info' : 'neutral'} label={row.item.symbol_kind || row.item.kind} />
+              {/if}
+            </button>
+          {/each}
+          {#if !showAllRows && rows.length > ROW_CAP}
+            <button type="button" class="btn small ghost" onclick={() => (showAllRows = true)}>
+              Show all {rows.length} matches ({rows.length - ROW_CAP} more)
+            </button>
+          {/if}
+        </div>
+      </LoadState>
     </div>
-  </Modal>
-{/if}
+  </div>
+</div>
 
 <style>
-  .se-wrap { display: flex; flex-direction: column; gap: var(--sp-3); min-inline-size: 0; }
+  /* Percentages of the inset:0 backdrop (= the window), never vh: in the WKWebView vh
+     is the SCREEN height (same rule as the ⌘K palette). */
+  .qo-backdrop {
+    position: fixed; inset: 0; z-index: var(--z-modal);
+    display: flex; flex-direction: column; align-items: center;
+    background: var(--scrim-soft);
+  }
+  .qo-backdrop::before { content: ''; flex: 0 0 12%; }
+  .qo-panel {
+    display: flex; flex-direction: column; gap: var(--sp-3); flex: 0 1 auto; min-block-size: 0;
+    inline-size: 720px; max-inline-size: calc(100% - 48px); max-block-size: min(560px, 76%);
+    padding: var(--sp-4); background: var(--surface); border: 1px solid var(--glass-border);
+    border-radius: var(--radius-l); box-shadow: var(--glass-shadow);
+  }
+  /* Phone: a full-width sheet from the top, sized to the visible viewport (`--app-h`
+     follows the on-screen keyboard), so the field and the first results stay above it.
+     A short page (a phone on its side, ~380-430 px tall) gets the same sheet: the
+     centred card with a 12% top gap left room for two results (review I4-10). */
+  @media (max-width: 640px), (max-height: 520px) {
+    .qo-backdrop::before { flex-basis: env(safe-area-inset-top, 0px); }
+    .qo-panel {
+      inline-size: 100%; max-inline-size: 100%; border-block-start: none;
+      border-start-start-radius: 0; border-start-end-radius: 0;
+      max-block-size: calc(var(--app-h, 100%) - env(safe-area-inset-top, 0px) - 8px);
+    }
+  }
+  @media (max-height: 520px) {
+    .qo-panel { gap: var(--sp-2); padding-block: var(--sp-2); }
+  }
   .se-input-row, .se-replace-row, .se-filter-row { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+  .se-opts { display: flex; align-items: center; gap: var(--sp-2); }
   .se-lead-icon { display: inline-flex; color: var(--text-dim); padding-inline-start: var(--sp-2); }
   .se-input {
     flex: 1; min-inline-size: 160px; block-size: 32px; padding-inline: 10px; font-size: var(--fs-s);
@@ -611,7 +570,7 @@
   .se-opt { font-family: var(--font-mono); padding-inline: var(--sp-4); }
   .se-opt[aria-pressed='true'] { background: var(--accent-soft); color: var(--accent-text); }
   .se-preview-box {
-    display: flex; flex-direction: column; gap: var(--sp-3); max-block-size: 180px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: var(--sp-3); max-block-size: 180px; overflow-y: auto; flex-shrink: 0;
     padding: var(--sp-4) 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-s); font-size: var(--fs-xs);
   }
   .se-preview-head { font-weight: 600; color: var(--text); }
@@ -620,8 +579,10 @@
   .se-preview-file { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .se-diff-before { color: var(--danger); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .se-diff-after { color: var(--success); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .se-results { display: flex; flex-direction: column; max-block-size: 340px; overflow-y: auto; border-block-start: 1px solid var(--border); padding-block-start: var(--sp-3); }
+  .se-results { flex: 1 1 auto; min-block-size: 0; overflow-y: auto; border-block-start: 1px solid var(--border); padding-block-start: var(--sp-3); }
   .se-list { display: flex; flex-direction: column; gap: var(--sp-1); }
+  .se-hint { margin: 0; padding: var(--sp-3) 10px; font-size: var(--fs-xs); color: var(--text-dim); }
+  .se-section-head { padding: var(--sp-2) 10px; font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); }
   .se-group-head {
     display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--sp-4);
     font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); background: var(--surface-2); border-radius: var(--radius-s);
@@ -631,8 +592,11 @@
     background: transparent; border: none; border-radius: var(--radius-s); color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer;
   }
   .se-row.selected, .se-row:hover { background: var(--surface-2); }
+  .se-row.selected { outline: 1px solid var(--accent-line); outline-offset: -1px; }
   .se-hit-body { flex: 1; min-inline-size: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
+  .se-hit-inline { flex-direction: row; align-items: baseline; gap: var(--sp-3); }
+  .se-name { flex-shrink: 0; max-inline-size: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .se-main { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .se-sub { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .se-kbd { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); padding: var(--sp-1) var(--sp-3); border: 1px solid var(--border); border-radius: var(--radius-s); }
+  .se-sub { min-inline-size: 0; font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .se-kbd { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); padding: var(--sp-1) var(--sp-3); border: 1px solid var(--border); border-radius: var(--radius-s); white-space: nowrap; }
 </style>

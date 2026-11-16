@@ -152,6 +152,10 @@ test('G11: leaving the IDE page keeps which proposals were applied; a project sw
     '../ideStore.svelte': { ide: {}, ideBasename: (p: string) => p },
     '../store/ideDiffApplier': { detectProposalLanguage: () => '', lineRangeFromOffsets: () => null, offsetsForLineRange: () => null },
     './ideSymbolChip': { upsertIdeContextChipList: (l: unknown) => l },
+    '../store/ideProjectMemory': {
+      memoryKeyOf: () => '', recallDurable: () => null, recallVolatile: () => undefined,
+      registerProjectMemoryParticipant: () => {}, rememberDurable: () => {}, stashVolatile: () => {},
+    },
   });
   const st = mod.ideAgentState;
   st.appliedUndoByProposalId = { p1: 'before' };

@@ -10,6 +10,7 @@
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
   import { onScratches, openScratches } from './ideScratches.svelte';
+  import { ideSwitcherFolders, realWorkspaceId } from './ideProjectRecents.svelte';
 
   interface Props {
     triggerEl: HTMLButtonElement | undefined;
@@ -40,7 +41,7 @@
 
   const filteredWorkspaces = $derived.by(() => {
     const q = query.trim().toLowerCase();
-    const list = ws.workspaces.filter((w) => w.id !== SCRATCH_WORKSPACE_ID && w.root_path);
+    const list = ideSwitcherFolders(ws.workspaces.filter((w) => w.id !== SCRATCH_WORKSPACE_ID && w.root_path));
     if (!q) return list;
     return list.filter(
       (w) => (w.name || '').toLowerCase().includes(q) || w.root_path.toLowerCase().includes(q),
@@ -90,20 +91,15 @@
     };
   });
 
+  // Close BEFORE switching: the unsaved-changes confirm must not open under the popover (I3-01).
   async function pickWorkspace(rootPath: string, id: string): Promise<void> {
-    try {
-      await ide.setLocalTarget(rootPath, id);
-    } finally {
-      closePopover(true);
-    }
+    closePopover(true);
+    await ide.setLocalTarget(rootPath, realWorkspaceId(id));
   }
 
   async function pickNamedProject(proj: IdeNamedProject): Promise<void> {
-    try {
-      await ide.activateProject(proj.id);
-    } finally {
-      closePopover(true);
-    }
+    closePopover(true);
+    await ide.activateProject(proj.id);
   }
 </script>
 
@@ -140,7 +136,7 @@
         type="button"
         class="ws-item"
         class:is-active={onScratches()}
-        onclick={() => void openScratches().finally(() => closePopover(true))}
+        onclick={() => { closePopover(true); void openScratches(); }}
         data-testid="ide-scratches-option"
       >
         <span class="ws-item-icon"><Icon name="workbench" size={14} /></span>

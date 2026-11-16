@@ -6,7 +6,10 @@
   import { announce } from '../../../lib/announce.svelte';
   import { loadErrorText } from '../../../lib/loadError';
 
-  let { request, sessionId, agent, onanswered }: { request: RuntimeRequest; sessionId: string; agent: string; onanswered: () => void } = $props();
+  // `docked`: the live form in the attention dock — its fields scroll inside
+  // a bounded body and Send answer stays in view at the bottom (never below
+  // the fold). Otherwise the settled record ("Previous questions").
+  let { request, sessionId, agent, onanswered, docked = false }: { request: RuntimeRequest; sessionId: string; agent: string; onanswered: () => void; docked?: boolean } = $props();
   const answers = new SvelteMap<string, QuestionAnswer>();
   const other = new SvelteMap<string, boolean>();
   let busy = $state(false);
@@ -55,9 +58,10 @@
   }
 </script>
 
-<form class="question-card" onsubmit={send} data-testid="runtime-question-card">
-  <p class="question-by">{agent} · {questionOutcome(request)}</p>
-  {#if request.question_title}<p dir="auto">{request.question_title}</p>{/if}
+<form class="question-card" class:docked onsubmit={send} data-testid="runtime-question-card">
+  {#if !docked}<p class="question-by">{agent} · {questionOutcome(request)}</p>{/if}
+  <div class="qc-body">
+  {#if request.question_title}<p class="question-title" dir="auto">{request.question_title}</p>{/if}
   {#each questions as q, index (q.id)}
     <fieldset disabled={!live || busy}>
       <legend dir="auto">{q.header}{q.required ? '' : ' (optional)'}</legend>
@@ -87,9 +91,13 @@
       {/if}
     </fieldset>
   {/each}
+  </div>
   <p class="question-error" role="alert">{error ?? ''}</p>
-  {#if live}<button class="btn" type="submit" disabled={busy} data-testid="runtime-question-send">{busy ? 'Sending…' : 'Send answer'}</button>
-    <button class="btn" type="button" disabled={busy} onclick={() => void dismiss('decline')}>Skip question</button>
+  {#if live}
+    <div class="qc-foot">
+      <button class="btn qc-btn" type="button" disabled={busy} onclick={() => void dismiss('decline')}>Skip question</button>
+      <button class="btn primary qc-btn" type="submit" disabled={busy} data-testid="runtime-question-send">{busy ? 'Sending…' : 'Send answer'}</button>
+    </div>
   {/if}
 </form>
 
@@ -106,4 +114,13 @@
   textarea { resize: vertical; width: 100%; box-sizing: border-box; min-height: 56px; }
   .question-error:empty { margin: 0; }
   .question-error { color: var(--danger); font-size: var(--fs-s); }
+  .question-title { margin: 0 0 8px; font-weight: 600; overflow-wrap: anywhere; }
+  .qc-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+  /* Docked: the card is the dock's body — no border of its own, fields
+     scroll, the actions stay put. */
+  .question-card.docked { display: flex; flex-direction: column; flex: 1 1 auto; min-block-size: 0; padding: 0; border: 0; background: transparent; }
+  .docked .qc-body { flex: 1 1 auto; min-block-size: 0; overflow-y: auto; overscroll-behavior: contain; padding-inline-end: 2px; }
+  .docked .qc-foot { flex: none; padding-block-start: 6px; border-block-start: 1px solid var(--border); }
+  .docked .question-error:not(:empty) { flex: none; margin: 4px 0 0; }
+  @media (pointer: coarse) { .qc-btn { min-block-size: calc(var(--hit-min) + 8px); padding-inline: 14px; } }
 </style>

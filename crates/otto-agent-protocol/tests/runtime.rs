@@ -3532,7 +3532,14 @@ async fn council_seats_form_one_read_only_group_and_the_judge_reads_every_answer
             assert_eq!(s.parent_id.as_ref(), Some(&root.id));
         }
     }
-    assert_eq!(seats[1].title, "which cache? · gemini");
+    // Two seats of one provider differ by number; model / effort when picked.
+    assert_eq!(seats[1].title, "which cache? · Seat 2 · Gemini");
+    assert_eq!(seats[2].title, "which cache? · Seat 3 · Codex Low");
+    let c3 = seats[2].council().unwrap();
+    assert_eq!(
+        (c3.provider.as_deref(), c3.model, c3.effort.as_deref()),
+        (Some("codex"), None, Some("low"))
+    );
     for s in &seats[..2] {
         let r = rt.latest_reply(&s.id, WAIT).await.unwrap();
         assert!(!r.busy);

@@ -5,6 +5,9 @@
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { ide, ideBasename, type IdeRunConfig } from '../ideStore.svelte';
+  import {
+    CURRENT_FILE_CONFIG_ID, currentFileRunnable, orderDetectedForLanguage, saveLaunchMemory,
+  } from '../store/ideLaunchTarget';
 
   interface Props {
     triggerEl: HTMLButtonElement | undefined;
@@ -25,10 +28,16 @@
     return ide.runConfigs.filter((c) => !c.auto_detected && (!q || c.name.toLowerCase().includes(q) || c.runner.toLowerCase().includes(q)));
   });
 
+  // The active file's ecosystem first: a Python file lists its Python targets
+  // before Go/Maven/Shell ones.
   const detectedConfigs = $derived.by(() => {
     const q = filter.trim().toLowerCase();
-    return ide.runConfigs.filter((c) => Boolean(c.auto_detected) && (!q || c.name.toLowerCase().includes(q) || c.runner.toLowerCase().includes(q)));
+    const hits = ide.runConfigs.filter((c) => Boolean(c.auto_detected) && (!q || c.name.toLowerCase().includes(q) || c.runner.toLowerCase().includes(q)));
+    return orderDetectedForLanguage(hits, ide.activeTab?.language);
   });
+
+  const currentFile = $derived(currentFileRunnable(ide.activeTab));
+  const currentFileActive = $derived(!selectedConfig);
 
   const repoSuites = $derived.by(() => {
     const roots =
@@ -90,6 +99,7 @@
 
   function selectTarget(id: string): void {
     ide.selectedConfigId = id;
+    saveLaunchMemory(ide.target, { selected: id });
     closePopover(true);
   }
 </script>
@@ -123,6 +133,22 @@
   {/if}
 
   <div class="run-list">
+    <button
+      type="button"
+      class="run-item"
+      class:is-active={currentFileActive}
+      aria-current={currentFileActive ? 'true' : undefined}
+      disabled={!currentFile.ok}
+      title={currentFile.ok ? `Run or debug ${ide.activeTab?.name ?? 'the active file'}` : (currentFile.reason ?? undefined)}
+      onclick={() => selectTarget(CURRENT_FILE_CONFIG_ID)}
+      data-testid="ide-run-target-current-file"
+    >
+      <span class="run-item-name" dir="ltr">
+        Current file{#if ide.activeTab}<span class="run-item-sub">{` — ${ide.activeTab.name}`}</span>{/if}
+      </span>
+      {#if !currentFile.ok}<span class="run-item-why">{currentFile.reason}</span>{/if}
+    </button>
+
     {#if savedConfigs.length > 0}
       <div class="run-sec">Saved configurations</div>
       {#each savedConfigs as cfg (cfg.id)}
@@ -196,7 +222,7 @@
     {/if}
 
     {#if savedConfigs.length === 0 && detectedConfigs.length === 0 && repoSuites.length === 0}
-      <div class="run-empty">Runs the active editor file automatically, or create a named configuration below.</div>
+      <div class="run-empty">Create a named configuration below to run something other than the active file.</div>
     {/if}
   </div>
 
@@ -234,6 +260,11 @@
   }
   .run-item:hover { background: var(--hover); }
   .run-item.is-active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); font-weight: 600; }
+  .run-item:disabled { cursor: default; color: var(--text-dim); }
+  .run-item:disabled:hover { background: transparent; }
+  .run-item-sub { font-weight: 400; color: var(--text-dim); }
+  .run-item.is-active .run-item-sub { color: inherit; }
+  .run-item-why { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xs); color: var(--text-dim); }
   .run-item-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
   .run-repo-row {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;

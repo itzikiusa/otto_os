@@ -10,6 +10,7 @@
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
   import { onScratches } from './ideScratches.svelte';
+  import { ideFolderLabel } from './ideProjectRecents.svelte';
 
   const IdeWorkspacePopoverLazy = lazyComponent(() => import('./IdeWorkspacePopover.svelte'));
 
@@ -34,15 +35,11 @@
     }
     if (onScratches()) return 'Scratches';
     if (ide.activeProject) return ide.activeProject.name;
-    const matchedWs = ws.workspaces.find(
-      (w) => w.id !== SCRATCH_WORKSPACE_ID && w.root_path === ide.target.root,
-    );
-    return matchedWs?.name || ideBasename(ide.target.root) || ide.target.root;
+    return ideFolderLabel(ide.target.root, ws.workspaces.filter((w) => w.id !== SCRATCH_WORKSPACE_ID));
   });
 
   const subtitlePath = $derived(ide.hasTarget ? shortenHomePath(ide.target.root) : '');
   const extraRootCount = $derived(Math.max(0, ide.projectRoots.length - 1));
-  const pinnedProjects = $derived(ide.namedProjects.filter((p) => p.pinned !== false));
 
   function openProjectContextMenu(e: MouseEvent, proj: IdeNamedProject): void {
     e.preventDefault();
@@ -85,18 +82,6 @@
             await ide.activateProject(proj.id);
             ide.openSettings('project.modules');
           })(),
-      },
-      {
-        label: proj.pinned !== false ? 'Unpin from header bar' : 'Pin in header bar',
-        icon: 'pin',
-        action: () =>
-          void ide.saveNamedProject({
-            id: proj.id,
-            name: proj.name,
-            primary_root: proj.primary_root,
-            folders: proj.folders,
-            pinned: proj.pinned === false,
-          }),
       },
       { separator: true },
       {
@@ -144,7 +129,7 @@
         <Badge tone="accent" variant="outline" label={`${ide.projectRoots.length} repos`} />
       {:else if extraRootCount > 0}
         <Badge tone="accent" variant="outline" label={`+${extraRootCount}`} />
-      {:else if subtitlePath && pinnedProjects.length === 0}
+      {:else if subtitlePath}
         <span class="ws-path" dir="ltr">{subtitlePath}</span>
       {/if}
       <Icon name="chevronDown" size={12} />

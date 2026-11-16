@@ -191,17 +191,19 @@ test.describe('Desktop IDE Workflows — Polyglot Debug, Settings, Git, History 
 
     // 2b) Switch back to `Debugger` sub-tab -> toggle Split mode -> hide/show panes -> drag both resizers!
     await page.getByTestId('ide-debug-subtab-debugger').click();
-    await page.getByTestId('ide-debug-layout-toggle').click();
+    // Layout and column toggles live in the debugger bar's ⋯ menu (checked items).
+    const debugMenu = async (name: string) => { await page.getByTestId('ide-debug-more').click(); await page.getByRole('menuitemcheckbox', { name }).click(); };
+    await debugMenu('Split columns');
     await expect(page.getByTestId('ide-debug-split-grid')).toBeVisible();
 
-    await page.getByTestId('ide-debug-toggle-frames').click();
+    await debugMenu('Frames column');
     await expect(page.getByTestId('ide-debug-frames-pane')).toHaveCount(0);
-    await page.getByTestId('ide-debug-toggle-frames').click();
+    await debugMenu('Frames column');
     await expect(page.getByTestId('ide-debug-frames-pane')).toBeVisible();
 
-    await page.getByTestId('ide-debug-toggle-console').click();
+    await debugMenu('Console column');
     await expect(page.getByTestId('ide-debug-console-pane')).toHaveCount(0);
-    await page.getByTestId('ide-debug-toggle-console').click();
+    await debugMenu('Console column');
     await expect(page.getByTestId('ide-debug-console-pane')).toBeVisible();
 
     // Drag horizontal column resizer (+60px)
@@ -480,7 +482,8 @@ test.describe('Desktop IDE Workflows — Polyglot Debug, Settings, Git, History 
     // The header is one toolbar row: the tool window toggles from ⋯.
     const toggleBuildTool = async (): Promise<void> => {
       await page.getByTestId('ide-more-btn').click();
-      await page.locator('.ctx-menu').getByRole('menuitem', { name: /^(Show|Hide) (Maven|Gradle) tool window/ }).first().click();
+      await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Tool windows' }).first().click();
+      await page.locator('.ctx-submenu').getByRole('menuitem', { name: /^(Show|Hide) (Maven|Gradle) tool window/ }).first().click();
     };
     await toggleBuildTool();
     await expect(page.locator('body')).toContainText('otto-bonus-service');
@@ -603,7 +606,8 @@ test.describe('Desktop IDE Workflows — Polyglot Debug, Settings, Git, History 
     await expect(tree.locator('button.tree-item[title$="recoverable.txt"]')).toHaveCount(0, { timeout: 10_000 });
     expect(existsSync(recAbs)).toBe(false);
 
-    await page.getByTestId('ide-tree-local-history-btn').click();
+    await page.getByTestId('ide-tree-more-btn').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Local history and deleted files…' }).click();
     await expect(cmpModal).toBeVisible({ timeout: 10_000 });
     await page.getByTestId('ide-local-history-filter-deleted').click();
     const delRow = cmpModal.getByTestId('ide-local-history-row').filter({ hasText: 'recoverable.txt' }).first();
@@ -645,12 +649,13 @@ test.describe('Desktop IDE Workflows — Polyglot Debug, Settings, Git, History 
     await expect(clipModal).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');
 
-    // 8a) `⌘G` opens the Go to Line:Column dialog; `⌘L` adds the selection to the AI
+    // 8a) `⌘G` opens the quick-open in `:` line mode; `⌘L` adds the selection to the AI
     // Agent (opening its dock), as the editor context menu and docs/features/ide.md say.
     await editorContent(page).click();
     await page.keyboard.press('Meta+g');
-    const gotoDialog = page.getByRole('dialog').filter({ hasText: /Go to Line/i }).first();
+    const gotoDialog = page.getByTestId('ide-quick-open');
     await expect(gotoDialog).toBeVisible({ timeout: 5_000 });
+    await expect(gotoDialog.getByTestId('ide-search-input')).toHaveValue(':');
     await page.keyboard.press('Escape');
     await expect(gotoDialog).toHaveCount(0);
 
@@ -658,7 +663,7 @@ test.describe('Desktop IDE Workflows — Polyglot Debug, Settings, Git, History 
     await editorContent(page).click();
     await page.keyboard.press('Meta+l');
     await expect(agentPanel).toBeVisible({ timeout: 5_000 });
-    await expect(page.getByRole('dialog').filter({ hasText: /Go to Line/i })).toHaveCount(0);
+    await expect(page.getByTestId('ide-quick-open')).toHaveCount(0);
 
     const composer = page.getByTestId('ide-agent-composer');
     await composer.click();

@@ -19,7 +19,7 @@ function loadStore(handler: (method: string, path: string, body?: unknown) => un
     '../../../lib/stores/runtimeDraftRecovery.svelte': { installRuntimeDraftRecovery: () => {} },
     '../../../lib/live': { onLive: () => () => {}, appLive: { onResync: () => () => {} } },
     '../../../lib/router.svelte': { router: {} },
-    '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: () => {} },
+    '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: () => {}, syncRuntimeWaiting: () => {} },
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
     '../threadsStore.svelte': { threads: {} },
     '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => {} } },

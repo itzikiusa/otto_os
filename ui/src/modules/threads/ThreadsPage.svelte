@@ -18,6 +18,8 @@
   import { pageChrome } from '../../lib/stores/pageChrome.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { keyboard } from '../../lib/stores/keyboard.svelte';
+  import { trackComposerFocus, typingChrome } from './threadsTyping';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { sessionState } from '../../lib/status';
   import NewThreadStage from './NewThreadStage.svelte';
@@ -34,6 +36,7 @@
   import RelatedThreadsChip from './RelatedThreadsChip.svelte';
   import { relatedPopover } from './relatedPopover.svelte';
   import { threadsPageMenu } from './threadsPageMenu';
+  import { fitRightPanel } from './threadsLayout';
   import { prepareDeepLink } from '../../lib/deepLinkOpen';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { asThreadSession, isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
@@ -41,6 +44,7 @@
   import { threadOrigin } from './threadOrigins';
   import { personalAgentName } from '../../lib/personalAgentBadges';
   import { threads, type ThreadsLayoutMode } from './threadsStore.svelte';
+  import { initialThreadId } from './threadNav.svelte';
 
   const SIDEBAR_W_KEY = 'threads.sidebarW';
   const INSPECTOR_W_KEY = 'threads.inspectorW';
@@ -56,8 +60,35 @@
   const compact = $derived(
     viewport.isPhone || viewport.isTablet || (stageWidth > 0 && stageWidth < 860),
   );
+  // The thread list is a column wherever it leaves the conversation room (an
+  // iPad in portrait once the navigator folds), a drawer below that — and on
+  // a phone on its side, where the conversation needs the width more.
+  const listDrawer = $derived(viewport.isPhone || viewport.isShort || (stageWidth > 0 && stageWidth < 760));
+  // At 1280 with both panels open the right panel gives way (never below its
+  // minimum) so the conversation keeps ~640 px; a manual width comes back
+  // whenever there is room for it.
+  const inspectorShownW = $derived(fitRightPanel(inspectorW, stageWidth, !listDrawer && threads.sidebarOpen ? sidebarW : 0));
 
   $effect(() => threads.setInspectorCompact(compact));
+
+  // Typing with the on-screen keyboard up: what folds away (threadsTyping.ts).
+  // `focusIn` is where the caret is — the composer, the attention dock above
+  // it (a question's answer, a secret), or elsewhere (the terminal drawer).
+  let pageEl = $state<HTMLDivElement | null>(null);
+  let focusIn = $state<'composer' | 'dock' | null>(null);
+  $effect(() => (pageEl ? trackComposerFocus(pageEl, (f) => (focusIn = f)) : undefined));
+  const typing = $derived(typingChrome(keyboard.open, focusIn !== null, keyboard.visibleHeight));
+  // The keyboard opening/closing resizes every timeline at once; one that was
+  // following the latest message keeps it in view (RuntimeFollow marks it
+  // `data-at-bottom`; Chromium's resize scroll event can beat its observer).
+  $effect(() => {
+    void [keyboard.visibleHeight, typing];
+    const el = untrack(() => pageEl);
+    const frame = requestAnimationFrame(() => {
+      for (const s of el?.querySelectorAll<HTMLElement>('.rt-scroll[data-at-bottom="1"]') ?? []) s.scrollTop = s.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
+  });
   onMount(() => () => threads.setInspectorCompact(false));
 
   // Newest activity first, so the page opens on the most recent thread (not
@@ -101,7 +132,9 @@
   // open Side panel is shown closed here (transient) and comes back on
   // leaving; opening it on purpose (shortcut / ⌘K) shows it.
   onMount(() => {
-    const restoreChrome = pageChrome.set({ hideSideRail: true, hideStatusBar: true });
+    // foldNav: an iPad folds Otto's navigator to its rail, so the thread list
+    // gets the left column (App.svelte).
+    const restoreChrome = pageChrome.set({ hideSideRail: true, hideStatusBar: true, foldNav: true });
     const hadTransient = ui.rightTransient !== null;
     if (!hadTransient && ui.rightOpen) ui.rightTransient = { open: false, tab: ui.rightTab };
     return () => {
@@ -114,7 +147,7 @@
   // icon rail (not persisted — the shell's own preference is untouched), and
   // comes back on leaving. Expanding it here is remembered as "don't fold".
   onMount(() => {
-    if (viewport.isPhone || viewport.isTablet) return;
+    if (viewport.isPhone) return;
     let folded = false;
     if (threads.collapseNav && ui.railExpanded) {
       ui.railExpanded = false;
@@ -202,7 +235,7 @@
       }
       if (threads.paneIds.length === 0 && !threads.newDraftMode) {
         if (liveThreadIds.length > 0 && !router.parts[1]) {
-          threads.selectThread(liveThreadIds[0], { syncRoute: false });
+          threads.selectThread(initialThreadId(liveThreadIds) ?? liveThreadIds[0], { syncRoute: false });
         } else {
           threads.newDraftMode = true;
         }
@@ -356,6 +389,9 @@
         terminalOpen: threadsChrome.terminalOpen,
         cardOn: compact ? null : showWelcomeStage ? threadsChrome.cardVisible : cardPopover,
         threadId: focused?.id ?? null,
+        compact,
+        phone: viewport.isPhone,
+        sidebarVisible: !listDrawer && threads.sidebarOpen,
       },
       {
         newThread: () => threads.startNewThread({ workspaceId: ws.currentId }),
@@ -368,7 +404,7 @@
   }
 
   function toggleLeftBar(): void {
-    if (compact) {
+    if (listDrawer) {
       mobileSidebarOpen = !mobileSidebarOpen;
       if (mobileSidebarOpen) threads.setInspectorOpen(false);
     } else threads.toggleSidebar();
@@ -383,20 +419,47 @@
   }
 </script>
 
-<div class="th-page" data-testid="threads-page">
+<div
+  class="th-page"
+  class:kb-nohead={!typing.header}
+  class:kb-nobanners={!typing.banners}
+  class:kb-noterm={!typing.terminal}
+  class:kb-tight={typing.tight}
+  class:kb-dockhead={typing.tight && focusIn === 'composer'}
+  data-testid="threads-page"
+  bind:this={pageEl}
+>
   <PageHeader title="Threads">
     {#snippet leading()}
+      {#if viewport.isShort}
+        <!-- A phone on its side: this is the only header row (the shell's bar
+             steps aside), so Otto's Navigator — and its bell — opens here. -->
+        <button
+          type="button"
+          class="icon-btn"
+          aria-label="Open navigator"
+          title="Open navigator"
+          aria-haspopup="dialog"
+          aria-expanded={ui.navDrawerOpen}
+          data-testid="threads-open-navigator"
+          onclick={() => (ui.navDrawerOpen = !ui.navDrawerOpen)}
+        >
+          <Icon name="sidebar" size={14} />
+        </button>
+      {/if}
       <button
         type="button"
         class="icon-btn"
-        class:th-btn-on={compact ? mobileSidebarOpen : threads.sidebarOpen}
-        aria-pressed={compact ? mobileSidebarOpen : threads.sidebarOpen}
-        aria-label="Toggle threads sidebar"
-        title="Toggle sidebar"
+        class:th-btn-on={listDrawer ? mobileSidebarOpen : threads.sidebarOpen}
+        aria-pressed={listDrawer ? mobileSidebarOpen : threads.sidebarOpen}
+        aria-label="Thread list"
+        title={(listDrawer ? mobileSidebarOpen : threads.sidebarOpen) ? 'Hide the thread list' : 'Show the thread list'}
         data-testid="threads-toggle-sidebar"
         onclick={toggleLeftBar}
       >
-        <Icon name="sidebar" size={14} />
+        <!-- The threads icon, not a sidebar glyph: the app rail's own sidebar
+             button sits right beside it and toggles the navigator. -->
+        <Icon name="threads" size={14} />
       </button>
     {/snippet}
 
@@ -416,8 +479,8 @@
         class="icon-btn"
         class:th-btn-on={rightOpen}
         aria-pressed={rightOpen}
-        aria-label="Toggle right panel"
-        title="Right panel (files, diff, pull request, side chat)"
+        aria-label="Right panel"
+        title={rightOpen ? 'Hide the right panel' : 'Show the right panel: files, changes, pull request, side chat'}
         data-icon="panel"
         data-testid="threads-toggle-inspector"
         onclick={toggleRightBar}
@@ -442,8 +505,8 @@
 
   <PageBody width="full" padded={false} fill>
     <div class="th-workspace" class:compact bind:clientWidth={stageWidth}>
-      {#if !compact && threads.sidebarOpen}
-        <div class="th-left-col" style:inline-size="{sidebarW}px">
+      {#if !listDrawer && threads.sidebarOpen}
+        <div class="th-left-col" style:inline-size="{compact ? Math.min(sidebarW, 240) : sidebarW}px">
           <ThreadSidebar onstartroom={(sid) => (roomSessionId = sid)} />
         </div>
         <PaneDivider
@@ -489,18 +552,20 @@
           invert
           label="Resize thread inspector"
         />
-        <div class="th-right-col" class:th-max={maximized} style:inline-size={maximized ? null : `${inspectorW}px`}>
+        <div class="th-right-col" class:th-max={maximized} style:inline-size={maximized ? null : `${inspectorShownW}px`}>
           <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{}} />
         </div>
       {/if}
 
-      {#if compact}
+      {#if listDrawer}
         <Drawer bind:open={mobileSidebarOpen} side="left" title="Threads" width="min(360px, 100vw)">
           <ThreadSidebar
             onselect={() => (mobileSidebarOpen = false)}
             onstartroom={(sid) => { mobileSidebarOpen = false; roomSessionId = sid; }}
           />
         </Drawer>
+      {/if}
+      {#if compact}
         <Drawer bind:open={threads.inspectorOverlayOpen} side="right" title="Thread details" width="min(420px, 100vw)">
           <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{ showCard: true }} />
         </Drawer>
@@ -549,8 +614,12 @@
     font-weight: 500;
     min-width: 0;
   }
-  @media (max-width: 640px) {
+  @media (max-width: 640px), (max-height: 500px) and (pointer: coarse) {
     .th-crumb-project, .th-crumb-sep { display: none; }
+  }
+  /* A phone on its side: the one header row is a little lower. */
+  @media (max-height: 500px) and (pointer: coarse) {
+    .th-page :global(.page-header-bar) { --ph-h: 40px; }
   }
   .th-workspace {
     position: relative;
@@ -610,6 +679,93 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+  /* The conversation's height chain (RuntimeThread's .rt-scroll / .rt-dock):
+     the composer never leaves the screen. When height runs short the notices
+     and the attention dock above the composer shrink (and scroll inside),
+     the composer keeps its size, and the timeline keeps a one-line peek. */
+  .th-page :global(.rt-scroll) {
+    min-block-size: 22px;
+  }
+  .th-page :global(.rt-dock) {
+    min-block-size: 0;
+  }
+  .th-page :global(.rt-dock > :not(.rt-composer)) {
+    min-block-size: 0;
+    overflow: auto;
+  }
+  .th-page :global(.rt-composer) {
+    flex-shrink: 0;
+  }
+  /* Typing with the on-screen keyboard up (threadsTyping.ts): fold what the
+     reply does not need, the least needed first. */
+  .th-page.kb-nohead > :global(.page-header-bar) {
+    display: none;
+  }
+  .th-page.kb-nobanners :global(.rt-dock [data-banner='plan']),
+  .th-page.kb-nobanners :global(.rt-dock [data-banner='queue']),
+  .th-page.kb-nobanners :global(.rt-dock [data-testid='runtime-banners-more']) {
+    display: none;
+  }
+  .th-page.kb-noterm :global(:is([data-testid='threads-terminal-dock'], [data-testid^='thread-terminal-drawer-'])) {
+    display: none;
+  }
+  /* Tight (a phone on its side, an iPhone SE): the composer is one row —
+     text, attach, send/stop — with the model and access chips back on blur;
+     the attention dock shows its one-line head while the caret is in the
+     composer (its answers return when you leave it). */
+  .th-page.kb-tight :global(.rt-dock) {
+    padding-block-end: 4px;
+  }
+  .th-page.kb-tight :global(.rt-composer) {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    column-gap: 6px;
+    padding-block: 4px;
+    padding-inline: 10px 6px;
+  }
+  .th-page.kb-tight :global(.rt-composer > :not(textarea, .rt-foot)) {
+    flex-basis: 100%;
+  }
+  .th-page.kb-tight :global(.rt-composer textarea) {
+    flex: 1 1 0;
+    min-inline-size: 0;
+    min-block-size: 0;
+    max-block-size: calc(3lh + 4px);
+    align-self: center;
+  }
+  .th-page.kb-tight :global(.rt-foot) {
+    flex: none;
+    gap: 4px;
+  }
+  .th-page.kb-tight :global(.rt-foot :is(.rt-grow, [data-testid='runtime-ask-agent'])) {
+    display: none;
+  }
+  .th-page.kb-dockhead :global(.rt-dock :is(.ad-body, .ad-jump)) {
+    display: none;
+  }
+  /* A narrow phone (iPhone SE): the composer's foot stays ONE row — send /
+     stop, attach and the model chip (truncated, never below ~5 letters); the
+     access mode shows as its icon (its name stays in the label and the
+     menu) instead of wrapping both chips onto a row of their own. */
+  @media (pointer: coarse) {
+    @container (max-inline-size: 420px) {
+      .th-page :global(.rt-foot) {
+        flex-wrap: nowrap;
+      }
+      .th-page :global(.rt-foot .rt-grow) {
+        order: 0;
+        flex-basis: auto;
+        flex-wrap: nowrap;
+      }
+      .th-page :global(.rt-foot .rt-agent) {
+        min-inline-size: 72px;
+      }
+      .th-page :global(.rt-foot .ac:not(.static) > .ellipsis) {
+        display: none;
+      }
+    }
   }
   /* iOS zooms the page into any text field under 16px on focus and stays
      zoomed after blur — the Threads header ended up cut off at the top. */

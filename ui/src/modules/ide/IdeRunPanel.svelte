@@ -9,7 +9,6 @@
   import { formatSeconds } from '../../lib/metric-format';
   import { loadPaneWidth } from '../../lib/paneResizer';
   import type { BadgeTone } from '../../lib/status';
-  import { viewport } from '../../lib/stores/viewport.svelte';
   import {
     ide,
     ideBasename,
@@ -19,6 +18,8 @@
   import { ideAgent } from './store/ideAgentController.svelte';
   import IdeConsoleView, { type ConsoleLineInput } from './debug/IdeConsoleView.svelte';
   import { stripAnsiCodes } from './debug/ideLogParser';
+  import { ideLayout } from './shell/ideLayout.svelte';
+  import { runOutputSeqBase } from './store/ideDebugSnapshotSync';
 
   const LS_RUN_TREE_W = 'otto.ide.runTreeW';
 
@@ -109,9 +110,13 @@
   });
 
   const cleanLines = $derived((shownRun?.output ?? []).map((line) => stripAnsiCodes(line)));
-  const consoleLines = $derived<readonly ConsoleLineInput[]>(
-    (shownRun?.output ?? []).map((text) => ({ text })),
-  );
+  // Line `i` is sequence `base + i` (the daemon counts every line ever written),
+  // so Clear and row keys survive the 2,000-line window sliding.
+  const consoleLines = $derived.by((): readonly ConsoleLineInput[] => {
+    if (!shownRun) return [];
+    const base = runOutputSeqBase(shownRun);
+    return shownRun.output.map((text, i) => ({ text, seq: base + i }));
+  });
 
   function testKey(t: IdeTestResult, idx: number): string {
     return `${t.suite ?? ''}::${t.name}::${idx}`;
@@ -231,7 +236,7 @@
       {#if tests.length > 0 && showTestsPane}
         <section
           class="run-tree"
-          style:inline-size={!viewport.isPhone ? `${treeW}px` : undefined}
+          style:inline-size={!ideLayout.stack ? `${treeW}px` : undefined}
           aria-label="Structured test results"
         >
           {#if filteredTests.length === 0}
@@ -321,7 +326,7 @@
           {/if}
         </section>
 
-        {#if !viewport.isPhone}
+        {#if !ideLayout.stack}
           <PaneDivider bind:width={treeW} storageKey={LS_RUN_TREE_W} min={200} max={620} defaultWidth={320} label="Resize test results tree" />
         {/if}
       {/if}

@@ -4,6 +4,7 @@
 // `error` and the drain skips it: it shows the reason with Retry (re-queue),
 // Edit and Remove. Pure (unit/threadsTaskStop.test.ts).
 import type { QueuedPrompt } from '../../../lib/api/types.ts';
+import { messageAttribution } from './timeline.ts';
 
 export type QueuedAction = 'retry' | 'steer' | 'edit' | 'remove';
 
@@ -30,4 +31,15 @@ export function sendRefusal(status: number, message: string): string {
     return 'The queue already holds 20 messages. Send or remove one first.';
   }
   return message;
+}
+
+/** A queued message's one-line label. A framed message — a child thread's
+ *  reply woken into this one, a linked thread's message — reads by who it is
+ *  from (the same parser as the timeline's "From …" rows), never as the raw
+ *  `[Reply from thread …]` header the agent receives. */
+export function queuedLabel(text: string): string {
+  const a = messageAttribution(text);
+  if (!a) return `Queued: ${text}`;
+  const body = a.body.replace(/\s+/g, ' ').trim();
+  return `Queued ${a.reply ? 'reply' : 'message'} from ${a.from}${body ? `: ${body}` : ''}`;
 }

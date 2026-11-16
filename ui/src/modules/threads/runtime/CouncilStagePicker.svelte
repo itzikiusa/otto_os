@@ -48,7 +48,7 @@
     {#each council.seats as seat, i (`${seat.provider}:${seat.model}:${seat.effort}`)}
       <span class="cp-seat">
         {#if hasProviderIcon(seat.provider)}<ProviderIcon provider={seat.provider} size={12} />{/if}
-        <span class="ellipsis">{seatLabel(seat, auth.meta)}</span>
+        <span class="ellipsis"><span class="cp-no">Seat {i + 1} ·</span> {seatLabel(seat, auth.meta)}</span>
         <button
           type="button"
           class="icon-btn cp-remove"
@@ -126,6 +126,20 @@
   .cp-hint {
     font-size: var(--fs-xs);
     color: var(--text-dim);
+  }
+  .cp-no {
+    color: var(--text-dim);
+  }
+  /* Touch: the seat chips and their remove buttons are finger-sized. */
+  @media (pointer: coarse) {
+    .cp-seat {
+      block-size: 36px;
+      padding-inline: 10px 0;
+    }
+    .cp-remove {
+      inline-size: 44px;
+      block-size: 36px;
+    }
   }
   @media (max-width: 640px) {
     .cp-toggle-label {
