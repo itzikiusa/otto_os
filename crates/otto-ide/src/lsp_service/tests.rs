@@ -528,3 +528,34 @@ fn python_organize_imports_leaves_parenthesised_imports_alone() {
     assert_eq!(organized, "import os\nimport sys\n");
 }
 
+#[test]
+fn ts_outline_lists_typed_arrows_class_fields_abstract_methods_and_enum_members() {
+    let src = "export const fetchBalance = async (id: string): Promise<Money> => {\n  return get(id);\n};\nexport abstract class Repo {\n  static readonly VERSION = '1';\n  #token: string;\n  retries = 3;\n  onError = (e: Error) => log(e);\n  abstract find(): Promise<Money>;\n  get(id: string): string {\n    count = 1;\n    return id;\n  }\n}\nenum Status {\n  Active = 'a',\n  Closed,\n}\n";
+    let syms = parse_document_symbols("api.ts", "typescript", src);
+    let names = |n: &crate::types::IdeSymbolNode| {
+        n.children
+            .iter()
+            .map(|c| (c.name.clone(), c.kind.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(syms[0].name, "fetchBalance");
+    let repo = syms.iter().find(|s| s.name == "Repo").unwrap();
+    assert_eq!(
+        names(repo),
+        [
+            ("VERSION", "field"),
+            ("#token", "field"),
+            ("retries", "field"),
+            ("onError", "method"),
+            ("find", "method"),
+            ("get", "method")
+        ]
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+    );
+    let status = syms.iter().find(|s| s.name == "Status").unwrap();
+    assert_eq!(
+        names(status),
+        [("Active", "constant"), ("Closed", "constant")]
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+    );
+}
