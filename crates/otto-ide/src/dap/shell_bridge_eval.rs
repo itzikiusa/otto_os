@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use crate::line_reader::{LossyLines, MAX_OUTPUT_LINE_BYTES, MAX_PROTOCOL_LINE_BYTES};
 use tokio::net::unix::pipe::{Receiver as PipeReceiver, Sender as PipeSender};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -28,8 +28,8 @@ pub(super) fn spawn_trap_readers(
         let tx = trap_tx.clone();
         let keepalive = Arc::clone(&evt_keepalive);
         tokio::spawn(async move {
-            let mut lines = BufReader::new(out).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
+            let mut lines = LossyLines::new(out, MAX_OUTPUT_LINE_BYTES);
+            while let Some(l) = lines.next_line().await {
                 let _ = tx.send(TrapMsg::Output {
                     category: "stdout",
                     text: format!("{l}\n"),
@@ -43,8 +43,8 @@ pub(super) fn spawn_trap_readers(
     let stderr_handle = stderr.map(|err| {
         let tx = trap_tx.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(err).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
+            let mut lines = LossyLines::new(err, MAX_OUTPUT_LINE_BYTES);
+            while let Some(l) = lines.next_line().await {
                 let _ = tx.send(TrapMsg::Output {
                     category: "stderr",
                     text: format!("{l}\n"),
@@ -53,11 +53,11 @@ pub(super) fn spawn_trap_readers(
         })
     });
     let evt_handle = tokio::spawn(async move {
-        let mut lines = BufReader::new(evt_pipe).lines();
+        let mut lines = LossyLines::new(evt_pipe, MAX_PROTOCOL_LINE_BYTES);
         let mut cur_reason = String::new();
         let mut cur_frames: Vec<(String, String, u32)> = Vec::new();
         let mut cur_vars: Vec<(String, String)> = Vec::new();
-        while let Ok(Some(line)) = lines.next_line().await {
+        while let Some(line) = lines.next_line().await {
             if line == "READY" {
                 if let Ok(mut g) = evt_keepalive.lock() {
                     *g = None;

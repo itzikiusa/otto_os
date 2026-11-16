@@ -8,6 +8,7 @@ import { pollWhileVisible, type Poller } from '../../../lib/poll';
 import { auth } from '../../../lib/stores/auth.svelte';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
+import { ideCollabNotices } from './ideCollabNotices.svelte';
 import {
   attachDebugSessionStream,
   normalizeIncomingDebugSnapshot,
@@ -26,7 +27,7 @@ export {
   syncSnapshotBreakpointsToStore,
 };
 import {
-  collabGuestPost, defaultRunnerForLanguage, streamIdeSse, type IdeBottomTab,
+  collabGuestPost, defaultRunnerForLanguage, IdeCollabHttpError, ideTargetKey, streamIdeSse, type IdeBottomTab,
   type IdeBreakpoint, type IdeCollabRoom, type IdeDebugSessionSnapshot, type IdeDetectedSdk,
   type IdeEnvVar, type IdeGutterItem, type IdeInstalledSdk, type IdeInstallJob,
   type IdeOpenTab, type IdeProjectEnvironment, type IdeProjectRoot, type IdePythonVenv,
@@ -268,6 +269,8 @@ export function startJobsPoller(host: DebugAndEnvHost, prev: Poller | null, onDo
 
 export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
   if (!host.target.root) return;
+  const key = ideTargetKey(host.target);
+  const stale = (): boolean => ideTargetKey(host.target) !== key;
   host.envLoading = true;
   host.envError = null;
   try {
@@ -279,6 +282,8 @@ export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
       detected_configs?: IdeRunConfig[];
       effective_env?: Record<string, string>;
     }>(`/ide/environments?${host.targetQuery()}`);
+    // The project switched while this was in flight: its run configs belong to the old one.
+    if (stale()) return;
     host.projectEnv = resp.env;
     host.effectiveEnv = resp.effective_env ?? {};
     if (resp.env?.additional_roots?.length) {
@@ -295,8 +300,8 @@ export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
     if (!hasCurrent || (host.selectedConfigId?.startsWith('auto:') && explicitFirst)) {
       host.selectedConfigId = explicitFirst?.id ?? combined[0]?.id ?? null;
     }
-  } catch (e) { host.envError = loadErrorText(e); }
-  finally { host.envLoading = false; }
+  } catch (e) { if (!stale()) host.envError = loadErrorText(e); }
+  finally { if (!stale()) host.envLoading = false; }
 }
 
 export async function persistEnvironment(
@@ -638,7 +643,15 @@ export async function sendDebugAction(
       },
     );
     onSnapshot(resp.session);
-  } catch (e) { toastError(`Couldn’t run debugger ${action.replace('_', ' ')}`, e); }
+  } catch (e) {
+    // The host owns its debug session: a guest's refused action (Restart) is said next to
+    // the button, not as a raw error toast.
+    if (host.collabIsGuest && e instanceof IdeCollabHttpError && e.status === 403) {
+      ideCollabNotices.debug = e.message ? `${e.message.charAt(0).toUpperCase()}${e.message.slice(1)}` : 'Only the host can do that.';
+      return;
+    }
+    toastError(`Couldn’t run debugger ${action.replace('_', ' ')}`, e);
+  }
 }
 
 export async function installToolchainJob(

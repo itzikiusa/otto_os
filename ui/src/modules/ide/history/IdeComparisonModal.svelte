@@ -9,6 +9,7 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
+  import { confirmer } from '../../../lib/confirm.svelte';
   import { loadErrorText } from '../../../lib/loadError';
   import { loadPaneWidth } from '../../../lib/paneResizer';
   import { toasts } from '../../../lib/toast.svelte';
@@ -21,6 +22,7 @@
     fetchGitRefFileContent,
     promptPutLocalHistoryLabel,
     readClipboardForCompare,
+    openTabBuffer,
     readCurrentDiskOrTab,
     refreshTreeForRestoredPath,
     writeCurrentAndSyncIde,
@@ -78,6 +80,8 @@
   let detailError = $state<string | null>(null);
   let leftText = $state('');
   let rightText = $state('');
+  // What the "Current" side read from disk: the precondition when it is written back.
+  let rightDisk = $state<string | null>(null);
   let rightExists = $state(true);
   let leftLabel = $state('Before');
   let activeComparePath = $state('');
@@ -229,7 +233,9 @@
           if (ctl.signal.aborted) return;
           activeComparePath = res.entry.path || targetPath;
           leftText = res.content ?? '';
-          rightText = res.current_content ?? '';
+          rightDisk = res.current_content ?? '';
+          // An open tab's live buffer is "Current" (unsaved edits included), not the disk copy.
+          rightText = openTabBuffer(activeComparePath) ?? rightDisk;
           rightExists = res.current_exists;
           const ts = new Date(res.entry.timestamp_ms).toLocaleTimeString();
           leftLabel = `Before · ${ts} (${res.entry.label || res.entry.event_kind})`;
@@ -253,6 +259,7 @@
           activeComparePath = targetPath;
           leftText = res.leftText;
           rightText = res.rightText;
+          rightDisk = res.rightText;
           rightExists = res.rightExists;
           leftLabel = curMode === 'git-branch' ? `Branch · ${ref}` : `Revision · ${ref.slice(0, 8)}`;
         })
@@ -278,6 +285,7 @@
         activeComparePath = targetPath;
         leftText = left;
         rightText = cur.content;
+        rightDisk = cur.content;
         rightExists = cur.exists;
         leftLabel = curMode === 'file' && secondPath ? ideBasename(secondPath) : 'Clipboard';
       } catch (e) {
@@ -292,8 +300,9 @@
   async function applyToCurrent(nextText: string, reason: string): Promise<void> {
     const dest = activeComparePath || targetPath;
     if (!dest) return;
-    const ok = await writeCurrentAndSyncIde(dest, nextText, !rightExists);
-    if (ok) {
+    const written = await writeCurrentAndSyncIde(dest, nextText, !rightExists, rightDisk);
+    if (written !== null) {
+      rightDisk = written;
       rightText = nextText;
       rightExists = true;
       if (reason !== 'Edited Current') toasts.success(reason, ideBasename(dest));
@@ -303,6 +312,14 @@
   async function restoreSelectedWholeFile(): Promise<void> {
     const entry = selectedEntry;
     if (!entry || restoring) return;
+    const openTab = ide.tabs.find((t) => t.path === ide.resolvePath(entry.path));
+    const live = openTab ? openTabBuffer(openTab.path) : null;
+    if (openTab && live !== null && live !== openTab.savedContent) {
+      const ok = await confirmer.ask(`“${openTab.name}” has unsaved changes. Reverting replaces them with this snapshot.`, {
+        title: 'Unsaved changes', confirmLabel: 'Revert anyway', danger: true,
+      });
+      if (!ok) return;
+    }
     restoring = true;
     try {
       const res = await api.post<HistoryRestoreResp>('/ide/history/restore', { root, id: entry.id });

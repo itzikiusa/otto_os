@@ -66,6 +66,10 @@ pub(crate) struct CodexSubagent {
     pub settled: bool,
     #[serde(default)]
     pub settlement_seq: u32,
+    /// The child thread's running turn (`turn/started`), so a person's
+    /// Stop can `turn/interrupt` it.
+    #[serde(default)]
+    pub child_turn_id: Option<String>,
 }
 
 impl CodexSubagent {
@@ -234,6 +238,7 @@ impl CodexDriver {
                 seen_child_tools: HashSet::new(),
                 settled: false,
                 settlement_seq: 0,
+                child_turn_id: None,
             });
         if card.description.is_none() && description.is_some() {
             card.description = description;
@@ -321,6 +326,8 @@ impl CodexDriver {
                 started_at,
                 item_id: Some(card_item_id),
                 due_at: None,
+                stopping: false,
+                stop_error: None,
             });
         }
         step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
@@ -403,6 +410,8 @@ impl CodexDriver {
                         started_at,
                         item_id: Some(item_id),
                         due_at: None,
+                        stopping: false,
+                        stop_error: None,
                     });
                     step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
                 }
@@ -423,6 +432,9 @@ impl CodexDriver {
         match method {
             "turn/started" => {
                 if let Some(card) = self.subagents.get_mut(&key) {
+                    if let Some(t) = params.pointer("/turn/id").and_then(Value::as_str) {
+                        card.child_turn_id = Some(t.to_string());
+                    }
                     if card.settled {
                         card.settled = false;
                         card.status = TurnItemStatus::Running;
@@ -441,6 +453,8 @@ impl CodexDriver {
                                 started_at,
                                 item_id: Some(item_id),
                                 due_at: None,
+                                stopping: false,
+                                stop_error: None,
                             });
                             step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
                         }
@@ -585,6 +599,9 @@ impl CodexDriver {
                     _ => return,
                 };
                 self.child_items.remove(child_tid);
+                if let Some(card) = self.subagents.get_mut(&key) {
+                    card.child_turn_id = None;
+                }
                 self.settle_subagent_by_key(step, &key, status, None, err);
             }
             "subAgentActivity" | "subagent/activity" => {
@@ -663,18 +680,19 @@ impl CodexDriver {
             }
             TurnTerminalStatus::Completed => return,
         };
+        // A card whose child thread runs stays open: Otto interrupted that
+        // thread's own turn (`interrupt_children`) or the parent failed
+        // without touching it, and its own `turn/completed` settles it.
+        // Calling it stopped here would hide a child that may still run.
         let open_keys: Vec<String> = self
             .subagents
             .iter()
             .filter(|(_, c)| c.status.is_open() || !c.settled)
+            .filter(|(_, c)| c.child_thread_id.is_none() || c.child_turn_id.is_none())
             .map(|(k, _)| k.clone())
             .collect();
         for key in open_keys {
             self.settle_subagent_by_key(step, &key, item_status, None, None);
-        }
-        if !self.bg_tasks.is_empty() {
-            self.bg_tasks.clear();
-            step.push(DriverEvent::BackgroundTasks(Vec::new()));
         }
     }
 

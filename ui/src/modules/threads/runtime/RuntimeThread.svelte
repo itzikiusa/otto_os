@@ -45,6 +45,8 @@
   import RuntimeContextChips from './RuntimeContextChips.svelte';
   import RuntimeDraftStatus from './RuntimeDraftStatus.svelte';
   import RuntimeFollow from './RuntimeFollow.svelte';
+  import RuntimeFreshStop from './RuntimeFreshStop.svelte';
+  import { interruptTurn } from './taskStops.svelte';
   import RuntimeHistoryBar from './RuntimeHistoryBar.svelte';
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimePlan from './RuntimePlan.svelte';
@@ -55,6 +57,8 @@
   import RuntimeUiControl from './RuntimeUiControl.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import { formatLiveElapsed } from './liveStatus';
+  import { renderWindow, timelineRowKey } from './follow';
+  import { sendRefusal } from './queueRows';
   import { isRunning, latestTurn, pendingApprovals, timelineRows, turnOutcome } from './timeline';
 
   const RuntimeQuestions = lazyComponent(() => import('./RuntimeQuestions.svelte'));
@@ -74,7 +78,8 @@
     onaccessmodechange?: (mode: RuntimeAccessMode) => void;
     fallbackCwd?: string | null;
     hasExternalContext?: boolean;
-    transformOutgoingText?: (text: string) => string;
+    /** `fresh`: this send starts a fresh conversation (an embed re-adds its context). */
+    transformOutgoingText?: (text: string, fresh?: boolean) => string;
     transformRestoredQueuedText?: (text: string) => string;
     onExternalContextConsumed?: () => void;
     onopenpath?: (path: string, line?: number) => void;
@@ -113,7 +118,8 @@
   const effectiveItems = $derived(p ? withOptimisticItem(p.items, optimisticMessage) : optimisticMessage ? [optimisticMessage.item] : []);
   const rows = $derived(p || optimisticMessage ? timelineRows(effectiveItems, p?.turns ?? []) : []);
   let rowCap = $state(200);
-  const visibleRows = $derived(rows.length > rowCap ? rows.slice(rows.length - rowCap) : rows);
+  let holdFrom = $state<string | null>(null);
+  const visibleRows = $derived(renderWindow(rows, rowCap, holdFrom, timelineRowKey));
   let prevMsgIds: string[] = [];
   const messageIds = $derived.by(() => (prevMsgIds = collectMessageIds(rows, prevMsgIds)));
   const approvals = $derived(new Map((p ? pendingApprovals(p) : []).map((a) => [a.requestId, a] as const)));
@@ -169,7 +175,8 @@
   const chosenModel = $derived(resolveEffectiveDraftModel(draft.model, session?.model));
   const agentLabel = $derived.by(() => {
     const label = chosenModel ? formatModelLabel(provider, chosenModel, auth.meta) : harnessLabel(provider);
-    return draft.effort ? `${label} · ${formatEffortShort(draft.effort)}` : label;
+    const effort = draft.effort ?? session?.effort ?? null; // the pick, else what the thread stored
+    return effort ? `${label} · ${formatEffortShort(effort)}` : label;
   });
 
   const accessMode = $derived(accessModeOverride ?? draft.pickedMode ?? session?.access_mode ?? 'approval-required');
@@ -179,6 +186,9 @@
   const canFiles = $derived(attachmentSupport(caps).files);
   const takes = (f: File): boolean => takesFile(caps, f);
   let fileEl = $state<HTMLInputElement | null>(null);
+  /** "Stop background work and start fresh": `next` = the next fresh send asks the daemon to
+   *  stop it first; `tried` = it was asked and still refused (an older daemon) — the reason shows. */
+  let freshStopBg = $state<'' | 'next' | 'tried'>('');
 
   $effect(() => {
     if (optimisticMessage && p && effectiveItems === p.items) optimisticMessage = null;
@@ -197,7 +207,7 @@
     const docs = sent.images.filter((f) => !f.mime.startsWith('image/'));
     const assembled = assembleComposerMessage(t, sent.context);
     const finalPrompt =
-      typeof transformOutgoingText === 'function' ? transformOutgoingText(assembled) : assembled;
+      typeof transformOutgoingText === 'function' ? transformOutgoingText(assembled, sent.fresh_context) : assembled;
     const effectiveAccess =
       (typeof accessModeOverride !== 'undefined' && accessModeOverride) || sent.access_mode;
     const sessionModel = typeof session !== 'undefined' ? session?.model : null;
@@ -215,7 +225,7 @@
           ...(pics.length ? { images: pics.map(({ name, mime, data_base64 }) => ({ ...(name ? { name } : {}), mime, data_base64 })) } : {}),
           ...(docs.length ? { files: docs } : {}),
           ...(effectiveAccess ? { access_mode: effectiveAccess } : {}),
-          ...(sent.fresh_context ? { fresh_context: true } : {}),
+          ...(sent.fresh_context ? { fresh_context: true, ...(typeof freshStopBg !== 'undefined' && freshStopBg === 'next' ? { stop_background: true } : {}) } : {}),
           ...(delivery ? { delivery } : {}),
         },
         sent.images,
@@ -227,14 +237,17 @@
       if (usedExternal && typeof onExternalContextConsumed === 'function') onExternalContextConsumed();
       draft.flushSave();
       draft.startError = null;
+      if (typeof freshStopBg !== 'undefined') freshStopBg = '';
     } catch (e) {
       if (typeof optimisticMessage !== 'undefined') optimisticMessage = null;
       if (!runtimeDrafts.owns(ownerId, draft)) return;
       if (optimistic && typeof restoreOptimisticDraft === 'function') restoreOptimisticDraft(draft, sent);
-      if (e instanceof ApiError && (e.status === 400 || e.status === 409)) draft.startError = e.message;
-      else toastError('Couldn’t send message', e);
+      if (e instanceof ApiError && (e.status === 400 || e.status === 409 || e.status === 413)) {
+        draft.startError = typeof sendRefusal === 'function' ? sendRefusal(e.status, e.message) : e.message;
+      } else toastError('Couldn’t send message', e);
     } finally {
       draft.sending = false;
+      if (typeof freshStopBg !== 'undefined' && freshStopBg === 'next') freshStopBg = 'tried';
     }
   }
 
@@ -265,7 +278,7 @@
     if (askTargets.for(ownerId).length) {
       const assembled = assembleComposerMessage(t, draft.context);
       const payload =
-        typeof transformOutgoingText === 'function' ? transformOutgoingText(assembled) : assembled;
+        typeof transformOutgoingText === 'function' ? transformOutgoingText(assembled, draft.freshContext) : assembled;
       if (extCtx && typeof onExternalContextConsumed === 'function') onExternalContextConsumed();
       const effectiveAccess =
         (typeof accessModeOverride !== 'undefined' && accessModeOverride) || draft.pickedMode;
@@ -278,7 +291,7 @@
     if (!running && !submitted.fresh_context && typeof buildOptimisticUserMessage === 'function') {
       const assembled = assembleComposerMessage(t, submitted.context);
       const finalPrompt =
-        typeof transformOutgoingText === 'function' ? transformOutgoingText(assembled) : assembled;
+        typeof transformOutgoingText === 'function' ? transformOutgoingText(assembled, submitted.fresh_context) : assembled;
       const lastOrd = typeof p !== 'undefined' && p && p.items.length > 0 ? p.items[p.items.length - 1].ordinal : 0;
       optimisticMessage = buildOptimisticUserMessage(finalPrompt, lastOrd, submitted.images);
     }
@@ -334,7 +347,7 @@
     if (draft.stopping) return;
     draft.stopping = true;
     try {
-      await runtimeThreads.interrupt(ownerId);
+      await interruptTurn(ownerId);
     } catch (e) {
       toastError('Couldn’t stop the turn', e);
     } finally {
@@ -429,13 +442,14 @@
       </div>
     </div>
   </div>
-  <RuntimeFollow bind:this={followRef} {scroller} seq={p?.lastSequence} {messageIds} />
+  <RuntimeFollow bind:this={followRef} {scroller} seq={p?.lastSequence} {messageIds} firstRow={visibleRows[0] ? timelineRowKey(visibleRows[0]) : null} bind:holdFrom />
 
   <div class="rt-dock">
     <RuntimeBannerStack blocks={banners}>
       {#snippet block(key: string)}
         {#if key === 'error' && sessionError}
           <p class="rt-banner" dir="auto" use:announceShown={{ text: sessionError, assertive: true }}><Icon name="warning" size={13} />{sessionError}</p>
+          <RuntimeFreshStop show={draft.freshContext && background.some((b) => b.stopId) && freshStopBg === ''} count={background.length} onstop={() => { freshStopBg = 'next'; submit(); }} />
         {:else if key === 'ui'}
           <RuntimeUiControl {sessionId} />
         {:else if key === 'questions' && p}
@@ -727,6 +741,12 @@
     gap: 2px;
     flex: 1;
     min-inline-size: 0;
+  }
+  /* A-9: a narrow embed (PR dock, 280–360 px) keeps both chips readable —
+     the chips take their own row above the foot's buttons, never just "…". */
+  @container (max-inline-size: 380px) {
+    .rt-foot { flex-wrap: wrap; row-gap: 4px; }
+    .rt-grow { order: -1; flex-basis: 100%; flex-wrap: wrap; }
   }
   .rt-agent {
     display: inline-flex;

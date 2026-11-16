@@ -10,7 +10,7 @@ function load(router: { module?: string }, threads: { focusedSessionId?: string 
   const { runtimeThreads } = loadSource(new URL('../src/modules/threads/runtime/runtimeThreads.svelte.ts', import.meta.url), {
     '../../../lib/api/client': { api: { get: (p: string) => { gets.push(p); return get(p); } } },
     '../../../lib/stores/runtimeDraftRecovery.svelte': { installRuntimeDraftRecovery: () => {} },
-    '../../../lib/live': { onLive: () => () => {} }, '../../../lib/router.svelte': { router },
+    '../../../lib/live': { onLive: () => () => {}, appLive: { onResync: () => () => {} } }, '../../../lib/router.svelte': { router },
     '../../../lib/stores/runtimeAttention.svelte': { noteRuntimeWaiting: () => {} },
     '../../../lib/stores/uiControl.svelte': { uiControl: { addSource: () => {} } },
     '../threadsStore.svelte': { threads }, '../../../lib/stores/runtimeDrafts.svelte': { runtimeDrafts: { forget: () => {} } },

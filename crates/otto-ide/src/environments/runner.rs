@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, watch};
 
 use crate::target::TargetManager;
@@ -20,9 +19,13 @@ pub(super) use super::runner_cmd::{
 };
 use super::runner_parsers::IncrementalTestTracker;
 use super::runner_proc::{
-    cleanup_remaining_process_group, kill_child_process_group, run_before_launch, spawn_run_child,
-    ChildProcessGroupGuard,
+    cleanup_remaining_process_group, kill_child_process_group, run_remote_before_launch,
+    spawn_run_child, ChildProcessGroupGuard,
 };
+use super::runner_steps::{
+    run_local_before_launch, unless_stopped, StepOutcome, BEFORE_LAUNCH_TIMEOUT,
+};
+use crate::line_reader::{spawn_line_drain, MAX_OUTPUT_LINE_BYTES};
 
 pub(super) const MAX_FINISHED_RUNS: usize = 8;
 pub(super) const MAX_RUN_OUTPUT_LINES: usize = 2_000;
@@ -255,67 +258,86 @@ pub(super) async fn execute_run_task(
             .filter(|s| !s.is_empty())
         {
             append_run_line(&handle, format!("$ {pre}"));
-            if let Err(err) = run_before_launch(
-                &targets,
-                &target,
-                ssh.as_ref(),
-                &handle.owner_user_id,
-                pre,
-                &cwd,
-                &env_map,
-            )
-            .await
-            {
-                finish_run(
+            let outcome = if target.kind == IdeTargetKind::Local {
+                run_local_before_launch(
                     &handle,
-                    IdeRunStatus::Failed,
-                    Some(1),
-                    started.elapsed(),
-                    Some(err),
+                    pre,
+                    &cwd,
+                    &env_map,
+                    &mut stop_rx,
+                    BEFORE_LAUNCH_TIMEOUT,
+                )
+                .await
+            } else {
+                let remote = run_remote_before_launch(
+                    &targets,
+                    &target,
+                    ssh.as_ref(),
+                    &handle.owner_user_id,
+                    pre,
+                    &cwd,
+                    &env_map,
                 );
-                evict_finished_runs(&runs);
-                return;
-            }
-        }
-
-        let (program, args) = if target.kind == IdeTargetKind::Local
-            && cfg.runner == IdeRunnerKind::JavaMain
-            && !has_manual_classpath(&cfg)
-        {
-            match compile_java_main_step(&cfg, &target, &cwd, &env_map, &handle).await {
-                Ok((prog, built_args)) => (prog, built_args),
-                Err(err) => {
-                    finish_run(
+                match unless_stopped(&mut stop_rx, remote).await {
+                    None => StepOutcome::Stopped,
+                    Some(Ok(())) => StepOutcome::Done(()),
+                    Some(Err(err)) => StepOutcome::Failed(err),
+                }
+            };
+            match outcome {
+                StepOutcome::Done(()) => {}
+                StepOutcome::Failed(err) => {
+                    end_run(
+                        &runs,
                         &handle,
                         IdeRunStatus::Failed,
                         Some(1),
-                        started.elapsed(),
+                        started,
                         Some(err),
                     );
-                    evict_finished_runs(&runs);
+                    return;
+                }
+                StepOutcome::Stopped => {
+                    end_run(&runs, &handle, IdeRunStatus::Stopped, None, started, None);
                     return;
                 }
             }
+        }
+
+        // Compile steps race Stop: dropping one kills its build's process group.
+        let compiled = if target.kind == IdeTargetKind::Local
+            && cfg.runner == IdeRunnerKind::JavaMain
+            && !has_manual_classpath(&cfg)
+        {
+            let step = compile_java_main_step(&cfg, &target, &cwd, &env_map, &handle);
+            Some(unless_stopped(&mut stop_rx, step).await)
         } else if target.kind == IdeTargetKind::Local
             && cfg.runner == IdeRunnerKind::GoRun
             && is_default_go_command(&cfg)
         {
-            match compile_go_run_step(&cfg, &target, &cwd, &env_map).await {
-                Ok((prog, built_args)) => (prog, built_args),
-                Err(err) => {
-                    finish_run(
-                        &handle,
-                        IdeRunStatus::Failed,
-                        Some(1),
-                        started.elapsed(),
-                        Some(err),
-                    );
-                    evict_finished_runs(&runs);
-                    return;
-                }
-            }
+            let step = compile_go_run_step(&cfg, &target, &cwd, &env_map);
+            Some(unless_stopped(&mut stop_rx, step).await)
         } else {
-            build_runner_command(&cfg, target.kind, &cwd, &env_map)
+            None
+        };
+        let (program, args) = match compiled {
+            None => build_runner_command(&cfg, target.kind, &cwd, &env_map),
+            Some(Some(Ok(built))) => built,
+            Some(Some(Err(err))) => {
+                end_run(
+                    &runs,
+                    &handle,
+                    IdeRunStatus::Failed,
+                    Some(1),
+                    started,
+                    Some(err),
+                );
+                return;
+            }
+            Some(None) => {
+                end_run(&runs, &handle, IdeRunStatus::Stopped, None, started, None);
+                return;
+            }
         };
 
         append_run_line(
@@ -366,23 +388,15 @@ pub(super) async fn execute_run_task(
         // `child.stdin` on first poll, which would trigger our remote EOF-kill watcher).
         let mut ssh_stdin = if is_local { None } else { child.stdin.take() };
 
+        // Lossy, bounded readers drain both pipes to EOF: one invalid UTF-8 byte
+        // or an endless line must never close the pipe under the program.
         let stdout_task = child.stdout.take().map(|out| {
             let h = Arc::clone(&handle);
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(out).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    append_run_line(&h, line);
-                }
-            })
+            spawn_line_drain(out, MAX_OUTPUT_LINE_BYTES, move |l| append_run_line(&h, l))
         });
         let stderr_task = child.stderr.take().map(|err| {
             let h = Arc::clone(&handle);
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(err).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    append_run_line(&h, line);
-                }
-            })
+            spawn_line_drain(err, MAX_OUTPUT_LINE_BYTES, move |l| append_run_line(&h, l))
         });
 
         let wait_res = tokio::select! {
@@ -455,6 +469,19 @@ pub(super) async fn execute_run_task(
         None,
     );
     evict_finished_runs(&runs);
+}
+
+/// Finish the run and trim the finished-run list.
+fn end_run(
+    runs: &DashMap<String, Arc<ActiveRunHandle>>,
+    handle: &ActiveRunHandle,
+    status: IdeRunStatus,
+    exit_code: Option<i32>,
+    started: Instant,
+    err_msg: Option<String>,
+) {
+    finish_run(handle, status, exit_code, started.elapsed(), err_msg);
+    evict_finished_runs(runs);
 }
 
 fn multi_step_label(cfg: &IdeRunConfig) -> &'static str {

@@ -3,9 +3,12 @@ import { ws } from '../../lib/stores/workspace.svelte';
 import { harnessLabel, isPlainShellSession } from '../../lib/providers';
 import { delegatedParentId, inThreadsScope, type SessionPool } from '../../lib/stores/sessionBuckets';
 
-export type PreviewKind = 'markdown' | 'json' | 'csv' | 'svg' | 'image' | 'code';
-
 export { harnessLabel, isPlainShellSession };
+
+// The file viewer's preview kinds and table parse live with the shared
+// FilePreview (lib/) — re-exported so callers keep importing them from here.
+export { previewKindForPath, type PreviewKind } from '../../lib/components/filePreviewKind';
+export { parseDelimitedTable } from '../../lib/render/previewText';
 
 /**
  * Whether a session belongs in the Threads workspace (`#/threads`): the shared
@@ -126,51 +129,4 @@ export function baseName(path: string): string {
   const clean = path.replace(/\/+$/, '');
   const idx = clean.lastIndexOf('/');
   return idx >= 0 ? clean.slice(idx + 1) : clean;
-}
-
-/** Rich preview kind supported by `ThreadFileTabs`. */
-export function previewKindForPath(path: string): PreviewKind {
-  const lower = path.toLowerCase();
-  if (/\.(md|markdown|mdx)$/.test(lower)) return 'markdown';
-  if (/\.json$/.test(lower)) return 'json';
-  if (/\.(csv|tsv)$/.test(lower)) return 'csv';
-  if (/\.svg$/.test(lower)) return 'svg';
-  if (/\.(png|jpe?g|gif|webp|avif|ico|bmp)$/.test(lower)) return 'image';
-  return 'code';
-}
-
-/** Lightweight CSV/TSV parser for the PandaCode-style structured table preview. */
-export function parseDelimitedTable(raw: string, delimiter = ',', maxRows = 120): { headers: string[]; rows: string[][] } {
-  const lines = raw
-    .split(/\r?\n/)
-    .map((l) => l.trimEnd())
-    .filter((l) => l.length > 0)
-    .slice(0, maxRows + 1);
-  if (lines.length === 0) return { headers: [], rows: [] };
-  const splitLine = (line: string): string[] => {
-    const out: string[] = [];
-    let cur = '';
-    let quoted = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '"') {
-        if (quoted && line[i + 1] === '"') {
-          cur += '"';
-          i++;
-        } else {
-          quoted = !quoted;
-        }
-      } else if (ch === delimiter && !quoted) {
-        out.push(cur);
-        cur = '';
-      } else {
-        cur += ch;
-      }
-    }
-    out.push(cur);
-    return out;
-  };
-  const headers = splitLine(lines[0]);
-  const rows = lines.slice(1).map(splitLine);
-  return { headers, rows };
 }

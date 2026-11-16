@@ -34,7 +34,7 @@ pub fn attribution_generation() -> u64 {
     ATTRIBUTION_GENERATION.load(std::sync::atomic::Ordering::Acquire)
 }
 
-fn bump_attribution_generation() {
+pub(crate) fn bump_attribution_generation() {
     ATTRIBUTION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 }
 
@@ -57,7 +57,8 @@ pub struct UsageLabelRow {
     pub workspace_id: String,
     pub title: String,
     pub created_by: String,
-    /// `sessions.kind` (`agent` / `connection`).
+    /// `sessions.kind` (`agent` / `connection`), or `thread` for a row of
+    /// `agent_runtime_sessions` (a structured-runtime thread).
     pub kind: String,
     /// `meta.source` when it is a string (review / channel / product-…).
     pub source: Option<String>,
@@ -999,7 +1000,14 @@ impl SessionsRepo {
                       CASE WHEN json_type(meta_json, '$.source') = 'text' \
                            THEN json_extract(meta_json, '$.source') END \
                     END AS source \
-             FROM sessions",
+             FROM sessions \
+             UNION ALL \
+             SELECT id, workspace_id, title, created_by, 'thread' AS kind, \
+                    CASE WHEN json_valid(meta) THEN \
+                      CASE WHEN json_type(meta, '$.source') = 'text' \
+                           THEN json_extract(meta, '$.source') END \
+                    END AS source \
+             FROM agent_runtime_sessions",
         )
         .fetch_all(&self.pool)
         .await?;

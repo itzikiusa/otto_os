@@ -30,6 +30,7 @@ import {
   type RuntimeProjection,
 } from './projection';
 import { runtimeThreads } from './runtimeThreads.svelte';
+import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
 
 export const TAIL_TURNS = 40;
 export const MOBILE_TAIL_TURNS = 12;
@@ -47,6 +48,13 @@ const ACTIVE_LIVENESS_MS = 4_000;
 const IDLE_LIVENESS_MS = 15_000;
 const LIVE_WS_FRESH_MS = 2_500;
 const STREAM_BATCH_MS = 32;
+/** Catch-up when the daemon announced a sequence its events endpoint does not
+ *  deliver (a dropped event, a restart mid-turn): back off 250 ms doubling to
+ *  4 s while no progress is made, then give up on events and reload one
+ *  snapshot, whose sequence is taken as the truth. */
+const CHASE_BASE_MS = 250;
+const CHASE_MAX_MS = 4_000;
+export const CHASE_MAX_ATTEMPTS = 5;
 
 function isCoalesceableStreamEvent(ev: RuntimeEvent): boolean {
   if (ev.type === 'command_output.delta') return true;
@@ -77,6 +85,11 @@ interface View {
   /** Consecutive failed replay count for bounded backoff. */
   failures: number;
   retryTimer: ReturnType<typeof setTimeout> | null;
+  /** Catch-up fetches in a row that applied nothing new. */
+  chase: number;
+  chaseTimer: ReturnType<typeof setTimeout> | null;
+  /** The next replay asks for a snapshot (`after_sequence=0`). */
+  forceSnapshot: boolean;
   openSpan: Measurement | null;
 }
 
@@ -120,9 +133,11 @@ export class RuntimeViews {
     if (lastSequence > applied) void this.replay(id, true);
   }
 
-  /** Keep `id`'s projection live while open; returns the release. */
+  /** Keep `id`'s projection live while open; returns the release. The
+   *  thread's composer draft syncs only while a view holds it too. */
   open(id: string): () => void {
     if (!this.stopLive) this.startListeners();
+    const releaseDraft = runtimeDrafts.hold(id);
     const view = this.views.get(id);
     if (view) view.refs++;
     else {
@@ -138,11 +153,15 @@ export class RuntimeViews {
         liveFlushTimer: null,
         failures: 0,
         retryTimer: null,
+        chase: 0,
+        chaseTimer: null,
+        forceSnapshot: false,
         openSpan: startMeasurement('ui.thread.open', 'threads'),
       });
       void this.replay(id, false);
     }
     return () => {
+      releaseDraft();
       const v = this.views.get(id);
       if (!v || --v.refs > 0) return;
       if (v.openSpan) {
@@ -150,6 +169,7 @@ export class RuntimeViews {
         v.openSpan = null;
       }
       if (v.retryTimer) clearTimeout(v.retryTimer);
+      if (v.chaseTimer) clearTimeout(v.chaseTimer);
       if (v.liveFlushTimer) clearTimeout(v.liveFlushTimer);
       v.pendingLive.length = 0;
       this.views.delete(id);
@@ -338,12 +358,30 @@ export class RuntimeViews {
     }, delay);
   }
 
+  /** Still behind `knownSequence` after a replay that applied nothing:
+   *  retry with backoff, then once as a snapshot. */
+  private scheduleChase(id: string, view: View): void {
+    if (view.chaseTimer || this.views.get(id) !== view) return;
+    view.chase += 1;
+    if (view.chase > CHASE_MAX_ATTEMPTS) view.forceSnapshot = true;
+    const n = Math.min(view.chase, CHASE_MAX_ATTEMPTS);
+    const delay = Math.min(CHASE_BASE_MS * 2 ** (n - 1), CHASE_MAX_MS);
+    view.chaseTimer = setTimeout(() => {
+      view.chaseTimer = null;
+      if (this.views.get(id) === view) void this.replay(id, true);
+    }, delay);
+  }
+
   private async replay(id: string, bg = false): Promise<void> {
     const view = this.views.get(id);
     if (!view) return;
     if (view.retryTimer) {
       clearTimeout(view.retryTimer);
       view.retryTimer = null;
+    }
+    if (view.chaseTimer && !view.held) {
+      clearTimeout(view.chaseTimer);
+      view.chaseTimer = null;
     }
     if (view.held) {
       view.dirty = true;
@@ -352,7 +390,10 @@ export class RuntimeViews {
     this.flushPendingLive(id, view);
     view.held = [];
     view.dirty = false;
-    const after = this.projections[id]?.lastSequence ?? 0;
+    const applied = this.projections[id]?.lastSequence ?? 0;
+    const snapshotReload = view.forceSnapshot;
+    view.forceSnapshot = false;
+    const after = snapshotReload ? 0 : applied;
     const path = `/runtime-sessions/${id}/events?after_sequence=${after}&tail_turns=${defaultTailTurns()}&max_lines=${TAIL_MAX_LINES}&compact=true`;
     try {
       const replay = await (bg ? inLane('bg', () => api.get<RuntimeReplay>(path)) : api.get<RuntimeReplay>(path));
@@ -378,10 +419,19 @@ export class RuntimeViews {
         const { [id]: _fresh, ...stale } = this.staleError;
         this.staleError = stale;
       }
-      const rerun = gap || view.dirty || view.knownSequence > projection.lastSequence;
+      if (snapshotReload) {
+        // The daemon's own snapshot is the truth: stop chasing what it never had.
+        if (view.knownSequence > projection.lastSequence) view.knownSequence = projection.lastSequence;
+        view.chase = 0;
+      } else if (projection.lastSequence > applied) {
+        view.chase = 0; // progress (a replay page): keep going at once
+      }
+      const behind = gap || view.knownSequence > projection.lastSequence;
+      const again = view.dirty;
       view.held = null;
       view.dirty = false;
-      if (rerun) void this.replay(id, true);
+      if (again || (behind && view.chase === 0 && projection.lastSequence > applied)) void this.replay(id, true);
+      else if (behind) this.scheduleChase(id, view);
     } catch (e) {
       if (this.views.get(id) !== view) return;
       const held = view.held ?? [];

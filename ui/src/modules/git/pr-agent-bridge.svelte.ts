@@ -33,7 +33,7 @@ class PrAgentBridge {
   /** The ⋯ menu's hint for PR `n`'s agent entries. */
   hint(repoId: string, n: number): string {
     const st = this.status[prAgentOriginId(repoId, n)];
-    return st === 'working' ? 'agent · working' : st === 'needs-you' ? 'agent · needs you' : 'agent';
+    return st === 'working' ? 'agent · working' : st === 'needs-you' ? 'agent · needs you' : st === 'background' ? 'agent · background task' : 'agent';
   }
 
   ask(repoId: string, n: number, ask: PrAgentAsk): void {

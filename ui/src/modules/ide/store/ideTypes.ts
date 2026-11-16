@@ -101,6 +101,9 @@ export interface IdeFileReadResp {
 export interface IdeOpenTab {
   path: string; name: string; content: string; savedContent: string; dirty?: boolean;
   eol?: '\r\n' | '\n';
+  /** Per-line terminators of the file as last read/written, kept only when it MIXES
+   *  styles (CRLF + LF, lone CR): saving then keeps each untouched line's ending. */
+  diskEols?: string[];
   sha256?: string; language: string; readOnly: boolean; truncated: boolean;
   loading: boolean; error: string | null; preview: boolean;
   pinned?: boolean; external?: boolean;
@@ -114,13 +117,74 @@ export function detectTextEol(text: string): '\r\n' | '\n' {
   return crlf > 0 && crlf >= lf - crlf ? '\r\n' : '\n';
 }
 
+/** Identity of a target for stale-response checks: a load that started under one key and
+ *  finishes under another (the project switched meanwhile) must drop its result. */
+export function ideTargetKey(t: Pick<IdeTargetSpec, 'kind' | 'root' | 'connection_id'>): string {
+  return `${t.kind}:${t.connection_id ?? ''}:${t.root}`;
+}
+
 export function normalizeEditorLf(text: string): string {
   return text.indexOf('\r') >= 0 ? text.replace(/\r\n?/g, '\n') : text;
 }
 
-export function serializeTabDiskContent(tab: Pick<IdeOpenTab, 'eol'>, editorLfContent: string): string {
+/** The line terminators of `raw`, one per line (the last line's is ''), or undefined when
+ *  the file uses one style throughout (the common case: `eol` alone describes it). */
+export function diskEolsOf(raw: string): string[] | undefined {
+  if (raw.indexOf('\r') < 0) return undefined;
+  const eols: string[] = [];
+  const seen = new Set<string>();
+  const re = /\r\n|\n|\r/g;
+  for (let m = re.exec(raw); m; m = re.exec(raw)) { eols.push(m[0]); seen.add(m[0]); }
+  if (seen.size < 2) return undefined;
+  eols.push('');
+  return eols;
+}
+
+/**
+ * Editor text (LF) → the bytes to write. One-style files get that style. A file with mixed
+ * endings keeps the ending of every line the edit did not touch, so a one-line edit stays
+ * a one-line diff: lines in the unchanged prefix/suffix (against `savedContent`, which
+ * `diskEols` describes) keep theirs, a same-size changed block keeps them line by line, and
+ * only genuinely inserted lines take the dominant style.
+ */
+export function serializeTabDiskContent(
+  tab: { eol?: IdeOpenTab['eol']; diskEols?: string[]; savedContent?: string },
+  editorLfContent: string,
+): string {
   const lf = normalizeEditorLf(editorLfContent);
-  return tab.eol === '\r\n' ? lf.replace(/\n/g, '\r\n') : lf;
+  const def = tab.eol === '\r\n' ? '\r\n' : '\n';
+  const eols = tab.diskEols;
+  const oldLines = eols && typeof tab.savedContent === 'string' ? tab.savedContent.split('\n') : null;
+  if (!eols || !oldLines || oldLines.length !== eols.length) return def === '\r\n' ? lf.replace(/\n/g, '\r\n') : lf;
+  const newLines = lf.split('\n');
+  let p = 0;
+  while (p < oldLines.length && p < newLines.length && oldLines[p] === newLines[p]) p++;
+  let so = oldLines.length;
+  let sn = newLines.length;
+  while (so > p && sn > p && oldLines[so - 1] === newLines[sn - 1]) { so--; sn--; }
+  const sameSizeBlock = sn - p === so - p;
+  let out = '';
+  for (let i = 0; i < newLines.length; i++) {
+    out += newLines[i];
+    if (i === newLines.length - 1) break;
+    const oldIdx = i < p ? i : i >= sn ? i - sn + so : sameSizeBlock ? i : -1;
+    out += (oldIdx >= 0 ? eols[oldIdx] : '') || def;
+  }
+  return out;
+}
+
+/** Hex SHA-256 of `text` as UTF-8 (what `PUT /ide/fs/file` compares `expected_sha256`
+ *  against), or undefined where WebCrypto is missing (a plain-http remote origin). */
+export async function sha256HexOfText(text: string): Promise<string | undefined> {
+  const subtle = globalThis.crypto?.subtle;
+  const Enc = globalThis.TextEncoder;
+  if (!subtle || !Enc) return undefined;
+  try {
+    const digest = await subtle.digest('SHA-256', new Enc().encode(text));
+    return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return undefined;
+  }
 }
 
 export interface IdeSearchItem {
@@ -431,11 +495,30 @@ export async function streamIdeSse(path: string, headers: Record<string, string>
   }
 }
 
+/** A refused guest call: the HTTP status plus the daemon's own reason (its JSON `error`). */
+export class IdeCollabHttpError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export function collabErrorText(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as { error?: unknown; message?: unknown };
+    const msg = typeof parsed.error === 'string' ? parsed.error : typeof parsed.message === 'string' ? parsed.message : '';
+    return msg || raw;
+  } catch {
+    return raw;
+  }
+}
+
 export async function collabGuestPost<T>(path: string, guestToken: string | null, body: unknown): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (guestToken) headers['X-Ide-Collab-Token'] = guestToken;
   const resp = await laneFetch('int', path, { method: 'POST', headers, body: JSON.stringify(body) });
-  if (!resp.ok) throw new Error(await resp.text());
+  if (!resp.ok) throw new IdeCollabHttpError(resp.status, collabErrorText(await resp.text()));
   return (await resp.json()) as T;
 }
 

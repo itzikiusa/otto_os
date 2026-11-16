@@ -31,6 +31,40 @@ export const RUNTIME_PROVIDERS: readonly RuntimeProvider[] = [
   'muse',
 ];
 
+/** Whether a detected tool (`/meta.tools[].name`) is an agent CLI Otto can
+ *  run a session on — every known family, not just the first three. */
+export function isAgentCliTool(name: string): boolean {
+  return (KNOWN_AGENT_FAMILIES as readonly string[]).includes(name);
+}
+
+/** Whether a TERMINAL session of `provider` takes an effort: the daemon's
+ *  `/meta.provider_terminal_effort` (its CLI has an effort flag — Muse,
+ *  opencode, grok, gemini don't, so a choice there would be silently
+ *  ignored). An older daemon without the map → `fallback`. */
+export function terminalTakesEffort(
+  provider: string,
+  meta: Pick<MetaResp, 'provider_terminal_effort'> | null | undefined,
+  fallback: boolean,
+): boolean {
+  return meta?.provider_terminal_effort?.[provider] ?? fallback;
+}
+
+/** The built-in providers and their default update commands (`null` = none),
+ *  mirroring `ProviderRegistry::build_map` in `crates/otto-sessions/src/providers.rs`
+ *  (a unit test keeps the two in step). Muse's launcher has no `update`
+ *  subcommand: the environment makes `--version` refresh it synchronously. */
+export const BUILTIN_PROVIDER_UPDATES: readonly { name: string; updateCmd: string | null }[] = [
+  { name: 'claude', updateCmd: 'claude update' },
+  { name: 'codex', updateCmd: 'codex update' },
+  { name: 'agy', updateCmd: 'agy update' },
+  { name: 'gemini', updateCmd: 'npm install -g @google/gemini-cli@latest' },
+  { name: 'grok', updateCmd: 'grok update' },
+  { name: 'opencode', updateCmd: 'opencode upgrade' },
+  { name: 'pi', updateCmd: 'pi update' },
+  { name: 'muse', updateCmd: 'MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1 MUSE_UPDATE_INTERVAL_SECONDS=0 muse --version' },
+  { name: SHELL_PROVIDER, updateCmd: null },
+];
+
 export type ProviderFamilyMeta = Pick<MetaResp, 'provider_models'> &
   Partial<Pick<MetaResp, 'provider_families' | 'providers' | 'runtime_capabilities'>>;
 

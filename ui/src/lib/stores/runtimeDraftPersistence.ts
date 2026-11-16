@@ -32,7 +32,13 @@ export function snapshotDraft(d: ComposerContent): RuntimeDraftContent {
   if (d.model === undefined) cloned.model = undefined;
   return cloned;
 }
+const acknowledged = new WeakSet<RuntimeDraftContent>();
+/** Clear what `sent` carried from the composer, once per snapshot: a send
+ *  acknowledges at submit and again when the daemon answers, and the second
+ *  pass must not strip an identical image pasted while the request ran. */
 export function acknowledgeComposer(d: ComposerContent, sent: RuntimeDraftContent): void {
+  if (acknowledged.has(sent)) return;
+  acknowledged.add(sent);
   acknowledgeDraft(composerContent(d), sent);
 }
 
@@ -99,6 +105,23 @@ export function acknowledgeDraft(current: RuntimeDraftContent, sent: RuntimeDraf
   current.context = current.context.filter(x => !sent.context.some(s => equal(s, x)));
   if (current.fresh_context === sent.fresh_context) current.fresh_context = false;
 }
+/** The daemon refuses a stored draft over 24 MiB of JSON (otto-state
+ *  agent_runtime/drafts.rs) and its route body over 24 MiB (otto-agent-protocol
+ *  http.rs): a bigger one is never sent. */
+export const MAX_DRAFT_JSON_BYTES = 24 * 1024 * 1024;
+const TOO_LARGE = 'Draft too large to save (24 MB limit). Remove an attachment.';
+
+/** A save the daemon refused for its content (413 size, 400 invalid): the
+ *  person-facing reason, or null for a failure worth retrying. */
+export function refusedSaveText(e: unknown): string | null {
+  const status = (e as { status?: number } | null)?.status;
+  if (status !== 413 && status !== 400) return null;
+  const msg = e instanceof Error ? e.message.trim() : '';
+  // axum's own body-limit rejection has no useful words for a person.
+  if (status === 413 && (!msg || /length limit|body/i.test(msg))) return TOO_LARGE;
+  return msg || 'The daemon refused this draft.';
+}
+
 export interface DraftTransport {
   load(): Promise<RuntimeDraftRecord>;
   save(draft: RuntimeDraftContent, revision: number): Promise<RuntimeDraftRecord>;
@@ -115,6 +138,9 @@ export class DraftPersistence {
   private inSaveCall = false;
   private saved = '';
   private conflicted = false;
+  /** Length of a draft the daemon refused (or that is over the limit): no
+   *  automatic save again until the draft changes (400) or shrinks (413). */
+  private refused: { json: number; shrinkOnly: boolean; at: string; msg: string } | null = null;
   private baseline: RuntimeDraftContent;
   private current: RuntimeDraftContent;
   private transport: DraftTransport;
@@ -220,6 +246,17 @@ export class DraftPersistence {
     while (this.owns()) {
       const currentJson = JSON.stringify(this.current);
       if (currentJson === this.saved) break;
+      const r = this.refused;
+      if (r && (r.shrinkOnly ? currentJson.length >= r.json : currentJson === r.at)) {
+        this.status('error', r.msg);
+        return;
+      }
+      this.refused = null;
+      if (currentJson.length > MAX_DRAFT_JSON_BYTES) {
+        this.refused = { json: currentJson.length, shrinkOnly: true, at: '', msg: TOO_LARGE };
+        this.status('error', TOO_LARGE);
+        return;
+      }
       const snapshot = JSON.parse(currentJson) as RuntimeDraftContent;
       this.status('saving');
       this.inSaveCall = true;
@@ -230,6 +267,13 @@ export class DraftPersistence {
         this.saved = currentJson;
       } catch (e) {
         if (!this.owns()) return;
+        const refusal = refusedSaveText(e);
+        if (refusal) {
+          const tooLarge = (e as { status?: number }).status === 413;
+          this.refused = { json: currentJson.length, shrinkOnly: tooLarge, at: tooLarge ? '' : currentJson, msg: refusal };
+          this.status('error', refusal);
+          return;
+        }
         this.conflicted = (e as { status?: number }).status === 409;
         this.status('error', this.conflicted ? 'This draft changed in another window. Retry to save this version.' : 'Draft not saved. Retry when connected.');
         return;
@@ -242,6 +286,7 @@ export class DraftPersistence {
   /** Explicit Retry keeps local work, refreshing only the revision after a conflict. */
   async retry(): Promise<void> {
     if (!this.owns()) return;
+    this.refused = null;
     if (this.conflicted) {
       try {
         const record = await this.transport.load();

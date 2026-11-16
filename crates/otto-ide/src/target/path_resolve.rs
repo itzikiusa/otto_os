@@ -8,6 +8,7 @@ use otto_ssh::{valid_proxy_jump, valid_ssh_host, valid_ssh_user};
 
 use crate::types::{IdeSshSpec, IdeTargetKind, IdeTargetSpec};
 
+use super::control_paths::enforce_control_path;
 use super::fs_ops::{enforce_non_root_path, resolve_local_existing_in_roots};
 use super::sdk_paths::{
     collect_readonly_sdk_roots, discover_local_go_replace_roots, is_virtual_archive_uri,
@@ -42,6 +43,15 @@ pub(crate) fn canonicalize_local_root_dir(raw_root: &str, is_root_user: bool) ->
     }
     if !is_root_user {
         enforce_non_root_path(&canonical)?;
+        // A non-root root serves its whole subtree for unsandboxed daemon
+        // writes: `/`, `$HOME`, an ancestor of a protected dir or a hidden
+        // tool home would put `~/.zshrc` or a LaunchAgent in reach (the
+        // vault refuses the same roots).
+        if let Some(why) = otto_core::secret_paths::subtree_root_denial(&canonical) {
+            return Err(Error::Forbidden(format!(
+                "{why}; only the root user can open it"
+            )));
+        }
     }
     Ok(canonical)
 }
@@ -133,6 +143,7 @@ pub(crate) async fn resolve_local_prospective_in_roots(
 
     if !is_root_user {
         enforce_non_root_path(&prospective)?;
+        enforce_control_path(&prospective, false)?;
     }
     if create_dirs {
         if let Some(parent) = prospective.parent() {
@@ -154,6 +165,8 @@ pub(crate) async fn resolve_local_prospective_in_roots(
             }
         }
     }
+    // Re-checked on the final path: the parent was re-resolved above.
+    enforce_control_path(&prospective, is_root_user)?;
     Ok((prospective, matched_root))
 }
 
@@ -232,25 +245,45 @@ pub(crate) fn resolve_remote_in_roots_or_sdk(
         return Err(Error::Invalid("remote path must not be empty".into()));
     }
     let normalized = lexical_normalize_remote(&decoded)?;
-    let is_remote_sdk = [
-        "/usr/local/go/",
-        "/usr/lib/go",
-        "/usr/share/go",
-        "/usr/lib/python",
-        "/usr/lib/jvm/",
-        "/.otto/toolchains/",
-        "/go/pkg/mod/",
-        "/.cargo/registry/",
-        "/.rustup/toolchains/",
-    ]
-    .iter()
-    .any(|prefix| normalized.contains(prefix));
-    if is_remote_sdk {
+    if is_remote_sdk_path(&normalized) {
         return Ok((normalized, None));
     }
     Err(Error::Forbidden(format!(
         "remote path '{normalized}' is outside workspace root '{root}'"
     )))
+}
+
+/// Read-only remote SDK/module-cache files a target may open outside its
+/// roots. A PATH-PREFIX match: system prefixes from `/`, tool caches from a
+/// home directory (`~/`, `/home/<u>/`, `/Users/<u>/`, `/root/`) — never a
+/// substring, which let any path containing `/go/pkg/mod/` through.
+fn is_remote_sdk_path(normalized: &str) -> bool {
+    const SYSTEM: &[&str] = &[
+        "/usr/local/go/",
+        "/usr/lib/go",
+        "/usr/share/go",
+        "/usr/lib/python",
+        "/usr/lib/jvm/",
+    ];
+    const IN_HOME: &[&str] = &[
+        ".otto/toolchains/",
+        "go/pkg/mod/",
+        ".cargo/registry/",
+        ".rustup/toolchains/",
+    ];
+    if SYSTEM.iter().any(|p| normalized.starts_with(p)) {
+        return true;
+    }
+    let in_home = normalized
+        .strip_prefix("~/")
+        .or_else(|| normalized.strip_prefix("/root/"))
+        .or_else(|| {
+            let rest = normalized
+                .strip_prefix("/home/")
+                .or_else(|| normalized.strip_prefix("/Users/"))?;
+            rest.split_once('/').map(|(_, r)| r)
+        });
+    in_home.is_some_and(|r| IN_HOME.iter().any(|p| r.starts_with(p)))
 }
 
 fn lexical_normalize_remote(path: &str) -> Result<String> {
@@ -570,6 +603,32 @@ impl TargetManager {
                 let (p, _) = resolve_remote_in_roots_or_sdk(root, additional_roots, raw_path)?;
                 Ok(p)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod remote_sdk_tests {
+    use super::is_remote_sdk_path;
+
+    #[test]
+    fn remote_sdk_allowlist_is_a_path_prefix_not_a_substring() {
+        for ok in [
+            "/usr/local/go/src/fmt/print.go",
+            "/home/u/go/pkg/mod/golang.org/x/a.go",
+            "/Users/u/.cargo/registry/src/x.rs",
+            "~/.rustup/toolchains/stable/lib.rs",
+            "/root/.otto/toolchains/go/src/a.go",
+        ] {
+            assert!(is_remote_sdk_path(ok), "{ok}");
+        }
+        for bad in [
+            "/home/u/.ssh/go/pkg/mod/x",
+            "/etc/shadow/.cargo/registry/x",
+            "/srv/app/.otto/toolchains/secret",
+            "/home/u/secrets/x",
+        ] {
+            assert!(!is_remote_sdk_path(bad), "{bad}");
         }
     }
 }

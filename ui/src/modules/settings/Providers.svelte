@@ -23,6 +23,7 @@
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import { formToProvider, joinArgs, providerToForm, type ProviderDef } from './providerForm';
+  import { BUILTIN_PROVIDER_UPDATES } from '../../lib/providerRegistry';
 
   interface CliAutoUpdate {
     enabled: boolean;
@@ -38,18 +39,8 @@
     reload_sessions: true,
   };
 
-  // Built-in providers with their default update commands (None for shell).
-  const BUILTINS: { name: string; updateCmd: string | null }[] = [
-    { name: 'claude',   updateCmd: 'claude update' },
-    { name: 'codex',    updateCmd: 'codex update' },
-    { name: 'agy',      updateCmd: 'agy update' },
-    { name: 'gemini',   updateCmd: 'npm install -g @google/gemini-cli@latest' },
-    { name: 'grok',     updateCmd: 'grok update' },
-    { name: 'opencode', updateCmd: 'opencode upgrade' },
-    { name: 'pi',       updateCmd: 'pi update' },
-    { name: 'muse',     updateCmd: 'MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1 MUSE_UPDATE_INTERVAL_SECONDS=0 muse --version' },
-    { name: 'shell',    updateCmd: null },
-  ];
+  // Built-in providers with their default update commands (the shared registry).
+  const BUILTINS = BUILTIN_PROVIDER_UPDATES;
 
   let loading = $state(true);
   // A failed load shows inline with Retry. Rendering the form instead showed

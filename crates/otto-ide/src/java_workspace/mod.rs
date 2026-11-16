@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 
 pub use self::builder::{
-    collect_java_files_rec, infer_java_fqcn_from_file, prepare_java_execution, JavaExecutionPlan,
+    collect_java_files_rec, infer_java_fqcn_from_file, prepare_java_execution,
+    prepare_java_execution_cancellable, JavaExecutionPlan,
 };
 pub use self::zip_jdk::{
     global_jdk_index, read_jar_classes_and_packages, read_zip_central_dir_entries, JdkClassIndex,

@@ -79,10 +79,12 @@ pub fn sanitize_prompt_text(s: &str) -> String {
 /// own provider, or the one captured running inside a plain terminal
 /// (`meta.nested_provider`, the same resolution the resume feature and the
 /// transcript route use). A bare shell stays refused: it would EXECUTE the line.
-pub fn nudgeable(session: &Session) -> bool {
+/// A custom provider rides its CLI family through the registry (a `work`
+/// provider with `model_family: "claude"` is Claude) — never a name guess.
+pub fn nudgeable_in(providers: &otto_sessions::ProviderRegistry, session: &Session) -> bool {
     session.kind == SessionKind::Agent
         && matches!(
-            crate::transcript::resolve::effective_provider(session).as_str(),
+            crate::transcript::resolve::effective_provider_in(providers, session).as_str(),
             "claude" | "codex"
         )
 }
@@ -116,7 +118,10 @@ pub fn nested_agent_alive(
 /// Async wrapper: snapshot the process table (a `ps` call, off the runtime
 /// threads) and check [`nested_agent_alive`] for `session`'s live PTY.
 pub async fn agent_running(ctx: &ServerCtx, session: &Session) -> bool {
-    if matches!(session.provider.as_str(), "claude" | "codex") {
+    if matches!(
+        ctx.manager.cli_family(&session.provider).as_str(),
+        "claude" | "codex"
+    ) {
         return ctx.manager.is_live(&session.id);
     }
     let Some(pid) = ctx.manager.live_handle(&session.id).and_then(|h| h.pid()) else {
@@ -257,7 +262,7 @@ async fn deliver(ctx: &ServerCtx, repo: &ActivityRepo, session_id: &Id, pending:
     let Ok(session) = ctx.manager.get(session_id).await else {
         return;
     };
-    if !nudgeable(&session) {
+    if !nudgeable_in(ctx.manager.providers(), &session) {
         tracing::debug!(session = %session_id, provider = %session.provider, "nudge sweep: session cannot take a nudge");
         return;
     }
@@ -423,6 +428,10 @@ mod tests {
 
     #[test]
     fn only_claude_codex_agents_are_nudgeable() {
+        let reg = otto_sessions::ProviderRegistry::new(Some(&serde_json::json!({
+            "work": {"cmd": "/opt/wrap", "model_family": "claude"},
+            "museum-cli": {"cmd": "/opt/museum"}
+        })));
         let mut s = Session {
             id: "s".into(),
             workspace_id: "w".into(),
@@ -439,22 +448,34 @@ mod tests {
             archived: false,
             meta: serde_json::Value::Null,
         };
-        assert!(nudgeable(&s));
+        assert!(nudgeable_in(&reg, &s));
         s.provider = "shell".into();
         assert!(
-            !nudgeable(&s),
+            !nudgeable_in(&reg, &s),
             "a bare shell would run the line as a command"
         );
         // A terminal in which the user launched claude (captured nested provider)
         // is running a chat TUI → nudgeable, like the transcript/resume paths.
         s.meta = serde_json::json!({ "nested_provider": "claude", "nested_cwd": "/x" });
-        assert!(nudgeable(&s), "captured-shell case");
+        assert!(nudgeable_in(&reg, &s), "captured-shell case");
         s.meta = serde_json::json!({ "nested_provider": "python" });
-        assert!(!nudgeable(&s));
+        assert!(!nudgeable_in(&reg, &s));
         s.meta = serde_json::Value::Null;
         s.provider = "codex".into();
         s.kind = SessionKind::Connection;
-        assert!(!nudgeable(&s));
+        assert!(!nudgeable_in(&reg, &s));
+        // I-09: a custom provider whose name says nothing is resolved through
+        // the registry (its explicit `model_family`), not guessed from a name.
+        s.kind = SessionKind::Agent;
+        s.provider = "work".into();
+        assert!(nudgeable_in(&reg, &s));
+        s.provider = "claudework-unregistered".into();
+        assert!(
+            !nudgeable_in(&reg, &s),
+            "an unregistered name is not guessed"
+        );
+        s.provider = "museum-cli".into();
+        assert!(!nudgeable_in(&reg, &s));
     }
 
     #[test]

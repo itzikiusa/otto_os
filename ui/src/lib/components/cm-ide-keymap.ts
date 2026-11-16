@@ -7,7 +7,7 @@ import {
   moveLineDown, moveLineUp, selectParentSyntax, simplifySelection,
   toggleBlockComment, toggleComment,
 } from '@codemirror/commands';
-import { gotoLine as cmGotoLine, openSearchPanel, selectNextOccurrence, selectSelectionMatches } from '@codemirror/search';
+import { gotoLine as cmGotoLine, openSearchPanel, searchPanelOpen, selectNextOccurrence, selectSelectionMatches } from '@codemirror/search';
 import {
   EditorSelection, EditorState, Prec,
   type ChangeSpec, type Extension, type SelectionRange,
@@ -346,6 +346,8 @@ export function buildIdeKeymapSpecs(
     {
       key: 'Mod-g',
       run: (v) => {
+        // Find panel open: leave ⌘G to the search keymap's "find next".
+        if (searchPanelOpen(v.state)) return false;
         const cb = getCallbacks().onGoToLine;
         if (cb) { cb(); return true; }
         return cmGotoLine(v);

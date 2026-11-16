@@ -586,7 +586,7 @@ export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions
       const items: MenuItem[] = [];
       if (cbs.onAgentAction) {
         items.push(
-          { label: 'Add Selection to Agent (⌘L)', icon: 'assistant', action: () => cbs.onAgentAction?.('chat', selectionOrCurrentLine(view.state)) },
+          { label: 'Add Selection to Agent', icon: 'assistant', hint: '⌘L', action: () => cbs.onAgentAction?.('chat', selectionOrCurrentLine(view.state)) },
           { label: 'Inline Edit with Agent (⌘I)', icon: 'sparkle', disabled: view.state.readOnly, action: () => cbs.onAgentAction?.('inline', selectionOrCurrentLine(view.state)) },
         );
       }

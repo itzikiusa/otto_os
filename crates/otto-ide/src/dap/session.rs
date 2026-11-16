@@ -23,7 +23,7 @@ pub(super) use super::session_entry::{
 };
 pub use super::session_inline::compute_inline_values;
 pub(super) use super::session_inline::mark_resumed;
-use super::session_inline::{build_session_title, stop_entry};
+use super::session_inline::{build_session_title, shutdown_entry, stop_entry};
 use super::session_inspect::{select_frame_and_refresh, sync_all_breakpoints};
 use super::session_transport::{
     boot_session_connection, evict_terminated_sessions, handshake_and_run,
@@ -296,13 +296,13 @@ impl DapManager {
         }
     }
 
-    /// Stop and tear down all active debug sessions on daemon shutdown.
+    /// Stop and tear down all active debug sessions on daemon shutdown —
+    /// concurrently, each bounded, so one slow adapter or a session still
+    /// booting cannot use up the host's shutdown slot.
     pub async fn shutdown(&self) {
         let entries: Vec<Arc<SessionEntry>> =
             self.sessions.iter().map(|e| e.value().clone()).collect();
-        for entry in entries {
-            stop_entry(&entry).await;
-        }
+        futures_util::future::join_all(entries.iter().map(|e| shutdown_entry(e))).await;
         self.sessions.clear();
     }
 
@@ -485,12 +485,16 @@ impl DapManager {
             if entry.boot_generation.load(Ordering::SeqCst) != my_gen || entry.is_terminal() {
                 return;
             }
-            let resolved = match otto_telemetry::context::measure_result(
+            // Stop while the target is still compiling drops the build (and
+            // kills its process group) instead of letting it run to the end.
+            let resolve = otto_telemetry::context::measure_result(
                 "ide.dap.resolve_adapter",
                 resolve_dap_adapter_with_manager(&data_dir, &req, &ctx, Some(&environments)),
-            )
-            .await
-            {
+            );
+            let Some(resolved) = entry.unless_superseded(my_gen, resolve).await else {
+                return;
+            };
+            let resolved = match resolved {
                 Ok(r) => r,
                 Err(err) => {
                     let _guard = entry.lifecycle_lock.lock().await;
@@ -513,12 +517,13 @@ impl DapManager {
                 snap.language = resolved.language.clone();
                 snap.adapter = resolved.adapter_name.clone();
             });
-            if let Err(err) = otto_telemetry::context::measure_result(
+            // The lifecycle lock is held from here: Stop supersedes the boot so
+            // it does not wait out a 15 s port or `initialize` timeout for it.
+            let boot = otto_telemetry::context::measure_result(
                 "ide.dap.handshake",
                 boot_session_connection(&sessions, &entry, resolved, &req, &ctx),
-            )
-            .await
-            {
+            );
+            if let Some(Err(err)) = entry.unless_superseded(my_gen, boot).await {
                 if entry.boot_generation.load(Ordering::SeqCst) == my_gen && !entry.is_terminal() {
                     entry.fail_and_evict(&sessions, err.to_string());
                 }

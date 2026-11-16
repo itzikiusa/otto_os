@@ -46,8 +46,9 @@ const MAX_SCANNED_PER_PASS: usize = 5_000;
 /// Must equal `otto_context::materialize::BUNDLE_CWD_MARKER` (ottod does not
 /// link otto-context; a test below checks the two stay in step).
 pub const MARKER: &str = ".otto-cwd";
-/// The provider folders bundles live in (`delivers_context` providers).
-const PROVIDERS: [&str; 5] = ["claude", "codex", "agy", "grok", "opencode"];
+/// The provider folders bundles live in (`delivers_context` providers; a
+/// test below keeps the two in step).
+const PROVIDERS: [&str; 6] = ["claude", "codex", "agy", "grok", "opencode", "pi"];
 const DAY: u64 = 24 * 3600;
 
 /// The grace from the setting value: absent / malformed → the default,
@@ -330,6 +331,22 @@ mod tests {
         assert!(src.contains(&format!(
             "pub const BUNDLE_CWD_MARKER: &str = \"{MARKER}\";"
         )));
+    }
+
+    /// I-10: the sweep covers exactly the providers Otto writes bundles for
+    /// (pi's were never reclaimed).
+    #[test]
+    fn the_swept_providers_are_the_delivers_context_ones() {
+        let src = include_str!("../../../otto-context/src/materialize.rs");
+        let start = src
+            .find("pub fn delivers_context")
+            .expect("delivers_context");
+        let body = &src[start..start + src[start..].find("\n}").expect("fn end")];
+        let mut listed: Vec<&str> = body.split('"').skip(1).step_by(2).collect();
+        listed.sort_unstable();
+        let mut swept = PROVIDERS.to_vec();
+        swept.sort_unstable();
+        assert_eq!(swept, listed);
     }
 
     #[test]

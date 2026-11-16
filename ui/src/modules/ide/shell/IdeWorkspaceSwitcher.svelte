@@ -7,15 +7,15 @@
   import { confirmer } from '../../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
-  import { rowMenu } from '../../../lib/rowMenu';
-  import { viewport } from '../../../lib/stores/viewport.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
 
   const IdeWorkspacePopoverLazy = lazyComponent(() => import('./IdeWorkspacePopover.svelte'));
 
+  // The pinned-project pills row is gone (one toolbar row, review G13): the
+  // switcher's popover lists the named projects.
   interface Props {
-    mode?: 'switcher' | 'pills-bar';
+    mode?: 'switcher';
     onpickfolder?: (mode: 'open' | 'attach') => void;
   }
 
@@ -163,41 +163,6 @@
       onerror={() => (menuOpen = false)}
     />
   {/if}
-{:else if !viewport.isPhone && pinnedProjects.length > 0}
-  <div class="ws-pills-bar" role="group" aria-label="Pinned IDE projects">
-    <div class="ws-pills-strip">
-      {#each pinnedProjects as proj (proj.id)}
-        {@const isActive = ide.activeProjectId === proj.id}
-        <button
-          type="button"
-          class="ws-proj-pill"
-          class:is-active={isActive}
-          aria-pressed={isActive}
-          title={`${proj.name} (${proj.folders.length} ${proj.folders.length === 1 ? 'repo' : 'repos'}) — right-click for options`}
-          onclick={() => void ide.activateProject(proj.id)}
-          oncontextmenu={(e) => openProjectContextMenu(e, proj)}
-          use:rowMenu
-          data-testid="ide-project-pill"
-        >
-          <span class="ws-pill-name" dir="auto">{proj.name}</span>
-          {#if proj.folders.length > 1}
-            <span class="ws-pill-cnt">{proj.folders.length}</span>
-          {/if}
-        </button>
-      {/each}
-      <button
-        type="button"
-        class="ws-proj-pill ws-add-proj"
-        aria-label="New multi-repo IDE project"
-        title="New multi-repo IDE project…"
-        onclick={() => (ide.bulkRepoPickerMode = 'create')}
-        data-testid="ide-new-project-btn"
-      >
-        <Icon name="plus" size={12} />
-        <span class="ws-add-lbl">Project</span>
-      </button>
-    </div>
-  </div>
 {/if}
 
 <style>
@@ -211,25 +176,6 @@
   .ws-icon { display: inline-flex; color: var(--accent-text); flex-shrink: 0; }
   .ws-name { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
   .ws-path { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-inline-size: 90px; }
-  .ws-pills-bar {
-    display: flex; align-items: center; padding-block: 4px; padding-inline: 16px;
-    background: var(--surface); border-block-end: 1px solid var(--border); flex-shrink: 0; min-inline-size: 0;
-  }
-  .ws-pills-strip {
-    display: flex; align-items: center; gap: 6px; inline-size: 100%;
-    overflow-x: auto; scrollbar-width: none; min-inline-size: 0;
-  }
-  .ws-pills-strip::-webkit-scrollbar { display: none; }
-  .ws-proj-pill {
-    display: inline-flex; align-items: center; gap: 4px; block-size: 24px; padding-inline: 8px;
-    border-radius: var(--radius-s); border: 1px solid var(--border); background: var(--surface-2);
-    color: var(--text-dim); font-size: var(--fs-xs); font-weight: 500; white-space: nowrap; cursor: pointer; flex-shrink: 0;
-  }
-  .ws-proj-pill:hover { background: var(--hover); color: var(--text); border-color: var(--border-strong); }
-  .ws-proj-pill.is-active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); font-weight: 600; }
-  .ws-pill-name { max-inline-size: 140px; overflow: hidden; text-overflow: ellipsis; }
-  .ws-pill-cnt { font-family: var(--font-mono); font-size: var(--fs-xs); opacity: 0.85; }
-  .ws-add-proj { border-style: dashed; background: transparent; }
-  @media (max-width: 1024px) { .ws-path, .ws-add-lbl { display: none; } .ws-switcher-btn { max-inline-size: 175px; } }
-  @media (max-width: 640px) { .ws-switcher-btn { max-inline-size: 145px; block-size: 26px; padding-inline: 8px; font-size: var(--fs-xs); } }
+  @media (max-width: 1024px) { .ws-path { display: none; } .ws-switcher-btn { max-inline-size: 175px; } }
+  @media (max-width: 640px) { .ws-switcher-btn { max-inline-size: min(145px, 34vw); block-size: 26px; padding-inline: 8px; font-size: var(--fs-xs); } }
 </style>

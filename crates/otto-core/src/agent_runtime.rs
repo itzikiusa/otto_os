@@ -146,6 +146,14 @@ pub struct BackgroundTask {
     /// Optional scheduled fire timestamp for one-shot timers (`schedule`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<DateTime<Utc>>,
+    /// A person asked to stop it and the provider has not confirmed yet
+    /// (`POST …/tasks/{task_id}/stop`). Set by the runtime, never a driver.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopping: bool,
+    /// Why the last stop did not take (the provider refused it, or the task
+    /// was still running when the stop grace ran out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_error: Option<String>,
 }
 
 /// Structured settlement metadata attached to a [`TurnItemKind::SystemNotice`]
@@ -249,6 +257,14 @@ pub struct ProviderTurn {
     /// `agent` = a turn the agent started on its own (no user message).
     #[serde(default, skip_serializing_if = "TurnOrigin::is_user")]
     pub origin: TurnOrigin,
+    /// The model this turn ran on, as far as Otto knows when it starts: the
+    /// pinned one, else the one the agent reported (`None` = its default,
+    /// unreported). A refused switch rewrites it to the model kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The reasoning effort sent with this turn (`None` = the provider's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// `OrchestrationV2TurnItemStatus`.
@@ -333,6 +349,11 @@ pub struct ProviderFailure {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
 }
+
+/// [`ProviderFailure::code`] of a driver error that says the agent refused a
+/// LIVE model switch (Claude `set_model`, ACP `-32602`): the runtime puts the
+/// thread back on the model it runs and says so in the timeline.
+pub const MODEL_SWITCH_REFUSED: &str = "model_switch_refused";
 
 /// The type-specific part of a turn item (`OrchestrationV2TurnItem`, subset).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1011,6 +1032,10 @@ pub struct RuntimeSession {
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The reasoning effort the thread runs at (picked at create or with an
+    /// accepted prompt), re-applied on every respawn; `None` = the provider's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// The provider's own session / thread id (resume key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_thread_id: Option<String>,
@@ -1197,6 +1222,11 @@ pub struct CreateRuntimeSessionBody {
     /// through (`meta.network_profile_id`); checked at spawn.
     #[serde(default)]
     pub network_profile_id: Option<String>,
+    /// The reasoning effort the thread starts at (stored on the session and
+    /// re-applied on every spawn). Not part of [`CreateRuntimeSessionReq`]:
+    /// the route sets it once the thread exists.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 impl CreateRuntimeSessionBody {
@@ -1692,6 +1722,10 @@ pub struct SynthesizeCouncilReq {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+    /// Stop a seat's leftover background work (a seat with nothing else
+    /// running) instead of refusing the synthesis with 409.
+    #[serde(default)]
+    pub stop_background: bool,
 }
 
 impl<'de> Deserialize<'de> for SynthesizeCouncilReq {
@@ -1708,6 +1742,8 @@ impl<'de> Deserialize<'de> for SynthesizeCouncilReq {
             model: Option<String>,
             #[serde(default)]
             effort: Option<String>,
+            #[serde(default)]
+            stop_background: bool,
         }
         let w = Wire::deserialize(deserializer)?;
         if w.provider.trim().is_empty() {
@@ -1719,6 +1755,7 @@ impl<'de> Deserialize<'de> for SynthesizeCouncilReq {
             provider_slug,
             model: w.model,
             effort: w.effort,
+            stop_background: w.stop_background,
         })
     }
 }
@@ -1816,6 +1853,11 @@ pub struct RuntimePromptReq {
     /// What to do when a turn is already running. Omitted = refuse (409).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<PromptDelivery>,
+    /// With `fresh_context` (and council synthesize): stop the thread's
+    /// background work instead of refusing with 409 when nothing else (no
+    /// turn, no pending request, no queued message) is in the way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stop_background: bool,
 }
 
 /// How a message sent while a turn runs is delivered.
@@ -1840,6 +1882,11 @@ pub struct QueuedPrompt {
     #[serde(default)]
     pub attachments: u32,
     pub created_at: DateTime<Utc>,
+    /// Why its last delivery failed: it stays queued (never lost) and is
+    /// skipped by the automatic drain until a person retries (`POST
+    /// …/queue/{id}` with any delivery), edits or removes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// `POST /runtime-sessions/{id}/queue/{queued_id}` — deliver a queued
@@ -2021,6 +2068,8 @@ mod tests {
                         started_at: ts(),
                         item_id: None,
                         due_at: None,
+                        stopping: false,
+                        stop_error: None,
                     }],
                     capabilities: None,
                     title: None,
@@ -2045,6 +2094,8 @@ mod tests {
                     completed_at: None,
                     turn_token_usage: None,
                     origin: TurnOrigin::Agent,
+                    model: Some("opus".into()),
+                    effort: Some("high".into()),
                 },
             },
             RuntimeEventBody::RuntimeRequestUpdated {
@@ -2083,6 +2134,7 @@ mod tests {
                     text: "after".into(),
                     attachments: 1,
                     created_at: ts(),
+                    error: Some("the agent could not start".into()),
                 }],
             },
             RuntimeEventBody::CommandOutputDelta {
@@ -2124,6 +2176,11 @@ mod tests {
         .unwrap();
         assert_eq!(turn.origin, TurnOrigin::User);
         assert!(serde_json::to_value(&turn).unwrap().get("origin").is_none());
+        assert_eq!(
+            (turn.model.as_deref(), turn.effort.as_deref()),
+            (None, None)
+        );
+        assert!(serde_json::to_value(&turn).unwrap().get("model").is_none());
         let agent = ProviderTurn {
             origin: TurnOrigin::Agent,
             ..turn

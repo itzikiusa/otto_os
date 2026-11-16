@@ -807,12 +807,15 @@ async fn acp_model_switch_respawns_and_resumes_and_unsupported_input_is_refused(
         effort: Some("high".into()),
         ..RuntimePromptReq::of("think")
     };
-    for req in [image, effort] {
-        match rt.prompt_with(&s.id, &req).await {
-            Err(Error::Invalid(m)) => assert!(m.starts_with("gemini does not"), "{m}"),
-            other => panic!("{other:?}"),
-        }
+    match rt.prompt_with(&s.id, &image).await {
+        Err(Error::Invalid(m)) => assert!(m.starts_with("gemini does not"), "{m}"),
+        other => panic!("{other:?}"),
     }
+    // An effort gemini cannot take runs the turn at its default (a notice
+    // says so) and is not stored as the thread's effort.
+    rt.prompt_with(&s.id, &effort).await.unwrap();
+    host.wait_n(is_terminal, 4).await;
+    assert_eq!(rt.get(&s.id).await.unwrap().effort, None);
     rt.close(&s.id).await.unwrap();
 }
 
@@ -2279,6 +2282,8 @@ async fn a_child_interrupted_by_restart_reports_to_its_parent() {
         completed_at: None,
         turn_token_usage: None,
         origin: otto_core::agent_runtime::TurnOrigin::User,
+        model: None,
+        effort: None,
     };
     let in_turn = |id: &str, ordinal: u32, status: TurnItemStatus, kind: TurnItemKind| {
         let mut i = otto_agent_protocol::driver::item(id.into(), status, None, kind);
@@ -2995,6 +3000,50 @@ async fn fresh_context_refuses_background_work_after_the_foreground_turn_ends() 
     rt.close(&s.id).await.unwrap();
 }
 
+/// A person stops one background task: the turn's interrupt leaves it
+/// alone, the per-task stop uses Claude Code's `stop_task`, the task is
+/// marked stopping and leaves the list only when the CLI settles it.
+#[tokio::test]
+async fn a_background_task_stops_natively_and_leaves_the_list_on_its_settlement() {
+    use otto_agent_protocol::runtime::TaskStopOutcome;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&s.id, "bg 30").await.unwrap();
+    host.wait(is_terminal).await;
+    // No turn runs: the turn's Stop stops nothing and says work remains.
+    assert!(!rt.interrupt(&s.id).await.unwrap());
+    assert_eq!(rt.background_count(&s.id).await.unwrap(), 1);
+    let task_id = rt.get(&s.id).await.unwrap().background_tasks[0].id.clone();
+    assert!(matches!(
+        rt.stop_task(&s.id, "no-such-task").await,
+        Err(Error::NotFound(_))
+    ));
+    let r = rt.stop_task(&s.id, &task_id).await.unwrap();
+    assert_eq!(r.outcome, TaskStopOutcome::Native);
+    for _ in 0..100 {
+        if rt.get(&s.id).await.unwrap().background_tasks.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(rt.get(&s.id).await.unwrap().background_tasks.is_empty());
+    assert!(host.items().iter().any(|i| matches!(
+        &i.kind,
+        TurnItemKind::SystemNotice { task_settlement: Some(t), .. }
+            if t.task_id == task_id && t.status == "stopped"
+    )));
+    // Ended: a second stop is a conflict, not a hang.
+    assert!(matches!(
+        rt.stop_task(&s.id, &task_id).await,
+        Err(Error::Conflict(_))
+    ));
+    rt.close(&s.id).await.unwrap();
+}
+
 #[tokio::test]
 async fn fresh_context_refuses_closed_threads_with_queued_prompts() {
     use otto_core::agent_runtime::PromptDelivery;
@@ -3664,6 +3713,7 @@ fn gemini_judge() -> otto_core::agent_runtime::SynthesizeCouncilReq {
         provider_slug: None,
         model: None,
         effort: None,
+        stop_background: false,
     }
 }
 
@@ -4763,4 +4813,142 @@ async fn a_codex_generated_image_is_served_from_disk_and_nothing_else_is() {
         Err(Error::NotFound(_))
     ));
     rt.close(&c.id).await.unwrap();
+}
+
+// ---- usage: settled turns reach the Usage store (review I-03) -------------
+
+/// The usage journal's undelivered rows: `(event_id, event)`. ClickHouse is
+/// missing in tests, so every recorded row stays here.
+async fn usage_outbox(data_dir: &std::path::Path) -> Vec<(String, otto_usage::UsageEvent)> {
+    let path = data_dir.join("usage-ingestion.sqlite3");
+    if !path.exists() {
+        return Vec::new();
+    }
+    let journal = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+    let rows: Vec<String> = sqlx::query_scalar("SELECT payload FROM outbox ORDER BY sequence")
+        .fetch_all(&journal)
+        .await
+        .unwrap_or_default();
+    journal.close().await;
+    rows.iter()
+        .map(|r| {
+            let v: serde_json::Value = serde_json::from_str(r).unwrap();
+            let id = v["event_id"].as_str().unwrap().to_string();
+            (id, serde_json::from_value(v).unwrap())
+        })
+        .collect()
+}
+
+async fn wait_usage_rows(
+    data_dir: &std::path::Path,
+    n: usize,
+) -> Vec<(String, otto_usage::UsageEvent)> {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let rows = usage_outbox(data_dir).await;
+        if rows.len() >= n || tokio::time::Instant::now() > deadline {
+            return rows;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn usage_of_a_settled_acp_turn_is_recorded_once_and_claude_turns_are_left_to_the_tailer() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let usage_dir = dir.path().join("usage");
+    let usage = otto_usage::UsageEngine::start(
+        otto_usage::UsageConfig {
+            enabled: true,
+            clickhouse_path: Some(
+                dir.path()
+                    .join("missing-clickhouse")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..Default::default()
+        },
+        usage_dir.clone(),
+    )
+    .await;
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    rt.set_usage_engine(usage.clone());
+
+    // An ACP (gemini) turn whose prompt response carries a draft `usage`:
+    // 5 fresh + 2 cached in, 3 out + 1 thinking.
+    let g = create_as(&rt, cwd, RuntimeProvider::Gemini).await;
+    rt.prompt(&g.id, "model").await.unwrap();
+    host.wait(is_terminal).await;
+    let turn = host
+        .all()
+        .into_iter()
+        .rev()
+        .find_map(|e| match e.body {
+            RuntimeEventBody::ProviderTurnUpdated { provider_turn } => Some(provider_turn),
+            _ => None,
+        })
+        .unwrap();
+    let rows = wait_usage_rows(&usage_dir, 1).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (id, ev) = &rows[0];
+    assert_eq!(id, &format!("runtime-turn:{}:{}", g.id, turn.id));
+    assert_eq!(
+        (
+            ev.session_id.as_str(),
+            ev.workspace_id.as_str(),
+            ev.provider.as_str(),
+            ev.origin.as_str()
+        ),
+        (
+            g.id.as_str(),
+            "w1",
+            "gemini",
+            otto_usage::RUNTIME_TURN_ORIGIN
+        )
+    );
+    let session = rt.get(&g.id).await.unwrap();
+    assert_eq!(
+        ev.model,
+        turn.model.clone().or(session.model).unwrap_or_default()
+    );
+    assert_eq!(
+        (ev.input_tokens, ev.cache_read_tokens, ev.output_tokens),
+        (5, 2, 4)
+    );
+    assert!(ev.ts.is_some());
+
+    // A Claude turn reports usage too, but its transcript is the tailer's:
+    // the runtime records nothing for it.
+    let c = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    rt.prompt(&c.id, "hello").await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(usage_outbox(&usage_dir).await.len(), 1);
+
+    // A replay of the same turn (a repeated hand-over) adds nothing…
+    assert!(!usage
+        .enqueue_runtime_turn(id.clone(), ev.clone())
+        .await
+        .unwrap());
+    // …and neither does a restart: recovery never re-settles a finished turn.
+    rt.flush(&g.id).await;
+    rt.shutdown().await;
+    let host2 = TestHost::new(cwd, false);
+    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
+    rt2.set_usage_engine(usage.clone());
+    rt2.recover().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(usage_outbox(&usage_dir).await.len(), 1);
+    usage.shutdown().await;
 }

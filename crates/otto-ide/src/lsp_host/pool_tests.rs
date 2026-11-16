@@ -495,3 +495,64 @@ fn language_memory_caps_set_go_java_rust_and_node_flags() {
     }
     assert!(java_args.contains(&"-data".to_string()));
 }
+
+/// The periodic RSS sweep never kills a server an editor is attached to: being
+/// over budget is the lesser harm (the count caps still bound the pool).
+#[tokio::test]
+async fn rss_sweep_never_evicts_servers_with_attached_sockets() {
+    let probe: RssProbe = Arc::new(|_k: &PoolKey, _pid| 600 * 1024 * 1024);
+    let (pool, _fake) = fake_pool_with_rss(IDLE_TIMEOUT, Some(probe));
+    let lang_key = |lang: &str, root: &str| PoolKey {
+        owner: "u1".into(),
+        lang: lang.into(),
+        root: root.into(),
+        ssh: None,
+        go_build_tags: Vec::new(),
+    };
+    let _a = pool
+        .attach(lang_key("go", "/svc-go"), "gopls", &[])
+        .unwrap();
+    let _b = pool
+        .attach(lang_key("java", "/svc-java"), "jdtls", &[])
+        .unwrap();
+    let _c = pool
+        .attach(lang_key("rust", "/svc-rust"), "rust-analyzer", &[])
+        .unwrap();
+    pool.enforce_rss_budget(None);
+    let status = pool.status_snapshot(None, None, None);
+    assert_eq!(status.active_server_count, 3, "{:?}", status.servers);
+    assert!(status.total_rss_bytes > LSP_RSS_BUDGET_BYTES);
+}
+
+/// When a new server needs a slot and every server is in use, the least
+/// recently used one goes — and its socket is told why before it closes.
+#[tokio::test]
+async fn evicting_an_in_use_server_tells_its_socket_before_closing() {
+    let (pool, _fake) = fake_pool(IDLE_TIMEOUT);
+    let lang_key = |lang: &str, root: &str| PoolKey {
+        owner: "u1".into(),
+        lang: lang.into(),
+        root: root.into(),
+        ssh: None,
+        go_build_tags: Vec::new(),
+    };
+    let mut oldest = pool.attach(lang_key("go", "/m1"), "gopls", &[]).unwrap();
+    let _b = pool.attach(lang_key("java", "/m2"), "jdtls", &[]).unwrap();
+    let _c = pool
+        .attach(lang_key("rust", "/m3"), "rust-analyzer", &[])
+        .unwrap();
+    let _d = pool
+        .attach(lang_key("typescript", "/m4"), "tsls", &[])
+        .unwrap();
+    assert_eq!(pool.live_servers(), MAX_GLOBAL_SERVERS);
+
+    let notice = recv(&mut oldest).await;
+    assert_eq!(notice["method"], json!("otto/lspEvicted"));
+    assert_eq!(notice["params"]["reason"], json!("server_cap"));
+    assert_eq!(notice["params"]["lang"], json!("go"));
+    assert_eq!(notice["params"]["root"], json!("/m1"));
+    let closed = tokio::time::timeout(Duration::from_secs(2), oldest.rx.recv())
+        .await
+        .expect("socket should close after the notice");
+    assert!(closed.is_none());
+}

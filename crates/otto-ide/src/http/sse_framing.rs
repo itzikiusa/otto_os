@@ -155,14 +155,28 @@ pub(super) fn format_collab_event_frame(ev: &IdeCollabEvent) -> Bytes {
     format_sse_data(&val)
 }
 
+/// Runs its callback when dropped: with the stream state, i.e. when the
+/// client goes away or the stream ends.
+struct OnClose(Option<Box<dyn FnOnce() + Send>>);
+
+impl Drop for OnClose {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
+
 pub(super) fn build_collab_sse_response(
     room: IdeCollabRoom,
     rx: broadcast::Receiver<IdeCollabEvent>,
+    on_close: Option<Box<dyn FnOnce() + Send>>,
 ) -> Response {
     struct State {
         initial_room: Option<IdeCollabRoom>,
         rx: broadcast::Receiver<IdeCollabEvent>,
         done: bool,
+        _on_close: OnClose,
     }
 
     let stream = stream::unfold(
@@ -170,6 +184,7 @@ pub(super) fn build_collab_sse_response(
             initial_room: Some(room),
             rx,
             done: false,
+            _on_close: OnClose(on_close),
         },
         |mut st| async move {
             if st.done {

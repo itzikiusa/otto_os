@@ -1293,6 +1293,8 @@ pub struct SessionManager {
     /// detached a terminal, pinged a chat. With the PTY's own last-output time
     /// it orders the live-session cap's least-recently-used eviction.
     last_touch: Arc<DashMap<Id, std::time::Instant>>,
+    /// Latest agent-hook turn boundary per session (`manager/status_classify.rs`).
+    turn_marks: status_classify::TurnMarks,
     repo: SessionsRepo,
     networks: Arc<crate::network::SessionNetworks>,
     events: broadcast::Sender<Event>,
@@ -1422,6 +1424,7 @@ impl SessionManager {
             retiring: Arc::new(DashMap::new()),
             size_persist: Arc::new(tokio::sync::Mutex::new(())),
             last_touch: Arc::new(DashMap::new()),
+            turn_marks: Default::default(),
             repo,
             networks,
             events,
@@ -2312,7 +2315,7 @@ impl SessionManager {
                 // claude's --session-id flag requires a UUID, so provider
                 // session ids are UUIDs (the Otto session id stays a ULID).
                 let sid = uuid::Uuid::new_v4().to_string();
-                let mut spec = self.providers.build_spec(&provider, &sid, &cwd, false)?;
+                let mut spec = self.providers.build_new_spec(&provider, &sid, &cwd)?;
                 // Append --add-dir args from req.meta.extra_dirs
                 let meta_val = req.meta.clone().unwrap_or(serde_json::json!({}));
                 let cli_prov = self
@@ -2562,13 +2565,7 @@ impl SessionManager {
         }
         self.live.insert(session.id.clone(), Arc::clone(&handle));
         self.publish_grid(&session.id);
-        self.start_status_task(
-            session.id.clone(),
-            session.workspace_id.clone(),
-            session.provider.clone(),
-            handle,
-            false,
-        );
+        self.start_status_task(&session, handle, false);
         let _ = self.events.send(Event::SessionCreated {
             session: session.clone(),
         });
@@ -3086,6 +3083,7 @@ impl SessionManager {
         self.suspend_cpu.remove(id);
         self.suspend_hold.remove(id);
         self.passive_resume.remove(id);
+        self.turn_marks.remove(id);
     }
 
     /// Register an engine turn driver as a watcher of `id` for as long as the
@@ -5047,8 +5045,7 @@ impl SessionManager {
                         "connection sessions are reopened via their connection".into(),
                     ));
                 }
-                let resume = session.provider_session_id.is_some()
-                    && self.providers.supports_resume(&session.provider);
+                let resume = self.providers.resumes_session(&session);
                 let sid = session
                     .provider_session_id
                     .clone()
@@ -5262,13 +5259,7 @@ impl SessionManager {
             self.stamp_suspended(&session, None).await;
         }
         self.record_lifecycle(&session, "Session resumed");
-        self.start_status_task(
-            id.clone(),
-            session.workspace_id,
-            session.provider,
-            handle,
-            false,
-        );
+        self.start_status_task(&session, handle, false);
         self.repo.get(id).await
     }
 
@@ -5439,13 +5430,7 @@ impl SessionManager {
             &session,
             "Reattached after a daemon restart (process kept running)",
         );
-        self.start_status_task(
-            sid.clone(),
-            session.workspace_id.clone(),
-            session.provider.clone(),
-            handle,
-            true,
-        );
+        self.start_status_task(&session, handle, true);
         // A codex/agy id capture that was still pending died with the old
         // daemon: re-arm it (it waits for the next input, as at spawn).
         if session.kind == SessionKind::Agent
@@ -5751,22 +5736,19 @@ impl SessionManager {
         }
     }
 
-    /// Per-session status task: every 2s classify working/idle from PTY
-    /// activity; on exit mark `exited` and stop. When an [`OutputScanner`] is
+    /// Per-session status task: every 2s classify working/idle
+    /// ([`status_classify`]); on exit mark `exited` and stop. When an [`OutputScanner`] is
     /// configured, also spawns a sibling task that streams the PTY's live
     /// output into the scanner (mid-session re-auth detection).
     /// `readopted`: `handle` is a held PTY re-adopted after a daemon restart.
     /// Until it prints something new, its status ticks are corrections, not
     /// activity, so they must not stamp `last_active_at` (A14) — the first
     /// tick turns the adoption's `Running` into `Idle`.
-    fn start_status_task(
-        &self,
-        id: Id,
-        workspace_id: Id,
-        provider: String,
-        handle: Arc<PtyHandle>,
-        readopted: bool,
-    ) {
+    fn start_status_task(&self, session: &Session, handle: Arc<PtyHandle>, readopted: bool) {
+        let (id, workspace_id) = (session.id.clone(), session.workspace_id.clone());
+        let provider = session.provider.clone();
+        let mut classifier =
+            status_classify::StatusClassifier::new(self, session, Arc::clone(&handle));
         // Mid-session output scan: subscribe to the PTY broadcast and forward
         // chunks to the scanner. Ends when the PTY closes (broadcast Closed).
         if let Some(scanner) = self.output_scanner.clone() {
@@ -5827,11 +5809,7 @@ impl SessionManager {
                                 handle.set_history_cap(otto_pty::UNVIEWED_SCROLLBACK_LINES);
                             }
                         }
-                        let next = if handle.last_output_at().elapsed() < WORKING_WINDOW {
-                            SessionStatus::Working
-                        } else {
-                            SessionStatus::Idle
-                        };
+                        let next = classifier.next(current).await;
                         if next != current {
                             // A lifecycle op in flight owns the status right
                             // now: don't wait behind it (a respawn can take
@@ -6160,6 +6138,8 @@ pub use runtime_spawn::{RuntimeMcpDelivery, RuntimeMcpServer};
 mod session_files;
 #[path = "manager/shutdown_guard.rs"]
 mod shutdown_guard;
+#[path = "manager/status_classify.rs"]
+mod status_classify;
 #[path = "manager/trail.rs"]
 mod trail;
 #[path = "manager/transcript_roots.rs"]

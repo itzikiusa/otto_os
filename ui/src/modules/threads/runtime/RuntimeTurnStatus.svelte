@@ -3,13 +3,15 @@
   // elapsed timer while running ("Working · Running npm test · 14s" or
   // "Background wakeup · Thinking… · 4s"), a calm waiting line when idle with
   // scheduled/background tasks ("Waiting on 1 background task: …"), or outcome
-  // ("Stopped", "Stopped · no progress", "Failed", "Partly done").
+  // ("Stopped", "Stopped · no progress", "Failed", "Partly done"). Each names
+  // the model (and effort) the turn actually ran on when the daemon says.
   import type { MessageAttachment } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
   import type { AgentTask } from './agentTasks';
   import { deriveLiveFooter } from './liveStatus';
   import type { RuntimeProjection } from './projection';
-  import { workLabel, type TurnOutcome } from './timeline';
+  import { formatEffortShort } from '../../../lib/providerModels';
+  import { latestTurn, workLabel, type TurnOutcome } from './timeline';
 
   interface Props {
     projection?: RuntimeProjection | null;
@@ -34,6 +36,9 @@
     onedit,
   }: Props = $props();
   let showFailed = $state(false);
+  const turn = $derived(projection ? latestTurn(projection) : null);
+  /** "claude-sonnet-4-5 · High": what the latest turn really ran on (absent on older daemons). */
+  const ranOn = $derived([turn?.model, turn?.effort ? formatEffortShort(turn.effort) : null].filter(Boolean).join(' · '));
   const live = $derived(deriveLiveFooter(projection, workingFor, ownTurn, background));
   const retryText = $derived(outcome?.retryText ?? '');
   const retryAttachments = $derived(outcome?.retryAttachments);
@@ -70,7 +75,7 @@
 {#if live?.mode === 'working'}
   <p class="ts" data-testid="runtime-working">
     <span class="spinner" aria-hidden="true"></span>
-    <span>{live.prefix} · {live.activity} · {live.elapsed}</span>
+    <span>{live.prefix} · {live.activity} · {live.elapsed}{ranOn ? ` · ${ranOn}` : ''}</span>
   </p>
 {:else if live?.mode === 'waiting_bg'}
   <p class="ts ts-bg" data-testid="runtime-bg-waiting">
@@ -79,7 +84,7 @@
   </p>
 {:else if outcome?.kind === 'stopped'}
   <div class="ts" data-testid="runtime-stopped">
-    <span>Stopped</span>
+    <span>Stopped{ranOn ? ` · ${ranOn}` : ''}</span>
     {@render retryActions()}
   </div>
 {:else if outcome?.kind === 'stalled'}
@@ -90,7 +95,7 @@
 {:else if outcome?.kind === 'failed'}
   <div class="ts" data-testid="runtime-failed">
     <Icon name="warning" size={12} />
-    <span>Turn failed</span>
+    <span>Turn failed{ranOn ? ` · ${ranOn}` : ''}</span>
     {@render retryActions()}
   </div>
 {:else if outcome?.kind === 'partial'}
@@ -104,6 +109,8 @@
       {#each outcome.failed as f (f.id)}<li dir="auto">{workLabel(f)}</li>{/each}
     </ul>
   {/if}
+{:else if ranOn && turn?.status === 'completed'}
+  <p class="ts" data-testid="runtime-ran-on">Ran on {ranOn}</p>
 {/if}
 
 <style>
@@ -121,7 +128,12 @@
     --spinner-size: 11px;
   }
   .ts-bg {
+    flex-wrap: nowrap;
     padding-block: 4px;
+  }
+  .ts-bg > span:last-child {
+    flex: 1;
+    min-inline-size: 0;
   }
   .pulse-dot {
     inline-size: 7px;

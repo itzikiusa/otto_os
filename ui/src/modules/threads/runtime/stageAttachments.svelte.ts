@@ -2,7 +2,7 @@
 // thread's first message. A harness switch hides what the new one can't take.
 import { toasts } from '../../../lib/toast.svelte';
 import { attachmentSupport, takesFile, type TakesCaps } from './attachmentSupport';
-import { MAX_DRAFT_IMAGES, readAttachments, type ComposerFile } from './runtimeComposer';
+import { MAX_DRAFT_IMAGES, attachmentBytes, readAttachments, type ComposerFile } from './runtimeComposer';
 
 export class StageAttachments {
   picked = $state<ComposerFile[]>([]);
@@ -21,7 +21,8 @@ export class StageAttachments {
     return this.can.images ? this.picked.filter((a) => takesFile(this.caps(), { type: a.mime })) : [];
   }
   async add(files: File[]): Promise<void> {
-    const read = await readAttachments(files, (f) => takesFile(this.caps(), f));
+    // The running total: several picks together stay inside the message budget.
+    const read = await readAttachments(files, (f) => takesFile(this.caps(), f), { usedBytes: attachmentBytes(this.picked) });
     if (read.length === 0) return;
     const combined = [...this.picked, ...read];
     if (combined.length > MAX_DRAFT_IMAGES) {

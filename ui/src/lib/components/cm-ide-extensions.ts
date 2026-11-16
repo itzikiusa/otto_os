@@ -19,6 +19,7 @@ import type {
 } from '../api/types.ts';
 import { ctxMenu } from '../contextmenu.svelte.ts';
 import { isIconName } from './Icon.svelte';
+import { ideCompactExtension } from './cm-ide-compact.ts';
 import { createIdeCsvExtension } from './cm-ide-csv.ts';
 import {
   createIdeGitAndAgentExtensions, selectionOrCurrentLine, setBaselineSourceEffect, setBlameLinesEffect, setSavedContentEffect,
@@ -597,7 +598,7 @@ export function createIdeExtensions(opts: CreateIdeExtensionsOptions): Extension
   const isManifest = isIdeManifestPath(fPath);
 
   return [
-    ideEditorTheme, debugField, peersField,
+    ideEditorTheme, debugField, peersField, ideCompactExtension(),
     createIdeRefactorExtensions({
       filePath: fPath,
       language: opts.language,

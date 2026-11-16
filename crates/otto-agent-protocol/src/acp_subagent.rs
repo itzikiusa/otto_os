@@ -657,6 +657,8 @@ impl AcpDriver {
             started_at: meta.started_at,
             item_id: meta.item_id.clone(),
             due_at: meta.due_at,
+            stopping: false,
+            stop_error: None,
         };
         self.state.bg_meta.insert(meta.id.clone(), meta);
         let changed = super::bg::upsert_bg_task(&mut self.state.bg_tasks, task);

@@ -4,22 +4,20 @@
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { loadErrorText } from '../../lib/loadError';
-  import { renderMarkdownGfm } from '../../lib/md';
   import { router } from '../../lib/router.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { FsBrowse, FsEntry, FsRead } from '../../lib/api/types';
-  import {
-    baseName,
-    compactPath,
-    parseDelimitedTable,
-    previewKindForPath,
-    relToRoot,
-  } from './threadsHelpers';
+  import { baseName, compactPath, previewKindForPath, relToRoot } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
+
+  // The shared file preview (Markdown, JSON tree, table, image) — the IDE's too.
+  const FilePreviewLazy = lazyComponent(() => import('../../lib/components/FilePreview.svelte'));
 
   interface Props {
     rootPath: string;
@@ -145,21 +143,6 @@
   const visibleEntries = $derived(
     entries.filter((e) => showHidden || !e.name.startsWith('.')),
   );
-
-  const formattedJson = $derived.by(() => {
-    if (previewKind !== 'json' || !fileRead?.content) return null;
-    try {
-      return JSON.stringify(JSON.parse(fileRead.content), null, 2);
-    } catch {
-      return null;
-    }
-  });
-
-  const parsedTable = $derived.by(() => {
-    if (previewKind !== 'csv' || !fileRead?.content) return null;
-    const delim = activeTab?.path.toLowerCase().endsWith('.tsv') ? '\t' : ',';
-    return parseDelimitedTable(fileRead.content, delim);
-  });
 
   function rawMediaSrc(path: string): string {
     const tok = getToken();
@@ -408,45 +391,19 @@
           onretry={() => fileRetry++}
         >
           {#if fileRead}
-            {#if viewMode === 'preview' && previewKind === 'markdown'}
-              <div class="tf-md md-body" dir="auto">
-                {@html renderMarkdownGfm(fileRead.content)}
-              </div>
-            {:else if viewMode === 'preview' && previewKind === 'json' && formattedJson}
-              <div class="tf-editor-host">
-                <CodeEditor
-                  path={fileRead.path}
-                  content={formattedJson}
-                  root={rootPath}
-                  language="json"
-                  readOnly
-                />
-              </div>
-            {:else if viewMode === 'preview' && previewKind === 'csv' && parsedTable}
-              <div class="tf-table-wrap">
-                <table class="tf-table">
-                  <thead>
-                    <tr>
-                      {#each parsedTable.headers as h, idx (idx)}
-                        <th>{h}</th>
-                      {/each}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {#each parsedTable.rows as row, rIdx (rIdx)}
-                      <tr>
-                        {#each parsedTable.headers as _, cIdx (cIdx)}
-                          <td>{row[cIdx] ?? ''}</td>
-                        {/each}
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
-              </div>
-            {:else if viewMode === 'preview' && (previewKind === 'image' || previewKind === 'svg')}
-              <div class="tf-image-wrap">
-                <img src={rawMediaSrc(activeTab.path)} alt={baseName(activeTab.path)} />
-              </div>
+            {#if viewMode === 'preview' && hasRichPreview}
+              <LazyMount
+                lazy={FilePreviewLazy}
+                what="the preview"
+                variant="panel"
+                props={{
+                  path: fileRead.path,
+                  text: fileRead.content,
+                  root: rootPath,
+                  mediaUrl: rawMediaSrc,
+                  onOpenLink: (p: string) => threads.openFileTab(wsKey, p, { pin: false }),
+                }}
+              />
             {:else}
               <div class="tf-editor-host">
                 <CodeEditor
@@ -650,47 +607,5 @@
     display: flex;
     flex-direction: column;
     overflow: auto;
-  }
-  .tf-md {
-    flex: 1;
-    overflow-y: auto;
-    padding: 14px 16px;
-    font-size: var(--fs-s);
-  }
-  .tf-table-wrap {
-    flex: 1;
-    overflow: auto;
-  }
-  .tf-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--fs-xs);
-  }
-  .tf-table th,
-  .tf-table td {
-    padding: 6px 8px;
-    border-block-end: 1px solid var(--border);
-    text-align: start;
-    white-space: nowrap;
-  }
-  .tf-table th {
-    position: sticky;
-    inset-block-start: 0;
-    background: var(--surface-2);
-    font-weight: 600;
-    color: var(--text);
-  }
-  .tf-image-wrap {
-    flex: 1;
-    overflow: auto;
-    display: grid;
-    place-items: center;
-    padding: 16px;
-  }
-  .tf-image-wrap img {
-    max-width: 100%;
-    max-height: 100%;
-    border-radius: var(--radius-s);
-    border: 1px solid var(--border);
   }
 </style>

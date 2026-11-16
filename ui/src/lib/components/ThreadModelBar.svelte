@@ -20,6 +20,7 @@
     type InteractionMode,
   } from '../providerModels';
   import { auth } from '../stores/auth.svelte';
+  import { terminalTakesEffort } from '../providerRegistry';
   import Icon from './Icon.svelte';
 
   interface Props {
@@ -70,7 +71,7 @@
     Boolean(
       provider &&
         parts.includes('effort') &&
-        supportsEffortSelection(provider) &&
+        terminalTakesEffort(provider, meta, supportsEffortSelection(provider)) &&
         !disabled &&
         supportedEfforts.length > 0,
     ),

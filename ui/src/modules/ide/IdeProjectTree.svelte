@@ -14,7 +14,9 @@
   import type { IdeCompareMode } from './history/ideComparisonLoader';
   import type { FlatSymbolNode } from './history/IdeTreeSecondaryTabs.svelte';
   import type { FlatTreeNode } from './history/ideTreeNodeMenus';
-  import { ide, type IdeFsEntry, type IdeSymbolNode } from './ideStore.svelte';
+  import { treeFilterMatches, treeNavAction, treeRowHeight } from './history/ideTreeNav';
+  import { ide, ideBasename, type IdeFsEntry, type IdeSymbolNode } from './ideStore.svelte';
+  import { ideTreeDirErrors } from './store/ideTreeDirErrors.svelte';
 
   const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
   const IdeTreeSecondaryTabsLazy = lazyComponent(
@@ -40,7 +42,9 @@
   let { onOpenCompare }: Props = $props();
 
   const VIRTUAL_MIN = 150;
-  const ROW_H = 26;
+  // One row height for the virtualiser AND the CSS (`--tree-row-h`): 40 px touch rows on a
+  // coarse pointer, the dense 26 px row otherwise; offsets stay exact either way.
+  const ROW_H = treeRowHeight(typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)').matches));
   const OVERSCAN = 20;
 
   let activeTab = $state<ExplorerTab>('files');
@@ -51,6 +55,22 @@
   let selectedDirPath = $state<string | null>(null);
   let manifestTreeModal = $state<{ title: string; output: string } | null>(null);
   let liveGit = $state<typeof IdeGitSingleton | null>(null);
+  // One Tab stop for the whole tree (roving tabindex): the row last moved to with the arrow
+  // keys, else the open file's row, else the first row.
+  let focusKey = $state<string | null>(null);
+  // The filter input updates at once; the (whole-tree) filtering runs ~80 ms after typing stops.
+  let filterDraft = $state(ide.treeFilter);
+  let filterTimer: ReturnType<typeof setTimeout> | null = null;
+  function onFilterInput(value: string): void {
+    filterDraft = value;
+    if (filterTimer) clearTimeout(filterTimer);
+    filterTimer = setTimeout(() => { filterTimer = null; ide.treeFilter = value; }, 80);
+  }
+  $effect(() => {
+    const ext = ide.treeFilter;
+    untrack(() => { if (!filterTimer && ext !== filterDraft) filterDraft = ext; });
+  });
+  $effect(() => () => { if (filterTimer) clearTimeout(filterTimer); });
 
   $effect(() => {
     void import('./git/ideGitController.svelte').then((m) => {
@@ -120,8 +140,13 @@
   const visibleNodes = $derived.by((): FlatTreeNode[] => {
     const q = ide.treeFilter.trim().toLowerCase();
     const out: FlatTreeNode[] = [];
-    const matchesTree = (entry: IdeFsEntry): boolean =>
-      !q || entry.name.toLowerCase().includes(q) || Boolean(ide.childrenByDir[entry.path]?.some(matchesTree));
+    const dirErrors = ideTreeDirErrors.byPath;
+    const hits = treeFilterMatches(q, ide.projectRoots.map((r) => (r.isPrimary ? ide.treeRootEntries : (ide.childrenByDir[r.path] ?? []))), ide.childrenByDir);
+    const matchesTree = (entry: IdeFsEntry): boolean => !hits || hits.has(entry.path);
+    const pushDirError = (dirPath: string, depth: number): void => {
+      const err = dirErrors[dirPath];
+      if (err) out.push({ entry: { name: '', path: `${dirPath}\u0000error`, kind: 'file' }, depth, loadError: err, errorDir: dirPath });
+    };
     const walk = (entries: IdeFsEntry[], depth: number): void => {
       for (let i = 0; i < entries.length; i++) {
         const entry = entries[i];
@@ -130,6 +155,7 @@
         if (entry.kind === 'dir' && (ide.expandedDirs[entry.path] || Boolean(q && ide.childrenByDir[entry.path]))) {
           const kids = ide.childrenByDir[entry.path];
           if (kids) walk(kids, depth + 1);
+          else if (ide.expandedDirs[entry.path]) pushDirError(entry.path, depth + 1);
         }
       }
     };
@@ -153,9 +179,56 @@
         subtitle: shortenHome(root.path),
       });
       if (isExpanded || Boolean(q)) walk(rootKids, 1);
+      if (isExpanded && !root.isPrimary && !ide.childrenByDir[root.path]) pushDirError(root.path, 1);
     }
     return out;
   });
+
+  const rowKey = (node: FlatTreeNode): string => `${node.isProjectRoot ? 'root:' : ''}${node.entry.path}`;
+  const rowExpanded = (node: FlatTreeNode): boolean =>
+    node.entry.kind === 'dir' && Boolean(ide.expandedDirs[node.entry.path] ?? node.defaultExpanded ?? false);
+  const tabStopKey = $derived.by((): string | null => {
+    const nodes = visibleNodes;
+    if (focusKey && nodes.some((n) => rowKey(n) === focusKey)) return focusKey;
+    const active = ide.activePath ? nodes.find((n) => !n.isProjectRoot && n.entry.path === ide.activePath) : undefined;
+    const first = nodes.find((n) => !n.loadError);
+    return active ? rowKey(active) : first ? rowKey(first) : null;
+  });
+
+  /** Move keyboard focus to row `index`: scroll it into the (virtualized) window first. */
+  async function focusRow(index: number): Promise<void> {
+    const node = visibleNodes[index];
+    if (!node) return;
+    const key = rowKey(node);
+    focusKey = key;
+    if (treeScrollEl) {
+      const top = index * ROW_H;
+      if (top < treeScrollEl.scrollTop) treeScrollEl.scrollTop = top;
+      else if (top + ROW_H > treeScrollEl.scrollTop + clientHeight) treeScrollEl.scrollTop = top + ROW_H - clientHeight;
+      scrollTop = treeScrollEl.scrollTop;
+    }
+    await tick();
+    treeScrollEl?.querySelector<HTMLElement>(`[data-tree-key="${CSS.escape(key)}"]`)?.focus();
+  }
+
+  function onTreeKeyDown(e: KeyboardEvent, node: FlatTreeNode): void {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const index = visibleNodes.indexOf(node);
+    const rows = visibleNodes.map((n) => ({ depth: n.depth, isDir: n.entry.kind === 'dir', expanded: rowExpanded(n), loadError: n.loadError }));
+    const act = treeNavAction(rows, index, e.key, e.shiftKey);
+    if (!act) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (act.kind === 'focus') { void focusRow(act.index); return; }
+    if (act.kind === 'menu') {
+      const el = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
+      if (el) void import('./history/ideTreeNodeMenus').then((m) => m.showTreeNodeContextMenu(el, node, menuCallbacks));
+      return;
+    }
+    // Expand / collapse goes through the same path as a click (lazy child load included).
+    focusKey = rowKey(node);
+    onNodeClick(node);
+  }
 
   const treeWin = $derived.by(() => {
     const total = visibleNodes.length;
@@ -217,7 +290,8 @@
   }
 
   function onNodeKeyDown(e: KeyboardEvent, node: FlatTreeNode): void {
-    if (node.isProjectRoot) return;
+    onTreeKeyDown(e, node);
+    if (e.defaultPrevented || node.isProjectRoot) return;
     if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'F6') {
       e.preventDefault();
       e.stopPropagation();
@@ -237,14 +311,14 @@
       el && (e.detail === 0 || (e.type === 'click' && el.getBoundingClientRect().height <= 48))
         ? el
         : new MouseEvent('contextmenu', { clientX: e.clientX, clientY: e.clientY });
-    void import('./history/ideTreeNodeMenus').then((m) =>
-      m.showTreeNodeContextMenu(savedAnchor, node, {
-        openCompare: openCompareModal,
-        onOpenFolderPicker: () => (addFolderPickerOpen = true),
-        onManifestOutput: (title, output) => (manifestTreeModal = { title, output }),
-      }),
-    );
+    void import('./history/ideTreeNodeMenus').then((m) => m.showTreeNodeContextMenu(savedAnchor, node, menuCallbacks));
   }
+
+  const menuCallbacks = {
+    openCompare: openCompareModal,
+    onOpenFolderPicker: () => (addFolderPickerOpen = true),
+    onManifestOutput: (title: string, output: string) => (manifestTreeModal = { title, output }),
+  };
 </script>
 
 <aside class="ide-tree" aria-label="Project explorer" data-testid="ide-project-tree">
@@ -253,7 +327,7 @@
   {#if activeTab === 'files'}
     <div class="tree-panel" role="tabpanel" id="ide-explorer-panel-files" aria-labelledby="ide-explorer-tab-files">
       <div class="tree-toolbar">
-        <input class="tree-filter" type="search" dir="ltr" aria-label="Filter files" placeholder="Filter…" bind:value={ide.treeFilter} data-testid="ide-tree-filter" />
+        <input class="tree-filter" type="search" dir="ltr" aria-label="Filter files" placeholder="Filter…" value={filterDraft} oninput={(e) => onFilterInput(e.currentTarget.value)} data-testid="ide-tree-filter" />
         <button type="button" class="tree-act" aria-label="New file…" title="New file…" onclick={() => triggerNewTreeEntry(ide.target.root || selectedDirPath || '', 'create_file')}>
           <Icon name="plus" size={12} />
         </button>
@@ -293,17 +367,22 @@
             />
           {/snippet}
 
-          <div class="tree-list" class:is-virtual={treeWin.virtual} role="list">
+          <div class="tree-list" class:is-virtual={treeWin.virtual} role="tree" aria-label="Project files" style:--tree-row-h="{ROW_H}px">
             {#if treeWin.topPx > 0}<div style:block-size="{treeWin.topPx}px" aria-hidden="true"></div>{/if}
-            {#each treeWin.items as node (`${node.isProjectRoot ? 'root:' : ''}${node.entry.path}`)}
-              {@const isExpanded = node.entry.kind === 'dir' ? Boolean(ide.expandedDirs[node.entry.path] ?? node.defaultExpanded ?? false) : false}
+            {#each treeWin.items as node (rowKey(node))}
+              {#if node.loadError}
+                <div class="tree-row tree-err-row" role="none" style="padding-inline-start: calc(6px + {node.depth * 12}px)" data-testid="ide-tree-dir-error">
+                  <LoadState what={`“${ideBasename(node.errorDir ?? '')}”`} variant="compact" error={node.loadError} onretry={() => void ide.loadTree(node.errorDir)} />
+                </div>
+              {:else}
+              {@const isExpanded = rowExpanded(node)}
               {@const gitLetter = resolveGitLetter(node)}
               {@const dirtyDir = isDirtyFolder(node)}
               <div
                 class="tree-row"
                 class:active={!node.isProjectRoot && ide.activePath === node.entry.path}
                 class:is-root={Boolean(node.isProjectRoot)}
-                role="listitem"
+                role="none"
                 style="padding-inline-start: calc(6px + {node.depth * 12}px)"
                 data-testid={node.isProjectRoot ? (node.isPrimaryRoot ? 'ide-tree-root-node' : 'ide-tree-attached-root') : undefined}
               >
@@ -311,6 +390,12 @@
                   type="button"
                   class="tree-item"
                   dir="ltr"
+                  role="treeitem"
+                  aria-level={node.depth + 1}
+                  aria-selected={!node.isProjectRoot && ide.activePath === node.entry.path}
+                  tabindex={rowKey(node) === tabStopKey ? 0 : -1}
+                  data-tree-key={rowKey(node)}
+                  onfocus={() => (focusKey = rowKey(node))}
                   aria-expanded={node.entry.kind === 'dir' ? isExpanded : undefined}
                   aria-current={node.entry.kind !== 'dir' && ide.activePath === node.entry.path ? 'true' : undefined}
                   onclick={() => onNodeClick(node)}
@@ -333,10 +418,11 @@
                   {#if dirtyDir}<span class="tree-dirty-dot" title="Contains uncommitted Git changes" aria-hidden="true"></span>{/if}
                   {#if gitLetter}<span class="tree-git-mark mono" data-git={gitLetter} data-testid="ide-tree-git-status">{gitLetter === 'U' ? '?' : gitLetter}</span>{/if}
                 </button>
-                <button type="button" class="tree-act tree-more" aria-label="Actions for {node.entry.name}" title="Actions for {node.entry.name}" onclick={(e) => openNodeMenu(e, node)}>
+                <button type="button" class="tree-act tree-more" tabindex="-1" aria-label="Actions for {node.entry.name}" title="Actions for {node.entry.name} (⇧F10)" onclick={(e) => openNodeMenu(e, node)}>
                   <Icon name="more" size={12} />
                 </button>
               </div>
+              {/if}
             {/each}
             {#if treeWin.bottomPx > 0}<div style:block-size="{treeWin.bottomPx}px" aria-hidden="true"></div>{/if}
           </div>
@@ -397,7 +483,7 @@
   .tree-list.is-virtual { gap: 0; }
   .tree-row { display: flex; align-items: center; padding-inline-end: 4px; min-inline-size: 0; overflow: hidden; }
   .tree-row.is-root { background: var(--surface-2); border-block-end: 1px solid var(--separator); }
-  .tree-list.is-virtual .tree-row { block-size: 26px; box-sizing: border-box; }
+  .tree-list.is-virtual .tree-row { block-size: var(--tree-row-h, 26px); box-sizing: border-box; }
   .tree-row:hover, .tree-row.active { background: var(--hover); }
   .tree-item {
     flex: 1; min-inline-size: 0; display: flex; align-items: center; gap: 6px;
@@ -420,7 +506,18 @@
   .tree-git-mark { font-size: var(--fs-xs); font-weight: 600; flex-shrink: 0; }
   .tree-root-sub { flex: 1; min-inline-size: 0; font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tree-more { opacity: 0; block-size: 20px; inline-size: 20px; }
+  .tree-item:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; border-radius: var(--radius-s); }
+  .tree-err-row { padding-inline-end: 6px; }
+  .tree-list.is-virtual .tree-err-row { overflow: hidden; }
   .tree-row:hover .tree-more, .tree-row:focus-within .tree-more { opacity: 1; }
   .dep-tree-pre { overflow: auto; padding: 10px; background: var(--surface-2); border-radius: var(--radius-s); font-size: var(--fs-xs); white-space: pre; }
   @media (hover: none) { .tree-more { opacity: 1; } }
+  /* Touch: rows and their buttons are comfortable targets (the row height is the same
+     constant the virtualiser uses, see ROW_H). */
+  @media (pointer: coarse) {
+    .tree-row { min-block-size: var(--tree-row-h, 40px); box-sizing: border-box; }
+    .tree-toolbar { block-size: auto; min-block-size: 40px; max-block-size: none; }
+    .tree-act, .tree-more { block-size: 36px; inline-size: 36px; }
+    .tree-filter { block-size: 32px; }
+  }
 </style>

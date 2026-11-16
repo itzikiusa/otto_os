@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Local, TimeZone, Utc};
+use otto_core::agent_runtime::MUSE_NO_AUTO_UPDATE;
 use otto_core::domain::{NoticeKind, NoticeSeverity, SessionKind};
 use otto_state::{NewNotice, SettingsRepo};
 use serde::{Deserialize, Serialize};
@@ -298,12 +299,14 @@ fn version_changed(before: Option<&str>, after: Option<&str>) -> bool {
     }
 }
 
-/// Reload tally for the notice: restarted now, failed, deferred until idle.
+/// Reload tally for the notice: restarted now, failed, deferred until idle,
+/// and kept on the old binary because a restart would lose the conversation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ReloadTally {
     reloaded: u32,
     failed: u32,
     deferred: u32,
+    kept: u32,
 }
 
 /// Run one update pass. Public so a future "run now" route can reuse it.
@@ -425,6 +428,12 @@ fn build_body(outcomes: &[UpdateOutcome], reload: Option<ReloadTally>) -> String
         if t.failed > 0 {
             body.push_str(&format!(" ({} failed)", t.failed));
         }
+        if t.kept > 0 {
+            body.push_str(&format!(
+                "; {} session(s) that can't resume their conversation keep the old version until they end",
+                t.kept
+            ));
+        }
         if t.deferred > 0 {
             body.push_str(&format!(
                 "; {} busy session(s) reload when idle",
@@ -446,6 +455,9 @@ async fn probe_version(program: &str) -> Option<String> {
         .arg("-l")
         .arg("-c")
         .arg(&quoted)
+        // The probe must not itself update the CLI (Muse's launcher checks on
+        // every run unless told not to); harmless for every other CLI.
+        .env(MUSE_NO_AUTO_UPDATE.0, MUSE_NO_AUTO_UPDATE.1)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -523,6 +535,13 @@ async fn reload_agent_sessions(ctx: &ServerCtx, providers: &HashSet<String>) -> 
                 || !providers.contains(&s.provider)
                 || !ctx.manager.is_live(&s.id)
             {
+                continue;
+            }
+            // A restart of a session that can't resume (Muse, opencode, no
+            // captured id) starts a NEW conversation: never on the person's
+            // behalf. It keeps the old binary until it ends.
+            if !ctx.manager.providers().resumes_session(&s) {
+                tally.kept += 1;
                 continue;
             }
             if ctx.manager.busy_for_restart(&s.id).await {
@@ -697,7 +716,7 @@ mod tests {
         Some(ReloadTally {
             reloaded,
             failed,
-            deferred: 0,
+            ..Default::default()
         })
     }
 
@@ -727,7 +746,8 @@ mod tests {
                 Some(ReloadTally {
                     reloaded: 1,
                     failed: 0,
-                    deferred: 2
+                    deferred: 2,
+                    kept: 0,
                 })
             ),
             "Updated CLIs: claude (2.1.0 → 2.1.3). Already up to date: codex. \
@@ -787,6 +807,20 @@ mod tests {
         assert_eq!(
             build_body(&o, tally(3, 2)),
             "Updated CLIs: claude. Reloaded 3 open session(s) (2 failed)."
+        );
+    }
+
+    #[test]
+    fn body_says_non_resumable_sessions_keep_the_old_version() {
+        let o = [outcome("muse", true, "")];
+        let t = ReloadTally {
+            kept: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            build_body(&o, Some(t)),
+            "Updated CLIs: muse. Reloaded 0 open session(s); 1 session(s) that can't resume \
+             their conversation keep the old version until they end."
         );
     }
 

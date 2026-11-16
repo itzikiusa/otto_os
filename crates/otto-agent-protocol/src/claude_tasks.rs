@@ -134,6 +134,8 @@ impl ClaudeDriver {
                 started_at: t.started_at,
                 item_id: t.item_id.clone(),
                 due_at: None,
+                stopping: false,
+                stop_error: None,
             })
             .collect();
         v.sort_by(|a, b| a.started_at.cmp(&b.started_at).then(a.id.cmp(&b.id)));

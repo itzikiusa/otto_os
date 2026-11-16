@@ -347,8 +347,10 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
     assert_eq!(state.shared_buffers.get("main.go").unwrap().version, 2);
     assert_eq!(state.active_debug.unwrap().id, "dbg_99");
 
-    // Once the debugged target finishes (`Terminated`), `active_debug` clears to `None`,
-    // non-restart actions are rejected, and an `Editor` peer can still trigger `Restart`.
+    // Once the debugged target finishes (`Terminated`), `active_debug` clears to `None`
+    // and non-restart actions are rejected. `Restart` relaunches the program as the
+    // HOST (env, secrets, network bridge) running whatever a guest just saved, so a
+    // guest — even an `Editor` — can never trigger it (E4); only the host can.
     let mut term_snap = dbg_snap.clone();
     term_snap.revision = 2;
     term_snap.state = IdeDebugState::Terminated;
@@ -395,7 +397,7 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
                 breakpoints: None,
             },
         )
-        .is_ok());
+        .is_err_and(|e| matches!(e, Error::Forbidden(ref m) if m.contains("only the host"))));
 
     hub.close_room(&host, &created.room.id).expect("close room");
     let ev = rx.recv().await.expect("room closed event");
@@ -497,4 +499,153 @@ fn room_caps_idle_ttl_and_buffer_eviction_invariants_hold() {
     }
     let remaining = hub.list_rooms(&host).unwrap();
     assert!(!remaining.iter().any(|r| r.id == active.room.id));
+}
+
+fn editor_room(hub: &CollabHub) -> IdeCreateCollabRoomResp {
+    hub.create_room(
+        &test_user("u_host", "itzik", false),
+        IdeCreateCollabRoomReq {
+            target: IdeTargetSpec {
+                connection_id: Some("conn_secret".into()),
+                additional_roots: vec!["/Users/itzik/other".into()],
+                ..IdeTargetSpec::local("/Users/itzik/repo")
+            },
+            title: None,
+            default_role: IdeCollabRole::Editor,
+        },
+    )
+    .expect("create room")
+}
+
+fn join(hub: &CollabHub, room: &IdeCreateCollabRoomResp, name: &str) -> Result<IdeCollabJoinResp> {
+    hub.join_room(
+        &room.room.id,
+        IdeCollabJoinReq {
+            display_name: name.into(),
+            token: room.invite_token.clone(),
+        },
+    )
+}
+
+/// E7: joining without ever opening an event stream can't squat the room
+/// full — a guest with no stream for `PEER_STALE_AFTER` loses its seat and
+/// peers hear `PeerLeft`; a guest whose stream is open keeps it.
+#[tokio::test]
+async fn left_peers_free_their_seats_and_peers_hear_peer_left() {
+    let hub = CollabHub::new();
+    let room = editor_room(&hub);
+    let live = join(&hub, &room, "live").unwrap();
+    let (_, _live_rx) = hub
+        .subscribe_peer(&room.room.id, &room.invite_token, Some(&live.peer_id))
+        .unwrap();
+    while join(&hub, &room, "squatter").is_ok() {}
+    assert!(matches!(
+        join(&hub, &room, "friend"),
+        Err(Error::Conflict(_))
+    ));
+
+    let (_, mut rx) = hub.subscribe(&room.room.id, &room.invite_token).unwrap();
+    {
+        let mut guard = hub.rooms.write().unwrap();
+        for p in &mut guard.get_mut(&room.room.id).unwrap().peers {
+            p.last_seen = Instant::now() - PEER_STALE_AFTER - Duration::from_secs(1);
+        }
+    }
+    let friend = join(&hub, &room, "friend").expect("stale seats are freed");
+    let ids: Vec<_> = friend
+        .room
+        .peers
+        .iter()
+        .map(|p| p.peer_id.clone())
+        .collect();
+    assert!(
+        ids.contains(&live.peer_id),
+        "a peer with an open stream stays"
+    );
+    assert_eq!(friend.room.peers.len(), 3, "host + live + friend: {ids:?}");
+    assert!(matches!(
+        rx.recv().await.unwrap(),
+        IdeCollabEvent::PeerLeft { .. }
+    ));
+
+    // Its stream ending starts the live peer's grace period.
+    hub.peer_stream_closed(&room.room.id, &live.peer_id);
+    let guard = hub.rooms.read().unwrap();
+    let rec = guard
+        .get(&room.room.id)
+        .unwrap()
+        .peers
+        .iter()
+        .find(|p| p.peer.peer_id == live.peer_id)
+        .map(|p| p.streams);
+    assert_eq!(rec, Some(0));
+}
+
+/// E7: open event streams per room are capped.
+#[test]
+fn event_streams_per_room_are_capped() {
+    let hub = CollabHub::new();
+    let room = editor_room(&hub);
+    let mut held = Vec::new();
+    for _ in 0..MAX_SUBSCRIBERS_PER_ROOM {
+        held.push(hub.subscribe(&room.room.id, &room.invite_token).unwrap());
+    }
+    assert!(matches!(
+        hub.subscribe(&room.room.id, &room.invite_token),
+        Err(Error::Conflict(_))
+    ));
+    held.pop();
+    assert!(hub.subscribe(&room.room.id, &room.invite_token).is_ok());
+}
+
+/// E7: a stalled reader can't make the event ring pin unbounded memory —
+/// each `BufferUpdated` carries the whole buffer, so past
+/// `MAX_ROOM_EVENT_BYTES` unread an edit is refused; once readers catch up
+/// edits flow again.
+#[tokio::test]
+async fn a_stalled_reader_bounds_the_bytes_the_event_ring_pins() {
+    let hub = CollabHub::new();
+    let room = editor_room(&hub);
+    let (_, mut stalled) = hub.subscribe(&room.room.id, &room.invite_token).unwrap();
+    let big = "a".repeat(MAX_SHARED_BUFFER_BYTES);
+    let edit = |n: usize| IdeCollabEditReq {
+        peer_id: room.host_peer_id.clone(),
+        peer_secret: room.host_peer_secret.clone(),
+        path: format!("f{n}.txt"),
+        content: big.clone(),
+        base_version: None,
+        save: false,
+    };
+    let fits = MAX_ROOM_EVENT_BYTES / MAX_SHARED_BUFFER_BYTES;
+    for n in 0..fits {
+        hub.apply_edit(&room.room.id, &edit(n), false).unwrap();
+    }
+    assert!(matches!(
+        hub.apply_edit(&room.room.id, &edit(fits), false),
+        Err(Error::Conflict(_))
+    ));
+    while stalled.try_recv().is_ok() {}
+    hub.apply_edit(&room.room.id, &edit(fits), false)
+        .expect("readers caught up");
+}
+
+/// E11: guests don't learn the host's user id, workspace, connection id or
+/// other roots; the root stays (the guest UI resolves absolute paths on it).
+#[test]
+fn guest_snapshots_carry_no_host_identifiers() {
+    let hub = CollabHub::new();
+    let room = editor_room(&hub);
+    assert_eq!(
+        room.room.host_user_id, "u_host",
+        "the host's own view is full"
+    );
+    let joined = join(&hub, &room, "guest").unwrap();
+    let state = hub.get_state(&room.room.id, &room.invite_token).unwrap();
+    for view in [&joined.room, &state.room] {
+        assert_eq!(view.host_user_id, "");
+        assert_eq!(view.target.root, "/Users/itzik/repo");
+        assert!(view.target.connection_id.is_none());
+        assert!(view.target.additional_roots.is_empty());
+    }
+    assert_eq!(hub.host_user_id(&room.room.id).as_deref(), Some("u_host"));
 }

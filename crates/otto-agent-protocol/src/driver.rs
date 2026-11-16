@@ -137,6 +137,13 @@ pub enum DriverEvent {
     },
     /// The agent's pending background work, whole (replaces the last list).
     BackgroundTasks(Vec<BackgroundTask>),
+    /// The provider answered a [`TaskStop::Native`] call for `task_id`:
+    /// `error` is its refusal. Acceptance is not the end of the task — that
+    /// still comes as the task leaving [`DriverEvent::BackgroundTasks`].
+    TaskStopAnswered {
+        task_id: String,
+        error: Option<String>,
+    },
     /// The protocol says the running turn ended.
     Terminal {
         status: TurnTerminalStatus,
@@ -191,6 +198,64 @@ pub fn item(
         detail_omitted: false,
         kind,
     }
+}
+
+/// The provider as a person reads it in a notice.
+pub fn provider_name(p: RuntimeProvider) -> &'static str {
+    match p {
+        RuntimeProvider::Claude => "Claude Code",
+        RuntimeProvider::Codex => "Codex",
+        RuntimeProvider::Pi => "Pi",
+        RuntimeProvider::Agy => "Antigravity",
+        RuntimeProvider::Grok => "Grok",
+        RuntimeProvider::Muse => "Muse",
+        RuntimeProvider::Gemini => "Gemini",
+        RuntimeProvider::Opencode => "OpenCode",
+    }
+}
+
+/// A system notice row (an Otto-side remark in the timeline).
+pub fn notice(id: String, message: String) -> TurnItem {
+    item(
+        id,
+        TurnItemStatus::Completed,
+        None,
+        TurnItemKind::SystemNotice {
+            message,
+            task_settlement: None,
+        },
+    )
+}
+
+/// `req` without an effort `provider` does not take, plus the notice that
+/// says so: an unsupported level runs the turn at the agent's default
+/// instead of refusing the whole prompt (an "Ask another agent" create).
+pub fn drop_unsupported_effort(
+    provider: RuntimeProvider,
+    efforts: &[String],
+    req: &RuntimePromptReq,
+) -> (RuntimePromptReq, Option<TurnItem>) {
+    let Some(effort) = req.effort.as_deref() else {
+        return (req.clone(), None);
+    };
+    if efforts.iter().any(|e| e == effort) {
+        return (req.clone(), None);
+    }
+    let message = format!(
+        "{} does not take the reasoning effort \u{201c}{effort}\u{201d} \u{2014} this turn runs at its default effort.",
+        provider_name(provider)
+    );
+    let req = RuntimePromptReq {
+        effort: None,
+        ..req.clone()
+    };
+    (
+        req,
+        Some(notice(
+            format!("effort-dropped:{}", otto_core::new_id()),
+            message,
+        )),
+    )
 }
 
 /// A failed tool's error text for [`TurnItem::error`]: trimmed, at most
@@ -377,6 +442,17 @@ pub enum SidebandPayload {
     },
 }
 
+/// How a driver stops one piece of its agent's background work
+/// ([`StructuredDriver::stop_task`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskStop {
+    /// The provider's own stop call is in `step`; its answer comes back as
+    /// [`DriverEvent::TaskStopAnswered`].
+    Native(DriverStep),
+    /// This provider has no stop call for it: the runtime asks the agent.
+    Unsupported,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriverError(pub String);
 
@@ -478,6 +554,14 @@ pub trait StructuredDriver: Send + 'static {
     /// Cancel the running turn; the driver still reports the terminal when the
     /// provider acknowledges. Open protocol requests are answered here.
     fn interrupt(&mut self) -> DriverStep;
+
+    /// Stop one background task (`task_id` from [`DriverEvent::BackgroundTasks`])
+    /// with the provider's own call. The default — and any task the driver
+    /// cannot address natively — is [`TaskStop::Unsupported`]; never a kill
+    /// of a process the driver cannot prove is that task's.
+    fn stop_task(&mut self, _task_id: &str) -> TaskStop {
+        TaskStop::Unsupported
+    }
 
     /// Answer a pending request with a person's decision.
     fn respond(

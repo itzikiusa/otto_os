@@ -16,8 +16,8 @@ import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { findContainingRoot, isPathExternal } from '../shell/ideProjectHelpers';
 import {
-  detectIdeLanguage, detectTextEol, ideBasename, isReadOnlySdkOrCachePath,
-  normalizeEditorLf, serializeTabDiskContent,
+  detectIdeLanguage, detectTextEol, diskEolsOf, ideBasename, isReadOnlySdkOrCachePath,
+  normalizeEditorLf, serializeTabDiskContent, sha256HexOfText,
   type IdeDiagnostic, type IdeEditorHandle, type IdeEditorSelectionRange, type IdeFileReadResp,
   type IdeGutterItem, type IdeOpenTab, type IdeProjectRoot, type IdeSymbolNode, type IdeTargetSpec,
 } from './ideTypes';
@@ -264,6 +264,15 @@ export class IdeBufferPerfController {
       saveWorkspaceOpenTabs(host.target.root, host.tabs.map((t) => t.path), host.activePath, host.splitPath);
     }
   }
+  private discardAllDrafts(host: IdeBufferHost): void {
+    this.flushHistorySnapshot(host);
+    for (const t of this.draftTimers.values()) clearTimeout(t);
+    this.draftTimers.clear();
+    for (let i = 0; i < host.tabs.length; i++) removeIdeUndoDraft(host.tabs[i].path);
+    if (host.target.root) {
+      saveWorkspaceOpenTabs(host.target.root, host.tabs.map((t) => t.path), host.activePath, host.splitPath);
+    }
+  }
   markClean(tab: IdeOpenTab, content: string, sha256?: string): void {
     this.clearSync(tab.path); this.clearAutoSaveTimer(tab.path); this.clearDraftTimer(tab.path);
     this.liveBuffers.delete(tab.path); this.conflictedPaths.delete(tab.path);
@@ -300,8 +309,13 @@ export class IdeBufferPerfController {
     if (clearProblems && host.problems.some((d) => closed.has(d.path))) host.problems = host.problems.filter((d) => !closed.has(d.path));
     notifyEvicted(closed);
   }
-  resetAll(host: IdeBufferHost): void {
-    this.flushAndSnapshotAll(host);
+  /** Drop every buffer (a target switch). `discardDirty`: the person chose "Discard & switch"
+   *  (or storage was cleared), so unsaved edits are NOT written back as drafts that the next
+   *  open would resurrect (and autosave would then write). Local History still gets its
+   *  snapshot, which is how a discard stays recoverable. */
+  resetAll(host: IdeBufferHost, opts: { discardDirty?: boolean } = {}): void {
+    if (opts.discardDirty) this.discardAllDrafts(host);
+    else this.flushAndSnapshotAll(host);
     for (const t of this.syncTimers.values()) clearTimeout(t);
     for (const t of this.autoSaveTimers.values()) clearTimeout(t);
     for (const t of this.draftTimers.values()) clearTimeout(t);
@@ -455,7 +469,7 @@ export async function performOpenFile(
         const res = await api.get<IdeFileReadResp>(readFileUrl());
         const eol = detectTextEol(res.content);
         const normContent = normalizeEditorLf(res.content);
-        existing.eol = eol;
+        existing.eol = eol; existing.diskEols = diskEolsOf(res.content);
         perf.markClean(existing, normContent, res.sha256);
         existing.language = res.language || detectIdeLanguage(fullPath);
         existing.truncated = Boolean(res.truncated);
@@ -487,7 +501,7 @@ export async function performOpenFile(
     const isReadOnly = Boolean(res.read_only) || Boolean(res.truncated) || sdkReadOnly;
     const tab = host.tabs.find((t) => t.path === fullPath);
     if (tab) {
-      tab.eol = eol;
+      tab.eol = eol; tab.diskEols = diskEolsOf(res.content);
       const persisted = !opts.reload ? readIdeUndoDraft(fullPath) : null;
       const persistedSaved = persisted && typeof persisted.savedContent === 'string' ? normalizeEditorLf(persisted.savedContent) : null;
       const persistedDraft = persisted && typeof persisted.draftContent === 'string' ? normalizeEditorLf(persisted.draftContent) : null;
@@ -546,10 +560,14 @@ async function saveFileNow(
   opts: { silent?: boolean },
 ): Promise<boolean> {
   const targetPath = path ? host.resolvePath(path) : host.activePath;
+  const tab = targetPath ? host.tabs.find((t) => t.path === targetPath) : null;
+  // A tab still loading (or whose read failed) holds a placeholder, not the file: saving it
+  // would write an empty file over the real one. Checked before the flush, which would
+  // otherwise also drop the crash-recovery draft the load is about to restore.
+  if (!targetPath || !tab || tab.loading || tab.error) return false;
   const rawFlushed = perf.flush(host, targetPath);
   const contentToSave = normalizeEditorLf(rawFlushed);
-  const tab = targetPath ? host.tabs.find((t) => t.path === targetPath) : null;
-  if (!targetPath || !tab || tab.readOnly || tab.truncated || !host.canEditCollab) return false;
+  if (tab.readOnly || tab.truncated || !host.canEditCollab) return false;
   if (host.collabIsGuest) {
     const ok = await host.sendCollabEdit(targetPath, contentToSave, true);
     if (!ok) return false;
@@ -571,11 +589,11 @@ async function saveFileNow(
     const diskContent = serializeTabDiskContent(tab, contentToSave);
     const resp = await api.put<{ path: string; size: number; sha256: string }>('/ide/fs/file', {
       target: saveTarget, path: targetPath, content: diskContent,
-      expected_sha256: forceOverwrite || !tab.sha256 ? undefined : tab.sha256,
+      expected_sha256: forceOverwrite ? undefined : await expectedDiskSha(tab),
       local_history_enabled: prefs.localHistoryEnabled,
       local_history_retention_days: prefs.localHistoryRetentionDays,
     });
-    tab.savedContent = contentToSave; tab.sha256 = resp.sha256;
+    tab.savedContent = contentToSave; tab.sha256 = resp.sha256; tab.diskEols = diskEolsOf(diskContent);
     perf.conflictedPaths.delete(targetPath);
     const latest = perf.getBuffer(host, targetPath);
     tab.dirty = latest !== tab.savedContent;
@@ -603,7 +621,21 @@ async function saveFileNow(
   }
 }
 
-export async function reloadTabsFromDisk(host: IdeBufferHost, perf: IdeBufferPerfController, paths: Set<string>): Promise<void> {
+/** The precondition for overwriting an existing file: the sha the tab was read with, or
+ *  (a tab whose sha a collab save cleared) the hash of what the tab believes is on disk.
+ *  Without one the daemon writes unconditionally, so this only gives up where WebCrypto
+ *  is missing. */
+export async function expectedDiskSha(tab: IdeOpenTab): Promise<string | undefined> {
+  if (tab.sha256) return tab.sha256;
+  return sha256HexOfText(serializeTabDiskContent(tab, tab.savedContent));
+}
+
+/** Re-read `paths` from disk after a workspace operation (Replace in Path, Rename) wrote
+ *  them. A tab that still holds unsaved edits (its save failed or is in conflict) keeps
+ *  them: it is not marked clean, its stale sha makes the next save ask, and its path is
+ *  returned so the caller can say so. */
+export async function reloadTabsFromDisk(host: IdeBufferHost, perf: IdeBufferPerfController, paths: Set<string>): Promise<string[]> {
+  const kept: string[] = [];
   const normalized = new Set<string>();
   for (const p of paths) {
     normalized.add(p);
@@ -617,6 +649,9 @@ export async function reloadTabsFromDisk(host: IdeBufferHost, perf: IdeBufferPer
   );
   await Promise.allSettled(
     matching.map(async (tab) => {
+      perf.flush(host, tab.path);
+      if (perf.isTabDirty(tab)) { kept.push(tab.path); return; }
+      const before = perf.getBuffer(host, tab.path);
       const containing = host.target.kind === 'local' && host.projectRoots
         ? findContainingRoot(tab.path, host.projectRoots)
         : null;
@@ -624,9 +659,11 @@ export async function reloadTabsFromDisk(host: IdeBufferHost, perf: IdeBufferPer
         ? host.targetQuery({ root: containing.path, path: tab.path })
         : host.targetQuery({ path: tab.path });
       const fresh = await api.get<IdeFileReadResp>(`/ide/fs/file?${query}`);
+      // Typed into while the read was in flight: those keystrokes win over the disk copy.
+      if (!host.tabs.includes(tab) || perf.getBuffer(host, tab.path) !== before) { kept.push(tab.path); return; }
       const eol = detectTextEol(fresh.content);
       const normContent = normalizeEditorLf(fresh.content);
-      tab.eol = eol;
+      tab.eol = eol; tab.diskEols = diskEolsOf(fresh.content);
       tab.truncated = Boolean(fresh.truncated);
       tab.readOnly = Boolean(fresh.read_only) || Boolean(fresh.truncated) || isReadOnlySdkOrCachePath(tab.path);
       tab.error = null;
@@ -639,6 +676,7 @@ export async function reloadTabsFromDisk(host: IdeBufferHost, perf: IdeBufferPer
       }
     }),
   );
+  return kept;
 }
 
 export function computeFallbackSelection(content: string, cursorInfo: IdeBufferHost['cursorInfo']): IdeEditorSelectionRange {

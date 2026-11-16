@@ -10,6 +10,7 @@
   import { toastError } from '../../../lib/toastError';
   import RuntimeChildCard from './RuntimeChildCard.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
+  import { stopThreadWork } from './taskStops.svelte';
 
   type Hint = { provider?: string | null; title?: string | null; model?: string | null; effort?: string | null };
   interface Props {
@@ -18,17 +19,19 @@
   let { kids }: Props = $props();
 
   let stopping = $state(false);
-  const working = $derived(
-    kids.filter((k) => {
-      const st = runtimeThreads.get(k.id)?.status;
-      return st === 'working' || st === 'starting' || st === 'awaiting_permission';
-    }),
-  );
+  const turnRuns = (id: string): boolean => {
+    const st = runtimeThreads.get(id)?.status;
+    return st === 'working' || st === 'starting' || st === 'awaiting_permission';
+  };
+  // A child busy only on background work counts as working too (its Stop stops that work).
+  const working = $derived(kids.filter((k) => turnRuns(k.id) || (runtimeThreads.get(k.id)?.background_tasks?.length ?? 0) > 0));
 
   async function stopAll(): Promise<void> {
     if (stopping) return;
     stopping = true;
-    const results = await Promise.allSettled(working.map((k) => runtimeThreads.interrupt(k.id)));
+    const results = await Promise.allSettled(
+      working.map((k) => stopThreadWork(k.id, { turnRunning: turnRuns(k.id), taskIds: (runtimeThreads.get(k.id)?.background_tasks ?? []).map((b) => b.id) })),
+    );
     stopping = false;
     const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
     if (failed) toastError('Couldn’t stop every thread', failed.reason);

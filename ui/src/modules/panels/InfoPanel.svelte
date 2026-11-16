@@ -16,6 +16,7 @@
   import { allProviders, defaultAgentProvider } from '../../lib/providers';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmFreshRestart } from '../../lib/freshRestart';
 
   const session = $derived(ws.activeSession);
   const workspace = $derived(ws.current);
@@ -100,8 +101,14 @@
       );
       if (!ok) return;
     }
+    const choice = await confirmFreshRestart(session, confirmer, { canSaveOnly: true });
+    if (choice === 'cancel') return;
     try {
       await ws.updateSessionMeta(id, { extra_dirs: dirs });
+      if (choice === 'save') {
+        toasts.success(verb === 'added' ? 'Folder added' : 'Folder removed', 'Saved — applies to the next session.');
+        return;
+      }
       await ws.restartSession(id, { quiet: true });
       toasts.success(verb === 'added' ? 'Folder added' : 'Folder removed', 'The session restarted with the new folders.');
     } catch (e) {

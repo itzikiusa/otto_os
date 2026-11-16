@@ -9,6 +9,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import { isAgentCliTool } from '../../lib/providerRegistry';
   import type { FsBrowse } from '../../lib/api/types';
 
   // A reload after the root account exists resumes here (auth boot reads the
@@ -60,12 +61,11 @@
   // after setup, since it needs an authenticated session).
   const clickhouse = $derived(auth.meta?.tools?.find((t) => t.name === 'clickhouse'));
 
-  // Detected agent CLIs (claude / codex / agy). Otto can't run an agent session
-  // without one, so the tool-check step calls this out specifically — the
-  // first-run coach on the Agents page then walks the user to a launched agent.
-  const agentTools = $derived(
-    (auth.meta?.tools ?? []).filter((t) => t.name === 'claude' || t.name === 'codex' || t.name === 'agy'),
-  );
+  // Detected agent CLIs (every known family — a Muse-only machine has one).
+  // Otto can't run an agent session without one, so the tool-check step calls
+  // this out specifically — the first-run coach on the Agents page then walks
+  // the user to a launched agent.
+  const agentTools = $derived((auth.meta?.tools ?? []).filter((t) => isAgentCliTool(t.name)));
   const hasAgentCli = $derived(agentTools.some((t) => t.found));
 
   /** Create the root account (once) and authenticate with it. Runs when the

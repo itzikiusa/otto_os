@@ -23,6 +23,11 @@ import { errorText, type TimelineRow } from './timeline';
 
 /** Per file (images and PDFs). */
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+/** All of one message's attachments together, raw bytes. Base64 grows them by a
+ *  third (16 → ~21.4 MiB), which stays under the daemon's 24 MiB draft ceiling
+ *  (`otto-state` agent_runtime/drafts.rs) and its 32 MiB prompt body limit
+ *  (`otto-agent-protocol` http.rs) with room for the text and context chips. */
+export const MAX_TOTAL_ATTACHMENT_BYTES = 16 * 1024 * 1024;
 /** Maximum images/PDFs attached to a single composer draft (mirrors server draft cap). */
 export const MAX_DRAFT_IMAGES = 20;
 let optimisticSeq = 0;
@@ -35,20 +40,55 @@ export interface OptimisticMessageState {
   afterOrdinal: number;
 }
 
-/** Read the files `takes` accepts as base64 attachments (oversized ones are
- *  refused with a toast). */
-export async function readAttachments(files: Iterable<File>, takes: (f: File) => boolean): Promise<ComposerFile[]> {
+const MB = 1024 * 1024;
+
+/** Decoded size of base64 attachments, without decoding them. */
+export function attachmentBytes(files: readonly { data_base64: string }[]): number {
+  let n = 0;
+  for (const f of files) {
+    const s = f.data_base64;
+    const pad = s.endsWith('==') ? 2 : s.endsWith('=') ? 1 : 0;
+    n += Math.max(0, Math.floor((s.length * 3) / 4) - pad);
+  }
+  return n;
+}
+
+/** Why `name` (`size` bytes) can't join attachments already holding `used`
+ *  bytes, or null when it fits. Names the limit the person ran into. */
+export function attachmentRefusal(name: string, size: number, used: number): string | null {
+  if (size > MAX_ATTACHMENT_BYTES) return `${name} is over the ${MAX_ATTACHMENT_BYTES / MB} MB limit for one file.`;
+  if (used + size > MAX_TOTAL_ATTACHMENT_BYTES) {
+    return `${name} not added: one message carries at most ${MAX_TOTAL_ATTACHMENT_BYTES / MB} MB of attachments. Send it in a separate message.`;
+  }
+  return null;
+}
+
+/** Read the files `takes` accepts as base64 attachments. A file over the
+ *  per-file cap, or one that would take the message (with `usedBytes`
+ *  already attached) past {@link MAX_TOTAL_ATTACHMENT_BYTES}, is refused
+ *  through `refuse` (a toast when none is given); the files after it still
+ *  get their chance. */
+export async function readAttachments(
+  files: Iterable<File>,
+  takes: (f: File) => boolean,
+  opts: { usedBytes?: number; refuse?: (message: string) => void } = {},
+): Promise<ComposerFile[]> {
   const out: ComposerFile[] = [];
+  const refuse = opts.refuse ?? ((m: string) => toastError('Attachment not added', new Error(m)));
+  let used = opts.usedBytes ?? 0;
   for (const f of files) {
     if (!takes(f)) continue;
-    if (f.size > MAX_ATTACHMENT_BYTES) {
-      toastError('File too large', new Error(`${f.name} is over 10 MB`));
+    const name = f.name || 'pasted image';
+    const why = attachmentRefusal(name, f.size, used);
+    if (why) {
+      refuse(why);
       continue;
     }
+    used += f.size;
     const data = new Uint8Array(await f.arrayBuffer());
     let bin = '';
     for (let i = 0; i < data.length; i += 0x8000) bin += String.fromCharCode(...data.subarray(i, i + 0x8000));
-    out.push({ name: f.name || 'pasted image', mime: f.type, data_base64: btoa(bin) });
+    out.push({ name, mime: f.type, data_base64: btoa(bin) });
   }
   return out;
 }
@@ -100,21 +140,41 @@ export async function hydrateRetryAttachments(
   return out;
 }
 
-export async function appendDraftAttachments<TDraft extends { images: ComposerFile[] }>(
+/** Add files to a thread's composer. What doesn't fit (count or size) is
+ *  named inline under the composer (`draft.attachError`, RuntimeDraftStatus). */
+export async function appendDraftAttachments<TDraft extends { images: ComposerFile[]; attachError?: string | null }>(
   ownerId: string,
   draft: TDraft,
   files: Iterable<File>,
   takes: (f: File) => boolean,
 ): Promise<void> {
-  const read = await readAttachments(files, takes);
-  if (!read.length || !runtimeDrafts.owns(ownerId, draft as never)) return;
-  const combined = [...draft.images, ...read];
-  if (combined.length > MAX_DRAFT_IMAGES) {
-    toastError('Too many attachments', new Error(`At most ${MAX_DRAFT_IMAGES} images or PDFs per message.`));
-    draft.images = combined.slice(0, MAX_DRAFT_IMAGES);
-    return;
+  let refused: string | null = null;
+  const read = await readAttachments(files, takes, {
+    usedBytes: attachmentBytes(draft.images),
+    refuse: (m) => (refused ??= m),
+  });
+  if (!runtimeDrafts.owns(ownerId, draft as never)) return;
+  // Another paste may have landed while these were read: re-check the total.
+  let used = attachmentBytes(draft.images);
+  const kept: ComposerFile[] = [];
+  for (const f of read) {
+    const size = attachmentBytes([f]);
+    const why = attachmentRefusal(f.name, size, used);
+    if (why) {
+      refused ??= why;
+      continue;
+    }
+    used += size;
+    kept.push(f);
   }
-  draft.images = combined;
+  const combined = [...draft.images, ...kept];
+  if (combined.length > MAX_DRAFT_IMAGES) {
+    refused ??= `At most ${MAX_DRAFT_IMAGES} images or PDFs per message.`;
+    draft.images = combined.slice(0, MAX_DRAFT_IMAGES);
+  } else if (kept.length) {
+    draft.images = combined;
+  }
+  draft.attachError = refused;
 }
 
 export function pasteDraftAttachments<TDraft extends { images: ComposerFile[] }>(
@@ -276,6 +336,8 @@ export function mergeQueuedAttachments(
   const seen = new Set(kept.map((f) => `${f.mime}:${f.data_base64}`));
   const extra: ComposerFile[] = [];
   let capped = current.length > MAX_DRAFT_IMAGES;
+  let oversize = false;
+  let used = attachmentBytes(kept);
   for (const item of restored) {
     const key = `${item.mime}:${item.data_base64}`;
     if (seen.has(key)) continue;
@@ -283,11 +345,22 @@ export function mergeQueuedAttachments(
       capped = true;
       break;
     }
+    const size = attachmentBytes([item]);
+    if (used + size > MAX_TOTAL_ATTACHMENT_BYTES) {
+      oversize = true;
+      continue;
+    }
+    used += size;
     seen.add(key);
     extra.push({ ...item });
   }
   if (capped) {
     toastError('Too many attachments', new Error(`Kept the first ${MAX_DRAFT_IMAGES} attachments in the composer.`));
+  } else if (oversize) {
+    toastError(
+      'Attachments left out',
+      new Error(`One message carries at most ${MAX_TOTAL_ATTACHMENT_BYTES / MB} MB of attachments; the rest were not restored.`),
+    );
   }
   return extra.length > 0 ? [...kept, ...extra] : kept;
 }

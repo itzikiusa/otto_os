@@ -89,3 +89,15 @@ export function addTarget(list: readonly AskChildTarget[], t: AskChildTarget): A
   if (list.some(same) || list.length >= ASK_MAX_TARGETS) return [...list];
   return [...list, t];
 }
+
+/** `effort` when the agent takes it, else null: switching to another
+ *  provider must never carry a level it refuses (a 400 that fails the whole
+ *  ask — Gemini takes none, Codex no `max`). */
+export function clampEffort(effort: string | null | undefined, levels: readonly string[]): string | null {
+  return effort && levels.includes(effort) ? effort : null;
+}
+
+/** What "Send the answer to <agent>" puts in this thread: whose answer it is, then the answer. */
+export function answerHandoff(from: string, answer: string): string {
+  return `${from} answered the question I asked it:\n\n${answer.trim()}`;
+}

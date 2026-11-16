@@ -19,11 +19,13 @@ pub mod gutter;
 pub mod http;
 pub mod java_workspace;
 pub mod jsonrpc_framing;
+pub mod line_reader;
 pub mod local_history;
 pub mod lsp_host;
 pub mod lsp_service;
 pub mod netbridge;
 pub mod plugins;
+pub mod proc_group;
 pub mod projects;
 pub mod target;
 pub mod text_pos;
@@ -173,12 +175,21 @@ impl IdeEngine {
     }
 
     /// Gracefully terminate all active IDE runs, DAP debuggers, pooled LSP servers,
-    /// and network bridges on daemon shutdown.
+    /// network bridges and build helpers on daemon shutdown.
+    ///
+    /// The host gives this a few seconds. Pooled servers go first (synchronous,
+    /// instant), then runs, debug sessions and bridges stop concurrently so a
+    /// debug session that is still booting cannot use up the slot and leave
+    /// bridge children behind. Helper process groups (builds, `before_launch`)
+    /// are killed last, after their owners had the chance to stop them.
     pub async fn shutdown(&self) {
-        self.environments.shutdown().await;
-        self.dap.shutdown().await;
         self.lsp_pool.shutdown();
-        self.netbridge.shutdown().await;
+        tokio::join!(
+            self.environments.shutdown(),
+            self.dap.shutdown(),
+            self.netbridge.shutdown(),
+        );
+        proc_group::kill_all_helper_groups();
     }
 }
 

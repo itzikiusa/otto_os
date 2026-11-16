@@ -56,6 +56,13 @@ export interface AgentTask {
   toolUses: number;
   /** Whether full TurnItem details were omitted and can be loaded on expand. */
   detailOmitted: boolean;
+  /** The daemon's background task id when the row is one of the thread's
+   *  running background tasks: what `POST …/tasks/{task_id}/stop` stops.
+   *  Absent = no per-task stop (a turn's own subagent, a swarm member). */
+  stopId?: string | null;
+  /** The daemon is stopping it / its last stop failed (newer daemons). */
+  stopping?: boolean;
+  stopError?: string | null;
 }
 
 export interface AgentTasksOptions {
@@ -226,6 +233,10 @@ function toolFields(
   };
 }
 
+function stopFields(b: BackgroundTask): Pick<AgentTask, 'stopId' | 'stopping' | 'stopError'> {
+  return { stopId: b.id, stopping: Boolean(b.stopping), stopError: b.stop_error ?? null };
+}
+
 export function agentTasks(
   items: readonly TurnItem[],
   background: readonly BackgroundTask[],
@@ -365,6 +376,7 @@ export function agentTasks(
         childSessionId: null,
         taskId: null,
         ...subagentFields(linked, children, status),
+        ...stopFields(b),
       });
       continue;
     }
@@ -383,6 +395,7 @@ export function agentTasks(
       childSessionId: null,
       taskId: kind === 'command' ? b.id : null,
       ...toolFields(linked, liveOut),
+      ...stopFields(b),
     });
   }
 

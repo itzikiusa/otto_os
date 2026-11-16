@@ -42,8 +42,10 @@
   .dot.working {
     background: var(--status-working);
   }
+  /* Alive but not classified yet: the info hue, never --accent (green in Warm,
+     where it read as "working"). */
   .dot.running {
-    background: var(--accent);
+    background: var(--info);
   }
   .dot.failed {
     background: var(--status-exited);

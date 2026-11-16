@@ -35,6 +35,18 @@ import { processResources } from './process-resources';
 //      enforcing `active_server_count <= 3`, combined RSS (`ottod` + child LSPs + UI) <= 1.8 GB
 //      (`1,887,436` KB), zero crashes, and zero console or `/api/v1/ide/*` 4xx/5xx errors.
 
+/** The IDE header is one toolbar row: Settings, Share, Git, Search… live in its ⋯ menu. */
+async function openIdeMenuItem(page: Page, name: string | RegExp): Promise<void> {
+  await page.getByTestId('ide-more-btn').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name }).first().click();
+}
+
+/** Open a named multi-repo project from the workspace switcher (the pills row is gone). */
+async function openNamedProject(page: Page, name: string): Promise<void> {
+  await page.getByTestId('ide-target-switcher').click();
+  await page.getByTestId('ide-named-project-option').filter({ hasText: name }).first().click();
+}
+
 test.use({ serviceWorkers: 'block' });
 test.describe.configure({ mode: 'serial' });
 
@@ -677,14 +689,14 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
 
     // 1b) Open & close all IDE LazyMount modals via UI & Escape with ZERO `b.onclose` errors
     // Modal 1: IdeSettingsModal (`⌘,` button)
-    await page.getByTestId('ide-settings-btn').click();
+    await openIdeMenuItem(page, 'Settings & Project Structure…');
     const dialog = page.locator('[role="dialog"]').first();
     await expect(dialog).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden({ timeout: 10_000 });
 
     // Modal 2: IdeShareModal (`Share` button)
-    await page.getByTestId('ide-share-btn').click();
+    await openIdeMenuItem(page, 'Share live session…');
     await expect(dialog).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden({ timeout: 10_000 });
@@ -717,8 +729,8 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden({ timeout: 10_000 });
 
-    // Modal 7: IdeSearchEverywhere (`Search everywhere` header button)
-    await page.getByRole('button', { name: 'Search everywhere' }).click();
+    // Modal 7: IdeSearchEverywhere (⋯ → `Search everywhere…`)
+    await openIdeMenuItem(page, 'Search everywhere…');
     await expect(dialog).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden({ timeout: 10_000 });
@@ -842,19 +854,21 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
     await page.goto('/#/ide');
     await expect(page.getByTestId('ide-page')).toBeVisible({ timeout: 20_000 });
 
-    // Verify all 7 pinned multi-repo projects appear in the header strip with `50` repo badges
-    const pills = page.getByTestId('ide-project-pill');
-    await expect(pills).toHaveCount(SCALE_PROJECTS.length, { timeout: 15_000 });
+    // Verify all 7 pinned multi-repo projects are listed in the workspace switcher with `50` repo badges
+    await page.getByTestId('ide-target-switcher').click();
+    const options = page.getByTestId('ide-named-project-option');
+    await expect(options).toHaveCount(SCALE_PROJECTS.length, { timeout: 15_000 });
     for (const proj of seededProjects) {
-      await expect(pills.filter({ hasText: proj.name })).toContainText(String(REPOS_PER_PROJECT));
+      await expect(options.filter({ hasText: proj.name })).toContainText(String(REPOS_PER_PROJECT));
     }
+    await page.keyboard.press('Escape');
 
     // Pass 1: Visit all 7 projects, open 20 tabs across 20 distinct repos per project (140 tabs total),
     // verify 21st-tab LRU cap, run LSP operations + edits/auto-save + project tree & dock interactions.
     for (let pIdx = 0; pIdx < seededProjects.length; pIdx++) {
       const proj = seededProjects[pIdx];
       const swStart = performance.now();
-      await pills.filter({ hasText: proj.name }).first().click();
+      await openNamedProject(page, proj.name);
       await expect(page.getByTestId('ide-target-switcher')).toContainText(
         `${REPOS_PER_PROJECT} repos`,
         { timeout: 20_000 },
@@ -971,7 +985,7 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
     for (let step = 0; step < visitOrder.length; step++) {
       const proj = seededProjects[visitOrder[step]];
       const swStart = performance.now();
-      await pills.filter({ hasText: proj.name }).first().click();
+      await openNamedProject(page, proj.name);
       await expect(page.getByTestId('ide-target-switcher')).toContainText(
         `${REPOS_PER_PROJECT} repos`,
         { timeout: 15_000 },
@@ -982,7 +996,7 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
 
       if (step === 0) {
         // Visit Git dock across 50-repo project
-        await page.getByTestId('ide-git-btn').click();
+        await openIdeMenuItem(page, 'Git Changes');
         await expect(page.getByTestId('ide-dock-tab-git')).toBeVisible({ timeout: 10_000 });
       } else if (step === 2) {
         // Visit DB Watch dock
@@ -998,7 +1012,7 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
         await sleep(500);
       } else if (step === 8) {
         // Search Everywhere across 50 repos
-        await page.getByRole('button', { name: 'Search everywhere' }).click();
+        await openIdeMenuItem(page, 'Search everywhere…');
         const searchDlg = page.locator('[role="dialog"]').first();
         await expect(searchDlg).toBeVisible({ timeout: 10_000 });
         await page.keyboard.type('stage_05');

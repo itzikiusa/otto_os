@@ -19,6 +19,8 @@ export function embedStatus(s: EmbedStatusInput): RuntimeEmbedStatus {
   if (s.status === 'closed') return 'closed';
   // Waiting on the person outranks working: the dot must ask for them.
   if (s.pendingRequests > 0 || s.status === 'awaiting_permission') return 'needs-you';
-  if (s.turnRunning || s.status === 'working' || s.status === 'starting' || s.backgroundTasks > 0) return 'working';
+  if (s.turnRunning || s.status === 'working' || s.status === 'starting') return 'working';
+  // The agent is idle; only work it started runs on: calm, never the pulse.
+  if (s.backgroundTasks > 0) return 'background';
   return 'idle';
 }

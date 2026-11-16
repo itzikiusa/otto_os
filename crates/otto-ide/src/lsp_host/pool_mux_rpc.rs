@@ -62,19 +62,69 @@ fn non_root_rust_settings() -> Value {
 }
 
 /// The repo's venv interpreter for pyright (which EXECUTES it to read
-/// `sys.path`). A real venv's `bin/python` links to an interpreter outside the
-/// repo; one that resolves inside it is a committed file, never run.
+/// `sys.path`). A real venv (it has `pyvenv.cfg`) links `bin/python` to an
+/// installed interpreter; one that resolves inside the repo is a committed
+/// file, and a committed symlink to anywhere else (another repo, Downloads,
+/// `/tmp`) is not an installation either — so the target must lie under a
+/// known interpreter home. Anything else is never run.
 #[allow(clippy::disallowed_methods)]
 fn detect_local_python_path(root: &str) -> Option<String> {
     let r = Path::new(root);
     let canon_root = std::fs::canonicalize(r).ok()?;
-    for rel in [".venv/bin/python", "venv/bin/python", ".env/bin/python"] {
-        let p = r.join(rel);
-        if std::fs::canonicalize(&p).is_ok_and(|c| c.is_file() && !c.starts_with(&canon_root)) {
+    let bases = trusted_interpreter_bases();
+    for venv in [".venv", "venv", ".env"] {
+        let p = r.join(venv).join("bin/python");
+        if !r.join(venv).join("pyvenv.cfg").is_file() {
+            continue;
+        }
+        if std::fs::canonicalize(&p).is_ok_and(|c| {
+            c.is_file() && !c.starts_with(&canon_root) && bases.iter().any(|b| c.starts_with(b))
+        }) {
             return Some(p.to_string_lossy().into_owned());
         }
     }
     None
+}
+
+/// Canonical homes of installed Python interpreters: system, Xcode/CLT,
+/// python.org, Homebrew, pyenv/uv/mise/asdf/rye/conda, and Otto's toolchains.
+#[allow(clippy::disallowed_methods)]
+fn trusted_interpreter_bases() -> Vec<std::path::PathBuf> {
+    let mut raw: Vec<std::path::PathBuf> = [
+        "/usr/bin",
+        "/usr/lib",
+        "/usr/local",
+        "/opt/homebrew",
+        "/opt/local",
+        "/Library/Frameworks/Python.framework",
+        "/Library/Developer/CommandLineTools",
+        "/Applications/Xcode.app",
+    ]
+    .iter()
+    .map(std::path::PathBuf::from)
+    .collect();
+    if let Some(home) = otto_core::secret_paths::home_dir() {
+        for rel in [
+            ".pyenv",
+            ".local/share/uv",
+            ".local/share/mise",
+            ".asdf",
+            ".rye",
+            "miniconda3",
+            "anaconda3",
+            "miniforge3",
+            "mambaforge",
+            ".conda",
+        ] {
+            raw.push(home.join(rel));
+        }
+    }
+    for data in otto_core::secret_paths::otto_data_dirs() {
+        raw.push(data.join("toolchains"));
+    }
+    raw.into_iter()
+        .filter_map(|b| std::fs::canonicalize(b).ok())
+        .collect()
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -697,10 +747,23 @@ mod python_path_tests {
         let root = ws.path().to_str().unwrap();
         assert_eq!(super::detect_local_python_path(root), None);
 
+        // E5: a committed symlink to an attacker file outside the repo (another
+        // repo, Downloads, /tmp) is not an installed interpreter either.
+        std::fs::write(ws.path().join(".venv/pyvenv.cfg"), "home = /tmp\n").unwrap();
         let interp = outside.path().join("python3");
         std::fs::write(&interp, "").unwrap();
         std::fs::remove_file(bin.join("python")).unwrap();
         std::os::unix::fs::symlink(&interp, bin.join("python")).unwrap();
-        assert!(super::detect_local_python_path(root).is_some());
+        assert_eq!(super::detect_local_python_path(root), None);
+
+        // A real venv on an installed interpreter is still found.
+        if let Some(sys) = ["/usr/bin/python3", "/opt/homebrew/bin/python3"]
+            .into_iter()
+            .find(|p| std::path::Path::new(p).is_file())
+        {
+            std::fs::remove_file(bin.join("python")).unwrap();
+            std::os::unix::fs::symlink(sys, bin.join("python")).unwrap();
+            assert!(super::detect_local_python_path(root).is_some());
+        }
     }
 }

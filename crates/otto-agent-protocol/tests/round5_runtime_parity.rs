@@ -284,6 +284,7 @@ async fn claudework_custom_provider_create_children_council_and_agent_session_pa
                 provider_slug: Some("claudework".into()),
                 model: None,
                 effort: None,
+                stop_background: false,
             },
         )
         .await

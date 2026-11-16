@@ -35,9 +35,9 @@ use otto_core::agent_runtime::{
 use serde_json::{json, Value};
 
 use crate::driver::{
-    item, rpc_failure, rpc_key, tool_error, DriverError, DriverEvent, DriverStep, LaunchContext,
-    LaunchSpec, McpDelivery, McpServerDef, SidebandPayload, SidebandPoll, SidebandResumeSeed,
-    SidebandSource, StructuredDriver,
+    item, notice, provider_name, rpc_failure, rpc_key, tool_error, DriverError, DriverEvent,
+    DriverStep, LaunchContext, LaunchSpec, McpDelivery, McpServerDef, SidebandPayload,
+    SidebandPoll, SidebandResumeSeed, SidebandSource, StructuredDriver,
 };
 
 #[path = "acp_bg.rs"]
@@ -200,6 +200,11 @@ pub(super) struct Pending {
 pub(super) struct AcpDriverState {
     pub(super) cwd: String,
     pub(super) resume: Option<String>,
+    /// There was a conversation to resume but the agent could not load it
+    /// (no `loadSession`, or the load failed): the new session's `Ready`
+    /// says so in the thread instead of silently starting fresh.
+    #[serde(default)]
+    pub(super) lost_resume: bool,
     /// Otto runtime session ID (for scoping `/tmp/otto-acp-bg/<sid>/` tails).
     #[serde(default)]
     pub(super) otto_session_id: Option<String>,
@@ -376,6 +381,7 @@ impl AcpDriver {
                 plan_active: false,
                 cost_total: None,
                 cost_at_turn: None,
+                lost_resume: false,
             },
         }
     }
@@ -657,6 +663,26 @@ impl AcpDriver {
         };
         self.state.phase = Phase::Creating { loading: load };
         step.write(line);
+    }
+
+    /// The agent could not reload the earlier conversation (a model or
+    /// access switch restarts it, as does a daemon restart): a session
+    /// boundary plus a notice, never a silent new session.
+    fn push_fresh_boundary(&self, step: &mut DriverStep) {
+        let id = otto_core::new_id();
+        step.push(DriverEvent::TurnItem(item(
+            format!("acp-reset:{id}:session-boundary"),
+            TurnItemStatus::Completed,
+            None,
+            TurnItemKind::SessionBoundary,
+        )));
+        step.push(DriverEvent::TurnItem(notice(
+            format!("acp-reset:{id}"),
+            format!(
+                "{} could not reload this conversation \u{2014} it starts fresh from here and does not remember the messages above.",
+                provider_name(self.provider)
+            ),
+        )));
     }
 
     fn session_meta(&self) -> Option<serde_json::Map<String, Value>> {
@@ -1673,6 +1699,7 @@ impl AcpDriver {
                 step.push(DriverEvent::Fatal(rpc_failure("handshake_error", &e)));
                 return;
             }
+            self.state.lost_resume = self.state.resume.is_some() && !load;
             self.create_session(step, load && self.state.resume.is_some());
         } else if id == self.state.create_id && matches!(self.state.phase, Phase::Creating { .. }) {
             let loading = matches!(self.state.phase, Phase::Creating { loading: true });
@@ -1691,8 +1718,10 @@ impl AcpDriver {
                     }
                 }
                 if loading {
-                    // T3 Code: a failed load / resume starts a fresh session.
+                    // T3 Code: a failed load / resume starts a fresh session
+                    // (and the thread says so at `Ready`).
                     self.state.resume = None;
+                    self.state.lost_resume = true;
                     self.create_session(step, false);
                     return;
                 }
@@ -1757,6 +1786,9 @@ impl AcpDriver {
                 native_thread_id: self.state.session_id.clone(),
                 model: None,
             });
+            if !loading && std::mem::take(&mut self.state.lost_resume) {
+                self.push_fresh_boundary(step);
+            }
             self.write_model_config(step);
             // A mode no launch flag gave (agy has none): set it now.
             if let Some(want) = self.flavor.mode_id.and_then(|f| f(self.state.access)) {
@@ -1782,8 +1814,16 @@ impl AcpDriver {
             if let Some(e) = error {
                 // -32602: the agent refused the value; anything else (an
                 // internal error, a dropped request) was not applied.
-                self.state.config_retry = e.get("code").and_then(Value::as_i64) != Some(-32602);
-                step.push(DriverEvent::Error(rpc_failure("provider_error", &e)));
+                let refused = e.get("code").and_then(Value::as_i64) == Some(-32602);
+                self.state.config_retry = !refused;
+                let mut failure = rpc_failure("provider_error", &e);
+                if refused {
+                    // The agent still runs its earlier model; the runtime puts
+                    // the thread back on it, and the next pick is sent again.
+                    self.state.model = None;
+                    failure.code = Some(otto_core::agent_runtime::MODEL_SWITCH_REFUSED.into());
+                }
+                step.push(DriverEvent::Error(failure));
             }
         } else if Some(id) == self.state.effort_req {
             self.state.effort_req = None;
@@ -2054,11 +2094,29 @@ impl StructuredDriver for AcpDriver {
             return Err(DriverError("a prompt is already running".into()));
         }
         let name = self.provider.as_str();
+        let mut step = DriverStep::default();
+        // An effort the agent cannot take is dropped with a notice, never a
+        // refused prompt (an "Ask another agent" create carries the
+        // previous provider's level).
+        let mut owned = None;
         if let Some(raw) = req.effort.as_deref().filter(|e| !e.trim().is_empty()) {
             let next_opts = req.model.as_deref().and_then(|m| self.efforts_for_model(m));
             let opts = next_opts.as_deref().unwrap_or(&self.state.effort_options);
-            self.resolve_effort_with(opts, raw)?;
+            if let Err(DriverError(why)) = self.resolve_effort_with(opts, raw) {
+                step.push(DriverEvent::TurnItem(notice(
+                    format!("{turn_id}:effort-dropped"),
+                    format!(
+                        "{why} \u{2014} this turn runs at {}'s default effort.",
+                        provider_name(self.provider)
+                    ),
+                )));
+                owned = Some(RuntimePromptReq {
+                    effort: None,
+                    ..req.clone()
+                });
+            }
         }
+        let req = owned.as_ref().unwrap_or(req);
         // Capabilities are only known once `initialize` answered; before that a
         // queued attachment goes out and the agent itself refuses it if it must.
         let ready = self.state.phase == Phase::Ready;
@@ -2073,7 +2131,6 @@ impl StructuredDriver for AcpDriver {
                 "{name} does not accept file attachments"
             )));
         }
-        let mut step = DriverStep::default();
         if ready {
             self.send_prompt(&mut step, turn_id.to_string(), req);
         } else {
@@ -2601,7 +2658,21 @@ mod tests {
         d2.start(&ctx(None));
         d2.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
         d2.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
-        assert!(d2.prompt("t1", &req).is_err(), "no effort option");
+        // No effort option: the prompt still goes, at the agent's default,
+        // and the timeline says so (never a refused prompt).
+        let sent = d2
+            .prompt("t1", &req)
+            .expect("effort is dropped, not refused");
+        assert!(sent.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i) if matches!(
+                &i.kind,
+                TurnItemKind::SystemNotice { message, .. }
+                    if message.contains("does not take a reasoning effort")
+                        && message.contains("default effort")
+            )
+        )));
+        assert!(sent.writes.iter().all(|w| !w.contains("thought_level")));
         assert!(d2.capabilities().efforts.is_empty());
     }
 
@@ -3308,7 +3379,10 @@ mod tests {
         assert_eq!(prompt["method"], "session/prompt");
         // A refusal (-32602) is final: the next prompt goes alone.
         let refused = json!({"jsonrpc":"2.0","id":again["id"],"error":{"code":-32602,"message":"unknown model"}});
-        d.on_line(&refused.to_string());
+        let s = d.on_line(&refused.to_string());
+        // …and says so, so the runtime puts the thread back on its model.
+        assert!(matches!(&s.events[0], DriverEvent::Error(f)
+            if f.code.as_deref() == Some(otto_core::agent_runtime::MODEL_SWITCH_REFUSED)));
         let done = json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}});
         d.on_line(&done.to_string());
         let s = d.prompt("t2", &RuntimePromptReq::of("again")).unwrap();

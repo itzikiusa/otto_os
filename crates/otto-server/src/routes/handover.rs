@@ -558,7 +558,7 @@ fn fallback_brief(context: &str) -> String {
 /// can't recover anything. Prefers the claude transcript (richer, survives an
 /// exited session); falls back to the live terminal scrollback for other CLIs.
 async fn gather_source_context(ctx: &ServerCtx, source: &Session) -> Option<String> {
-    if source.provider == "claude" {
+    if ctx.manager.cli_family(&source.provider) == "claude" {
         if let Some(sid) = source.provider_session_id.as_deref() {
             // The project-dir scan and the whole-transcript digest are sync
             // fs + CPU work: run them on the blocking pool, not a worker.

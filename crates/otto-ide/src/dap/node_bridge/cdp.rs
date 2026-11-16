@@ -246,21 +246,23 @@ pub(super) async fn spawn_inspected_node(
 
     if let Some(out) = stdout {
         let tx = out_tx.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(out).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+        crate::line_reader::spawn_line_drain(
+            out,
+            crate::line_reader::MAX_OUTPUT_LINE_BYTES,
+            move |line| {
                 let _ = tx.send(("stdout".into(), format!("{line}\n")));
-            }
-        });
+            },
+        );
     }
 
-    let mut err_lines = BufReader::new(stderr).lines();
+    let mut err_lines =
+        crate::line_reader::LossyLines::new(stderr, crate::line_reader::MAX_OUTPUT_LINE_BYTES);
     let mut found: Option<(u16, String)> = None;
     let mut boot_err = String::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_secs(3), err_lines.next_line()).await {
-            Ok(Ok(Some(line))) => {
+            Ok(Some(line)) => {
                 if let Some(parsed) = extract_ws_port_and_path(&line) {
                     found = Some(parsed);
                     break;
@@ -270,8 +272,8 @@ pub(super) async fn spawn_inspected_node(
                     boot_err.push('\n');
                 }
             }
-            Ok(Ok(None)) => break,
-            _ => {}
+            Ok(None) => break,
+            Err(_) => {}
         }
     }
     let Some(res) = found else {
@@ -284,7 +286,7 @@ pub(super) async fn spawn_inspected_node(
 
     let tx_err = out_tx.clone();
     tokio::spawn(async move {
-        while let Ok(Some(line)) = err_lines.next_line().await {
+        while let Some(line) = err_lines.next_line().await {
             if !line.starts_with("Debugger listening on ")
                 && !line.starts_with("For help, see: https://nodejs.org")
                 && !line.starts_with("Debugger attached.")

@@ -86,6 +86,7 @@ impl AgentRuntime {
     pub async fn recover_and_adopt(&self) -> Result<HashSet<Id>> {
         let mut live_ids = HashSet::new();
         let mut handled_ids = HashSet::new();
+        let mut failed = Vec::new();
         let persist_enabled = self.inner.host.session_persistence_enabled().await;
         if let Some(holders_dir) = self.inner.config.holders_dir.clone() {
             for sock in list_holder_sockets(&holders_dir) {
@@ -94,7 +95,7 @@ impl AgentRuntime {
                     let _ = tokio::fs::remove_file(&sock).await;
                     continue;
                 }
-                if let Some((sid, is_alive)) = self.adopt_holder_socket(&sock).await {
+                if let Some((sid, is_alive)) = self.adopt_holder_socket(&sock, &mut failed).await {
                     if is_alive {
                         live_ids.insert(sid.clone());
                     }
@@ -106,10 +107,28 @@ impl AgentRuntime {
             }
         }
         self.recover_excluding(&handled_ids).await?;
+        // Recovery settled the cut-off turn; the thread also says why.
+        for (sid, why) in failed {
+            let _ = self
+                .notice(
+                    &sid,
+                    &format!(
+                        "Otto restarted and could not reattach to this agent ({why}), so its \
+                         running work was stopped. Send a message to continue the conversation."
+                    ),
+                )
+                .await;
+        }
         Ok(live_ids)
     }
 
-    async fn adopt_holder_socket(&self, socket_path: &Path) -> Option<(Id, bool)> {
+    /// `failed` collects threads whose saved driver state did not load (a
+    /// notice tells each one after recovery).
+    async fn adopt_holder_socket(
+        &self,
+        socket_path: &Path,
+        failed: &mut Vec<(Id, String)>,
+    ) -> Option<(Id, bool)> {
         let adopted = match adopt_socket(socket_path).await {
             Ok(a) => a,
             Err(e) => {
@@ -143,6 +162,7 @@ impl AgentRuntime {
         };
         if let Err(e) = driver.restore_state(&adopted.checkpoint.driver_state) {
             tracing::warn!(session = %sid, "runtime holder driver restore failed: {e}");
+            failed.push((sid.clone(), format!("its saved state did not load: {e}")));
             adopted.client.shutdown(Duration::from_millis(500)).await;
             let _ = tokio::fs::remove_file(socket_path).await;
             return None;
@@ -196,6 +216,8 @@ impl AgentRuntime {
                             completed_at: None,
                             turn_token_usage: None,
                             origin: t_snap.origin,
+                            model: st.session.model.clone(),
+                            effort: st.session.effort.clone(),
                         };
                         emit(
                             &self.inner,

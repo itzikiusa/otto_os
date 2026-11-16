@@ -3,6 +3,9 @@
   // attribute means no scripts, no forms, no same-origin access, no top-level
   // navigation — the page is rendered, never executed. A strict CSP meta is
   // prepended as a second fence (no network fetches beyond inline/data images).
+  // The document (CSP fence + page) is shared with the IDE/Threads preview.
+  import { buildHtmlPreviewDoc } from '../../../lib/render/previewText';
+
   interface Props {
     content: string;
     name: string;
@@ -11,14 +14,7 @@
   }
   let { content, name, svg = false }: Props = $props();
 
-  const CSP =
-    "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data: blob: https:; style-src 'unsafe-inline' https:; font-src data: https:\">";
-
-  const doc = $derived(
-    svg
-      ? `<!doctype html><html><head>${CSP}<meta name="color-scheme" content="light"><style>html,body{margin:0;height:100%;background:Canvas}body{display:flex;align-items:center;justify-content:center}svg{max-width:100%;max-height:100%}</style></head><body>${content}</body></html>`
-      : `${CSP}${content}`,
-  );
+  const doc = $derived(buildHtmlPreviewDoc(content, { svg }));
 </script>
 
 <iframe

@@ -12,11 +12,18 @@ test('idle when nothing runs or waits (and before the row loads)', () => {
   assert.equal(embedStatus({ ...base, status: 'dormant' }), 'idle');
 });
 
-test('working: a running turn, a working or starting session, or background work', () => {
+test('working: a running turn, or a working or starting session', () => {
   assert.equal(embedStatus({ ...base, turnRunning: true }), 'working');
   assert.equal(embedStatus({ ...base, status: 'working' }), 'working');
   assert.equal(embedStatus({ ...base, status: 'starting' }), 'working');
-  assert.equal(embedStatus({ ...base, backgroundTasks: 2 }), 'working');
+  // A turn that runs while background work runs is still working.
+  assert.equal(embedStatus({ ...base, turnRunning: true, backgroundTasks: 2 }), 'working');
+});
+
+test('background: an idle agent with only background work left is calm, not working', () => {
+  assert.equal(embedStatus({ ...base, backgroundTasks: 2 }), 'background');
+  assert.equal(embedStatus({ ...base, status: 'awaiting_permission', backgroundTasks: 1 }), 'needs-you');
+  assert.equal(embedStatus({ ...base, status: 'closed', backgroundTasks: 1 }), 'closed');
 });
 
 test('needs-you outranks working: a pending approval or question, or awaiting permission', () => {

@@ -11,7 +11,7 @@ mod ops;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
@@ -29,13 +29,23 @@ use crate::types::{
     IdeSharedBuffer, IdeTargetSpec,
 };
 
-const BROADCAST_CAPACITY: usize = 256;
+const BROADCAST_CAPACITY: usize = 64;
+/// Bytes of buffer content the room's event ring may hold unread. A stalled
+/// `/events` reader pins every queued event (each `BufferUpdated` carries the
+/// whole buffer); past this an edit is refused until readers catch up.
+pub(super) const MAX_ROOM_EVENT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_COLLAB_ROOMS: usize = 32;
 pub(crate) const ROOM_IDLE_TTL: Duration = Duration::from_secs(2 * 3600);
 pub(crate) const MAX_SHARED_BUFFERS_PER_ROOM: usize = 32;
 pub(crate) const MAX_ROOM_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_SHARED_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PEERS_PER_ROOM: usize = 32;
+/// Open `/events` streams per room. Every guest shares the one invite token,
+/// so this is also the per-token cap.
+pub(super) const MAX_SUBSCRIBERS_PER_ROOM: usize = MAX_PEERS_PER_ROOM + 8;
+/// A guest with no open event stream for this long has left: its seat is
+/// freed and peers hear `PeerLeft`.
+pub(super) const PEER_STALE_AFTER: Duration = Duration::from_secs(90);
 pub(super) const MAX_SELECTIONS_PER_PEER: usize = 64;
 
 const PEER_COLORS: &[&str] = &[
@@ -52,6 +62,9 @@ const PEER_COLORS: &[&str] = &[
 pub(super) struct PeerRecord {
     pub(super) peer: IdeCollabPeer,
     pub(super) secret_hash: [u8; 32],
+    /// Open `/events` streams that named this peer.
+    pub(super) streams: usize,
+    pub(super) last_seen: Instant,
 }
 
 impl std::fmt::Debug for PeerRecord {
@@ -87,6 +100,9 @@ pub(super) struct RoomState {
     pub(super) created_at: String,
     pub(super) last_activity_at: Instant,
     pub(super) events_tx: broadcast::Sender<IdeCollabEvent>,
+    /// Content bytes of the most recent sends (newest last), so the unread
+    /// tail of the event ring can be priced — see [`MAX_ROOM_EVENT_BYTES`].
+    pub(super) sent_sizes: VecDeque<usize>,
 }
 
 impl std::fmt::Debug for RoomState {
@@ -114,6 +130,62 @@ impl RoomState {
             peers: self.peers.iter().map(|p| p.peer.clone()).collect(),
             active_debug_id: self.active_debug.as_ref().map(|d| d.id.clone()),
             created_at: self.created_at.clone(),
+        }
+    }
+
+    /// What a guest (join, state, events) sees: no host user id, workspace,
+    /// connection id or extra roots. The root path stays: shared buffers and
+    /// cursors carry absolute host paths and the guest UI resolves its tabs
+    /// against `room.target.root`.
+    pub(super) fn guest_snapshot(&self) -> IdeCollabRoom {
+        let mut room = self.snapshot();
+        room.host_user_id = String::new();
+        room.target = IdeTargetSpec {
+            kind: self.target.kind,
+            root: self.target.root.clone(),
+            ..IdeTargetSpec::default()
+        };
+        room
+    }
+
+    /// Send `ev`, recording its content size for [`Self::pinned_event_bytes`].
+    pub(super) fn send_event(&mut self, ev: IdeCollabEvent) {
+        let size = match &ev {
+            IdeCollabEvent::BufferUpdated { content, .. } => content.len(),
+            _ => 0,
+        };
+        if self.sent_sizes.len() >= BROADCAST_CAPACITY {
+            self.sent_sizes.pop_front();
+        }
+        self.sent_sizes.push_back(size);
+        let _ = self.events_tx.send(ev);
+    }
+
+    /// Content bytes the ring holds for a reader that has not caught up: the
+    /// queued values are the newest `len()` sends (tokio drops a value once
+    /// every receiver has seen it). Sends that bypass `send_event` only make
+    /// this overestimate.
+    pub(super) fn pinned_event_bytes(&self) -> usize {
+        let queued = self.events_tx.len();
+        self.sent_sizes.iter().rev().take(queued).sum()
+    }
+
+    /// Free the seats of guests that left (no open event stream for
+    /// [`PEER_STALE_AFTER`]); the host's seat is never freed.
+    pub(super) fn evict_stale_peers(&mut self, now: Instant) {
+        let (gone, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.peers).into_iter().partition(|p| {
+                !p.peer.is_host
+                    && p.streams == 0
+                    && now.saturating_duration_since(p.last_seen) >= PEER_STALE_AFTER
+            });
+        self.peers = kept;
+        for p in gone {
+            let room = self.guest_snapshot();
+            self.send_event(IdeCollabEvent::PeerLeft {
+                peer_id: p.peer.peer_id,
+                room,
+            });
         }
     }
 
@@ -179,6 +251,7 @@ impl RoomState {
         if !ct_eq_32(&candidate, &rec.secret_hash) {
             return Err(Error::Unauthorized);
         }
+        rec.last_seen = Instant::now();
         Ok(rec)
     }
 }
@@ -282,6 +355,8 @@ impl CollabHub {
                 updated_at: now.clone(),
             },
             secret_hash: host_peer_secret_hash,
+            streams: 0,
+            last_seen: now_inst,
         };
 
         let last_debug_id = initial_debug.as_ref().map(|d| d.id.clone());
@@ -305,6 +380,7 @@ impl CollabHub {
             created_at: now,
             last_activity_at: now_inst,
             events_tx,
+            sent_sizes: VecDeque::new(),
         };
 
         let snapshot = state.snapshot();
@@ -407,13 +483,13 @@ impl CollabHub {
         peer_rec.peer.updated_at = now_rfc3339();
         room.last_activity_at = Instant::now();
 
-        let snapshot = room.snapshot();
-        let _ = room.events_tx.send(IdeCollabEvent::RoleChanged {
+        let guest_view = room.guest_snapshot();
+        room.send_event(IdeCollabEvent::RoleChanged {
             peer_id: peer_id.to_string(),
             role,
-            room: snapshot.clone(),
+            room: guest_view,
         });
-        Ok(snapshot)
+        Ok(room.snapshot())
     }
 
     /// Host closes/revokes a collaboration room immediately.
@@ -462,6 +538,9 @@ impl CollabHub {
             .ok_or_else(|| Error::NotFound(format!("collab room '{room_id}' not found")))?;
         room.verify_invite_token(&req.token)?;
         room.last_activity_at = now_inst;
+        // Seats of guests that left are freed first, so joining without ever
+        // opening an event stream can't squat the room full.
+        room.evict_stale_peers(now_inst);
 
         if room.peers.len() >= MAX_PEERS_PER_ROOM {
             return Err(Error::Conflict(format!(
@@ -487,10 +566,12 @@ impl CollabHub {
         room.peers.push(PeerRecord {
             peer: peer.clone(),
             secret_hash,
+            streams: 0,
+            last_seen: now_inst,
         });
 
-        let snapshot = room.snapshot();
-        let _ = room.events_tx.send(IdeCollabEvent::PeerJoined {
+        let snapshot = room.guest_snapshot();
+        room.send_event(IdeCollabEvent::PeerJoined {
             peer,
             room: snapshot.clone(),
         });

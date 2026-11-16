@@ -9,7 +9,9 @@ import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
 import { isBroadNonProjectRootClient, normalizeMacPrivatePath } from '../../../lib/fileUri';
 import { ideGit } from '../git/ideGitController.svelte';
 import { ide, ideBasename, type IdeOpenTab } from '../ideStore.svelte';
+import { ideLayout } from '../shell/ideLayout.svelte';
 import { ideAgent } from '../store/ideAgentController.svelte';
+import { ideEditorChrome } from './ideEditorChrome.svelte';
 import { normalizeEditorLf, type IdeReferenceLocation } from '../store/ideTypes';
 import {
   closeAllIdeTabs,
@@ -17,6 +19,7 @@ import {
   flushAutoLocalHistorySnapshot,
   formatIdeTabDisplayName,
   getIdeProjectFolders,
+  idePreviewMode,
   isIdeTabPinned,
   openIdeTerminalForPath,
   pushIdeNavLocation,
@@ -84,8 +87,20 @@ export function openIdeOverflowTabsMenu(anchor: HTMLElement | null): void {
       },
     };
   });
+  // The tab strip's Editor | Preview control, again here (a menu row is easier to hit on a phone).
+  const pvModes = idePreviewMode.available(ide.activePath);
+  const pvCur = idePreviewMode.modeFor(ide.activePath);
+  const pvLabel = { source: 'Editor', split: 'Editor and preview', preview: 'Preview' } as const;
+  const pvIcon = { source: 'editorLines', split: 'editorSplit', preview: 'image' } as const;
+  if (pvModes.length) {
+    items.push({ separator: true }, ...pvModes.map((m) => ({ label: pvLabel[m], icon: pvIcon[m], checked: pvCur === m, action: () => idePreviewMode.set(ide.activePath, m) })));
+  }
   items.push(
     { separator: true },
+    // Stacked layout: the editor toolbar row is hidden to give the code that row.
+    ...(ideLayout.stack
+      ? [{ label: 'Show editor toolbar', icon: 'panel' as const, checked: ideEditorChrome.subbarShown, action: () => (ideEditorChrome.subbarShown = !ideEditorChrome.subbarShown) }]
+      : []),
     { label: 'Close unmodified tabs', action: () => void closeUnmodifiedIdeTabs() },
     { label: 'Close all tabs', icon: 'x', action: () => void closeAllIdeTabs() },
   );

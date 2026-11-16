@@ -9,7 +9,6 @@ use dashmap::DashMap;
 use otto_core::{Error, Result};
 use otto_ssh::SshTunnel;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
@@ -26,16 +25,17 @@ use super::wire::DapEvent;
 use super::{spawn_target_process, ssh_tunnel_config, BridgeGuard};
 use crate::types::{IdeDebugState, IdeStartDebugReq, IdeTargetKind};
 
+/// Drain an adapter pipe to EOF line by line (lossy UTF-8, bounded lines), so a
+/// non-UTF-8 byte never closes the pipe under the adapter.
 pub(super) fn spawn_line_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     reader: R,
-    mut on_line: impl FnMut(String) + Send + 'static,
+    on_line: impl FnMut(String) + Send + 'static,
 ) {
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            on_line(line);
-        }
-    });
+    crate::line_reader::spawn_line_drain(
+        reader,
+        crate::line_reader::MAX_OUTPUT_LINE_BYTES,
+        on_line,
+    );
 }
 
 pub(super) async fn resolve_target_endpoint(

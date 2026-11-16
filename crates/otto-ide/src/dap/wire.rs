@@ -209,6 +209,56 @@ impl<R: AsyncRead + Unpin> DapReader<R> {
     pub async fn next_raw_frame(&mut self) -> io::Result<Option<String>> {
         read_raw_frame(&mut self.inner).await
     }
+
+    /// Next message, or a [`DapReadItem::Skipped`] frame (over the 16 MiB cap,
+    /// or not a DAP message) that leaves the stream usable: the caller fails
+    /// just the request it answered instead of ending the session.
+    pub async fn next_item(&mut self) -> io::Result<Option<DapReadItem>> {
+        use crate::jsonrpc_framing::{read_frame_or_skip, Frame, SKIPPED_HEAD_BYTES};
+        let item = match read_frame_or_skip(&mut self.inner).await? {
+            None => return Ok(None),
+            Some(Frame::Body(body)) => match serde_json::from_slice::<DapMessage>(&body) {
+                Ok(msg) => DapReadItem::Message(msg),
+                Err(e) => DapReadItem::Skipped {
+                    len: body.len(),
+                    request_seq: response_request_seq(&body[..body.len().min(SKIPPED_HEAD_BYTES)]),
+                    reason: format!("invalid DAP message: {e}"),
+                },
+            },
+            Some(Frame::Oversized { len, head }) => DapReadItem::Skipped {
+                len,
+                request_seq: response_request_seq(&head),
+                reason: format!("{len} bytes, over the 16 MiB message cap"),
+            },
+        };
+        Ok(Some(item))
+    }
+}
+
+/// One item read by [`DapReader::next_item`].
+#[derive(Debug)]
+pub enum DapReadItem {
+    Message(DapMessage),
+    /// A frame that was read past; `request_seq` names the request it answered
+    /// when its head says it is a response.
+    Skipped {
+        len: usize,
+        request_seq: Option<i64>,
+        reason: String,
+    },
+}
+
+/// `request_seq` of a response, from the first bytes of its JSON.
+fn response_request_seq(head: &[u8]) -> Option<i64> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let text = String::from_utf8_lossy(head);
+    if !text.contains("\"response\"") {
+        return None;
+    }
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r#""request_seq"\s*:\s*(\d+)"#).expect("static request_seq regex")
+    });
+    re.captures(&text)?.get(1)?.as_str().parse().ok()
 }
 
 /// Monotonically sequenced async DAP wire writer over any [`AsyncWrite`].

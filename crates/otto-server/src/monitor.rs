@@ -618,27 +618,8 @@ async fn idle_confirm(ctx: &ServerCtx) -> Duration {
 
 const PROMPT_CONFIRM: Duration = Duration::from_secs(3);
 
-/// True when the bottom of an idle agent PTY screen holds an interactive
-/// permission / approval / question prompt (as opposed to an idle composer).
-pub(crate) fn screen_awaits_approval(rows: &[String]) -> bool {
-    const NEEDLES: &[&str] = &[
-        "do you want to ",
-        "would you like to run",
-        "approve and run",
-        "allow once",
-        "allow for this session",
-        "enter to confirm",
-        "esc to cancel",
-    ];
-    rows.iter()
-        .rev()
-        .filter(|r| !r.trim().is_empty())
-        .take(16)
-        .any(|r| {
-            let low = r.to_ascii_lowercase();
-            NEEDLES.iter().any(|n| low.contains(n))
-        })
-}
+/// The needles live with the status task that also reads them.
+pub(crate) use otto_sessions::screen::awaits_approval as screen_awaits_approval;
 
 async fn handle_session_transition(
     ctx: &ServerCtx,

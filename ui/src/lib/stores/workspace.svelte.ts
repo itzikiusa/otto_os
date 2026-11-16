@@ -7,6 +7,7 @@ import { router } from '../router.svelte';
 import type { ActiveWorkflowRun, AttachedIssue, CreateSessionReq, Id, OpenAgentSessionReq, OpenAgentSessionResp, OttoEvent, Session, SessionStatus, Workspace, WorkspaceSettings, WorkspaceWithRole } from '../api/types';
 import { toasts } from '../toast.svelte';
 import { confirmer } from '../confirm.svelte';
+import { respawnChoice } from '../freshRestart';
 import { ui, clientId } from './ui.svelte';
 import { winKey } from '../win';
 import { lsGet, lsSet } from '../storage';
@@ -16,7 +17,7 @@ import { isEmbedded } from '../desktop';
 import { SCRATCH_WORKSPACE_ID, sessionVerbsApply } from './sessionScope';
 import { runtimeFlagged } from './runtimeAttention.svelte';
 import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
-import { bucketSessions, idChunks, inThreadsScope, isForeground, isShownKind, isThreadSurfaceSession, parseTabIds, sessionRoute, shownListQuery } from './sessionBuckets';
+import { bucketSessions, idChunks, inThreadsScope, isForeground, isShownKind, isThreadSurfaceSession, parseTabIds, sessionRoute, shownListQuery, visibleWorkingCount } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
 import { toastError } from '../toastError';
 import { loadErrorText } from '../loadError';
@@ -396,15 +397,14 @@ class WorkspaceStore {
   private archivedCursor: Record<Id, string | null> = {};
   private archivedGeneration = 0;
 
-  // "Working" count for the Agents badge — only foreground agent sessions, not
-  // background review/channel ones (those are hidden from the Agents list, so
-  // counting them made the badge disagree with the list, e.g. badge 4 / list empty).
+  // "Working" count for the Agents badge: exactly the green rows the Agents
+  // section renders ({@link visibleWorkingCount}), other workspaces' only while listed.
   workingCount: number = $derived(
-    this.buckets.foregroundActive.filter((s) => this.statusMap[s.id] === 'working').length,
+    visibleWorkingCount([this.buckets.plainAgent, this.buckets.scratch, ...(this.allWorkspaces ? this.otherWsGroups.map((g) => g.sessions) : [])], this.statusMap, this.needsYou),
   );
 
   /** Foreground agent sessions currently flagged "needs you" — the sidebar
-   *  "Needs you" badge/count (mirrors {@link workingCount}'s scoping). */
+   *  "Needs you" badge/count. */
   needsYouCount: number = $derived(
     this.buckets.foregroundActive.filter((s) => this.needsYou[s.id] === true).length,
   );
@@ -1871,12 +1871,12 @@ class WorkspaceStore {
   }
 
   async updateSessionConfig(id: Id, metaPatch: Record<string, unknown>, opts?: { restartIfIdle?: boolean; toastTitle?: string }): Promise<Session> {
-    const updated = await api.patch<Session>(`/sessions/${id}`, { meta: metaPatch });
-    this.patchSession(id, () => updated);
+    const choice = await respawnChoice(this.getSession(id), this.statusMap[id], opts?.restartIfIdle !== false, confirmer); if (choice === 'cancel') return this.getSession(id)!;
+    const updated = await api.patch<Session>(`/sessions/${id}`, { meta: metaPatch }); this.patchSession(id, () => updated);
     const st = this.statusMap[id] ?? updated.status;
-    const canRespawn = opts?.restartIfIdle !== false && !updated.archived && updated.kind === 'agent' && updated.provider !== 'shell';
+    const canRespawn = choice === 'restart' && opts?.restartIfIdle !== false && !updated.archived && updated.kind === 'agent' && updated.provider !== 'shell';
     if (canRespawn && (st === 'running' || st === 'idle')) { await this.restartSession(id, { quiet: true }); if (opts?.toastTitle) toasts.info(opts.toastTitle); return this.getSession(id) ?? updated; }
-    if (opts?.toastTitle) toasts.info(opts.toastTitle, canRespawn && st === 'working' ? 'Saved — restart session after this turn to apply new CLI flags' : undefined);
+    if (opts?.toastTitle) toasts.info(opts.toastTitle, choice === 'save' ? 'Saved — applies to the next session' : canRespawn && st === 'working' ? 'Saved — restart session after this turn to apply new CLI flags' : undefined);
     return updated;
   }
 

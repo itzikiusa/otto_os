@@ -42,6 +42,10 @@ pub(crate) struct EchoClock {
     avg_scaled: AtomicU64,
     max_us: AtomicU64,
     samples: AtomicU64,
+    /// µs since `epoch` + 1 of the most recent input write; 0 = none yet.
+    /// Unlike `pending_us` it is never cleared by output: the session status
+    /// task reads it to tell "someone typed since the turn closed".
+    last_input_us: AtomicU64,
 }
 
 impl EchoClock {
@@ -53,6 +57,7 @@ impl EchoClock {
             avg_scaled: AtomicU64::new(0),
             max_us: AtomicU64::new(0),
             samples: AtomicU64::new(0),
+            last_input_us: AtomicU64::new(0),
         }
     }
 
@@ -65,6 +70,7 @@ impl EchoClock {
     /// answered yet.
     pub(crate) fn input_written(&self) {
         let stamp = self.now_us() + 1;
+        self.last_input_us.store(stamp, Ordering::Relaxed);
         let _ = self
             .pending_us
             .compare_exchange(0, stamp, Ordering::AcqRel, Ordering::Relaxed);
@@ -82,6 +88,14 @@ impl EchoClock {
         }
         let sample = self.now_us().saturating_sub(pending - 1);
         self.record(sample);
+    }
+
+    /// When input last reached the PTY (`None` = never since spawn).
+    pub(crate) fn last_input_at(&self) -> Option<Instant> {
+        match self.last_input_us.load(Ordering::Relaxed) {
+            0 => None,
+            us => Some(self.epoch + std::time::Duration::from_micros(us - 1)),
+        }
     }
 
     fn record(&self, sample_us: u64) {
@@ -144,6 +158,16 @@ mod tests {
         c.input_written(); // does not move the stamp forward
         c.output();
         assert!(c.stats().last_ms >= 5.0);
+    }
+
+    #[test]
+    fn last_input_survives_the_answering_output() {
+        let c = EchoClock::new();
+        assert!(c.last_input_at().is_none());
+        c.input_written();
+        c.output();
+        let at = c.last_input_at().expect("input recorded");
+        assert!(at <= Instant::now());
     }
 
     #[test]

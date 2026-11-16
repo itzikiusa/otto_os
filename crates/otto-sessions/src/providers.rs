@@ -92,9 +92,17 @@ struct ProviderOverride {
 
 /// Muse's launcher has no `update` subcommand: this environment makes it
 /// refresh its own install synchronously, then print the version (T3 Code
-/// runs the same).
-pub const MUSE_UPDATE_COMMAND: &str =
-    "MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1 MUSE_UPDATE_INTERVAL_SECONDS=0 muse --version";
+/// runs the same). `program` is the provider's own command (the built-in
+/// `muse`, or a Muse-family custom provider's binary), shell-quoted when it
+/// is a path.
+pub fn muse_update_command(program: &str) -> String {
+    let program = if program.contains('/') || program.contains(char::is_whitespace) {
+        format!("'{}'", program.replace('\'', "'\\''"))
+    } else {
+        program.to_string()
+    };
+    format!("MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1 MUSE_UPDATE_INTERVAL_SECONDS=0 {program} --version")
+}
 
 /// Families with a model catalog (`provider_models`) and a `--model` flag.
 pub const MODEL_FAMILIES: [&str; 8] = [
@@ -119,15 +127,15 @@ fn matches_family_token(candidate: &str, fam: &str) -> bool {
     if fam.len() <= 2 {
         return false;
     }
-    if fam.len() == 3 {
-        return lower.starts_with(fam)
-            && (lower.ends_with("work")
-                || lower
-                    .as_bytes()
-                    .get(fam.len())
-                    .is_some_and(|b| !b.is_ascii_alphabetic()));
-    }
+    // Longer names: the family glued to `work` (`claudework`, `agywork`) or
+    // followed by a non-letter (`claude2`) — never a bare prefix: `museum-cli`
+    // is not Muse, `codexify` is not Codex.
     lower.starts_with(fam)
+        && (lower.ends_with("work")
+            || lower
+                .as_bytes()
+                .get(fam.len())
+                .is_some_and(|b| !b.is_ascii_alphabetic()))
 }
 
 /// The catalog family a custom provider belongs to: its explicit
@@ -647,7 +655,7 @@ impl ProviderRegistry {
                     MUSE_NO_AUTO_UPDATE.0.to_string(),
                     MUSE_NO_AUTO_UPDATE.1.to_string(),
                 )]),
-                update_command: Some(MUSE_UPDATE_COMMAND.into()),
+                update_command: Some(muse_update_command("muse")),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 model_family: Some("muse".into()),
                 captures_session_id: false,
@@ -676,9 +684,16 @@ impl ProviderRegistry {
                 for (name, o) in parsed {
                     let (cmd, inline_args, base_args, env) =
                         normalize_override_command(&o.cmd, o.args, o.env);
-                    // Only keep a non-empty update_command string.
-                    let update_command = o.update_command.filter(|s| !s.trim().is_empty());
                     let model_family = infer_model_family(o.model_family.as_deref(), &cmd, &name);
+                    // Only keep a non-empty update_command string; a Muse-family
+                    // provider without one refreshes ITS binary the Muse way.
+                    let update_command =
+                        o.update_command
+                            .filter(|s| !s.trim().is_empty())
+                            .or_else(|| {
+                                (model_family.as_deref() == Some("muse"))
+                                    .then(|| muse_update_command(&cmd))
+                            });
                     // An explicit EMPTY template means "no model flag"; an
                     // unset one defaults to `--model {model}` for a provider of
                     // a known family (every one of them takes it — grok too).
@@ -859,6 +874,34 @@ impl ProviderRegistry {
             .is_some_and(|p| p.resume_args.is_some())
     }
 
+    /// THE "can this session be restarted without losing its conversation?"
+    /// predicate: an agent session whose provider has resume args AND that
+    /// recorded its provider-side conversation id. Everything else (Muse,
+    /// opencode, a custom CLI without `resume_args`, a codex/agy session whose
+    /// id was never captured) respawns as a brand-new conversation, so any
+    /// restart Otto makes without asking the person (the nightly CLI update's
+    /// reload) must skip it. `restart_locked` uses it to pick the argv.
+    pub fn resumes_session(&self, s: &otto_core::domain::Session) -> bool {
+        s.kind == otto_core::domain::SessionKind::Agent
+            && s.provider_session_id
+                .as_deref()
+                .is_some_and(|p| !p.is_empty())
+            && self.supports_resume(&s.provider)
+    }
+
+    /// `/meta.provider_resumable`: per enabled provider, whether a restart can
+    /// reopen its conversation (it has resume args). The UI asks before a
+    /// restart of a provider that can't.
+    pub fn resume_flags(&self) -> HashMap<String, bool> {
+        self.names()
+            .into_iter()
+            .map(|n| {
+                let r = self.supports_resume(&n);
+                (n, r)
+            })
+            .collect()
+    }
+
     /// True when the provider mints its OWN session id (codex) — so Otto records
     /// no `provider_session_id` at spawn and instead captures it from disk after
     /// launch. False for Otto-assigned providers (claude) and non-resumables.
@@ -903,6 +946,18 @@ impl ProviderRegistry {
             .expect("provider registry lock")
             .get(name)
             .and_then(|p| p.model_family.clone())
+    }
+
+    /// THE provider name → CLI family resolver: a registered provider's
+    /// family (built-in, or a custom one's explicit / inferred
+    /// `model_family`), else `slug` unchanged — an unknown CLI is its own
+    /// family, never guessed from a prefix. Every "is this Claude?" decision
+    /// (handover, agent-task nudges, transcripts, review, improve) goes
+    /// through here or `SessionManager::cli_family`, which is the same.
+    pub fn cli_family(&self, slug: &str) -> String {
+        let slug = slug.trim();
+        self.model_family_for(slug)
+            .unwrap_or_else(|| slug.to_string())
     }
 
     /// Whether `slug` is an enabled built-in or registered custom provider.
@@ -1003,6 +1058,32 @@ impl ProviderRegistry {
             .expect("provider registry lock")
             .get(name)
             .map(|spec| spec.cmd.clone())
+    }
+
+    /// Refuse a provider the person turned off (settings `disabled_providers`)
+    /// for a NEW session or a saved configuration that would start one.
+    /// Existing sessions keep resuming it through [`Self::build_spec`].
+    pub fn ensure_enabled(&self, provider: &str) -> Result<()> {
+        let provider = provider.trim();
+        if self
+            .disabled
+            .read()
+            .expect("provider registry lock")
+            .contains(provider)
+        {
+            return Err(Error::Invalid(format!(
+                "{provider} is turned off in Settings › Providers"
+            )));
+        }
+        Ok(())
+    }
+
+    /// [`Self::build_spec`] for a NEW session: every path that opens one
+    /// (workflows, scheduled tasks, MCP `otto_open_session`, personal agents)
+    /// funnels through `SessionManager::create`, which calls this.
+    pub fn build_new_spec(&self, provider: &str, sid: &str, cwd: &str) -> Result<CommandSpec> {
+        self.ensure_enabled(provider)?;
+        self.build_spec(provider, sid, cwd, false)
     }
 
     /// Build the concrete command for `provider`, expanding `{sid}`/`{cwd}`.

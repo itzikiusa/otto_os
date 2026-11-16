@@ -1,21 +1,17 @@
-// The one Threads thread a pull request gets (PrAgentPanel): created on the
-// first ask with `source: 'pr-agent'` and `origin: {kind:'pr', id:'<repo>#<n>'}`
-// so the Threads sidebar files it under "Pull requests" (not the main list),
-// the daemon closes it after `embedded_thread_auto_close_hours` idle, and the
-// PR finds it again (`GET …/runtime-sessions?source=pr-agent&origin_id=`).
+// The Threads thread a pull request gets (PrAgentPanel): started from the
+// embed's start composer with `source: 'pr-agent'` and `origin: {kind:'pr',
+// id:'<repo>#<n>'}` so the Threads sidebar files it under "Pull requests"
+// (not the main list), the daemon closes it after
+// `embedded_thread_auto_close_hours` idle, and the PR finds it again through
+// the Threads store (`findByOrigin`: an open thread before a closed one).
 //
 // An older daemon ignores `source` / `origin` (a plain thread, listed in
 // Threads) and the list filter: the thread id is then also remembered in this
-// browser, so the PR still finds its thread. The modules/threads store is
-// another feature's, so this talks to the runtime routes directly.
-import { api, ApiError } from '../../lib/api/client';
-import type {
-  CreateRuntimeSessionReq,
-  RuntimeAccessMode,
-  RuntimePromptResp,
-  RuntimeProvider,
-  RuntimeSession,
-} from '../../lib/api/types';
+// browser, so the PR still finds its thread. Every read and send goes through
+// the Threads session port (lib/runtimeThreadPort.ts), never the runtime
+// routes directly, so the embed's access chip and status stay true.
+import type { RuntimeSession } from '../../lib/api/types';
+import type { RuntimeEmbedStatus, RuntimeSessionPort } from '../../lib/runtimeThreadPort';
 
 export const PR_AGENT_SOURCE = 'pr-agent';
 
@@ -28,43 +24,6 @@ export function prAgentOriginLabel(repoName: string, n: number, title: string): 
   return s.length > 200 ? `${s.slice(0, 199)}…` : s;
 }
 
-/** Providers a thread can run on (the structured runtime's drivers; the
- *  rest are terminal-only). Mirrors isRuntimeProvider in the Threads module. */
-const RUNTIME_PROVIDERS: readonly string[] = ['claude', 'codex', 'gemini', 'grok', 'agy', 'opencode', 'pi', 'muse'];
-
-/** The provider a new PR thread runs on: the person's default when it can
- *  run a thread and is installed, else the first that can — null when none
- *  can (the panel says what to set up instead of failing a request). */
-export function pickRuntimeProvider(
-  preferred: string,
-  registered: readonly string[],
-  ready: (p: string) => boolean,
-): RuntimeProvider | null {
-  const ok = (p: string): boolean => RUNTIME_PROVIDERS.includes(p) && registered.includes(p) && ready(p);
-  if (ok(preferred)) return preferred as RuntimeProvider;
-  return (registered.find(ok) as RuntimeProvider | undefined) ?? null;
-}
-
-function originIdOf(s: Pick<RuntimeSession, 'meta'>): string | null {
-  const o = s.meta?.origin as { id?: unknown } | undefined;
-  return typeof o?.id === 'string' ? o.id : null;
-}
-
-/** The PR's thread among `rows`: tagged with this origin (or the id this
- *  browser remembered), never a linked thread its agent opened (those
- *  inherit the origin), newest activity first. */
-export function pickPrThread(
-  rows: readonly RuntimeSession[],
-  originId: string,
-  rememberedId: string | null,
-): RuntimeSession | null {
-  const mine = rows.filter(
-    (r) => !r.parent_id && (r.id === rememberedId || (r.meta?.source === PR_AGENT_SOURCE && originIdOf(r) === originId)),
-  );
-  mine.sort((a, b) => b.last_active_at.localeCompare(a.last_active_at));
-  return mine[0] ?? null;
-}
-
 const REMEMBER_KEY = 'otto_pr_agent_threads';
 function remembered(): Record<string, string> {
   try {
@@ -74,9 +33,12 @@ function remembered(): Record<string, string> {
     return {};
   }
 }
-function remember(originId: string, id: string): void {
+
+/** Keep `id` as the PR's thread in this browser (an older daemon's only link). */
+export function rememberPrThread(originId: string, id: string): void {
   try {
     const all = remembered();
+    delete all[originId];
     all[originId] = id;
     // Bounded: the newest 200 PRs (insertion order).
     const keys = Object.keys(all);
@@ -87,51 +49,32 @@ function remember(originId: string, id: string): void {
   }
 }
 
-/** The PR's thread in `workspaceId` (closed ones too), or null. */
-export async function findPrThread(workspaceId: string, originId: string): Promise<RuntimeSession | null> {
-  const q = `source=${PR_AGENT_SOURCE}&origin_id=${encodeURIComponent(originId)}`;
-  const rows = await api.get<RuntimeSession[]>(`/workspaces/${workspaceId}/runtime-sessions?${q}`);
-  const hit = pickPrThread(rows, originId, remembered()[originId] ?? null);
-  if (hit) return hit;
+type FindPort = Pick<RuntimeSessionPort['runtimeThreads'], 'findByOrigin' | 'loadOne'>;
+
+/** The PR's thread in `workspaceId` (an open one first; closed ones too), or null. */
+export async function findPrThread(port: FindPort, workspaceId: string, originId: string): Promise<RuntimeSession | null> {
+  const id = remembered()[originId] ?? null;
+  const hit = await port.findByOrigin(workspaceId, PR_AGENT_SOURCE, originId, id);
+  if (hit || !id) return hit;
   // Remembered but not in the list (another workspace's list, or past an old
   // daemon's 500-row cap): read it directly.
-  const id = remembered()[originId];
-  if (!id) return null;
   try {
-    return await api.get<RuntimeSession>(`/runtime-sessions/${id}`);
+    return await port.loadOne(id);
   } catch {
     return null;
   }
 }
 
-/** `POST /workspaces/{id}/runtime-sessions` with the embed fields. */
-export type PrThreadCreateReq = CreateRuntimeSessionReq & {
-  source: typeof PR_AGENT_SOURCE;
-  origin: { kind: 'pr'; id: string; label?: string };
-};
-
-export async function createPrThread(workspaceId: string, req: PrThreadCreateReq): Promise<RuntimeSession> {
-  const path = `/workspaces/${workspaceId}/runtime-sessions`;
-  let created: RuntimeSession;
-  try {
-    created = await api.post<RuntimeSession>(path, req);
-  } catch (e) {
-    // A daemon that refuses the embed fields (400 / 422): a plain thread.
-    if (!(e instanceof ApiError) || (e.status !== 400 && e.status !== 422) || !/source|origin|unknown field/i.test(e.message)) throw e;
-    const plain: CreateRuntimeSessionReq = { provider: req.provider, cwd: req.cwd, title: req.title, model: req.model, access_mode: req.access_mode };
-    created = await api.post<RuntimeSession>(path, plain);
-  }
-  remember(req.origin.id, created.id);
-  return created;
-}
-
-/** Send `text` to the thread in `access` mode (sticky from this turn on). A
- *  closed thread is reopened first; a running turn gets it queued behind. */
-export async function sendToPrThread(
-  thread: Pick<RuntimeSession, 'id' | 'status'>,
-  text: string,
-  access: RuntimeAccessMode,
-): Promise<RuntimePromptResp> {
-  if (thread.status === 'closed') await api.post<RuntimeSession>(`/runtime-sessions/${thread.id}/reopen`);
-  return api.post<RuntimePromptResp>(`/runtime-sessions/${thread.id}/prompt`, { text, access_mode: access, delivery: 'queue' });
+/** A folded / closed-sheet PR's dot, from its thread's row alone (the store
+ *  keeps it live): no conversation view is mounted just for this. An
+ *  approval or question waiting shows as `awaiting_permission`. */
+export function prThreadStatus(
+  row: Pick<RuntimeSession, 'status' | 'background_tasks'> | null | undefined,
+): RuntimeEmbedStatus | null {
+  if (!row) return null;
+  if (row.status === 'closed') return 'closed';
+  if (row.status === 'awaiting_permission') return 'needs-you';
+  if (row.status === 'working' || row.status === 'starting') return 'working';
+  if ((row.background_tasks?.length ?? 0) > 0) return 'background';
+  return 'idle';
 }

@@ -22,7 +22,8 @@ test('the agent opener opens the sheet and shows the thread working while it is 
   const sheet = page.getByRole('dialog', { name: 'Agent · PR #51' });
   await expect(sheet).toBeVisible();
   await sheet.getByRole('button', { name: 'Explain this PR' }).click();
-  await expect(sheet.getByTestId('embedded-runtime-thread')).toBeVisible({ timeout: 10_000 });
+  // The start composer hands over to the thread once it exists.
+  await expect(sheet.locator('[data-testid^="runtime-thread-"]')).toBeVisible({ timeout: 10_000 });
 
   await sheet.getByRole('button', { name: 'Close Agent · PR #51' }).click();
   await expect(sheet).toBeHidden();

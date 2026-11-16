@@ -16,6 +16,7 @@ import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { ideGit } from '../git/ideGitController.svelte';
 import { ide, ideBasename, type IdeFileReadResp } from '../ideStore.svelte';
+import { detectTextEol, diskEolsOf, normalizeEditorLf, serializeTabDiskContent, sha256HexOfText } from '../store/ideTypes';
 
 export type IdeCompareMode =
   | 'local-history'
@@ -49,6 +50,13 @@ async function readDiskFile(
     if (e instanceof ApiError && e.status === 404) return { content: '', exists: false };
     throw e;
   }
+}
+
+/** The live buffer of an open, loaded tab for `absPath` (what "Current" must show, unsaved
+ *  edits included), or null when the file is not open. */
+export function openTabBuffer(absPath: string): string | null {
+  const clean = ide.resolvePath(absPath);
+  return ide.tabs.some((t) => t.path === clean && !t.loading && !t.error) ? ide.getBuffer(clean) : null;
 }
 
 export async function readCurrentDiskOrTab(
@@ -85,41 +93,68 @@ export async function refreshTreeForRestoredPath(
   return resolved;
 }
 
+/**
+ * Write the comparison's "Current" side. Returns the text now on disk, or null when
+ * nothing was written.
+ *
+ * - The file is open: the change goes into the buffer as ONE undoable edit (⌘Z still
+ *   works), then through the tab's normal save (sha precondition, conflict prompt, line
+ *   endings). Unsaved edits in that tab are never replaced silently: ask first.
+ * - Not open: a direct write that keeps the line endings of `diskBaseline` (the text the
+ *   comparison read) and is refused (409) if the file changed on disk since.
+ */
 export async function writeCurrentAndSyncIde(
   absPath: string,
   nextContent: string,
   wasMissing = false,
-): Promise<boolean> {
+  diskBaseline: string | null = null,
+): Promise<string | null> {
   const clean = ide.resolvePath(absPath);
+  const tab = ide.tabs.find((t) => t.path === clean);
+  if (tab && !tab.loading && !tab.error) {
+    if (tab.readOnly || tab.truncated) {
+      toasts.error(`${ideBasename(clean)} is read-only`, 'Nothing was changed.');
+      return null;
+    }
+    if (ide.getBuffer(clean) !== tab.savedContent) {
+      const ok = await confirmer.ask(
+        `“${tab.name}” has unsaved changes. Applying this change saves them to disk together with it.`,
+        { title: 'Unsaved changes', confirmLabel: 'Apply and save' },
+      );
+      if (!ok) return null;
+    }
+    if (!(await ide.applyAgentEdit(clean, nextContent))) return null;
+    if (!(await ide.saveFile(clean))) return null;
+    void ideGit.refreshActive();
+    return nextContent;
+  }
   const root = ideGit.rootContainingPath(clean)?.path || ide.target.root;
+  const base = diskBaseline ?? '';
+  const disk = serializeTabDiskContent({ eol: detectTextEol(base), diskEols: diskEolsOf(base), savedContent: normalizeEditorLf(base) }, nextContent);
   try {
     const prefs = readIdePreferences();
-    const resp = await api.put<{ path: string; size: number; sha256: string }>('/ide/fs/file', {
+    // A missing file must still be missing (the empty-content hash is the daemon's "absent").
+    const expected = wasMissing ? await sha256HexOfText('') : diskBaseline !== null ? await sha256HexOfText(diskBaseline) : undefined;
+    await api.put<{ path: string; size: number; sha256: string }>('/ide/fs/file', {
       target: { ...ide.targetPayload, root },
       path: clean,
-      content: nextContent,
+      content: disk,
+      expected_sha256: expected,
       local_history_enabled: prefs.localHistoryEnabled,
       local_history_retention_days: prefs.localHistoryRetentionDays,
     });
-    const tab = ide.tabs.find((t) => t.path === clean);
-    if (tab) {
-      if (ide.activePath === clean || ide.splitPath === clean) {
-        const applied = await ide.replaceBufferContent(clean, nextContent);
-        if (!applied) ide.updateBuffer(clean, nextContent);
-      } else {
-        ide.updateBuffer(clean, nextContent);
-      }
-      tab.content = nextContent;
-      tab.savedContent = nextContent;
-      tab.dirty = false;
-      tab.sha256 = resp.sha256;
-    }
+    // A tab still loading (or that failed to) re-reads what was just written.
+    if (tab) void ide.openFile(clean, { reload: true, background: true });
     if (wasMissing) await refreshTreeForRestoredPath(root, clean);
     void ideGit.refreshActive();
-    return true;
+    return disk;
   } catch (e) {
-    toastError(`Couldn’t save ${ideBasename(clean)}`, e);
-    return false;
+    if (e instanceof ApiError && e.status === 409) {
+      toasts.error(`${ideBasename(clean)} changed on disk`, 'Nothing was written. Reopen the comparison to see the current version.');
+    } else {
+      toastError(`Couldn’t save ${ideBasename(clean)}`, e);
+    }
+    return null;
   }
 }
 

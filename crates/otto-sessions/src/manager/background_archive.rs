@@ -164,7 +164,7 @@ mod tests {
     async fn manager() -> (Arc<SessionManager>, SessionsRepo, Id, Id) {
         let dir = tempfile::tempdir().unwrap();
         let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
-        std::mem::forget(dir);
+        crate::test_tmp::keep_until_exit(dir);
         let (user, ws) = (otto_core::new_id(), otto_core::new_id());
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, 'u', 'x', 'U', 0, ?)")

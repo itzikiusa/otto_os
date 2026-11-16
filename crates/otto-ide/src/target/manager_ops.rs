@@ -389,7 +389,8 @@ impl TargetManager {
                 additional_roots,
                 actor_id,
             } => {
-                let (remote_path, _) = resolve_remote_in_roots(root, additional_roots, path)?;
+                let (remote_path, matched_root) =
+                    resolve_remote_in_roots(root, additional_roots, path)?;
                 let sftp = self.acquire_sftp(actor_id, spec)?;
                 if !allow_overwrite_large {
                     if let Ok(existing_sz) = sftp.file_size(&remote_path).await {
@@ -417,6 +418,9 @@ impl TargetManager {
                             .await;
                     }
                 }
+                // The lexical check above can't see remote symlinks.
+                self.confine_remote_write(target, &matched_root, &remote_path)
+                    .await?;
                 let tmp = tempfile::NamedTempFile::new()
                     .map_err(|e| Error::Internal(format!("temp upload file: {e}")))?;
                 tokio::fs::write(tmp.path(), new_bytes)

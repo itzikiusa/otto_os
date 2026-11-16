@@ -25,7 +25,7 @@ import {
   type IdeProjectRoot,
 } from '../ideStore.svelte';
 import { onIdeTargetReset } from '../store/ideStateSlices.svelte';
-import { detectTextEol, normalizeEditorLf } from '../store/ideTypes';
+import { detectTextEol, diskEolsOf, normalizeEditorLf } from '../store/ideTypes';
 
 export type IdeGitLetter = 'M' | 'A' | 'D' | 'U' | 'R' | 'C';
 
@@ -140,10 +140,10 @@ class IdeGitController {
       if (prev === undefined || rev <= prev) continue;
       for (let j = 0; j < ide.tabs.length; j++) {
         const tab = ide.tabs[j];
-        if (tab.dirty || tab.loading || tab.path.startsWith('untitled:')) continue;
+        if (isOpenTabDirty(tab) || tab.loading || tab.path.startsWith('untitled:')) continue;
         const rel = this.repoRelativePath(repo, tab.path);
         if (rel && git.liveTouches(repo.id, rel)) {
-          void this.reloadIdeTabIfOpen(tab.path, { onlyIfChangedOnDisk: true });
+          void this.reloadIdeTabIfOpen(tab.path, { onlyIfChangedOnDisk: true, onlyIfClean: true });
         }
       }
     }
@@ -642,8 +642,8 @@ class IdeGitController {
     for (let i = 0; i < ide.tabs.length; i++) {
       const t = ide.tabs[i];
       const tp = normSlash(t.path);
-      if (!t.dirty && (tp === base || tp.startsWith(`${base}/`))) {
-        await this.reloadIdeTabIfOpen(t.path);
+      if (!isOpenTabDirty(t) && (tp === base || tp.startsWith(`${base}/`))) {
+        await this.reloadIdeTabIfOpen(t.path, { onlyIfClean: true });
       }
     }
   }
@@ -674,14 +674,19 @@ class IdeGitController {
     return s;
   }
 
-  /** Refresh an open IDE tab in place from disk (or close it if deleted by discard). */
+  /** Refresh an open IDE tab in place from disk (or close it if deleted by discard).
+   *  `onlyIfClean`: a background reload (repo watcher, checkout/pull) never replaces unsaved
+   *  edits. Whatever the caller, keystrokes typed while the read was in flight win: the tab
+   *  keeps them and its old sha, so the next save asks about the disk change. */
   async reloadIdeTabIfOpen(
     absPath: string,
-    opts: { onlyIfChangedOnDisk?: boolean } = {},
+    opts: { onlyIfChangedOnDisk?: boolean; onlyIfClean?: boolean } = {},
   ): Promise<void> {
     const clean = normSlash(ide.resolvePath(absPath));
     const existing = ide.tabs.find((t) => normSlash(t.path) === clean);
     if (!existing) return;
+    if (opts.onlyIfClean && isOpenTabDirty(existing)) return;
+    const before = ide.getBuffer(existing.path);
     let fresh: IdeFileReadResp;
     try {
       const root =
@@ -692,6 +697,7 @@ class IdeGitController {
         `/ide/fs/file?${ide.targetQuery({ root, path: clean })}`,
       );
     } catch (e) {
+      if (!ide.tabs.includes(existing) || ide.getBuffer(existing.path) !== before) return;
       if (e instanceof ApiError && e.status === 404) {
         existing.dirty = false;
         existing.savedContent = existing.content;
@@ -703,6 +709,8 @@ class IdeGitController {
       return;
     }
 
+    if (!ide.tabs.includes(existing) || ide.getBuffer(existing.path) !== before) return;
+    if (opts.onlyIfClean && isOpenTabDirty(existing)) return;
     const detectedEol = detectTextEol(fresh.content);
     const lfContent = normalizeEditorLf(fresh.content);
     if (
@@ -716,6 +724,7 @@ class IdeGitController {
     }
     existing.error = null;
     existing.eol = detectedEol;
+    existing.diskEols = diskEolsOf(fresh.content);
     try {
       if (ide.activePath === existing.path || ide.splitPath === existing.path) {
         const applied = await ide.replaceBufferContent(existing.path, lfContent);
@@ -746,6 +755,12 @@ class IdeGitController {
     if (ap.startsWith(`${rp}/`)) return ap.slice(rp.length + 1);
     return null;
   }
+}
+
+/** Dirty including keystrokes not yet synced into `tab.content` (they live ~250 ms in the
+ *  store's live buffer, so `tab.dirty` alone lags behind typing). */
+function isOpenTabDirty(tab: { path: string; savedContent: string; dirty?: boolean }): boolean {
+  return Boolean(tab.dirty) || ide.getBuffer(tab.path) !== tab.savedContent;
 }
 
 export const ideGit = new IdeGitController();

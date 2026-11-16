@@ -16,6 +16,7 @@ mod runner;
 mod runner_cmd;
 mod runner_parsers;
 mod runner_proc;
+mod runner_steps;
 pub mod shell_env;
 #[cfg(test)]
 mod tests;

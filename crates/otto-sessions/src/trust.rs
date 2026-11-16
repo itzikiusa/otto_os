@@ -53,8 +53,19 @@ fn fingerprint(path: &Path) -> Fingerprint {
 /// `path` — but only while `path` still matches `read_fp`, the fingerprint
 /// taken before the caller read it. `Ok(false)` = the file changed meanwhile
 /// (a CLI saved it); nothing was written and the caller should re-read.
+///
+/// The temp file is created with the original's mode from the start (0600
+/// when there is none) — never a world-readable copy of `~/.claude.json`,
+/// even for a moment — and fsynced before the rename, so a crash can't leave
+/// a zero-length config. A symlinked config (a dotfiles repo) is written
+/// through to the file it resolves to ([`replace_target`]) and stays a
+/// symlink.
 fn atomic_replace(path: &Path, contents: &[u8], read_fp: Fingerprint) -> Result<bool, String> {
     use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let path = &replace_target(path)?;
+    let existing = std::fs::symlink_metadata(path).ok();
+    let mode = existing.map_or(0o600, |m| m.permissions().mode() & 0o777);
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -68,13 +79,13 @@ fn atomic_replace(path: &Path, contents: &[u8], read_fp: Fingerprint) -> Result<
     let written = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(mode)
         .open(&tmp)
         .and_then(|mut f| {
+            // Exactly the original's mode (the umask may have narrowed it).
+            f.set_permissions(std::fs::Permissions::from_mode(mode))?;
             f.write_all(contents)?;
-            if let Ok(meta) = std::fs::metadata(path) {
-                let _ = f.set_permissions(meta.permissions());
-            }
-            Ok(())
+            f.sync_all()
         });
     if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
@@ -89,6 +100,34 @@ fn atomic_replace(path: &Path, contents: &[u8], read_fp: Fingerprint) -> Result<
         return Err(format!("rename onto {}: {e}", path.display()));
     }
     Ok(true)
+}
+
+/// The file a config write replaces: `path` itself, or — when `path` is a
+/// symlink (a dotfiles repo's `~/.claude.json`) — the file it resolves to,
+/// once, provided that is a regular file owned by this user. The temp file is
+/// then created beside the REAL file, so the rename keeps the link. A
+/// symlink to anything else (another user's file, a device, a directory, a
+/// dangling link — what a planted link looks like) is refused.
+fn replace_target(path: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+    let is_link = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    if !is_link {
+        return Ok(path.to_path_buf());
+    }
+    let refuse = |why: &str| {
+        format!(
+            "{} is a symlink {why}; Otto leaves it alone (grant the folder in the CLI itself)",
+            path.display()
+        )
+    };
+    let real = std::fs::canonicalize(path).map_err(|_| refuse("that doesn't resolve"))?;
+    let meta = std::fs::symlink_metadata(&real).map_err(|_| refuse("that doesn't resolve"))?;
+    // SAFETY: getuid(2) has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if !meta.file_type().is_file() || meta.uid() != uid {
+        return Err(refuse("to something other than a file you own"));
+    }
+    Ok(real)
 }
 
 /// `(config file, grant key)` → the file's [`Fingerprint`] when that grant was
@@ -554,6 +593,47 @@ mod tests {
             })
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    /// I-12: a dotfiles symlink to a file this user owns is written THROUGH
+    /// (the link stays a link, the real file gets the change); a symlink to
+    /// something else — here a directory, as a planted link might be — is
+    /// refused and left exactly as it is; a new file is created owner-only.
+    #[test]
+    fn atomic_replace_writes_through_own_symlinks_refuses_others_and_creates_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("dotfiles");
+        std::fs::create_dir(&repo).unwrap();
+        let real = repo.join("claude.json");
+        std::fs::write(&real, "{}").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.path().join(".claude.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(atomic_replace(&link, b"{\"x\":1}", fingerprint(&link)).unwrap());
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "{\"x\":1}");
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let planted = dir.path().join("planted.json");
+        std::os::unix::fs::symlink(&repo, &planted).unwrap();
+        let err = atomic_replace(&planted, b"x", fingerprint(&planted)).expect_err("dir link");
+        assert!(err.contains("symlink"), "{err}");
+        assert!(std::fs::symlink_metadata(&planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let dangling = dir.path().join("dangling.json");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).unwrap();
+        assert!(atomic_replace(&dangling, b"x", None).is_err());
+
+        let fresh = dir.path().join("config.toml");
+        assert!(atomic_replace(&fresh, b"x", None).unwrap());
+        let mode = std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

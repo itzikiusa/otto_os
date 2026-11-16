@@ -90,6 +90,27 @@ export function openIdeRecentFilesMenu(): void {
 
 const inXterm = (t: EventTarget | null): boolean => t instanceof Element && Boolean(t.closest('.xterm'));
 
+/** A text field outside the code editor: the agent composer, the commit box, a filter or
+ *  the editor's own find/replace inputs. Bare ⌃ keys are text editing there (⌃D is
+ *  forward-delete on macOS), so the IDE's bare ⌃R / ⌃D / F-key commands stay out. */
+export function inTextField(t: EventTarget | null): boolean {
+  if (!(t instanceof Element)) return false;
+  const tag = t.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  return (t as HTMLElement).isContentEditable === true && !t.closest('.cm-content');
+}
+
+/** The focused editor has its find panel open: ⌘G is "find next" there, not Go to Line. */
+function inEditorWithFindPanel(t: EventTarget | null): boolean {
+  return t instanceof Element && Boolean(t.closest('.cm-editor')?.querySelector('.cm-search'));
+}
+
+/** ⌘L: add the editor selection (or the current line) to the agent, as the editor's
+ *  context menu and the docs say. ⇧⌘L toggles the agent dock; Go to Line is ⌘G. */
+function addSelectionToAgent(): void {
+  ideAgent.markSelectionFromEditor({ openPanel: true });
+}
+
 function matchesKey(e: KeyboardEvent, code: string, letter: string): boolean {
   return e.code === code || e.key.toLowerCase() === letter;
 }
@@ -160,8 +181,8 @@ export function handleIdeChord(
   if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyW', 'w') && ide.activePath) { e.preventDefault(); void ide.closeTab(ide.activePath); return true; }
   if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyT', 't')) { e.preventDefault(); void ide.reopenClosedTab(); return true; }
   if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyE', 'e')) { e.preventDefault(); openIdeRecentFilesMenu(); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyG', 'g')) { e.preventDefault(); void promptIdeGoToLine(); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyL', 'l')) { e.preventDefault(); void promptIdeGoToLine(); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyG', 'g') && !inEditorWithFindPanel(e.target)) { e.preventDefault(); void promptIdeGoToLine(); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyL', 'l')) { e.preventDefault(); addSelectionToAgent(); return true; }
   if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyL', 'l') && triggerAgent) { e.preventDefault(); triggerAgent(); return true; }
   if (pureMod && !e.shiftKey && !e.altKey && e.code === 'Digit1') { e.preventDefault(); toggleExplorer(); return true; }
   if (pureMod && !e.shiftKey && !e.altKey && e.code === 'Digit4') { e.preventDefault(); ide.openBottomTab('run'); return true; }
@@ -222,7 +243,7 @@ export function handleIdeWindowKeyDown(e: KeyboardEvent, overlayOpen: boolean, t
     return;
   }
   if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey) && !e.altKey && !(e.ctrlKey && !e.metaKey && term)) {
-    if (!e.shiftKey && matchesKey(e, 'KeyL', 'l')) { e.preventDefault(); void promptIdeGoToLine(); return; }
+    if (!e.shiftKey && matchesKey(e, 'KeyL', 'l')) { e.preventDefault(); addSelectionToAgent(); return; }
     if (e.shiftKey && matchesKey(e, 'KeyL', 'l')) { e.preventDefault(); triggerAgent(); return; }
     if (!e.shiftKey && matchesKey(e, 'KeyI', 'i')) { e.preventDefault(); ideAgent.openInlineEdit(); return; }
     if (!e.shiftKey && (e.code === 'Comma' || e.key === ',')) { e.preventDefault(); ide.openSettings(); return; }
@@ -240,6 +261,8 @@ export function handleIdeWindowKeyDown(e: KeyboardEvent, overlayOpen: boolean, t
     if (e.code === 'ArrowUp' || e.key === 'ArrowUp') { e.preventDefault(); void ide.stepOut(); return; }
   }
   if (e.defaultPrevented) return;
+  // Bare ⌃ letters and F-keys belong to the text field the person is typing in.
+  if (inTextField(e.target) && !e.metaKey && !e.altKey && (e.ctrlKey || /^F\d+$/.test(e.key))) return;
   if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'F12') { e.preventDefault(); ide.openBottomTab('terminal'); }
   else if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'F7' && ide.activePath) { e.preventDefault(); void ide.findReferences(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col); }
   else if (!term && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && matchesKey(e, 'KeyR', 'r')) { e.preventDefault(); void ide.startRun(); }

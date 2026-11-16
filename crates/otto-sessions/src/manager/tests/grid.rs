@@ -93,13 +93,8 @@ async fn grid_feed_reads_zero_once_the_process_exits() {
     };
     let handle = Arc::new(PtyHandle::spawn_sized(&spec, 120, 40).unwrap());
     mgr.live.insert(id.clone(), Arc::clone(&handle));
-    mgr.start_status_task(
-        id.clone(),
-        ws.id.clone(),
-        "shell".into(),
-        Arc::clone(&handle),
-        false,
-    );
+    let row = repo.get(&id).await.unwrap();
+    mgr.start_status_task(&row, Arc::clone(&handle), false);
     let _viewer = mgr.attach(&id);
     let mut rx = mgr.grid_watch(&id);
     assert_eq!(rx.borrow_and_update().cols, 120);
