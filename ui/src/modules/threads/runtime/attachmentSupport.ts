@@ -8,6 +8,8 @@ export interface TakesCaps {
   files: boolean;
   steer?: boolean;
   efforts?: string[];
+  /** A prompt may ask for plan mode. */
+  plan?: boolean;
 }
 
 const NONE: TakesCaps = { images: false, files: false, steer: false, efforts: [] };

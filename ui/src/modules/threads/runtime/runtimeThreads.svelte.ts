@@ -247,7 +247,7 @@ class RuntimeThreads {
     if (row && row.status !== 'closed' && (ev.type === 'provider_session.updated' || ev.type === 'provider_turn.updated')) {
       if (ev.type === 'provider_session.updated') {
         const ps = ev.provider_session;
-        this.byId[ev.session_id] = { ...row, status: SESSION_STATUS[ps.status], background_tasks: ps.background_tasks ?? [], capabilities: ps.capabilities ?? row.capabilities, last_active_at: ev.ts };
+        this.byId[ev.session_id] = { ...row, status: SESSION_STATUS[ps.status], background_tasks: ps.background_tasks ?? [], capabilities: ps.capabilities ?? row.capabilities, title: ps.title ?? row.title, last_active_at: ev.ts };
       } else this.byId[ev.session_id] = { ...row, last_active_at: ev.ts };
     }
   }
@@ -260,8 +260,12 @@ class RuntimeThreads {
       provider: RuntimeProvider;
       cwd: string | null;
       title: string;
+      /** `title` is a placeholder the agent's own name for it replaces. */
+      titleAuto?: boolean;
       model: string | null;
       effort?: string;
+      /** The opening turn in plan mode (where the agent has one). */
+      plan?: boolean;
       prompt: string;
       /** Images / PDFs for the first message. */
       attachments?: readonly { name: string; mime: string; data_base64: string }[];
@@ -271,6 +275,7 @@ class RuntimeThreads {
       provider: req.provider,
       cwd: req.cwd,
       title: req.title,
+      ...(req.titleAuto ? { title_auto: true } : {}),
       model: req.model,
       // No access mode: a new thread starts in the daemon's default — Full
       // access while Settings › Providers skips permission prompts (the same
@@ -283,6 +288,7 @@ class RuntimeThreads {
       await this.prompt(created.id, {
         text: req.prompt,
         ...(req.effort ? { effort: req.effort } : {}),
+        ...(req.plan ? { plan: true } : {}),
         ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
         ...(docs.length ? { files: docs.map((d) => ({ ...d })) } : {}),
       });

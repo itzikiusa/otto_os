@@ -13,6 +13,7 @@
 
 import type {
   PlanArtifact,
+  ProviderCommand,
   ProviderSession,
   ProviderThread,
   ProviderTurn,
@@ -37,10 +38,12 @@ export interface RuntimeProjection {
   queued: QueuedPrompt[];
   /** Live `command_output.delta` text per command item (never persisted). */
   output: Record<string, string>;
+  /** The agent's own slash commands (`commands.updated`). */
+  commands: ProviderCommand[];
 }
 
 export function emptyProjection(): RuntimeProjection {
-  return { lastSequence: 0, session: null, thread: null, turns: [], items: [], requests: [], plans: [], queued: [], output: {} };
+  return { lastSequence: 0, session: null, thread: null, turns: [], items: [], requests: [], plans: [], queued: [], output: {}, commands: [] };
 }
 
 export function fromSnapshot(snapshot: RuntimeSnapshot, sequence: number): RuntimeProjection {
@@ -54,6 +57,7 @@ export function fromSnapshot(snapshot: RuntimeSnapshot, sequence: number): Runti
     plans: snapshot.plans,
     queued: snapshot.queued_prompts ?? [],
     output: {},
+    commands: snapshot.commands ?? [],
   };
 }
 
@@ -100,6 +104,8 @@ function applyOne(p: RuntimeProjection, ev: RuntimeEvent): RuntimeProjection {
       return { ...next, plans: upsert(p.plans, ev.plan) };
     case 'queue.updated':
       return { ...next, queued: ev.queued_prompts };
+    case 'commands.updated':
+      return { ...next, commands: ev.commands };
     case 'command_output.delta':
       return { ...next, output: { ...p.output, [ev.item_id]: (p.output[ev.item_id] ?? '') + ev.chunk } };
     case 'turn.terminal':

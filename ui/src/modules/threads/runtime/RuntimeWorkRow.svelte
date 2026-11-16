@@ -196,8 +196,8 @@
       {:else if item.type === 'dynamic_tool'}
         <pre class="rw-pre">{json(item.input)}</pre>
         {#if item.output}<pre class="rw-pre">{item.output}</pre>{/if}
-        {#if item.images?.length}
-          <LazyMount lazy={RuntimeToolImages} what="the tool images" variant="compact" props={{ images: item.images }} />
+        {#if item.images?.length || item.image_files?.length}
+          <LazyMount lazy={RuntimeToolImages} what="the tool images" variant="compact" props={{ images: item.images ?? [], files: item.image_files ?? [], itemId: item.id }} />
         {/if}
       {:else if item.type === 'web_search'}
         <ul class="rw-list">

@@ -53,6 +53,8 @@
   import CouncilStagePicker from './runtime/CouncilStagePicker.svelte';
   import StageAttach from './runtime/StageAttach.svelte';
   import { StageAttachments } from './runtime/stageAttachments.svelte';
+  import { capsOf } from './runtime/attachmentSupport';
+  import { placeholderTitle } from './threadTitle';
 
   interface Props {
     /** Float the project card top-right (wide screen, right panel closed). */
@@ -89,6 +91,11 @@
   const runtime = $derived(isRuntimeProvider(provider));
   const files = new StageAttachments(() => auth.meta?.runtime_capabilities?.[provider], () => runtime && !council.on);
   const modeSupported = $derived(supportsInteractionMode(provider) && !runtime);
+  // A runtime thread's plan mode and effort levels come from what its agent
+  // reports (`MetaResp.runtime_capabilities`), never from its name.
+  const stageCaps = $derived(capsOf(null, auth.meta?.runtime_capabilities?.[provider]));
+  const planSupported = $derived(runtime && !!stageCaps.plan);
+  const takesEffort = $derived(runtime ? (stageCaps.efforts?.length ?? 0) > 0 : supportsEffortSelection(provider));
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
   const onWorktree = $derived(worktree !== null && worktree.path.replace(/\/+$/, '') === cleanCwd);
   const repo = $derived(onWorktree ? worktree!.repo : threadRepos.repoFor(cleanCwd, scratchActive ? null : ws.currentId));
@@ -100,7 +107,7 @@
     const meta = auth.meta;
     if (council.on) return councilAgentLabel(meta);
     const model = selectedModel ? formatModelLabel(provider, selectedModel, meta) : harnessLabel(provider);
-    return supportsEffortSelection(provider) && selectedEffort ? `${model} · ${formatEffortShort(selectedEffort)}` : model;
+    return takesEffort && selectedEffort ? `${model} · ${formatEffortShort(selectedEffort)}` : model;
   });
 
   $effect(() => {
@@ -283,14 +290,17 @@
         ...(selectedModel ? { model: selectedModel } : {}),
         ...(selectedEffort ? { effort: selectedEffort } : {}),
       };
-      const title = firstMsg ? firstMsg.replace(/\s+/g, ' ').slice(0, 56) : `${harnessLabel(provider)} thread`;
+      const title = placeholderTitle(firstMsg, `${harnessLabel(provider)} thread`);
       const opts = { scratch: scratchActive && ws.currentId !== SCRATCH_WORKSPACE_ID };
       const asCouncil = withPrompt && council.ready;
       const created = asCouncil
         ? (await council.start(targetWs, { prompt: firstMsg, title, cwd: dir || null }))[0]
         : runtime && isRuntimeProvider(provider)
         ? await runtimeThreads.start(targetWs, {
-            provider, title, cwd: dir || null, model: selectedModel, effort: selectedEffort ?? undefined, prompt: firstMsg, attachments: withPrompt ? files.list : [],
+            provider, title, titleAuto: !!firstMsg, cwd: dir || null, model: selectedModel,
+            effort: takesEffort ? (selectedEffort ?? undefined) : undefined,
+            plan: planSupported && interactionMode === 'plan',
+            prompt: firstMsg, attachments: withPrompt ? files.list : [],
           })
         : firstMsg
           ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
@@ -350,6 +360,11 @@
       if (modeSupported) {
         e.preventDefault();
         interactionMode = nextInteractionModeToggle(interactionMode);
+        return;
+      }
+      if (planSupported) {
+        e.preventDefault();
+        interactionMode = interactionMode === 'plan' ? 'full' : 'plan';
         return;
       }
     }
@@ -418,7 +433,7 @@
       {/if}
     </h1>
 
-    <div class="nt-composer" class:plan={interactionMode === 'plan'}>
+    <div class="nt-composer" class:plan={interactionMode === 'plan' && (modeSupported || planSupported)}>
       {#if cmdOpen}
         <StageSlashPopup
           id={slashPopId}
@@ -433,7 +448,7 @@
         bind:value={prompt}
         dir="auto"
         rows={2}
-        placeholder={interactionMode === 'plan'
+        placeholder={interactionMode === 'plan' && (modeSupported || planSupported)
           ? 'Describe what to explore and plan. / commands, ⇧⇥ leaves Plan'
           : 'Ask anything. @ files, / commands'}
         aria-label="Opening prompt for new thread"
@@ -582,6 +597,21 @@
           <Icon name={interactionMode === 'plan' ? 'compass' : interactionMode === 'accept-edits' ? 'shield' : 'unlock'} size={13} />
           <span>{formatInteractionModeLabel(interactionMode)}</span>
         </button>
+      {:else if planSupported}
+        <!-- A runtime thread's access is the daemon default; Plan is the one
+             mode its agent adds (⇧⇥ toggles it). -->
+        <button
+          type="button"
+          class="nt-meta-btn"
+          class:warn={interactionMode === 'plan'}
+          aria-pressed={interactionMode === 'plan'}
+          title="Plan first: the agent researches and proposes, and changes nothing (⇧⇥)"
+          data-testid="picker-plan"
+          onclick={() => (interactionMode = interactionMode === 'plan' ? 'full' : 'plan')}
+        >
+          <Icon name="compass" size={13} />
+          <span>Plan</span>
+        </button>
       {/if}
     </div>
   </div>
@@ -597,7 +627,8 @@
     mode={interactionMode}
     onprovider={selectProvider}
     onmodel={(m) => { council.pick({ provider, model: m, effort: selectedEffort }); selectedModel = m; }}
-    oneffort={(e) => (selectedEffort = e)}
+    oneffort={takesEffort ? (e) => (selectedEffort = e) : undefined}
+    effortLevels={runtime ? (stageCaps.efforts ?? []) : undefined}
     onmode={modeSupported ? (m) => (interactionMode = m) : undefined}
     onclose={() => (pickerOpen = false)}
   />
