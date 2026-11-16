@@ -211,6 +211,21 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
     assert_eq!(v2, 2);
     let _ = rx.recv().await.expect("buffer v2 updated event");
 
+    // A guest save is announced as saved only after its disk write, and only for
+    // the latest version: a late write of v1 must not mark v2 clean.
+    hub.mark_buffer_saved(&created.room.id, &edit_req.peer_id, &edit_req.path, 1);
+    assert!(rx.try_recv().is_err(), "stale version must not broadcast");
+    hub.mark_buffer_saved(&created.room.id, &edit_req.peer_id, &edit_req.path, 2);
+    match rx.recv().await.expect("saved event") {
+        IdeCollabEvent::BufferUpdated {
+            version,
+            saved,
+            sha256,
+            ..
+        } => assert!(version == 2 && saved && sha256.is_some()),
+        other => panic!("unexpected event {other:?}"),
+    }
+
     let stale_req = IdeCollabEditReq {
         base_version: Some(1),
         content: "stale\n".into(),

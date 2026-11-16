@@ -294,24 +294,18 @@ pub(super) async fn collab_guest_edit<S: IdeCtx>(
     };
 
     // Commit buffer version under the room lock BEFORE writing to disk so a racing
-    // `base_version` conflict never overwrites target files.
-    let version = ctx
-        .ide()
-        .collab
-        .apply_edit(&room_id, &req, resolved_for_save.is_some())?;
+    // `base_version` conflict never overwrites target files. Peers hear "saved"
+    // only after the write succeeds.
+    let version = ctx.ide().collab.apply_edit(&room_id, &req, false)?;
 
     if let Some(resolved) = resolved_for_save {
-        if let Err(err) = ctx
-            .ide()
+        ctx.ide()
             .targets
             .write_file(&resolved, &req.path, &req.content, None, false)
-            .await
-        {
-            ctx.ide()
-                .collab
-                .mark_buffer_dirty(&room_id, &req.path, version);
-            return Err(err.into());
-        }
+            .await?;
+        ctx.ide()
+            .collab
+            .mark_buffer_saved(&room_id, &req.peer_id, &req.path, version);
     }
     Ok(Json(IdeCollabEditResp { version }))
 }

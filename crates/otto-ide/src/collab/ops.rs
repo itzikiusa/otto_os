@@ -119,16 +119,32 @@ impl CollabHub {
     }
 
     /// Mark an already-applied shared buffer version as dirty if a subsequent disk save failed.
-    pub fn mark_buffer_dirty(&self, room_id: &str, path: &str, version: u64) {
-        if let Ok(mut guard) = self.rooms.write() {
-            if let Some(room) = guard.get_mut(room_id) {
-                if let Some(rec) = room.shared_buffers.get_mut(path) {
-                    if rec.buf.version == version {
-                        rec.clean = false;
-                    }
-                }
-            }
+    /// Mark a guest save clean and announce it, once the disk write succeeded and
+    /// only while `version` is still the room's latest for `path` (a newer edit
+    /// keeps its own dirty state).
+    pub fn mark_buffer_saved(&self, room_id: &str, peer_id: &str, path: &str, version: u64) {
+        let Ok(mut guard) = self.rooms.write() else {
+            return;
+        };
+        let Some(room) = guard.get_mut(room_id) else {
+            return;
+        };
+        let Some(rec) = room.shared_buffers.get_mut(path) else {
+            return;
+        };
+        if rec.buf.version != version {
+            return;
         }
+        rec.clean = true;
+        let content = rec.buf.content.clone();
+        let _ = room.events_tx.send(IdeCollabEvent::BufferUpdated {
+            peer_id: peer_id.to_string(),
+            path: path.to_string(),
+            sha256: Some(hex::encode(Sha256::digest(content.as_bytes()))),
+            content,
+            version,
+            saved: true,
+        });
     }
 
     fn check_base_version(
