@@ -757,7 +757,15 @@ async fn live_shell_bridge_debugs_both_bash_and_zsh_with_midrun_breakpoints() {
     let (_ctx, app) = build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
     let ws_str = ws.to_string_lossy().into_owned();
 
-    for (fname, shebang) in [("run.sh", "#!/bin/bash"), ("run.zsh", "#!/bin/zsh")] {
+    for (fname, shebang, shell) in [
+        ("run.sh", "#!/bin/bash", "bash"),
+        ("run.zsh", "#!/bin/zsh", "zsh"),
+    ] {
+        // Ubuntu CI runners ship no zsh; the bridge then rightly fails with
+        // "Zsh shell ('zsh') not found", so skip that leg like other toolchains.
+        if !ensure_bins_or_skip(&[shell]) {
+            continue;
+        }
         let script = ws.join(fname);
         std::fs::write(
             &script,
