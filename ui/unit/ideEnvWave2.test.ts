@@ -64,3 +64,42 @@ test('V7: a session that is still starting has no chat turn, but a prompt to it 
   assert.equal(ops.isChatTurnRunning(bridge('idle', [{ status: 'running' }]), 's1'), true);
   assert.equal(ops.isChatTurnRunning(bridge('idle'), 's1'), false);
 });
+
+test('V1: adding or removing one folder of a named project saves the project on the server', async () => {
+  const posts: { url: string; body: { folders: string[] } }[] = [];
+  const api = { post: async (url: string, body: { folders: string[] }) => { posts.push({ url, body }); return {}; } };
+  const projects = loadSource(ideUrl('shell/ideProjectsManager.ts'), {
+    svelte: { tick: async () => {}, untrack: (f: () => unknown) => f() },
+    '../../../lib/api/client': { api, ApiError: class extends Error {} },
+    '../../../lib/components/cm-ide-prefs': { readIdePreferences: () => ({}) },
+    '../../../lib/confirm.svelte': { confirmer: {} },
+    '../../../lib/toast.svelte': { toasts: {} },
+    '../../../lib/toastError': { toastError: () => {} },
+    '../../../lib/storage': { lsGet: () => null, lsSet: () => {}, lsRemove: () => {} },
+    '../../../lib/ideProjectsModel': { loadNamedIdeProjectsLocal: () => [], saveNamedIdeProjectsLocal: () => {}, fetchNamedIdeProjectsFromServer: async () => [], parseNamedIdeProject: () => null },
+    '../../../lib/ideWorkspacePort.svelte': { ideWorkspacePort: { setLastRoot: () => {} } },
+    '../../../lib/components/cm-ide-lsp': { disposePooledLspClients: async () => {} },
+  }, {}, { relative: true });
+  const proj = { id: 'p1', name: 'Hunt Multi', primary_root: '/w/currency', folders: ['/w/currency', '/w/cfg', '/w/club'], pinned: true, updated_at: 0 };
+  const host = {
+    namedProjects: [proj], activeProjectId: 'p1',
+    target: { kind: 'local', root: '/w/currency' }, additionalRoots: ['/w/cfg'],
+  };
+  await projects.syncCurrentProjectFolders(host);
+  assert.equal(posts.length, 1, 'Remove club-manager reaches the server, so a reload keeps it removed');
+  assert.equal(posts[0].url, '/ide/projects');
+  assert.deepEqual([...posts[0].body.folders], ['/w/currency', '/w/cfg']);
+  assert.deepEqual([...host.namedProjects[0].folders], ['/w/currency', '/w/cfg']);
+  await projects.syncCurrentProjectFolders(host);
+  assert.equal(posts.length, 1, 'nothing to save when the folders already match');
+});
+
+test('V1: connecting to an SSH host leaves the named project, so its tabs are not overwritten', async () => {
+  const fs = await import('node:fs');
+  const store = fs.readFileSync(ideUrl('ideStore.svelte.ts'), 'utf8');
+  const start = store.indexOf('async setSshTarget(');
+  const body = store.slice(start, store.indexOf('\n  }', start));
+  assert.match(body, /this\.activeProjectId = null/);
+  assert.match(body, /saveLastSshTarget\(\{/, 'and a reload reopens the SSH host');
+  assert.ok(body.indexOf('snapshotProjectTabs') < body.indexOf('this.activeProjectId = null'), 'the project keeps its own local tabs');
+});

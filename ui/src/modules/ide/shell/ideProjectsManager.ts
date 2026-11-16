@@ -325,21 +325,12 @@ export async function attachProjectFoldersBatch(
   return added.length;
 }
 
-export function syncCurrentProjectFolders(
-  host: { namedProjects: IdeNamedProject[]; activeProjectId: string | null; target: IdeTargetSpec; additionalRoots: string[] },
-): void {
+/** Save the active named project's folders after a single add / remove, on the
+ *  server too: a local-only copy came back stale after a reload or on another device. */
+export async function syncCurrentProjectFolders(host: NamedProjectsHost): Promise<void> {
   if (!host.activeProjectId || !host.target.root) return;
   const primary = normalizeRootPath(host.target.root);
-  const seenKeys = new Set<string>([canonicalRootKey(primary)]);
-  const folders = [primary];
-  for (let i = 0; i < host.additionalRoots.length; i++) {
-    const f = normalizeRootPath(host.additionalRoots[i]);
-    const k = canonicalRootKey(f);
-    if (f && k && !seenKeys.has(k)) {
-      seenKeys.add(k);
-      folders.push(f);
-    }
-  }
+  const folders = [primary, ...host.additionalRoots];
   const cur = host.namedProjects.find((p) => p.id === host.activeProjectId);
   if (!cur) return;
   if (
@@ -348,11 +339,7 @@ export function syncCurrentProjectFolders(
   ) {
     return;
   }
-  const next = host.namedProjects.map((p) =>
-    p.id === host.activeProjectId ? { ...p, primary_root: primary, folders, updated_at: Date.now() } : p,
-  );
-  host.namedProjects = next;
-  saveNamedProjectsLocal(next, host.activeProjectId);
+  await upsertNamedProject(host, { id: cur.id, name: cur.name, primary_root: primary, folders, pinned: cur.pinned });
 }
 
 export async function performMutateFs(

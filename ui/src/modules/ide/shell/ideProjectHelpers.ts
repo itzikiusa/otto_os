@@ -10,7 +10,7 @@ import {
   type NamedIdeProject,
 } from '../../../lib/ideProjectsModel';
 import { ideWorkspacePort } from '../../../lib/ideWorkspacePort.svelte';
-import { lsGet, lsSet } from '../../../lib/storage';
+import { lsGet, lsRemove, lsSet } from '../../../lib/storage';
 import { toasts } from '../../../lib/toast.svelte';
 import { loadErrorText } from '../../../lib/loadError';
 import { toastError } from '../../../lib/toastError';
@@ -596,6 +596,22 @@ export function emitIdeProjectsChanged(projects?: IdeNamedProject[], activeProje
 
 export function saveLastIdeRoot(root: string): void {
   if (root) ideWorkspacePort.setLastRoot(root);
+}
+
+const LAST_SSH_TARGET_KEY = 'otto.ide.lastSshTarget';
+/** The SSH host + folder the IDE was on, so a reload reopens it (null once a local project opens). */
+export interface SavedSshTarget { connection_id: string; root: string; connection_name: string | null }
+export function saveLastSshTarget(t: SavedSshTarget | null): void {
+  if (t) lsSet(LAST_SSH_TARGET_KEY, JSON.stringify(t));
+  else lsRemove(LAST_SSH_TARGET_KEY);
+}
+export function loadLastSshTarget(): SavedSshTarget | null {
+  try {
+    const v = JSON.parse(lsGet(LAST_SSH_TARGET_KEY) || 'null') as SavedSshTarget | null;
+    return v && typeof v.connection_id === 'string' && typeof v.root === 'string' ? v : null;
+  } catch {
+    return null;
+  }
 }
 export function loadActiveProjectIdLocal(): string | null { return lsGet(ACTIVE_PROJECT_KEY) || null; }
 export function saveActiveProjectIdLocal(id: string | null, projects?: IdeNamedProject[], root?: string): void {

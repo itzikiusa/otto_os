@@ -50,8 +50,11 @@ export async function openScratches(): Promise<boolean> {
   try {
     const root = await loadScratchesRoot();
     // Remember the project we leave, for the Project tab.
-    if (ide.target.kind === 'local' && ide.target.root && !onScratches()) {
-      const last: RealProject = { root: ide.target.root, workspaceId: ide.target.workspace_id ?? null, projectId: ide.activeProjectId };
+    const t = ide.target;
+    if (t.root && !onScratches()) {
+      const last: RealProject = t.kind === 'ssh' && t.connection_id
+        ? { root: t.root, workspaceId: null, projectId: null, ssh: { connectionId: t.connection_id, connectionName: t.connection_name ?? null } }
+        : { root: t.root, workspaceId: t.workspace_id ?? null, projectId: ide.activeProjectId };
       lsSet(LAST_REAL_KEY, JSON.stringify(last));
     }
     return await ide.setLocalTarget(root, null);
@@ -70,6 +73,7 @@ export function returnProject(): RealProject | null {
 export async function openReturnProject(): Promise<boolean> {
   const p = returnProject();
   if (!p) return false;
+  if (p.ssh) return ide.setSshTarget(p.ssh.connectionId, p.root, p.ssh.connectionName);
   if (p.projectId) {
     await ide.activateProject(p.projectId);
     return ide.activeProjectId === p.projectId;

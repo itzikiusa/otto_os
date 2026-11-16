@@ -15,7 +15,7 @@ import {
   attachProjectFolder, canonicalizeLocalProjectPath, createTemplatedFile, detachProjectFolder,
   detectBuildToolFromState, formatRelativeToRoots, loadActiveProjectIdLocal, loadNamedProjectsLocal,
   confirmDiscardOnSwitch, mutatePathBreakpoints, normalizeRootPath, performCloseAllTabs, pushNavigationHistory,
-  restoreWorkspaceTabsOrInitial, revealPathInTree, saveActiveProjectIdLocal, saveBuildToolPrefsLocal, saveLastIdeRoot,
+  restoreWorkspaceTabsOrInitial, revealPathInTree, saveActiveProjectIdLocal, saveBuildToolPrefsLocal, saveLastIdeRoot, saveLastSshTarget, loadLastSshTarget,
 } from './shell/ideProjectHelpers';
 import {
   applyFallbackPrefixSuffix, computeFallbackSelection, IdeBufferPerfController, nextTabAccessStamp,
@@ -296,6 +296,8 @@ class IdeStore {
   attachDefaultWorkspace(): void {
     if (this.target.root || this.collabIsGuest) return;
     void loadProjMod().then((m) => m.syncNamedProjectsFromBackend(this));
+    const ssh = loadLastSshTarget();
+    if (ssh) { void this.setSshTarget(ssh.connection_id, ssh.root, ssh.connection_name); return; }
     if (this.activeProjectId) {
       const savedProj = this.namedProjects.find((p) => p.id === this.activeProjectId);
       if (savedProj) { void this.activateProject(savedProj.id); return; }
@@ -318,6 +320,7 @@ class IdeStore {
     const matchedProj = opts.projectId !== undefined ? opts.projectId : (this.namedProjects.find((p) => p.primary_root === clean)?.id ?? null);
     this.activeProjectId = matchedProj;
     saveLastIdeRoot(clean);
+    saveLastSshTarget(null);
     saveActiveProjectIdLocal(matchedProj, this.namedProjects, clean);
     this.resetTargetState({ kind: 'local', workspace_id: workspaceId, root: clean, connection_id: null, connection_name: null }, opts.additionalRoots);
     if (opts.skipAutoOpen) this.hasClosedAllTabs = true;
@@ -333,6 +336,11 @@ class IdeStore {
   async setSshTarget(connectionId: string, root: string, connectionName: string | null = null): Promise<boolean> {
     if (!(await this.confirmDiscardUnsaved())) return false;
     const clean = normalizeRootPath(root) || '~';
+    // A remote host is no named project: keep its tabs out of the project's saved set.
+    if (this.activeProjectId) (await loadProjMod()).snapshotProjectTabs(this.activeProjectId, this.tabs, this.activePath);
+    this.activeProjectId = null;
+    saveActiveProjectIdLocal(null, this.namedProjects);
+    saveLastSshTarget({ connection_id: connectionId, root: clean, connection_name: connectionName });
     this.resetTargetState({ kind: 'ssh', workspace_id: null, root: clean, connection_id: connectionId, connection_name: connectionName });
     await this.loadTree();
     void this.loadEnvironments(); return true;

@@ -170,6 +170,7 @@ const SENSITIVE_EXACT_KEYS = [
   'otto.ide.projects.v1',
   'otto.ide.namedProjects.v1',
   'otto.ide.lastRoot',
+  'otto.ide.lastSshTarget',
   'otto.ide.activeProjectId.v1',
   'otto.ide.openThreadHandoff',
   IDE_CURSOR_POS_KEY,

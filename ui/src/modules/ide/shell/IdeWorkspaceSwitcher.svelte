@@ -42,10 +42,12 @@
 
   const subtitlePath = $derived(ide.hasTarget ? shortenHomePath(ide.target.root) : '');
   const extraRootCount = $derived(Math.max(0, ide.projectRoots.length - 1));
-  const pinnedProjects = $derived(ide.namedProjects.filter((p) => p.pinned !== false));
 
   function openProjectContextMenu(e: MouseEvent, proj: IdeNamedProject): void {
     e.preventDefault();
+    // Every item opens a dialog or switches project: close the popover first, or
+    // its backdrop sits above the dialog and eats the first click.
+    menuOpen = false;
     const items: MenuItem[] = [
       {
         label: 'Rename project…',
@@ -85,18 +87,6 @@
             await ide.activateProject(proj.id);
             ide.openSettings('project.modules');
           })(),
-      },
-      {
-        label: proj.pinned !== false ? 'Unpin from header bar' : 'Pin in header bar',
-        icon: 'pin',
-        action: () =>
-          void ide.saveNamedProject({
-            id: proj.id,
-            name: proj.name,
-            primary_root: proj.primary_root,
-            folders: proj.folders,
-            pinned: proj.pinned === false,
-          }),
       },
       { separator: true },
       {
@@ -148,7 +138,7 @@
         <Badge tone="accent" variant="outline" label={`${ide.projectRoots.length} repos`} />
       {:else if extraRootCount > 0}
         <Badge tone="accent" variant="outline" label={`+${extraRootCount}`} />
-      {:else if subtitlePath && pinnedProjects.length === 0}
+      {:else if subtitlePath}
         <span class="ws-path" dir="ltr">{subtitlePath}</span>
       {/if}
       <Icon name="chevronDown" size={12} />
@@ -183,5 +173,5 @@
   .ws-name { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
   .ws-path { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-inline-size: 90px; }
   @media (max-width: 1024px) { .ws-path { display: none; } .ws-switcher-btn { max-inline-size: 175px; } }
-  @media (max-width: 640px) { .ws-switcher-btn { max-inline-size: min(145px, 34vw); block-size: 26px; padding-inline: 8px; font-size: var(--fs-xs); } }
+  @media (max-width: 640px) { .ws-switcher-btn :global(.badge) { display: none; } .ws-switcher-btn { max-inline-size: min(145px, 34vw); block-size: 26px; padding-inline: 8px; font-size: var(--fs-xs); } }
 </style>

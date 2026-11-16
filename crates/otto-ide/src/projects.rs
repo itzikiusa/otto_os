@@ -182,7 +182,7 @@ impl ProjectStore {
     }
 
     /// Return attached sibling folders configured for any Named Project owned by `user`
-    /// whose `primary_root` or any member entry in `folders` matches `root`, using pure
+    /// whose `primary_root` matches `root`, using pure
     /// in-memory string comparisons (zero `realpath` syscalls on Tokio workers).
     pub fn folders_for_root_for_user(&self, root: &str, user: &User) -> Vec<String> {
         let Some(lookup) = normalize_lookup_fast(root) else {
@@ -223,7 +223,7 @@ impl ProjectStore {
         Vec::new()
     }
 
-    /// Root-level lookup matching `primary_root` and every member entry in `folders`.
+    /// Root-level lookup matching `primary_root` (a member folder alone is a plain workspace).
     pub fn folders_for_root(&self, root: &str) -> Vec<String> {
         let Some(lookup) = normalize_lookup_fast(root) else {
             return Vec::new();

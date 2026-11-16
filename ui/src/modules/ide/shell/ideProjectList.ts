@@ -50,6 +50,8 @@ export interface RealProject {
   root: string;
   workspaceId: string | null;
   projectId: string | null;
+  /** Set when that project was a folder on an SSH host. */
+  ssh?: { connectionId: string; connectionName: string | null };
 }
 
 /** What the Project tab returns to: the last real project if it still exists, else the

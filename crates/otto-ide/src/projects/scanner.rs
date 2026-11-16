@@ -284,16 +284,16 @@ pub(super) fn normalize_lookup_fast(root: &str) -> Option<String> {
     (!norm.is_empty()).then_some(norm)
 }
 
+/// Whether `lookup` is this project's PRIMARY root. A member folder opened on
+/// its own is a plain workspace: matching members too pulled the project's other
+/// folders into it, and Remove there could never stick.
 pub(super) fn stored_project_matches(entry: &StoredProject, lookup: &str) -> bool {
     let lookup_key = crate::types::root_equiv_key(crate::types::IdeTargetKind::Local, lookup);
-    let eq_any = |cand: &str| {
+    let eq = |cand: &str| {
         cand == lookup
             || crate::types::root_equiv_key(crate::types::IdeTargetKind::Local, cand) == lookup_key
     };
-    eq_any(&entry.project.primary_root)
-        || eq_any(&entry.raw_primary_root)
-        || entry.project.folders.iter().any(|f| eq_any(f))
-        || entry.raw_folders.iter().any(|f| eq_any(f))
+    eq(&entry.project.primary_root) || eq(&entry.raw_primary_root)
 }
 
 const MAX_SCAN_REPOS_ENTRIES: usize = 200;
@@ -430,6 +430,29 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_member_folder_is_not_its_project() {
+        let entry = StoredProject {
+            owner_user_id: "u1".into(),
+            raw_primary_root: "/w/other".into(),
+            raw_folders: vec!["/w/other".into(), "/w/lonely".into()],
+            project: IdeNamedProject {
+                id: "p1".into(),
+                name: "X".into(),
+                primary_root: "/w/other".into(),
+                folders: vec!["/w/other".into(), "/w/lonely".into()],
+                pinned: false,
+                updated_at: String::new(),
+            },
+            non_root_project: None,
+        };
+        assert!(stored_project_matches(&entry, "/w/other"));
+        assert!(
+            !stored_project_matches(&entry, "/w/lonely"),
+            "opening `lonely` alone must not attach `other`"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
