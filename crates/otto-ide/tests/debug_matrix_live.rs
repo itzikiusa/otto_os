@@ -83,7 +83,9 @@ impl Fixture {
             build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
         let root = root_path.to_string_lossy().into_owned();
         let second = tmp.path().join("proj2");
-        let second_root = second.is_dir().then(|| second.to_string_lossy().into_owned());
+        let second_root = second
+            .is_dir()
+            .then(|| second.to_string_lossy().into_owned());
         let mut env_vars =
             vec![json!({ "key": "PATH", "value": path_with_extras(), "secret": false })];
         for (k, v) in env {
@@ -118,7 +120,9 @@ impl Fixture {
     }
 
     fn folders(&self) -> Vec<&String> {
-        std::iter::once(&self.root).chain(&self.second_root).collect()
+        std::iter::once(&self.root)
+            .chain(&self.second_root)
+            .collect()
     }
 
     fn target(&self) -> Value {
@@ -1013,5 +1017,149 @@ async fn matrix_ts_debug_main() {
     let f = Fixture::new(&[("app.ts", TS_MAIN)], &[]).await;
     let item = f.current_file("app.ts", "node", "typescript");
     f.debug(&item, "app.ts", &[(7, &["base"]), (8, &["total"])])
+        .await;
+}
+
+// ------------------------------------- nested folders and a second project root
+// Debug must not depend on the file sitting at the project root: each language
+// again with the file several folders deep (and Python / Go in a second root).
+
+const RS_DEEP: &str = r#"pub fn mul(a: i32, b: i32) -> i32 {
+    a * b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multiplies_deep() {
+        let left = 6;
+        let product = mul(left, 7);
+        assert_eq!(product, 42);
+        println!("RS_DEEP_DONE");
+    }
+}
+"#;
+
+async fn rust_deep_fixture() -> Fixture {
+    Fixture::new(
+        &[
+            ("Cargo.toml", CARGO_TOML),
+            ("src/lib.rs", "pub mod a;\n"),
+            ("src/a/mod.rs", "pub mod b;\n"),
+            ("src/a/b.rs", RS_DEEP),
+        ],
+        &[],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn matrix_rust_run_nested_test() {
+    if !ensure_bins_or_skip(&["cargo"]) {
+        return;
+    }
+    let f = rust_deep_fixture().await;
+    let item = f.gutter("src/a/b.rs", "test", "multiplies_deep").await;
+    f.run(&item, "RS_DEEP_DONE").await;
+}
+
+#[tokio::test]
+async fn matrix_rust_debug_nested_test() {
+    if !ensure_bins_or_skip(&["cargo", "lldb"]) {
+        return;
+    }
+    let f = rust_deep_fixture().await;
+    let item = f.gutter("src/a/b.rs", "test", "multiplies_deep").await;
+    f.debug(&item, "src/a/b.rs", &[(12, &["left"]), (13, &["product"])])
+        .await;
+}
+
+const PY_DEEP: &str = r#"def main():
+    base = 40
+    total = base + 2
+    print("PY_DEEP_DONE", total)
+
+
+if __name__ == "__main__":
+    main()
+"#;
+const PY_DEEP_CELLS: &[&str] = &["scripts/sub/tool.py", "../proj2/pkg/deep/tool.py"];
+
+#[tokio::test]
+async fn matrix_python_run_and_debug_nested_and_second_root_scripts() {
+    if !ensure_bins_or_skip(&["python3"]) {
+        return;
+    }
+    let f = Fixture::new(
+        &[(PY_DEEP_CELLS[0], PY_DEEP), (PY_DEEP_CELLS[1], PY_DEEP)],
+        &[],
+    )
+    .await;
+    for rel in PY_DEEP_CELLS {
+        let item = f.gutter(rel, "main", "__main__").await;
+        f.run(&item, "PY_DEEP_DONE 42").await;
+        f.debug(&item, rel, &[(3, &["base"]), (4, &["total"])])
+            .await;
+    }
+}
+
+const JAVA_DEEP_TEST_REL: &str = "core/src/test/java/com/acme/core/deep/inner/DeepTest.java";
+const JAVA_DEEP_TEST: &str = r#"package com.acme.core.deep.inner;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import com.acme.core.Calc;
+import org.junit.jupiter.api.Test;
+
+class DeepTest {
+    @Test
+    void addsDeep() {
+        int left = 30;
+        int sum = Calc.add(left, 12);
+        assertEquals(42, sum);
+        System.out.println("JUNIT5_DEEP_DONE");
+    }
+}
+"#;
+
+#[tokio::test]
+async fn matrix_java_run_and_debug_test_in_a_deeper_package() {
+    if !java_ready() {
+        return;
+    }
+    let f = Fixture::new(
+        &[
+            ("pom.xml", POM_PARENT),
+            ("core/pom.xml", POM_CORE),
+            ("legacy/pom.xml", POM_LEGACY),
+            (CALC_REL, JAVA_CALC),
+            (JAVA_DEEP_TEST_REL, JAVA_DEEP_TEST),
+            ("legacy/src/main/java/com/acme/legacy/Old.java", JAVA_OLD),
+        ],
+        &[],
+    )
+    .await;
+    let item = f.gutter(JAVA_DEEP_TEST_REL, "test", "addsDeep").await;
+    f.run(&item, "JUNIT5_DEEP_DONE").await;
+    f.debug(
+        &item,
+        JAVA_DEEP_TEST_REL,
+        &[(12, &["left"]), (13, &["sum"])],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn matrix_ts_run_and_debug_nested_main() {
+    if !ensure_bins_or_skip(&["node"]) {
+        return;
+    }
+    let rel = "src/deep/inner/app.ts";
+    let f = Fixture::new(&[(rel, TS_MAIN)], &[]).await;
+    let item = f.current_file(rel, "node", "typescript");
+    f.run(&item, "TS_MAIN_DONE 42").await;
+    f.debug(&item, rel, &[(7, &["base"]), (8, &["total"])])
         .await;
 }
