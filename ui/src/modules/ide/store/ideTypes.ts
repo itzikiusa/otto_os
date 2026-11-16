@@ -105,6 +105,8 @@ export interface IdeOpenTab {
    *  styles (CRLF + LF, lone CR): saving then keeps each untouched line's ending. */
   diskEols?: string[];
   sha256?: string; language: string; readOnly: boolean; truncated: boolean;
+  /** The read found NUL bytes or invalid UTF-8: shown read-only, maybe blank or garbled. */
+  binary?: boolean;
   loading: boolean; error: string | null; preview: boolean;
   pinned?: boolean; external?: boolean;
   lastAccessedAt?: number;

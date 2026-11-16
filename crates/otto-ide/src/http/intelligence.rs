@@ -499,6 +499,8 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
             }
             None => Vec::new(),
         };
+        // The editor's idle "Change" snapshot often lands right after the save already logged
+        // the same bytes: skip it then. A labelled snapshot of the same bytes is still kept.
         store
             .record_bytes_with_retention_sync(
                 matched_root,
@@ -506,7 +508,7 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
                 &bytes,
                 "manual",
                 label,
-                false,
+                label == "Change",
                 retention_days,
             )?
             .ok_or_else(|| {

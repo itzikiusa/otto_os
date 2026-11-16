@@ -135,7 +135,8 @@ active:
 
 - **Multi-cursor:** `Option + Click` adds/removes cursors; `Option + Drag`
   draws rectangular column selections; `⌥⇧I` splits a multi-line selection into
-  one cursor per line; `⌥⇧↑` / `⌥⇧↓` (`⌘⌥↑` / `⌘⌥↓`) adds cursors above/below;
+  one cursor per line; `⌘⌥↑` / `⌘⌥↓` adds cursors above/below (`⌥⇧↑` / `⌥⇧↓`
+  move the line);
   `⌃G` selects the next occurrence and `⌃⌘G` selects all occurrences.
 - **Add Prefix / Suffix to Lines:** Wraps every selected line (or every cursor
   line) with a chosen prefix and/or suffix in a single undoable CodeMirror

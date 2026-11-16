@@ -408,7 +408,8 @@
   .st-modal.narrow:not(.list) .st-left, .st-modal.narrow.list .st-right { display: none; }
   .st-nav-arrows.hidden-narrow { display: none; }
   .st-list-btn { min-block-size: 36px; flex-shrink: 0; }
-  .st-left { flex-shrink: 0; display: flex; flex-direction: column; background: var(--surface-2); min-inline-size: 0; min-block-size: 0; }
+  /* The -16px modal margin tucks the column's top under the header: pad it back so the search box isn't clipped. */
+  .st-left { flex-shrink: 0; display: flex; flex-direction: column; background: var(--surface-2); min-inline-size: 0; min-block-size: 0; padding-block-start: 16px; }
   .st-search-box {
     display: flex; align-items: center; gap: 6px; margin: 10px 10px 6px; padding: 6px 8px;
     border: 1px solid var(--control-border); border-radius: var(--radius-s); background: var(--surface); color: var(--text-dim);

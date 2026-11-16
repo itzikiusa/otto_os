@@ -269,13 +269,18 @@ describe('Round 4 — IDE CodeVision inline refactor hints & editor refactorings
       newName: 'aaHeaders',
     });
 
-    const implHint = hints.find((h) => h.kind === 'implement-interface');
-    assert.deepEqual(implHint, {
+    assert.equal(hints.find((h) => h.kind === 'implement-interface'), undefined, 'a plain data struct gets no "Implement interface" hint');
+
+    const withIface = `type Responder interface {\n\tRespond() error\n}\n\n${edited}`;
+    assert.deepEqual(detectInlineRefactorHints(withIface, null, 'go').find((h) => h.kind === 'implement-interface'), {
       kind: 'implement-interface',
-      line: 3,
+      line: 7,
       column: 1,
       symbol: 'GenericHttpResponse',
     });
+    const ts = 'interface Shape { area(): number }\nclass Square {}\n';
+    assert.equal(detectInlineRefactorHints(ts, null, 'typescript').filter((h) => h.kind === 'implement-interface').length, 1);
+    assert.equal(detectInlineRefactorHints('class Square {}\n', null, 'typescript').length, 0);
   });
 
   it('transforms string cases and computes Introduce Variable / Inline Variable edits', () => {

@@ -414,7 +414,16 @@ export async function fetchIdeWorkspaceTree(
         ? rawEntries.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) }))
         : rawEntries;
       host.treeRootEntries = entries;
-      host.childrenByDir = { ...host.childrenByDir, [normalizeRootPath(host.target.root)]: entries };
+      // A root load is a refresh: expanded folders refetch, and collapsed ones drop their
+      // cached listing so the next expand reads the disk instead of a stale snapshot.
+      const rootKey = normalizeRootPath(host.target.root);
+      const kept: typeof host.childrenByDir = { [rootKey]: entries };
+      for (const [dir, children] of Object.entries(host.childrenByDir)) {
+        if (dir === rootKey || !host.expandedDirs[dir]) continue;
+        kept[dir] = children;
+        if (!host.additionalRoots.includes(dir)) void fetchIdeWorkspaceTree(host, dir, onProbeBuildTool);
+      }
+      host.childrenByDir = kept;
       if (host.runConfigs.length === 0) {
         const fast = detectFastRunConfigs(host.target.root, entries);
         host.detectedConfigs = fast;
