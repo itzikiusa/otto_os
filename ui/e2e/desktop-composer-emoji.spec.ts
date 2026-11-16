@@ -90,3 +90,11 @@ test('with "Show emoji in agent replies" off, shortcodes stay as written', async
   await page.evaluate(() => (window as unknown as { __mockRuntime: Hooks }).__mockRuntime.say('rt_emoji', ['Shipped :rocket:']));
   await expect(page.getByTestId('runtime-thread-rt_emoji').getByText('Shipped :rocket:')).toBeVisible();
 });
+
+test('Appearance shows the emoji setting; its lazy sections still load', async ({ page }) => {
+  await page.goto('/#/settings/appearance');
+  const toggle = page.getByTestId('agent-emoji-toggle');
+  await expect(toggle).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('db-auto-vertical')).toBeVisible();
+  await expect(page.getByTestId('settings-sidebar-list')).toBeVisible();
+});

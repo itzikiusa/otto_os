@@ -224,7 +224,6 @@
     "src/modules/product/TestCasesTab.svelte": 1527,
     "src/modules/product/design/DesignArena.svelte": 1696,
     "src/modules/scheduled-tasks/ScheduledTasksPage.svelte": 1466,
-    "src/modules/settings/Appearance.svelte": 845,
     "src/modules/settings/Channels.svelte": 1063,
     "src/modules/settings/Providers.svelte": 866,
     "src/modules/settings/Users.svelte": 952,

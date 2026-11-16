@@ -5,31 +5,22 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import SettingToggle from './SettingToggle.svelte';
   import AppearanceLightMode from './AppearanceLightMode.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   // Theme (native / pro-dark / warm), scheme (auto / light / dark), accent.
   import { ui, TERM_FONT_OPTIONS, type SchemePref, type ThemeName, type Direction } from '../../lib/stores/ui.svelte';
   import { agentEmoji } from '../../lib/stores/agentEmoji.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { radioKey } from '../../lib/radioKey';
-  import { AUTO_VERTICAL_ENGINES } from '../../lib/db-view-prefs';
-  import { dbPrefs } from '../../lib/stores/dbPrefs.svelte';
-  import { clipHistory } from '../../lib/stores/clipHistory.svelte';
-  import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { AMBIENT_MODES, ambientImage, type AmbientMode } from '../../lib/ambient';
   import { processWallpaper } from '../../lib/wallpaper';
   import { barStore } from '../../lib/stores/bar.svelte';
   import type { BarPref } from '../../lib/floatingBar';
-  import { plugins } from '../../lib/stores/plugins.svelte';
-  import {
-    FAVORITES_ID,
-    availableModules,
-    moveAmong,
-    moveWithinGroup,
-    resolveGroupOrder,
-    resolveOrder,
-    sidebarSections,
-    type SidebarPluginEntry,
-  } from '../../lib/sidebar';
+
+  // Below the fold: their own chunks, so the default Settings page paints light.
+  const DbSection = lazyComponent(() => import('./AppearanceDatabase.svelte'));
+  const SidebarSection = lazyComponent(() => import('./AppearanceSidebar.svelte'));
 
   // The "Type or speak… ⌘K" bar over the content column (FloatingBar.svelte).
   const barPrefs: { id: BarPref; label: string; hint: string }[] = [
@@ -38,44 +29,6 @@
     { id: 'docked', label: 'Docked', hint: 'A small chip in the status bar that never covers content; ⌘K opens the full bar.' },
     { id: 'hidden', label: 'Hidden', hint: 'No bar; ⌘K opens the command palette sheet instead.' },
   ];
-
-  // The full resolved sidebar list (same logic as the Navigator/Rail): built-ins
-  // the user may see + permitted plugins, in the saved order, including hidden
-  // ones (so they can be toggled back on here).
-  const sidebarPlugins = $derived(
-    plugins.list
-      .filter((p) => auth.canPlugin(p.slug, 'view'))
-      .map((p): SidebarPluginEntry => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name })),
-  );
-  const sidebarResolved = $derived(
-    resolveOrder(availableModules((f) => auth.can(f, 'view'), sidebarPlugins), ui.sidebarOrder),
-  );
-  // Section by section exactly as the sidebar shows them: Favorites first
-  // (while it has any), then the sections in the user's order.
-  const sidebarSecs = $derived(sidebarSections(sidebarResolved, ui.sidebarFavorites, ui.sidebarGroupOrder));
-  const sidebarFavIds = $derived(
-    sidebarSecs[0]?.group.id === FAVORITES_ID ? sidebarSecs[0].modules.map((m) => m.id) : [],
-  );
-  const sidebarMovableSecs = $derived(
-    sidebarSecs.filter((s) => s.group.id !== FAVORITES_ID).map((s) => s.group.id as string),
-  );
-  /** Up/down within the module's sidebar section (same rule as the Navigator);
-   *  a favorite moves among the favorites. */
-  function moveSidebarItem(id: string, delta: -1 | 1): void {
-    if (sidebarFavIds.includes(id)) {
-      const favs = moveAmong(ui.sidebarFavorites, id, delta, (x) => sidebarFavIds.includes(x));
-      if (favs) ui.setSidebarFavorites(favs);
-      return;
-    }
-    const next = moveWithinGroup(sidebarResolved, id, delta);
-    if (next) ui.setSidebarOrder(next);
-  }
-  /** Up/down for a whole section (Favorites always stays first). */
-  function moveSidebarSection(id: string, delta: -1 | 1): void {
-    const all = resolveGroupOrder(ui.sidebarGroupOrder).map((g) => g.id as string);
-    const next = moveAmong(all, id, delta, (g) => sidebarMovableSecs.includes(g));
-    if (next) ui.setSidebarGroupOrder(next);
-  }
 
   const themes: { id: ThemeName; name: string; desc: string }[] = [
     { id: 'native', name: 'Native', desc: 'macOS vibrancy, blue accent' },
@@ -355,166 +308,8 @@
     </label>
   </div>
 
-  <div class="section-title">Database Explorer</div>
-  <p class="hint-line">
-    Open wide results in the Vertical view (one record per block) instead of the grid. Set per
-    engine: on for MongoDB, whose documents are nested; off for the SQL engines, where a wide
-    table is what the grid is for. MongoDB results open in Vertical anyway until you pick Grid
-    or JSON on one of the connection’s tabs — this threshold then still sends wide ones back to
-    Vertical.
-  </p>
-  <div class="av-table" role="group" aria-label="Auto-Vertical by engine" data-testid="db-auto-vertical">
-    {#each AUTO_VERTICAL_ENGINES as eng (eng.id)}
-      {@const n = ui.dbAutoVertical[eng.id]}
-      <div class="av-row">
-        <label class="switch-row av-toggle">
-          <input
-            type="checkbox"
-            checked={n > 0}
-            onchange={(e) => ui.setDbAutoVertical(eng.id, e.currentTarget.checked ? 10 : 0)}
-          />
-          <span>{eng.label}</span>
-        </label>
-        <label class="av-num" class:off={n === 0}>
-          <span>more than</span>
-          <input
-            type="number"
-            class="input num-input mono"
-            min="1"
-            max="500"
-            step="1"
-            disabled={n === 0}
-            value={n === 0 ? '' : n}
-            placeholder="—"
-            oninput={(e) => {
-              // A cleared box is mid-edit, not "off" — keep the setting until a number lands.
-              const v = e.currentTarget.value;
-              if (v !== '' && Number(v) > 0) ui.setDbAutoVertical(eng.id, Number(v));
-            }}
-            onchange={(e) => {
-              // Leaving the box: show what was actually saved (a cleared box,
-              // 0, a decimal or a value past 500 would otherwise keep showing
-              // a number that isn’t in effect).
-              e.currentTarget.value = String(ui.dbAutoVertical[eng.id] || '');
-            }}
-            aria-label="{eng.label}: column threshold"
-          />
-          <span>columns</span>
-        </label>
-      </div>
-    {/each}
-  </div>
-  <p class="hint-line">
-    A view you pick on a tab (the Grid / Vertical / JSON switch or ⇧⌘V) always wins. Saved per
-    device.
-  </p>
-  <SettingToggle
-    label="Connect restored tabs on click only"
-    hint="After a reload only the active connection connects; the other tabs wait, marked “Not connected yet”, until you open one. Off: they connect in the background, three at a time."
-    checked={dbPrefs.warmRestored === 'on-click'}
-    onchange={(on) => dbPrefs.setWarmRestored(on ? 'on-click' : 'background')}
-    testid="db-warm-on-click"
-  />
-  <SettingToggle
-    label="Keep open connections alive"
-    hint="Pings each open, connected database every 4 minutes so its pool and SSH tunnel don’t close from inactivity, and a dropped one shows red before your next query."
-    checked={dbPrefs.keepAlive}
-    onchange={(on) => dbPrefs.setKeepAlive(on)}
-    testid="db-keep-alive"
-  />
-  <SettingToggle
-    label="Clipboard history"
-    hint="Remember the last 50 copies made in Otto (result cells, the query editor) so ⌥⌘V in the query editor can paste them again. Only copies made inside Otto, never from masked tabs. Off clears it."
-    checked={clipHistory.enabled}
-    onchange={(on) => clipHistory.setEnabled(on)}
-    testid="clip-history-enabled"
-  />
-
-  <div class="section-title">Sidebar</div>
-  <p class="hint-line">
-    Show, hide and reorder the items and sections of the left sidebar — keep only what you use. Star
-    an item to pin it to Favorites at the top. Hidden items can be brought back here anytime. You
-    can also drag directly in the sidebar (“Customize sidebar” at the bottom of the expanded
-    sidebar). Saved per device.
-  </p>
-  <div class="sidebar-list" data-testid="settings-sidebar-list">
-    <!-- Section by section, as the sidebar shows them; item moves stay
-         in-section (a favorite moves among the favorites). -->
-    {#each sidebarSecs as sec (sec.group.id)}
-      {@const isFavSec = sec.group.id === FAVORITES_ID}
-      {@const si = sidebarMovableSecs.indexOf(sec.group.id)}
-      <div class="sidebar-group-label">
-        {#if isFavSec}<span class="sb-group-star"><Icon name="star" size={12} /></span>{/if}
-        <span class="grow">{sec.group.label}</span>
-        {#if !isFavSec}
-          <button
-            class="sb-btn"
-            onclick={() => moveSidebarSection(sec.group.id, -1)}
-            disabled={si <= 0}
-            title="Move section up"
-            aria-label={`Move ${sec.group.label} section up`}
-          >
-            <Icon name="arrowUp" size={12} />
-          </button>
-          <button
-            class="sb-btn"
-            onclick={() => moveSidebarSection(sec.group.id, 1)}
-            disabled={si >= sidebarMovableSecs.length - 1}
-            title="Move section down"
-            aria-label={`Move ${sec.group.label} section down`}
-          >
-            <Icon name="arrowDown" size={12} />
-          </button>
-        {/if}
-      </div>
-      {#each sec.modules as m, i (m.id)}
-        {@const fav = sidebarFavIds.includes(m.id)}
-        <div class="sidebar-row" class:row-hidden={ui.sidebarHidden.includes(m.id)}>
-          <Icon name={m.icon} size={14} />
-          <span class="grow">{m.label}</span>
-          <button
-            class="sb-btn sb-star"
-            class:on={fav}
-            onclick={() => ui.toggleSidebarFavorite(m.id)}
-            title={fav ? 'Remove from Favorites' : 'Add to Favorites'}
-            aria-label={`Favorite ${m.label}`}
-            aria-pressed={fav}
-          >
-            <Icon name="star" size={13} />
-          </button>
-          <button
-            class="sb-btn"
-            onclick={() => moveSidebarItem(m.id, -1)}
-            disabled={i === 0}
-            title="Move up"
-            aria-label={`Move ${m.label} up`}
-          >
-            <Icon name="arrowUp" size={12} />
-          </button>
-          <button
-            class="sb-btn"
-            onclick={() => moveSidebarItem(m.id, 1)}
-            disabled={i === sec.modules.length - 1}
-            title="Move down"
-            aria-label={`Move ${m.label} down`}
-          >
-            <Icon name="arrowDown" size={12} />
-          </button>
-          <label class="sb-toggle" title={ui.sidebarHidden.includes(m.id) ? 'Hidden' : 'Shown'}>
-            <input
-              type="checkbox"
-              checked={!ui.sidebarHidden.includes(m.id)}
-              onchange={() => ui.toggleSidebarHidden(m.id)}
-              aria-label={`Show ${m.label}`}
-            />
-          </label>
-        </div>
-      {/each}
-    {/each}
-  </div>
-  <div class="row">
-    <button class="btn small" onclick={() => ui.resetSidebar()}>Reset to default</button>
-  </div>
+  <LazyMount lazy={DbSection} what="the Database Explorer settings" variant="compact" />
+  <LazyMount lazy={SidebarSection} what="the sidebar settings" variant="compact" />
   </PageBody>
 </div>
 
@@ -688,37 +483,6 @@
     accent-color: var(--accent);
     cursor: pointer;
   }
-  .num-input {
-    width: 64px;
-    text-align: end;
-  }
-  /* Auto-Vertical per engine: toggle · "more than N columns", one row each. */
-  /* Two columns (engine · threshold) so every "more than N columns" sits in
-     one aligned column right beside its engine, instead of being flung to
-     the far edge of the box by space-between. */
-  .av-table {
-    display: grid;
-    grid-template-columns: max-content max-content;
-    column-gap: 20px;
-    row-gap: 4px;
-    margin-top: 8px;
-  }
-  .av-row {
-    display: contents;
-  }
-  .av-toggle {
-    min-height: 30px;
-  }
-  .av-num {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
-  .av-num.off {
-    opacity: 0.55;
-  }
   .accent-input {
     width: 36px;
     height: 27px;
@@ -727,86 +491,6 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
     cursor: pointer;
-  }
-  .sidebar-list {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    max-width: min(420px, 92vw);
-    margin-top: 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    padding: 6px;
-    background: var(--surface);
-  }
-  .sidebar-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    height: 32px;
-    padding-block: 0; padding-inline: 8px 4px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-m);
-    color: var(--text);
-  }
-  .sidebar-row:hover {
-    background: var(--hover);
-  }
-  .sidebar-group-label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 24px;
-    padding-block: 8px 2px; padding-inline: 8px 4px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--text-dim);
-  }
-  .sidebar-group-label .grow {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /* Section moves sit in the same column as the rows' up/down buttons. */
-  .sidebar-group-label .sb-btn {
-    width: 24px;
-    height: 22px;
-  }
-  .sidebar-group-label .sb-btn:last-child {
-    /* align with the rows' down arrow: skip the Show checkbox column
-       (row gap 8px + the 19px checkbox label) */
-    margin-inline-end: 28px;
-  }
-  .sb-group-star {
-    display: grid;
-    place-items: center;
-  }
-  /* Favorites toggle: an outline star, filled in the accent when on. */
-  .sb-star.on {
-    color: var(--accent-text);
-  }
-  .sb-star.on :global(svg path),
-  .sb-group-star :global(svg path) {
-    fill: currentColor;
-  }
-  .sidebar-group-label:first-child {
-    padding-top: 2px;
-  }
-  .sidebar-row .grow {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /* A hidden module is dimmed but still listed so it can be re-shown. */
-  .sidebar-row.row-hidden {
-    color: var(--text-dim);
-    opacity: 0.7;
   }
   .sb-btn {
     display: grid;
@@ -826,20 +510,5 @@
   .sb-btn:disabled {
     opacity: var(--disabled-opacity);
     cursor: default;
-  }
-  .sb-toggle {
-    display: grid;
-    place-items: center;
-    cursor: pointer;
-    padding-inline-start: 4px;
-  }
-  .sb-toggle input {
-    /* No UA margins (they differ between WebKit and Chromium): the section
-       arrows' column offset above depends on this column's exact width. */
-    margin: 0;
-    width: 15px;
-    height: 15px;
-    accent-color: var(--accent);
-    cursor: pointer;
   }
 </style>
