@@ -203,15 +203,11 @@ export function showTreeNodeContextMenu(
       { separator: true },
     );
   }
-  items.push(
-    { label: 'New file…', icon: 'plus', action: () => void promptCreateTreeEntry(baseDir, 'create_file') },
-    {
-      label: 'New Go file…',
-      icon: 'file',
-      action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.go'),
-    },
-    { label: 'New folder…', icon: 'folder', action: () => void promptCreateTreeEntry(baseDir, 'mkdir') },
-  );
+  // "New Go file…" only where Go is in play: a go.mod / go.work or .go file among the loaded folders.
+  const isGo = Object.values(ide.childrenByDir).some((es) => es.some((e) => e.name === 'go.mod' || e.name === 'go.work' || e.name.endsWith('.go')));
+  items.push({ label: 'New file…', icon: 'plus', action: () => void promptCreateTreeEntry(baseDir, 'create_file') });
+  if (isGo) items.push({ label: 'New Go file…', icon: 'file', action: () => void promptCreateTreeEntry(baseDir, 'create_file', '.go') });
+  items.push({ label: 'New folder…', icon: 'folder', action: () => void promptCreateTreeEntry(baseDir, 'mkdir') });
   if (ide.target.kind === 'local') {
     items.push(
       { label: 'Add folder to project…', icon: 'worktree', action: cb.onOpenFolderPicker },

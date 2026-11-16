@@ -18,14 +18,12 @@
   import { ideLayout } from '../shell/ideLayout.svelte';
   import { ideCollabNotices } from '../store/ideCollabNotices.svelte';
   import { ideEditorChrome } from './ideEditorChrome.svelte';
-  import { pushIdeNavLocation, revealInIdeProjectTree, toggleFormatOnSave } from './ideEditorStoreBridge.svelte';
-  import type { IdeOutlineNode } from './ideLangAnalyzer';
+  import { revealInIdeProjectTree, toggleFormatOnSave } from './ideEditorStoreBridge.svelte';
   import SendToButton from '../filetools/send/SendToButton.svelte';
 
   interface Props {
     activeTab: IdeOpenTab;
     pathSegments: string[];
-    enclosingSymbol: IdeSymbolNode | null;
     effectiveSymbols: IdeSymbolNode[];
     activeJsonPath: string | null;
     sdkLabel: string | null;
@@ -37,7 +35,6 @@
     warnCount: number;
     onapplyjson: (nextText: string) => void;
     onjumpsymbol: (delta: -1 | 1) => void;
-    ongotoline: (line: number, col: number) => void;
     onopenstructure: () => void;
     ontoggleblame: () => void;
     onopenquickfix: (e: MouseEvent) => void;
@@ -46,9 +43,9 @@
   }
 
   let {
-    activeTab, pathSegments, enclosingSymbol, effectiveSymbols, activeJsonPath, sdkLabel,
+    activeTab, pathSegments, effectiveSymbols, activeJsonPath, sdkLabel,
     activeDocKind, effectiveViewMode, hasNonEmptySelection, blameActive, errorCount, warnCount,
-    onapplyjson, onjumpsymbol, ongotoline, onopenstructure, ontoggleblame,
+    onapplyjson, onjumpsymbol, onopenstructure, ontoggleblame,
     onopenquickfix, oncyclediag, onfocusagent,
   }: Props = $props();
 
@@ -133,21 +130,6 @@
     ctxMenu.showAt(anchor, items, { align: 'end' });
   }
 
-  function openSymbolBreadcrumbMenu(e: MouseEvent): void {
-    const anchor = e.currentTarget as HTMLElement | null;
-    if (!effectiveSymbols.length) { onopenstructure(); return; }
-    const items: MenuItem[] = effectiveSymbols.slice(0, 50).map((s) => ({
-      label: s.name,
-      icon: s.line === enclosingSymbol?.line ? 'check' : 'function',
-      hint: `L${s.line}`,
-      action: () => {
-        pushIdeNavLocation(activeTab.path, ide.cursorInfo.line, ide.cursorInfo.col);
-        ongotoline(s.line, (s as IdeOutlineNode).column || 1);
-      },
-    }));
-    items.push({ separator: true }, { label: 'Search file structure…', icon: 'search', hint: coarsePointer ? undefined : '⌘F12', action: onopenstructure });
-    ctxMenu.showAt(anchor, items, { align: 'start' });
-  }
 
   async function openSchemePickerMenu(e: MouseEvent): Promise<void> {
     const anchor = e.currentTarget as HTMLElement | null;
@@ -197,12 +179,6 @@
       {#if idx > 0}<span class="crumb-sep" aria-hidden="true"><Icon name="chevronRight" size={12} noflip /></span>{/if}
       <button type="button" class="crumb-btn" class:last={idx === pathSegments.length - 1} onclick={() => void revealInIdeProjectTree(activeTab.path)} title="Reveal in project tree">{seg}</button>
     {/each}
-    {#if enclosingSymbol}
-      <span class="crumb-sep" aria-hidden="true"><Icon name="chevronRight" size={12} noflip /></span>
-      <button type="button" class="crumb-sym-btn" onclick={openSymbolBreadcrumbMenu} title={`Jump to symbol in file${kh('⌘F12')}`}>
-        <Icon name="function" size={12} /><span>{enclosingSymbol.name}</span>
-      </button>
-    {/if}
     {#if activeJsonPath && activeJsonPath !== '$'}
       <span class="crumb-sep" aria-hidden="true"><Icon name="chevronRight" size={12} noflip /></span>
       <button type="button" class="crumb-sym-btn mono" onclick={() => void copyWithToast(activeJsonPath, 'JSONPath')} title="Click to copy JSONPath" data-testid="ide-jsonpath-crumb">{activeJsonPath}</button>

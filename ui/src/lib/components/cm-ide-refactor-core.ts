@@ -32,6 +32,8 @@ interface ParsedDeclLine {
 const KW_DECL_RE = /^(\s*)((?:export\s+)?(?:default\s+)?(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:func(?:\s*\([^)]*\))?|fn|function|def|type|struct|class|interface|enum|trait|const|var|let)\s+)([A-Za-z_]\w*)(\b.*)$/;
 export const GO_FIELD_RE = /^(\s+)([A-Za-z_]\w*)(\s+)((?:\*|\[\]|map\[|chan\b|func\(|interface\{|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)(?:\s+`[^`]*`)?\s*(?:\/\/.*)?)$/;
 const TYPED_MEMBER_RE = /^(\s*)((?:(?:public|private|protected|internal|static|final|readonly|abstract|override)\s+)+(?:[A-Za-z_][\w<>,.?[\]]*\s+)?)([A-Za-z_]\w*)(\s*[=(;:].*)$/;
+// "Implement interface" only means something when the file declares one to implement.
+const DECLARES_INTERFACE_RE = /^\s*(?:export\s+)?(?:type\s+[A-Za-z_]\w*\s+interface\b|(?:pub(?:\([^)]*\))?\s+)?(?:(?:public|abstract|sealed|fun)\s+)*(?:interface|trait)\s+[A-Za-z_])/m;
 const IMPL_STRUCT_RE = /^(\s*)(?:type\s+([A-Za-z_]\w*)\s+struct\b|(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Za-z_]\w*)\b|(?:export\s+)?(?:(?:public|abstract|final)\s+)*class\s+([A-Za-z_]\w*)\b)/;
 
 function parseDeclLine(lineText: string): ParsedDeclLine | null {
@@ -89,7 +91,8 @@ export function detectInlineRefactorHints(
   const hints: IdeInlineRefactorHint[] = [];
   let implCount = 0;
   const langLower = (language ?? '').toLowerCase();
-  const supportsImplHint = !langLower || ['go', 'rust', 'typescript', 'javascript', 'java', 'kotlin', 'python'].includes(langLower);
+  const supportsImplHint = (!langLower || ['go', 'rust', 'typescript', 'java', 'kotlin'].includes(langLower))
+    && DECLARES_INTERFACE_RE.test(docText);
 
   for (let i = 0; i < docLines.length; i++) {
     const lineText = docLines[i];

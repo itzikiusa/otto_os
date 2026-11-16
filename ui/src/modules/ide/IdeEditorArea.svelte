@@ -333,18 +333,6 @@
     if (ide.activeSymbols.length > 0) return ide.activeSymbols;
     return langAnalyzerMod ? langAnalyzerMod.extractInstantSymbols(t.path, t.language, t.content) : [];
   });
-  const enclosingSymbol = $derived.by((): IdeSymbolNode | null => {
-    const ln = ide.cursorInfo.line;
-    let best: IdeSymbolNode | null = null;
-    const walk = (nodes: IdeSymbolNode[]): void => {
-      for (let i = 0; i < nodes.length; i++) {
-        const s = nodes[i];
-        if (ln >= s.line && ln <= Math.max(s.line, s.end_line)) { best = s; if (s.children?.length) walk(s.children); }
-      }
-    };
-    walk(effectiveSymbols);
-    return best;
-  });
   const activeJsonPath = $derived(
     activeDocKind === 'json' && ide.activeTab && langAnalyzerMod
       ? langAnalyzerMod.computeJsonPathAt(ide.activeTab.content, ide.cursorInfo.line, ide.cursorInfo.col)
@@ -474,7 +462,6 @@
       <IdeEditorSubbarLazy.component
         {activeTab}
         {pathSegments}
-        {enclosingSymbol}
         {effectiveSymbols}
         {activeJsonPath}
         sdkLabel={activeFileMeta.sdkLabel}
@@ -486,7 +473,6 @@
         {warnCount}
         onapplyjson={(txt) => { if (!primaryEditorRef?.applyAgentEdit?.(txt)) ide.updateBuffer(activeTab.path, txt); }}
         onjumpsymbol={jumpAdjacentSymbol}
-        ongotoline={(ln, col) => primaryEditorRef?.goToLine(ln, col)}
         onopenstructure={() => (structureOpen = true)}
         ontoggleblame={() => toggleBlameFor(activeTab.path)}
         onopenquickfix={(e) => openIntentionPopoverAt(activeTab.path, ide.cursorInfo.line, ide.cursorInfo.col, { x: e.clientX - 200, y: e.clientY + 10 })}
@@ -666,7 +652,7 @@
     <div class="ide-empty-editor">
       <EmptyState
         headingLevel={2} icon="ide" title="Select a file to start coding"
-        body="Choose a file in the explorer, press ⇧⇧ to search everywhere, or hold ⌥ and drag in any file for multi-cursor editing"
+        body="Choose a file in the explorer or press ⇧⇧ to search everywhere."
         actionLabel="Search everywhere" actionIcon="search" actionKind="secondary"
         onaction={() => { ide.searchInitialTab = 'all'; ide.searchEverywhereOpen = true; }}
       />

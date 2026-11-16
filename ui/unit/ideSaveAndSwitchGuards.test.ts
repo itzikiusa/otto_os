@@ -7,11 +7,14 @@ class ApiError extends Error {
   constructor(status: number) { super(`HTTP ${status}`); this.status = status; }
 }
 
-function ideModules(api: Record<string, unknown>, confirmAnswers: boolean[] = [], chooseValue: string | null = null) {
+function ideModules(api: Record<string, unknown>, confirmAnswers: boolean[] = [], chooseValue: string | null | (string | null)[] = null) {
   const asked: string[] = [];
   const toastLog: string[] = [];
   const lsWrites: string[] = [];
-  const confirmer = { ask: async (msg: string) => { asked.push(msg); return confirmAnswers.shift() ?? false; }, choose: async () => ({ value: chooseValue }) };
+  const confirmer = { ask: async (msg: string) => { asked.push(msg); return confirmAnswers.shift() ?? false; }, choose: async (msg: string) => {
+    asked.push(msg);
+    return { value: Array.isArray(chooseValue) ? (chooseValue.shift() ?? null) : chooseValue };
+  } };
   const toasts = { success: (t: string) => toastLog.push(`ok:${t}`), error: (t: string) => toastLog.push(`err:${t}`), info: () => {} };
   const prefs = { autoSave: false, localHistoryEnabled: false, localHistoryRetentionDays: 7 };
   const client = { api, ApiError, getToken: () => '', laneFetch: () => { throw new Error('unused'); } };
@@ -133,18 +136,36 @@ test('switching to a named project keeps the current tabs when the discard promp
 });
 
 test('switching target asks before dropping unsaved tabs and stops when declined', async () => {
-  const { buf, helpers, asked } = ideModules({}, [false, true]);
+  const { buf, helpers, asked } = ideModules({}, [], [null, 'discard']);
   const perf = new buf.IdeBufferPerfController();
   const h = host([tab('/repo/a.ts', 'edited', 'saved'), tab('/repo/b.ts', 'same')]);
   let flushed = 0;
-  assert.equal(await helpers.confirmDiscardOnSwitch(h, perf, async () => { flushed += 1; }), false);
+  const noSave = async () => false;
+  assert.equal(await helpers.confirmDiscardOnSwitch(h, perf, async () => { flushed += 1; }, noSave), false);
   assert.equal(asked.length, 1);
   assert.match(asked[0], /“a\.ts” has unsaved changes/);
   assert.equal(flushed, 0, 'autosave off: nothing to flush');
-  assert.equal(await helpers.confirmDiscardOnSwitch(h, perf, async () => {}), true);
+  assert.equal(await helpers.confirmDiscardOnSwitch(h, perf, async () => {}, noSave), true);
   const clean = host([tab('/repo/b.ts', 'same')]);
-  assert.equal(await helpers.confirmDiscardOnSwitch(clean, perf, async () => {}), true);
+  assert.equal(await helpers.confirmDiscardOnSwitch(clean, perf, async () => {}, noSave), true);
   assert.equal(asked.length, 2, 'clean tabs switch without a prompt');
+});
+
+test('switching target offers Save all: saved tabs switch, a failed save stays', async () => {
+  const { buf, helpers } = ideModules({}, [], ['save', 'save']);
+  const perf = new buf.IdeBufferPerfController();
+  const h = host([tab('/repo/a.ts', 'edited', 'saved'), tab('/repo/b.ts', 'same')]);
+  const saved: string[] = [];
+  const save = async (p: string) => {
+    saved.push(p);
+    const t = h.tabs.find((x) => x.path === p)!;
+    t.savedContent = t.content; t.dirty = false;
+    return true;
+  };
+  assert.equal(await helpers.confirmDiscardOnSwitch(h, perf, async () => {}, save), true);
+  assert.deepEqual(saved, ['/repo/a.ts'], 'only the dirty tab is saved');
+  const h2 = host([tab('/repo/c.ts', 'edited', 'saved')]);
+  assert.equal(await helpers.confirmDiscardOnSwitch(h2, perf, async () => {}, async () => false), false);
 });
 
 function depsModel(post: () => Promise<unknown>) {

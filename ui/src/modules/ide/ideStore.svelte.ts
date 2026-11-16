@@ -342,7 +342,7 @@ class IdeStore {
     this.resetTargetState({ kind: 'local', workspace_id: null, root: '', connection_id: null, connection_name: null });
   }
 
-  confirmDiscardUnsaved(): Promise<boolean> { return confirmDiscardOnSwitch(this, this.bufPerf, () => this.flushAutoSave()); }
+  confirmDiscardUnsaved(): Promise<boolean> { return confirmDiscardOnSwitch(this, this.bufPerf, () => this.flushAutoSave(), (p) => this.saveFile(p)); }
   private resetTargetState(next: IdeTargetSpec, overrideAdditionalRoots?: string[]): void {
     this.disposeStreams();
     resetTargetLifecycleState(this, next, () => { this._activePath = null; }, overrideAdditionalRoots);
