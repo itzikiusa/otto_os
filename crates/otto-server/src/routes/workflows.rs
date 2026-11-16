@@ -94,13 +94,7 @@ pub async fn update_workflow(
     }
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
-    if let Some(v) = req.on_restart.as_deref() {
-        if !matches!(v, "resume" | "fail") {
-            return Err(ApiError(Error::Invalid(format!(
-                "on_restart must be 'resume' or 'fail', got '{v}'"
-            ))));
-        }
-    }
+    req.check(wf.version).map_err(ApiError)?;
     Ok(Json(
         repo(&ctx)
             .publish(
@@ -1968,6 +1962,30 @@ mod tests {
             assert_eq!(json!(pinned.graph), json!(live.graph));
             assert_eq!(repository.list_versions(&wf.id).await.unwrap().len(), 4);
         }
+    }
+
+    #[tokio::test]
+    async fn stale_expected_version_is_a_conflict_and_saves_nothing() {
+        let (_tmp, ctx, app, wf) = version_page_fixture(2).await;
+        let path = format!("/workflows/{}", wf.id);
+        let (status, _) = version_request_body(
+            &app,
+            "PATCH",
+            &path,
+            Some(json!({"instructions":"stale","expected_version":1})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(repo(&ctx).get(&wf.id).await.unwrap().version, 2);
+        let (status, body) = version_request_body(
+            &app,
+            "PATCH",
+            &path,
+            Some(json!({"instructions":"fresh","expected_version":2})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["instructions"], "fresh");
     }
 
     #[tokio::test]

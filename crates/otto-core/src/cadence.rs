@@ -576,11 +576,16 @@ pub fn describe(spec: &Value, tz: Tz) -> String {
 
 fn check_at(spec: &Value) -> Result<()> {
     let at = spec.get("at").and_then(Value::as_str).unwrap_or("09:00");
-    let mut it = at.split(':');
+    // Two-digit minutes: "9:5" used to save and read "Daily at 9:5".
     let ok = (|| {
-        let h = it.next()?.trim().parse::<u32>().ok()?;
-        let m = it.next()?.trim().parse::<u32>().ok()?;
-        (h < 24 && m < 60).then_some(())
+        let (h, m) = at.split_once(':')?;
+        let digits = |p: &str, n: std::ops::RangeInclusive<usize>| {
+            n.contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit())
+        };
+        (digits(h, 1..=2) && digits(m, 2..=2))
+            .then_some(())
+            .filter(|_| h.parse::<u32>().is_ok_and(|h| h < 24))
+            .filter(|_| m.parse::<u32>().is_ok_and(|m| m < 60))
     })();
     ok.ok_or_else(|| Error::Invalid(format!("schedule.at must be 'HH:MM' (got '{at}')")))
 }
@@ -876,6 +881,10 @@ mod tests {
         assert!(validate(&json!({"cadence":"interval","every_min":60})).is_ok());
         assert!(validate(&json!({"cadence":"monthly"})).is_err());
         assert!(validate(&json!({"cadence":"daily","at":"25:00"})).is_err());
+        assert!(validate(&json!({"cadence":"daily","at":"9:5"})).is_err());
+        assert!(validate(&json!({"cadence":"daily","at":"09:05:00"})).is_err());
+        assert!(validate(&json!({"cadence":"daily","at":"09:05"})).is_ok());
+        assert!(validate(&json!({"cadence":"daily","at":"9:05"})).is_ok());
         assert!(validate(&json!({"cadence":"weekly","at":"03:00","weekday":9})).is_err());
     }
 

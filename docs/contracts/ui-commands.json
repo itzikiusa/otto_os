@@ -469,7 +469,7 @@
         "prompt": { "type": "string", "description": "Merged into the input as `prompt`." } },
         "additionalProperties": false } },
     { "name": "wf_cancel_run", "module": "workflows", "route": "workflows", "risk": "local_write", "timeout_ms": 120000,
-      "description": "Cancel a running workflow run (it finishes the current step, then halts). The user confirms (attributed; may be allowed for the session).",
+      "description": "Cancel a running workflow run (the running step stops now). The user confirms (attributed; may be allowed for the session).",
       "input_schema": { "type": "object", "required": ["run_id"], "properties": {
         "run_id": { "type": "string" } },
         "additionalProperties": false } },

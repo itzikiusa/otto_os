@@ -17,6 +17,7 @@ import { fileUriToPath } from '../../../lib/fileUri.ts';
 import { applyHtmlBlockDirections } from '../../../lib/textDirection.ts';
 import { looksLikeNonPath } from '../../../lib/pathLinks/resolve.ts';
 import { resolveEmojiShortcode } from '../../../lib/emojiShortcodes.ts';
+import { ALLOWED_TAGS } from '../../../lib/sanitize.ts';
 
 const esc = escapeHtml;
 const LOCAL_IMG_EXT = /\.(?:png|jpe?g|gif|webp|svg|avif|bmp)$/i;
@@ -140,6 +141,14 @@ export const chatMarkedExtension: MarkedExtension = {
     },
   ],
   renderer: {
+    // Raw HTML in agent prose: `Vec<String>` or `<name>` is text the sanitizer
+    // would unwrap into nothing, so only tags it keeps (`<br>`, `<details>`…)
+    // and comments stay HTML; anything else is shown as written.
+    html({ text }: Tokens.HTML | Tokens.Tag) {
+      const t = text.trim();
+      const tag = /^<\/?([a-z][a-z0-9-]*)/i.exec(t)?.[1]?.toLowerCase();
+      return t.startsWith('<!--') || (tag && ALLOWED_TAGS.has(tag)) ? false : esc(text);
+    },
     codespan({ text }: Tokens.Codespan) {
       const ref = codeSpanFile(text);
       if (!ref) return false;

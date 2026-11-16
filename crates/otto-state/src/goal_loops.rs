@@ -586,6 +586,20 @@ impl GoalLoopsRepo {
         Ok(())
     }
 
+    /// Close every unfinished iteration of a paused or stopped loop as `stopped`.
+    pub async fn stop_open_iterations(&self, loop_id: &Id) -> Result<()> {
+        sqlx::query(
+            "UPDATE goal_loop_iterations SET status = 'stopped', finished_at = COALESCE(finished_at, ?)
+             WHERE loop_id = ? AND status NOT IN ('done','error','stopped')",
+        )
+        .bind(fmt(Utc::now()))
+        .bind(loop_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("stop open goal-loop iterations"))?;
+        Ok(())
+    }
+
     pub async fn set_iter_plan(&self, iter_id: &Id, plan: &str) -> Result<()> {
         sqlx::query("UPDATE goal_loop_iterations SET plan = ? WHERE id = ?")
             .bind(plan)
@@ -756,7 +770,7 @@ impl GoalLoopsRepo {
             .map_err(dberr("fail running goal loop"))?;
             sqlx::query(
                 "UPDATE goal_loop_iterations SET status = 'error', finished_at = COALESCE(finished_at, ?)
-                 WHERE loop_id = ? AND status NOT IN ('done','error')",
+                 WHERE loop_id = ? AND status NOT IN ('done','error','stopped')",
             )
             .bind(&now)
             .bind(&l.id)
@@ -976,6 +990,33 @@ mod tests {
             GoalLoopStatus::Blocked
         );
         assert_eq!(repo.get(&l.id).await.unwrap().ledger.questions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_open_iterations_closes_only_unfinished_ones() {
+        let pool = mem_pool().await;
+        let repo = GoalLoopsRepo::new(pool.clone());
+        let l = repo.create(new_loop()).await.unwrap();
+        let execs = l.config.executors.clone();
+        let done = repo
+            .add_iteration(&l.id, &l.workspace_id, 1, "", &execs)
+            .await
+            .unwrap();
+        repo.update_iteration_status(&done.id, "done", true)
+            .await
+            .unwrap();
+        let live = repo
+            .add_iteration(&l.id, &l.workspace_id, 2, "", &execs)
+            .await
+            .unwrap();
+        repo.update_iteration_status(&live.id, "executing", false)
+            .await
+            .unwrap();
+        repo.stop_open_iterations(&l.id).await.unwrap();
+        let its = repo.get_detail(&l.id).await.unwrap().iterations;
+        let status = |id: &Id| its.iter().find(|i| &i.id == id).unwrap().status.clone();
+        assert_eq!(status(&done.id), "done");
+        assert_eq!(status(&live.id), "stopped");
     }
 
     #[tokio::test]

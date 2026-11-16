@@ -200,6 +200,9 @@ test('cancel a running run from the run view (R7)', async ({ page }) => {
   // The Cancel affordance appears for an active run…
   const cancel = page.getByTestId('run-cancel');
   await expect(cancel).toBeVisible({ timeout: 10_000 });
+  // One Stop, saying what it does (A13: two buttons said "finishes the current step").
+  await expect(page.getByRole('button', { name: /Stop run/ })).toHaveCount(1);
+  await expect(cancel).toHaveAttribute('title', /stop.* now/i);
   await cancel.click();
   // Cancelling can't be undone, so it asks first.
   await page.getByRole('dialog').getByRole('button', { name: 'Stop run', exact: true }).click();

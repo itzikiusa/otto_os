@@ -71,7 +71,13 @@
     error = null;
     const poller = liveQuery({
       on: ['workflow_run_updated'],
-      match: (ev: LiveEvent) => ev.workspace_id === wid,
+      match: (ev: LiveEvent) => {
+        if (ev.workspace_id !== wid) return false;
+        // Show the new status at once; the rate-capped refetch fills the rest.
+        const row = items.find((r) => r.id === ev.run_id);
+        if (row && typeof ev.status === 'string') row.status = ev.status as RunListItem['status'];
+        return true;
+      },
       fallbackMs: 30_000,
       safetyMs: 120_000,
       minIntervalMs: 5_000,

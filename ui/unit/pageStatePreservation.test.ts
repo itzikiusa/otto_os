@@ -206,6 +206,8 @@ test('skillsLabState and workflowsUi preserve filters, selections, and in-flight
       },
       '../../lib/toast.svelte': { toasts: { success() {} } },
       '../../lib/toastError': { toastError() {} },
+      '../../lib/api/workflows': { patchWorkflow() {} },
+      '../../lib/confirm.svelte': { confirmer: {} },
     },
   );
   workflowsUi.resetForTests();

@@ -9,6 +9,8 @@
   import Switch from '../../lib/components/Switch.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { api, baseUrl } from '../../lib/api/client';
+  import { liveQuery, type LiveEvent } from '../../lib/live';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { WorkflowTrigger, TriggerKind } from '../../lib/api/types';
@@ -138,6 +140,29 @@
     if (workflowId) void load();
   });
 
+  // A trigger firing starts a run: refresh "Last fired" on run events instead
+  // of only when the panel is reopened (events carry no workflow id, so any
+  // run of the workspace counts; rate-capped).
+  $effect(() => {
+    const id = workflowId;
+    const wid = ws.currentId;
+    if (!id) return;
+    const poller = liveQuery({
+      on: ['workflow_run_updated'],
+      match: (ev: LiveEvent) => ev.workspace_id === wid,
+      fallbackMs: 60_000,
+      minIntervalMs: 5_000,
+      immediate: false,
+      run: async (signal) => {
+        const ts = await api.bg.get<WorkflowTrigger[]>(`/workflows/${id}/triggers`, signal);
+        if (signal.aborted || !alive) return;
+        triggers = ts;
+        ontriggers?.(ts);
+      },
+    });
+    return () => poller.stop();
+  });
+
   function buildSpec(): Record<string, unknown> { return buildTriggerSpec(form, originalSpec); }
 
   async function addTrigger(): Promise<void> {
@@ -261,8 +286,8 @@
         </label>
         {#if form.cadence === 'interval'}
           <label class="fl">
-            <span>Every (min)</span>
-            <input type="number" min="1" max="10080" bind:value={form.everyMin} />
+            <span>Every (minutes, min 5)</span>
+            <input type="number" min="5" max="10080" bind:value={form.everyMin} />
           </label>
         {:else if form.cadence === 'cron'}
           <label class="fl"><span>Cron (5 fields)</span><input dir="ltr" bind:value={form.cron} placeholder="0 9 * * 1-5" /></label>
