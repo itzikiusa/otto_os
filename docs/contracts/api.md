@@ -184,9 +184,11 @@ failure on a read returns an error (500) — never a 200 with zero totals.
 - GET /usage/by-kind?days=N&otto_only=B → `FeatureUsage[]` — the same per-feature rollup
   on its own. `FeatureUsage{feature, events, input_tokens, output_tokens,
   cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, sessions}`. `feature` is
-  the kind of Otto work — `review`|`product`|`channel`|`agent`|`connection`|`external`|…
-  — derived server-side from each session's metadata (same label as a session row's
-  `kind`). Visibility only; no budgets/enforcement. Pricing is unchanged (per-row
+  the kind of Otto work — `review`|`product`|`channel`|`agent`|`connection`|`thread`|
+  `external`|`deleted`|… — derived server-side from each session's metadata (same label
+  as a session row's `kind`; a Threads session is `thread` unless its meta `source`
+  names a feature). A session with no row is `external` when its workspace is
+  `external` (a CLI run outside Otto), else `deleted` (its Otto row was removed). Visibility only; no budgets/enforcement. Pricing is unchanged (per-row
   `cost_usd` summed).
 - GET /usage/metrics?minutes=N → `MetricPoint[]` (system CPU/RAM/load time-series).
 - PUT /usage/config → UsageStatus (update + persist engine config).

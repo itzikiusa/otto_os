@@ -10,10 +10,11 @@
 //!   * **cache read** — tokens served from the prompt cache, at ~0.1× input
 //!     (model-specific on the newest models: Opus 5.5 $0.20 = 0.05×, Fable 5.1
 //!     $0.25 = 0.025×).
-//!   * **cache write** — tokens written to the prompt cache, at ~1.25× input
-//!     (the 5-minute-TTL rate the agent CLIs use; the 1-hour TTL is 2×, but the
-//!     transcripts report a single `cache_creation` count with no TTL, so we
-//!     price the common case).
+//!   * **cache write** — tokens written to the prompt cache: 1.25× input for
+//!     the 5-minute TTL, 2× for the 1-hour TTL. Claude Code reports the split
+//!     (`usage.cache_creation.ephemeral_1h_input_tokens`) and now writes most of
+//!     its cache at 1 h; see [`estimate_cost_with_1h`]. Without a split every
+//!     write is priced at the 5-minute rate.
 //!
 //! Unknown models fall back to a conservative non-zero tier (see
 //! [`FALLBACK`]) rather than silently costing $0 — a brand-new model id must
@@ -33,6 +34,8 @@ pub const PRICED_AS_OF: &str = "2026-10-11";
 const CACHE_READ_FACTOR: f64 = 0.1;
 /// Cache-write (5m TTL) tokens cost ~1.25× the base input rate.
 const CACHE_WRITE_FACTOR: f64 = 1.25;
+/// Cache-write (1h TTL) tokens cost 2× the base input rate.
+const CACHE_WRITE_1H_FACTOR: f64 = 2.0;
 
 /// Per-model rates, all per 1M tokens.
 #[derive(Clone, Copy)]
@@ -212,14 +215,36 @@ pub fn estimate_cost(
     cache_read_tokens: u64,
     cache_write_tokens: u64,
 ) -> f64 {
+    estimate_cost_with_1h(
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        0,
+    )
+}
+
+/// [`estimate_cost`] where `cache_write_1h_tokens` of the `cache_write_tokens`
+/// were written with the 1-hour TTL (2× input); the rest are 5-minute writes.
+pub fn estimate_cost_with_1h(
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    cache_write_1h_tokens: u64,
+) -> f64 {
     let r = lookup(model)
         .unwrap_or(FALLBACK)
         .for_prompt(input_tokens + cache_read_tokens + cache_write_tokens);
     let per_m = |tokens: u64, rate: f64| (tokens as f64 / 1_000_000.0) * rate;
+    let write_1h = cache_write_1h_tokens.min(cache_write_tokens);
     per_m(input_tokens, r.input)
         + per_m(output_tokens, r.output)
         + per_m(cache_read_tokens, r.cache_read())
-        + per_m(cache_write_tokens, r.cache_write())
+        + per_m(cache_write_tokens - write_1h, r.cache_write())
+        + per_m(write_1h, r.input * CACHE_WRITE_1H_FACTOR)
 }
 
 #[cfg(test)]
@@ -229,6 +254,24 @@ mod tests {
     /// 1M tokens of each class makes the per-class rates easy to read off.
     fn cost(model: &str) -> f64 {
         estimate_cost(model, 1_000_000, 1_000_000, 1_000_000, 1_000_000)
+    }
+
+    /// 1-hour cache writes cost 2× input, 5-minute ones 1.25×; no split (or a
+    /// split larger than the writes) prices like before.
+    #[test]
+    fn one_hour_cache_writes_cost_twice_input() {
+        let m = "claude-opus-4-8"; // $5 input
+        let five_m = estimate_cost(m, 0, 0, 0, 1_000_000);
+        assert!((five_m - 6.25).abs() < 1e-9, "got {five_m}");
+        let one_h = estimate_cost_with_1h(m, 0, 0, 0, 1_000_000, 1_000_000);
+        assert!((one_h - 10.0).abs() < 1e-9, "got {one_h}");
+        let mixed = estimate_cost_with_1h(m, 0, 0, 0, 1_000_000, 400_000);
+        assert!(
+            (mixed - (0.6 * 6.25 + 0.4 * 10.0)).abs() < 1e-9,
+            "got {mixed}"
+        );
+        let capped = estimate_cost_with_1h(m, 0, 0, 0, 1_000_000, 5_000_000);
+        assert!((capped - one_h).abs() < 1e-9);
     }
 
     #[test]

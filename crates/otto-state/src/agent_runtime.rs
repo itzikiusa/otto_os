@@ -325,6 +325,8 @@ impl AgentRuntimeRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("set native thread id"))?;
+        // The usage tailer attributes provider transcripts by this id.
+        crate::sessions::bump_attribution_generation();
         Ok(())
     }
 

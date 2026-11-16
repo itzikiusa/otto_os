@@ -112,6 +112,8 @@ pub struct UsageTailer {
     /// The daemon data dir (`provider-accounts/*`, the e2e fixture).
     data_dir: PathBuf,
     grok_root: PathBuf,
+    /// Muse Code's data dir (`~/.local/share/muse`).
+    muse_root: PathBuf,
     agy_extra_dir: Option<PathBuf>,
     /// Transcript-root inputs ([`otto_transcript::roots`]). Empty by default
     /// — the daemon injects the process environment, isolated tests do not.
@@ -229,6 +231,7 @@ impl UsageTailer {
             roots_env: RootsEnv::default(),
             data_dir: data_dir.clone(),
             grok_root: home.join(".grok"),
+            muse_root: otto_transcript::muse_usage::default_muse_root(&home),
             agy_extra_dir: None,
             home,
             cursors,
@@ -283,6 +286,11 @@ impl UsageTailer {
     /// Where Grok writes `updates.jsonl` (watched like the transcript roots).
     fn grok_sessions_root(&self) -> PathBuf {
         self.grok_root.join("sessions")
+    }
+
+    /// Where Muse writes its `session.jsonl` logs.
+    fn muse_sessions_root(&self) -> PathBuf {
+        self.muse_root.join("sessions")
     }
 
     /// Every directory Antigravity conversation DBs are discovered in.
@@ -381,6 +389,7 @@ impl UsageTailer {
                     // Native providers too: an event-driven pass only scans
                     // them when one of their files changed (see scan_paths).
                     roots.push(self.grok_sessions_root());
+                    roots.push(self.muse_sessions_root());
                     roots.extend(self.agy_roots());
                     w.ensure_roots(&roots);
                 }
@@ -545,12 +554,14 @@ impl UsageTailer {
         // Transcripts waiting for their owner are retried on every pass,
         // whether or not they wrote anything since.
         paths.extend(self.owner_wait.keys().cloned());
-        // Grok / Antigravity are polled only when the watcher saw one of
+        // Grok / Antigravity / Muse are polled only when the watcher saw one of
         // their files change; the reconcile pass (scan_once) covers the rest.
         // An idle event-driven pass used to walk both trees every ≤20 s.
         let grok_root = self.grok_sessions_root();
         let agy_roots = self.agy_roots();
         let grok_dirty = paths.iter().any(|p| p.starts_with(&grok_root));
+        let muse_root = self.muse_sessions_root();
+        let muse_dirty = paths.iter().any(|p| p.starts_with(&muse_root));
         let agy_dirty = paths
             .iter()
             .any(|p| agy_roots.iter().any(|root| p.starts_with(root)));
@@ -580,7 +591,8 @@ impl UsageTailer {
         .await
         .unwrap_or_default();
         self.tail_listed(&claude, &codex).await;
-        self.scan_native_parts(grok_dirty, agy_dirty).await?;
+        self.scan_native_parts(grok_dirty, agy_dirty, muse_dirty)
+            .await?;
         self.persist().await
     }
 
@@ -992,12 +1004,13 @@ impl UsageTailer {
 
     fn record_claude(&mut self, line: ClaudeLine, ids: &(String, String), provider: &str) {
         let usage = line.usage;
-        let cost = estimate_cost(
+        let cost = crate::estimate_cost_with_1h(
             &usage.model,
             usage.input,
             usage.output,
             usage.cache_read,
             usage.cache_write,
+            line.cache_write_1h,
         );
         self.pending_events.push(UsageEvent {
             ts: line.timestamp,
@@ -1624,7 +1637,14 @@ fn rebuild_events(
                 output_tokens: u.output,
                 cache_read_tokens: u.cache_read,
                 cache_write_tokens: u.cache_write,
-                cost_usd: estimate_cost(&u.model, u.input, u.output, u.cache_read, u.cache_write),
+                cost_usd: crate::estimate_cost_with_1h(
+                    &u.model,
+                    u.input,
+                    u.output,
+                    u.cache_read,
+                    u.cache_write,
+                    line.cache_write_1h,
+                ),
                 duration_ms: 0,
                 ..Default::default()
             });
@@ -2232,6 +2252,92 @@ mod accounting_tests {
         journal.close().await;
         pool.close().await;
         // Best-effort: background writers can still be creating files here.
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    /// Muse logs bill per model call to the Otto session that owns the Muse
+    /// session id — here a Threads session (its native thread id) — with a
+    /// subagent's calls on its parent; an unowned log stays external.
+    #[tokio::test]
+    async fn muse_calls_bill_to_their_threads_session_and_subagents_to_the_parent() {
+        let root = std::env::temp_dir().join(format!("otto-muse-usage-{}", otto_core::new_id()));
+        let home = root.join("home");
+        let day = home.join(".local/share/muse/sessions/2026/11/16");
+        let call = |id: &str, input: u64, cached: u64| {
+            serde_json::json!({"id": id, "recorded_at": 1794826678513891_i64, "payload_type": "runtime.session",
+                "payload": {"kind": "run", "event": {"kind": "model_completed", "model": "muse-wonder-full-1.0",
+                "usage": {"input_tokens": input, "output_tokens": 7, "cached_tokens": cached, "cache_read_tokens": cached, "cache_write_tokens": 0}}}})
+            .to_string()
+                + "\n"
+        };
+        let write = |dir: &Path, body: String| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("session.jsonl"), body).unwrap();
+        };
+        write(
+            &day.join("muse-thread"),
+            call("c1", 100, 60) + &call("c2", 50, 0),
+        );
+        write(&day.join("muse-thread/subagent/child"), call("c3", 10, 0));
+        write(&day.join("muse-cli"), call("c4", 20, 0));
+
+        let pool = otto_state::open(&root.join("state.db")).await.unwrap();
+        let now = "2026-11-16T10:00:00Z";
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)").bind(now).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces(id,name,root_path,created_at) VALUES('w','w','/repo',?)",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO agent_runtime_sessions(id,workspace_id,provider,title,cwd,native_thread_id,closed,created_by,created_at,last_active_at) VALUES('thread','w','muse','t','/repo','muse-thread',1,'u',?,?)").bind(now).bind(now).execute(&pool).await.unwrap();
+        let usage = UsageEngine::start(
+            crate::UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let mut tailer = UsageTailer::new(usage, pool.clone(), root.join("data"), home);
+        tailer.owner_grace = Duration::ZERO;
+        tailer.scan_native_parts(false, false, true).await.unwrap();
+
+        let mut got: Vec<_> = tailer
+            .pending_events
+            .iter()
+            .map(|e| {
+                (
+                    e.session_id.as_str(),
+                    e.workspace_id.as_str(),
+                    e.provider.as_str(),
+                    e.input_tokens,
+                    e.cache_read_tokens,
+                    e.output_tokens,
+                    e.cost_usd,
+                )
+            })
+            .collect();
+        got.sort_by(|a, b| (a.0, a.3).cmp(&(b.0, b.3)));
+        assert_eq!(
+            got,
+            [
+                ("muse-cli", EXTERNAL_WORKSPACE, "muse", 20, 0, 7, 0.0),
+                ("thread", "w", "muse", 10, 0, 7, 0.0),
+                ("thread", "w", "muse", 40, 60, 7, 0.0),
+                ("thread", "w", "muse", 50, 0, 7, 0.0),
+            ]
+        );
+        assert_eq!(
+            tailer.pending_events[0].ts.as_deref(),
+            Some("2026-11-16T10:57:58.513Z")
+        );
+        // A second pass reads nothing new.
+        let before = tailer.pending_events.len();
+        tailer.scan_native_parts(false, false, true).await.unwrap();
+        assert_eq!(tailer.pending_events.len(), before);
+        pool.close().await;
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 

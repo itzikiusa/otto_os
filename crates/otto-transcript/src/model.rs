@@ -177,6 +177,21 @@ impl TurnUsage {
             .cache_creation_tokens
             .saturating_add(o.cache_creation_tokens);
     }
+
+    /// Raise each field to at least `o`'s; returns what grew.
+    pub fn grow_to(&mut self, o: &TurnUsage) -> TurnUsage {
+        let grown = TurnUsage {
+            input_tokens: o.input_tokens.saturating_sub(self.input_tokens),
+            output_tokens: o.output_tokens.saturating_sub(self.output_tokens),
+            thinking_tokens: o.thinking_tokens.saturating_sub(self.thinking_tokens),
+            cache_read_tokens: o.cache_read_tokens.saturating_sub(self.cache_read_tokens),
+            cache_creation_tokens: o
+                .cache_creation_tokens
+                .saturating_sub(self.cache_creation_tokens),
+        };
+        self.add(&grown);
+        grown
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

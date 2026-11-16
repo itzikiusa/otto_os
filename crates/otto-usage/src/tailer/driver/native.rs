@@ -185,17 +185,90 @@ impl super::UsageTailer {
     /// New provider history starts at byte zero; its baselines commit alongside
     /// the emitted events, so a restart cannot replay the historical backfill.
     pub(super) async fn scan_native(&mut self) -> Result<(), String> {
-        self.scan_native_parts(true, true).await
+        self.scan_native_parts(true, true, true).await
     }
 
     /// [`Self::scan_native`] limited to the providers whose trees changed
     /// (an event-driven pass); the reconcile pass scans both.
-    pub(super) async fn scan_native_parts(&mut self, grok: bool, agy: bool) -> Result<(), String> {
+    pub(super) async fn scan_native_parts(
+        &mut self,
+        grok: bool,
+        agy: bool,
+        muse: bool,
+    ) -> Result<(), String> {
         if grok {
             self.scan_grok().await?;
         }
         if agy {
             self.scan_agy().await;
+        }
+        if muse {
+            self.scan_muse().await?;
+        }
+        Ok(())
+    }
+
+    /// Muse logs are append-only, one line per model call, so the cursor alone
+    /// counts each call once (no baseline). Tokens only: Muse prices nothing.
+    async fn scan_muse(&mut self) -> Result<(), String> {
+        use otto_transcript::muse_usage::{discover_session_files, parse_model_completed_line};
+        let root = self.muse_root.clone();
+        let files = tokio::task::spawn_blocking(move || discover_session_files(&root))
+            .await
+            .unwrap_or_default();
+        for (path, owner) in files {
+            let Ok(meta) = tokio::fs::metadata(&path).await else {
+                continue;
+            };
+            let size = meta.len();
+            if self.cursors.get(&path) == Some(size) {
+                continue;
+            }
+            // A PTY session learns its Muse id from `.session.lock` just
+            // after spawn; a young log nobody owns yet is retried next pass.
+            let session = self.lookup_native("muse", &owner).await;
+            if session.is_none() && self.wait_for_owner(&path).await {
+                continue;
+            }
+            self.owner_wait.remove(&path);
+            let (workspace_id, session_id) = match session {
+                Some(s) => (s.workspace_id, s.otto_session_id),
+                None => (crate::EXTERNAL_WORKSPACE.to_string(), owner),
+            };
+            loop {
+                let chunk = self
+                    .read_new_lines(&path, size, parse_model_completed_line)
+                    .await;
+                let Some((calls, offset, more)) = (match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        tracing::debug!("usage tailer: Muse {}: {error}", path.display());
+                        break;
+                    }
+                }) else {
+                    break;
+                };
+                for (_, call) in calls {
+                    self.pending_events.push(crate::UsageEvent {
+                        ts: Some(call.timestamp),
+                        workspace_id: workspace_id.clone(),
+                        session_id: session_id.clone(),
+                        provider: "muse".into(),
+                        model: call.usage.model,
+                        kind: "completion".into(),
+                        input_tokens: call.usage.input,
+                        output_tokens: call.usage.output,
+                        cache_read_tokens: call.usage.cache_read,
+                        cache_write_tokens: call.usage.cache_write,
+                        ..Default::default()
+                    });
+                }
+                self.set_cursor(&path, offset);
+                if !more {
+                    break;
+                }
+                self.persist().await?;
+            }
         }
         Ok(())
     }

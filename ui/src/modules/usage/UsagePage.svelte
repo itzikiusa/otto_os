@@ -17,6 +17,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import { kindLabel } from '../../lib/labels';
+  import { openAgentSession } from '../../lib/openAgentSession';
   import { pluralNoun } from '../../lib/plural';
   import { registry } from '../../lib/commands.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -61,11 +62,9 @@
     if (router.module === 'usage') router.go(next === 'overview' ? 'usage' : `usage/${next}`);
   }
 
-  // Navigate to a session from the top-sessions table (click-through drill-down).
-  function openSession(sessionId: string): void {
-    // Only known Otto sessions (those with a title or kind) can be navigated to.
-    ws.navigateToSession(sessionId);
-  }
+  // A top-sessions row with no Otto session behind it: run outside Otto, or deleted.
+  const unknownSessionLabel = (s: { workspace_id: string }) =>
+    s.workspace_id === 'external' ? 'Session outside Otto' : 'Deleted session';
 
   const WINDOWS = [
     { days: 7, label: '7d' },
@@ -416,7 +415,9 @@
     channel: 'Channels',
     agent: 'Ad-hoc agents',
     connection: 'Connections',
+    thread: 'Threads',
     external: 'External',
+    deleted: 'Deleted sessions',
   };
   function featureLabel(k: string): string {
     return FEATURE_LABELS[k] ?? (k ? k[0].toUpperCase() + k.slice(1) : 'Other');
@@ -1256,7 +1257,7 @@
                   class="sess-vlist"
                   findText={(s) =>
                     [
-                      s.title ?? (s.kind != null ? s.session_id.slice(0, 12) : 'Session outside Otto'),
+                      s.title ?? (s.kind != null ? s.session_id.slice(0, 12) : unknownSessionLabel(s)),
                       s.kind ?? '',
                       s.session_id.slice(0, 12),
                       s.workspace_name ?? '—',
@@ -1273,10 +1274,10 @@
                       <div class="sess-cell" title={s.title ? `${s.title}\n${s.session_id}` : s.session_id}>
                         <div class="sess-top">
                           {#if isOttoSession}
-                            <button class="sess-name sess-open ellip-any" onclick={() => openSession(s.session_id)}
+                            <button class="sess-name sess-open ellip-any" onclick={() => void openAgentSession(s.session_id)}
                               aria-label="Open session {s.title ?? s.session_id}">{s.title ?? s.session_id.slice(0, 12)}</button>
                           {:else}
-                            <span class="sess-name ellip-any">{s.title ?? 'Session outside Otto'}</span>
+                            <span class="sess-name ellip-any">{s.title ?? unknownSessionLabel(s)}</span>
                           {/if}
                           {#if s.kind}<Badge label={kindLabel(s.kind)} />{/if}
                         </div>
