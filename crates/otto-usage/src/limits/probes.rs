@@ -446,10 +446,16 @@ pub(crate) fn grok_row(r: &Reading, now: DateTime<Utc>) -> AccountLimits {
 /// as the plan. Field names are read camelCase or snake_case, resets as
 /// epoch milliseconds or RFC 3339.
 pub(crate) fn muse_row(r: &Reading, now: DateTime<Utc>) -> AccountLimits {
-    let data = match &r.answer {
+    let raw = match &r.answer {
         Ok(d) => d,
         Err(why) => return unknown("muse", MUSE_LABEL, why),
     };
+    // `muse usage --json` (1.4.20) wraps the windows in `allowance`, which is
+    // null with a `hint` until the server reports usage for this window.
+    let data = raw
+        .get("allowance")
+        .filter(|a| a.is_object())
+        .unwrap_or(raw);
     let num = |v: &Value, a: &str, b: &str| v.get(a).or_else(|| v.get(b)).and_then(Value::as_f64);
     let plan = data["tier"]
         .as_str()
@@ -483,11 +489,15 @@ pub(crate) fn muse_row(r: &Reading, now: DateTime<Utc>) -> AccountLimits {
         ));
     }
     if windows.is_empty() {
-        let mut row = unknown(
-            "muse",
-            MUSE_LABEL,
-            "muse reports no plan usage for this login (an API key, or nothing used this window yet).",
-        );
+        let why = raw["hint"]
+            .as_str()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(|h| format!("Muse: {h}"))
+            .unwrap_or_else(|| {
+                "muse reports no plan usage for this login (an API key, or nothing used this window yet).".into()
+            });
+        let mut row = unknown("muse", MUSE_LABEL, &why);
         row.plan = plan;
         return row;
     }
@@ -578,6 +588,23 @@ mod tests {
         );
         assert_eq!(none.status, LimitStatus::Unknown);
         assert_eq!(none.plan.as_deref(), Some("Free"));
+    }
+
+    #[test]
+    fn muse_reads_the_allowance_wrapper_and_shows_its_hint() {
+        let now = t("2026-11-13T13:05:00Z");
+        // The real `muse usage --json` (1.4.20) before any use this window.
+        let empty = json!({"schemaVersion":1,"allowance":null,"reason":"server_sent_no_usage","hint":"the server sent no usage data for this subscription; this can happen before your first use in a new window"});
+        let row = muse_row(&reading(Ok(empty)), now);
+        assert_eq!(row.status, LimitStatus::Unknown);
+        assert!(row
+            .reason
+            .unwrap()
+            .starts_with("Muse: the server sent no usage data"));
+        let wrapped = json!({"schemaVersion":1,"allowance":{"tier":"Muse Pro","window":{"usedPercent":25.0,"windowDurationMins":300}}});
+        let row = muse_row(&reading(Ok(wrapped)), now);
+        assert_eq!(row.plan.as_deref(), Some("Muse Pro"));
+        assert_eq!(row.windows[0].left_percent, Some(75.0));
     }
 
     #[test]
