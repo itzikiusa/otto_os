@@ -726,8 +726,7 @@
     background: color-mix(in srgb, var(--worktree) 12%, transparent);
   }
   /* Inline "open worktree" affordance next to the branch / worktree name. */
-  /* Yields first (and ellipsizes) so a narrow sidebar keeps the BRANCH name —
-     it used to hold its width and squeeze the name to 0 px. */
+  /* Yields first (ellipsized) so a narrow sidebar keeps the BRANCH name, not 0 px of it. */
   .refs-panel :global(.wt-open-hint) {
     flex: 0 100 auto;
     min-width: 0;

@@ -231,8 +231,14 @@ async fn confirmed_force_push_moves_the_tracking_ref() {
     let root = tempfile::tempdir().unwrap();
     let bare = root.path().join("remote.git");
     let work = root.path().join("work");
-    git(root.path(), &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()]);
-    git(root.path(), &["init", "-q", "-b", "main", work.to_str().unwrap()]);
+    git(
+        root.path(),
+        &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
+    );
+    git(
+        root.path(),
+        &["init", "-q", "-b", "main", work.to_str().unwrap()],
+    );
     for kv in [
         ["user.name", "Fixture"],
         ["user.email", "fixture@example.test"],
@@ -243,7 +249,10 @@ async fn confirmed_force_push_moves_the_tracking_ref() {
     git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
     git(&work, &["commit", "--allow-empty", "-qm", "published"]);
     git(&work, &["push", "-q", "-u", "origin", "main"]);
-    git(&work, &["commit", "--amend", "--allow-empty", "-qm", "rewritten"]);
+    git(
+        &work,
+        &["commit", "--amend", "--allow-empty", "-qm", "rewritten"],
+    );
     let local = LocalGit::new(&work);
     let target = local.push_target().await.unwrap();
     local.push_confirmed(None, &target).await.unwrap();

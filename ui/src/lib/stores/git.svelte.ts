@@ -215,21 +215,16 @@ class GitStore {
     if (!this.openRepoIds.includes(repoId)) {
       this.openRepoIds = [...this.openRepoIds, repoId];
     }
-    if (this.subTab[repoId] == null) {
-      this.subTab = { ...this.subTab, [repoId]: normSubTab(sub) };
-    } else if (sub) {
-      this.subTab = { ...this.subTab, [repoId]: normSubTab(sub) };
-    }
+    if (this.subTab[repoId] == null || sub) this.subTab = { ...this.subTab, [repoId]: normSubTab(sub) };
+    this.arrive(repoId);
+  }
+
+  /** A tab became active. The status bar's branch follows it (it showed the session repo's). */
+  private arrive(repoId: string): void {
     this.activeRepoId = repoId;
     this.repoUsedAt[repoId] = Date.now();
     this.persistOpenTabs();
     this.fetchOnArrival();
-    this.followTab(repoId);
-  }
-
-  /** The status bar's "Current branch" follows the repo tab the user opens —
-   *  it kept showing the session repo's branch while you worked in another. */
-  private followTab(repoId: string): void {
     const repo = this.allRepos.find((r) => r.id === repoId);
     if (repo && this.primary?.id !== repoId) void this.selectPrimary(repo);
   }
@@ -252,11 +247,7 @@ class GitStore {
   /** Activate an already-open repo tab. */
   activateRepoTab(repoId: string): void {
     if (!this.openRepoIds.includes(repoId)) return;
-    this.activeRepoId = repoId;
-    this.repoUsedAt[repoId] = Date.now();
-    this.persistOpenTabs();
-    this.fetchOnArrival();
-    this.followTab(repoId);
+    this.arrive(repoId);
   }
 
   /** Move `repoId` to the position currently held by `targetIdx` (drag-reorder). */

@@ -846,18 +846,10 @@ pub(crate) async fn start_local_review(
         .await
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
-    // One local review per repo at a time: a second start used to run beside
-    // the first, hidden from the panel, which could only stop the newest.
-    let runs = ctx
-        .reviews_store
-        .list_for_pr(&repo_id, LOCAL_REVIEW_PR_NUMBER as i64)
+    ctx.reviews_store
+        .refuse_if_running(&repo_id, LOCAL_REVIEW_PR_NUMBER)
         .await
         .map_err(crate::error::ApiError)?;
-    if runs.iter().any(|r| r.status == ReviewStatus::Running) {
-        return Err(crate::error::ApiError(Error::Conflict(
-            "a local review of this repo is already running".into(),
-        )));
-    }
     review_budget_gate(&ctx, &repo.workspace_id)
         .await
         .map_err(crate::error::ApiError)?;
@@ -872,14 +864,10 @@ pub(crate) async fn start_local_review(
         .resolve_base(want)
         .await
         .map_err(crate::error::ApiError)?;
-    let diff_text = match git.review_diff_text(&resolved.diff_ref).await {
-        Ok(d) => d,
-        Err(e) => {
-            return Err(crate::error::ApiError(Error::Invalid(format!(
-                "git diff failed: {e}"
-            ))));
-        }
-    };
+    let diff_text = git
+        .review_diff_text(&resolved.diff_ref)
+        .await
+        .map_err(|e| crate::error::ApiError(Error::Invalid(format!("git diff failed: {e}"))))?;
 
     // Create the review row.
     let review = ctx

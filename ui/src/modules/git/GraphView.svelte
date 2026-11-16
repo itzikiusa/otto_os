@@ -151,9 +151,7 @@
       get worktreeBranches() { return index.worktreeBranches; },
       get refKnowledge() { return index.refKnowledge; },
       get baseBranch() { return index.baseBranch; },
-      get canOpenPr() {
-        return canOpenPrs(git.allRepos.find((r) => r.id === repoId) ?? git.repos.find((r) => r.id === repoId));
-      },
+      get canOpenPr() { return canOpenPrs(git.allRepos.find((r) => r.id === repoId) ?? git.repos.find((r) => r.id === repoId)); },
       openCreatePr,
       chipsFor: (c) => index.chipsFor(c),
       setCleanupBase: (name) => data.setCleanupBase(name),
@@ -700,8 +698,7 @@
     cursor: pointer;
   }
   .graph-select { flex: 1; height: 100%; }
-  /* Shrinks to the chip's floor (icons + a few letters), not to nothing. */
-  .ref-select { flex-shrink: 1; min-width: auto; }
+  .ref-select { flex-shrink: 1; min-width: auto; } /* floor: the chip's icons + a few letters */
   .graph-row:has(.graph-select:focus-visible) {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
@@ -914,9 +911,7 @@
      overflowed a 156px (or 76px with the detail open) cell and, being
      end-aligned, got clipped at its START — "gin/CS3-15178-goo…" lost both
      ends. The HEAD badge and the +N expander stay rigid. */
-  .branch-cell :global(.ref-chip) {
-    flex-shrink: 1;
-  }
+  .branch-cell :global(.ref-chip) { flex-shrink: 1; }
 
   /* ── Multi-ref collapse: the "▾ +N" expander + its grouped popover ──────────── */
   .ref-expander {

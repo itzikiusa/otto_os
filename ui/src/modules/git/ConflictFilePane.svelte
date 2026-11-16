@@ -351,7 +351,7 @@
 <style>
   .whole-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
   /* "Take <long branch>" ellipsizes within the pane instead of overflowing it. */
-  .whole-actions .btn { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .whole-actions :global(.btn) { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pane {
     display: flex;
     flex-direction: column;

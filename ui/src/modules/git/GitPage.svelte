@@ -45,8 +45,7 @@
   const activeRepo = $derived(git.allRepos.find((r) => r.id === git.activeRepoId) ?? null);
   const activeStatus = $derived(activeRepo ? (git.statusById[activeRepo.id] ?? null) : null);
   let repoView = $state<{ moreMenuItems: () => MenuItem[] } | undefined>();
-  // The header toolbar's stash browser, mounted here: inside PageHeader's
-  // actions row the overflow measurer hid the dialog (and Pull with it).
+  // Header toolbar's stash browser lives here: in PageHeader's actions row the overflow measurer hid it.
   const StashBrowser = lazyComponent(() => import('./StashBrowser.svelte'));
   let stashesRepo = $state<string | null>(null);
 
@@ -367,22 +366,8 @@
       {/snippet}
     </PageHeader>
 
-    {#if stashesRepo}
-      {@const sid = stashesRepo}
-      <LazyMount
-        lazy={StashBrowser}
-        what="the stash browser"
-        quiet
-        onerror={() => (stashesRepo = null)}
-        props={{
-          repoId: sid,
-          onclose: () => (stashesRepo = null),
-          onchanged: (st: RepoStatusResp) => {
-            git.setStatus(sid, st);
-            gitBridge.refreshGraph(sid);
-          },
-        }}
-      />
+    {#if stashesRepo}{@const sid = stashesRepo}
+      <LazyMount lazy={StashBrowser} what="the stash browser" quiet onerror={() => (stashesRepo = null)} props={{ repoId: sid, onclose: () => (stashesRepo = null), onchanged: (st: RepoStatusResp) => { git.setStatus(sid, st); gitBridge.refreshGraph(sid); } }} />
     {/if}
 
     {#if focusView}
