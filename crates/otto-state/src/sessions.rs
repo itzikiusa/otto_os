@@ -1574,7 +1574,7 @@ mod tests {
                     access_mode: RuntimeAccessMode::ApprovalRequired,
                     created_by: user.clone(),
                     parent_id: None,
-                    meta: Some(serde_json::json!({"source": "personal-agent"})),
+                    meta: Some(serde_json::json!({"source": "personal_agent"})),
                 })
                 .await
                 .unwrap();
@@ -1602,7 +1602,7 @@ mod tests {
         let closed = labels.iter().find(|l| l.id == "t-agy").unwrap();
         assert_eq!(closed.kind, "thread");
         assert_eq!(closed.title, "t-agy title");
-        assert_eq!(closed.source.as_deref(), Some("personal-agent"));
+        assert_eq!(closed.source.as_deref(), Some("personal_agent"));
         assert_eq!(closed.created_by, user);
         assert!(labels.iter().any(|l| l.id == "t-new"));
     }

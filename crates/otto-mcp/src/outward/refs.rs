@@ -252,6 +252,8 @@ pub const PIN_NARROW_TOOLS: &[&str] = &[
 /// whatever `workspace_id` the caller sends). Listed so the classification
 /// test forces a conscious choice for every new tool.
 pub const PIN_UNVERIFIABLE: &[&str] = &[
+    // Asks the person for a secret in the calling session; no workspace argument.
+    "request_secret",
     // A schedule / run id alone names no workspace (no read route to probe).
     "update_personal_agent_schedule",
     "remove_personal_agent_schedule",
