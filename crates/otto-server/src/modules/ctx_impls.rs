@@ -607,6 +607,9 @@ impl otto_git::GitCtx for ServerCtx {
             None => settings.delete(&key).await,
         }
     }
+    fn worktree_files_changed(&self, paths: Vec<std::path::PathBuf>) {
+        self.ide.lsp_pool.notify_watched_files(&paths);
+    }
 }
 
 /// Settings key holding one repo's cleanup base branch override (drives the

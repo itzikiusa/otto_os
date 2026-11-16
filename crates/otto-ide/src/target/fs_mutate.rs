@@ -110,7 +110,7 @@ pub(super) async fn mutate_local_fs_in_roots(
                 .await;
             }
             if let Some(pool) = lsp_pool {
-                pool.notify_watched_file_if_build_manifest(&file, 1);
+                pool.notify_watched_file(&file, 1);
             }
             Ok(IdeFsMutateResp {
                 ok: true,
@@ -169,8 +169,8 @@ pub(super) async fn mutate_local_fs_in_roots(
                 .await;
             }
             if let Some(pool) = lsp_pool {
-                pool.notify_watched_file_if_build_manifest(&src, 3);
-                pool.notify_watched_file_if_build_manifest(&dst, 1);
+                pool.notify_watched_file(&src, 3);
+                pool.notify_watched_file(&dst, 1);
             }
             Ok(IdeFsMutateResp {
                 ok: true,
@@ -224,7 +224,7 @@ pub(super) async fn mutate_local_fs_in_roots(
                     .await
                     .map_err(|e| map_io_err("delete file", &target_path, e))?;
                 if let Some(pool) = lsp_pool {
-                    pool.notify_watched_file_if_build_manifest(&target_path, 3);
+                    pool.notify_watched_file(&target_path, 3);
                 }
             }
             Ok(IdeFsMutateResp {

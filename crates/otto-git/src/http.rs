@@ -56,6 +56,11 @@ pub trait GitCtx: Clone + Send + Sync + 'static {
     async fn set_cleanup_base_branch(&self, _repo_id: &Id, _base: Option<String>) -> Result<()> {
         Ok(())
     }
+
+    /// A checkout, pull or stash rewrote these worktree files (absolute paths;
+    /// gone ones were deleted). The default ignores them; `otto-server` tells the
+    /// IDE's language servers.
+    fn worktree_files_changed(&self, _paths: Vec<PathBuf>) {}
 }
 
 /// Build the git router. Paths are relative to the `/api/v1` mount point.
@@ -2075,6 +2080,7 @@ async fn repo_pull<S: GitCtx>(
         Some(m) => m,
         None => git.pull_mode_default().await,
     };
+    let before = crate::worktree_changes::before(&git).await;
     let note = if body.auto_stash {
         let (_, note) = git.pull_autostash_mode(token, mode).await?;
         note
@@ -2082,6 +2088,7 @@ async fn repo_pull<S: GitCtx>(
         git.pull_outcome_mode(token, mode).await?;
         None
     };
+    s.worktree_files_changed(crate::worktree_changes::changed_since(&git, before).await);
     drop(_rg);
     drop(_g);
     Ok(Json(serde_json::json!({
@@ -2186,11 +2193,13 @@ async fn repo_checkout<S: GitCtx>(
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let before = crate::worktree_changes::before(&git).await;
     if req.auto_stash {
         git.checkout_autostash(branch, req.create).await?;
     } else {
         git.checkout(branch, req.create).await?;
     }
+    s.worktree_files_changed(crate::worktree_changes::changed_since(&git, before).await);
     status_after_release(&git, _g).await
 }
 
@@ -2598,6 +2607,7 @@ async fn repo_stash<S: GitCtx>(
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let before = crate::worktree_changes::before(&git).await;
     match req.op.as_str() {
         "save" => {
             git.stash_save().await?;
@@ -2625,6 +2635,7 @@ async fn repo_stash<S: GitCtx>(
         }
         other => return Err(Error::Invalid(format!("bad stash op: {other}")).into()),
     }
+    s.worktree_files_changed(crate::worktree_changes::changed_since(&git, before).await);
     status_after_release(&git, _g).await
 }
 

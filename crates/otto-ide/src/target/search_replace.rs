@@ -110,7 +110,7 @@ pub(super) fn replace_local_sync(
             tmp.persist(&canon_p)
                 .map_err(|e| map_io_err("commit replace", &canon_p, e.error))?;
             if let Some(pool) = lsp_pool {
-                pool.notify_watched_file_if_build_manifest(&canon_p, 2);
+                pool.notify_watched_file(&canon_p, 2);
             }
         }
 

@@ -496,7 +496,7 @@ pub(super) async fn write_local_atomic(
     .await
     .map_err(|e| Error::Internal(format!("atomic save worker failed: {e}")))??;
     if let Some(pool) = lsp_pool {
-        pool.notify_watched_file_if_build_manifest(dest, 2);
+        pool.notify_watched_file(dest, 2);
     }
     Ok(())
 }
