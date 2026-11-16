@@ -204,10 +204,7 @@
       clusterId: cluster.id,
       topic,
       async peek(o) {
-        // An agent peek right after opening waits out the opening one
-        // (`consume` refuses to start while another runs).
-        await openingPeek;
-        tab = 'messages';
+        await openingPeek; tab = 'messages'; // `consume` won't start while the opening peek runs
         startMode = o.start ?? 'latest';
         partition = o.partition ?? '';
         limit = o.limit ?? 50;
@@ -249,11 +246,9 @@
       .catch((e) => (detailErr = loadErrorText(e)));
   }
 
-  /** The peek a topic opens with (see the effect below). */
   let openingPeek: Promise<void> | null = null;
   $effect(() => {
-    // re-run when topic changes
-    void topic;
+    void topic; // re-run when topic changes
     result = null;
     selected = null;
     fullCtl?.abort();
@@ -263,9 +258,7 @@
     tailError = null;
     tailLastSuccess = null;
     tailOffsets = new Map();
-    loadDetail();
-    // Open on the newest messages, not on an empty "press Peek" pane.
-    openingPeek = untrack(() => consume());
+    loadDetail(); openingPeek = untrack(() => consume()); // open on the newest messages
   });
 
   // Incremental live-tail: on each tick, request only messages past the max

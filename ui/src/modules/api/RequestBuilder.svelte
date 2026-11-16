@@ -29,8 +29,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { copyTextOrThrow } from '../../lib/clipboard';
-  import { reindentJson } from '../../lib/jsonReindent';
+  import { copyTextOrThrow } from '../../lib/clipboard'; import { reindentJson } from '../../lib/jsonReindent';
 
   type Tab = 'params' | 'headers' | 'body' | 'auth' | 'settings' | 'scripts' | 'docs';
 
@@ -153,8 +152,6 @@
     if (!body.trim()) return;
     try {
       let out: string;
-      // Validate, then re-indent the text itself: parse → stringify would
-      // round big ints and rewrite `1.10` / `1e400` in the body sent.
       if (rawType === 'JSON' || draft.kind === 'grpc') { JSON.parse(body); out = reindentJson(body); }
       else if (rawType === 'XML' || rawType === 'HTML') out = beautifyXml(body);
       else { toasts.info('Nothing to format', 'Formatting works for JSON, XML and HTML bodies.'); return; }

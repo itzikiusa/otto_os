@@ -297,8 +297,7 @@
   const pageRowCount = $derived(result?.rows.length ?? 0);
   const pageFrom = $derived(pageRowCount === 0 ? 0 : offset + 1);
   const pageTo = $derived(offset + pageRowCount);
-  // The drivers fetch one row past the page, so `truncated` says whether a
-  // next page exists (a full last page used to offer Next onto nothing).
+  // Drivers fetch one row past the page: `truncated` says a next page exists.
   const hasNextPage = $derived(pageSize > 0 && !!result?.truncated);
   const hasOrderBy = $derived(/\border\s+by\b/i.test(statement ?? ''));
 

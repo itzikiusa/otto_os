@@ -195,16 +195,8 @@
   // Schema) is a collapsible, independently-scrolling block — tap a header to
   // expand/minimise so the user keeps only what they need on screen. These
   // flags are inert on desktop/tablet (the headers only render when isPhone).
-  let connOpen = $state(true);
-  let schemaOpen = $state(true);
-  // Phone: once a connection tab is active its pane gets the screen; both
-  // accordions stay a tap away.
-  $effect(() => {
-    if (viewport.isPhone && database.selectedConnId) {
-      connOpen = false;
-      schemaOpen = false;
-    }
-  });
+  let connOpen = $state(true), schemaOpen = $state(true);
+  $effect(() => { if (viewport.isPhone && database.selectedConnId) { connOpen = false; schemaOpen = false; } }); // phone: the tab gets the screen
 
   // Dock this connection as a pane in the Agents split (beside an agent), with
   // the full DB Explorer. Right-clicked from a connection tab or sidebar row.
