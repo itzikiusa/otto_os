@@ -8,7 +8,7 @@
 // Defense-in-depth for vault notes, agent transcript prose and tool output
 // (WebFetch text is attacker-controlled) rendered to HTML.
 
-const ALLOWED_TAGS = new Set([
+export const ALLOWED_TAGS = new Set([
   'a', 'abbr', 'b', 'blockquote', 'br', 'code', 'del', 'details', 'div', 'em',
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'img', 'input', 'kbd', 'li',
   'mark', 'ol', 'p', 'pre', 's', 'small', 'span', 'strong', 'sub', 'summary',
