@@ -5,12 +5,6 @@
   import { paneResizer, RESIZE_TITLE } from '../../lib/paneResizer';
   import { ws } from '../../lib/stores/workspace.svelte';
   import ThreadPane from './ThreadPane.svelte';
-  import LazyMount from '../../lib/components/LazyMount.svelte';
-  import { lazyComponent } from '../../lib/lazy-component.svelte';
-  // On demand: the council view embeds the whole runtime thread per seat, and
-  // most thread pages never show one.
-  const CouncilView = lazyComponent(() => import('./runtime/CouncilView.svelte'));
-  import { council } from './runtime/councilStore.svelte';
   import { isThreadSession } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
 
@@ -54,14 +48,8 @@
   }
 </script>
 
-<!-- A council (`meta.council`) shows as its columns unless the person chose
-     "Continue here" on that thread. -->
 {#snippet pane(id: string, focused: boolean, multiPane: boolean)}
-  {#if council.showsCouncil(id)}
-    <LazyMount lazy={CouncilView} what="the council" variant="panel" props={{ sessionId: id }} />
-  {:else}
-    <ThreadPane paneId={id} {focused} {multiPane} {onstartroom} />
-  {/if}
+  <ThreadPane paneId={id} {focused} {multiPane} {onstartroom} />
 {/snippet}
 
 <div

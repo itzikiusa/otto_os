@@ -241,7 +241,7 @@
     );
   }
 
-  async function launch(withPrompt: boolean, overridePrompt?: string): Promise<void> {
+  async function launch(withPrompt: boolean, overridePrompt?: string, background = false): Promise<void> {
     if (busy) return;
     const readiness = providerReadiness(provider);
     if (!readiness.available) {
@@ -314,7 +314,7 @@
       const opts = { scratch: scratchActive && ws.currentId !== SCRATCH_WORKSPACE_ID };
       const asCouncil = withPrompt && council.ready;
       const created = asCouncil
-        ? (await council.start(targetWs, { prompt: firstMsg, title, cwd: dir || null }))[0]
+        ? (await council.start(targetWs, { prompt: firstMsg, title, cwd: dir || null }, background ? 'background' : 'panes'))[0]
         : runtime && isRuntimeProvider(provider, auth.meta)
           ? await runtimeThreads.start(targetWs, {
               provider,
@@ -337,8 +337,8 @@
       files.picked = [];
       threads.draftCwd = null;
       threads.rememberProject(dir || null);
-      if (openInBeside && threads.paneIds.length > 0) threads.openBeside(created.id);
-      else threads.selectThread(created.id);
+      if (openInBeside && threads.paneIds.length > 0 && !asCouncil) threads.openBeside(created.id);
+      else if (!asCouncil) threads.selectThread(created.id);
     } catch (e) {
       toastError('Couldn’t start thread', e);
     } finally {
@@ -438,7 +438,7 @@
     }
     if (enterSends(e)) {
       e.preventDefault();
-      void launch(!((e.metaKey || e.ctrlKey) && !prompt.trim() && stageContext.length === 0 && files.list.length === 0));
+      void launch(!((e.metaKey || e.ctrlKey) && !prompt.trim() && stageContext.length === 0 && files.list.length === 0), undefined, e.metaKey || e.ctrlKey);
     }
   }
 
@@ -578,7 +578,7 @@
           class="nt-send"
           class:ask={council.ready}
           aria-label={busy ? 'Starting thread' : council.ready ? `Ask ${council.seats.length} agents` : 'Start thread'}
-          title="Start thread (↵) — ⌘↵ with no text opens an empty one"
+          title={council.ready ? 'Ask every agent (↵) — ⌘↵ starts them in the background' : 'Start thread (↵) — ⌘↵ with no text opens an empty one'}
           data-testid="new-thread-send-btn"
           disabled={busy || (!prompt.trim() && stageContext.length === 0 && files.list.length === 0)}
           onclick={() => void launch(true)}

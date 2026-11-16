@@ -289,7 +289,7 @@ export async function executeIdePromptSend(opts: {
       title: summarizeIdeThreadTitle(opts.seedText, opts.provider),
       cwd: opts.localCwd,
       ...(pics.length > 0 ? { images: pics } : {}),
-    });
+    }, 'background');
     rememberIdeProjectRoot(opts.localCwd);
     if (seats[0]) await opts.selectSession(seats[0].id);
     return;

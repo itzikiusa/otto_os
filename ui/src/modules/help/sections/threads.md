@@ -43,11 +43,9 @@ Threads (Experimental) is a conversation-first workspace for coding agents. It k
 
 **Council: one prompt, several agents**
 - In the new-thread stage, turn on **Ask several** beside the agent chip, then pick 2–4 models. Each one is a seat; the send button reads e.g. **Ask 3**.
-- The seats answer side by side in columns (one at a time on a phone). Every seat is read-only, so agents working in one folder never clash on files.
-- **Synthesize with …** (the judge defaults to seat 1's agent) opens one more read-only thread that compares the answers: where they agree, where they differ, and a pick or a merge. It is the last column.
-- **Keep talking to it**: the box under the columns sends a follow-up round to **All seats** or one seat (click a seat's name). Each seat answers in its own thread and keeps its context; a busy seat queues it. **Ask the others** drafts "Seat X answered: … Where do you disagree, and why?" for the rest — edit it, then send. **Stop all** stops the seats still working. At most 10 rounds; nothing is sent without your click.
-- From round 2, **Synthesize round N** judges the latest round and names any seat with no answer in it. Earlier syntheses stay in the **Rounds** strip.
-- **Continue here** takes one seat on as a normal thread. The sidebar shows the council as one **Council · N** row.
+- The seats open side by side (Split for 2, Grid for 3–4). Each one is a normal thread with its own composer: to follow up with one agent, type in its thread. Every seat is read-only, so agents working in one folder never clash on files. ⌘↵ starts them in the background and a toast offers **Show**.
+- The sidebar nests the seats under seat 1. On a phone, the header's **Related threads** chip switches between seats.
+- The thread's **⋯** menu holds the rest: **Open council side by side**, **Ask every seat…** (the same follow-up to each seat; a busy seat queues it) and **Synthesize with ▸** a judge (seat 1's agent first). The judge is one more read-only thread, opened beside the seats, that compares each seat's latest answer: where they agree, where they differ, and a pick or a merge.
 
 **Workspace inspector** (the right panel: Browser, Files, Diff, Pull request, Side chat)
 - **Files**: browse the working tree and open multiple file tabs (`Preview` for Markdown, JSON, CSV/TSV and images, or `Source` with syntax highlighting).

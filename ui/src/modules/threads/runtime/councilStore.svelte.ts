@@ -1,12 +1,19 @@
 // Council state (docs/features/threads-structured-runtime.md "Council"): the
-// seats picked in the new-thread stage, the two council routes, and which
-// council threads a person chose to continue as a plain thread.
+// seats picked in the new-thread stage, the two council routes, and the
+// council's ⋯ items. A council is a linked group of normal threads: seats
+// open in the Split / Grid panes, and every follow-up is typed in a seat.
 
 import { api } from '../../../lib/api/client';
+import { confirmer } from '../../../lib/confirm.svelte';
+import type { MenuItem } from '../../../lib/contextmenu.svelte';
+import { pluralNoun } from '../../../lib/plural';
 import { formatEffortShort, formatModelLabel } from '../../../lib/providerModels';
-import { harnessLabel } from '../../../lib/providers';
+import { agentProviders, harnessLabel, providerReadiness, sessionProviderSlug } from '../../../lib/providers';
+import { router } from '../../../lib/router.svelte';
 import { auth } from '../../../lib/stores/auth.svelte';
-import type { CouncilFollowUpReq, CouncilResp, CouncilRoundsResp, CreateCouncilReq, RuntimeProviderOrSlug, RuntimeSession, SynthesizeCouncilReq } from '../../../lib/api/types';
+import { toasts } from '../../../lib/toast.svelte';
+import { toastError } from '../../../lib/toastError';
+import type { CouncilResp, CreateCouncilReq, RuntimeProviderOrSlug, RuntimeSession, SynthesizeCouncilReq } from '../../../lib/api/types';
 import { threads } from '../threadsStore.svelte';
 import { COUNCIL_MAX_SEATS, COUNCIL_MIN_SEATS, councilChipLabel, councilMembers, councilOf, toggleSeat, type CouncilSeat } from './council';
 import { isRuntimeProvider, runtimeThreads } from './runtimeThreads.svelte';
@@ -16,12 +23,6 @@ class CouncilStore {
   on = $state(false);
   /** The seats picked there (2–4 to send). */
   seats = $state<CouncilSeat[]>([]);
-  /** Sidebar: councils shown expanded into their seats, by council id. */
-  expanded = $state<Record<string, true>>({});
-  /** Council threads continued as a plain thread ("Continue here"), by id. */
-  continued = $state<Record<string, true>>({});
-  /** Each council's rounds (`GET …/council/rounds`), by council id. */
-  rounds = $state<Record<string, CouncilRoundsResp>>({});
   /** ⌘ / Shift was held on the last click in the model picker. */
   private multi = false;
   /** The stage's pick when the picker opened (a ⌘-click adds to it). */
@@ -74,8 +75,14 @@ class CouncilStore {
     return this.seats.length >= COUNCIL_MAX_SEATS;
   }
 
-  /** Start the council (all seats or none); returns its seats, seat 1 first. */
-  async start(workspaceId: string, req: { prompt: string; title: string; cwd: string | null; images?: CreateCouncilReq['images'] }): Promise<RuntimeSession[]> {
+  /** Start the council (all seats or none); returns its seats, seat 1 first.
+   *  `panes` opens them side by side in Threads; `background` (⌘↵, the IDE)
+   *  leaves the view as it is and toasts "Started N threads" with Show. */
+  async start(
+    workspaceId: string,
+    req: { prompt: string; title: string; cwd: string | null; images?: CreateCouncilReq['images'] },
+    open: 'panes' | 'background',
+  ): Promise<RuntimeSession[]> {
     const body: CreateCouncilReq = {
       prompt: req.prompt,
       title: req.title,
@@ -91,7 +98,16 @@ class CouncilStore {
     for (const s of resp.seats) runtimeThreads.byId[s.id] = s;
     this.on = false;
     this.seats = [];
+    const ids = resp.seats.map((x) => x.id);
+    if (open === 'panes') threads.openGroup(ids);
+    else toasts.push('success', `Started ${ids.length} threads`, undefined, 8000, { action: { label: 'Show', run: () => this.showInThreads(ids) } });
     return resp.seats;
+  }
+
+  /** Show seats `ids` side by side in Threads, from anywhere (the IDE). */
+  showInThreads(ids: readonly string[]): void {
+    threads.openGroup(ids);
+    if (ids[0]) router.go(`threads/${ids[0]}`);
   }
 
   /** Open the council's judge (409 while a seat still works). */
@@ -99,47 +115,6 @@ class CouncilStore {
     const judge = await api.post<RuntimeSession>(`/runtime-sessions/${id}/council/synthesize`, req);
     runtimeThreads.byId[judge.id] = judge;
     return judge;
-  }
-
-  /** Load the rounds of the council `id` sits on. */
-  async loadRounds(councilId: string, id: string): Promise<CouncilRoundsResp> {
-    const r = await api.get<CouncilRoundsResp>(`/runtime-sessions/${id}/council/rounds`);
-    this.rounds = { ...this.rounds, [councilId]: r };
-    return r;
-  }
-
-  /** A follow-up round (every seat when `seats` is empty); a seat still
-   *  working queues it. Sent only from a click: nothing re-asks by itself. */
-  async followUp(councilId: string, id: string, req: CouncilFollowUpReq): Promise<CouncilRoundsResp> {
-    const r = await api.post<CouncilRoundsResp>(`/runtime-sessions/${id}/council/rounds`, req);
-    this.rounds = { ...this.rounds, [councilId]: r };
-    return r;
-  }
-
-  /** Threads shows `id` as a council (not a plain thread). */
-  showsCouncil(id: string | null | undefined): boolean {
-    return !!id && !!councilOf(runtimeThreads.get(id)) && !this.continued[id];
-  }
-
-  /** "Continue here": focus one seat (or the synthesis) as a plain thread. */
-  continueHere(id: string): void {
-    this.continued = { ...this.continued, [id]: true };
-    threads.selectThread(id);
-  }
-
-  /** Back to the council view of `id`'s council. */
-  showCouncil(id: string): void {
-    const c = councilMembers(Object.values(runtimeThreads.byId), id);
-    const ids = c ? [...c.seats, ...(c.synthesis ? [c.synthesis] : [])].map((s) => s.id) : [id];
-    const next = { ...this.continued };
-    for (const m of ids) delete next[m];
-    this.continued = next;
-    threads.selectThread(c?.seats[0]?.id ?? id);
-  }
-
-  toggleExpanded(councilId: string): void {
-    const { [councilId]: was, ...rest } = this.expanded;
-    this.expanded = was ? rest : { ...rest, [councilId]: true };
   }
 }
 
@@ -154,4 +129,60 @@ export function seatLabel(seat: CouncilSeat, meta: Parameters<typeof formatModel
 /** The agent chip while "Ask several" is on: "Opus, Sol, +1". */
 export function councilAgentLabel(meta: Parameters<typeof formatModelLabel>[2]): string {
   return council.seats.length ? councilChipLabel(council.seats.map((s) => seatLabel(s, meta))) : 'Pick 2–4 agents';
+}
+
+/** The council `id` sits on, from the loaded threads. */
+const membersOf = (id: string) => councilMembers(Object.values(runtimeThreads.byId), id);
+
+/** "Ask every seat…": the same text to each open seat, queued behind a turn
+ *  that still runs (one prompt per seat, like typing it in each). */
+async function askEverySeat(id: string): Promise<void> {
+  const seats = (membersOf(id)?.seats ?? []).filter((s) => s.status !== 'closed');
+  if (!seats.length) return;
+  const text = await confirmer.promptText(`Send the same message to the council’s ${seats.length} open seats.`, {
+    title: 'Ask every seat',
+    confirmLabel: `Ask ${seats.length}`,
+    placeholder: 'Follow-up question',
+  });
+  if (!text?.trim()) return;
+  const r = await Promise.allSettled(seats.map((s) => runtimeThreads.prompt(s.id, { text: text.trim(), delivery: 'queue' })));
+  const bad = r.findIndex((x) => x.status === 'rejected');
+  if (bad >= 0) toastError(`Couldn’t ask ${seats[bad].title}`, (r[bad] as PromiseRejectedResult).reason);
+  else toasts.success(`Asked ${seats.length} seats`);
+}
+
+/** Synthesize with `provider`: the judge opens as a child pane beside the seats. */
+async function synthesizeWith(id: string, provider: RuntimeProviderOrSlug): Promise<void> {
+  try {
+    const judge = await council.synthesize(id, { provider });
+    threads.openBeside(judge.id);
+  } catch (e) {
+    toastError('Couldn’t synthesize', e);
+  }
+}
+
+/** The council items of a council thread's ⋯ (none for any other thread). */
+export function councilMenuItems(id: string): MenuItem[] {
+  const c = membersOf(id);
+  if (!c) return [];
+  const ids = [...c.seats, ...(c.synthesis ? [c.synthesis] : [])].map((s) => s.id).slice(0, COUNCIL_MAX_SEATS);
+  const busy = c.seats.filter((s) => s.status === 'working').map((s) => councilOf(s)?.seat);
+  const why = busy.length ? `${pluralNoun(busy.length, 'Seat')} ${busy.join(', ')} still working` : undefined;
+  const first = c.seats[0] ? sessionProviderSlug(c.seats[0]) : 'claude';
+  const judges = [first, ...agentProviders().filter((p) => p !== first && isRuntimeProvider(p, auth.meta))];
+  return [
+    { label: 'Open council side by side', icon: 'grid', action: () => threads.openGroup(ids) },
+    { label: 'Ask every seat…', icon: 'send', action: () => void askEverySeat(id) },
+    {
+      label: 'Synthesize with',
+      icon: 'sparkle',
+      disabled: !!why,
+      title: why,
+      children: judges.map((p) => ({
+        label: harnessLabel(p),
+        disabled: !providerReadiness(p).available,
+        action: () => void synthesizeWith(id, p as RuntimeProviderOrSlug),
+      })),
+    },
+  ];
 }

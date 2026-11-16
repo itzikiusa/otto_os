@@ -13,6 +13,7 @@ import { toastError } from '../../../lib/toastError';
 import { threads } from '../threadsStore.svelte';
 import { phoneHandoff } from '../../../lib/stores/phoneHandoff.svelte';
 import { openProjectInIde } from '../ideProjects.svelte';
+import { councilMenuItems } from './councilStore.svelte';
 import { runtimeThreads } from './runtimeThreads.svelte';
 
 export function runtimeThreadMenu(id: string): MenuItem[] {
@@ -31,6 +32,7 @@ export function runtimeThreadMenu(id: string): MenuItem[] {
       action: () => threads.toggleTerminal(id),
     },
     ...uiControlItem(id),
+    ...councilMenuItems(id),
     ...phoneHandoff.menuItem(`threads/${id}`, 'this thread'),
     { separator: true },
     // Tidy the list without stopping the agent (closing does both).
