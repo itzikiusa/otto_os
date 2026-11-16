@@ -10,6 +10,7 @@ import {
   type IdeDebugSessionSnapshot,
   type IdeProjectRoot,
   type IdeTargetSpec,
+  type IdeVariable,
   type IdeWatch,
 } from './ideTypes';
 
@@ -77,6 +78,23 @@ export function normalizeIncomingDebugSnapshot(
     output,
   };
   return { snap, paused };
+}
+
+/** DAP variable references are only valid for one stop, and delve hands out the
+ *  same numbers again, so a new stop (or frame) drops every cached expansion and
+ *  seeds each scope from the snapshot. Keyed on the old numbers, Locals kept
+ *  showing the first stop's variables after Continue. */
+export function syncStopVariables(
+  host: { expandedVariables: Record<number, IdeVariable[]> },
+  prev: IdeDebugSessionSnapshot | null,
+  snap: IdeDebugSessionSnapshot,
+): void {
+  const stop = (s: IdeDebugSessionSnapshot | null): string =>
+    s?.state === 'paused' ? `${s.id}:${s.active_thread_id}:${s.active_frame_id}:${s.paused_file}:${s.paused_line}` : '';
+  if (snap.state !== 'paused' || stop(prev) === stop(snap)) return;
+  const fresh: Record<number, IdeVariable[]> = {};
+  for (const sc of snap.scopes ?? []) if (sc.variables_reference > 0 && sc.variables?.length) fresh[sc.variables_reference] = sc.variables;
+  host.expandedVariables = fresh;
 }
 
 export function syncSnapshotBreakpointsToStore(

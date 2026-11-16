@@ -123,8 +123,8 @@
   {/if}
 
   <div class="run-list">
-    {#if ide.gutterTarget}
-      {@const item = ide.gutterTarget}
+    {#if ide.envState.gutterTarget}
+      {@const item = ide.envState.gutterTarget}
       {@const active = ide.selectedConfigId === GUTTER_TARGET_ID}
       <div class="run-sec">From the editor</div>
       <button type="button" class="run-item" class:is-active={active} aria-current={active ? 'true' : undefined} onclick={() => selectTarget(GUTTER_TARGET_ID)} data-testid="ide-run-gutter-target">

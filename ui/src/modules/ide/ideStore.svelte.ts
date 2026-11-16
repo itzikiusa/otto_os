@@ -26,7 +26,6 @@ import {
   normalizePathDiagnostics, performCloseTabBatch, resetTargetLifecycleState, syncAdditionalRootsFromEnvState,
   type IdeDebugLaunchMemo, type IdeRunLaunchMemo, type IncomingIdeDiagnostic,
 } from './store/ideStateSlices.svelte';
-import { GUTTER_TARGET_ID } from './store/ideTypes';
 import {
   resolveRepoGoBuildTags,
   resolveRepoRootForPath,
@@ -149,7 +148,6 @@ class IdeStore {
   get runConfigs() { return this.envState.runConfigs; } set runConfigs(v) { this.envState.runConfigs = v; }
   get detectedConfigs() { return this.envState.detectedConfigs; } set detectedConfigs(v) { this.envState.detectedConfigs = v; }
   get selectedConfigId() { return this.envState.selectedConfigId; } set selectedConfigId(v) { this.envState.selectedConfigId = v; }
-  get gutterTarget() { return this.envState.gutterTarget; } set gutterTarget(v) { this.envState.gutterTarget = v; }
   get envLoading() { return this.envState.envLoading; } set envLoading(v) { this.envState.envLoading = v; }
   get envError() { return this.envState.envError; } set envError(v) { this.envState.envError = v; }
   get activeRun() { return this.envState.activeRun; } set activeRun(v) { this.envState.activeRun = v; }
@@ -615,7 +613,6 @@ class IdeStore {
     return this.startRun(memo);
   }
   async startRun(opts: { configId?: string; adhoc?: Partial<IdeRunConfig>; keepTestcontainers?: boolean; coverage?: boolean; skipProdConfirm?: boolean } = {}): Promise<void> {
-    if (!opts.configId && !opts.adhoc && this.repeatGutterTarget('run', opts)) return;
     const gate = await (await loadRepoActionsMod()).confirmIdeTargetProdLaunch(this.target, this.projectEnv, opts.skipProdConfirm);
     if (!gate.allowed) return;
     if (idePreferences.current.autoSave) await this.flushAutoSave();
@@ -623,19 +620,9 @@ class IdeStore {
     this.runPoller = poller;
     this.runSseCtl = sseCtl;
   }
-  /** The toolbar's selected target is the last gutter launch: launch it again. */
-  private repeatGutterTarget(mode: 'run' | 'debug', runOpts: { keepTestcontainers?: boolean; coverage?: boolean } = {}): boolean {
-    const item = this.selectedConfigId === GUTTER_TARGET_ID ? this.gutterTarget : null;
-    if (item) this.runFromGutter(item, mode, runOpts);
-    return Boolean(item);
-  }
-  runFromGutter(item: IdeGutterItem, mode: 'run' | 'debug' | 'run_keep_tc', runOpts: { keepTestcontainers?: boolean; coverage?: boolean } = {}): void {
+  runFromGutter(item: IdeGutterItem, mode: 'run' | 'debug' | 'run_keep_tc'): void {
     void loadDebugEnvMod().then((m) =>
-      m.launchGutterAction(
-        this, item, mode,
-        (adhoc, keepTc) => void this.startRun({ ...runOpts, adhoc, keepTestcontainers: keepTc || runOpts.keepTestcontainers }),
-        (opts) => void this.startDebug(opts),
-      ),
+      m.launchGutterAction(this, item, mode, (adhoc, keepTc) => void this.startRun({ adhoc, keepTestcontainers: keepTc }), (opts) => void this.startDebug(opts)),
     );
   }
   installToolchain(ecosystem: string, component: 'sdk' | 'lsp' | 'dap' | 'all', version?: string): Promise<IdeInstallJob | null> {
@@ -701,7 +688,6 @@ class IdeStore {
     } catch { /* exited */ }
   }
   async startDebug(opts: { configId?: string; language?: string; skipProdConfirm?: boolean; launch?: IdeDebugLaunchMemo['launch'] } = {}): Promise<void> {
-    if (!opts.configId && !opts.launch && this.repeatGutterTarget('debug')) return;
     const gate = await (await loadRepoActionsMod()).confirmIdeTargetProdLaunch(this.target, this.projectEnv, opts.skipProdConfirm);
     if (!gate.allowed) return;
     if (idePreferences.current.autoSave) await this.flushAutoSave();
@@ -718,7 +704,7 @@ class IdeStore {
       if (!this.debugState.lastDebugLaunch && (sl?.program || sl?.attach_port)) {
         this.debugState.lastDebugLaunch = { configId: snap.config_id ?? undefined, language: snap.language, launch: { program: sl.program, args: sl.args, build_flags: sl.build_flags, cwd: sl.cwd ?? undefined, test_name: sl.test_name ?? undefined, attach_port: sl.attach_port ?? undefined, env: sl.env, env_file: sl.env_file, inherit_shell_env: sl.inherit_shell_env, sdk_path: sl.sdk_path } };
       }
-      m.syncSnapshotBreakpointsToStore(this, snap);
+      m.syncSnapshotBreakpointsToStore(this, snap); m.syncStopVariables(this, cur, snap);
       if (snap.state === 'paused' && paused && snap.paused_line) {
         if (`${paused}:${snap.paused_line}` !== prevPaused) void this.openFile(paused, { line: snap.paused_line, preview: false });
         void this.refreshWatches();

@@ -63,6 +63,9 @@ struct Fixture {
     _tmp: tempfile::TempDir,
     app: Router,
     root: String,
+    /// `proj2`, the multi-root project's second folder, when a file is written
+    /// under `../proj2/`.
+    second_root: Option<String>,
 }
 
 impl Fixture {
@@ -79,6 +82,8 @@ impl Fixture {
         let (_ctx, app) =
             build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
         let root = root_path.to_string_lossy().into_owned();
+        let second = tmp.path().join("proj2");
+        let second_root = second.is_dir().then(|| second.to_string_lossy().into_owned());
         let mut env_vars =
             vec![json!({ "key": "PATH", "value": path_with_extras(), "secret": false })];
         for (k, v) in env {
@@ -88,7 +93,11 @@ impl Fixture {
             &app,
             Method::PUT,
             "/ide/environments",
-            Some(json!({ "target": { "kind": "local", "root": root }, "env_vars": env_vars })),
+            Some(json!({
+                "target": { "kind": "local", "root": root },
+                "env_vars": env_vars,
+                "additional_roots": second_root.iter().collect::<Vec<_>>(),
+            })),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "PUT /ide/environments failed: {body}");
@@ -96,15 +105,24 @@ impl Fixture {
             _tmp: tmp,
             app,
             root,
+            second_root,
         }
     }
 
+    /// `rel` under the project root, or under the second root as `../proj2/…`.
     fn path(&self, rel: &str) -> String {
-        format!("{}/{rel}", self.root)
+        match (rel.strip_prefix("../proj2/"), &self.second_root) {
+            (Some(r), Some(second)) => format!("{second}/{r}"),
+            _ => format!("{}/{rel}", self.root),
+        }
+    }
+
+    fn folders(&self) -> Vec<&String> {
+        std::iter::once(&self.root).chain(&self.second_root).collect()
     }
 
     fn target(&self) -> Value {
-        json!({ "kind": "local", "root": self.root })
+        json!({ "kind": "local", "root": self.root, "additional_roots": self.second_root.iter().collect::<Vec<_>>() })
     }
 
     /// The gutter item of `rel` whose kind is `kind` and label contains `label`.
@@ -155,7 +173,7 @@ impl Fixture {
             "/ide/runs",
             Some(json!({
                 "target": self.target(),
-                "project_folders": [self.root],
+                "project_folders": self.folders(),
                 "adhoc": {
                     "id": format!("gutter-{}", item["line"]),
                     "name": item["label"],
@@ -219,7 +237,7 @@ impl Fixture {
             "/ide/debug/sessions",
             Some(json!({
                 "target": self.target(),
-                "project_folders": [self.root],
+                "project_folders": self.folders(),
                 "language": item["language"],
                 "launch": { "program": program, "args": [], "cwd": spec["cwd"], "test_name": test_name },
                 "breakpoints": bps,
@@ -246,7 +264,10 @@ impl Fixture {
             budget = Duration::from_secs(30);
             assert_eq!(snap["paused_line"], *line, "wrong pause: {}", brief(&snap));
             assert!(
-                snap["paused_file"].as_str().unwrap_or("").ends_with(rel),
+                snap["paused_file"]
+                    .as_str()
+                    .unwrap_or("")
+                    .ends_with(rel.trim_start_matches("../")),
                 "paused in the wrong file: {}",
                 brief(&snap)
             );
@@ -369,13 +390,31 @@ func main() {
 }
 "#;
 
+/// A test two packages deep (the user's `go_utilities/orm/sql` shape); with
+/// `tag` it is a `//go:build <tag>` suite like the component tests.
+fn go_nested_test(tag: Option<&str>, pkg: &str, name: &str) -> String {
+    let header = tag.map_or(String::new(), |t| format!("//go:build {t}\n\n"));
+    format!(
+        "{header}package {pkg}\n\nimport \"testing\"\n\nfunc {name}(t *testing.T) {{\n\ttable := \"players\"\n\tid := 7\n\tquery := table + \"/\"\n\tif id == 0 {{\n\t\tt.Fatal(query)\n\t}}\n\tt.Log(\"GO_NESTED_DONE\", query)\n}}\n"
+    )
+}
+
 async fn go_fixture() -> Fixture {
+    let nested = go_nested_test(None, "sql", "TestDeleteSuccess");
+    let tagged = go_nested_test(Some("component"), "flow", "TestFlowComponent");
+    let second = go_nested_test(None, "deep", "TestSecondRoot");
+    let at_root = go_nested_test(None, "gm", "TestRootPkg");
     Fixture::new(
         &[
             ("go.mod", GO_MOD),
             ("calc/calc.go", GO_CALC),
             ("calc/calc_test.go", GO_TEST),
             ("cmd/app/main.go", GO_MAIN),
+            ("root_test.go", &at_root),
+            ("orm/sql/query_builder_test.go", &nested),
+            ("test/flow/flow_component_test.go", &tagged),
+            ("../proj2/go.mod", "module example.com/second\n\ngo 1.21\n"),
+            ("../proj2/svc/deep/deep_test.go", &second),
         ],
         // testify comes from the module cache: never reach the network.
         &[
@@ -410,6 +449,40 @@ async fn matrix_go_debug_test() {
         &[(12, &["left", "right"]), (14, &["sum"])],
     )
     .await;
+}
+
+/// The gutter test items of the nested, tagged and second-root Go tests.
+/// Their bodies share one shape: stop on `id := 7` (line `l`) and the `t.Log` line.
+const GO_NESTED_CELLS: &[(&str, &str, u32)] = &[
+    ("root_test.go", "TestRootPkg", 7),
+    ("orm/sql/query_builder_test.go", "TestDeleteSuccess", 7),
+    ("test/flow/flow_component_test.go", "TestFlowComponent", 9),
+    ("../proj2/svc/deep/deep_test.go", "TestSecondRoot", 7),
+];
+
+#[tokio::test]
+async fn matrix_go_run_nested_tagged_and_second_root_tests() {
+    if !ensure_bins_or_skip(&["go"]) {
+        return;
+    }
+    let f = go_fixture().await;
+    for (rel, name, _) in GO_NESTED_CELLS {
+        let item = f.gutter(rel, "test", name).await;
+        f.run(&item, "GO_NESTED_DONE").await;
+    }
+}
+
+#[tokio::test]
+async fn matrix_go_debug_nested_tagged_and_second_root_tests() {
+    if !ensure_bins_or_skip(&["go", "dlv"]) {
+        return;
+    }
+    let f = go_fixture().await;
+    for (rel, name, l) in GO_NESTED_CELLS {
+        let item = f.gutter(rel, "test", name).await;
+        f.debug(&item, rel, &[(*l, &["table"]), (*l + 5, &["query", "id"])])
+            .await;
+    }
 }
 
 #[tokio::test]

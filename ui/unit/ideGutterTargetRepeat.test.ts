@@ -38,7 +38,7 @@ function host(extra: Record<string, unknown> = {}): any {
     projectEnv: null,
     runConfigs: [],
     selectedConfigId: null,
-    gutterTarget: null,
+    envState: { gutterTarget: null },
     activeSpringProfiles: [],
     activeMavenProfiles: [],
     effectiveBreakpoints: [],
@@ -60,16 +60,29 @@ describe('IDE toolbar target after a gutter launch', () => {
       const h = host({ selectedConfigId: 'auto:go_run:cmd' });
       mod.launchGutterAction(h, goTest, mode, () => {}, () => {});
       assert.equal(h.selectedConfigId, 'gutter', mode);
-      assert.equal(h.gutterTarget, goTest, mode);
+      assert.equal(h.envState.gutterTarget, goTest, mode);
     }
   });
 
   it('reloading the run configs keeps the gutter target selected', async () => {
     const auto = { id: 'auto:go_run:cmd', name: 'Go Run cmd', runner: 'go_run', args: ['run', './cmd/x'], auto_detected: true };
     const mod = load({ get: async () => ({ env: {}, configs: [], detected_configs: [auto] }) });
-    const h = host({ selectedConfigId: 'gutter', gutterTarget: goTest });
+    const h = host({ selectedConfigId: 'gutter', envState: { gutterTarget: goTest } });
     await mod.fetchEnvironments(h);
     assert.equal(h.selectedConfigId, 'gutter');
+  });
+
+  it('the toolbar Debug / Run repeat the selected gutter target', async () => {
+    let body: any = null;
+    const mod = load({ post: async (_url: string, b: unknown) => { body = b; throw new Error('stop'); } });
+    const auto = { id: 'auto:go_run:cmd', name: 'Go Run cmd', runner: 'go_run', args: ['run', './cmd/x'], auto_detected: true, env_overrides: {} };
+    const h = host({ runConfigs: [auto], selectedConfigId: 'gutter', envState: { gutterTarget: goTest } });
+    await mod.launchDebugSession(h, {}, null, () => {});
+    assert.equal(body.launch.program, '/ws/app/pkg');
+    assert.equal(body.launch.test_name, '^TestX$');
+    await mod.launchIdeRun(h, {}, null, null);
+    assert.equal(body.adhoc.runner, 'go_test');
+    assert.deepEqual([...body.adhoc.args], goTest.run_spec.args);
   });
 
   it('debugging a tool-runner config does not pass its Run argv to the program', async () => {

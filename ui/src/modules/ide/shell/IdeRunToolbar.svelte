@@ -21,7 +21,7 @@
   const isDebugging = $derived(
     Boolean(ide.activeDebug && ide.activeDebug.state !== 'terminated' && ide.activeDebug.state !== 'error'),
   );
-  const gutterTarget = $derived(ide.selectedConfigId === GUTTER_TARGET_ID ? ide.gutterTarget : null);
+  const gutterTarget = $derived(ide.selectedConfigId === GUTTER_TARGET_ID ? ide.envState.gutterTarget : null);
   const selectedConfig = $derived<IdeRunConfig | null>(
     gutterTarget ? null : ide.runConfigs.find((c) => c.id === ide.selectedConfigId) ?? ide.runConfigs[0] ?? null,
   );
