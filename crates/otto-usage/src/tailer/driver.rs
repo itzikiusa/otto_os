@@ -1004,12 +1004,13 @@ impl UsageTailer {
 
     fn record_claude(&mut self, line: ClaudeLine, ids: &(String, String), provider: &str) {
         let usage = line.usage;
-        let cost = estimate_cost(
+        let cost = crate::estimate_cost_with_1h(
             &usage.model,
             usage.input,
             usage.output,
             usage.cache_read,
             usage.cache_write,
+            line.cache_write_1h,
         );
         self.pending_events.push(UsageEvent {
             ts: line.timestamp,
@@ -1636,7 +1637,14 @@ fn rebuild_events(
                 output_tokens: u.output,
                 cache_read_tokens: u.cache_read,
                 cache_write_tokens: u.cache_write,
-                cost_usd: estimate_cost(&u.model, u.input, u.output, u.cache_read, u.cache_write),
+                cost_usd: crate::estimate_cost_with_1h(
+                    &u.model,
+                    u.input,
+                    u.output,
+                    u.cache_read,
+                    u.cache_write,
+                    line.cache_write_1h,
+                ),
                 duration_ms: 0,
                 ..Default::default()
             });

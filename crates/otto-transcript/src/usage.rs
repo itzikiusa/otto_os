@@ -74,6 +74,10 @@ pub struct ClaudeLine {
     pub dedup_key: Option<String>,
     /// The line's own `timestamp` (RFC3339), the true time of the API call.
     pub timestamp: Option<String>,
+    /// The part of `usage.cache_write` written with the 1-hour TTL
+    /// (`cache_creation.ephemeral_1h_input_tokens`), priced at 2× input.
+    #[serde(default)]
+    pub cache_write_1h: u64,
     /// `message.stop_reason` is set — this line carries the response's FINAL
     /// usage. While a response streams, Claude Code writes earlier lines with
     /// `stop_reason: null` and a *partial* `output_tokens` (seen on subagent
@@ -117,6 +121,11 @@ pub fn parse_claude_line(line: &str) -> Option<ClaudeLine> {
         },
         dedup_key,
         timestamp: v.timestamp.map(|t| t.into_owned()),
+        cache_write_1h: usage
+            .cache_creation
+            .as_ref()
+            .and_then(|c| c.get("ephemeral_1h_input_tokens")?.as_u64())
+            .unwrap_or(0),
         complete: message.stop_reason.is_some(),
     })
 }
@@ -165,6 +174,9 @@ struct ClaudeWireUsage {
     cache_read_input_tokens: LenientU64,
     #[serde(default)]
     cache_creation_input_tokens: LenientU64,
+    /// The TTL split of `cache_creation_input_tokens` (any JSON: lenient).
+    #[serde(default)]
+    cache_creation: Option<serde_json::Value>,
 }
 
 /// A token count: any non-`u64` JSON value (null, float, string, object…)
@@ -399,6 +411,7 @@ impl ResponseFolder {
         counted.cache_read = counted.cache_read.max(u.cache_read);
         counted.cache_write = counted.cache_write.max(u.cache_write);
         out.push(ClaudeLine {
+            cache_write_1h: line.cache_write_1h.min(delta.cache_write),
             usage: delta,
             dedup_key: Some(key.to_string()),
             timestamp: ts.clone().or_else(|| line.timestamp.clone()),
@@ -415,6 +428,7 @@ pub fn merge_max(a: &mut ClaudeLine, b: &ClaudeLine) {
     a.usage.output = a.usage.output.max(b.usage.output);
     a.usage.cache_read = a.usage.cache_read.max(b.usage.cache_read);
     a.usage.cache_write = a.usage.cache_write.max(b.usage.cache_write);
+    a.cache_write_1h = a.cache_write_1h.max(b.cache_write_1h);
     if a.usage.model.is_empty() {
         a.usage.model = b.usage.model.clone();
     }
@@ -1216,9 +1230,26 @@ mod tests {
                 },
                 dedup_key: Some("msg_01Xezx:req_011Ccd".to_string()),
                 timestamp: Some("2026-06-15T18:20:13.595Z".to_string()),
+                cache_write_1h: 0,
                 complete: true,
             }
         );
+    }
+
+    /// Claude Code reports the cache-write TTL split (real shape, from a
+    /// claude-opus-5-5 transcript); an odd `cache_creation` never fails a line.
+    #[test]
+    fn parse_claude_keeps_the_one_hour_cache_write_share() {
+        let line = r#"{"type":"assistant","requestId":"req_A","timestamp":"2026-09-29T08:00:01Z","message":{"id":"msg_A","model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":38854,"cache_read_input_tokens":24932,"output_tokens":185,"cache_creation":{"ephemeral_1h_input_tokens":38854,"ephemeral_5m_input_tokens":0}}}}"#;
+        let got = parse_claude_line(line).unwrap();
+        assert_eq!((got.usage.cache_write, got.cache_write_1h), (38854, 38854));
+        for odd in [r#"null"#, r#""x""#, r#"{}"#] {
+            let line = format!(
+                r#"{{"type":"assistant","message":{{"usage":{{"cache_creation_input_tokens":5,"cache_creation":{odd}}}}}}}"#
+            );
+            let got = parse_claude_line(&line).expect("parses");
+            assert_eq!((got.usage.cache_write, got.cache_write_1h), (5, 0));
+        }
     }
 
     #[test]

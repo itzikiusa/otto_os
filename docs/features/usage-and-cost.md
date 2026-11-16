@@ -375,9 +375,12 @@ prices as of **`PRICED_AS_OF` = `2026-09-25`** (surfaced in the UI as
 - **output** — model output rate.
 - **cache read** — `0.1 ×` the base input rate, except where the model lists its
   own: Opus 5.5 **$0.20** (0.05×), Fable/Mythos 5.1 **$0.25** (0.025×).
-- **cache write** — `1.25 ×` the base input rate (the 5-minute-TTL cache rate the
-  CLIs use; the transcripts report a single un-typed `cache_creation` count, so the
-  common case is priced).
+- **cache write** — `1.25 ×` the base input rate for the 5-minute TTL and `2 ×` for
+  the 1-hour TTL. Claude Code reports the split
+  (`usage.cache_creation.ephemeral_1h_input_tokens`) and writes most of its cache at
+  1 h; a write with no split is priced at the 5-minute rate. The cost is fixed when a
+  turn is recorded, and stored rows keep no split, so turns recorded before this
+  priced every write at 1.25× (under by about 37 % on 1-hour writes).
 
 Rate card (per 1M, input / output), matched **case-insensitively, most-specific-first**:
 
