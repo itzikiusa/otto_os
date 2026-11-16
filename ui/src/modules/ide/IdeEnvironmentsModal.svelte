@@ -13,6 +13,7 @@
   import { announceShown } from '../../lib/announce.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { joinArgs, splitArgs } from '../settings/providerForm';
   import { ide, type IdeEnvVar, type IdePythonVenv, type IdeRunConfig } from './ideStore.svelte';
   import IdeNetworkBridgeCard from './shell/IdeNetworkBridgeCard.svelte';
   import IdeRunConfigEditor, { type ConfigDraft, emptyConfigDraft } from './shell/IdeRunConfigEditor.svelte';
@@ -132,8 +133,9 @@
       target_path: cfg.target_path ?? '',
       command: cfg.command ?? '',
       test_filter: cfg.test_filter ?? '',
-      buildFlagsText: (cfg.build_flags ?? []).join(' '),
-      argsText: (cfg.args ?? []).join(' '),
+      // Shell words both ways, so an argv element with a space survives Save → re-open → Save.
+      buildFlagsText: joinArgs(cfg.build_flags),
+      argsText: joinArgs(cfg.args),
       cwd: cfg.cwd ?? '',
       env_file: cfg.env_file ?? '',
       sdk_path: cfg.sdk_path ?? '',
@@ -378,11 +380,6 @@
     cfgDraft = { ...cfgDraft, id: '', name: `${cfgDraft.name || 'Configuration'} (copy)`, autoDetected: false };
   }
 
-  function parseArgs(raw: string): string[] {
-    const tokens = raw.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
-    return tokens.map((t) => t.replace(/^['"]|['"]$/g, ''));
-  }
-
   async function saveCurrentConfig(afterAction: 'none' | 'run' | 'debug' = 'none'): Promise<boolean> {
     cfgValidationError = '';
     const name = cfgDraft.name.trim();
@@ -414,8 +411,8 @@
         target_path: cfgDraft.target_path.trim() || null,
         command: cfgDraft.command.trim() || null,
         test_filter: cfgDraft.test_filter.trim() || null,
-        build_flags: parseArgs(cfgDraft.buildFlagsText),
-        args: parseArgs(cfgDraft.argsText),
+        build_flags: splitArgs(cfgDraft.buildFlagsText),
+        args: splitArgs(cfgDraft.argsText),
         cwd: cfgDraft.cwd.trim() || null,
         env_file: cfgDraft.env_file.trim() || null,
         sdk_path: cfgDraft.sdk_path.trim() || null,
