@@ -144,7 +144,7 @@
     {@const a = messageAttribution(row.item.text)!}
     {@const peerIso = row.item.started_at ?? row.item.updated_at}
     {@const peerClock = formatMessageClock(peerIso)}
-    <div class="rt-from" data-testid="rt-from">
+    <div class="rt-from" data-testid="rt-from" data-rt-msg={row.item.id}>
       <span class="rt-from-h">
         <Icon name="send" size={12} /> From {a.from}
         {#if peerClock && peerIso}
@@ -157,7 +157,7 @@
     {@const parsed = parseUserMessageItemWithBadges(row.item)}
     {@const userIso = row.item.started_at ?? row.item.updated_at}
     {@const userClock = formatMessageClock(userIso)}
-    <div class="rt-user">
+    <div class="rt-user" data-rt-msg={row.item.id}>
       {#if row.item.attachments?.length}<RuntimeAttachments {sessionId} attachments={row.item.attachments} />{/if}
       {#if parsed.badges.length > 0}
         <div class="rt-ctx-badges">
@@ -201,7 +201,7 @@
     {@const activeIso = row.item.streaming ? startIso : endIso}
     {@const assistantClock = formatMessageClock(activeIso)}
     {@const elapsedMs = !row.item.streaming && row.item.started_at && row.item.completed_at ? Date.parse(row.item.completed_at) - Date.parse(row.item.started_at) : 0}
-    <div class="rt-assistant" class:streaming={row.item.streaming} dir="auto">
+    <div class="rt-assistant" class:streaming={row.item.streaming} dir="auto" data-rt-msg={row.item.id}>
       {#if mdText || !assistantFooter}<Markdown md={mdText} streaming={row.item.streaming} />{/if}
       {#if assistantFooter}{@render assistantFooter(row.item)}{/if}
       {#if assistantClock && activeIso}

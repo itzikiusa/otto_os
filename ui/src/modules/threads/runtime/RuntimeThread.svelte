@@ -47,6 +47,8 @@
   import RuntimeFollow from './RuntimeFollow.svelte';
   import SelectionQuote from '../../../lib/components/SelectionQuote.svelte';
   import { withQuote } from '../../../lib/quote/quote';
+  import { registerFindProvider } from '../../../lib/findProviders';
+  import { threadFindProvider } from './threadFind';
   import RuntimeHistoryBar from './RuntimeHistoryBar.svelte';
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimePlan from './RuntimePlan.svelte';
@@ -365,6 +367,13 @@
   const focusComposer = (): void => {
     composerEl?.focus({ preventScroll: true });
   };
+
+  // ⌘F finds in the whole loaded thread, not just its mounted rows.
+  $effect(() =>
+    registerFindProvider(
+      threadFindProvider({ root: () => streamEl, rows: () => rows, cap: () => rowCap, setCap: (n) => (rowCap = n) }),
+    ),
+  );
 
   // Quote a passage of an answer: it lands in the composer, caret below it.
   function quoteIntoComposer(text: string): void {

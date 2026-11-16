@@ -209,6 +209,16 @@ you already typed, caret on a free line under it (T3 Code #33124, #34181).
 It is UI-only, so every provider has it. The button is
 `lib/components/SelectionQuote.svelte`, the text `lib/quote/quote.ts`.
 
+## Find in a thread
+
+⌘F opens the app's find bar (next / previous, match count, highlight) over
+the thread like any page. A long thread mounts only its newest 200 rows, so
+past that the thread registers a find provider
+(`modules/threads/runtime/threadFind.ts`) over every loaded message's text:
+a match in an older message widens the mounted window to show it. History
+not loaded yet (above "Load older") is not searched. A focused terminal or
+editor keeps its own ⌘F (T3 Code #10439).
+
 ## API & WebSocket Surface
 
 - `GET /api/v1/sessions/{id}/transcript` (`?sub=<subagentId>` supported for
