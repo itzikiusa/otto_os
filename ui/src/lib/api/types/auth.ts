@@ -160,6 +160,9 @@ export interface MetaResp {
   model_flags: Record<string, boolean>;
   /** Per-provider catalog of selectable models + supported effort levels. */
   provider_models: Record<string, ProviderModelOption[]>;
+  /** True while some provider's model discovery is still running: a later
+   *  `/meta` read may add models (the UI re-reads until it is false). */
+  provider_models_provisional?: boolean;
   /** Per runtime provider: what a new thread's agent takes before its
    *  session reports its own (`RuntimeSession.capabilities`). */
   runtime_capabilities?: Record<string, RuntimeCapabilities>;

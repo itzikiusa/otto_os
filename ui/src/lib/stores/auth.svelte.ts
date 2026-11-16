@@ -183,21 +183,33 @@ class AuthStore {
     this.provisionalMetaTimer = null;
   }
 
-  /** Re-read `/meta` once after boot when the initial cold response arrived
-   *  before background shell-alias tool probes or model catalogs settled. */
-  private scheduleProvisionalMetaRefresh(): void {
+  private provisionalMetaReads = 0;
+
+  /** Re-read `/meta` after boot while the cold response arrived before
+   *  background shell-alias tool probes or model catalogs settled — the
+   *  daemon says so with `provider_models_provisional` (a slow CLI such as
+   *  `muse serve` answers after the first read). At most 10 re-reads. */
+  private scheduleProvisionalMetaRefresh(first = true): void {
     this.clearProvisionalMetaRefresh();
+    if (first) this.provisionalMetaReads = 0;
     const m = this.meta;
     if (!m || !Array.isArray(m.providers) || m.providers.length === 0) return;
     const toolNames = new Set((m.tools ?? []).map((t) => t.name));
     const missingTool = m.providers.some((p) => p !== 'shell' && !toolNames.has(p));
     const emptyModels = m.provider_models != null && Object.keys(m.provider_models).length === 0;
-    if (!missingTool && !emptyModels) return;
+    if (!missingTool && !emptyModels && !m.provider_models_provisional) return;
+    // Missing tools / an empty catalog get one re-read; only a catalog the
+    // daemon still calls provisional keeps being re-read.
+    if (!first && !m.provider_models_provisional) return;
+    if (this.provisionalMetaReads >= 10) return;
+    this.provisionalMetaReads += 1;
     const token = getToken();
     this.provisionalMetaTimer = setTimeout(() => {
       this.provisionalMetaTimer = null;
       if (this.phase === 'ready' && token === getToken()) {
-        void this.refreshMeta();
+        void this.refreshMeta().then((ok) => {
+          if (ok) this.scheduleProvisionalMetaRefresh(false);
+        });
       }
     }, 3_500);
     (this.provisionalMetaTimer as { unref?: () => void } | null)?.unref?.();

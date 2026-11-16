@@ -75,6 +75,7 @@ pub async fn meta(
             default_provider: None,
             model_flags: Default::default(),
             provider_models: Default::default(),
+            provider_models_provisional: false,
             runtime_capabilities: Default::default(),
             provider_families: Default::default(),
             provider_resumable: Default::default(),
@@ -133,9 +134,9 @@ pub async fn meta(
         .active_claude_config_dirs(&otto_transcript::roots::home_dir());
     let probe = otto_sessions::provider_models::ModelProbe::from_tool_specs(families, &tool_specs)
         .with_claude_config_dirs(claude_dirs);
-    let (tools, provider_models) = tokio::join!(
+    let (tools, (provider_models, provider_models_provisional)) = tokio::join!(
         otto_sessions::tool_probe::probe_tools_cached(tool_specs),
-        otto_sessions::provider_models::probe_provider_models_cached(&probe),
+        otto_sessions::provider_models::probe_provider_models_cached_with_status(&probe),
     );
 
     Ok(Json(MetaResp {
@@ -148,6 +149,7 @@ pub async fn meta(
         default_provider,
         model_flags,
         provider_models,
+        provider_models_provisional,
         runtime_capabilities: otto_core::agent_runtime::RuntimeProvider::ALL
             .into_iter()
             .map(|p| {
