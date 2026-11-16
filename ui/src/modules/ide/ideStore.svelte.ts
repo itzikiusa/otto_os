@@ -390,7 +390,7 @@ class IdeStore {
   async toggleDir(dirPath: string): Promise<void> {
     const clean = normalizeRootPath(dirPath); const next = !this.expandedDirs[clean];
     this.expandedDirs = { ...this.expandedDirs, [clean]: next };
-    if (next && !this.childrenByDir[clean]) await this.loadTree(clean);
+    if (next) await this.loadTree(clean); // every expand rereads the disk (no fs watcher); the cached listing shows meanwhile
   }
   collapseAllDirs(): void {
     const primary = normalizeRootPath(this.target.root);

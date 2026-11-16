@@ -47,3 +47,32 @@ test('E1: F6 Move to a project-relative path renames to the absolute path and re
   assert.equal(host.tabs[0].path, '/repo/src/x.txt', 'the tab keys on the absolute path, so ⌘S saves it');
   assert.equal(active, '/repo/src/x.txt');
 });
+
+test('E2: a tree refresh refetches expanded folders and forgets collapsed ones; every expand reads the disk', async () => {
+  const gets: string[] = [];
+  const listings: Record<string, { name: string; path: string; kind: string }[]> = {
+    '': [{ name: 'src', path: '/repo/src', kind: 'dir' }, { name: 'lib', path: '/repo/lib', kind: 'dir' }],
+    '/repo/src': [{ name: 'a.ts', path: '/repo/src/a.ts', kind: 'file' }, { name: 'new.ts', path: '/repo/src/new.ts', kind: 'file' }],
+  };
+  const { load } = ideModules({ get: async (url: string) => {
+    const path = new URLSearchParams(url.split('?')[1]).get('path') ?? '';
+    gets.push(path);
+    return { root: '/repo', path, entries: listings[path] ?? [] };
+  } });
+  const slices = load('store/ideStateSlices.svelte.ts');
+  const host = {
+    target, collabIsGuest: false, additionalRoots: [], projectRoots: [], showHidden: false,
+    treeLoading: false, treeError: null, treeRootEntries: [], runConfigs: [{ id: 'x' }], selectedConfigId: 'x',
+    expandedDirs: { '/repo': true, '/repo/src': true, '/repo/lib': false } as Record<string, boolean>,
+    childrenByDir: {
+      '/repo': [], '/repo/src': [{ name: 'a.ts', path: '/repo/src/a.ts', kind: 'file' }], '/repo/lib': [{ name: 'gone.ts', path: '/repo/lib/gone.ts', kind: 'file' }],
+    } as Record<string, unknown[]>,
+    targetQuery: (extra: Record<string, unknown>) => new URLSearchParams({ root: '/repo', path: String(extra.path ?? '') }).toString(),
+    syncWorkspacePort: () => {},
+  };
+  await slices.fetchIdeWorkspaceTree(host, undefined, () => {}, { deferTabRestore: true });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(gets, ['', '/repo/src'], 'the expanded folder is reread with the root');
+  assert.equal(host.childrenByDir['/repo/src'].length, 2, 'Refresh shows the file created outside Otto');
+  assert.equal(host.childrenByDir['/repo/lib'], undefined, 'a collapsed folder drops its stale listing');
+});
