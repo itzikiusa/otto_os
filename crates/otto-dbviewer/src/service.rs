@@ -913,7 +913,19 @@ impl DbViewerService {
         let conn = &snap.conn;
         let engine =
             Engine::from_kind(conn.kind).ok_or_else(|| Error::Invalid("not a database".into()))?;
-        let operations = crate::access::operations(engine, &req.statement)?;
+        let operations = match crate::access::operations(engine, &req.statement) {
+            // A form restricted SQL can't prove (SHOW PROCESSLIST, KILL, a cast
+            // it doesn't list…) bounds nothing for a caller whose native rights
+            // are already unrestricted: fall back to the lexer classification.
+            // The read-only and production checks below still apply.
+            Err(Error::Forbidden(reason)) => {
+                if !self.executes_unrestricted(snap, user_id, req).await? {
+                    return Err(Error::Forbidden(reason));
+                }
+                crate::access::lexer_operations(engine, &req.statement)?
+            }
+            other => other?,
+        };
         for operation in &operations {
             let (op, node) = crate::access::authorized_as(operation, req.node.as_deref());
             self.authorize_snap(snap, user_id, node, op).await?;
@@ -940,12 +952,41 @@ impl DbViewerService {
         {
             return Err(Error::Forbidden(format!(
                 "review_required: on production connection '{}', changes require an approved \
-                 immutable change — submit one in Database Explorer → Changes, or set an \
+                 immutable change — submit one in Database Explorer → ⋯ → Database changes, or set an \
                  environment other than Production in the connection's settings",
                 conn.name
             )));
         }
         Ok(())
+    }
+
+    /// Root, or the owner executing as the connection's own account: the
+    /// same callers [`Self::verify_native_snap`] lets through unchecked.
+    async fn executes_unrestricted(
+        &self,
+        snap: &AccessSnapshot,
+        user_id: &Id,
+        req: &QueryRequest,
+    ) -> Result<bool> {
+        let pool = self.connections.pool();
+        let user = crate::access::current_user(&pool, &snap.conn, user_id).await?;
+        if user.is_root {
+            return Ok(true);
+        }
+        if user.id != snap.conn.created_by {
+            return Ok(false);
+        }
+        let child = crate::access::child(req.node.as_deref());
+        let (profile, _) = crate::access::credential_profile_with(
+            &pool,
+            &snap.conn,
+            &snap.policy,
+            user_id,
+            child.as_deref(),
+            "db_query",
+        )
+        .await?;
+        Ok(profile == snap.conn.id)
     }
 
     async fn verify_native(&self, conn_id: &Id, user_id: &Id, r: &Resolved) -> Result<()> {

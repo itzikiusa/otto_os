@@ -83,7 +83,7 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 - **Import file…** loads CSV, TSV, JSON or NDJSON into an existing table or collection in batches. It works for the SQL engines and MongoDB, not Redis.
 
 **Reviewed database changes (MySQL, PostgreSQL)**
-- **⋯ → Schema changes** (MySQL and PostgreSQL, at the end of the view bar) opens a review workflow. Draft a script with its targets, validate it for an executor, and submit it. A different person approves it. The executor then runs the exact approved revision. Every attempt and outcome is audited.
+- **⋯ → Database changes** (MySQL and PostgreSQL, at the end of the view bar) opens a review workflow. Draft a script with its targets, validate it for an executor, and submit it. A different person approves it. The executor then runs the exact approved revision. Every attempt and outcome is audited.
 
 ## Keyboard shortcuts
 

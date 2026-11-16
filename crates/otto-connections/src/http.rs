@@ -975,7 +975,11 @@ async fn sftp_read<S: ConnectionsCtx>(
     ctx.connections()
         .authorize(&id, &user.id, "sftp_read")
         .await?;
-    Ok(Json(SftpReadResp { text, truncated }))
+    Ok(Json(SftpReadResp {
+        binary: text.is_none(),
+        text: text.unwrap_or_default(),
+        truncated,
+    }))
 }
 
 /// Pull what the viewer needs into `local`: a quick size probe (≤500 ms) picks
@@ -997,7 +1001,10 @@ async fn fetch_preview(
 
 /// Read up to `SFTP_READ_CAP` bytes from a local file, returning the UTF-8
 /// (lossy) text and whether it was truncated by the cap.
-fn read_capped(path: &std::path::Path) -> std::io::Result<(String, bool)> {
+/// The capped prefix as text, or `None` when it isn't UTF-8 (a binary file;
+/// lossy text would show mojibake). A character the cap cut in half is
+/// dropped, not counted as binary.
+fn read_capped(path: &std::path::Path) -> std::io::Result<(Option<String>, bool)> {
     use std::io::Read;
     let size = std::fs::metadata(path)?.len();
     let truncated = size > SFTP_READ_CAP;
@@ -1005,7 +1012,17 @@ fn read_capped(path: &std::path::Path) -> std::io::Result<(String, bool)> {
     std::fs::File::open(path)?
         .take(SFTP_READ_CAP)
         .read_to_end(&mut buf)?;
-    Ok((String::from_utf8_lossy(&buf).into_owned(), truncated))
+    let text = match String::from_utf8(buf) {
+        Ok(text) => Some(text),
+        Err(e) if truncated && e.utf8_error().error_len().is_none() => {
+            let valid = e.utf8_error().valid_up_to();
+            let mut bytes = e.into_bytes();
+            bytes.truncate(valid);
+            String::from_utf8(bytes).ok()
+        }
+        Err(_) => None,
+    };
+    Ok((text, truncated))
 }
 
 // --- Connection sections ----------------------------------------------------
@@ -1178,6 +1195,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn read_capped_reports_binary_and_keeps_a_cut_character_out() {
+        let dir = std::env::temp_dir().join(format!("otto-read-capped-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f");
+        std::fs::write(&path, b"ok \xE2\x9C\x93").unwrap();
+        assert_eq!(
+            read_capped(&path).unwrap(),
+            (Some("ok \u{2713}".into()), false)
+        );
+        std::fs::write(&path, [0x89, b'P', b'N', b'G', 0, 0xFF]).unwrap();
+        assert_eq!(read_capped(&path).unwrap(), (None, false));
+        // The cap lands inside a 3-byte character: the prefix is still text.
+        let mut big = vec![b'a'; SFTP_READ_CAP as usize - 1];
+        big.extend_from_slice("\u{2713}".as_bytes());
+        std::fs::write(&path, &big).unwrap();
+        let (text, truncated) = read_capped(&path).unwrap();
+        assert!(truncated);
+        assert_eq!(text.unwrap().len() as u64, SFTP_READ_CAP - 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A legacy/imported row whose host, user or jump starts with `-` never
     /// reaches sftp's argv (it would be parsed as an option there).
     #[test]
@@ -1308,7 +1347,7 @@ mod tests {
             }
             let (text, over) = read_capped(&local).unwrap();
             assert_eq!(stopped || over, want_truncated, "{size:?} {body_kb:?}");
-            assert!(text.len() as u64 <= SFTP_READ_CAP);
+            assert!(text.unwrap().len() as u64 <= SFTP_READ_CAP);
             assert!(started.elapsed() < std::time::Duration::from_secs(20));
             let log = std::fs::read_to_string(dir.join("log")).unwrap();
             // Probe first (its log line may be lost if the 500 ms bound fires

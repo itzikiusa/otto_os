@@ -175,7 +175,8 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                 "StrictHostKeyChecking=accept-new".to_string(),
             ];
             args.extend(keepalive_opts(user_ssh_config().as_deref()));
-            if let Some(identity) = opt_str(p, "identity_file") {
+            let identity = opt_str(p, "identity_file");
+            if let Some(identity) = identity {
                 args.push("-i".into());
                 args.push(identity.into());
             }
@@ -185,8 +186,7 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
             }
             if let Some(jump) = opt_str(p, "jump") {
                 reject_option_like("ssh", "jump", jump)?;
-                args.push("-J".into());
-                args.push(jump.into());
+                args.extend(otto_ssh::jump_args(jump, identity));
             }
             let target = match opt_str(p, "user") {
                 Some(user) => {
@@ -538,8 +538,10 @@ mod tests {
                 "/home/me/.ssh/id_ed25519",
                 "-p",
                 "2222",
-                "-J",
-                "bastion.example.com",
+                "-o",
+                "ProxyCommand=ssh -i '/home/me/.ssh/id_ed25519' -o IdentitiesOnly=yes \
+                 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -W %h:%p -- \
+                 'bastion.example.com'",
                 "--",
                 "deploy@db.example.com"
             ]

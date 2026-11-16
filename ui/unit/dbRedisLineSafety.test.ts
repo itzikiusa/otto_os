@@ -122,3 +122,21 @@ test('a rename that re-emits a line-broken value from the data is refused as a w
   const ok = { cells: new Map([[0, 'clean']]), set: new Map(), unset: new Set(), rename: new Map() };
   assert.deepEqual(commands(adapter.buildUpdate([{ rowIdx: 1, patch: ok }], ctx('HGETALL k', [['f'], ['v']])).sql), ['HSET']);
 });
+
+// A rename and a value edit of the same field in one batch write the NEW value
+// under the NEW name (the value command used to re-set the old name, and the
+// rename re-set the old value).
+test('rename plus value edit of one hash field writes the new value under the new name', () => {
+  const edit = (rowIdx: number, ci: number, v: string) => ({
+    rowIdx,
+    patch: { cells: new Map([[ci, v]]), set: new Map(), unset: new Set(), rename: new Map() },
+  });
+  const pairs = adapter.buildUpdate(
+    [edit(0, 0, 'new'), edit(1, 0, 'v2')],
+    ctx('HGETALL h', [['old'], ['v1']]),
+  );
+  assert.equal(pairs.sql, 'HDEL h old\nHSET h new "v2"\nHSET h new "v2"');
+  const kvPatch = { cells: new Map([[0, 'new'], [1, 'v2']]), set: new Map(), unset: new Set(), rename: new Map() };
+  const kv = adapter.buildUpdate([{ rowIdx: 0, patch: kvPatch }], ctx('HGETALL h', [['old', 'v1']], ['key', 'value']));
+  assert.equal(kv.sql, 'HDEL h old\nHSET h new "v2"\nHSET h new "v2"');
+});

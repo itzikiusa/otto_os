@@ -667,6 +667,13 @@ export class DbQueryRunsStore {
     // first removes the native cancellation handle before /cancel can use it.
     // Capture this controller: a new run may start before cancellation settles.
     void this.sendCancel(target.connId, target.queryId, report).finally(() => entry?.controller.abort());
+    // The result on screen belongs to another statement than the one stopped:
+    // drop it rather than show it under the new statement. A stopped page of
+    // the same statement (the pager) keeps the page still on screen.
+    if (t.result && t.pending && t.pending.sql !== t.ran_statement) {
+      t.result = null;
+      resultBudget.forget(t.uid);
+    }
     // Clear UI ownership immediately; late results/errors cannot affect this
     // tab, and re-attach must not resurrect a run the user explicitly stopped.
     t.running = false;

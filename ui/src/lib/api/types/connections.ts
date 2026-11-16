@@ -243,4 +243,6 @@ export interface SftpReadResp {
   text: string;
   /** True when the file exceeded the read cap (content is the capped prefix). */
   truncated: boolean;
+  /** The file isn't UTF-8 text: `text` is empty. Omitted when false. */
+  binary?: boolean;
 }

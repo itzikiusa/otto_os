@@ -29,7 +29,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { copyTextOrThrow } from '../../lib/clipboard';
+  import { copyTextOrThrow } from '../../lib/clipboard'; import { reindentJson } from '../../lib/jsonReindent';
 
   type Tab = 'params' | 'headers' | 'body' | 'auth' | 'settings' | 'scripts' | 'docs';
 
@@ -152,7 +152,7 @@
     if (!body.trim()) return;
     try {
       let out: string;
-      if (rawType === 'JSON' || draft.kind === 'grpc') out = JSON.stringify(JSON.parse(body), null, 2);
+      if (rawType === 'JSON' || draft.kind === 'grpc') { JSON.parse(body); out = reindentJson(body); }
       else if (rawType === 'XML' || rawType === 'HTML') out = beautifyXml(body);
       else { toasts.info('Nothing to format', 'Formatting works for JSON, XML and HTML bodies.'); return; }
       setField('body', out);

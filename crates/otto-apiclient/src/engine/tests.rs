@@ -717,3 +717,39 @@ fn encoded_form_variables_keep_secret_binding_and_missing_variable_checks() {
         vec!["token"]
     );
 }
+
+#[tokio::test]
+async fn compressed_and_latin1_bodies_read_as_text() {
+    use std::io::Write as _;
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(b"{\"ok\":true}").unwrap();
+    let packed = gz.finish().unwrap();
+    let mut reply = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\
+         Content-Length: {}\r\n\r\n",
+        packed.len()
+    )
+    .into_bytes();
+    reply.extend_from_slice(&packed);
+    let addr = one_shot_server(Some(reply)).await;
+    let wid = otto_core::new_id();
+    let send = |addr: std::net::SocketAddr| {
+        let exec = exec_req(&format!("http://{addr}/"));
+        let wid = wid.clone();
+        async move {
+            build_and_send(&wid, &exec, &serde_json::Map::new(), None, true)
+                .await
+                .unwrap()
+        }
+    };
+    let (resp, raw) = send(addr).await;
+    assert_eq!(resp.body, "{\"ok\":true}");
+    assert_eq!(raw, b"{\"ok\":true}");
+
+    let mut reply = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=\"ISO-8859-1\"\r\n\
+        Content-Length: 4\r\n\r\ncaf"
+        .to_vec();
+    reply.push(0xE9);
+    let (resp, _) = send(one_shot_server(Some(reply)).await).await;
+    assert_eq!(resp.body, "café");
+}

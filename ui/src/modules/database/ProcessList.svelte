@@ -18,7 +18,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { database } from '../../lib/stores/database.svelte';
   import { isWriteBlocked } from '../../lib/stores/database/model';
-  import { PROCESS_SQL, killChoices, killNotDone, killSql, parseProcesses, processEngine, processNotices, queryPreview, type KillChoice, type ProcessRow } from './process-list';
+  import { PROCESS_SQL, killChoices, killNotDone, killSql, parseProcesses, processEngine, processNotices, queryPreview, runningCount, type KillChoice, type ProcessRow } from './process-list';
 
   let { conn, onclose }: { conn: Connection; onclose: () => void } = $props();
 
@@ -96,7 +96,7 @@
 <Modal title={`Processes · ${conn.name}`} width={760} {onclose}>
   <div class="pl-bar">
     <span class="pl-note">
-      {rows.length} running{conn.read_only ? ' · Read-only connection: Kill is not available' : ''}
+      {[error || !engine ? '' : `${runningCount(engine, rows)} running`, conn.read_only ? 'Read-only connection: Kill is not available' : ''].filter(Boolean).join(' · ')}
     </span>
     <button class="btn" type="button" onclick={() => void load()} disabled={loading} title="Refresh the list" data-testid="db-processes-refresh">
       <Icon name="refresh" size={13} /> Refresh
@@ -165,6 +165,12 @@
     border-collapse: collapse;
     font-size: var(--fs-s);
   }
+  /* Every column but the query keeps its content width; the query takes
+     what is left and ellipsizes, so the table fits the dialog. */
+  .pl-table th,
+  .pl-table td:not(.pl-query) {
+    white-space: nowrap;
+  }
   .pl-table th,
   .pl-table td {
     text-align: start;
@@ -196,7 +202,6 @@
   }
   .pl-actions {
     display: flex;
-    flex-wrap: wrap;
     gap: 4px;
   }
   .pl-hidden {
@@ -204,7 +209,8 @@
     font-style: italic;
   }
   .pl-query {
-    max-inline-size: 320px;
+    inline-size: 100%;
+    max-inline-size: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

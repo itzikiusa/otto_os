@@ -870,3 +870,40 @@ async fn mongo_process_list_lists_and_validates_kill() {
         .expect("killOp of a finished op");
     assert_eq!(gone.columns[0].name, "result");
 }
+
+/// `show collections` / `show dbs` run (they don't parse as mongosh
+/// expressions), and string results print bare, without JSON quotes.
+#[tokio::test]
+#[ignore]
+async fn mongo_show_helpers_list_names_without_quotes() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MongoDriver::default();
+    let run = |statement: &str| QueryRequest {
+        statement: statement.into(),
+        node: Some("shopdb".into()),
+        ..Default::default()
+    };
+    d.run(&cfg(), &run("db.otto_show_probe.insertOne({ n: 1 })"))
+        .await
+        .expect("insert");
+    let cells = |res: otto_dbviewer::types::QueryResult| -> Vec<String> {
+        res.rows
+            .into_iter()
+            .map(|r| r[0].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    for statement in ["show collections", "db.getCollectionNames()"] {
+        let names = cells(d.run(&cfg(), &run(statement)).await.expect(statement));
+        assert!(
+            names.contains(&"otto_show_probe".to_string()),
+            "{statement}: {names:?}"
+        );
+    }
+    let dbs = cells(d.run(&cfg(), &run("show dbs")).await.expect("show dbs"));
+    assert!(dbs.contains(&"admin".to_string()), "{dbs:?}");
+    d.run(&cfg(), &run("db.otto_show_probe.drop()"))
+        .await
+        .expect("drop");
+}

@@ -40,7 +40,7 @@
   let busy: Record<string, boolean> = $state({});
 
   // Text-viewer modal state.
-  let viewing: { name: string; text: string; truncated: boolean } | null = $state(null);
+  let viewing: { name: string; text: string; truncated: boolean; binary?: boolean } | null = $state(null);
 
   // Search box — filters the current directory's listing by name (case-insensitive).
   let query = $state('');
@@ -167,7 +167,7 @@
     busy = { ...busy, [e.name]: true };
     try {
       const resp = await sftp.readText(conn.id, path);
-      viewing = { name: e.name, text: resp.text, truncated: resp.truncated };
+      viewing = { name: e.name, ...resp };
     } catch (err) {
       toastError('Couldn’t read the file', err);
     } finally {
@@ -468,10 +468,14 @@
 <!-- Read-only text viewer. -->
 {#if viewing}
   <Modal title={`View — ${viewing.name}`} width={820} onclose={() => (viewing = null)}>
-    {#if viewing.truncated}
-      <div class="trunc">Showing the first 1 MiB — file is larger.</div>
+    {#if viewing.binary}
+      <div class="trunc">This is a binary file, so it isn’t shown. Download it to open it.</div>
+    {:else}
+      {#if viewing.truncated}
+        <div class="trunc">Showing the first 1 MiB — file is larger.</div>
+      {/if}
+      <pre class="viewer mono" dir="ltr">{viewing.text}</pre>
     {/if}
-    <pre class="viewer mono" dir="ltr">{viewing.text}</pre>
   </Modal>
 {/if}
 

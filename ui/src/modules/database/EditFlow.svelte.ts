@@ -762,7 +762,7 @@ export class EditFlow {
         ' The remaining drafts are still pending.';
     }
     this.reviewError = `${failure.message}${where}\n${written}`;
-    toasts.error('The write stopped partway', written);
+    toasts.error(atomic || failure.completed === 0 ? 'Nothing was written' : 'The write stopped partway', written);
   }
   /** Row statements that matched NO row (deleted, key changed) — not "Applied":
    *  keep those drafts and the modal, clear only the rows fully written. */

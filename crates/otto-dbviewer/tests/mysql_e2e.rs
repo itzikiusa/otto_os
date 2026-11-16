@@ -1165,3 +1165,34 @@ async fn mysql_native_boundaries_survive_ansi_quotes_chunk() {
     assert_eq!(result.more_results[1].columns[0].name, "last_result");
     assert_eq!(result.more_results[1].rows, vec![vec![json!("second")]]);
 }
+
+/// SHOW output, information_schema and `->>` come back as VARBINARY with a
+/// text collation: they decode as text; a real binary value stays base64.
+#[tokio::test]
+#[ignore]
+async fn mysql_text_collated_varbinary_decodes_as_text() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MysqlDriver::default();
+    let cfg = cfg();
+    let res = d
+        .run(&cfg, &query("SHOW VARIABLES LIKE 'version_comment'"))
+        .await
+        .expect("run");
+    assert_eq!(res.rows[0][0], json!("version_comment"));
+    let res = d
+        .run(
+            &cfg,
+            &query(
+                "SELECT j ->> '$.a' AS t, CAST('hi' AS BINARY) AS b \
+                 FROM (SELECT JSON_OBJECT('a', 'x') AS j) s",
+            ),
+        )
+        .await
+        .expect("run");
+    assert_eq!(res.rows[0][0], json!("x"));
+    assert_eq!(res.rows[0][1], json!("aGk="));
+    let binary: Vec<_> = res.columns.iter().map(|c| c.binary).collect();
+    assert_eq!(binary, vec![false, true]);
+}

@@ -463,3 +463,65 @@ async fn local_infile_grant_tracks_host_permission_for_incremental_scripts() {
         .get("__mysql_local_infile_authorized")
         .is_none());
 }
+
+/// Root and the owner on the connection's own account fall back to the lexer
+/// for SQL forms restricted SQL can't prove (process lists, `KILL`); an editor,
+/// and the owner through an alternate credential profile, are still refused.
+#[tokio::test]
+async fn unrestricted_callers_run_unparsed_sql_forms_editors_do_not() {
+    let fixture = Fixture::new().await;
+    let conn = mysql_owned_by(&fixture, "mysql", false).await;
+    put_rules(
+        &fixture,
+        &conn,
+        vec![
+            allow("owner", &fixture.owner, None),
+            allow("editor", &fixture.editor, None),
+        ],
+    )
+    .await;
+    let snap = fixture.service.access_snapshot(&conn).await.unwrap();
+    let run = |user: Id, sql: &'static str| {
+        let (service, snap) = (&fixture.service, &snap);
+        async move {
+            let req = QueryRequest {
+                statement: sql.into(),
+                ..QueryRequest::default()
+            };
+            service.execution_access_snap(snap, &user, &req).await
+        }
+    };
+    run(fixture.owner.clone(), "SHOW FULL PROCESSLIST")
+        .await
+        .unwrap();
+    for sql in ["SHOW FULL PROCESSLIST", "KILL 42"] {
+        run(fixture.root.clone(), sql).await.unwrap();
+        assert!(matches!(
+            run(fixture.editor.clone(), sql).await.unwrap_err(),
+            Error::Forbidden(_)
+        ));
+    }
+    put_rules(
+        &fixture,
+        &conn,
+        vec![allow(
+            "owner",
+            &fixture.owner,
+            Some(fixture.profile.clone()),
+        )],
+    )
+    .await;
+    let snap = fixture.service.access_snapshot(&conn).await.unwrap();
+    let req = QueryRequest {
+        statement: "SHOW FULL PROCESSLIST".into(),
+        ..QueryRequest::default()
+    };
+    assert!(matches!(
+        fixture
+            .service
+            .execution_access_snap(&snap, &fixture.owner, &req)
+            .await
+            .unwrap_err(),
+        Error::Forbidden(_)
+    ));
+}

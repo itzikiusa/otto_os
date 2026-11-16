@@ -708,7 +708,7 @@ the UI:
   connection a write is refused (`read-only connection '<name>' cannot perform
   database mutations; turn off Read-only in the connection's settings…`); on an
   enforced **production** connection it is refused with `review_required:` — changes
-  there go through Database Explorer → Changes.
+  there go through Database Explorer → ⋯ → Database changes.
 - **The write-guard** (legacy connections): a connection marked **Read-only** or with
   environment **Production** refuses the write with `write_blocked: … so an agent
   cannot write to it; a person can run the write in the Database Explorer, or turn

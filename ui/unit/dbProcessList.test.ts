@@ -11,6 +11,7 @@ import {
   processEngine,
   processNotices,
   queryPreview,
+  runningCount,
 } from '../src/modules/database/process-list.ts';
 
 // Processes panel: a read-only listing per engine, and a Kill statement that
@@ -156,4 +157,18 @@ test('a PostgreSQL signal that found no process is reported, not called a succes
   assert.equal(killNotDone('postgres', { id: '9' }, [[true]]), null);
   assert.equal(killNotDone('mongodb', { id: '9' }, [['attempting to kill op']]), null);
   assert.equal(killNotDone('postgres', { id: '9' }, undefined), null);
+});
+
+test('ClickHouse drops the listing’s own row; running counts only busy sessions', () => {
+  const cols = ['query_id', 'user', 'elapsed', 'read_rows', 'memory_usage', 'query'].map((name) => ({ name }));
+  const ch = parseProcesses('clickhouse', cols, [
+    ['self', 'default', '0.01', '0', '0', PROCESS_SQL.clickhouse],
+    ['ab-1', 'default', '2.5', '1000', '2048', 'SELECT count() FROM t'],
+  ]);
+  assert.deepEqual(ch.map((p) => p.id), ['ab-1']);
+  assert.equal(runningCount('clickhouse', ch), 1);
+  const pg = (state: string) => ({ id: '1', user: '', seconds: 0, state, query: '' });
+  assert.equal(runningCount('postgres', [pg('active'), pg('idle'), pg('idle in transaction'), pg('active · waiting on Lock: relation')]), 2);
+  const my = (state: string) => ({ id: '1', user: '', seconds: 0, state, query: '' });
+  assert.equal(runningCount('mysql', [my('Sleep'), my('Query · Sending data'), my('Daemon · Waiting on empty queue')]), 2);
 });

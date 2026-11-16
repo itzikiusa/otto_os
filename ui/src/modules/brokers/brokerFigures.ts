@@ -10,6 +10,16 @@ export function rateText(rate: number | null | undefined, failed: boolean): stri
   return Math.round(rate).toLocaleString();
 }
 
+/** Why per-broker CPU / RAM is missing when the cluster HAS a Metrics URL:
+ *  the daemon couldn't read it (null when no URL is set — then the panel
+ *  explains how to set one). */
+export function metricsUnreachable(metricsUrl: string | null | undefined): string | null {
+  const url = metricsUrl?.trim();
+  return url
+    ? `Couldn’t read metrics from ${url}. Check that it’s reachable from this Mac and serves Prometheus text.`
+    : null;
+}
+
 /** Overview total: `null` until the first sweep lands. */
 export function totalText(total: number | null | undefined): string {
   return total == null ? '—' : total.toLocaleString();
