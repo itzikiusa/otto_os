@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
+pub(crate) use super::servers_root::climb_to_build_root;
 pub use super::servers_root::{
     is_lightweight_non_lsp_lang, is_multi_repo_umbrella_dir, resolve_lsp_module_root,
     resolve_lsp_module_root_with_markers,

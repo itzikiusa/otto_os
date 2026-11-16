@@ -8,6 +8,7 @@ mod runner_java;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub(crate) use self::runner_cmd_langs::find_build_wrapper;
 use self::runner_cmd_langs::{
     build_custom_cmd, build_gradle_cmd, build_java_main_cmd, build_maven_cmd, build_npm_cmd,
     build_pytest_cmd, build_script_cmd, build_shell_cmd, build_vitest_cmd,

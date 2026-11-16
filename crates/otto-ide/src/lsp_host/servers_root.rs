@@ -150,7 +150,11 @@ fn canonical_or_existing_ancestor(path: &Path) -> PathBuf {
 /// reactor whose `pom.xml` lists the child in `<modules>`, a Gradle build with
 /// `settings.gradle*`, or the Cargo `[workspace]` that holds the member.
 #[allow(clippy::disallowed_methods)]
-fn climb_to_build_root(norm_lang: &str, module: &Path, allowed: &dyn Fn(&Path) -> bool) -> PathBuf {
+pub(crate) fn climb_to_build_root(
+    norm_lang: &str,
+    module: &Path,
+    allowed: &dyn Fn(&Path) -> bool,
+) -> PathBuf {
     let read = |p: PathBuf| std::fs::read_to_string(p).unwrap_or_default();
     let has_settings_gradle =
         |d: &Path| d.join("settings.gradle").is_file() || d.join("settings.gradle.kts").is_file();

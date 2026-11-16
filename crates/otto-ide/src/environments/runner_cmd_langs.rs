@@ -346,7 +346,7 @@ pub(super) fn build_gradle_cmd(
 
 /// The build wrapper lives at the top of a multi-module build, above the module the build
 /// runs in: look in `cwd`, then up while the parent still belongs to the build.
-fn find_build_wrapper(cwd: &str, wrapper: &str, build_files: &[&str]) -> Option<String> {
+pub(crate) fn find_build_wrapper(cwd: &str, wrapper: &str, build_files: &[&str]) -> Option<String> {
     let mut dir = Path::new(cwd);
     loop {
         let candidate = dir.join(wrapper);

@@ -249,7 +249,15 @@ plus zero-install built-in bridges across every major ecosystem: `dlv dap` (Go),
 `debugpy.adapter` or built-in `otto-py-bdb` (Python stdlib `bdb`), `js-debug`
 or built-in `otto-node-cdp` (`node --inspect-brk=0` CDP), `codelldb` /
 `lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust), and
-`otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter:
+`otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter.
+
+A Java Debug (or `java_main` Run) of a file in a Maven module takes the classpath
+from Maven itself: `mvn -q test-compile dependency:build-classpath` (run from the
+reactor root with `-pl <module> -am`, using `mvnw` when the build has one), then
+`target/test-classes:target/classes:<deps>`. Without a `pom.xml` or Maven, or
+when Maven can't resolve the module (an attached repo that was never installed),
+Otto compiles with its own `javac -g` instead; a failure shows the first 20 lines
+of the build output.
 
 - **1-Click Gutter Breakpoints:** Clicking anywhere beside or on line numbers in
   `.cm-gutters` toggles verified breakpoints in 1 click (persisted across tab
