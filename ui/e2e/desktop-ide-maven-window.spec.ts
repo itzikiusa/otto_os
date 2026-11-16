@@ -191,7 +191,7 @@ test.describe('Desktop IDE — Maven tool window on a multi-root project', () =>
     // A double-click on a goal starts it once, not once per click plus once for the dblclick.
     await win.locator('.bt-goal-main', { hasText: 'validate' }).first().dblclick();
     await expect.poll(() => runPosts).toBeGreaterThan(0);
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(800); // ui-guards: allow — absence: no second or third run starts
     expect(runPosts, 'POST /ide/runs per double-click').toBe(1);
 
     // Toolbar buttons respond.

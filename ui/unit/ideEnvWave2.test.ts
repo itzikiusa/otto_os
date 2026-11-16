@@ -99,9 +99,12 @@ test('V1: connecting to an SSH host leaves the named project, so its tabs are no
   const store = fs.readFileSync(ideUrl('ideStore.svelte.ts'), 'utf8');
   const start = store.indexOf('async setSshTarget(');
   const body = store.slice(start, store.indexOf('\n  }', start));
-  assert.match(body, /this\.activeProjectId = null/);
-  assert.match(body, /saveLastSshTarget\(\{/, 'and a reload reopens the SSH host');
-  assert.ok(body.indexOf('snapshotProjectTabs') < body.indexOf('this.activeProjectId = null'), 'the project keeps its own local tabs');
+  assert.match(body, /leaveProjectForSsh\(this, \{ connection_id: connectionId/);
+  const mgr = fs.readFileSync(ideUrl('shell/ideProjectsManager.ts'), 'utf8');
+  const leave = mgr.slice(mgr.indexOf('export function leaveProjectForSsh('), mgr.indexOf('\n}\n', mgr.indexOf('export function leaveProjectForSsh(')));
+  assert.match(leave, /host\.activeProjectId = null/);
+  assert.match(leave, /saveLastSshTarget\(ssh\)/, 'and a reload reopens the SSH host');
+  assert.ok(leave.indexOf('snapshotProjectTabs') < leave.indexOf('host.activeProjectId = null'), 'the project keeps its own local tabs');
 });
 
 test('V6: after a dependency action the daemon wrote, the manifest tab reloads from disk', async () => {

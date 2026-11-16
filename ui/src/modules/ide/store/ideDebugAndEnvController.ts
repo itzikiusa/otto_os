@@ -572,7 +572,7 @@ export async function launchDebugSession(
   },
   prevCtl: AbortController | null,
   onSnapshot: (snap: IdeDebugSessionSnapshot) => void,
-  onUpdateTool?: () => Promise<void>,
+  retry?: () => Promise<void>,
 ): Promise<AbortController | null> {
   if (!host.target.root) return prevCtl;
   const gutterItem = opts.launch || opts.configId ? null : selectedGutterTarget(host);
@@ -639,14 +639,27 @@ export async function launchDebugSession(
     return attachDebugSessionStream(host, resp.session.id, prevCtl, onSnapshot);
   } catch (e) {
     const outdated = toolOutdatedNotice(e);
-    if (outdated && onUpdateTool) {
-      toasts.push('warn', outdated.title, outdated.body, 20_000, { action: { label: outdated.action, run: onUpdateTool } });
+    if (outdated && retry) {
+      const run = () => updateDelveAndRetry(host, retry);
+      toasts.push('warn', outdated.title, outdated.body, 20_000, { action: { label: outdated.action, run } });
     } else {
       toastError('Couldn’t start debugger', e);
     }
     return prevCtl;
   } finally {
     host.debugLoading = false;
+  }
+}
+
+/** "Update Delve": rebuild it with the project's Go, then start the same debug session again. */
+async function updateDelveAndRetry(host: DebugAndEnvHost, retry: () => Promise<void>): Promise<void> {
+  const job = await installToolchainJob(host, 'go', 'dap', undefined, () => {});
+  if (!job) return;
+  for (let i = 0; i < 300; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const cur = (await api.get<{ job: IdeInstallJob }>(`/ide/toolchains/jobs/${encodeURIComponent(job.id)}`)).job;
+    if (cur.status === 'error') throw new Error(cur.error || 'Delve install failed');
+    if (cur.status === 'done') return retry();
   }
 }
 

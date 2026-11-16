@@ -15,7 +15,7 @@ import {
   attachProjectFolder, canonicalizeLocalProjectPath, createTemplatedFile, detachProjectFolder,
   detectBuildToolFromState, formatRelativeToRoots, loadActiveProjectIdLocal, loadNamedProjectsLocal,
   confirmDiscardOnSwitch, mutatePathBreakpoints, normalizeRootPath, performCloseAllTabs, pushNavigationHistory,
-  restoreWorkspaceTabsOrInitial, revealPathInTree, saveActiveProjectIdLocal, saveBuildToolPrefsLocal, saveLastIdeRoot, saveLastSshTarget, loadLastSshTarget,
+  restoreWorkspaceTabsOrInitial, revealPathInTree, saveActiveProjectIdLocal, saveBuildToolPrefsLocal, saveLastIdeRoot, loadLastSshTarget,
 } from './shell/ideProjectHelpers';
 import {
   applyFallbackPrefixSuffix, computeFallbackSelection, IdeBufferPerfController, nextTabAccessStamp,
@@ -296,12 +296,9 @@ class IdeStore {
   attachDefaultWorkspace(): void {
     if (this.target.root || this.collabIsGuest) return;
     void loadProjMod().then((m) => m.syncNamedProjectsFromBackend(this));
-    const ssh = loadLastSshTarget();
-    if (ssh) { void this.setSshTarget(ssh.connection_id, ssh.root, ssh.connection_name); return; }
-    if (this.activeProjectId) {
-      const savedProj = this.namedProjects.find((p) => p.id === this.activeProjectId);
-      if (savedProj) { void this.activateProject(savedProj.id); return; }
-    }
+    const ssh = loadLastSshTarget(); if (ssh) { void this.setSshTarget(ssh.connection_id, ssh.root, ssh.connection_name); return; }
+    const savedProj = this.activeProjectId ? this.namedProjects.find((p) => p.id === this.activeProjectId) : undefined;
+    if (savedProj) { void this.activateProject(savedProj.id); return; }
     if (!ws.current && !ws.listSettled) return;
     const cur = ws.current ?? ws.workspaces.find((w) => w.id !== SCRATCH_WORKSPACE_ID && w.root_path) ?? ws.workspaces[0];
     void (cur?.root_path ? this.setLocalTarget(cur.root_path, cur.id) : import('./shell/ideScratches.svelte').then((m) => m.openScratches())); // else the default project
@@ -320,7 +317,6 @@ class IdeStore {
     const matchedProj = opts.projectId !== undefined ? opts.projectId : (this.namedProjects.find((p) => p.primary_root === clean)?.id ?? null);
     this.activeProjectId = matchedProj;
     saveLastIdeRoot(clean);
-    saveLastSshTarget(null);
     saveActiveProjectIdLocal(matchedProj, this.namedProjects, clean);
     this.resetTargetState({ kind: 'local', workspace_id: workspaceId, root: clean, connection_id: null, connection_name: null }, opts.additionalRoots);
     if (opts.skipAutoOpen) this.hasClosedAllTabs = true;
@@ -336,11 +332,7 @@ class IdeStore {
   async setSshTarget(connectionId: string, root: string, connectionName: string | null = null): Promise<boolean> {
     if (!(await this.confirmDiscardUnsaved())) return false;
     const clean = normalizeRootPath(root) || '~';
-    // A remote host is no named project: keep its tabs out of the project's saved set.
-    if (this.activeProjectId) (await loadProjMod()).snapshotProjectTabs(this.activeProjectId, this.tabs, this.activePath);
-    this.activeProjectId = null;
-    saveActiveProjectIdLocal(null, this.namedProjects);
-    saveLastSshTarget({ connection_id: connectionId, root: clean, connection_name: connectionName });
+    (await loadProjMod()).leaveProjectForSsh(this, { connection_id: connectionId, root: clean, connection_name: connectionName });
     this.resetTargetState({ kind: 'ssh', workspace_id: null, root: clean, connection_id: connectionId, connection_name: connectionName });
     await this.loadTree();
     void this.loadEnvironments(); return true;
@@ -699,22 +691,7 @@ class IdeStore {
     const gate = await (await loadRepoActionsMod()).confirmIdeTargetProdLaunch(this.target, this.projectEnv, opts.skipProdConfirm);
     if (!gate.allowed) return;
     if (idePreferences.current.autoSave) await this.flushAutoSave();
-    this.debugSseCtl = await (await loadDebugEnvMod()).launchDebugSession(
-      this, { ...opts, confirmProdTargets: gate.confirmProdTargets }, this.debugSseCtl, (s) => this.applyDebugSnapshot(s),
-      () => this.updateDelveAndRetry(opts),
-    );
-  }
-  /** "Update Delve": rebuild it with the project's Go, then start the same debug session again. */
-  private async updateDelveAndRetry(opts: Parameters<IdeStore['startDebug']>[0]): Promise<void> {
-    if (this.toolchains.length === 0) await this.loadToolchains();
-    const job = await this.installToolchain('go', 'dap');
-    if (!job) return;
-    for (let i = 0; i < 300; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      const cur = (await api.get<{ job: IdeInstallJob }>(`/ide/toolchains/jobs/${encodeURIComponent(job.id)}`)).job;
-      if (cur.status === 'error') throw new Error(cur.error || 'Delve install failed');
-      if (cur.status === 'done') return this.startDebug(opts);
-    }
+    this.debugSseCtl = await (await loadDebugEnvMod()).launchDebugSession(this, { ...opts, confirmProdTargets: gate.confirmProdTargets }, this.debugSseCtl, (s) => this.applyDebugSnapshot(s), () => this.startDebug(opts));
   }
   applyDebugSnapshot(raw: IdeDebugSessionSnapshot): void {
     const apply = (m: typeof DebugEnvMod): void => {

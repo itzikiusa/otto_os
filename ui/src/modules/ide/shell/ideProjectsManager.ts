@@ -42,7 +42,9 @@ import {
   saveAdditionalRootsLocal,
   saveBuildToolPrefsLocal,
   saveLastIdeRoot,
+  saveLastSshTarget,
   saveNamedProjectsLocal,
+  type SavedSshTarget,
   toIdeNamedProject,
   type WorkspaceBuildToolPrefs,
 } from './ideProjectHelpers';
@@ -200,6 +202,15 @@ export async function removeNamedProject(host: NamedProjectsHost, projectId: str
       })
       .catch(() => {});
   }
+}
+
+/** Going to an SSH host: it is no named project, so the project keeps its own local
+ *  tabs and stops being Active; a reload reopens the host. */
+export function leaveProjectForSsh(host: NamedProjectsHost, ssh: SavedSshTarget): void {
+  if (host.activeProjectId) snapshotProjectTabs(host.activeProjectId, host.tabs, host.activePath);
+  host.activeProjectId = null;
+  saveActiveProjectIdLocal(null, host.namedProjects);
+  saveLastSshTarget(ssh);
 }
 
 export async function activateNamedProject(host: NamedProjectsHost, projectId: string): Promise<void> {

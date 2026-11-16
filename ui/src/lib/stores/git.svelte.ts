@@ -304,9 +304,6 @@ class GitStore {
     }
   }
 
-  /** Load the workspace's repos. With nothing kept, the primary (status-bar
-   *  branch) is the repo at the workspace's own `rootPath`, not whichever
-   *  sorts first: attaching repos to an IDE project registers them here too. */
   async loadRepos(workspaceId: Id, force = false, rootPath?: string | null): Promise<void> {
     if (!force && this.loadedFor === workspaceId) return;
     this.loadedFor = workspaceId;
@@ -323,8 +320,7 @@ class GitStore {
         return;
       }
       this.repos = repos;
-      const root = rootPath?.replace(/\/+$/, '');
-      this.primary = (root && repos.find((r) => r.path.replace(/\/+$/, '') === root)) || repos[0] || null;
+      this.primary = repos.find((r) => rootPath && r.path.replace(/\/+$/, '') === rootPath.replace(/\/+$/, '')) ?? repos[0] ?? null;
       this.primaryStatus = null;
       if (this.primary) {
         await this.selectPrimary(this.primary);

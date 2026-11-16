@@ -594,8 +594,11 @@ export function emitIdeProjectsChanged(projects?: IdeNamedProject[], activeProje
   }
 }
 
+/** A local project opened: it is the last root, and no SSH host is reopened on reload. */
 export function saveLastIdeRoot(root: string): void {
-  if (root) ideWorkspacePort.setLastRoot(root);
+  if (!root) return;
+  ideWorkspacePort.setLastRoot(root);
+  saveLastSshTarget(null);
 }
 
 const LAST_SSH_TARGET_KEY = 'otto.ide.lastSshTarget';
