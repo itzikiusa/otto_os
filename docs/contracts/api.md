@@ -218,7 +218,7 @@ failure on a read returns an error (500) — never a 200 with zero totals.
   wrapper-script, shell-alias, or conventional `CLAUDE_CONFIG_DIR`): root also sees the machine's
   enabled CLI homes (`~/.codex` / `$CODEX_HOME`, `~/.claude`, active `~/.claude-*`, Antigravity,
   Grok), everyone sees their own subscription profiles
-  (`/auth/provider-accounts`). `AccountLimits{key, provider: "codex"|"claude"|"agy"|"grok", account_id?,
+  (`/auth/provider-accounts`). `AccountLimits{key, provider: "codex"|"claude"|"agy"|"grok"|"muse", account_id?,
   label, source: "default"|"config_dir"|"account", status: "ok"|"stale"|"unknown", reason?,
   plan?, taken_at?, windows: WindowLimit[], credits?: {has_credits, unlimited, balance?},
   limit_reached?, check?: ClaudeCheck}`; `WindowLimit{id, name, window_minutes?, used_percent?,
@@ -918,7 +918,7 @@ and owner-or-admin (root passes); listing returns the caller's own sessions
 credential** — an agent session's, MCP or share credential gets **403**; the
 request answer is also an `Admin`-class approval gate (above).
 
-`RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini"|"grok"|"agy"|"opencode"|"pi",
+`RuntimeSession`: `{id, workspace_id, provider: "claude"|"codex"|"gemini"|"grok"|"agy"|"opencode"|"pi"|"muse",
 title, cwd, model?, native_thread_id?, status, access_mode, created_by, created_at,
 last_active_at, last_sequence, parent_id?, ui_control?, meta?, background_tasks?,
 capabilities, title_auto?}` (`background_tasks`: live, see below; absent = none)
@@ -930,7 +930,7 @@ the agent's own name for the conversation replaces it: Codex
 thread's agent takes: the provider's baseline until a running driver reports
 its own after the handshake, which `provider_session.capabilities` carries
 live — an ACP agent's `promptCapabilities` and its effort config option
-(agy `thought_level`, grok `reasoning_effort`). `steer`: Claude (stdin),
+(agy and Muse `thought_level`, grok `reasoning_effort`). `steer`: Claude (stdin),
 Codex (`turn/steer`), pi (RPC `steer`); never an ACP agent (ACP v1 has no
 way into a running prompt, so a message for it waits in the queue). `files`:
 PDFs — natively for Claude and ACP agents with `embeddedContext`; Codex and
@@ -939,7 +939,7 @@ to the text, T3 Code's `providerMessageTextWithAttachmentPaths`. `plan`: a
 prompt may carry `plan: true` — Claude permission mode `plan`, Codex
 `collaborationMode {mode: plan}` (a later turn sends `default` once with
 Otto's instructions back), an ACP agent's advertised `plan` session mode
-(agy); grok, pi, opencode and gemini have none. The UI gates Send now,
+(agy); grok, pi, opencode, gemini and Muse have none. The UI gates Send now,
 attachments, effort and the Plan chip on it) (`meta`: the
 server-owned meta a personal agent's run / chat thread runs under, migration
 0201 — see "Personal Agents"; absent on a plain thread, never settable by a
@@ -2596,7 +2596,10 @@ stays `false`. The UI uses `update_available` to show an **Update** button.
 copies the full multi-file tree into the Otto library AND into each provider CLI's
 native global skills dir so the skill is discoverable everywhere: claude →
 `~/.claude/skills/<name>/`, codex → `$CODEX_HOME/skills/<name>/` (else
-`~/.codex/skills/<name>/`), agy → `~/.gemini/skills/<name>/`. The copy replaces
+`~/.codex/skills/<name>/`), agy → `~/.gemini/skills/<name>/` (not Muse Code: it
+already loads `~/.claude/skills` and `~/.codex/skills`; its own
+`~/.config/muse/skills` is listed read-only under `GET /library/provider-skills`
+with `provider: "muse"`). The copy replaces
 the previous one with a swap (new tree in a hidden sibling, then renamed in, so a
 failed copy leaves the previous tree), install doubles as update, and each provider
 dir keeps an `.otto-managed.json` manifest listing the skills Otto owns there.
@@ -3374,7 +3377,7 @@ Workspace-independent: one Mac, one daemon. `busy` = a background agent arriving
 | GET /usage/report | Usage:View (non-root: own sessions) | `sessions_limit` (1–1000, default 100), `include=daily_models` | UsageReport (daily/monthly/model/session tables; `daily_models` only when included) |
 | POST /usage/ccusage-check | root | `{days?}` | CcusageCheck (opt-in `npx ccusage` cross-check) |
 | GET /usage/metrics | root | — | system CPU/RAM metrics |
-| GET /usage/limits | Usage:View (non-root: own subscription profiles only) | — | LimitsResp — remaining allowance per active provider login filtered by `ActiveLimitProviders` (Codex from local rollouts; Claude from session events or the opt-in check; Antigravity and Grok asked of their CLIs when installed & enabled, cached 5 min); see the Usage bullets above |
+| GET /usage/limits | Usage:View (non-root: own subscription profiles only) | — | LimitsResp — remaining allowance per active provider login filtered by `ActiveLimitProviders` (Codex from local rollouts; Claude from session events or the opt-in check; Antigravity, Grok and Muse (`muse usage --json`) asked of their CLIs when installed & enabled, cached 5 min); see the Usage bullets above |
 | PUT /usage/limits/claude-check | Usage:View + person + the caller sees that active login | `{key, enabled}` | LimitsResp (opt-in switch, off by default; **404** when Claude or the target login is disabled/unseen) |
 | POST /usage/limits/claude-check/run | Usage:View + person + the caller sees that active login | `{key}` | LimitsResp (runs the enabled Claude-family CLI `get_usage`; **404** when disabled/unseen, **400** while the switch is off; 10 s timeout, 5 min cache, single flight) |
 | PUT /usage/config | root | UsageConfig | config |
@@ -4918,7 +4921,7 @@ takes an id or name (resolved across the workspaces you can read).
 | `otto.run_personal_agent` | yes (DANGEROUS) | off | `POST /personal-agents/{id}/run` |
 
 **Runs and chats are Threads threads** on a structured-runtime provider
-(`claude`, `codex`, `gemini`, `grok`, `opencode`, `pi`); any other provider
+(`claude`, `codex`, `gemini`, `grok`, `opencode`, `pi`, `muse`); any other provider
 (`agy`, custom) keeps a terminal session. A run's thread (`PersonalAgentRun.session_id`
 holds its id) carries the run's server-owned `RuntimeSession.meta`
 (`source:"personal_agent"`, `personal_agent`, `run_id`, `agent_mode`,
@@ -5092,7 +5095,7 @@ cursor they read the room's **tail** (`tail=true`), not its first messages.
 
 Per-provider model lists for enabled providers, refreshed hourly (and on demand)
 with **no API keys**: CLI probe (`agy models`, `opencode models`,
-`pi --offline --list-models`) → docs-page scrape (Anthropic / ChatGPT / Gemini
+`pi --offline --list-models`, Muse's `model/list` over `muse serve`) → docs-page scrape (Anthropic / ChatGPT / Gemini
 model docs, netguard-checked, defensive token extraction) → models.dev
 fallback. A failed refresh NEVER wipes the last good list; disabled providers
 are omitted from `GET /api/v1/providers/models` and skipped during refresh.

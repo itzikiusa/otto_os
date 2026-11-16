@@ -3,8 +3,8 @@
 `Threads` (`#/threads` and `#/threads/<sessionId>`) is Otto's dedicated,
 inbox-style conversational workspace for coding-agent sessions (`claude`,
 `codex`, `agy`, and registered custom providers). It complements classic
-terminal **Agents** (`#/agents`). New Claude, Codex, Gemini, Grok, opencode
-and pi threads use the [structured runtime](threads-structured-runtime.md). Existing terminal coding
+terminal **Agents** (`#/agents`). New Claude, Codex, Gemini, Grok, opencode,
+pi and Muse threads use the [structured runtime](threads-structured-runtime.md). Existing terminal coding
 sessions can also open in Threads through their transcript view, keeping the
 same live PTY and conversation.
 

@@ -61,7 +61,7 @@ you've clicked Allow.
 ### Threads
 
 Agents in **Threads** (the structured runtime: Claude, Codex, Gemini, Grok,
-opencode, pi) use the same tools and the same grant. The request appears
+opencode, pi, Muse) use the same tools and the same grant. The request appears
 under the thread's header (*"‹Gemini› · ‹thread› wants to drive Otto"*, with
 **Allow for this thread** / **Deny**), and the thread's **⋯ → Allow UI
 control** flips it. The grant is stored on the thread and ends when the

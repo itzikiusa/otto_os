@@ -1,7 +1,7 @@
 # Threads — structured agent runtime (how T3 Code does it → how Otto mirrors it)
 
-Status: new Claude, Codex, Gemini, Grok, Antigravity (`agy acp`), opencode
-and pi threads use `/runtime-sessions` (§5), including Scratch. Other
+Status: new Claude, Codex, Gemini, Grok, Antigravity (`agy acp`), opencode,
+pi and Muse Code (`muse acp`) threads use `/runtime-sessions` (§5), including Scratch. Other
 harnesses and existing PTY sessions (older Antigravity threads included) keep
 their terminal-backed view. Structured threads support recoverable
 composer drafts, typed provider questions, fresh context in the same visible
@@ -43,7 +43,8 @@ Otto ports that design rather than inventing its own.
 
 Installed CLIs it was built against: claude 2.1.318, codex-cli 0.166.0,
 gemini (with `--acp`), grok 1.0.70 (`agent stdio`, ACP protocol v1), agy
-1.5.8 (`acp`), opencode 1.19.5 (`acp`), pi 1.5.0 (`--mode rpc`).
+1.5.8 (`acp`), opencode 1.19.5 (`acp`), pi 1.5.0 (`--mode rpc`), Muse Code
+1.4.20 (`acp`).
 
 **Claude, ACP or SDK?** T3 Code's own Claude provider is the SDK path. The
 ACP adapter (`@agentclientprotocol/claude-agent-acp`) is only a Registry
@@ -451,6 +452,77 @@ working login on the test machine.
   about 2 s warm, so its probe gets 10 s. `pi --offline --list-models` prints
   a `provider model context …` table, read as `provider/model` ids.
 
+### Muse Code (`muse acp`; `AcpDriver::muse`)
+
+Built against **Muse Code 1.4.20** (`curl -fsSL https://dev.meta.ai/install.sh
+| bash`: `~/.local/bin/muse` is a bash launcher that keeps the versioned
+binary beside it up to date). T3 Code drives Muse over its own session
+protocol (`muse serve`, `packages/provider-muse`); Otto uses the ACP server
+Muse ships (`muse acp`, ACP v1) through the shared ACP driver instead of a
+second protocol stack. What it advertises (verified live):
+
+- `initialize`: `loadSession`, `promptCapabilities {image, embeddedContext}`
+  (images and PDFs), MCP over stdio and HTTP, one auth method `muse-login`
+  ("Sign in with a device code shown in your browser").
+- `session/new|load`: the modes `allowAll`, `promptUnmatched`, `onRequest`
+  (default), `denyUnmatched` — approval policies, no plan mode — and, from
+  Muse's model catalog once signed in, a `thought_level` config option.
+  `session/load` replays the history and continues the session.
+- Updates: `session_info_update.title` (a generated name), `usage_update`
+  (context used / size), the usual message, thought and tool updates,
+  `available_commands_update` (its skills plus `/compact`).
+
+How Otto launches it: `muse acp --trust-workspace [--model <id>]
+[--disable-sandbox]` with `MUSE_NO_AUTO_UPDATE=1`.
+
+- **Access mode** is a live `session/set_mode`: approval-required
+  `promptUnmatched`, auto-accept-edits `onRequest` (Muse's default: asks only
+  when an action needs it), full access `allowAll`.
+- **Model** is `--model` (a change respawns and loads the session); the list
+  comes from `muse serve`'s `model/list` (below). **Effort** is the
+  `thought_level` option, sent by the tier name Muse lists (`minimal` …
+  `max`, `ultra` behind its experiment); the picker orders them low to high.
+- **Sandbox:** Muse's own OS sandbox is turned off only when Otto's Seatbelt
+  confines the process (macOS refuses a nested sandbox); otherwise it stays
+  on. `--trust-workspace` loads the folder's skills and rules, as every other
+  CLI's pre-trusted cwd does.
+- **Seatbelt home rules** (`otto-sandbox`, terminal and thread alike): Muse
+  may write its session logs, index and runtime sockets
+  (`~/.local/share/muse/{sessions,session-server,runtime,local-tracing}` and
+  that folder's top-level files) and the top-level files of `~/.config/muse`
+  (a login's `auth.json` refresh) — never `~/.config/muse/{settings.json,
+  AGENTS.md}`, its `skills/`, `plugins/`, `hooks/`, `rules/`, or
+  `~/.local/share/muse/{plugins,skills}` (code every later session loads).
+  Verified: `muse acp` runs a turn under the generated agent profile.
+- **Updates:** `MUSE_NO_AUTO_UPDATE=1` keeps the launcher from checking for a
+  new binary on every spawn (T3 Code does the same). Otto's update pass runs
+  the launcher's synchronous refresh: `MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1
+  MUSE_UPDATE_INTERVAL_SECONDS=0 muse --version`. The "installed binary is
+  missing; rerun the installer" error comes from the launcher when it cannot
+  read `.muse-version` beside itself; Otto's Seatbelt leaves reads open, and
+  with auto-update off the launcher writes nothing.
+- **Sign-in:** a signed-out Muse refuses `session/new` with "log in to Muse
+  before opening a session". Otto never calls `authenticate` for it
+  (`AcpFlavor::no_authenticate`): `muse-login` would open a browser from the
+  daemon. The thread shows Muse's message; run `muse login` (or set
+  `META_API_KEY`) and retry.
+- **Models:** `muse serve --disable-shell --disable-write --no-session-log`
+  answers `initialize` → `initialized` → `model/list` on stdin, signed in or
+  not: `modelId`, `displayLabel`, `variants` (effort tiers) and
+  `defaultReasoningEffort`. `muse-spark-1.3` shows as "Muse Spark 1.3".
+- **Terminal sessions:** `muse --trust-workspace [--yolo] [--model id]`.
+  Muse mints its own session ids and `muse resume --last` would cross-wire
+  sessions that share a folder, so terminal Muse starts fresh on every
+  respawn, like opencode; the ACP path resumes exactly.
+- **Not delivered:** Otto's context bundle (no system-prompt flag or setting —
+  Muse reads the tree's and the user's own rules, `~/.claude/skills` and
+  `~/.codex/skills` included), so a persona-carrying run refuses Muse as it
+  does Gemini.
+- **Live check:** `cargo test -p otto-agent-protocol --test runtime muse_live
+  -- --ignored` runs the installed `muse acp` (its offline `echo` provider,
+  no login) through the runtime and this flavor: a prompt round-trip and an
+  image prompt.
+
 ### Access modes
 
 The session's `access_mode` is T3 Code's `RuntimeMode` without `auto`:
@@ -465,7 +537,8 @@ enabled, approval-required otherwise. Each driver passes it the way T3 Code does
 kept `externalSandbox` under Otto's Seatbelt); Grok's argv
 (`grokAcpSpawnArgs`, `acpSupport.ts:47-58`; no accept-edits variant, so that
 mode asks); Gemini's `--approval-mode` and live `session/set_mode` when
-advertised; agy's `session/set_mode` plus its launch-only full access. A driver that cannot switch
+advertised; agy's `session/set_mode` plus its launch-only full access; Muse's
+`session/set_mode` approval policies. A driver that cannot switch
 live (`StructuredDriver::switches_access_live`) is respawned in the new mode
 and resumes its thread, as for a model switch. Otto does NOT port T3 Code's
 client-side auto-answering (`clientPolicy.ts:143-200`): whatever the CLI
@@ -937,7 +1010,7 @@ secret question forms are refused instead of being collected into history.
   mints the per-session `otto` credential and applies the workspace's enabled
   MCP servers. Claude / Codex get them as a terminal session does
   (`.mcp.json` + `claude --mcp-config` with Otto's managed entries, codex
-  `-c`); ACP agents (Gemini, Grok, Antigravity, opencode) get
+  `-c`); ACP agents (Gemini, Grok, Antigravity, opencode, Muse) get
   them in `session/new|load.mcpServers` with each server's env. pi (1.x) gets
   them through a private per-session `-e` extension that registers each
   server (see "opencode and pi" above). The credential is revoked when the
