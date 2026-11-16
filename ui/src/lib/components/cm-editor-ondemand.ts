@@ -7,6 +7,7 @@ import type { Compartment } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import { api, baseUrl, getToken, WS_BEARER_SUBPROTOCOL } from '../api/client';
 import type { IdeDiagnostic, LspCapabilities } from '../api/types';
+import { auth } from '../stores/auth.svelte';
 import { fileUriToPath, pathToFileUri } from '../fileUri';
 import { ws } from '../stores/workspace.svelte';
 import { toasts } from '../toast.svelte';
@@ -79,6 +80,8 @@ export async function attachCodeEditorLsp(opts: {
     if (!lspLang || !resolvedRoot) return;
     const serverLang = normalizeIdeLspServerLang(lspLang);
     if (!opts.connId) {
+      // The daemon serves a local pooled language server to root only (403 otherwise).
+      if (!auth.isRoot) return;
       let caps = await getLspCapabilities(false);
       if (opts.ideMode && caps && !caps.servers.some((s) => s.lang === serverLang && s.available)) {
         caps = await getLspCapabilities(true);

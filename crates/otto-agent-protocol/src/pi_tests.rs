@@ -318,9 +318,22 @@ fn snapshot_and_restore_preserve_pi_streaming_text_tools_and_settlement_mode() {
         r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Half "}}"#,
     );
 
-    let snap = d1.snapshot_state();
-    let mut d2 = PiDriver::with_program("pi");
+    // An earlier build's snapshot: no `program`, none of the later fields.
+    let mut snap = d1.snapshot_state();
+    let o = snap.as_object_mut().unwrap();
+    for k in [
+        "program",
+        "spent",
+        "context_window",
+        "commands_req",
+        "dialogs",
+        "user_mcp",
+    ] {
+        o.remove(k);
+    }
+    let mut d2 = PiDriver::with_program("otto-fake-pi");
     d2.restore_state(&snap).unwrap();
+    assert_eq!(d2.program, "otto-fake-pi");
 
     let tool_end = d2.on_line(
         r#"{"type":"tool_execution_end","toolCallId":"tc-1","toolName":"bash","result":"ok","isError":false}"#,

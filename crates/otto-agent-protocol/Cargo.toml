@@ -15,6 +15,8 @@ otto-pty = { workspace = true }
 otto-telemetry = { workspace = true }
 # Claude's plan limits (`rate_limit_event` frames) recorded passively per login.
 otto-usage = { workspace = true }
+# Claude's project-folder encoder for the `ai-title` transcript probe.
+otto-transcript = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }

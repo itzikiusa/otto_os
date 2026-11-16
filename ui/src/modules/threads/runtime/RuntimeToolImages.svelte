@@ -3,7 +3,7 @@
   // aspect kept; a click opens the shared Lightbox (fit / 1:1). Images a tool
   // left on disk (Codex `imageView` / `imageGeneration`, `image_files`) load
   // from the daemon's read-only route for this thread.
-  import { getContext, onDestroy } from 'svelte';
+  import { getContext } from 'svelte';
   import Lightbox from '../../../lib/components/Lightbox.svelte';
   import { authedBlobUrl } from '../../../lib/api/client';
   import type { ToolOutputImage } from '../../../lib/api/types';
@@ -12,27 +12,30 @@
 
   let { images = [], files = [], itemId = '' }: { images?: ToolOutputImage[]; files?: string[]; itemId?: string } = $props();
   const target = getContext<(() => { sessionId?: string }) | undefined>(PATH_LINK_CTX);
+  // A string, so the effect doesn't re-run (and re-download) on every update
+  // of the session row the getter reads.
+  const sid = $derived(target?.().sessionId);
   let fileUrls = $state<string[]>([]);
   $effect(() => {
-    const sid = target?.().sessionId;
     const n = files.length;
     if (!sid || !itemId || n === 0) return;
+    const id = sid;
     let alive = true;
+    let got: string[] = [];
     void Promise.all(
       Array.from({ length: n }, (_, i) =>
-        authedBlobUrl(`/runtime-sessions/${encodeURIComponent(sid)}/items/${encodeURIComponent(itemId)}/images/${i}`).catch(() => null),
+        authedBlobUrl(`/runtime-sessions/${encodeURIComponent(id)}/items/${encodeURIComponent(itemId)}/images/${i}`).catch(() => null),
       ),
     ).then((urls) => {
-      const got = urls.filter((u): u is string => !!u);
+      got = urls.filter((u): u is string => !!u);
       if (alive) fileUrls = got;
       else for (const u of got) URL.revokeObjectURL(u);
     });
     return () => {
       alive = false;
+      for (const u of got) URL.revokeObjectURL(u);
+      fileUrls = [];
     };
-  });
-  onDestroy(() => {
-    for (const u of fileUrls) URL.revokeObjectURL(u);
   });
   const sources = $derived([...toolImageSources(images), ...fileUrls]);
   let selected = $state<string | null>(null);

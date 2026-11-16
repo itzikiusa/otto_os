@@ -437,8 +437,9 @@ Auth: `Sec-WebSocket-Protocol: otto-bearer, <token>` (echoed as `otto-bearer`;
 `?token=` → 401). Scoped share tokens, MCP-only tokens and agent-session
 credentials are refused with 403 (`RootRoute::Lsp`).
 
-- **Local target (`connection_id` omitted or empty):** Requires human root
-  authority (`root_authority`), and `root` must be an existing directory
+- **Local target (`connection_id` omitted or empty):** Requires a root
+  account: any other caller gets `403` `lsp_requires_root` before the upgrade
+  (the UI then attaches no language server, silently). `root` must be an existing directory
   outside Otto's data dir and secret directories (`~/.ssh`, key files). When optional `file` is
   supplied inside an authorized directory, the bridge walks up from `file` to
   the nearest module manifest (`go.mod`, `Cargo.toml`, `pom.xml`, `build.gradle*`,

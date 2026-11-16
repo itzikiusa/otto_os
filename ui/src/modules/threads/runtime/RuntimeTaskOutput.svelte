@@ -5,8 +5,10 @@
   // runs. Follows the bottom unless you scrolled up (T3 Code's
   // CommandOutputPanel, MIT, Copyright (c) 2026 T3 Tools Inc.).
   import { onDestroy, tick } from 'svelte';
-  import { api } from '../../../lib/api/client';
+  import { api, ApiError } from '../../../lib/api/client';
   import type { RuntimeTaskOutput } from '../../../lib/api/types';
+  import LoadState from '../../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
 
   interface Props {
     sessionId: string;
@@ -18,18 +20,22 @@
   const POLL_MS = 2000;
   let out = $state<RuntimeTaskOutput | null>(null);
   let missing = $state(false);
+  let error = $state<string | null>(null);
   let el = $state<HTMLPreElement | null>(null);
   let timer: ReturnType<typeof setTimeout> | null = null;
   let gone = false;
 
   async function load(): Promise<void> {
+    if (timer) clearTimeout(timer);
     const follow = !el || el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
     try {
       out = await api.get<RuntimeTaskOutput>(`/runtime-sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}/output`);
       missing = false;
+      error = null;
       if (follow) void tick().then(() => el && (el.scrollTop = el.scrollHeight));
-    } catch {
-      missing = true;
+    } catch (e) {
+      missing = e instanceof ApiError && e.status === 404;
+      error = missing ? null : loadErrorText(e);
     }
     if (!gone && live) timer = setTimeout(() => void load(), POLL_MS);
   }
@@ -52,6 +58,8 @@
     <p class="to-meta">{live ? 'No output yet…' : 'It printed nothing.'}</p>
   {:else if missing}
     <p class="to-meta">The output isn’t available (the agent no longer keeps it).</p>
+  {:else if error}
+    <LoadState what="its output" {error} empty variant="compact" onretry={() => void load()} />
   {:else}
     <p class="to-meta">Reading its output…</p>
   {/if}

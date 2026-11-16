@@ -165,6 +165,8 @@ struct Spent {
 /// every field must stay serializable, new ones `#[serde(default)]`.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct PiDriver {
+    /// The factory's binary: kept across a restore, never snapshotted.
+    #[serde(skip)]
     program: String,
     next_id: u64,
     state_req: Option<String>,
@@ -1629,8 +1631,10 @@ impl StructuredDriver for PiDriver {
 
     fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
         if !state.is_null() {
-            *self =
+            let mut restored: Self =
                 serde_json::from_value(state.clone()).map_err(|e| DriverError(e.to_string()))?;
+            restored.program = std::mem::take(&mut self.program);
+            *self = restored;
         }
         Ok(())
     }

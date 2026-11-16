@@ -7,13 +7,12 @@
 //!   agent work area of Otto's data dir (`<data>/personal/<agent>`);
 //! - another non-admin member of the same workspace is refused (403);
 //! - `../../otto.db` and an absolute path are 400;
-//! - `/ws/lsp` rooted at the owner's persona dir is not refused for access,
-//!   and the same root is 403 for another member;
+//! - `/ws/lsp` on a Local target is root-only: a non-root owner is 403
+//!   `lsp_requires_root` even on their own persona dir;
 //! - with the temp data dir PROTECTED (the global data-dir deny sees it, as
 //!   it sees the real one — TQ-5-04), a session whose cwd is the data dir's
-//!   parent (the stand-in for `~`) can't read another persona folder, and
-//!   neither can an LSP rooted there, while the persona-dir session still
-//!   reads its own files.
+//!   parent (the stand-in for `~`) can't read another persona folder, while
+//!   the persona-dir session still reads its own files.
 
 use chrono::Utc;
 use otto_core::domain::{Capability, Feature, SessionKind};
@@ -33,8 +32,6 @@ struct Daemon {
     /// Carol's session whose cwd is the data dir's PARENT (the `~` case).
     home_session: String,
     persona: std::path::PathBuf,
-    /// Another user's persona dir (`<data>/personal/agent-2`).
-    other_persona: std::path::PathBuf,
     /// The data dir's directory name, relative to the home session's cwd.
     data_name: String,
     _tmp: tempfile::TempDir,
@@ -179,7 +176,6 @@ async fn boot() -> Daemon {
         session,
         home_session,
         persona,
-        other_persona,
         data_name,
         _tmp: tmp,
     }
@@ -207,9 +203,10 @@ impl Daemon {
         (status, serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
-    /// The pre-upgrade status of `/ws/lsp` rooted at `root`.
-    async fn lsp_status(&self, token: &str, root: &std::path::Path) -> u16 {
-        self.http
+    /// The pre-upgrade status and Problem code of `/ws/lsp` rooted at `root`.
+    async fn lsp_status(&self, token: &str, root: &std::path::Path) -> (u16, String) {
+        let resp = self
+            .http
             .get(format!("{}/ws/lsp", self.base))
             // An unknown language: the access check runs first, so a refused
             // root is 403 and an allowed one is 400 — no server is spawned.
@@ -224,9 +221,13 @@ impl Daemon {
             .header("Sec-WebSocket-Protocol", format!("otto-bearer, {token}"))
             .send()
             .await
-            .unwrap()
-            .status()
-            .as_u16()
+            .unwrap();
+        let status = resp.status().as_u16();
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        (
+            status,
+            body["code"].as_str().unwrap_or_default().to_string(),
+        )
     }
 }
 
@@ -268,13 +269,17 @@ async fn escapes_are_400() {
     }
 }
 
+/// A local language server runs unsandboxed as the daemon's user: a non-root
+/// member gets none, not even on their own session's folder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lsp_opens_on_the_owners_persona_dir_only() {
+async fn a_non_root_member_gets_no_local_language_server() {
     let d = boot().await;
-    // The owner passes the access check and reaches the language lookup.
-    assert_eq!(d.lsp_status(&d.carol, &d.persona).await, 400);
-    // Another member rooted at Carol's persona dir is refused.
-    assert_eq!(d.lsp_status(&d.dave, &d.persona).await, 403);
+    for token in [&d.carol, &d.dave] {
+        assert_eq!(
+            d.lsp_status(token, &d.persona).await,
+            (403, "lsp_requires_root".to_string())
+        );
+    }
 }
 
 /// TQ-5-04: the data-dir deny holds for a session rooted ABOVE the data dir.
@@ -299,7 +304,4 @@ async fn a_home_cwd_session_cannot_reach_another_persona_folder() {
     let (st, body) = d.get(&d.carol, "read", "memory/notes.md").await;
     assert_eq!(st, 200, "{body}");
     assert_eq!(body["content"], "- likes tea\n");
-    // No language server on someone else's persona dir, and still one on hers.
-    assert_eq!(d.lsp_status(&d.carol, &d.other_persona).await, 403);
-    assert_eq!(d.lsp_status(&d.carol, &d.persona).await, 400);
 }

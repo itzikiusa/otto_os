@@ -64,6 +64,29 @@ fn command(thread: &str, turn_id: &str, status: &str, output: Option<&str>) -> V
                     "aggregatedOutput": output, "exitCode": output.map(|_| 0)}})
 }
 
+/// What a plain turn echoes besides its text: `model` / `effort` / the image
+/// count, a collaboration mode and a skill input.
+fn echo_extras(params: &Value, input: &[Value]) -> String {
+    let images = input.iter().filter(|i| i["type"] == "image").count();
+    let mut extras = match (params["model"].as_str(), params["effort"].as_str()) {
+        (None, None) if images == 0 => String::new(),
+        (m, e) => format!(" [{} {} {images}]", m.unwrap_or("-"), e.unwrap_or("-")),
+    };
+    if let Some(m) = params
+        .pointer("/collaborationMode/mode")
+        .and_then(Value::as_str)
+    {
+        extras.push_str(&format!(" (mode {m})"));
+    }
+    if let Some(skill) = input.iter().find(|i| i["type"] == "skill") {
+        extras.push_str(&format!(
+            " (skill {})",
+            skill["name"].as_str().unwrap_or("?")
+        ));
+    }
+    extras
+}
+
 enum In {
     Line(Value),
     Eof,
@@ -166,25 +189,7 @@ fn main() {
                     .find_map(|i| i["text"].as_str())
                     .unwrap_or_default()
                     .to_string();
-                // `model` / `effort` / image inputs are echoed back.
-                let images = input.iter().filter(|i| i["type"] == "image").count();
-                let mut extras = match (params["model"].as_str(), params["effort"].as_str()) {
-                    (None, None) if images == 0 => String::new(),
-                    (m, e) => format!(" [{} {} {images}]", m.unwrap_or("-"), e.unwrap_or("-")),
-                };
-                // A collaboration mode and a skill input are echoed too.
-                if let Some(m) = params
-                    .pointer("/collaborationMode/mode")
-                    .and_then(Value::as_str)
-                {
-                    extras.push_str(&format!(" (mode {m})"));
-                }
-                if let Some(skill) = input.iter().find(|i| i["type"] == "skill") {
-                    extras.push_str(&format!(
-                        " (skill {})",
-                        skill["name"].as_str().unwrap_or("?")
-                    ));
-                }
+                let extras = echo_extras(&params, &input);
                 match text.as_str() {
                     // `stream:<n>:<ms>`: `c0 `…`c<n-1> `, one delta per <ms>.
                     t if t.starts_with("stream:") => {

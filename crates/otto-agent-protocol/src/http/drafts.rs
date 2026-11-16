@@ -81,12 +81,8 @@ pub(crate) fn validate_attachment_bytes(
         return Err(Error::PayloadTooLarge("Attachment exceeds 10 MiB.".into()));
     }
     let valid = match mime {
-        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
-        "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
-        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
-        "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
         "application/pdf" => bytes.starts_with(b"%PDF-"),
-        _ => false,
+        _ => crate::tool_images::image_mime(&bytes) == Some(mime),
     };
     if !valid {
         return Err(Error::Invalid(

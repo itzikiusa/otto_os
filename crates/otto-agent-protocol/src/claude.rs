@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 #[path = "claude_tasks.rs"]
-mod tasks;
+pub(crate) mod tasks;
 
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, PlanStepStatus, ProviderCommand,
@@ -33,14 +33,6 @@ use crate::driver::{
 
 /// Claude Code's switch for connecting MCP servers before the first request.
 const MCP_NONBLOCKING: &str = "MCP_CONNECTION_NONBLOCKING";
-
-/// Claude Code's project folder for `cwd` (otto-transcript `encode_cwd`:
-/// every non-ASCII-alphanumeric character becomes `-`).
-fn claude_project_dir(cwd: &str) -> String {
-    cwd.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
 
 /// `permissionModeForClaudeRuntimePolicy` (`ClaudeAdapterV2.ts:2573-2620`).
 fn permission_mode(mode: RuntimeAccessMode) -> &'static str {
@@ -111,8 +103,22 @@ struct Pending {
     suggestions: Vec<Value>,
 }
 
+/// Blocks as a map, or as the `[(index, block)]` pairs a holder snapshotted
+/// by an earlier build carries.
+fn blocks_compat<'de, D: serde::Deserializer<'de>>(d: D) -> Result<HashMap<u64, Block>, D::Error> {
+    let v: Value = serde::Deserialize::deserialize(d)?;
+    if v.is_array() {
+        serde_json::from_value::<Vec<(u64, Block)>>(v).map(|p| p.into_iter().collect())
+    } else {
+        serde_json::from_value(v)
+    }
+    .map_err(serde::de::Error::custom)
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClaudeDriver {
+    /// The factory's binary: kept across a restore, never snapshotted.
+    #[serde(skip)]
     program: String,
     /// `--session-id` for a fresh thread (the resume key from the start).
     fresh_session_id: String,
@@ -121,6 +127,7 @@ pub struct ClaudeDriver {
     init_req: Option<String>,
     turn_id: Option<String>,
     /// Streamed content blocks of the current message, by block index.
+    #[serde(deserialize_with = "blocks_compat")]
     blocks: HashMap<u64, Block>,
     message_id: Option<String>,
     /// Messages whose text arrived as stream events (their final `assistant`
@@ -1133,7 +1140,7 @@ impl StructuredDriver for ClaudeDriver {
         Some(
             self.transcript
                 .as_ref()?
-                .join(claude_project_dir(&self.cwd))
+                .join(otto_transcript::roots::encode_cwd(&self.cwd))
                 .join(format!("{sid}.jsonl")),
         )
     }
@@ -1328,8 +1335,10 @@ impl StructuredDriver for ClaudeDriver {
 
     fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
         if !state.is_null() {
-            *self =
+            let mut restored: Self =
                 serde_json::from_value(state.clone()).map_err(|e| DriverError(e.to_string()))?;
+            restored.program = std::mem::take(&mut self.program);
+            *self = restored;
         }
         Ok(())
     }
@@ -2325,9 +2334,24 @@ mod tests {
             json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hel"}}}),
         );
 
-        let snap = d1.snapshot_state();
-        let mut d2 = ClaudeDriver::new();
+        // The shape an earlier build's holder snapshotted: blocks as
+        // `[(index, block)]`, none of the later fields, no `program`.
+        let mut snap = d1.snapshot_state();
+        assert!(snap.get("program").is_none());
+        let o = snap.as_object_mut().unwrap();
+        for k in ["cost_total", "plan", "transcript", "cwd"] {
+            o.remove(k);
+        }
+        let pairs: Vec<Value> = o["blocks"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, b)| json!([k.parse::<u64>().unwrap(), b]))
+            .collect();
+        o["blocks"] = Value::Array(pairs);
+        let mut d2 = ClaudeDriver::with_program("otto-fake-claude");
         d2.restore_state(&snap).unwrap();
+        assert_eq!(d2.program, "otto-fake-claude");
 
         let resp = d2
             .respond("claude-req_9", ApprovalDecision::Accept)

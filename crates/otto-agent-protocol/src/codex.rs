@@ -63,6 +63,8 @@ impl Default for Item {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct CodexDriver {
+    /// The factory's binary: kept across a restore, never snapshotted.
+    #[serde(skip)]
     program: String,
     next_id: u64,
     init_id: u64,
@@ -706,7 +708,7 @@ impl CodexDriver {
                     let name = s.get("name")?.as_str()?.to_string();
                     let path = s.get("path")?.as_str()?.to_string();
                     let desc = s
-                        .pointer("/interface/short_description")
+                        .pointer("/interface/shortDescription")
                         .or_else(|| s.get("shortDescription"))
                         .or_else(|| s.get("description"))
                         .and_then(Value::as_str)
@@ -1372,8 +1374,10 @@ impl StructuredDriver for CodexDriver {
 
     fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
         if !state.is_null() {
-            *self =
+            let mut restored: Self =
                 serde_json::from_value(state.clone()).map_err(|e| DriverError(e.to_string()))?;
+            restored.program = std::mem::take(&mut self.program);
+            *self = restored;
         }
         Ok(())
     }
@@ -2020,9 +2024,22 @@ mod tests {
             json!({"id": 77, "method": "item/commandExecution/requestApproval", "params": {"itemId": "c1", "command": "cargo test"}}),
         );
 
-        let snap = d1.snapshot_state();
-        let mut d2 = CodexDriver::with_program("codex");
+        // An earlier build's snapshot: no `program`, none of the later fields.
+        let mut snap = d1.snapshot_state();
+        let o = snap.as_object_mut().unwrap();
+        for k in [
+            "program",
+            "thread_model",
+            "plan",
+            "developer_instructions",
+            "skills",
+            "skills_req",
+        ] {
+            o.remove(k);
+        }
+        let mut d2 = CodexDriver::with_program("otto-fake-codex");
         d2.restore_state(&snap).unwrap();
+        assert_eq!(d2.program, "otto-fake-codex");
 
         let approval = d2.respond("codex-77", ApprovalDecision::Accept).unwrap();
         assert_eq!(parse(&approval.writes[0])["id"], 77);

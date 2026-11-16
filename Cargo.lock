@@ -3900,6 +3900,7 @@ dependencies = [
  "otto-sessions",
  "otto-state",
  "otto-telemetry",
+ "otto-transcript",
  "otto-usage",
  "serde",
  "serde_json",

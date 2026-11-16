@@ -520,6 +520,50 @@ impl ProviderRegistry {
                 shell_fallback: false,
             },
         );
+        // gemini (Gemini CLI; verified against 0.43): `--session-id <uuid>`
+        // starts a session with Otto's id and `--resume <uuid>` reopens it;
+        // `--yolo` approves every tool.
+        let yolo: Vec<String> = if skip_permissions {
+            vec!["--yolo".into()]
+        } else {
+            Vec::new()
+        };
+        map.insert(
+            "gemini".to_string(),
+            ProviderSpec {
+                cmd: "gemini".into(),
+                args: [yolo.clone(), vec!["--session-id".into(), "{sid}".into()]].concat(),
+                resume_args: Some([yolo, vec!["--resume".into(), "{sid}".into()]].concat()),
+                env: BTreeMap::new(),
+                update_command: Some("npm install -g @google/gemini-cli@latest".into()),
+                model_args: Some(vec!["--model".into(), "{model}".into()]),
+                model_family: Some("gemini".into()),
+                captures_session_id: false,
+                shell_fallback: false,
+            },
+        );
+        // grok (Grok Build; verified against 1.0.77): `--session-id <uuid>`
+        // for a new conversation, `--resume <id>` to reopen it;
+        // `--always-approve` approves every tool.
+        let always: Vec<String> = if skip_permissions {
+            vec!["--always-approve".into()]
+        } else {
+            Vec::new()
+        };
+        map.insert(
+            "grok".to_string(),
+            ProviderSpec {
+                cmd: "grok".into(),
+                args: [always.clone(), vec!["--session-id".into(), "{sid}".into()]].concat(),
+                resume_args: Some([always, vec!["--resume".into(), "{sid}".into()]].concat()),
+                env: BTreeMap::new(),
+                update_command: Some("grok update".into()),
+                model_args: Some(vec!["--model".into(), "{model}".into()]),
+                model_family: Some("grok".into()),
+                captures_session_id: false,
+                shell_fallback: false,
+            },
+        );
         // opencode (opencode.ai; verified against 1.19.5): the TUI is
         // `opencode [project] [--model provider/model] [-s <id> | -c]
         // [--auto]`. `-s` only OPENS an existing session ("Session not

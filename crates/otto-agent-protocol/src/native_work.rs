@@ -24,6 +24,9 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::acp_sideband::burst::is_safe_session_id;
+use crate::claude::tasks::clip;
+
 /// A command output tail.
 const OUTPUT_TAIL: u64 = 64 * 1024;
 /// A member transcript tail / the board tail.
@@ -33,13 +36,6 @@ const STEPS_SHOWN: usize = 80;
 const STEP_TEXT: usize = 4_000;
 const TOOL_INPUT: usize = 600;
 const POSTS_SHOWN: usize = 40;
-
-fn safe_id(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
 
 /// `path` if it is a regular file whose real path is inside `root`.
 fn contained_file(root: &Path, path: &Path) -> Option<PathBuf> {
@@ -65,17 +61,6 @@ fn tail(path: &Path, max: u64) -> Option<(String, bool)> {
     Some((text, start > 0))
 }
 
-fn clip(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
-}
-
 #[derive(Debug, Serialize, PartialEq)]
 pub struct TaskOutput {
     pub text: String,
@@ -87,7 +72,7 @@ pub struct TaskOutput {
 /// root (`$CLAUDE_CODE_TMPDIR`, else `/tmp`).
 #[allow(clippy::disallowed_methods)] // runs on the blocking pool
 pub fn claude_task_output(tmp: &Path, uid: u32, session: &str, task: &str) -> Option<TaskOutput> {
-    if !safe_id(session) || !safe_id(task) {
+    if !is_safe_session_id(session) || !is_safe_session_id(task) {
         return None;
     }
     let root = tmp.join(format!("claude-{uid}"));
@@ -160,7 +145,7 @@ pub struct Swarm {
 /// steps. `None` when the session has no swarm. `brain` is
 /// `~/.gemini/antigravity-cli/brain`.
 pub fn agy_swarm(brain: &Path, session: &str, member: Option<&str>) -> Option<Swarm> {
-    if !safe_id(session) {
+    if !is_safe_session_id(session) {
         return None;
     }
     let gen = brain.join(session).join(".system_generated");
@@ -201,7 +186,7 @@ pub fn agy_swarm(brain: &Path, session: &str, member: Option<&str>) -> Option<Sw
             mine.drain(..mine.len().saturating_sub(POSTS_SHOWN));
             let (steps, truncated) = if member == Some(name.as_str()) {
                 s(m, "conversation_id")
-                    .filter(|c| safe_id(c))
+                    .filter(|c| is_safe_session_id(c))
                     .and_then(|c| {
                         let path = brain
                             .join(c)

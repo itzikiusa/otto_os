@@ -682,8 +682,8 @@ async fn swarm<S: RuntimeCtx>(
         .native_thread_id
         .filter(|_| session.provider == otto_core::agent_runtime::RuntimeProvider::Agy)
         .ok_or_else(gone)?;
-    let home = std::env::var_os("HOME").ok_or_else(gone)?;
-    let brain = std::path::PathBuf::from(home).join(".gemini/antigravity-cli/brain");
+    let brain =
+        std::path::PathBuf::from(crate::acp_sideband::default_agy_brain_dir().ok_or_else(gone)?);
     tokio::task::spawn_blocking(move || {
         crate::native_work::agy_swarm(&brain, &native, q.member.as_deref())
     })

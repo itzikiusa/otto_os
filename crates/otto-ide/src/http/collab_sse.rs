@@ -409,12 +409,15 @@ pub(super) async fn collab_guest_debug_action<S: IdeCtx>(
 
 /// Git config/hooks and agent CLI config run code on the HOST's next git or
 /// agent command (invisible in a diff), so an invited guest never saves them.
+/// Checked on the decoded path (a `file://` URI is percent-decoded before the
+/// write) and without case (APFS is case-insensitive).
 fn is_agent_or_git_control_path(path: &str) -> bool {
-    std::path::Path::new(path).components().any(|c| {
-        matches!(
-            c.as_os_str().to_str(),
-            Some(".git" | ".claude" | ".codex" | ".gemini" | ".mcp.json")
-        )
+    let path = crate::target::sdk_paths::strip_file_uri(path);
+    std::path::Path::new(&path).components().any(|c| {
+        let name = c.as_os_str().to_string_lossy();
+        [".git", ".claude", ".codex", ".gemini", ".mcp.json"]
+            .iter()
+            .any(|n| name.eq_ignore_ascii_case(n))
     })
 }
 
@@ -428,6 +431,10 @@ mod tests {
             "/w/.claude/settings.json",
             "/w/sub/.mcp.json",
             ".codex/config.toml",
+            "file:///w/%2Eclaude/settings.json",
+            "file:///w/%2Egit/config",
+            "/w/.CLAUDE/settings.json",
+            "/w/.Git/hooks/pre-commit",
         ] {
             assert!(super::is_agent_or_git_control_path(p), "{p}");
         }

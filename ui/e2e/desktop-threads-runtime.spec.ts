@@ -220,6 +220,27 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
 // own activity; a closed thread reopens when you send to it; Delete honours
 // Settings › "Closing a session tab" = Always delete.
 // ─────────────────────────────────────────────────────────────────────────────
+test('a new runtime thread sends the stage’s image with its first message', async ({ page }) => {
+  await page.goto('/#/threads');
+  await page.getByTestId('threads-new-btn').click();
+  const stage = page.getByTestId('new-thread-stage');
+  await expect(stage).toBeVisible({ timeout: 30_000 });
+  await stage.getByTestId('picker-agent').click();
+  await page.getByTestId('model-picker').getByTestId('model-picker-provider-codex').click();
+  await page.keyboard.press('Escape');
+
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+  await stage.locator('input[type=file]').setInputFiles({ name: 'first.png', mimeType: 'image/png', buffer: png });
+  await expect(stage.getByRole('img', { name: 'first.png' })).toBeVisible();
+  const sent = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/prompt'));
+  await stage.getByTestId('new-thread-input').fill('first with a picture');
+  await stage.getByTestId('new-thread-send-btn').click();
+  const body = (await sent).postDataJSON() as { text?: string; images?: { mime: string; name?: string }[] };
+  expect(body.text).toBe('first with a picture');
+  expect(body.images?.map((i) => [i.name, i.mime])).toEqual([['first.png', 'image/png']]);
+  await expect(page.locator('[data-testid^="runtime-thread-"]').getByText('echo: first with a picture')).toBeVisible({ timeout: 15_000 });
+});
+
 test('a Claude thread: background work, its own turn, a subagent card, reopen and delete', async ({ page }, info) => {
   const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, {
     data: { provider: 'claude', cwd: fixtureDir, title: 'Claude background' },

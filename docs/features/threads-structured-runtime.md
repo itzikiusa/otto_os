@@ -685,7 +685,11 @@ and still remembered the image.
     each holder socket, restores a fresh driver from the checkpoint, and
     replays the lines after the acknowledged one — the turn continues and
     completes in the new daemon.
-- **Without holders** (the setting off, or an unadoptable child) a structured
+  - **No session reaches a holder.** Seatbelt-confined sessions are denied
+    `connect()` to the socket directory and its `/tmp/otto-rth-*` fallback,
+    and to the PTY holders' sockets.
+- **Without holders** (the setting off, a child with a network profile, or
+  an unadoptable child) a structured
   child dies with the daemon. At boot (`AgentRuntime::recover`, from
   `recover_before_serve`):
   - every in-flight turn ends **`interrupted`**, and so do its open items;
@@ -859,8 +863,10 @@ private helpers as `SessionManager::create`, in the same order:
 6. `apply_sandbox`, **last**, over the fully built argv: the
    `process_sandbox` Seatbelt profile, same `sandbox_decision`.
 
-A named provider account or a workspace network profile is **refused**, not
-skipped.
+A named provider account and a workspace network profile apply as for a
+terminal session; an unknown or unusable account or profile fails the spawn.
+A child with a network profile is not held across a daemon restart (its
+tunnels end with the daemon): it resumes by a respawn with fresh tunnels.
 
 The PTY prompt guard types keystrokes to accept folder-trust or "press
 Enter" dialogs on a terminal screen. A structured child has no terminal:
@@ -932,7 +938,8 @@ secret question forms are refused instead of being collected into history.
   handshake, so a daemon that dies before that loses the resume (the next
   spawn starts fresh). A subagent's streamed text is not shown live (its
   complete messages are).
-- **Named provider accounts and network profiles** (refused today).
+- ~~Named provider accounts and network profiles~~ — done: applied as for a
+  terminal session; an unknown or unusable account or profile fails the spawn.
 - ~~Otto MCP tools for structured sessions~~ — done: `prepare_runtime_spawn`
   mints the per-session `otto` credential and applies the workspace's enabled
   MCP servers. Claude / Codex get them as a terminal session does

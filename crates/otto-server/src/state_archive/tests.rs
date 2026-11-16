@@ -481,6 +481,37 @@ async fn exported_rows_follow_the_primary_key() {
     assert_eq!(ids, vec![2, 10]);
 }
 
+/// Composer drafts past their 30 days (`updated_at` is unix seconds) are
+/// left out of the export.
+#[tokio::test]
+async fn expired_composer_drafts_are_not_exported() {
+    let pool = otto_state::db::test_pool().await;
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    for (session, at) in [("fresh", now), ("expired", now - 31 * 86_400)] {
+        sqlx::query(
+            "INSERT INTO runtime_composer_drafts(user_id,workspace_id,session_id,payload_json,updated_at) VALUES('u','ws',?,'{}',?)",
+        )
+        .bind(session)
+        .bind(at)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    }
+    let rows = schema::read_rows(&mut conn, "runtime_composer_drafts")
+        .await
+        .unwrap();
+    let kept: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r.get("session_id").and_then(Value::as_str))
+        .collect();
+    assert_eq!(kept, vec!["fresh"]);
+}
+
 /// data-integrity-6-03: a custom default MCP profile, an edited preset and a
 /// session naming the custom profile all survive a restore onto a fresh
 /// install — the seeded presets merge instead of conflicting, and the

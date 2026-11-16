@@ -1093,7 +1093,9 @@ impl AgentRuntime {
             env: spec.env,
         };
         if let Some(holders_dir) = self.inner.config.holders_dir.as_deref() {
-            if self.inner.host.session_persistence_enabled().await {
+            if !self.inner.host.network_profile_active(&session)
+                && self.inner.host.session_persistence_enabled().await
+            {
                 let launcher = self
                     .inner
                     .config
@@ -1735,7 +1737,7 @@ impl AgentRuntime {
             return Err(gone());
         }
         let bytes = tokio::fs::read(&path).await.map_err(|_| gone())?;
-        let mime = image_mime(&bytes).ok_or_else(gone)?;
+        let mime = crate::tool_images::image_mime(&bytes).ok_or_else(gone)?;
         Ok((mime.to_string(), bytes))
     }
 
@@ -2480,21 +2482,6 @@ fn transcript_title(path: &std::path::Path) -> Option<String> {
     find(&head)
 }
 
-/// A raster image's mime type by its first bytes.
-fn image_mime(b: &[u8]) -> Option<&'static str> {
-    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if b.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some("image/jpeg")
-    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if b.len() > 12 && b.starts_with(b"RIFF") && &b[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
-}
-
 /// An agent's command list as the session keeps it: at most 400 commands,
 /// unique by name, each description one line of at most 160 characters
 /// (Claude Code lists every skill with its whole description).
@@ -2821,7 +2808,7 @@ fn set_session_status(
             && p.last_error == last_error
             && p.background_tasks == background_tasks
             && p.capabilities == capabilities
-            && (p.title.is_none() || p.title == title)
+            && p.title == title
     }) {
         return;
     }

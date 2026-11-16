@@ -713,6 +713,57 @@ async fn codex_takes_model_effort_and_images_per_turn_without_a_respawn() {
     rt.close(&s.id).await.unwrap();
 }
 
+/// A prompt takes at most 20 attachments, each named in at most 1 KiB (the
+/// saved draft's caps).
+#[tokio::test]
+async fn prompt_attachments_are_capped_in_count_and_name_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Codex).await;
+    let image = |name: Option<String>| PromptImage {
+        mime: "image/png".into(),
+        data_base64: "iVBORw0KGgo=".into(),
+        name,
+    };
+    let with_images = |n: usize| RuntimePromptReq {
+        images: (0..n).map(|_| image(None)).collect(),
+        ..RuntimePromptReq::of("look")
+    };
+    assert!(matches!(
+        rt.prompt_with(&s.id, &with_images(21)).await,
+        Err(Error::PayloadTooLarge(_))
+    ));
+    let long = "a".repeat(1025);
+    let named_image = RuntimePromptReq {
+        images: vec![image(Some(long.clone()))],
+        ..RuntimePromptReq::of("look")
+    };
+    assert!(matches!(
+        rt.prompt_with(&s.id, &named_image).await,
+        Err(Error::Invalid(_))
+    ));
+    let named_pdf = RuntimePromptReq {
+        files: vec![PromptFile {
+            mime: "application/pdf".into(),
+            name: long,
+            data_base64: "JVBERi0xLjQ=".into(),
+            path: None,
+        }],
+        ..RuntimePromptReq::of("look")
+    };
+    assert!(matches!(
+        rt.prompt_with(&s.id, &named_pdf).await,
+        Err(Error::Invalid(_))
+    ));
+    rt.prompt_with(&s.id, &with_images(20)).await.unwrap();
+    let fin = host.wait(is_terminal).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    assert_eq!(last_assistant_text(&host), "echo: look [- - 20]");
+    rt.close(&s.id).await.unwrap();
+}
+
 #[tokio::test]
 async fn acp_model_switch_respawns_and_resumes_and_unsupported_input_is_refused() {
     let dir = tempfile::tempdir().unwrap();

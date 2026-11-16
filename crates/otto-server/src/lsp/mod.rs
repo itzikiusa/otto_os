@@ -7,7 +7,8 @@
 //! Routes exposed:
 //!   GET  /api/v1/lsp/capabilities                     → LspCapabilities (authed)
 //!   POST /api/v1/workspaces/{id}/lsp/install          → Session (Editor role)
-//!   GET  /ws/lsp?lang=&root=&connection_id=           → WebSocket bridge (`otto-bearer` subprotocol auth)
+//!   GET  /ws/lsp?lang=&root=&connection_id=           → WebSocket bridge (`otto-bearer` subprotocol auth;
+//!                                                       a Local target is root-only: 403 `lsp_requires_root`)
 
 pub use otto_ide::lsp_host::ws_bridge::{InstallLspReq, LspCapabilities, LspServerStatus};
 pub use otto_ide::lsp_host::{framing, pool, servers};
@@ -136,6 +137,19 @@ async fn lsp_ws(
     }
 
     let user = auth.effective_user.clone();
+    // A local language server runs unsandboxed as the daemon's user: root
+    // only. Remote SSH targets run on the remote host as before.
+    let local = q
+        .connection_id
+        .as_deref()
+        .is_none_or(|c| c.trim().is_empty());
+    if local && !user.is_root {
+        return ws_problem(
+            StatusCode::FORBIDDEN,
+            "lsp_requires_root",
+            "only a root account can open a local language server",
+        );
+    }
     let ctx_for_check = st.ctx.clone();
     let user_for_check = user.clone();
     let prepared = match prepare_lsp_ws_session(&st.ctx, &user, q, move |root_buf| {

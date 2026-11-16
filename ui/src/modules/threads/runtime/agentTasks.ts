@@ -572,13 +572,7 @@ export function withSwarm(tasks: AgentTasks, members: readonly SwarmMemberLite[]
     itemId: null,
     childSessionId: null,
     taskId: null,
-    stepSummary: null,
-    sublabel: null,
-    prompt: null,
-    output: null,
-    error: null,
-    toolUses: 0,
-    detailOmitted: false,
+    ...toolFields(undefined, undefined),
   });
   return {
     running: [...tasks.running, ...extra.filter((m) => !m.killed).map(row)],

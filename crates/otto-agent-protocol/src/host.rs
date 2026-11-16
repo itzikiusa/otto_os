@@ -39,6 +39,13 @@ pub trait RuntimeHost: Send + Sync + 'static {
     /// its spawn minted (the `otto` MCP credential). Best-effort.
     async fn retire(&self, _session: &RuntimeSession) {}
 
+    /// Whether the spawn just prepared for `session` brought up a network
+    /// profile. Its tunnels end with the daemon, so such a child is not
+    /// held across a restart: it respawns (resumes) with fresh tunnels.
+    fn network_profile_active(&self, _session: &RuntimeSession) -> bool {
+        false
+    }
+
     /// The access mode a new session starts in when the request names none —
     /// the default terminal sessions follow.
     fn default_access_mode(&self) -> RuntimeAccessMode {
@@ -167,6 +174,13 @@ impl RuntimeHost for SessionManagerHost {
         self.manager
             .retire_runtime_credentials(&as_agent_session(session))
             .await;
+    }
+
+    fn network_profile_active(&self, session: &RuntimeSession) -> bool {
+        self.manager
+            .network_status(session.id.as_str())
+            .profile_id
+            .is_some()
     }
 
     /// Full access while Settings › Providers skips permission prompts (the

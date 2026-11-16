@@ -646,6 +646,23 @@ impl SandboxPolicy {
             .map(|p| filter("literal", Path::new(p)))
             .collect();
         trailing.push(format!("(deny process-exec {})", exec.join(" ")));
+        // Session holders' sockets (runtime `<data_dir>/runtime-holders`, PTY
+        // `<data_dir>/pty-holders`, and their short-path fallbacks
+        // `/tmp/otto-rth-<hash>` / `$TMPDIR/otto-ptyh-<hash>`): connecting to
+        // one replays another session's output and types into it, and a file
+        // deny does not stop `connect()`. One `remote unix-socket` per filter.
+        let mut sockets = vec![
+            r#"(remote unix-socket (path-regex #"/otto-(rth|ptyh)-[0-9a-f]+/[^/]+$"))"#.to_string(),
+        ];
+        if data_dir_set {
+            for d in ["runtime-holders", "pty-holders"] {
+                sockets.push(format!(
+                    "(remote unix-socket {})",
+                    filter("subpath", &data_dir.join(d))
+                ));
+            }
+        }
+        trailing.push(format!("(deny network-outbound {})", sockets.join(" ")));
 
         Self {
             writable_roots: roots,
@@ -1249,6 +1266,15 @@ mod tests {
         assert!(sbpl.contains(&format!("(subpath \"{data}/tls\")")));
         // The carve-outs come after every grant, network included.
         assert!(deny > at(&sbpl, "(allow network-outbound)"));
+        // No session reaches another session's holder socket.
+        let sockets = at(&sbpl, "(deny network-outbound (remote unix-socket");
+        assert!(sockets > at(&sbpl, "(allow network-outbound)"));
+        for d in ["runtime-holders", "pty-holders"] {
+            assert!(
+                sbpl[sockets..].contains(&format!("(remote unix-socket (subpath \"{data}/{d}\"))"))
+            );
+        }
+        assert!(sbpl[sockets..].contains(r#"/otto-(rth|ptyh)-[0-9a-f]+/[^/]+$"#));
     }
 
     /// Design-assist turns edit `<data>/design/<artifact>/work/**` in place:

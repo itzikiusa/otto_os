@@ -44,6 +44,8 @@ struct TestHost {
     spawns: Mutex<usize>,
     events: Mutex<Vec<Arc<RuntimeEvent>>>,
     notify: tokio::sync::Notify,
+    /// Each spawn brings up a network profile.
+    network: bool,
 }
 
 #[async_trait::async_trait]
@@ -77,6 +79,9 @@ impl RuntimeHost for TestHost {
         *self.spawns.lock().unwrap() += 1;
         Ok(Vec::new())
     }
+    fn network_profile_active(&self, _s: &RuntimeSession) -> bool {
+        self.network
+    }
     fn publish(&self, _s: &RuntimeSession, event: Arc<RuntimeEvent>) {
         self.events.lock().unwrap().push(event);
         self.notify.notify_waiters();
@@ -91,6 +96,7 @@ impl TestHost {
             spawns: Mutex::default(),
             events: Mutex::default(),
             notify: tokio::sync::Notify::new(),
+            network: false,
         })
     }
 
@@ -338,6 +344,7 @@ async fn mid_turn(provider: RuntimeProvider) {
         .await
         .unwrap();
     host.wait(streamed("c3 ")).await;
+    let capabilities = rt.get(&s.id).await.unwrap().capabilities;
     rt.shutdown_for_restart().await;
     drop(rt);
     assert!(
@@ -348,6 +355,11 @@ async fn mid_turn(provider: RuntimeProvider) {
     let host2 = d.host();
     let rt2 = runtime(&pool, &host2);
     rt2.recover_and_adopt().await.unwrap();
+    assert_eq!(
+        rt2.get(&s.id).await.unwrap().capabilities,
+        capabilities,
+        "{provider:?}: the adopted thread keeps its handshake's capabilities"
+    );
     assert_eq!(
         rt2.get(&s.id).await.unwrap().status,
         RuntimeSessionStatus::Working,
@@ -657,6 +669,37 @@ async fn an_unadoptable_holder_falls_back_to_resume() {
     rt2.prompt(&s.id, "hi").await.unwrap();
     let t = host2.wait(is_terminal).await;
     assert_eq!(terminal(&t), Some(TurnTerminalStatus::Completed));
+    assert_eq!(host2.spawns(), 1, "resumed by a respawn");
+    rt2.close(&s.id).await.unwrap();
+}
+
+/// A child whose spawn brought up a network profile is not held: its tunnels
+/// end with the daemon, so after a restart it resumes by a respawn.
+#[tokio::test]
+async fn a_network_profile_child_is_not_held() {
+    let d = Dirs::new();
+    let pool = pool().await;
+    let host = Arc::new(TestHost {
+        network: true,
+        ..Arc::into_inner(d.host()).unwrap()
+    });
+    let rt = runtime(&pool, &host);
+    let s = create(&rt, d.cwd(), RuntimeProvider::Codex).await;
+    rt.prompt(&s.id, "hello").await.unwrap();
+    host.wait(is_terminal).await;
+    assert!(list_holder_sockets(&host.holders).is_empty());
+    rt.shutdown_for_restart().await;
+    drop(rt);
+
+    let host2 = d.host();
+    let rt2 = runtime(&pool, &host2);
+    rt2.recover_and_adopt().await.unwrap();
+    assert_eq!(
+        rt2.get(&s.id).await.unwrap().status,
+        RuntimeSessionStatus::Dormant
+    );
+    rt2.prompt(&s.id, "hi").await.unwrap();
+    host2.wait(is_terminal).await;
     assert_eq!(host2.spawns(), 1, "resumed by a respawn");
     rt2.close(&s.id).await.unwrap();
 }

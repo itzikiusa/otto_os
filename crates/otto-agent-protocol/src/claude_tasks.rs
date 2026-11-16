@@ -677,7 +677,7 @@ impl ClaudeDriver {
     }
 }
 
-fn clip(text: &str, max: usize) -> String {
+pub(crate) fn clip(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }

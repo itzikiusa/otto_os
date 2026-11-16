@@ -10,12 +10,6 @@
 
 use super::*;
 
-/// The exit signal of each structured child's active network profile: its
-/// tunnels stop when the child is retired (or respawned).
-static RUNTIME_NETWORK_EXITS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<Id, tokio::sync::watch::Sender<Option<i32>>>>,
-> = std::sync::LazyLock::new(Default::default);
-
 /// How a structured driver hands MCP servers to its agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMcpDelivery {
@@ -311,14 +305,11 @@ impl SessionManager {
                 .retain(|(key, _)| !network.env.iter().any(|(mapped, _)| mapped == key));
             spec.env.extend(network.env.clone());
         }
-        // The profile's tunnels live until this child is retired.
+        // The profile's tunnels live until this child is retired (`clear`):
+        // the exit signal never fires, its sender lives as long as the
+        // profile's monitor holds the receiver.
         let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
-        if network.is_some() {
-            RUNTIME_NETWORK_EXITS
-                .lock()
-                .unwrap()
-                .insert(session.id.clone(), exit_tx);
-        }
+        tokio::spawn(async move { exit_tx.closed().await });
         self.networks.activate(session.id.clone(), network, exit_rx);
         // Wrap shell aliases/functions (e.g. `claude-work` in `~/.zshrc`) BEFORE
         // Seatbelt so the outer sandbox wraps the login shell cleanly.
@@ -416,9 +407,7 @@ impl SessionManager {
     /// MCP credential and remove its per-session MCP files, as a PTY session's
     /// retirement does. Every respawn mints a fresh one. Best-effort.
     pub async fn retire_runtime_credentials(&self, session: &Session) {
-        if let Some(exit) = RUNTIME_NETWORK_EXITS.lock().unwrap().remove(&session.id) {
-            let _ = exit.send(Some(0));
-        }
+        self.networks.clear(&session.id);
         self.retire_credentials(session).await;
         let _ = tokio::fs::remove_file(claude_mcp_config_path(&session.id)).await;
     }

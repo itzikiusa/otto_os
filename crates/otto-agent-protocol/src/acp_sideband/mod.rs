@@ -25,7 +25,8 @@ use otto_core::agent_runtime::{PlanStep, RuntimeProvider, TurnTokenUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use self::agy::{default_agy_brain_dir, AgyState};
+pub(crate) use self::agy::default_agy_brain_dir;
+use self::agy::AgyState;
 use self::burst::{consume_budget, insert_bounded_set, now_ms, BurstFilter, MirroredCounts};
 use self::gemini::{default_gemini_home, GeminiState};
 use self::grok::{default_grok_home, GrokState};
