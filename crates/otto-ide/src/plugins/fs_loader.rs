@@ -82,6 +82,8 @@ fn default_version() -> String {
 
 impl IdePluginRegistry {
     pub(super) fn load_from_dir(dir: &Path, source_kind: &str) -> Result<Option<IdePluginInfo>> {
+        let enforce_dir_slug = matches!(source_kind, "managed" | "otto-plugin");
+        let dir_name = dir.file_name().and_then(|n| n.to_str());
         let direct = dir.join(MANIFEST_FILE);
         if direct.is_file() {
             let raw = std::fs::read_to_string(&direct)
@@ -97,13 +99,20 @@ impl IdePluginRegistry {
                     m.slug
                 )));
             }
+            if enforce_dir_slug && dir_name != Some(m.slug.as_str()) {
+                return Err(Error::Invalid(format!(
+                    "plugin manifest slug '{}' does not match directory '{}'",
+                    m.slug,
+                    dir_name.unwrap_or_default()
+                )));
+            }
             return Ok(Some(IdePluginInfo {
                 slug: m.slug,
                 name: m.name,
                 version: m.version,
                 description: m.description,
                 author: m.author,
-                enabled: true,
+                enabled: source_kind != "managed",
                 source: source_kind.to_string(),
                 install_path: dir.to_string_lossy().into_owned(),
                 contributions: m.contributions,
@@ -125,13 +134,20 @@ impl IdePluginRegistry {
                     env.slug
                 )));
             }
+            if enforce_dir_slug && dir_name != Some(env.slug.as_str()) {
+                return Err(Error::Invalid(format!(
+                    "plugin manifest slug '{}' does not match directory '{}'",
+                    env.slug,
+                    dir_name.unwrap_or_default()
+                )));
+            }
             return Ok(Some(IdePluginInfo {
                 slug: env.slug,
                 name: env.name,
                 version: env.version,
                 description: env.description,
                 author: env.author,
-                enabled: true,
+                enabled: source_kind != "managed",
                 source: source_kind.to_string(),
                 install_path: dir.to_string_lossy().into_owned(),
                 contributions: ide,

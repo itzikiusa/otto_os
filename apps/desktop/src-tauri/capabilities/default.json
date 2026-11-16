@@ -9,7 +9,9 @@
     "otto-bar",
     "otto-tray",
     "otto-pane-window-*",
-    "host-room-*"
+    "host-room-*",
+    "otto-ide-window",
+    "ide-*"
   ],
   "permissions": [
     "core:default",

@@ -20,7 +20,7 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, harnessLabel } from '../../lib/providers';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
@@ -123,8 +123,7 @@
   const channelLabel = (c: Channel): string => CHANNEL_LABELS[c];
 
   // Agent CLI ids → the names people know them by.
-  const CLI_NAMES: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', agy: 'Gemini (agy)' };
-  const cliName = (p: string): string => CLI_NAMES[p] ?? p.charAt(0).toUpperCase() + p.slice(1);
+  const cliName = (p: string): string => harnessLabel(p);
 
   // A first-time setup needs the secret: without one the row stays "Not set
   // up" after Save, which read as a silent failure.

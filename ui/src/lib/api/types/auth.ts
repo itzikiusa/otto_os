@@ -159,6 +159,8 @@ export interface MetaResp {
   model_flags: Record<string, boolean>;
   /** Per-provider catalog of selectable models + supported effort levels. */
   provider_models: Record<string, ProviderModelOption[]>;
+  /** Canonical CLI family per provider slug (e.g. `{ claudework: "claude" }`). */
+  provider_families?: Record<string, string>;
   /** Second LOOPBACK base for the same daemon (`http://localhost:<port>`; the
    *  daemon holds both 127.0.0.1 and [::1]) — a separate browser socket pool
    *  for background/slow calls. `null`/absent → single-host transport. */

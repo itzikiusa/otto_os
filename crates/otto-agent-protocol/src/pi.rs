@@ -138,6 +138,8 @@ pub struct PiDriver {
     /// non-retrying `agent_end` only stashes its outcome in `ended`.
     settles: bool,
     ended: Option<(TurnTerminalStatus, Option<ProviderFailure>)>,
+    in_agent_run: bool,
+    pending_abort: bool,
     bg_tasks: Vec<BackgroundTask>,
     bg_entries: HashMap<String, PiBgEntry>,
 }
@@ -162,6 +164,8 @@ impl PiDriver {
             subagent_order: Vec::new(),
             settles: false,
             ended: None,
+            in_agent_run: false,
+            pending_abort: false,
             bg_tasks: Vec::new(),
             bg_entries: HashMap::new(),
         }
@@ -209,6 +213,8 @@ impl PiDriver {
         self.prompt_req = None;
         self.steer_reqs.clear();
         self.ended = None;
+        self.in_agent_run = false;
+        self.pending_abort = false;
         step.push(DriverEvent::Terminal {
             status,
             failure,
@@ -578,9 +584,17 @@ impl PiDriver {
     fn on_event(&mut self, step: &mut DriverStep, v: &Value) {
         match v.get("type").and_then(Value::as_str) {
             Some("agent_start") => {
+                if self.pending_abort {
+                    self.pending_abort = false;
+                    self.in_agent_run = false;
+                    self.command(step, json!({"type": "abort"}));
+                    return;
+                }
+                self.in_agent_run = true;
                 self.ensure_autonomous_turn(step);
             }
             Some("message_start") => {
+                self.in_agent_run = true;
                 self.ensure_autonomous_turn(step);
                 if self.turn_id.is_some() {
                     self.close_thought(step);
@@ -588,6 +602,7 @@ impl PiDriver {
                 }
             }
             Some("message_update") => {
+                self.in_agent_run = true;
                 let ev = &v["assistantMessageEvent"];
                 let seg_parent = self
                     .resolve_parent_subagent(v, None, None, false)
@@ -696,6 +711,7 @@ impl PiDriver {
     }
 
     fn on_tool_start(&mut self, step: &mut DriverStep, v: &Value) {
+        self.in_agent_run = true;
         self.ensure_autonomous_turn(step);
         if self.turn_id.is_none() {
             return;
@@ -1138,6 +1154,8 @@ impl StructuredDriver for PiDriver {
             self.thought_parent = None;
             self.turn_id = None;
             self.ended = None;
+            self.in_agent_run = false;
+            self.pending_abort = false;
             self.bg_entries.clear();
             if !self.bg_tasks.is_empty() {
                 self.bg_tasks.clear();
@@ -1169,6 +1187,8 @@ impl StructuredDriver for PiDriver {
         }
         self.turn_id = Some(turn_id.to_string());
         self.messages = 0;
+        self.in_agent_run = false;
+        self.pending_abort = false;
         let mut cmd = json!({"type": "prompt", "message": req.text});
         if let Some(images) = Self::prompt_images(req) {
             cmd["images"] = images;
@@ -1216,6 +1236,10 @@ impl StructuredDriver for PiDriver {
     fn interrupt(&mut self) -> DriverStep {
         let mut step = DriverStep::default();
         self.command(&mut step, json!({"type": "abort"}));
+        if self.turn_id.is_some() && !self.in_agent_run {
+            self.finish(&mut step, TurnTerminalStatus::Interrupted, None);
+            self.pending_abort = true;
+        }
         step
     }
 

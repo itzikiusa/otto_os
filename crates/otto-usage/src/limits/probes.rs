@@ -125,9 +125,9 @@ fn short(s: &str) -> String {
 
 /// `agy -p /usage --output-format json` → `command.data`.
 pub(crate) async fn query_agy(program: &str, timeout: Duration) -> Result<Value, String> {
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(["-p", "/usage", "--output-format", "json"])
-        .current_dir(std::env::temp_dir())
+    let mut cmd =
+        super::cli::build_cli_command(program, &["-p", "/usage", "--output-format", "json"], true);
+    cmd.current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -154,8 +154,8 @@ pub(crate) async fn query_agy(program: &str, timeout: Duration) -> Result<Value,
 
 /// `grok agent stdio`: `initialize`, then `_x.ai/billing` → its result.
 pub(crate) async fn query_grok(program: &str, timeout: Duration) -> Result<Value, String> {
-    let mut child = tokio::process::Command::new(program)
-        .args(["agent", "stdio"])
+    let mut cmd = super::cli::build_cli_command(program, &["agent", "stdio"], true);
+    let mut child = cmd
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

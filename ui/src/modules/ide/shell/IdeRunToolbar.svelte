@@ -62,7 +62,7 @@
       bind:this={triggerEl}
       type="button"
       class="run-cfg-btn"
-      aria-label="Select launch target"
+      aria-label={`Launch target: ${selectorLabel}`}
       title={`Launch target: ${selectorLabel}`}
       aria-haspopup="dialog"
       aria-expanded={menuOpen}
@@ -109,18 +109,18 @@
       <Icon name="bug" size={14} />
     </button>
 
-    {#if isRunning || isDebugging}
-      <button
-        type="button"
-        class="btn small primary"
-        onclick={() => void ide.stopActiveExecution()}
-        title="Stop active session (⌘F2)"
-        data-testid="ide-stop-btn"
-      >
-        <Icon name="stop" size={12} />
-        Stop
-      </button>
-    {/if}
+    <button
+      type="button"
+      class="icon-btn run-stop-btn"
+      class:is-live={isRunning || isDebugging}
+      disabled={!isRunning && !isDebugging}
+      aria-label="Stop active session (⌘F2)"
+      title="Stop active session (⌘F2)"
+      onclick={() => void ide.stopActiveExecution()}
+      data-testid="ide-stop-btn"
+    >
+      <Icon name="stop" size={14} />
+    </button>
 
     <button
       type="button"
@@ -207,10 +207,14 @@
 <style>
   .run-cluster { display: inline-flex; align-items: center; gap: 4px; min-inline-size: 0; }
   .run-cfg-btn {
-    display: inline-flex; align-items: center; gap: 6px; max-inline-size: min(170px, 16vw);
+    display: inline-flex; align-items: center; gap: 6px; max-inline-size: 170px;
     min-inline-size: 0; block-size: 26px; padding-inline: 8px; background: var(--surface-2);
     color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-s);
     font-size: var(--fs-xs); font-weight: 500; cursor: pointer;
+  }
+  .run-stop-btn.is-live {
+    color: var(--danger);
+    background: var(--danger-soft);
   }
   .run-cfg-btn:hover { border-color: var(--border-strong); background: var(--hover); }
   .run-bridge-btn {

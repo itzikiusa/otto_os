@@ -294,10 +294,17 @@ impl Projection {
                     self.request_items
                         .insert(request_id.clone(), turn_item.id.clone());
                 }
+                let existed = self.items.contains_key(&turn_item.id);
                 self.upsert_item_entry(turn_item.clone());
                 // Streaming text is written once it settles (T3 Code persists
                 // every update; the settled item carries the whole text).
-                (!turn_item.is_streaming()).then(|| row(K_ITEM, &turn_item.id, json(turn_item)))
+                // Open subagent cards likewise persist on initial creation and
+                // settlement, skipping intermediate `sub_calls` churn.
+                let skip_db = turn_item.is_streaming()
+                    || (existed
+                        && matches!(turn_item.kind, TurnItemKind::Subagent { .. })
+                        && turn_item.status.is_open());
+                (!skip_db).then(|| row(K_ITEM, &turn_item.id, json(turn_item)))
             }
             RuntimeEventBody::RuntimeRequestUpdated { runtime_request } => {
                 self.requests
@@ -524,6 +531,47 @@ impl AgentRuntime {
             .await
     }
 
+    /// Evict idle cached projections and reconcile non-live sessions in SQLite
+    /// after a state-archive restore without auto-spawning queued prompts.
+    pub async fn settle_after_restore(&self) -> Result<usize> {
+        let active: std::collections::HashSet<Id> = self
+            .inner
+            .live
+            .iter()
+            .filter_map(|e| {
+                let st = e.value().lock();
+                (st.proc.is_some() || st.starting > 0).then(|| e.key().clone())
+            })
+            .collect();
+        self.inner.live.retain(|id, _| active.contains(id));
+        self.inner.repo.expire_drafts().await?;
+        let mut touched = 0;
+        for sid in self.inner.repo.session_ids().await? {
+            if active.contains(&sid) {
+                continue;
+            }
+            let rec = self.inner.repo.get(&sid).await?;
+            let mut seq = rec.seq_reserved.max(rec.session.last_sequence);
+            let mut rows = Vec::new();
+            for mut r in self.inner.repo.entities(&sid).await? {
+                let raw = serde_json::to_string(&r.payload).unwrap_or_default();
+                if let Some(next_str) = settle_archived_entity_json(&r.kind, &raw) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&next_str) {
+                        seq += 1;
+                        r.payload = v;
+                        r.sequence = seq;
+                        rows.push(r);
+                    }
+                }
+            }
+            if !rows.is_empty() {
+                touched += 1;
+                self.inner.repo.upsert_entities(&sid, &rows).await?;
+            }
+        }
+        Ok(touched)
+    }
+
     pub(super) async fn recover_excluding(
         &self,
         excluded: &std::collections::HashSet<Id>,
@@ -670,6 +718,41 @@ impl AgentRuntime {
         }
     }
 
+    /// Evict all cached in-memory [`Live`] sessions (stopping any live child
+    /// processes first) and reconcile the persisted projection after a
+    /// portable state-archive restore.
+    pub async fn reset_for_restore(&self) -> Result<usize> {
+        let keys: Vec<Id> = self.inner.live.iter().map(|e| e.key().clone()).collect();
+        let mut held_shutdowns = Vec::new();
+        for id in keys {
+            if let Some((_, live)) = self.inner.live.remove(&id) {
+                let proc = {
+                    let mut st = live.lock();
+                    st.epoch += 1;
+                    st.proc.take()
+                };
+                if let Some(p) = proc {
+                    live.proc_ended.notify_waiters();
+                    match p.transport {
+                        ProcTransport::Direct { stdin } => {
+                            drop(stdin);
+                            signal_group(p.pid, libc::SIGTERM);
+                        }
+                        ProcTransport::Held { client, .. } => {
+                            held_shutdowns.push(tokio::spawn(async move {
+                                client.shutdown(Duration::ZERO).await;
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        for task in held_shutdowns {
+            let _ = task.await;
+        }
+        self.recover().await
+    }
+
     // ---- sessions -------------------------------------------------------
 
     pub async fn create(
@@ -691,6 +774,19 @@ impl AgentRuntime {
         let provider = req
             .provider
             .ok_or_else(|| Error::Invalid("provider is required".into()))?;
+        let effective_slug = req
+            .meta
+            .as_ref()
+            .and_then(|m| m.get(otto_core::agent_runtime::PROVIDER_SLUG_META_KEY))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| provider.as_str());
+        if !self.inner.host.is_provider_enabled(effective_slug) {
+            return Err(Error::Invalid(format!(
+                "unknown or disabled runtime provider '{effective_slug}'"
+            )));
+        }
         if self.inner.drivers.create(provider).is_none() {
             return Err(Error::Invalid(format!(
                 "no structured driver for provider '{}' yet",
@@ -710,7 +806,7 @@ impl AgentRuntime {
             .title
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| format!("{} thread", provider.as_str()));
+            .unwrap_or_else(|| format!("{effective_slug} thread"));
         let model = req
             .model
             .map(|m| m.trim().to_string())
@@ -961,6 +1057,11 @@ impl AgentRuntime {
                     .iter()
                     .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
                     .map(|(_, v)| PathBuf::from(v))
+                    .or_else(|| {
+                        self.inner
+                            .host
+                            .claude_config_dir_for(session.provider_slug())
+                    })
             });
         let cmd = ChildCommand {
             program: spec.program.clone(),
@@ -992,13 +1093,8 @@ impl AgentRuntime {
                 }
             }
         }
-        let child = spawn_child(&cmd).map_err(|e| {
-            Error::Invalid(format!(
-                "could not start {} ({}): {e}",
-                session.provider.as_str(),
-                spec.program
-            ))
-        })?;
+        let child = spawn_child(&cmd)
+            .map_err(|e| map_spawn_error(session.provider.as_str(), &spec.program, e))?;
         let cli_pid = child.pid;
         let (epoch, flushed) = {
             let mut st = live.lock();
@@ -1073,14 +1169,25 @@ impl AgentRuntime {
         &self,
         id: &Id,
         live: &Arc<Live>,
-        req: &RuntimePromptReq,
+        raw_req: &RuntimePromptReq,
     ) -> Result<RuntimePromptResp> {
-        if let Some(m) = req
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|m| !m.is_empty())
-        {
+        let normalized_req = RuntimePromptReq {
+            model: raw_req
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string),
+            effort: raw_req
+                .effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+                .map(str::to_string),
+            ..raw_req.clone()
+        };
+        let req = &normalized_req;
+        if let Some(m) = req.model.as_deref() {
             crate::http::drafts::validate_model_name(m)?;
         }
         if req.text.trim().is_empty() && req.images.is_empty() && req.files.is_empty() {
@@ -1314,7 +1421,15 @@ impl AgentRuntime {
     ) -> Result<RuntimePromptResp> {
         if delivery == PromptDelivery::Steer {
             let attachments = self.store_attachments(id, req).await?;
-            if let Some(resp) = steer_turn(&self.inner, live, req, attachments.clone()) {
+            if let Some((resp, steered_model, steered_mode)) =
+                steer_turn(&self.inner, live, req, attachments.clone())
+            {
+                if let Some(m) = &steered_model {
+                    let _ = self.inner.repo.set_model(id, m).await;
+                }
+                if let Some(m) = steered_mode {
+                    let _ = self.inner.repo.set_access_mode(id, m).await;
+                }
                 return Ok(resp);
             }
             for a in &attachments {
@@ -2141,16 +2256,44 @@ impl Drop for Starting {
     }
 }
 
-/// Steer `req` into the running turn when its driver takes it.
+/// Steer `req` into the running turn when its driver takes it (and can honor
+/// any requested mid-turn model or access-mode switch).
 fn steer_turn(
     inner: &Inner,
     live: &Live,
     req: &RuntimePromptReq,
     attachments: Vec<Attachment>,
-) -> Option<RuntimePromptResp> {
+) -> Option<(
+    RuntimePromptResp,
+    Option<String>,
+    Option<otto_core::agent_runtime::RuntimeAccessMode>,
+)> {
     let mut st = live.lock();
     let turn_id = st.turn.as_ref()?.id.clone();
+    let model_change = req
+        .model
+        .as_ref()
+        .filter(|m| st.session.model.as_ref() != Some(*m))
+        .cloned();
+    let mode_change = req.access_mode.filter(|m| *m != st.session.access_mode);
+    {
+        let proc = st.proc.as_ref()?;
+        if model_change.is_some() && !proc.driver.steers_model_live() {
+            return None;
+        }
+        if let Some(m) = mode_change {
+            if !proc.driver.steers_access_live(m) {
+                return None;
+            }
+        }
+    }
     let step = st.proc.as_mut()?.driver.steer(req).ok()?;
+    if let Some(m) = &model_change {
+        st.session.model = Some(m.clone());
+    }
+    if let Some(m) = mode_change {
+        st.session.access_mode = m;
+    }
     let mut user = item(
         format!("{turn_id}:steer:{}", new_id()),
         TurnItemStatus::Completed,
@@ -2165,12 +2308,16 @@ fn steer_turn(
     let sequence = st.session.last_sequence;
     st.session.last_active_at = Utc::now();
     apply_step_opts(inner, live, &mut st, step, true, true);
-    Some(RuntimePromptResp {
-        turn_id,
-        sequence,
-        queued_id: None,
-        steered: true,
-    })
+    Some((
+        RuntimePromptResp {
+            turn_id,
+            sequence,
+            queued_id: None,
+            steered: true,
+        },
+        model_change,
+        mode_change,
+    ))
 }
 
 /// Spawn a drain of `id`'s queue (no-op when the runtime is gone).
@@ -2550,7 +2697,11 @@ fn upsert_item(inner: &Inner, live: &Live, st: &mut State, mut item: TurnItem) {
     // Superseded: the newer state of a held item replaces it.
     st.held.retain(|h| h.id != item.id);
     let window = inner.config.stream_coalesce;
-    if item.is_streaming() && !window.is_zero() {
+    let coalesce_eligible = item.is_streaming()
+        || (item.status.is_open()
+            && matches!(item.kind, TurnItemKind::Subagent { .. })
+            && st.proj.items.contains_key(&item.id));
+    if coalesce_eligible && !window.is_zero() {
         let now = Instant::now();
         let recent = st
             .stream_emitted
@@ -2645,6 +2796,55 @@ fn settle_item(item: &mut TurnItem, status: TurnItemStatus, now: chrono::DateTim
         }
         _ => {}
     }
+}
+
+/// Settle an archived `agent_runtime_entities` JSON payload so exported or
+/// restored history never preserves mid-turn spinners, running provider
+/// sessions, or pending approvals. Returns `Some(updated_json)` only when the
+/// entity required settling.
+pub fn settle_archived_entity_json(kind: &str, payload_json: &str) -> Option<String> {
+    let now = Utc::now();
+    let raw: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    let updated = match kind {
+        K_TURN => serde_json::from_value::<ProviderTurn>(raw)
+            .ok()
+            .filter(|t| !t.status.is_terminal())
+            .and_then(|mut t| {
+                t.status = ProviderTurnStatus::Interrupted;
+                t.completed_at = Some(now);
+                serde_json::to_value(t).ok()
+            }),
+        K_ITEM => serde_json::from_value::<TurnItem>(raw)
+            .ok()
+            .filter(|i| i.status.is_open() || i.is_streaming())
+            .and_then(|mut i| {
+                settle_item(&mut i, TurnItemStatus::Interrupted, now);
+                serde_json::to_value(i).ok()
+            }),
+        K_REQUEST => serde_json::from_value::<RuntimeRequest>(raw)
+            .ok()
+            .filter(|q| q.status == RuntimeRequestStatus::Pending)
+            .and_then(|mut q| {
+                q.status = RuntimeRequestStatus::Expired;
+                q.response_capability = ResponseCapability::NotResumable {
+                    reason: "Imported history; pending request was not resumed.".into(),
+                };
+                serde_json::to_value(q).ok()
+            }),
+        K_SESSION => serde_json::from_value::<ProviderSession>(raw)
+            .ok()
+            .filter(|s| {
+                s.status != ProviderSessionStatus::Stopped || !s.background_tasks.is_empty()
+            })
+            .and_then(|mut s| {
+                s.background_tasks.clear();
+                s.status = ProviderSessionStatus::Stopped;
+                s.updated_at = now;
+                serde_json::to_value(s).ok()
+            }),
+        _ => None,
+    }?;
+    serde_json::to_string(&updated).ok()
 }
 
 fn resolve_request(
@@ -3420,6 +3620,17 @@ fn scope_request_id(st: &State, native: &str) -> String {
         .expect("driver event has a live process")
         .request_ids
         .scoped(native)
+}
+
+pub(super) fn map_spawn_error(provider: &str, program: &str, e: std::io::Error) -> Error {
+    let msg = format!("could not start {provider} ({program}): {e}");
+    match e.kind() {
+        std::io::ErrorKind::NotFound
+        | std::io::ErrorKind::PermissionDenied
+        | std::io::ErrorKind::InvalidInput => Error::Invalid(msg),
+        std::io::ErrorKind::TimedOut => Error::Upstream(msg),
+        _ => Error::Internal(msg),
+    }
 }
 
 #[cfg(test)]

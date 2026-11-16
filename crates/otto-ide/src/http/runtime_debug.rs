@@ -79,6 +79,7 @@ pub(super) async fn list_run_configs<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeTargetQuery>,
 ) -> ApiResult<Json<IdeRunConfigsResp>> {
+    let has_root_auth = otto_core::auth::root_authority(&user);
     let mut target = q.into_target_spec()?;
     let ssh = ctx
         .ide()
@@ -99,7 +100,7 @@ pub(super) async fn list_run_configs<S: IdeCtx>(
             &ctx.ide().targets,
             &target,
             ssh.as_ref(),
-            user.is_root,
+            has_root_auth,
         )
         .await?;
     Ok(Json(IdeRunConfigsResp {
@@ -113,6 +114,7 @@ pub(super) async fn upsert_run_config<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(raw_body): Json<serde_json::Value>,
 ) -> ApiResult<Json<IdeRunConfigResp>> {
+    let has_root_auth = otto_core::auth::root_authority(&user);
     let has_coverage = raw_body
         .as_object()
         .is_some_and(|o| o.contains_key("coverage"));
@@ -127,6 +129,10 @@ pub(super) async fn upsert_run_config<S: IdeCtx>(
 
     let mut req: IdeUpsertRunConfigReq =
         serde_json::from_value(raw_body).map_err(|e| Error::Invalid(e.to_string()))?;
+    req.target.validate()?;
+    if req.target.kind == IdeTargetKind::Local {
+        super::require_root_user(&user)?;
+    }
     let _ = ctx
         .ide()
         .targets
@@ -156,7 +162,7 @@ pub(super) async fn upsert_run_config<S: IdeCtx>(
     let config = ctx
         .ide()
         .environments
-        .upsert_run_config_for_user(&ctx.pool(), req, user.is_root)
+        .upsert_run_config_for_user(&ctx.pool(), req, has_root_auth)
         .await?;
     Ok(Json(IdeRunConfigResp { config }))
 }
@@ -171,6 +177,10 @@ pub(super) async fn delete_run_config<S: IdeCtx>(
         || q.kind == Some(IdeTargetKind::Ssh)
     {
         let spec = q.into_target_spec()?;
+        spec.validate()?;
+        if spec.kind == IdeTargetKind::Local {
+            super::require_root_user(&user)?;
+        }
         let _ = ctx.ide().targets.resolve_write(&ctx, &user, &spec).await?;
         Some(spec)
     } else {
@@ -181,6 +191,9 @@ pub(super) async fn delete_run_config<S: IdeCtx>(
         .environments
         .get_run_config_target(&ctx.pool(), explicit_target.as_ref(), &id)
         .await?;
+    if target.kind == IdeTargetKind::Local {
+        super::require_root_user(&user)?;
+    }
     if explicit_target.is_none() {
         let _ = ctx
             .ide()
@@ -201,11 +214,8 @@ pub(super) async fn start_run<S: IdeCtx>(
     Json(mut req): Json<IdeStartRunReq>,
 ) -> ApiResult<Json<IdeRunResp>> {
     req.target.absorb_project_folders(&req.project_folders);
-    if !user.is_root && req.target.kind == IdeTargetKind::Local {
-        return Err(Error::Forbidden(
-            "local unsandboxed execution requires root; use a remote SSH target".into(),
-        )
-        .into());
+    if req.target.kind == IdeTargetKind::Local && !otto_core::auth::root_authority(&user) {
+        return Err(otto_core::auth::root_refusal().into());
     }
     let ssh = ctx
         .ide()
@@ -217,9 +227,8 @@ pub(super) async fn start_run<S: IdeCtx>(
         .ide()
         .environments
         .get_project_env(&ctx.pool(), &req.target)
-        .await
-        .ok()
-        .and_then(|p| p.network_bridge);
+        .await?
+        .network_bridge;
     let netbridge = match proj_nb.as_ref().filter(|nb| nb.enabled) {
         Some(nb) => {
             ctx.ide()
@@ -307,7 +316,11 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(mut req): Json<IdeStartDebugReq>,
 ) -> ApiResult<Json<IdeDebugSessionResp>> {
+    let has_root_auth = otto_core::auth::root_authority(&user);
     req.target.absorb_project_folders(&req.project_folders);
+    if req.target.kind == IdeTargetKind::Local && !has_root_auth {
+        return Err(otto_core::auth::root_refusal().into());
+    }
     let ssh = ctx
         .ide()
         .targets
@@ -318,12 +331,6 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
         .environments
         .enrich_target_roots_authorized(&ctx, &user, &mut req.target, true)
         .await;
-    if !user.is_root && req.target.kind == IdeTargetKind::Local {
-        return Err(Error::Forbidden(
-            "local unsandboxed debugging requires root; use a remote SSH target".into(),
-        )
-        .into());
-    }
     let run_config = match req.config_id.as_deref().filter(|s| !s.is_empty()) {
         Some(cid) => Some(
             ctx.ide()
@@ -355,7 +362,7 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
             &req.target,
             run_config.as_ref().or(adhoc_cfg.as_ref()),
             false,
-            user.is_root,
+            has_root_auth,
         )
         .await?;
     let netbridge = match loaded_proj.network_bridge.as_ref().filter(|nb| nb.enabled) {
@@ -384,7 +391,7 @@ pub(super) async fn start_debug_session<S: IdeCtx>(
         .with_run_config(run_config)
         .with_plugin_adapters(plugin_adapters)
         .with_netbridge(netbridge)
-        .with_caller_is_root(user.is_root)
+        .with_caller_is_root(has_root_auth)
         .with_owner_user_id(&user.id);
 
     let target_for_collab = req.target.clone();
@@ -467,6 +474,35 @@ pub(super) async fn set_debug_breakpoints<S: IdeCtx>(
     Ok(Json(IdeDebugSessionResp { session }))
 }
 
+pub(super) async fn execute_debug_command_with_netbridge<S: IdeCtx>(
+    ctx: &S,
+    acting_user: &User,
+    id: &str,
+    req: IdeDebugCommandReq,
+) -> ApiResult<crate::types::IdeDebugSessionSnapshot> {
+    if req.action == crate::types::IdeDebugAction::Restart {
+        ctx.ide()
+            .dap
+            .set_session_plugin_adapters(id, ctx.ide().plugins.active_dap_adapters());
+        if let Some((target, nb, confirm_prod)) = ctx.ide().dap.session_restart_netbridge_spec(id) {
+            let lease = ctx
+                .ide()
+                .netbridge
+                .acquire_for_launch_with_confirm(ctx, acting_user, &target, &nb, confirm_prod)
+                .await?;
+            ctx.ide().dap.set_session_netbridge(id, lease);
+        }
+    }
+    let owner_target = ctx.ide().dap.session_owner_and_target(id);
+    let session = ctx.ide().dap.command(id, req).await?;
+    ctx.ide().collab.publish_debug_snapshot(
+        owner_target.as_ref().map(|(_, t)| t),
+        owner_target.as_ref().map(|(o, _)| o.as_str()),
+        &session,
+    );
+    Ok(session)
+}
+
 pub(super) async fn debug_command<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -474,24 +510,7 @@ pub(super) async fn debug_command<S: IdeCtx>(
     Json(req): Json<IdeDebugCommandReq>,
 ) -> ApiResult<Json<IdeDebugSessionResp>> {
     ctx.ide().authorize_debug_session(&user, &id)?;
-    if req.action == crate::types::IdeDebugAction::Restart {
-        if let Some((target, nb, confirm_prod)) = ctx.ide().dap.session_restart_netbridge_spec(&id)
-        {
-            let lease = ctx
-                .ide()
-                .netbridge
-                .acquire_for_launch_with_confirm(&ctx, &user, &target, &nb, confirm_prod)
-                .await?;
-            ctx.ide().dap.set_session_netbridge(&id, lease);
-        }
-    }
-    let owner_target = ctx.ide().dap.session_owner_and_target(&id);
-    let session = ctx.ide().dap.command(&id, req).await?;
-    ctx.ide().collab.publish_debug_snapshot(
-        owner_target.as_ref().map(|(_, t)| t),
-        owner_target.as_ref().map(|(o, _)| o.as_str()),
-        &session,
-    );
+    let session = execute_debug_command_with_netbridge(&ctx, &user, &id, req).await?;
     Ok(Json(IdeDebugSessionResp { session }))
 }
 

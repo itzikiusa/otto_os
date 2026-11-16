@@ -179,7 +179,7 @@ impl RootsEnv {
             .filter_map(|dir| {
                 let name = dir.file_name()?.to_str()?.to_string();
                 let projects = dir.join("projects");
-                (name.starts_with(".claude-") && projects.is_dir())
+                (name.starts_with(".claude-") && is_claude_config_dir(&dir))
                     .then(|| Root::new(projects, name.trim_start_matches('.'), RootKind::Extra))
             })
             .collect();
@@ -283,6 +283,12 @@ impl RootsEnv {
         }
         roots.dedup();
         roots
+    }
+
+    /// Whether `OTTO_TRANSCRIPT_ROOTS` or `OTTO_E2E_ISOLATED` overrides real
+    /// home discovery.
+    pub fn is_overridden(&self, data_dir: Option<&Path>) -> bool {
+        self.overridden(data_dir).is_some()
     }
 
     /// [`TranscriptRoots::for_session`] against these inputs. `accounts_root`
@@ -402,6 +408,26 @@ impl TranscriptRoots {
     pub fn claude_root_of(&self, file: &Path) -> Option<&Root> {
         self.claude.iter().find(|r| file.starts_with(&r.dir))
     }
+
+    /// Prepend `<config_dir>/projects` as the primary Claude root for a custom
+    /// Claude-family provider (e.g. `claudework` -> `~/.claude-work/projects`).
+    pub fn with_custom_claude_config_dir(mut self, label: &str, config_dir: &Path) -> Self {
+        let projects = config_dir.join("projects");
+        self.claude
+            .insert(0, Root::new(projects, label, RootKind::Extra));
+        self.dedup();
+        self
+    }
+}
+
+/// Whether `~/.claude-*` is a valid Claude Code config directory: either it
+/// already wrote session transcripts (`projects/`) or it holds login/config
+/// state (`.claude.json` / `.credentials.json`).
+#[allow(clippy::disallowed_methods)] // sync helper: root discovery is blocking by contract
+pub fn is_claude_config_dir(dir: &Path) -> bool {
+    dir.join("projects").is_dir()
+        || dir.join(".claude.json").is_file()
+        || dir.join(".credentials.json").is_file()
 }
 
 /// Resolve an Antigravity (`agy`) transcript under `brain_root` for
@@ -575,6 +601,19 @@ mod tests {
         );
         assert_eq!(roots.claude[0].dir, home.join(".claude/projects"));
         assert_eq!(roots.codex[0].dir, home.join(".codex/sessions"));
+
+        // Freshly logged-in `~/.claude-fresh` with `.claude.json` or `.credentials.json`
+        // is recognized before its first session creates `projects/`.
+        std::fs::create_dir_all(home.join(".claude-fresh")).unwrap();
+        std::fs::write(home.join(".claude-fresh/.credentials.json"), b"{}").unwrap();
+        let fresh_roots = RootsEnv::default().discover(&home, &data);
+        assert!(
+            fresh_roots
+                .claude
+                .iter()
+                .any(|r| r.label == "claude-fresh" && r.dir == home.join(".claude-fresh/projects")),
+            "{fresh_roots:?}"
+        );
     }
 
     #[test]

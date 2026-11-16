@@ -38,11 +38,19 @@ pub(crate) fn transcript_roots(data_dir: &Path) -> TranscriptRoots {
     TranscriptRoots::discover(&home_dir(), data_dir)
 }
 
-/// The provider whose transcript this session has: its own for agent sessions,
-/// the captured nested one for a plain terminal the user ran `claude`/`codex` in.
+/// The provider whose transcript this session has: its own (or its CLI family)
+/// for agent sessions, the captured nested one for a plain terminal the user
+/// ran `claude`/`codex` in.
 pub(crate) fn effective_provider(session: &Session) -> String {
     if matches!(session.provider.as_str(), "claude" | "codex" | "agy") {
         return session.provider.clone();
+    }
+    if session.provider != "shell" {
+        if let Some(family) =
+            otto_sessions::providers::infer_model_family(None, "", &session.provider)
+        {
+            return family;
+        }
     }
     session
         .meta
@@ -50,6 +58,21 @@ pub(crate) fn effective_provider(session: &Session) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or(&session.provider)
         .to_string()
+}
+
+/// Registry-aware [`effective_provider`]: resolves custom slugs (e.g.
+/// `claudework` or `mywork` with `model_family = "claude"`) through `providers`
+/// before falling back to [`effective_provider`].
+pub(crate) fn effective_provider_in(
+    providers: &otto_sessions::ProviderRegistry,
+    session: &Session,
+) -> String {
+    if session.provider != "shell" {
+        if let Some(family) = providers.model_family_for(&session.provider) {
+            return family;
+        }
+    }
+    effective_provider(session)
 }
 
 /// A session's resolved transcript.
@@ -63,12 +86,25 @@ pub(crate) struct Resolved {
 /// (§4.2): the E2E fixture hook, then the persisted row (`persisted`), then
 /// the provider roots. `fresh` is true when the roots had to be searched —
 /// the caller may persist the result.
+#[cfg(test)]
 pub(crate) fn resolve_transcript_sync(
     data_dir: &Path,
     persisted: Option<&str>,
     session: &Session,
 ) -> Result<(Resolved, bool), UnavailableReason> {
-    let provider_name = effective_provider(session);
+    resolve_transcript_sync_with(data_dir, persisted, session, None, None)
+}
+
+pub(crate) fn resolve_transcript_sync_with(
+    data_dir: &Path,
+    persisted: Option<&str>,
+    session: &Session,
+    family_override: Option<&str>,
+    custom_claude_dir: Option<&Path>,
+) -> Result<(Resolved, bool), UnavailableReason> {
+    let provider_name = family_override
+        .map(str::to_string)
+        .unwrap_or_else(|| effective_provider(session));
     let provider = match provider_name.as_str() {
         "claude" => Provider::Claude,
         "codex" => Provider::Codex,
@@ -110,7 +146,18 @@ pub(crate) fn resolve_transcript_sync(
         .unwrap_or(&session.cwd);
     // The session's own account home, else the local defaults (never another
     // account's tree); an invalid account id yields no roots at all.
-    let roots = TranscriptRoots::for_session(&session.meta, data_dir);
+    let mut roots = TranscriptRoots::for_session(&session.meta, data_dir);
+    if !otto_transcript::roots::RootsEnv::from_process().is_overridden(Some(data_dir))
+        && session
+            .meta
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .is_none()
+    {
+        if let Some(dir) = custom_claude_dir {
+            roots = roots.with_custom_claude_config_dir(&session.provider, dir);
+        }
+    }
     let path = otto_sessions::transcript_path_in(
         &roots,
         &provider_name,
@@ -133,8 +180,16 @@ pub(crate) async fn resolve_transcript(
     let persisted = repo.transcript_path(&session.id).await.ok().flatten();
     let data_dir = ctx.data_dir.clone();
     let owned_session = session.clone();
+    let family = effective_provider_in(ctx.manager.providers(), session);
+    let custom_claude_dir = ctx.manager.claude_config_dir_for(&session.provider);
     let (resolved, fresh) = crate::offload::blocking(move || {
-        resolve_transcript_sync(&data_dir, persisted.as_deref(), &owned_session)
+        resolve_transcript_sync_with(
+            &data_dir,
+            persisted.as_deref(),
+            &owned_session,
+            Some(&family),
+            custom_claude_dir.as_deref(),
+        )
     })
     .await?;
     if fresh {

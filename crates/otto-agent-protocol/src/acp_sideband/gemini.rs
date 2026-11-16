@@ -77,6 +77,7 @@ impl GeminiState {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn parse_snapshot(
         &mut self,
         resolved_path: PathBuf,
@@ -84,6 +85,7 @@ impl GeminiState {
         doc: &Value,
         expected_session_id: Option<&str>,
         idle_since_ms: u64,
+        include_child_subcalls: bool,
         mirrored: &mut MirroredCounts,
     ) -> Vec<SidebandAction> {
         self.resolved_path = Some(resolved_path);
@@ -146,8 +148,14 @@ impl GeminiState {
             }
 
             self.ingest_thoughts(msg, &msg_id, baseline_only, mirrored, &mut actions);
-            active_open_tools +=
-                self.ingest_tools(msg, &msg_id, baseline_only, mirrored, &mut actions);
+            active_open_tools += self.ingest_tools(
+                msg,
+                &msg_id,
+                baseline_only,
+                include_child_subcalls,
+                mirrored,
+                &mut actions,
+            );
             self.ingest_content(msg, &msg_id, baseline_only, mirrored, &mut actions);
             self.ingest_tokens(msg, &msg_id, baseline_only, &mut actions);
 
@@ -211,6 +219,7 @@ impl GeminiState {
         msg: &Value,
         msg_id: &str,
         baseline_only: bool,
+        include_child_subcalls: bool,
         mirrored: &mut MirroredCounts,
         actions: &mut Vec<SidebandAction>,
     ) -> usize {
@@ -239,6 +248,9 @@ impl GeminiState {
             {
                 open += 1;
             }
+            if !baseline_only || include_child_subcalls {
+                self.ingest_sub_calls(call, &id, actions);
+            }
             let prev = self.seen_tool_status.get(&id).cloned();
             if prev.as_deref() == Some(raw_status) {
                 continue;
@@ -248,21 +260,25 @@ impl GeminiState {
                 id.clone(),
                 raw_status.to_string(),
             );
-            if baseline_only {
-                continue;
-            }
-            let name = call.get("name").and_then(Value::as_str).unwrap_or("tool");
-            let args = call.get("args").cloned();
             let parent_cid = call
                 .get("parentCallId")
                 .or_else(|| call.get("parent_call_id"))
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
+            let allow_child_in_baseline =
+                baseline_only && include_child_subcalls && parent_cid.is_some();
+            if baseline_only && !allow_child_in_baseline {
+                continue;
+            }
+            let name = call.get("name").and_then(Value::as_str).unwrap_or("tool");
+            let args = call.get("args").cloned();
             let desc = classify_tool(name, args.as_ref());
             if prev.is_none() {
-                mirrored.tool_calls = mirrored.tool_calls.saturating_add(1);
-                mirrored.preseed_tool_id(&id);
+                if !allow_child_in_baseline {
+                    mirrored.tool_calls = mirrored.tool_calls.saturating_add(1);
+                    mirrored.preseed_tool_id(&id);
+                }
                 actions.push(super::wrap_child_action(
                     None,
                     parent_cid,
@@ -276,43 +292,6 @@ impl GeminiState {
                         diff: desc.diff.clone(),
                     },
                 ));
-            }
-            if let Some(sub_calls) = call
-                .get("subCalls")
-                .or_else(|| call.get("childToolCalls"))
-                .and_then(Value::as_array)
-            {
-                for (si, sub) in sub_calls.iter().enumerate() {
-                    let sid = sub
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("{id}-sub-{si}"));
-                    if self.seen_tool_status.contains_key(&sid) {
-                        continue;
-                    }
-                    insert_bounded_map(
-                        &mut self.seen_tool_status,
-                        sid.clone(),
-                        "completed".to_string(),
-                    );
-                    let sname = sub.get("name").and_then(Value::as_str).unwrap_or("tool");
-                    let sargs = sub.get("args").cloned();
-                    let sdesc = classify_tool(sname, sargs.as_ref());
-                    actions.push(super::wrap_child_action(
-                        None,
-                        Some(&id),
-                        SidebandAction::ToolStart {
-                            id: sid.clone(),
-                            title: sdesc.title,
-                            kind: sdesc.kind,
-                            status: ToolCallStatus::Completed,
-                            raw_input: sargs,
-                            file: sdesc.file,
-                            diff: sdesc.diff,
-                        },
-                    ));
-                }
             }
             if matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed) {
                 actions.push(super::wrap_child_action(
@@ -332,6 +311,52 @@ impl GeminiState {
             }
         }
         open
+    }
+
+    fn ingest_sub_calls(
+        &mut self,
+        call: &Value,
+        parent_id: &str,
+        actions: &mut Vec<SidebandAction>,
+    ) {
+        let Some(sub_calls) = call
+            .get("subCalls")
+            .or_else(|| call.get("childToolCalls"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        for (si, sub) in sub_calls.iter().enumerate() {
+            let sid = sub
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{parent_id}-sub-{si}"));
+            if self.seen_tool_status.contains_key(&sid) {
+                continue;
+            }
+            insert_bounded_map(
+                &mut self.seen_tool_status,
+                sid.clone(),
+                "completed".to_string(),
+            );
+            let sname = sub.get("name").and_then(Value::as_str).unwrap_or("tool");
+            let sargs = sub.get("args").cloned();
+            let sdesc = classify_tool(sname, sargs.as_ref());
+            actions.push(super::wrap_child_action(
+                None,
+                Some(parent_id),
+                SidebandAction::ToolStart {
+                    id: sid,
+                    title: sdesc.title,
+                    kind: sdesc.kind,
+                    status: ToolCallStatus::Completed,
+                    raw_input: sargs,
+                    file: sdesc.file,
+                    diff: sdesc.diff,
+                },
+            ));
+        }
     }
 
     fn ingest_content(

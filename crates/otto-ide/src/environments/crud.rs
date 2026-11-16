@@ -26,6 +26,80 @@ use crate::types::{
     IdeUpdateEnvironmentReq,
 };
 
+pub(crate) fn local_env_mutation_requires_root(
+    raw_obj: Option<&serde_json::Map<String, serde_json::Value>>,
+    req: &IdeUpdateEnvironmentReq,
+    prev: &IdeProjectEnvironment,
+) -> bool {
+    let has_key = |keys: &[&str]| raw_obj.is_some_and(|o| keys.iter().any(|k| o.contains_key(*k)));
+    fn trimmed_opt(opt: &Option<String>) -> Option<&str> {
+        opt.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+
+    if has_key(&["env_vars", "vars", "env"])
+        && (!req.env_vars.is_empty() || req.env_vars != prev.env_vars)
+    {
+        return true;
+    }
+    if has_key(&["dotenv_path", "env_file"])
+        && (trimmed_opt(&req.dotenv_path).is_some()
+            || trimmed_opt(&req.dotenv_path) != prev.dotenv_path.as_deref())
+    {
+        return true;
+    }
+    if has_key(&["inherit_shell_env"])
+        && req
+            .inherit_shell_env
+            .is_some_and(|v| v != prev.inherit_shell_env || !v)
+    {
+        return true;
+    }
+    if has_key(&["sdk_path", "sdkPath"]) {
+        return true;
+    }
+    for (key, req_v, prev_v) in [
+        (
+            "java_home",
+            trimmed_opt(&req.java_home),
+            prev.java_home.as_deref(),
+        ),
+        (
+            "go_root",
+            trimmed_opt(&req.go_root),
+            prev.go_root.as_deref(),
+        ),
+        (
+            "rust_toolchain",
+            trimmed_opt(&req.rust_toolchain),
+            prev.rust_toolchain.as_deref(),
+        ),
+        (
+            "node_home",
+            trimmed_opt(&req.node_home),
+            prev.node_home.as_deref(),
+        ),
+        (
+            "python_interpreter",
+            trimmed_opt(&req.python_interpreter),
+            prev.python_interpreter.as_deref(),
+        ),
+        (
+            "extra_path",
+            trimmed_opt(&req.extra_path),
+            prev.extra_path.as_deref(),
+        ),
+    ] {
+        if has_key(&[key]) && (req_v.is_some() || req_v != prev_v) {
+            return true;
+        }
+    }
+    has_key(&["module_sdks", "moduleSdks"])
+        && req
+            .module_sdks
+            .as_ref()
+            .is_some_and(|m| !m.is_empty() || *m != prev.module_sdks)
+}
+
 fn validate_environment_update_permissions(
     req: &IdeUpdateEnvironmentReq,
     prev_proj: &IdeProjectEnvironment,

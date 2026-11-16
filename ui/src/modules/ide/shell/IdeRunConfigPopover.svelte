@@ -127,7 +127,7 @@
       <div class="run-sec">Saved configurations</div>
       {#each savedConfigs as cfg (cfg.id)}
         {@const active = selectedConfig?.id === cfg.id}
-        <button type="button" class="run-item" class:is-active={active} onclick={() => selectTarget(cfg.id)}>
+        <button type="button" class="run-item" class:is-active={active} aria-current={active ? 'true' : undefined} onclick={() => selectTarget(cfg.id)}>
           <span class="run-item-name" dir="ltr">{cfg.name}</span>
           <Badge tone="neutral" variant="outline" label={cfg.runner} />
         </button>
@@ -138,7 +138,7 @@
       <div class="run-sec">Auto-detected</div>
       {#each detectedConfigs as cfg (cfg.id)}
         {@const active = selectedConfig?.id === cfg.id}
-        <button type="button" class="run-item" class:is-active={active} onclick={() => selectTarget(cfg.id)}>
+        <button type="button" class="run-item" class:is-active={active} aria-current={active ? 'true' : undefined} onclick={() => selectTarget(cfg.id)}>
           <span class="run-item-name" dir="ltr">{cfg.name}</span>
           <Badge tone="info" variant="outline" label="auto" />
         </button>
@@ -155,7 +155,7 @@
               type="button"
               class="icon-btn"
               aria-label={`Run all tests in ${repo.name}`}
-              title={`Run all tests (${repo.name})`}
+              title={`Run all tests in ${repo.name}`}
               onclick={() => {
                 closePopover(false);
                 void ide.runRepoTests(repo.path, 'run');
@@ -168,7 +168,7 @@
               type="button"
               class="icon-btn"
               aria-label={`Run all tests with coverage in ${repo.name}`}
-              title={`Run all tests with coverage (${repo.name})`}
+              title={`Run all tests with coverage in ${repo.name}`}
               onclick={() => {
                 closePopover(false);
                 void ide.runRepoTests(repo.path, 'coverage');
@@ -181,7 +181,7 @@
               type="button"
               class="icon-btn"
               aria-label={`Debug all tests in ${repo.name}`}
-              title={`Debug all tests (${repo.name})`}
+              title={`Debug all tests in ${repo.name}`}
               onclick={() => {
                 closePopover(false);
                 void ide.runRepoTests(repo.path, 'debug');

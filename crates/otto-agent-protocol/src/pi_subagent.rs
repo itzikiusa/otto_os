@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use otto_core::agent_runtime::{
     BackgroundTask, ProviderFailure, TaskSettlement, TurnItemKind, TurnItemStatus,
     TurnTerminalStatus,
@@ -14,7 +14,8 @@ use crate::driver::{item, tool_error, DriverError, DriverEvent, DriverStep};
 
 use super::{PiBgEntry, PiDriver, Tool};
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct PiDriverState {
     next_id: u64,
     state_req: Option<String>,
@@ -24,20 +25,17 @@ struct PiDriverState {
     turn_id: Option<String>,
     auto_turns: u64,
     message: Option<(String, String, DateTime<Utc>)>,
-    #[serde(default)]
     message_parent: Option<String>,
     thought: Option<(String, String, DateTime<Utc>)>,
-    #[serde(default)]
     thought_parent: Option<String>,
     messages: u32,
     tools: HashMap<String, Tool>,
-    #[serde(default)]
     subagent_order: Vec<String>,
     settles: bool,
     ended: Option<(TurnTerminalStatus, Option<ProviderFailure>)>,
-    #[serde(default)]
+    in_agent_run: bool,
+    pending_abort: bool,
     bg_tasks: Vec<BackgroundTask>,
-    #[serde(default)]
     bg_entries: HashMap<String, PiBgEntry>,
 }
 
@@ -75,6 +73,8 @@ impl PiDriver {
         matches!(bare.as_str(), "schedule" | "timer" | "set_timer")
             || args.get("DurationSeconds").is_some()
             || args.get("duration_seconds").is_some()
+            || args.get("CronExpression").is_some()
+            || args.get("cron_expression").is_some()
     }
 
     pub(super) fn is_background_call(name: &str, args: &Value) -> bool {
@@ -91,13 +91,7 @@ impl PiDriver {
         if !Self::is_timer_tool(name, args) {
             return None;
         }
-        let secs = args
-            .get("DurationSeconds")
-            .or_else(|| args.get("duration_seconds"))
-            .or_else(|| args.get("delay_seconds"))
-            .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|u| u as i64)))
-            .filter(|s| *s > 0)?;
-        Some(started_at + Duration::seconds(secs))
+        crate::driver::one_shot_due_at(Some(args), started_at)
     }
 
     pub(super) fn arg_str(args: &Value, keys: &[&str]) -> Option<String> {
@@ -264,12 +258,19 @@ impl PiDriver {
         if is_self_subagent {
             return None;
         }
+        // Only infer parent subagent when exactly ONE foreground subagent is
+        // open; with concurrent foreground subagents and no explicit
+        // `parentToolCallId`, guessing would mis-attribute child tool calls.
+        let mut sole_match: Option<(String, String)> = None;
         for sub_call in self.subagent_order.iter().rev() {
             if current_call == Some(sub_call.as_str()) {
                 continue;
             }
             if let Some(t) = self.tools.get(sub_call) {
                 if t.is_subagent && t.bg_id.is_none() {
+                    if sole_match.is_some() {
+                        return None;
+                    }
                     let item_id = if t.item_id.is_empty() {
                         format!(
                             "{}:tool:{sub_call}",
@@ -278,11 +279,11 @@ impl PiDriver {
                     } else {
                         t.item_id.clone()
                     };
-                    return Some((sub_call.clone(), item_id));
+                    sole_match = Some((sub_call.clone(), item_id));
                 }
             }
         }
-        None
+        sole_match
     }
 
     pub(super) fn record_child_tool_on_parent(
@@ -363,6 +364,7 @@ impl PiDriver {
             .map(|e| e.item_id.clone())
             .collect();
         let mut keep: std::collections::HashMap<String, Tool> = std::collections::HashMap::new();
+        let mut bg_dirty = false;
         let now = Utc::now();
         for (call, tool) in std::mem::take(&mut self.tools) {
             let under_open_bg_subagent = tool
@@ -374,6 +376,14 @@ impl PiDriver {
             {
                 keep.insert(call, tool);
                 continue;
+            }
+            if let Some(ref bg_id) = tool.bg_id {
+                self.bg_entries.remove(bg_id);
+                let before = self.bg_tasks.len();
+                self.bg_tasks.retain(|t| &t.id != bg_id);
+                if self.bg_tasks.len() != before {
+                    bg_dirty = true;
+                }
             }
             let turn_str = tool.turn_id.as_deref().unwrap_or_default();
             let item_id = if tool.item_id.is_empty() {
@@ -402,6 +412,9 @@ impl PiDriver {
         }
         self.subagent_order.retain(|c| keep.contains_key(c));
         self.tools = keep;
+        if bg_dirty {
+            step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
+        }
     }
 
     pub(super) fn settle_bg_entry_inner(
@@ -494,6 +507,8 @@ impl PiDriver {
             subagent_order: self.subagent_order.clone(),
             settles: self.settles,
             ended: self.ended.clone(),
+            in_agent_run: self.in_agent_run,
+            pending_abort: self.pending_abort,
             bg_tasks: self.bg_tasks.clone(),
             bg_entries: self.bg_entries.clone(),
         })
@@ -522,6 +537,8 @@ impl PiDriver {
         self.subagent_order = s.subagent_order;
         self.settles = s.settles;
         self.ended = s.ended;
+        self.in_agent_run = s.in_agent_run;
+        self.pending_abort = s.pending_abort;
         self.bg_tasks = s.bg_tasks;
         self.bg_entries = s.bg_entries;
         Ok(())

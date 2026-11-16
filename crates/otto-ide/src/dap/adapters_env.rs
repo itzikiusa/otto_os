@@ -236,10 +236,6 @@ fn load_debug_dotenv_file(
     if req.target.kind != IdeTargetKind::Local {
         return None;
     }
-    let trimmed = raw_env_file.trim();
-    if trimmed.is_empty() || trimmed.contains("..") {
-        return None;
-    }
     let mut allowed_roots = canonical_target_roots(&req.target);
     if ctx.caller_is_root {
         for extra in req.project_folders.iter().chain(
@@ -249,29 +245,40 @@ fn load_debug_dotenv_file(
         ) {
             if !extra.is_empty() {
                 if let Ok(cr) = std::fs::canonicalize(extra) {
-                    allowed_roots.push(cr);
+                    if !allowed_roots.contains(&cr) {
+                        allowed_roots.push(cr);
+                    }
                 }
             }
         }
     }
-
-    let cand = if Path::new(trimmed).is_absolute() {
-        PathBuf::from(trimmed)
-    } else if !effective_cwd.is_empty() && Path::new(effective_cwd).join(trimmed).is_file() {
-        Path::new(effective_cwd).join(trimmed)
-    } else {
-        Path::new(&req.target.root).join(trimmed)
-    };
-    let canon = std::fs::canonicalize(&cand).ok()?;
-    if !allowed_roots.iter().any(|cr| canon.starts_with(cr)) {
-        return None;
+    let mut root_strs: Vec<String> = Vec::new();
+    if !effective_cwd.is_empty() {
+        if let Ok(cwd_canon) = std::fs::canonicalize(effective_cwd) {
+            if allowed_roots.iter().any(|cr| cwd_canon.starts_with(cr)) {
+                root_strs.push(cwd_canon.to_string_lossy().into_owned());
+            }
+        }
     }
+    for cr in &allowed_roots {
+        let s = cr.to_string_lossy().into_owned();
+        if !root_strs.contains(&s) {
+            root_strs.push(s);
+        }
+    }
+    let canon = crate::environments::resolve_confined_dotenv_path(
+        &root_strs,
+        raw_env_file,
+        ctx.caller_is_root,
+    )?;
     let content = std::fs::read_to_string(&canon).ok()?;
-    Some(crate::environments::parse_dotenv(&content))
+    let mut out = BTreeMap::new();
+    crate::environments::extend_from_dotenv_str(&mut out, &content);
+    Some(out)
 }
 
 /// Merge shell/base env, project SDK paths, `.env`/secret vars, run-config overrides,
-/// and launch-specific overrides while scrubbing daemon secrets for non-root callers.
+/// and launch-specific overrides while scrubbing daemon secrets and dangerous loader keys.
 pub fn build_effective_env(
     data_dir: &Path,
     req: &IdeStartDebugReq,
@@ -328,7 +335,12 @@ pub(crate) fn build_effective_env_with_manager(
                 .as_ref()
                 .is_some_and(|pe| pe.env_vars.iter().any(|ev| ev.key == *k))
             {
-                base.insert(k.clone(), v.clone());
+                crate::environments::insert_filtered_env_var(
+                    &mut base,
+                    k,
+                    v.clone(),
+                    ctx.caller_is_root,
+                );
             }
         }
         base
@@ -337,6 +349,14 @@ pub(crate) fn build_effective_env_with_manager(
     } else {
         let mut scrubbed = ctx.effective_env.clone();
         scrubbed.retain(|k, _| {
+            if crate::environments::is_reserved_internal_env_key(k) {
+                return false;
+            }
+            if !k.eq_ignore_ascii_case("PATH")
+                && crate::environments::is_dangerous_loader_env_key(k)
+            {
+                return false;
+            }
             let explicit = ctx
                 .project_env
                 .as_ref()
@@ -381,65 +401,45 @@ pub(crate) fn build_effective_env_with_manager(
         }
     }
 
+    let allow_sdk_and_path_overrides = ctx.caller_is_root || req.target.kind == IdeTargetKind::Ssh;
     let mut effective_proj = ctx.project_env.clone().unwrap_or_default();
-    if let Some(sdk_override) = resolve_debug_sdk_override(req, ctx, &effective_cwd) {
-        crate::environments::module_sdks::apply_module_sdk_to_project_env(
-            &mut effective_proj,
-            &effective_cwd,
-            &sdk_override,
-            ctx.run_config.as_ref().map(|rc| rc.runner),
-            Some(req.language.as_str()),
-        );
+    if allow_sdk_and_path_overrides {
+        if let Some(sdk_override) = resolve_debug_sdk_override(req, ctx, &effective_cwd) {
+            crate::environments::module_sdks::apply_module_sdk_to_project_env(
+                &mut effective_proj,
+                &effective_cwd,
+                &sdk_override,
+                ctx.run_config.as_ref().map(|rc| rc.runner),
+                Some(req.language.as_str()),
+            );
+        }
     }
 
-    let mut path_entries: Vec<String> = Vec::new();
-    for (home_opt, key) in [
-        (effective_proj.java_home.as_deref(), Some("JAVA_HOME")),
-        (effective_proj.go_root.as_deref(), Some("GOROOT")),
-        (effective_proj.node_home.as_deref(), None),
-    ] {
-        if let Some(h) = home_opt.filter(|s| !s.is_empty()) {
-            if let Some(k) = key {
-                env.insert(k.into(), h.to_string());
-            }
-            path_entries.push(format!("{}/bin", h.trim_end_matches('/')));
-        }
-    }
-    if let Some(rt) = effective_proj
-        .rust_toolchain
-        .as_deref()
-        .filter(|s| !s.is_empty())
-    {
-        if rt.starts_with('/') {
-            path_entries.push(format!("{}/bin", rt.trim_end_matches('/')));
-        } else {
-            env.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
-        }
-    }
-    if let Some(py) = effective_proj
-        .python_interpreter
-        .as_deref()
-        .filter(|s| !s.is_empty())
-    {
-        if let Some(parent) = Path::new(py).parent() {
-            path_entries.push(parent.to_string_lossy().into_owned());
-            if let Some(venv) = parent.parent() {
-                if venv.join("pyvenv.cfg").is_file() || req.target.kind == IdeTargetKind::Ssh {
-                    env.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
-                }
+    let (mut path_entries, _) = crate::environments::apply_project_sdk_layers(
+        &effective_proj,
+        req.target.kind,
+        allow_sdk_and_path_overrides,
+        &mut env,
+    );
+    if allow_sdk_and_path_overrides {
+        if let Some(extra) = effective_proj
+            .extra_path
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            for seg in extra.split(':').filter(|s| !s.trim().is_empty()) {
+                crate::environments::push_unique(&mut path_entries, seg.trim().to_string());
             }
         }
-    }
-    if let Some(extra) = effective_proj
-        .extra_path
-        .as_deref()
-        .filter(|s| !s.is_empty())
-    {
-        path_entries.extend(extra.split(':').filter(|s| !s.is_empty()).map(String::from));
     }
     for entry in effective_proj.env_vars.iter().filter(|e| !e.secret) {
         if let Some(val) = &entry.value {
-            env.insert(entry.key.clone(), val.clone());
+            crate::environments::insert_filtered_env_var(
+                &mut env,
+                &entry.key,
+                val.clone(),
+                ctx.caller_is_root,
+            );
         }
     }
 
@@ -458,29 +458,35 @@ pub(crate) fn build_effective_env_with_manager(
         ] {
             let p = tc.join(sub);
             if p.is_dir() {
-                path_entries.push(p.to_string_lossy().into_owned());
+                crate::environments::push_unique(
+                    &mut path_entries,
+                    p.to_string_lossy().into_owned(),
+                );
             }
         }
-        if let Some(home) = dirs::home_dir() {
-            for rel in ["go/bin", ".cargo/bin", ".local/bin"] {
-                let p = home.join(rel);
-                if p.is_dir() {
-                    path_entries.push(p.to_string_lossy().into_owned());
+        if !otto_core::e2e::isolated() && ctx.caller_is_root {
+            if let Some(home) = dirs::home_dir() {
+                for rel in ["go/bin", ".cargo/bin", ".local/bin"] {
+                    let p = home.join(rel);
+                    if p.is_dir() {
+                        crate::environments::push_unique(
+                            &mut path_entries,
+                            p.to_string_lossy().into_owned(),
+                        );
+                    }
                 }
             }
         }
         for sys_bin in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/local/go/bin"] {
             if Path::new(sys_bin).is_dir() {
-                path_entries.push(sys_bin.to_string());
+                crate::environments::push_unique(&mut path_entries, sys_bin.to_string());
             }
         }
     }
 
     if let Some(existing_path) = env.get("PATH").cloned() {
         for seg in existing_path.split(':').filter(|s| !s.is_empty()) {
-            if !path_entries.iter().any(|e| e == seg) {
-                path_entries.push(seg.to_string());
-            }
+            crate::environments::push_unique(&mut path_entries, seg.to_string());
         }
     }
     if !path_entries.is_empty() {
@@ -493,7 +499,14 @@ pub(crate) fn build_effective_env_with_manager(
                 env.extend(parsed);
             }
         }
-        env.extend(rc.env_overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
+        for (k, v) in &rc.env_overrides {
+            crate::environments::insert_filtered_env_var(
+                &mut env,
+                k,
+                v.clone(),
+                ctx.caller_is_root,
+            );
+        }
     }
     if let Some(launch_ef) = req
         .launch
@@ -505,7 +518,9 @@ pub(crate) fn build_effective_env_with_manager(
             env.extend(parsed);
         }
     }
-    env.extend(req.launch.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    for (k, v) in &req.launch.env {
+        crate::environments::insert_filtered_env_var(&mut env, k, v.clone(), ctx.caller_is_root);
+    }
     if let Some(nb) = &ctx.netbridge {
         nb.apply_to_env(&mut env);
     }

@@ -148,6 +148,47 @@ export function parseIdeContextChipsFromPrompt(text: string): ParsedPromptContex
   return out;
 }
 
+/** Extract full `IdeContextChip` items (including snippet bodies) and stripped prompt text
+ *  when restoring a queued or interrupted IDE Agent prompt back into the composer. */
+export function extractIdeContextChipsFromPrompt(text: string): {
+  cleanText: string;
+  chips: IdeContextChip[];
+} {
+  const chips: IdeContextChip[] = [];
+  if (!text) return { cleanText: '', chips };
+  let idx = 0;
+  for (const block of text.matchAll(/<ide_context\b[^>]*>([\s\S]*?)<\/ide_context>/gi)) {
+    for (const tag of block[1].matchAll(/<context\b([^>]*)>\r?\n?([\s\S]*?)\r?\n?<\/context>/gi)) {
+      const attrs = tag[1];
+      const body = unescapeHtml(tag[2] ?? '');
+      const read = (n: string): string | undefined => {
+        const m = new RegExp(`\\b${n}="([^"]*)"`, 'i').exec(attrs);
+        return m ? unescapeHtml(m[1]) : undefined;
+      };
+      const label = read('label') ?? '';
+      if (!label) continue;
+      const sLine = Number(read('start_line') ?? '');
+      const eLine = Number(read('end_line') ?? '');
+      const kind = (read('kind') ?? 'file') as IdeContextKind;
+      const path = read('path');
+      const startLine = Number.isFinite(sLine) && sLine > 0 ? sLine : undefined;
+      const endLine = Number.isFinite(eLine) && eLine > 0 ? eLine : undefined;
+      chips.push({
+        id: `restored-ctx-${idx++}-${kind}-${label}`,
+        key: path ? `${kind}:${path}:${startLine ?? 0}-${endLine ?? 0}` : `${kind}:${label}`,
+        kind,
+        label,
+        path,
+        startLine,
+        endLine,
+        language: read('language'),
+        snippet: body,
+      });
+    }
+  }
+  return { cleanText: stripIdeContextBlocks(text), chips };
+}
+
 export function buildIdeAgentPrompt(
   userPrompt: string, contexts: readonly IdeContextChip[] = [],
   opts: {

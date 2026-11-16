@@ -2,6 +2,7 @@
 // fetching for `IdeTabBar` and `ideEditorStoreBridge`.
 
 import { api } from '../../../lib/api/client';
+import { gitApi } from '../../../lib/api/git';
 import type { BlameLine, IdeGitBaseResp } from '../../../lib/api/types';
 import { copyWithToast } from '../../../lib/clipboard';
 import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
@@ -172,7 +173,7 @@ type RawBlameEntry = Partial<BlameLine> & {
   commit?: string;
 };
 
-export async function runFetchIdeGitBlame(rootPath: string, filePath: string, signal?: AbortSignal): Promise<Record<number, string> | null> {
+export async function runFetchIdeGitBlame(_rootPath: string, filePath: string, signal?: AbortSignal): Promise<Record<number, string> | null> {
   try {
     const normFile = normalizeMacPrivatePath(filePath);
     let repoId = '';
@@ -192,18 +193,16 @@ export async function runFetchIdeGitBlame(rootPath: string, filePath: string, si
         .map((r) => ({ id: r.id, root: normalizeMacPrivatePath(r.path).replace(/\/+$/, '') }))
         .filter((r) => normFile === r.root || normFile.startsWith(`${r.root}/`))
         .sort((a, b) => b.root.length - a.root.length);
-      const normRoot = rootPath ? normalizeMacPrivatePath(rootPath) : '';
-      if (!matches.length && (!normRoot || !normFile.startsWith(normRoot))) return null;
       if (!matches.length) return null;
       repoId = matches[0].id;
       relPath = normFile.slice(matches[0].root.length).replace(/^\/+/, '');
     }
     if (!relPath) return null;
-    const resp = await api.bg.get<{ lines?: RawBlameEntry[]; hunks?: RawBlameEntry[] } | RawBlameEntry[]>(
-      `/repos/${encodeURIComponent(repoId)}/blame?path=${encodeURIComponent(relPath)}`,
+    const resp = await gitApi.blame(repoId, relPath, undefined, {
       signal,
-    );
-    const list = Array.isArray(resp) ? resp : (resp.lines ?? resp.hunks ?? []);
+      background: true,
+    });
+    const list: RawBlameEntry[] = Array.isArray(resp) ? resp : (resp.lines ?? []);
     if (!list.length) return null;
     const map: Record<number, string> = {};
     for (const item of list) {
@@ -236,20 +235,19 @@ export async function runResolveIdeGitBaseContent(
   filePath: string,
   diskSavedContent: string | null,
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<string | null | undefined> {
   if (
-    ide.target.kind !== 'local' ||
     !filePath ||
     diskSavedContent == null ||
     filePath.startsWith('untitled:') ||
     filePath.startsWith('jdt://') ||
     filePath.startsWith('jar:')
   ) {
-    return diskSavedContent;
+    return undefined;
   }
-  const normFile = normalizeMacPrivatePath(filePath);
+  const normFile = ide.target.kind === 'local' ? normalizeMacPrivatePath(filePath) : filePath;
   const folders = getIdeProjectFolders()
-    .map((f) => normalizeMacPrivatePath(f).replace(/\/+$/, ''))
+    .map((f) => (ide.target.kind === 'local' ? normalizeMacPrivatePath(f) : f).replace(/\/+$/, ''))
     .filter((f) => f && (normFile === f || normFile.startsWith(`${f}/`)))
     .sort((a, b) => b.length - a.length);
   const root = folders[0] || ide.target.root;
@@ -257,8 +255,8 @@ export async function runResolveIdeGitBaseContent(
     `/ide/fs/git-base?${ide.targetQuery({ root, path: filePath })}`,
     signal,
   );
-  if (resp.binary) return null;
-  if (!resp.in_repo) return diskSavedContent;
+  if (!resp.in_repo) return undefined;
+  if (resp.binary || resp.truncated) return null;
   if (!resp.head_exists) return '';
   return normalizeEditorLf(resp.content ?? '');
 }

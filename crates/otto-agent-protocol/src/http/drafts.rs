@@ -97,9 +97,9 @@ pub(crate) fn validate_attachment_bytes(
 }
 
 fn validate(draft: &RuntimeDraftContent) -> otto_core::Result<()> {
-    if draft.text.len() > 1024 * 1024 || draft.images.len() > 12 || draft.context.len() > 32 {
+    if draft.text.len() > 1024 * 1024 || draft.images.len() > 20 || draft.context.len() > 32 {
         return Err(Error::PayloadTooLarge(
-            "Draft allows 1 MiB text, 12 attachments and 32 context chips.".into(),
+            "Draft allows 1 MiB text, 20 attachments and 32 context chips.".into(),
         ));
     }
     if let Some(m) = draft.model.as_deref() {
@@ -155,5 +155,21 @@ mod tests {
         assert!(validate(&draft).is_ok());
         draft.images[0].mime = "image/svg+xml".into();
         assert!(matches!(validate(&draft), Err(Error::UnsupportedMedia(_))));
+    }
+
+    #[test]
+    fn drafts_allow_up_to_twenty_attachments_and_reject_twenty_first() {
+        let png = PromptFile {
+            name: "shot.png".into(),
+            mime: "image/png".into(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nok"),
+        };
+        let mut draft = RuntimeDraftContent {
+            images: vec![png.clone(); 20],
+            ..Default::default()
+        };
+        assert!(validate(&draft).is_ok());
+        draft.images.push(png);
+        assert!(matches!(validate(&draft), Err(Error::PayloadTooLarge(_))));
     }
 }

@@ -50,7 +50,8 @@ pub(crate) struct Item {
     pub(crate) started_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct CodexDriverState {
     next_id: u64,
     init_id: u64,
@@ -441,6 +442,12 @@ impl CodexDriver {
                     retryable: None,
                 })
         });
+        if matches!(
+            status,
+            TurnTerminalStatus::Failed | TurnTerminalStatus::Interrupted
+        ) {
+            self.settle_open_subagents_on_parent_abort(step, status);
+        }
         step.push(DriverEvent::Terminal {
             status,
             failure,
@@ -947,7 +954,6 @@ impl StructuredDriver for CodexDriver {
         if input.is_empty() {
             return Err(DriverError("empty steer input".into()));
         }
-        self.access = req.access_mode.unwrap_or(self.access);
         let mut step = DriverStep::default();
         let (id, line) = self.request(
             "turn/steer",
@@ -1212,6 +1218,8 @@ impl StructuredDriver for CodexDriver {
         self.steer_reqs.clear();
         self.pending.clear();
         self.items.clear();
+        self.subagents.clear();
+        self.child_thread_to_key.clear();
         self.child_items.clear();
         self.bg_tasks.clear();
         DriverStep::default()

@@ -148,10 +148,10 @@ export function fetchIdeGitBlame(rootPath: string, filePath: string, signal?: Ab
   return import('./ideEditorActionsLazy').then((m) => m.runFetchIdeGitBlame(rootPath, filePath, signal));
 }
 
-const persistedGitBaseByPath: Record<string, string | null> = {};
+const persistedGitBaseByPath: Record<string, string | null | undefined> = {};
 const persistedGitBaseDigestByPath = new Map<string, string>();
 
-export function getPersistedIdeGitBaseSnapshot(): Record<string, string | null> {
+export function getPersistedIdeGitBaseSnapshot(): Record<string, string | null | undefined> {
   return { ...persistedGitBaseByPath };
 }
 
@@ -159,7 +159,7 @@ export function getPersistedIdeGitBaseDigest(filePath: string): string | undefin
   return persistedGitBaseDigestByPath.get(filePath);
 }
 
-export function setPersistedIdeGitBase(filePath: string, base: string | null, digest: string): void {
+export function setPersistedIdeGitBase(filePath: string, base: string | null | undefined, digest: string): void {
   persistedGitBaseByPath[filePath] = base;
   persistedGitBaseDigestByPath.set(filePath, digest);
 }
@@ -180,6 +180,6 @@ export function resolveIdeGitBaseContent(
   filePath: string,
   diskSavedContent: string | null,
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<string | null | undefined> {
   return import('./ideEditorActionsLazy').then((m) => m.runResolveIdeGitBaseContent(filePath, diskSavedContent, signal));
 }

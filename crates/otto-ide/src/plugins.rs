@@ -110,8 +110,12 @@ impl IdePluginRegistry {
                     continue;
                 }
                 if let Ok(Some(mut info)) = Self::load_from_dir(&path, "managed") {
-                    info.enabled = *state.enabled.get(&info.slug).unwrap_or(&true);
-                    by_slug.insert(info.slug.clone(), info);
+                    // Unrecorded on-disk managed plugin directories default to `enabled = false`
+                    // so restored archives or manually dropped folders never auto-execute
+                    // until root explicitly enables or installs them, and never shadow
+                    // pre-existing `~/otto-plugins` sidecars.
+                    info.enabled = *state.enabled.get(&info.slug).unwrap_or(&false);
+                    by_slug.entry(info.slug.clone()).or_insert(info);
                 }
             }
         }
@@ -246,8 +250,12 @@ impl IdePluginRegistry {
                 *flag = false;
             }
         }
-        if let Ok(entries) = std::fs::read_dir(&self.plugins_dir) {
-            for entry in entries.flatten() {
+        if self.plugins_dir.exists() {
+            let entries = std::fs::read_dir(&self.plugins_dir)
+                .map_err(|e| Error::Internal(format!("read ide-plugins dir: {e}")))?;
+            for entry in entries {
+                let entry =
+                    entry.map_err(|e| Error::Internal(format!("read ide-plugins entry: {e}")))?;
                 let path = entry.path();
                 let name = entry.file_name();
                 let dir_name = name.to_string_lossy();
@@ -333,6 +341,14 @@ impl IdePluginRegistry {
         })?;
 
         let dest = self.plugins_dir.join(&info.slug);
+        if let Some(sidecar_root) = &self.sidecar_plugins_dir {
+            if sidecar_root.join(&info.slug).is_dir() && resolved != sidecar_root.join(&info.slug) {
+                return Err(Error::Conflict(format!(
+                    "plugin slug '{}' conflicts with an installed ~/otto-plugins sidecar",
+                    info.slug
+                )));
+            }
+        }
         if dest != resolved {
             if dest.exists() {
                 std::fs::remove_dir_all(&dest)
@@ -415,6 +431,15 @@ impl IdePluginRegistry {
         };
 
         let dest = self.plugins_dir.join(&info.slug);
+        if let Some(sidecar_root) = &self.sidecar_plugins_dir {
+            if sidecar_root.join(&info.slug).is_dir() {
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                return Err(Error::Conflict(format!(
+                    "plugin slug '{}' conflicts with an installed ~/otto-plugins sidecar",
+                    info.slug
+                )));
+            }
+        }
         if dest.exists() {
             let _ = tokio::fs::remove_dir_all(&dest).await;
         }
@@ -449,21 +474,14 @@ impl IdePluginRegistry {
         std::fs::create_dir_all(&self.plugins_dir)
             .map_err(|e| Error::Internal(format!("create ide-plugins dir: {e}")))?;
         let state_path = self.plugins_dir.join(STATE_FILE);
-        let tmp_path = self
-            .plugins_dir
-            .join(format!(".{STATE_FILE}.{}.tmp", new_id()));
         let raw = serde_json::to_string_pretty(state)?;
-        {
-            let mut f = std::fs::File::create(&tmp_path)
-                .map_err(|e| Error::Internal(format!("create plugin state tmp: {e}")))?;
-            f.write_all(raw.as_bytes())
-                .map_err(|e| Error::Internal(format!("write plugin state tmp: {e}")))?;
-            let _ = f.sync_all();
-        }
-        if let Err(e) = std::fs::rename(&tmp_path, &state_path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(Error::Internal(format!("save plugin state: {e}")));
-        }
+        let mut tmp = tempfile::NamedTempFile::new_in(&self.plugins_dir)
+            .map_err(|e| Error::Internal(format!("create plugin state tmp: {e}")))?;
+        tmp.write_all(raw.as_bytes())
+            .map_err(|e| Error::Internal(format!("write plugin state tmp: {e}")))?;
+        let _ = tmp.as_file().sync_all();
+        tmp.persist(&state_path)
+            .map_err(|e| Error::Internal(format!("save plugin state: {}", e.error)))?;
         Ok(())
     }
 }

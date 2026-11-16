@@ -47,9 +47,16 @@ impl IntoResponse for ApiErr {
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!(error = %self.0, "runtime-sessions internal error");
+        }
+        let message = match &self.0 {
+            Error::Internal(_) => "internal server error".to_string(),
+            other => other.to_string(),
+        };
         let problem = Problem {
             code: self.0.code().to_string(),
-            message: self.0.to_string(),
+            message,
         };
         (status, Json(problem)).into_response()
     }
@@ -353,7 +360,7 @@ async fn create<S: RuntimeCtx>(
     require_human(&ctx, &auth)?;
     ctx.roles().check(&user, &ws, WorkspaceRole::Editor).await?;
     let rt = ctx.agent_runtime();
-    let req = body.into_req_with_resolver(|slug| rt.resolve_custom_provider(slug))?;
+    let req = body.into_req_with_resolver(|slug| rt.resolve_runtime_provider(slug))?;
     let s = rt.create(&user.id, &ws, req).await?;
     Ok((StatusCode::CREATED, Json(s)))
 }

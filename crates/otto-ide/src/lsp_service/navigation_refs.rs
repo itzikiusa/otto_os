@@ -187,7 +187,7 @@ pub(super) fn find_json_key_definitions(
                 out.push(IdeReferenceLocation {
                     path: path.to_string(),
                     line: (idx + 1) as u32,
-                    column: line[..pos].chars().count() as u32 + 2,
+                    column: crate::text_pos::byte_idx_to_utf16_col(line, pos + 1) as u32 + 1,
                     preview: line.trim().to_string(),
                 });
             }
@@ -208,12 +208,13 @@ pub(super) fn navigate_csv_column(
         .enumerate()
         .filter(|(_, l)| !l.trim().is_empty());
     let (header_idx, header_line) = non_empty.next()?;
-    let delim = detect_csv_delimiter(path, lang, header_line);
-    let headers = split_delimited_row(header_line, delim);
-    let cur_line = content.lines().nth(line.saturating_sub(1) as usize)?;
-    let col_idx = column_index_at_char_offset(cur_line, delim, column.saturating_sub(1) as usize);
+    let header_clean = crate::text_pos::strip_cr(header_line);
+    let delim = detect_csv_delimiter(path, lang, header_clean);
+    let headers = split_delimited_row(header_clean, delim);
+    let cur_line = crate::text_pos::strip_cr(content.lines().nth(line.saturating_sub(1) as usize)?);
+    let col_idx = column_index_at_utf16_offset(cur_line, delim, column.saturating_sub(1) as usize);
     let col_name = headers.get(col_idx)?.trim().to_string();
-    let header_char_col = char_offset_of_column(header_line, delim, col_idx) as u32 + 1;
+    let header_utf16_col = utf16_offset_of_column(header_clean, delim, col_idx) as u32 + 1;
     Some(IdeReferencesResp {
         symbol: if col_name.is_empty() {
             format!("Column {}", col_idx + 1)
@@ -223,17 +224,18 @@ pub(super) fn navigate_csv_column(
         locations: vec![IdeReferenceLocation {
             path: path.to_string(),
             line: (header_idx + 1) as u32,
-            column: header_char_col,
+            column: header_utf16_col,
             preview: format!("Column #{}: {}", col_idx + 1, col_name),
         }],
     })
 }
 
-fn column_index_at_char_offset(line: &str, delim: char, target_char: usize) -> usize {
+fn column_index_at_utf16_offset(line: &str, delim: char, target_utf16: usize) -> usize {
+    let target_byte = crate::text_pos::utf16_col_to_byte_idx(line, target_utf16);
     let mut in_q = false;
     let mut col = 0usize;
-    for (i, ch) in line.chars().enumerate() {
-        if i >= target_char {
+    for (byte_idx, ch) in line.char_indices() {
+        if byte_idx >= target_byte {
             break;
         }
         if ch == '"' {
@@ -245,19 +247,19 @@ fn column_index_at_char_offset(line: &str, delim: char, target_char: usize) -> u
     col
 }
 
-fn char_offset_of_column(line: &str, delim: char, want_col: usize) -> usize {
+fn utf16_offset_of_column(line: &str, delim: char, want_col: usize) -> usize {
     if want_col == 0 {
         return 0;
     }
     let mut in_q = false;
     let mut col = 0usize;
-    for (i, ch) in line.chars().enumerate() {
+    for (byte_idx, ch) in line.char_indices() {
         if ch == '"' {
             in_q = !in_q;
         } else if ch == delim && !in_q {
             col += 1;
             if col == want_col {
-                return i + 1;
+                return crate::text_pos::byte_idx_to_utf16_col(line, byte_idx + ch.len_utf8());
             }
         }
     }
@@ -265,36 +267,36 @@ fn char_offset_of_column(line: &str, delim: char, want_col: usize) -> usize {
 }
 
 pub(super) fn extract_quoted_string_at(line: &str, column: u32) -> Option<String> {
-    let chars: Vec<char> = line.chars().collect();
-    if chars.is_empty() {
+    let line = crate::text_pos::strip_cr(line);
+    if line.is_empty() {
         return None;
     }
-    let target = (column.saturating_sub(1) as usize).min(chars.len() - 1);
-    let mut i = 0;
-    while i < chars.len() {
-        if matches!(chars[i], '"' | '\'' | '`') {
-            let q = chars[i];
-            let start = i;
-            i += 1;
+    let mut target_byte =
+        crate::text_pos::utf16_col_to_byte_idx(line, column.saturating_sub(1) as usize);
+    if target_byte >= line.len() {
+        target_byte = line.char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+    }
+    let mut iter = line.char_indices().peekable();
+    while let Some((start_byte, ch)) = iter.next() {
+        if matches!(ch, '"' | '\'' | '`') {
+            let q = ch;
             let mut val = String::new();
-            while i < chars.len() {
-                if chars[i] == '\\' && i + 1 < chars.len() {
-                    val.push(chars[i + 1]);
-                    i += 2;
-                } else if chars[i] == q {
-                    if (start..=i).contains(&target) {
+            while let Some((cur_byte, inner)) = iter.next() {
+                if inner == '\\' {
+                    if let Some((_, esc)) = iter.next() {
+                        val.push(esc);
+                    }
+                } else if inner == q {
+                    let end_byte = cur_byte;
+                    if (start_byte..=end_byte).contains(&target_byte) {
                         return Some(val);
                     }
-                    i += 1;
                     break;
                 } else {
-                    val.push(chars[i]);
-                    i += 1;
+                    val.push(inner);
                 }
             }
-            continue;
         }
-        i += 1;
     }
     None
 }

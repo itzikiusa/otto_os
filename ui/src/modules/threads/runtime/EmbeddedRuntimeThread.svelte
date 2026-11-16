@@ -32,6 +32,7 @@
     fallbackCwd = null,
     hasExternalContext = false,
     transformOutgoingText,
+    transformRestoredQueuedText,
     onExternalContextConsumed,
     onopenpath,
     formatAssistantText,
@@ -125,6 +126,7 @@
           {fallbackCwd}
           {hasExternalContext}
           {transformOutgoingText}
+          {transformRestoredQueuedText}
           {onExternalContextConsumed}
           {onopenpath}
           {formatAssistantText}

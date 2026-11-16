@@ -43,6 +43,7 @@ mod java_diag;
 mod java_diag_index;
 mod navigation;
 mod navigation_ext;
+mod navigation_go_recv;
 mod navigation_imports;
 mod navigation_java;
 mod navigation_matchers;
@@ -77,8 +78,9 @@ pub async fn document_symbols<S: IdeCtx>(
     req: IdeSymbolsReq,
 ) -> Result<IdeSymbolsResp> {
     req.target.validate()?;
+    let has_root_auth = otto_core::auth::root_authority(user);
     let resolved_opt =
-        if !req.target.root.trim().is_empty() || !user.is_root || req.content.is_none() {
+        if !req.target.root.trim().is_empty() || !has_root_auth || req.content.is_none() {
             let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
             if !req.path.trim().is_empty() {
                 let _ = ctx
@@ -363,6 +365,7 @@ pub async fn format_document<S: IdeCtx>(
             });
         }
     }
+    let has_root_auth = otto_core::auth::root_authority(user);
     let mut env_map = build_formatter_env(ctx, user, &resolved, &req.target).await;
     if !env_map.contains_key("PATH") && req.target.kind == crate::types::IdeTargetKind::Local {
         env_map.insert(
@@ -370,13 +373,13 @@ pub async fn format_document<S: IdeCtx>(
             crate::lsp_host::servers::augmented_local_path_for_user(
                 ctx.data_dir(),
                 None,
-                user.is_root,
+                has_root_auth,
             ),
         );
     }
 
     for (label, cmd, args) in
-        formatter_candidates(&lang, effective_path, req.organize_imports, user.is_root)
+        formatter_candidates(&lang, effective_path, req.organize_imports, has_root_auth)
     {
         if let Some(raw_formatted) =
             run_stdin_formatter(ctx, &resolved, &cmd, &args, &env_map, &req.content).await
@@ -410,30 +413,30 @@ pub(super) async fn build_formatter_env<S: IdeCtx>(
     _resolved: &ResolvedTarget,
     target: &crate::types::IdeTargetSpec,
 ) -> BTreeMap<String, String> {
-    let mut env_map = match ctx
-        .ide()
-        .environments
-        .build_effective_env_for_run_as(&ctx.pool(), ctx.secrets(), target, None, user.is_root)
-        .await
-    {
-        Ok(map) => map,
-        Err(_) if target.kind == crate::types::IdeTargetKind::Local => ctx
+    let has_root_auth = otto_core::auth::root_authority(user);
+    if target.kind == crate::types::IdeTargetKind::Local {
+        ctx.ide().environments.ensure_hydrated(&ctx.pool()).await;
+        let mut env_map = ctx
             .ide()
             .environments
-            .cached_effective_env_for_local_root_as(&target.root, user.is_root),
-        Err(_) => BTreeMap::new(),
-    };
-    if target.kind == crate::types::IdeTargetKind::Local && !env_map.contains_key("PATH") {
-        env_map.insert(
-            "PATH".into(),
-            crate::lsp_host::servers::augmented_local_path_for_user(
-                ctx.data_dir(),
-                None,
-                user.is_root,
-            ),
-        );
+            .cached_probe_env_for_local_root_as(&target.root, has_root_auth);
+        if !env_map.contains_key("PATH") {
+            env_map.insert(
+                "PATH".into(),
+                crate::lsp_host::servers::augmented_local_path_for_user(
+                    ctx.data_dir(),
+                    None,
+                    has_root_auth,
+                ),
+            );
+        }
+        return env_map;
     }
-    env_map
+    ctx.ide()
+        .environments
+        .build_effective_env_for_run_as(&ctx.pool(), ctx.secrets(), target, None, has_root_auth)
+        .await
+        .unwrap_or_default()
 }
 
 pub(super) fn resolve_language<S: IdeCtx>(ctx: &S, path: &str, hint: Option<&str>) -> String {

@@ -352,21 +352,33 @@ pub(crate) fn extract_symbol_and_qualifier(
             }
         }
     };
-    let Some(line_str) = content.lines().nth(line.saturating_sub(1) as usize) else {
+    let Some(raw_line) = content.lines().nth(line.saturating_sub(1) as usize) else {
         return Some((sym, None));
     };
-    let chars: Vec<char> = line_str.chars().collect();
-    if chars.is_empty() {
+    let line_str = crate::text_pos::strip_cr(raw_line);
+    if line_str.is_empty() {
         return Some((sym, None));
     }
-    let mut pos = (column.saturating_sub(1) as usize).min(chars.len().saturating_sub(1));
-    while pos > 0 && (is_ident_char(chars[pos - 1]) || (lang == "shell" && chars[pos - 1] == '-')) {
-        pos -= 1;
+    let mut b_pos =
+        crate::text_pos::utf16_col_to_byte_idx(line_str, column.saturating_sub(1) as usize);
+    if b_pos >= line_str.len() {
+        b_pos = line_str
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
     }
-    let qual_end = if pos >= 1 && chars[pos - 1] == '.' {
-        Some(pos - 1)
-    } else if pos >= 2 && chars[pos - 2] == ':' && chars[pos - 1] == ':' {
-        Some(pos - 2)
+    while let Some((prev_idx, prev_ch)) = line_str[..b_pos].char_indices().next_back() {
+        if is_ident_char(prev_ch) || (lang == "shell" && prev_ch == '-') {
+            b_pos = prev_idx;
+        } else {
+            break;
+        }
+    }
+    let qual_end = if line_str[..b_pos].ends_with("::") {
+        Some(b_pos - 2)
+    } else if line_str[..b_pos].ends_with('.') {
+        Some(b_pos - 1)
     } else {
         None
     };
@@ -375,10 +387,14 @@ pub(crate) fn extract_symbol_and_qualifier(
             return None;
         }
         let mut qs = qe;
-        while qs > 0 && is_ident_char(chars[qs - 1]) {
-            qs -= 1;
+        while let Some((prev_idx, prev_ch)) = line_str[..qs].char_indices().next_back() {
+            if is_ident_char(prev_ch) {
+                qs = prev_idx;
+            } else {
+                break;
+            }
         }
-        (qs < qe).then(|| chars[qs..qe].iter().collect::<String>())
+        (qs < qe).then(|| line_str[qs..qe].to_string())
     });
 
     if qualifier.is_none() && explicit_clean.is_some() {
@@ -393,14 +409,17 @@ pub(crate) fn extract_symbol_and_qualifier(
                     .next()
                     .is_none_or(|c| !is_ident_char(c));
                 if boundary_ok && sep_byte > 0 {
-                    let prefix_chars: Vec<char> = line_str[..sep_byte].chars().collect();
-                    let qe = prefix_chars.len();
-                    let mut qs = qe;
-                    while qs > 0 && is_ident_char(prefix_chars[qs - 1]) {
-                        qs -= 1;
+                    let mut qs = sep_byte;
+                    while let Some((prev_idx, prev_ch)) = line_str[..qs].char_indices().next_back()
+                    {
+                        if is_ident_char(prev_ch) {
+                            qs = prev_idx;
+                        } else {
+                            break;
+                        }
                     }
-                    if qs < qe {
-                        qualifier = Some(prefix_chars[qs..qe].iter().collect());
+                    if qs < sep_byte {
+                        qualifier = Some(line_str[qs..sep_byte].to_string());
                         break;
                     }
                 }
@@ -416,30 +435,47 @@ pub(crate) fn extract_symbol_and_qualifier(
 }
 
 fn extract_shell_ident_at(content: &str, line: u32, column: u32) -> Option<String> {
-    let line_str = content.lines().nth(line.saturating_sub(1) as usize)?;
-    let chars: Vec<char> = line_str.chars().collect();
-    if chars.is_empty() {
+    let raw_line = content.lines().nth(line.saturating_sub(1) as usize)?;
+    let line_str = crate::text_pos::strip_cr(raw_line);
+    if line_str.is_empty() {
         return None;
     }
     let is_sh = |c: char| is_ident_char(c) || c == '-';
-    let mut pos = (column.saturating_sub(1) as usize).min(chars.len() - 1);
-    if !is_sh(chars[pos]) {
-        if pos > 0 && is_sh(chars[pos - 1]) {
-            pos -= 1;
+    let mut b_pos =
+        crate::text_pos::utf16_col_to_byte_idx(line_str, column.saturating_sub(1) as usize);
+    if b_pos >= line_str.len() {
+        b_pos = line_str.char_indices().next_back().map(|(i, _)| i)?;
+    }
+    let cur_ch = line_str[b_pos..].chars().next()?;
+    if !is_sh(cur_ch) {
+        if let Some((prev_idx, prev_ch)) = line_str[..b_pos].char_indices().next_back() {
+            if is_sh(prev_ch) {
+                b_pos = prev_idx;
+            } else {
+                return None;
+            }
         } else {
             return None;
         }
     }
-    let mut s = pos;
-    while s > 0 && is_sh(chars[s - 1]) {
-        s -= 1;
+    let mut s = b_pos;
+    while let Some((prev_idx, prev_ch)) = line_str[..s].char_indices().next_back() {
+        if is_sh(prev_ch) {
+            s = prev_idx;
+        } else {
+            break;
+        }
     }
-    let mut e = pos;
-    while e + 1 < chars.len() && is_sh(chars[e + 1]) {
-        e += 1;
+    let mut e = b_pos;
+    for ch in line_str[b_pos..].chars() {
+        if is_sh(ch) {
+            e += ch.len_utf8();
+        } else {
+            break;
+        }
     }
-    let out: String = chars[s..=e].iter().collect();
-    (!out.is_empty()).then_some(out)
+    let out = &line_str[s..e];
+    (!out.is_empty()).then(|| out.to_string())
 }
 
 fn find_symbol_column(line: &str, mask: &[bool], symbol: &str) -> Option<u32> {
@@ -449,10 +485,10 @@ fn find_symbol_column(line: &str, mask: &[bool], symbol: &str) -> Option<u32> {
         let e = s + symbol.len();
         let code_ok = mask.get(s..e).is_some_and(|sl| sl.iter().all(|&b| b));
         if code_ok {
-            return Some(line[..s].chars().count() as u32 + 1);
+            return Some(crate::text_pos::byte_idx_to_utf16_col(line, s) as u32 + 1);
         }
         from = s + line[s..].chars().next().map_or(1, char::len_utf8);
     }
     line.find(symbol)
-        .map(|s| line[..s].chars().count() as u32 + 1)
+        .map(|s| crate::text_pos::byte_idx_to_utf16_col(line, s) as u32 + 1)
 }

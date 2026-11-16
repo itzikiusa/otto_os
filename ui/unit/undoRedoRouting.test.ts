@@ -117,6 +117,7 @@ test('menu.ts routes the undo/redo ids', () => {
     './stores/sidePane.svelte': { sidePane: { handleMenu: () => false, nativeState: null, focused: false } },
     './nativePane': { nativePane: { focus: async () => { calls.push('focus'); } } },
     './desktop': { isEmbedded: false, closePopoutWindow: async () => true },
+    './embedGuest': { postToHost() {} },
     './keys': { dismissTopDialog() {}, modalKeyVerdict: () => 'run' },
     './stores/sessionScope': { sessionVerbsApply: () => true },
   });

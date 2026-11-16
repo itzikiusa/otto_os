@@ -9,7 +9,7 @@ import {
   isRuntimeProvider,
   providerSupportsSteer,
   RUNTIME_PROVIDERS,
-} from '../src/modules/threads/runtime/capabilities.ts';
+} from '../src/lib/providerRegistry.ts';
 
 test('RUNTIME_PROVIDERS enumerates all 7 structured runtime providers from canonical registry', () => {
   assert.deepEqual(RUNTIME_PROVIDERS, [

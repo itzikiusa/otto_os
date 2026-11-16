@@ -11,6 +11,7 @@
 // names are snake_case where T3 Code uses camelCase.
 
 import type { Id } from './core';
+import { sessionProviderSlug as resolveSessionProviderSlug } from '../../providerRegistry';
 
 export type RuntimeProvider = 'claude' | 'codex' | 'gemini' | 'grok' | 'agy' | 'opencode' | 'pi';
 
@@ -191,7 +192,6 @@ export interface MessageAttachment {
   id: string;
   kind: 'image' | 'file';
   mime: string;
-  media_type?: string;
   name?: string;
   /** Optimistic client-side data URL preview before the turn settles. */
   preview_url?: string;
@@ -366,14 +366,13 @@ export interface RuntimeSession {
 export function sessionProviderSlug(
   session: Pick<RuntimeSession, 'provider' | 'meta'> | null | undefined,
 ): string {
-  if (!session) return 'claude';
-  const slug = session.meta?.provider_slug;
-  return typeof slug === 'string' && slug.trim().length > 0 ? slug.trim() : session.provider;
+  return resolveSessionProviderSlug(session);
 }
 
 /** Body of `POST /runtime-sessions/{id}/peers` — open a linked thread. */
 export interface OpenPeerReq {
-  provider: RuntimeProvider;
+  provider: RuntimeProviderOrSlug;
+  provider_slug?: string;
   prompt?: string;
   title?: string;
   /** Omitted = the provider's default model. */
@@ -482,6 +481,7 @@ export interface CouncilFollowUpReq {
 export interface PeerInfo {
   id: Id;
   provider: RuntimeProvider;
+  provider_slug?: string | null;
   title: string;
   status: RuntimeSessionStatus;
   is_self: boolean;

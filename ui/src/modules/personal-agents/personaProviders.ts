@@ -4,13 +4,15 @@
 // the daemon refuses them (`otto_context::materialize::delivers_context`,
 // `personal_agents_engine::persona_provider`). Keep the list in step.
 
-import { harnessLabel } from '../../lib/providers';
+import { harnessLabel, inferProviderFamily } from '../../lib/providers';
 
 export const PERSONA_PROVIDERS: readonly string[] = ['claude', 'codex', 'agy', 'grok', 'opencode'];
 
 /** Empty = the daemon's default, Claude. */
 export function canCarryPersona(provider: string | null | undefined): boolean {
-  return PERSONA_PROVIDERS.includes((provider ?? '').trim() || 'claude');
+  const raw = (provider ?? '').trim();
+  if (!raw) return true;
+  return PERSONA_PROVIDERS.includes(inferProviderFamily(raw));
 }
 
 /** The registered providers a personal agent may pick. */

@@ -3,13 +3,7 @@
   import { setContext, untrack, type Snippet } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import { ApiError } from '../../../lib/api/client';
-  import type {
-    ApprovalDecision,
-    PromptDelivery,
-    RuntimeAccessMode,
-    RuntimeDraftContent,
-    TurnItem,
-  } from '../../../lib/api/types';
+  import type { ApprovalDecision, PromptDelivery, RuntimeAccessMode, RuntimeDraftContent, TurnItem } from '../../../lib/api/types';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
@@ -22,12 +16,7 @@
   import { formatEffortShort, formatModelLabel, supportsEffortSelection } from '../../../lib/providerModels';
   import { harnessLabel, sessionProviderSlug } from '../../../lib/providers';
   import type { RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
-  import {
-    INTERACTIVE_SLASH_COMMANDS,
-    isImmediateSlashCommand,
-    parseInteractiveSlashInput,
-    type ComposerSlashCommand,
-  } from '../../../lib/slashActions';
+  import { INTERACTIVE_SLASH_COMMANDS, isImmediateSlashCommand, parseInteractiveSlashInput, type ComposerSlashCommand } from '../../../lib/slashActions';
   import { auth } from '../../../lib/stores/auth.svelte';
   import { now } from '../../../lib/stores/now.svelte';
   import { acknowledgeComposer, snapshotDraft } from '../../../lib/stores/runtimeDraftPersistence';
@@ -40,32 +29,19 @@
   import { agentTasks } from './agentTasks';
   import { askFromComposer, askTargets } from './askTargets.svelte';
   import { attachmentSupport, takesFile } from './attachmentSupport';
-  import { providerSupportsSteer } from './capabilities';
+  import { providerSupportsSteer } from '../../../lib/providerRegistry';
   import { addComposerContext, assembleComposerMessage } from './composerContext';
   import { availableSlash } from './hostCommands';
   import RuntimeAccessChip from './RuntimeAccessChip.svelte';
   import RuntimeAskAgent from './RuntimeAskAgent.svelte';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
   import {
-    appendDraftAttachments,
-    buildOptimisticUserMessage,
-    buildRuntimeBanners,
-    collectMessageIds,
-    composerPlaceholderText,
-    deriveActivePlan,
-    deriveSessionError,
-    handleSlashMenuKey,
-    mapChildThreadSummaries,
-    mergeQueuedAttachments,
-    mergeQueuedEdit,
-    pasteDraftAttachments,
-    resolveEffectiveDraftModel,
-    resolvePromptModelOverride,
-    restoreOptimisticDraft,
-    runViewSlash,
-    withOptimisticItem,
-    type OptimisticMessageState,
+    appendDraftAttachments, buildOptimisticUserMessage, buildRuntimeBanners, collectMessageIds,
+    composerPlaceholderText, deriveActivePlan, deriveSessionError, handleSlashMenuKey, mapChildThreadSummaries,
+    pasteDraftAttachments, resolveEffectiveDraftModel, resolvePromptModelOverride, restoreOptimisticDraft,
+    runViewSlash, withOptimisticItem, type OptimisticMessageState,
   } from './runtimeComposer';
+  import { buildFailedTurnResendDraft, restoreFailedTurnToDraft, restorePoppedQueuedMessageToDraft } from './runtimeRetryRestore';
   import RuntimeComposerImages from './RuntimeComposerImages.svelte';
   import RuntimeContextChips from './RuntimeContextChips.svelte';
   import RuntimeDraftStatus from './RuntimeDraftStatus.svelte';
@@ -100,6 +76,7 @@
     fallbackCwd?: string | null;
     hasExternalContext?: boolean;
     transformOutgoingText?: (text: string) => string;
+    transformRestoredQueuedText?: (text: string) => string;
     onExternalContextConsumed?: () => void;
     onopenpath?: (path: string, line?: number) => void;
     formatAssistantText?: (item: Extract<TurnItem, { type: 'assistant_message' }>) => string;
@@ -110,24 +87,10 @@
   }
 
   let {
-    sessionId,
-    focused,
-    onswitch,
-    agentChat,
-    hostCommands,
-    compact = false,
-    accessModeOverride = null,
-    onaccessmodechange,
-    fallbackCwd = null,
-    hasExternalContext = false,
-    transformOutgoingText,
-    onExternalContextConsumed,
-    onopenpath,
-    formatAssistantText,
-    assistantFooter,
-    composerTopSlot,
-    composerFootLeadSlot,
-    testIds,
+    sessionId, focused, onswitch, agentChat, hostCommands, compact = false, accessModeOverride = null,
+    onaccessmodechange, fallbackCwd = null, hasExternalContext = false, transformOutgoingText,
+    transformRestoredQueuedText, onExternalContextConsumed, onopenpath, formatAssistantText,
+    assistantFooter, composerTopSlot, composerFootLeadSlot, testIds,
   }: Props = $props();
 
   const ownerId = untrack(() => sessionId);
@@ -444,7 +407,21 @@
               {assistantFooter}
             />
           {/if}
-          <RuntimeTurnStatus projection={p} {workingFor} {ownTurn} background={closed ? [] : background} {outcome} disabled={closed} onresend={(t) => void send(t, undefined, { ...snapshotDraft(draft), text: t, images: [], context: [], fresh_context: false })} />
+          <RuntimeTurnStatus
+            projection={p}
+            {workingFor}
+            {ownTurn}
+            background={closed ? [] : background}
+            {outcome}
+            disabled={closed}
+            onedit={(t, atts) => void restoreFailedTurnToDraft({ sessionId, draft, text: t, attachments: atts, transformText: transformRestoredQueuedText, focusComposer })}
+            onresend={async (t, atts) => {
+              try {
+                const r = await buildFailedTurnResendDraft({ sessionId, draft, text: t, attachments: atts, transformText: transformRestoredQueuedText });
+                await send(r.text, undefined, r.sent);
+              } catch (e) { toastError('Couldn’t resend message', e); }
+            }}
+          />
         </LoadState>
       </div>
     </div>
@@ -474,12 +451,7 @@
             {dormant}
             reopening={draft.reopening}
             onreopen={() => void reopen()}
-            onedit={(t, restoredAtts, editedSessionId) => {
-              const targetDraft = runtimeDrafts.for(editedSessionId);
-              targetDraft.text = mergeQueuedEdit(targetDraft.text, t);
-              if (restoredAtts.length > 0) targetDraft.images = mergeQueuedAttachments(targetDraft.images, restoredAtts);
-              if (editedSessionId === sessionId) focusComposer();
-            }}
+            onedit={(t, restoredAtts, editedSessionId) => restorePoppedQueuedMessageToDraft({ activeSessionId: sessionId, editedSessionId, text: t, restoredAtts, transformText: transformRestoredQueuedText, focusComposer })}
           />
         {:else if key === 'fresh'}
           <div class="rt-fresh" data-testid="runtime-fresh-notice" use:announceShown={'Next message starts fresh'}>
@@ -576,7 +548,10 @@
               data-testid={testIds?.model ?? 'runtime-model'}
               disabled={closed || !session}
               onpointerenter={() => ModelPicker.prefetch()}
-              onclick={() => (pickerOpen = true)}
+              onclick={() => {
+                if (ModelPicker.error) ModelPicker.retry();
+                pickerOpen = true;
+              }}
             >
               {#if session && hasProviderIcon(provider)}<ProviderIcon {provider} size={13} />{/if}
               <span class="ellipsis">{agentLabel}</span>

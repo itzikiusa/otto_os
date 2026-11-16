@@ -102,7 +102,8 @@ struct Pending {
     suggestions: Vec<Value>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct ClaudeDriverState {
     fresh_session_id: String,
     session_id: Option<String>,
@@ -995,6 +996,28 @@ impl StructuredDriver for ClaudeDriver {
         }
     }
 
+    fn adopt_spec(&mut self, spec: &mut LaunchSpec) {
+        // Custom provider specs often bake `--dangerously-skip-permissions` into
+        // `cmd`/`args` for PTY sessions; in `stream-json` SDK mode Claude uses
+        // `--permission-mode` + `--allow-dangerously-skip-permissions` instead.
+        if spec
+            .args
+            .iter()
+            .any(|a| a == "--dangerously-skip-permissions")
+        {
+            spec.args.retain(|a| a != "--dangerously-skip-permissions");
+            self.bypass_allowed = true;
+            if !spec
+                .args
+                .iter()
+                .any(|a| a == "--allow-dangerously-skip-permissions")
+            {
+                spec.args
+                    .push("--allow-dangerously-skip-permissions".into());
+            }
+        }
+    }
+
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
         self.model = ctx.model.clone();
         self.access = ctx.access_mode;
@@ -1047,6 +1070,10 @@ impl StructuredDriver for ClaudeDriver {
     }
 
     fn switches_model_live(&self) -> bool {
+        true
+    }
+
+    fn steers_model_live(&self) -> bool {
         true
     }
 

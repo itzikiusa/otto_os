@@ -199,34 +199,36 @@
     if (snap === hydratedSnapshot) return;
     hydratedSnapshot = snap;
     const e = ide.projectEnv;
-    inheritShellEnv = e.inherit_shell_env !== false;
-    javaHome = e.java_home ?? '';
-    goRoot = e.go_root ?? '';
-    goBuildTagsText = (e.go_build_tags ?? []).join(', ');
-    rustToolchain = e.rust_toolchain ?? '';
-    nodeHome = e.node_home ?? '';
-    pythonInterpreter = e.python_interpreter ?? '';
-    dotenvPath = e.dotenv_path ?? '';
-    extraPath = e.extra_path ?? '';
-    bridgeDraft = emptyNetworkBridgeDraft(e.network_bridge);
-    envRows = (e.env_vars ?? []).map((v, idx) => ({
-      rowId: `ev-${idx}-${v.key}`,
-      key: v.key,
-      value: v.secret ? '' : (v.value ?? ''),
-      secret: Boolean(v.secret),
-      has_secret: Boolean(v.has_secret),
-      replaceSecret: false,
-    }));
-    const selected = ide.runConfigs.find((c) => c.id === ide.selectedConfigId) ?? ide.runConfigs[0] ?? null;
-    if (selected) {
-      isNewDraft = Boolean(selected.auto_detected);
-      cfgDraft = configToDraft(selected);
-    } else {
-      isNewDraft = true;
-      cfgDraft = emptyConfigDraft();
-    }
-    baselineEnvSnap = computeEnvSnap();
-    baselineCfgSnap = computeCfgSnap(cfgDraft, isNewDraft);
+    untrack(() => {
+      inheritShellEnv = e.inherit_shell_env !== false;
+      javaHome = e.java_home ?? '';
+      goRoot = e.go_root ?? '';
+      goBuildTagsText = (e.go_build_tags ?? []).join(', ');
+      rustToolchain = e.rust_toolchain ?? '';
+      nodeHome = e.node_home ?? '';
+      pythonInterpreter = e.python_interpreter ?? '';
+      dotenvPath = e.dotenv_path ?? '';
+      extraPath = e.extra_path ?? '';
+      bridgeDraft = emptyNetworkBridgeDraft(e.network_bridge);
+      envRows = (e.env_vars ?? []).map((v, idx) => ({
+        rowId: `ev-${idx}-${v.key}`,
+        key: v.key,
+        value: v.secret ? '' : (v.value ?? ''),
+        secret: Boolean(v.secret),
+        has_secret: Boolean(v.has_secret),
+        replaceSecret: false,
+      }));
+      const selected = ide.runConfigs.find((c) => c.id === ide.selectedConfigId) ?? ide.runConfigs[0] ?? null;
+      if (selected) {
+        isNewDraft = Boolean(selected.auto_detected);
+        cfgDraft = configToDraft(selected);
+      } else {
+        isNewDraft = true;
+        cfgDraft = emptyConfigDraft();
+      }
+      baselineEnvSnap = computeEnvSnap();
+      baselineCfgSnap = computeCfgSnap(cfgDraft, isNewDraft);
+    });
   });
 
   const modalTabs = $derived<readonly TabItem<EnvTab>[]>([

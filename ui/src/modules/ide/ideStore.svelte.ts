@@ -4,6 +4,7 @@
 export * from './store/ideTypes';
 
 import { api, ApiError } from '../../lib/api/client';
+import { fileUriToPath } from '../../lib/fileUri';
 import { idePreferences } from '../../lib/idePreferences.svelte';
 import { ideWorkspacePort } from '../../lib/ideWorkspacePort.svelte';
 import { type Poller } from '../../lib/poll';
@@ -14,7 +15,7 @@ import {
   attachProjectFolder, canonicalizeLocalProjectPath, createTemplatedFile, detachProjectFolder,
   detectBuildToolFromState, formatRelativeToRoots, loadActiveProjectIdLocal, loadNamedProjectsLocal,
   mutatePathBreakpoints, normalizeRootPath, performCloseAllTabs, pushNavigationHistory,
-  revealPathInTree, saveActiveProjectIdLocal, saveBuildToolPrefsLocal, saveLastIdeRoot,
+  restoreWorkspaceTabsOrInitial, revealPathInTree, saveActiveProjectIdLocal, saveBuildToolPrefsLocal, saveLastIdeRoot,
 } from './shell/ideProjectHelpers';
 import {
   applyFallbackPrefixSuffix, computeFallbackSelection, IdeBufferPerfController, nextTabAccessStamp,
@@ -23,7 +24,7 @@ import {
 import {
   computeIdeProjectRoots, fetchIdeWorkspaceTree, IdeCollabState, IdeDebugState, IdeTargetEnvState,
   normalizePathDiagnostics, performCloseTabBatch, resetTargetLifecycleState, syncAdditionalRootsFromEnvState,
-  type IdeRunLaunchMemo, type IncomingIdeDiagnostic,
+  type IdeDebugLaunchMemo, type IdeRunLaunchMemo, type IncomingIdeDiagnostic,
 } from './store/ideStateSlices.svelte';
 import {
   resolveRepoGoBuildTags,
@@ -223,6 +224,14 @@ class IdeStore {
   private cursorSendTimer: ReturnType<typeof setTimeout> | null = null;
   private collabEditTimer: ReturnType<typeof setTimeout> | null = null;
 
+  constructor() {
+    if (typeof window !== 'undefined') {
+      window.addEventListener('otto:ide-storage-cleared', () => {
+        this.namedProjects = []; this.activeProjectId = null; this.closedTabPaths = []; this.recentPaths = []; this.clearTarget();
+      });
+    }
+  }
+
   syncWorkspacePort(): void {
     ideWorkspacePort.publish({
       root: this.target.kind === 'local' && this.target.root ? this.target.root : null,
@@ -275,8 +284,8 @@ class IdeStore {
     if (!p) return this.target.root;
     if (/^(?:jdt|jar):/i.test(p)) return p;
     let resolved = p;
-    if (p.startsWith('file://')) {
-      try { resolved = decodeURIComponent(p.replace(/^file:\/\/(?:localhost)?/, '')); } catch { resolved = p.slice(7); }
+    if (/^file:/i.test(p)) {
+      resolved = fileUriToPath(p);
     } else if (!p.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(p)) {
       const base = this.target.root.replace(/\/+$/, '');
       resolved = base ? `${base}/${p.replace(/^\/+/, '')}` : p;
@@ -313,9 +322,12 @@ class IdeStore {
     saveActiveProjectIdLocal(matchedProj, this.namedProjects, clean);
     this.resetTargetState({ kind: 'local', workspace_id: workspaceId, root: clean, connection_id: null, connection_name: null }, opts.additionalRoots);
     if (opts.skipAutoOpen) this.hasClosedAllTabs = true;
-    await this.loadTree();
+    await Promise.all([
+      fetchIdeWorkspaceTree(this, undefined, () => void loadProjMod().then((m) => m.probeWorkspaceBuildTool(this)), { deferTabRestore: true }),
+      this.loadEnvironments(),
+    ]);
     if (opts.skipAutoOpen) this.hasClosedAllTabs = false;
-    void this.loadEnvironments();
+    else void restoreWorkspaceTabsOrInitial(this);
   }
 
   async setSshTarget(connectionId: string, root: string, connectionName: string | null = null): Promise<void> {
@@ -523,8 +535,17 @@ class IdeStore {
     return tab ? computeFallbackSelection(this.getBuffer(tab.path), this.cursorInfo) : null;
   }
 
+  private editorHandleForPath(resolvedPath: string): IdeEditorHandle | null {
+    if (this._activePath === resolvedPath) return this.editorHandles.primary;
+    if (this.splitPath === resolvedPath) return this.editorHandles.split;
+    return null;
+  }
+  replaceBufferContent(path: string, nextContent: string, range?: { from: number; to: number }): boolean {
+    return Boolean(this.editorHandleForPath(this.resolvePath(path))?.applyAgentEdit?.(nextContent, range));
+  }
+
   async applyAgentEdit(path: string, nextContent: string, range?: { from: number; to: number }): Promise<boolean> {
-    const ok = await performAgentEdit(this, this.bufPerf, () => this.editorHandles.primary, path, nextContent, range);
+    const ok = await performAgentEdit(this, this.bufPerf, (resolved) => this.editorHandleForPath(resolved), path, nextContent, range);
     if (ok) this.syncWorkspacePort();
     return ok;
   }
@@ -664,7 +685,7 @@ class IdeStore {
       this.applyDebugSnapshot(resp.session);
     } catch { /* exited */ }
   }
-  async startDebug(opts: { configId?: string; language?: string; skipProdConfirm?: boolean; launch?: { program: string; args?: string[]; build_flags?: string[]; cwd?: string; test_name?: string; attach_port?: number; env?: Record<string, string> } } = {}): Promise<void> {
+  async startDebug(opts: { configId?: string; language?: string; skipProdConfirm?: boolean; launch?: IdeDebugLaunchMemo['launch'] } = {}): Promise<void> {
     const gate = await (await loadRepoActionsMod()).confirmIdeTargetProdLaunch(this.target, this.projectEnv, opts.skipProdConfirm);
     if (!gate.allowed) return;
     if (idePreferences.current.autoSave) await this.flushAutoSave();
@@ -673,55 +694,47 @@ class IdeStore {
   applyDebugSnapshot(raw: IdeDebugSessionSnapshot): void {
     const apply = (m: typeof DebugEnvMod): void => {
       const cur = this.activeDebug;
-      if (
-        cur &&
-        cur.id === raw.id &&
-        typeof raw.revision === 'number' &&
-        typeof cur.revision === 'number' &&
-        raw.revision < cur.revision
-      ) {
-        return;
-      }
+      if (cur && cur.id === raw.id && typeof raw.revision === 'number' && typeof cur.revision === 'number' && raw.revision < cur.revision) return;
       const prevPaused = `${cur?.paused_file ?? ''}:${cur?.paused_line ?? 0}`;
       const { snap, paused } = m.normalizeIncomingDebugSnapshot(this, raw);
       this.activeDebug = snap;
+      const sl = snap.launch;
+      if (!this.debugState.lastDebugLaunch && sl?.program) {
+        this.debugState.lastDebugLaunch = { configId: snap.config_id ?? undefined, language: snap.language, launch: { program: sl.program, args: sl.args, build_flags: sl.build_flags, cwd: sl.cwd ?? undefined, test_name: sl.test_name ?? undefined, attach_port: sl.attach_port ?? undefined, env: sl.env, env_file: sl.env_file, inherit_shell_env: sl.inherit_shell_env, sdk_path: sl.sdk_path } };
+      }
       m.syncSnapshotBreakpointsToStore(this, snap);
       if (snap.state === 'paused' && paused && snap.paused_line) {
         if (`${paused}:${snap.paused_line}` !== prevPaused) void this.openFile(paused, { line: snap.paused_line, preview: false });
         void this.refreshWatches();
       }
-      if (snap.state === 'terminated') { this.debugSseCtl?.abort(); this.debugSseCtl = null; this.debugStreamActive = false; }
+      if (snap.state === 'terminated' || snap.state === 'error') {
+        this.debugSseCtl?.abort(); this.debugSseCtl = null; this.debugStreamActive = false;
+      } else if (!this.debugSseCtl && !this.collabIsGuest) {
+        this.debugSseCtl = m.attachDebugSessionStream(this, snap.id, null, (s) => this.applyDebugSnapshot(s));
+      }
     };
     if (debugEnvSyncMod) apply(debugEnvSyncMod);
     else void loadDebugEnvMod().then(apply);
   }
 
-  async debugCommand(
-    action: 'continue' | 'pause' | 'step_over' | 'step_into' | 'step_out' | 'run_to_cursor' | 'select_frame' | 'restart' | 'stop',
-    extra: { thread_id?: number; frame_id?: number; path?: string; line?: number } = {},
-  ): Promise<void> {
+  async debugCommand(action: 'continue' | 'pause' | 'step_over' | 'step_into' | 'step_out' | 'run_to_cursor' | 'select_frame' | 'restart' | 'stop', extra: { thread_id?: number; frame_id?: number; path?: string; line?: number } = {}): Promise<void> {
     await (await loadDebugEnvMod()).sendDebugAction(this, action, extra, (s) => this.applyDebugSnapshot(s));
   }
-
   stepOver = () => this.debugCommand('step_over');
   stepInto = () => this.debugCommand('step_into');
   stepOut = () => this.debugCommand('step_out');
   resumeDebug = () => this.debugCommand('continue');
   pauseDebug = () => this.debugCommand('pause');
   restartDebug = async (): Promise<void> => {
-    if (this.activeDebug && this.activeDebug.state !== 'terminated' && this.activeDebug.state !== 'error') {
-      await this.stopDebug();
-    }
+    if (this.collabIsGuest) { await this.debugCommand('restart'); return; }
+    if (this.activeDebug && this.activeDebug.state !== 'terminated' && this.activeDebug.state !== 'error') await this.stopDebug();
     await this.startDebug(this.debugState.lastDebugLaunch ?? {});
   };
   stopDebug = () => this.debugCommand('stop');
   runToCursor = (path?: string, line?: number) => this.debugCommand('run_to_cursor', { path: path ?? this._activePath ?? undefined, line: line ?? this.cursorInfo.line });
   selectFrame = (frameId: number, threadId?: number) => this.debugCommand('select_frame', { frame_id: frameId, thread_id: threadId });
-
   expandVariables(variablesRef: number): Promise<IdeVariable[]> { return loadLspMod().then((m) => m.runExpandVariables(this, variablesRef)); }
-  evaluateDebug(expression: string, context: 'watch' | 'repl' | 'hover' = 'repl', frameId?: number): Promise<string> {
-    return loadLspMod().then((m) => m.runEvaluateDebug(this, expression, context, frameId));
-  }
+  evaluateDebug(expression: string, context: 'watch' | 'repl' | 'hover' = 'repl', frameId?: number): Promise<string> { return loadLspMod().then((m) => m.runEvaluateDebug(this, expression, context, frameId)); }
   addWatch(expression: string): void {
     const expr = expression.trim();
     if (!expr) return;
@@ -730,7 +743,6 @@ class IdeStore {
   }
   removeWatch(id: string): void { this.watches = this.watches.filter((w) => w.id !== id); }
   async refreshWatches(): Promise<void> { await (await loadDebugEnvMod()).refreshWatchValues(this); }
-
   async loadCollabRooms(): Promise<void> {
     if (!this.collabIsGuest) try { this.collabRooms = (await api.get<{ rooms: IdeCollabRoom[] }>('/ide/collab/rooms')).rooms ?? []; } catch { /* ignore */ }
   }
@@ -741,16 +753,9 @@ class IdeStore {
   setCollabPeerRole(peerId: string, role: IdeCollabRole): Promise<boolean> { return loadLspMod().then((m) => m.runSetCollabPeerRole(this, peerId, role)); }
   async stopCollabRoom(): Promise<boolean> {
     if (!this.collabRoom) return false;
-    const id = this.collabRoom.id;
     if (!this.collabIsGuest) {
-      try {
-        await api.del(`/ide/collab/rooms/${encodeURIComponent(id)}`);
-      } catch (e) {
-        if (!(e instanceof ApiError && e.status === 404)) {
-          toastError('Couldn’t close shared session', e);
-          return false;
-        }
-      }
+      try { await api.del(`/ide/collab/rooms/${encodeURIComponent(this.collabRoom.id)}`); }
+      catch (e) { if (!(e instanceof ApiError && e.status === 404)) { toastError('Couldn’t close shared session', e); return false; } }
     }
     this.leaveCollabRoom();
     return true;

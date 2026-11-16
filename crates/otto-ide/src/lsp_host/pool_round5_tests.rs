@@ -616,3 +616,129 @@ async fn go_build_tags_overwrite_init_options_rewrite_excluded_diagnostic_and_ev
         json!(["-mod=mod", "-tags=component"])
     );
 }
+
+#[tokio::test]
+async fn non_root_mux_handles_multibyte_utf8_and_blocks_rfc8089_secret_uris_and_emoji_target_validate(
+) {
+    // 1. Multi-byte UTF-8 < 6 chars / >= 6 bytes (`"🦀🦀"`) in `IdeTargetSpec::validate` must never panic.
+    let emoji_spec = crate::types::IdeTargetSpec {
+        kind: crate::types::IdeTargetKind::Local,
+        root: "🦀🦀".into(),
+        ..Default::default()
+    };
+    assert!(emoji_spec.validate().is_err());
+
+    // 2. Non-root pooled LSP mux handles Hebrew + emoji UTF-8 buffers cleanly while blocking
+    //    RFC 8089 single-slash `file:/...` escapes and `~/.ssh` URIs.
+    let tmp = tempfile::tempdir().unwrap();
+    let ws_root = tmp.path().join("workspace-utf8");
+    std::fs::create_dir_all(ws_root.join("src")).unwrap();
+    let allowed_file = ws_root.join("src/hebrew_emoji.ts");
+    let utf8_src = "// שלום 🦀\nexport const v = 42;\n";
+    std::fs::write(&allowed_file, utf8_src).unwrap();
+
+    let (pool, _rec) = recording_pool();
+    pool.record_owner_privilege("u_viewer", false);
+
+    let canon_ws = std::fs::canonicalize(&ws_root).unwrap();
+    let key = PoolKey {
+        owner: "u_viewer".into(),
+        lang: "typescript".into(),
+        root: canon_ws.to_string_lossy().into_owned(),
+        ssh: None,
+        go_build_tags: Vec::new(),
+    };
+    let mut client = pool.attach(key, "tsls", &[]).unwrap();
+
+    assert!(
+        client
+            .send(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": { "rootUri": otto_core::paths::path_to_file_uri(&canon_ws) }
+                })
+                .to_string()
+            )
+            .await
+    );
+    let _ = recv_msg(&mut client).await;
+    assert!(
+        client
+            .send(json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}).to_string())
+            .await
+    );
+
+    // RFC 8089 single-slash `file:/etc/passwd` and `~/.ssh/id_rsa` URIs must be rejected (`-32600`).
+    for (req_id, bad_uri) in [
+        (2, "file:/etc/passwd".to_string()),
+        (
+            3,
+            dirs::home_dir()
+                .map(|h| format!("file:{}", h.join(".ssh/id_rsa").display()))
+                .unwrap_or_else(|| "file:/root/.ssh/id_rsa".to_string()),
+        ),
+    ] {
+        assert!(
+            client
+                .send(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "method": "textDocument/hover",
+                        "params": {
+                            "textDocument": { "uri": bad_uri },
+                            "position": { "line": 0, "character": 0 }
+                        }
+                    })
+                    .to_string()
+                )
+                .await
+        );
+        let err_msg = recv_msg(&mut client).await;
+        assert_eq!(err_msg["id"], json!(req_id));
+        assert_eq!(err_msg["error"]["code"], json!(-32600));
+    }
+
+    // Multi-byte UTF-8 in-workspace `didOpen` + `hover` succeeds cleanly.
+    let allowed_uri = otto_core::paths::path_to_file_uri(&allowed_file);
+    assert!(
+        client
+            .send(
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": allowed_uri,
+                            "languageId": "typescript",
+                            "version": 1,
+                            "text": utf8_src
+                        }
+                    }
+                })
+                .to_string()
+            )
+            .await
+    );
+    assert!(
+        client
+            .send(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "textDocument/hover",
+                    "params": {
+                        "textDocument": { "uri": allowed_uri },
+                        "position": { "line": 1, "character": 13 }
+                    }
+                })
+                .to_string()
+            )
+            .await
+    );
+    let ok_msg = recv_msg(&mut client).await;
+    assert_eq!(ok_msg["id"], json!(4));
+    assert_eq!(ok_msg["result"]["contents"], json!("confined-hover-ok"));
+}

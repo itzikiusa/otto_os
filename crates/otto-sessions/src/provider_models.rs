@@ -42,6 +42,9 @@ pub struct ModelProbe {
     pub grok_program: Option<String>,
     pub opencode_program: Option<String>,
     pub pi_program: Option<String>,
+    /// Extra `CLAUDE_CONFIG_DIR` roots configured/inferred for enabled
+    /// Claude-family custom providers (e.g. `~/.claude-work`).
+    pub claude_config_dirs: Vec<PathBuf>,
 }
 
 impl ModelProbe {
@@ -64,7 +67,13 @@ impl ModelProbe {
             opencode_program: program_of("opencode"),
             pi_program: program_of("pi"),
             families,
+            claude_config_dirs: Vec::new(),
         }
+    }
+
+    pub fn with_claude_config_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.claude_config_dirs = dirs;
+        self
     }
 }
 
@@ -234,7 +243,7 @@ async fn fast_models(probe: &ModelProbe) -> HashMap<String, Vec<ProviderModelOpt
             continue;
         }
         let models = match family.as_str() {
-            "claude" => discover_claude_models(&home).await,
+            "claude" => discover_claude_models(&home, &probe.claude_config_dirs).await,
             "codex" => discover_codex_models(&codex_home).await,
             "agy" => fallback_agy_models(),
             "gemini" => fallback_gemini_models(),
@@ -282,9 +291,10 @@ async fn discover_models_with_status(
         let grok_program = probe.grok_program.clone();
         let opencode_program = probe.opencode_program.clone();
         let pi_program = probe.pi_program.clone();
+        let claude_dirs = probe.claude_config_dirs.clone();
         tasks.push(tokio::spawn(async move {
             let (models, incomplete) = match family.as_str() {
-                "claude" => (discover_claude_models(&home).await, false),
+                "claude" => (discover_claude_models(&home, &claude_dirs).await, false),
                 "codex" => (discover_codex_models(&codex_home).await, false),
                 "agy" => {
                     let prog = resolve_cli_program(agy_program).await;
@@ -358,24 +368,66 @@ async fn resolve_cli_program(program: Option<String>) -> Option<String> {
     .flatten()
 }
 
-fn cli_models_command(prog: &str, args: &[&str]) -> Command {
-    if crate::tool_probe::executable_in_path_or_fs(prog) {
-        let mut cmd = Command::new(prog);
-        cmd.args(args);
-        cmd
-    } else {
-        let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-        let (shell, wrapped) = crate::providers::shell_wrapped(prog, owned);
-        let mut cmd = Command::new(shell);
-        cmd.args(wrapped);
-        cmd
+pub(super) fn cli_models_command(prog: &str, args: &[&str]) -> Command {
+    let tokens = otto_transcript::claude_config::split_command_tokens(prog);
+    let mut env_pairs = Vec::new();
+    let mut bin: Option<String> = None;
+    let mut extra_args: Vec<String> = Vec::new();
+    for tok in tokens {
+        if bin.is_none() {
+            if tok == "env" {
+                continue;
+            }
+            if let Some((k, v)) = otto_transcript::claude_config::parse_env_assignment(&tok) {
+                env_pairs.push((k.to_string(), crate::tool_probe::expand_tilde(v)));
+                continue;
+            }
+            bin = Some(crate::tool_probe::expand_tilde(&tok));
+        } else {
+            extra_args.push(tok);
+        }
     }
+    let bin = bin.unwrap_or_else(|| crate::tool_probe::expand_tilde(prog));
+    extra_args.extend(args.iter().map(|s| (*s).to_string()));
+    let mut cmd = if crate::tool_probe::executable_in_path_or_fs(&bin) {
+        let mut c = Command::new(&bin);
+        c.args(&extra_args);
+        c
+    } else {
+        let (shell, wrapped) = crate::providers::shell_wrapped(&bin, extra_args);
+        let mut c = Command::new(shell);
+        c.args(wrapped);
+        c
+    };
+    cmd.envs(env_pairs);
+    cmd
 }
 
-async fn discover_claude_models(home: &Path) -> Vec<ProviderModelOption> {
-    let dir = home.join(".claude/cache/model-catalog");
-    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
-        let mut candidates: Vec<(u64, String)> = Vec::new();
+async fn discover_claude_models(home: &Path, extra_dirs: &[PathBuf]) -> Vec<ProviderModelOption> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(env_dir) = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+    {
+        roots.push(env_dir);
+    }
+    for d in extra_dirs {
+        if !d.as_os_str().is_empty() && !roots.contains(d) {
+            roots.push(d.clone());
+        }
+    }
+    if !home.as_os_str().is_empty() {
+        let def = home.join(".claude");
+        if !roots.contains(&def) {
+            roots.push(def);
+        }
+    }
+    let mut candidates: Vec<(u64, String)> = Vec::new();
+    for root in roots {
+        let dir = root.join("cache/model-catalog");
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+            continue;
+        };
         while let Ok(Some(e)) = entries.next_entry().await {
             let p = e.path();
             let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
@@ -383,7 +435,7 @@ async fn discover_claude_models(home: &Path) -> Vec<ProviderModelOption> {
             };
             if !name.ends_with("-cc.json") && !name.ends_with("-ccd.json") {
                 continue;
-            }
+            };
             let Ok(raw) = tokio::fs::read_to_string(&p).await else {
                 continue;
             };
@@ -395,12 +447,12 @@ async fn discover_claude_models(home: &Path) -> Vec<ProviderModelOption> {
             let bonus = u64::from(name.ends_with("-cc.json"));
             candidates.push((fetched.saturating_mul(2).saturating_add(bonus), raw));
         }
-        candidates.sort_by_key(|a| std::cmp::Reverse(a.0));
-        for (_, raw) in candidates {
-            let parsed = parse_claude_catalog_json(&raw);
-            if !parsed.is_empty() {
-                return parsed;
-            }
+    }
+    candidates.sort_by_key(|a| std::cmp::Reverse(a.0));
+    for (_, raw) in candidates {
+        let parsed = parse_claude_catalog_json(&raw);
+        if !parsed.is_empty() {
+            return parsed;
         }
     }
     fallback_claude_models()

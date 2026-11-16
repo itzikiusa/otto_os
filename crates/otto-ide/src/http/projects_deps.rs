@@ -41,7 +41,8 @@ pub(super) async fn upsert_project<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeUpsertProjectReq>,
 ) -> ApiResult<Json<IdeUpsertProjectResp>> {
-    if !user.is_root {
+    let has_root_auth = otto_core::auth::root_authority(&user);
+    if !has_root_auth {
         let effective_primary = if !req.primary_root.trim().is_empty() {
             req.primary_root.clone()
         } else {
@@ -111,13 +112,13 @@ pub(super) async fn scan_repos<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeScanReposReq>,
 ) -> ApiResult<Json<IdeScanReposResp>> {
-    if !user.is_root {
+    let has_root_auth = otto_core::auth::root_authority(&user);
+    if !has_root_auth {
         ctx.authorize_local_target(&user, &IdeTargetSpec::local(req.parent_path.clone()), false)
             .await?;
     }
-    let is_root = user.is_root;
     let resp = tokio::task::spawn_blocking(move || {
-        crate::projects::scan_parent_repos(&req.parent_path, is_root)
+        crate::projects::scan_parent_repos(&req.parent_path, has_root_auth)
     })
     .await
     .map_err(|e| Error::Internal(format!("scan repos worker failed: {e}")))??;
@@ -129,12 +130,13 @@ pub(super) async fn add_project_folders_bulk<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeBulkFoldersReq>,
 ) -> ApiResult<Json<IdeBulkFoldersResp>> {
+    let has_root_auth = otto_core::auth::root_authority(&user);
     let _ = ctx
         .ide()
         .targets
         .resolve_write(&ctx, &user, &req.target)
         .await?;
-    if req.target.kind == IdeTargetKind::Local && !user.is_root {
+    if req.target.kind == IdeTargetKind::Local && !has_root_auth {
         for fp in &req.folder_paths {
             if !fp.trim().is_empty() {
                 ctx.authorize_local_target(&user, &IdeTargetSpec::local(fp.clone()), true)
@@ -227,7 +229,7 @@ async fn resolve_manifest_target<S: IdeCtx>(
             canon_root.display()
         )));
     }
-    if !user.is_root {
+    if !otto_core::auth::root_authority(user) {
         enforce_non_root_path(&canon_manifest)?;
     }
     Ok((target, canon_root, canon_manifest, allowed_roots))
@@ -238,30 +240,20 @@ pub(super) async fn deps_inspect<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeDepsInspectReq>,
 ) -> ApiResult<Json<IdeDepsInspectResp>> {
+    let has_root_auth = otto_core::auth::root_authority(&user);
     let (target, _, manifest_path, allowed_roots) =
         resolve_manifest_target(&ctx, &user, req.target, &req.path, false).await?;
-    let env_map = match ctx
+    ctx.ide().environments.ensure_hydrated(&ctx.pool()).await;
+    let env_map = ctx
         .ide()
         .environments
-        .build_effective_env_for_run_as(&ctx.pool(), ctx.secrets(), &target, None, user.is_root)
-        .await
-    {
-        Ok(env) => env,
-        Err(err) => {
-            tracing::warn!(
-                target = %target.project_key(),
-                error = %err,
-                "failed to resolve effective environment for dependency inspection; continuing with empty overrides"
-            );
-            Default::default()
-        }
-    };
+        .cached_probe_env_for_local_root_as(&target.root, has_root_auth);
     let resp = crate::deps_inspector::inspect_dependencies_scoped(
         &manifest_path,
         req.content.as_deref(),
         &env_map,
         &allowed_roots,
-        user.is_root,
+        has_root_auth,
     )
     .await;
     Ok(Json(resp))
@@ -273,12 +265,13 @@ pub(super) async fn deps_action<S: IdeCtx>(
     Json(req): Json<IdeDepsActionReq>,
 ) -> ApiResult<Json<IdeDepsActionResp>> {
     super::require_root_user(&user)?;
+    let has_root_auth = otto_core::auth::root_authority(&user);
     let (target, canon_root, manifest_path, allowed_roots) =
         resolve_manifest_target(&ctx, &user, req.target.clone(), &req.path, true).await?;
     let env_map = ctx
         .ide()
         .environments
-        .build_effective_env_for_run_as(&ctx.pool(), ctx.secrets(), &target, None, user.is_root)
+        .build_effective_env_for_run_as(&ctx.pool(), ctx.secrets(), &target, None, has_root_auth)
         .await
         .map_err(|err| {
             tracing::warn!(
@@ -295,7 +288,7 @@ pub(super) async fn deps_action<S: IdeCtx>(
         &req,
         &env_map,
         &ctx.ide().history,
-        user.is_root,
+        has_root_auth,
     )
     .await?;
     if resp.ok {
@@ -341,7 +334,8 @@ pub(super) async fn build_tools_model<S: IdeCtx>(
             authorized_any = true;
         }
     }
-    if !user.is_root {
+    let has_root_auth = otto_core::auth::root_authority(&user);
+    if !has_root_auth {
         for r in &req.roots {
             if !r.trim().is_empty() {
                 ctx.authorize_local_target(&user, &IdeTargetSpec::local(r.clone()), false)
@@ -356,10 +350,10 @@ pub(super) async fn build_tools_model<S: IdeCtx>(
             .into());
         }
     }
-    let is_root = user.is_root;
-    let resp =
-        tokio::task::spawn_blocking(move || crate::build_tools::build_tools_model(&req, is_root))
-            .await
-            .map_err(|e| Error::Internal(format!("build tools model worker failed: {e}")))?;
+    let resp = tokio::task::spawn_blocking(move || {
+        crate::build_tools::build_tools_model(&req, has_root_auth)
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("build tools model worker failed: {e}")))?;
     Ok(Json(resp))
 }

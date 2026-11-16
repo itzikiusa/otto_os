@@ -5,11 +5,16 @@
 // Otto a picked chip sends the message to a NEW thread on that agent, linked
 // to this one (POST /runtime-sessions/{id}/children). Pure
 // (unit/threadsChildren.test.ts).
-import type { AskChildTarget, MetaResp, RuntimeProvider, RuntimeProviderOrSlug } from '../../../lib/api/types.ts';
-import { isRuntimeProvider, orderThreadHarnesses } from '../../../lib/providerRegistry.ts';
+import type { AskChildTarget, RuntimeProvider, RuntimeProviderOrSlug } from '../../../lib/api/types.ts';
+import {
+  isRuntimeProvider,
+  orderThreadHarnesses,
+  RUNTIME_PROVIDERS,
+  type ProviderFamilyMeta,
+} from '../../../lib/providerRegistry.ts';
 
 /** The built-in runtime providers a child thread can run on. */
-export const ASK_PROVIDERS: readonly RuntimeProvider[] = ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi'];
+export const ASK_PROVIDERS: readonly RuntimeProvider[] = RUNTIME_PROVIDERS;
 /** Agents one ask reaches (the daemon's ASK_CHILD_MAX_TARGETS). */
 export const ASK_MAX_TARGETS = 4;
 
@@ -17,7 +22,7 @@ export const ASK_MAX_TARGETS = 4;
  *  (including custom providers like `claudework` mapped to a runtime driver). */
 export function askableProviders(
   registered: readonly string[],
-  meta?: Pick<MetaResp, 'provider_models' | 'providers'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): RuntimeProviderOrSlug[] {
   const clean = registered.map((p) => p.trim()).filter((p) => p && p !== 'shell');
   if (clean.length === 0) return [...ASK_PROVIDERS];

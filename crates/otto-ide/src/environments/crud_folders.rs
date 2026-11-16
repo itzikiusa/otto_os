@@ -56,19 +56,27 @@ impl EnvironmentManager {
         write: bool,
     ) {
         target.absorb_project_folders(&[]);
-        if target.kind != IdeTargetKind::Local || user.is_root {
+        if target.kind != IdeTargetKind::Local || otto_core::auth::root_authority(user) {
             self.enrich_target_roots(&ctx.pool(), Some(&ctx.ide().projects), Some(user), target)
                 .await;
             return;
         }
         let pool = ctx.pool();
         let project_key = target.project_key();
-        let mut candidates = Vec::new();
+        let root_key = crate::types::root_equiv_key(target.kind, &target.root);
+        let mut candidates: Vec<String> = Vec::new();
         if let Ok((proj, stored)) = load_stored_project_env(&pool, &project_key).await {
             self.record_snapshot(&project_key, &proj, &stored);
             for r in proj.additional_roots {
-                if !r.is_empty() && r != target.root && !candidates.contains(&r) {
-                    candidates.push(r);
+                let clean = crate::types::trim_root_slash(&r);
+                let ck = crate::types::root_equiv_key(target.kind, &clean);
+                if !clean.is_empty()
+                    && ck != root_key
+                    && !candidates
+                        .iter()
+                        .any(|c| crate::types::root_equiv_key(target.kind, c) == ck)
+                {
+                    candidates.push(clean);
                 }
             }
         }
@@ -78,12 +86,24 @@ impl EnvironmentManager {
             .projects
             .folders_for_root_for_user(&target.root, user)
         {
-            if !r.is_empty() && r != target.root && !candidates.contains(&r) {
-                candidates.push(r);
+            let clean = crate::types::trim_root_slash(&r);
+            let ck = crate::types::root_equiv_key(target.kind, &clean);
+            if !clean.is_empty()
+                && ck != root_key
+                && !candidates
+                    .iter()
+                    .any(|c| crate::types::root_equiv_key(target.kind, c) == ck)
+            {
+                candidates.push(clean);
             }
         }
         for cand in candidates {
-            if target.additional_roots.contains(&cand) {
+            let ck = crate::types::root_equiv_key(target.kind, &cand);
+            if target
+                .additional_roots
+                .iter()
+                .any(|e| crate::types::root_equiv_key(target.kind, e) == ck)
+            {
                 continue;
             }
             if ctx
@@ -104,12 +124,21 @@ impl EnvironmentManager {
         target: &mut IdeTargetSpec,
     ) {
         target.absorb_project_folders(&[]);
+        let root_key = crate::types::root_equiv_key(target.kind, &target.root);
         let project_key = target.project_key();
         if let Ok((proj, stored)) = load_stored_project_env(pool, &project_key).await {
             self.record_snapshot(&project_key, &proj, &stored);
             for r in proj.additional_roots {
-                if !r.is_empty() && r != target.root && !target.additional_roots.contains(&r) {
-                    target.additional_roots.push(r);
+                let clean = crate::types::trim_root_slash(&r);
+                let ck = crate::types::root_equiv_key(target.kind, &clean);
+                if !clean.is_empty()
+                    && ck != root_key
+                    && !target
+                        .additional_roots
+                        .iter()
+                        .any(|e| crate::types::root_equiv_key(target.kind, e) == ck)
+                {
+                    target.additional_roots.push(clean);
                 }
             }
         }
@@ -121,8 +150,16 @@ impl EnvironmentManager {
                     None => store.folders_for_root(&target.root),
                 };
                 for r in extra {
-                    if !r.is_empty() && r != target.root && !target.additional_roots.contains(&r) {
-                        target.additional_roots.push(r);
+                    let clean = crate::types::trim_root_slash(&r);
+                    let ck = crate::types::root_equiv_key(target.kind, &clean);
+                    if !clean.is_empty()
+                        && ck != root_key
+                        && !target
+                            .additional_roots
+                            .iter()
+                            .any(|e| crate::types::root_equiv_key(target.kind, e) == ck)
+                    {
+                        target.additional_roots.push(clean);
                     }
                 }
             }
@@ -137,9 +174,16 @@ impl EnvironmentManager {
     ) -> Result<IdeProjectEnvironment> {
         target.validate()?;
         let normalized = validate_attached_folder_path(target, folder_path)?;
+        let root_key = crate::types::root_equiv_key(target.kind, &target.root);
+        let norm_key = crate::types::root_equiv_key(target.kind, &normalized);
         let project_key = target.project_key();
         let (mut proj, _) = load_stored_project_env(pool, &project_key).await?;
-        if normalized != target.root && !proj.additional_roots.contains(&normalized) {
+        if norm_key != root_key
+            && !proj
+                .additional_roots
+                .iter()
+                .any(|e| crate::types::root_equiv_key(target.kind, e) == norm_key)
+        {
             proj.additional_roots.push(normalized);
         }
         persist_project_roots(pool, target, &proj.additional_roots).await?;
@@ -154,6 +198,7 @@ impl EnvironmentManager {
         folders: &[String],
     ) -> Result<(IdeProjectEnvironment, usize)> {
         target.validate()?;
+        let root_key = crate::types::root_equiv_key(target.kind, &target.root);
         let project_key = target.project_key();
         let (mut proj, _) = load_stored_project_env(pool, &project_key).await?;
         let mut added = 0usize;
@@ -162,7 +207,13 @@ impl EnvironmentManager {
                 continue;
             }
             let normalized = validate_attached_folder_path(target, raw)?;
-            if normalized != target.root && !proj.additional_roots.contains(&normalized) {
+            let norm_key = crate::types::root_equiv_key(target.kind, &normalized);
+            if norm_key != root_key
+                && !proj
+                    .additional_roots
+                    .iter()
+                    .any(|e| crate::types::root_equiv_key(target.kind, e) == norm_key)
+            {
                 proj.additional_roots.push(normalized);
                 added += 1;
             }

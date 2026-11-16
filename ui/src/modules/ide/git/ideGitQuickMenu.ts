@@ -80,7 +80,7 @@ export async function gitPullRepo(absPath: string): Promise<void> {
 export async function gitPushRepo(absPath: string): Promise<void> {
   const repo = await requireRepo(absPath);
   if (!repo) return;
-  const st = ideGit.activeStatus;
+  const st = git.statusById[repo.id] ?? (ideGit.activeRepo?.id === repo.id ? ideGit.activeStatus : null);
   const branch = st?.branch || 'current branch';
   const remoteTarget = st?.upstream || repo.remote_url || 'origin';
   const ok = await confirmer.ask(
@@ -94,6 +94,7 @@ export async function gitPushRepo(absPath: string): Promise<void> {
   try {
     const next = await gitApi.push(repo.id);
     ideGit.applyStatus(repo.id, next);
+    git.bumpRefs(repo.id);
     toasts.success(`Pushed ${branch}`, remoteTarget);
   } catch (e) {
     toastError('Couldn’t push commits', e);

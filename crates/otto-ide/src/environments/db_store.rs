@@ -29,7 +29,7 @@ pub(super) const RESERVED_GO_BUILD_TAGS_KEY: &str = "__otto_go_build_tags__";
 pub(super) const RESERVED_MODULE_GO_BUILD_TAGS_KEY: &str = "__otto_module_go_build_tags__";
 pub(super) const RESERVED_RUN_COVERAGE_KEY: &str = "__otto_coverage__";
 
-pub(super) fn is_reserved_internal_env_key(key: &str) -> bool {
+pub(crate) fn is_reserved_internal_env_key(key: &str) -> bool {
     key.starts_with("__otto_")
         || matches!(
             key,
@@ -41,35 +41,63 @@ pub(super) fn is_reserved_internal_env_key(key: &str) -> bool {
         )
 }
 
-/// Environment variables that hijack dynamic linkers, JVM/Node/Python/Go/Rust
-/// startup hooks, SDK roots, `PATH`, or non-interactive shells (`Sec-P1-1`/`Sec-P1-2`).
-/// Forbidden for non-root callers across `env_vars`, `.env` files, and run overrides.
-pub(super) fn is_dangerous_loader_env_key(key: &str) -> bool {
+/// Environment variables that hijack dynamic linkers, compilers, JVM/Node/Python/Go/Rust
+/// startup hooks, SDK roots, `PATH`, `HOME`/`XDG_*`/`TMPDIR`, or non-interactive shells.
+/// Forbidden for untrusted/non-root callers across `env_vars`, `.env` files, run overrides, and DAP.
+pub(crate) fn is_dangerous_loader_env_key(key: &str) -> bool {
     let upper = key.trim().to_ascii_uppercase();
     upper.starts_with("DYLD_")
         || upper.starts_with("LD_")
         || upper.starts_with("GIT_CONFIG_")
         || upper.starts_with("NPM_CONFIG_")
+        || upper.starts_with("XDG_")
+        || upper.starts_with("PKG_CONFIG_")
+        || upper.starts_with("CGO_")
         || (upper.starts_with("CARGO_TARGET_")
             && (upper.ends_with("_LINKER") || upper.ends_with("_RUNNER")))
         || matches!(
             upper.as_str(),
             "PATH"
+                | "HOME"
+                | "USERPROFILE"
+                | "TMPDIR"
+                | "TMP"
+                | "TEMP"
                 | "VIRTUAL_ENV"
                 | "PYTHONHOME"
                 | "PYTHONPATH"
                 | "PYTHONUSERBASE"
                 | "PYTHONSTARTUP"
+                | "__PYVENV_LAUNCHER__"
                 | "GOROOT"
                 | "GOPATH"
                 | "GOFLAGS"
                 | "GOENV"
+                | "GOCACHEPROG"
+                | "GOTOOLDIR"
+                | "GOTOOLCHAIN"
+                | "GOPROXY"
+                | "GOSUMDB"
+                | "GONOSUMDB"
+                | "GONOPROXY"
+                | "GOPRIVATE"
+                | "CC"
+                | "CXX"
+                | "FC"
+                | "AR"
+                | "LD"
+                | "GCCGO"
+                | "PKG_CONFIG"
                 | "JAVA_HOME"
+                | "JAVA_OPTS"
                 | "JAVA_TOOL_OPTIONS"
                 | "JDK_JAVA_OPTIONS"
                 | "_JAVA_OPTIONS"
                 | "MAVEN_OPTS"
                 | "GRADLE_OPTS"
+                | "GRADLE_USER_HOME"
+                | "SBT_OPTS"
+                | "ANT_OPTS"
                 | "CARGO_HOME"
                 | "RUSTUP_HOME"
                 | "RUSTUP_TOOLCHAIN"
@@ -83,6 +111,7 @@ pub(super) fn is_dangerous_loader_env_key(key: &str) -> bool {
                 | "CARGO_ENCODED_RUSTFLAGS"
                 | "NODE_OPTIONS"
                 | "NODE_PATH"
+                | "NODE_EXTRA_CA_CERTS"
                 | "BASH_ENV"
                 | "ENV"
                 | "ZDOTDIR"
@@ -152,7 +181,7 @@ pub fn parse_dotenv(content: &str) -> BTreeMap<String, String> {
     out
 }
 
-pub(super) fn is_valid_env_key(key: &str) -> bool {
+pub(crate) fn is_valid_env_key(key: &str) -> bool {
     let mut chars = key.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -177,7 +206,7 @@ pub(super) fn clean_opt(opt: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(super) fn push_unique(vec: &mut Vec<String>, item: String) {
+pub(crate) fn push_unique(vec: &mut Vec<String>, item: String) {
     if !item.is_empty() && !vec.contains(&item) {
         vec.push(item);
     }
@@ -276,7 +305,7 @@ pub(super) fn validate_attached_folder_path(
         crate::target::enforce_non_root_path(&canon)?;
         Ok(canon_str)
     } else {
-        Ok(trimmed.trim_end_matches('/').to_string())
+        Ok(crate::target::normalize_posix_clean_root(trimmed))
     }
 }
 
@@ -329,7 +358,7 @@ pub(super) async fn persist_project_roots(
     Ok(())
 }
 
-pub(super) fn safe_join_allowed_roots(
+pub(crate) fn safe_join_allowed_roots(
     allowed_roots: &[String],
     rel_or_abs: &str,
 ) -> Option<PathBuf> {

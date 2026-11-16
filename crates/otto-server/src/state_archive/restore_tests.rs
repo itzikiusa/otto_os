@@ -270,6 +270,13 @@ async fn restore_snapshot_disables_imported_ide_plugins_until_root_enables_them(
     )
     .await
     .unwrap();
+    assert!(
+        !archive
+            .files
+            .iter()
+            .any(|f| f.root == "data-ide-plugins" && f.path == "state.json"),
+        "host ide-plugins/state.json must never be exported in archives"
+    );
 
     let target_pool = otto_state::db::test_pool().await;
     let target_dir = tempfile::tempdir().unwrap();
@@ -282,6 +289,14 @@ async fn restore_snapshot_disables_imported_ide_plugins_until_root_enables_them(
             "slug": "preexisting-pack",
             "name": "Preexisting Pack",
             "version": "0.1.0"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        target_plugins.join("state.json"),
+        serde_json::to_vec(&json!({
+            "enabled": { "preexisting-pack": true }
         }))
         .unwrap(),
     )
@@ -325,4 +340,89 @@ async fn restore_snapshot_disables_imported_ide_plugins_until_root_enables_them(
         find_slug("preexisting-pack").enabled,
         "pre-existing enabled target plugin should stay enabled"
     );
+}
+
+#[test]
+fn archive_inert_settles_runtime_netbridge_and_rejects_plugin_state_spoofing() {
+    let mut rt_sess: ArchiveRow = [
+        ("id".into(), json!("rt-1")),
+        ("ui_control".into(), json!("{\"allowed\":true}")),
+        ("native_thread_id".into(), json!("foreign-thread-99")),
+    ]
+    .into_iter()
+    .collect();
+    schema::inert("agent_runtime_sessions", &mut rt_sess);
+    assert_eq!(rt_sess["ui_control"], Value::Null);
+    assert_eq!(rt_sess["native_thread_id"], Value::Null);
+
+    let running_turn = otto_core::agent_runtime::ProviderTurn {
+        id: "t-1".into(),
+        ordinal: 1,
+        status: otto_core::agent_runtime::ProviderTurnStatus::Running,
+        started_at: Some(chrono::Utc::now()),
+        completed_at: None,
+        turn_token_usage: None,
+        origin: otto_core::agent_runtime::TurnOrigin::User,
+    };
+    let mut rt_ent: ArchiveRow = [
+        ("kind".into(), json!("turn")),
+        (
+            "payload_json".into(),
+            json!(serde_json::to_string(&running_turn).unwrap()),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    schema::inert("agent_runtime_entities", &mut rt_ent);
+    let settled: otto_core::agent_runtime::ProviderTurn =
+        serde_json::from_str(rt_ent["payload_json"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        settled.status,
+        otto_core::agent_runtime::ProviderTurnStatus::Interrupted
+    );
+    assert!(settled.completed_at.is_some());
+
+    let mut ide_env: ArchiveRow = [(
+        "env_vars_json".into(),
+        json!(json!([{
+            "key": "__otto_network_bridge__",
+            "value": "{\"enabled\":true,\"k8s_cluster_id\":\"c1\"}",
+            "secret": false
+        }])
+        .to_string()),
+    )]
+    .into_iter()
+    .collect();
+    schema::inert("ide_project_environments", &mut ide_env);
+    let env_entries: Vec<Value> =
+        serde_json::from_str(ide_env["env_vars_json"].as_str().unwrap()).unwrap();
+    let bridge: Value = serde_json::from_str(env_entries[0]["value"].as_str().unwrap()).unwrap();
+    assert_eq!(bridge["enabled"], json!(false));
+
+    let mk_archive = |path: &str, bytes: &[u8]| StateArchive {
+        archive_format: 2,
+        schema_version: 1,
+        daemon_version: "test".into(),
+        snapshot_at: "now".into(),
+        records: BTreeMap::new(),
+        roots: vec![ArchiveRoot {
+            id: "data-ide-plugins".into(),
+            kind: "data".into(),
+            owner_id: Some("ide-plugins".into()),
+        }],
+        files: vec![ArchiveFile {
+            root: "data-ide-plugins".into(),
+            path: path.into(),
+            sha256: digest(bytes),
+            content_base64: STANDARD.encode(bytes),
+        }],
+        excluded: vec![],
+        reconnect: vec![],
+    };
+    assert!(files::validate_files(&mk_archive("state.json", b"{}")).is_err());
+    assert!(files::validate_files(&mk_archive(
+        "evil-dir/otto-ide-plugin.json",
+        br#"{"slug":"trusted-slug"}"#,
+    ))
+    .is_err());
 }

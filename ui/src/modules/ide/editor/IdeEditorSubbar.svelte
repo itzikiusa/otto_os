@@ -127,13 +127,13 @@
     }));
     items.push(
       { separator: true },
-      { label: `Rainbow Brackets: ${cur.rainbowBrackets ? 'On' : 'Off'}`, icon: cur.rainbowBrackets ? 'check' : 'dot', action: () => { writeIdeEditorPreferences({ rainbowBrackets: !cur.rainbowBrackets }); } },
-      { label: `Inlay Parameter Hints: ${cur.inlayHints ? 'On' : 'Off'}`, icon: cur.inlayHints ? 'check' : 'dot', action: () => { writeIdeEditorPreferences({ inlayHints: !cur.inlayHints }); } },
-      { label: `CodeVision Usages: ${cur.codeVision ? 'On' : 'Off'}`, icon: cur.codeVision ? 'check' : 'dot', action: () => { writeIdeEditorPreferences({ codeVision: !cur.codeVision }); } },
-      { label: `Auto-fold Imports: ${cur.autoFoldImports ? 'On' : 'Off'}`, icon: cur.autoFoldImports ? 'check' : 'dot', action: () => { writeIdeEditorPreferences({ autoFoldImports: !cur.autoFoldImports }); } },
-      { label: `Breadcrumbs Bar: ${cur.showBreadcrumbs ? 'On' : 'Off'}`, icon: cur.showBreadcrumbs ? 'check' : 'dot', action: () => { writeIdeEditorPreferences({ showBreadcrumbs: !cur.showBreadcrumbs }); } },
-      { label: `Auto-Save: ${cur.autoSave ? 'On' : 'Off'}`, icon: cur.autoSave ? 'check' : 'dot', action: () => { writeIdeEditorPreferences({ autoSave: !cur.autoSave }); } },
-      { label: `Format on Save: ${cur.formatOnSave ? 'On' : 'Off'}`, icon: cur.formatOnSave ? 'check' : 'dot', action: () => { toggleFormatOnSave(); writeIdeEditorPreferences({ formatOnSave: !cur.formatOnSave }); } },
+      { label: `Rainbow Brackets: ${cur.rainbowBrackets ? 'On' : 'Off'}`, checked: cur.rainbowBrackets, action: () => { writeIdeEditorPreferences({ rainbowBrackets: !cur.rainbowBrackets }); } },
+      { label: `Inlay Parameter Hints: ${cur.inlayHints ? 'On' : 'Off'}`, checked: cur.inlayHints, action: () => { writeIdeEditorPreferences({ inlayHints: !cur.inlayHints }); } },
+      { label: `CodeVision Usages: ${cur.codeVision ? 'On' : 'Off'}`, checked: cur.codeVision, action: () => { writeIdeEditorPreferences({ codeVision: !cur.codeVision }); } },
+      { label: `Auto-fold Imports: ${cur.autoFoldImports ? 'On' : 'Off'}`, checked: cur.autoFoldImports, action: () => { writeIdeEditorPreferences({ autoFoldImports: !cur.autoFoldImports }); } },
+      { label: `Breadcrumbs Bar: ${cur.showBreadcrumbs ? 'On' : 'Off'}`, checked: cur.showBreadcrumbs, action: () => { writeIdeEditorPreferences({ showBreadcrumbs: !cur.showBreadcrumbs }); } },
+      { label: `Auto-Save: ${cur.autoSave ? 'On' : 'Off'}`, checked: cur.autoSave, action: () => { writeIdeEditorPreferences({ autoSave: !cur.autoSave }); } },
+      { label: `Format on Save: ${cur.formatOnSave ? 'On' : 'Off'}`, checked: cur.formatOnSave, action: () => { toggleFormatOnSave(); writeIdeEditorPreferences({ formatOnSave: !cur.formatOnSave }); } },
       { separator: true },
       { label: 'Optimize Imports', icon: 'sparkle', hint: '⌃⌥O', disabled: activeTab.readOnly, action: () => void ide.organizeImportsActiveFile() },
     );
@@ -223,7 +223,7 @@
         <button type="button" class="btn small ghost" aria-pressed={ide.prefixSuffixOpen} title="Add prefix or suffix to every selected line" onclick={() => (ide.prefixSuffixOpen = true)} data-testid="ide-prefix-suffix-toggle">
           Wrap
         </button>
-        <button type="button" class="icon-btn" aria-label="Split selection into lines" title="Split selection into multiple cursors (⌥⇧I)" onclick={() => ide.splitSelectionToLines()}>
+        <button type="button" class="icon-btn" aria-label="Split selection into multiple cursors (⌥⇧I)" title="Split selection into multiple cursors (⌥⇧I)" onclick={() => ide.splitSelectionToLines()}>
           <Icon name="layers" size={12} />
         </button>
       </div>
@@ -243,32 +243,32 @@
       data-testid="ide-inspection-pill"
     >
       {#if errorCount > 0 || warnCount > 0}
-        {#if errorCount > 0}<span class="ide-ins-err">✕ {errorCount}</span>{/if}
-        {#if warnCount > 0}<span class="ide-ins-warn">⚠ {warnCount}</span>{/if}
+        {#if errorCount > 0}<span class="ide-ins-err"><Icon name="x" size={12} /> {errorCount}</span>{/if}
+        {#if warnCount > 0}<span class="ide-ins-warn"><Icon name="warning" size={12} /> {warnCount}</span>{/if}
       {:else}
         <Icon name="check" size={12} />
       {/if}
     </button>
 
-    <button type="button" class="icon-btn" aria-label="Editor Color Scheme and Appearance" title="Color Scheme & Editor Appearance" onclick={openSchemePickerMenu} data-testid="ide-scheme-picker-btn">
+    <button type="button" class="icon-btn" aria-label="Color Scheme & Editor Appearance" title="Color Scheme & Editor Appearance" onclick={openSchemePickerMenu} data-testid="ide-scheme-picker-btn">
       <Icon name="palette" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="Previous function or symbol" title="Previous function (⌃↑)" disabled={effectiveSymbols.length === 0} onclick={() => onjumpsymbol(-1)}>
+    <button type="button" class="icon-btn" aria-label="Previous function (⌃↑)" title="Previous function (⌃↑)" disabled={effectiveSymbols.length === 0} onclick={() => onjumpsymbol(-1)}>
       <Icon name="arrowUp" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="Next function or symbol" title="Next function (⌃↓)" disabled={effectiveSymbols.length === 0} onclick={() => onjumpsymbol(1)}>
+    <button type="button" class="icon-btn" aria-label="Next function (⌃↓)" title="Next function (⌃↓)" disabled={effectiveSymbols.length === 0} onclick={() => onjumpsymbol(1)}>
       <Icon name="arrowDown" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="File structure" title="File structure (⌘F12)" onclick={onopenstructure} data-testid="ide-structure-btn">
+    <button type="button" class="icon-btn" aria-label="File structure (⌘F12)" title="File structure (⌘F12)" onclick={onopenstructure} data-testid="ide-structure-btn">
       <Icon name="layers" size={13} />
     </button>
     <button type="button" class="icon-btn" aria-label="Toggle git blame annotations" title="Toggle git blame annotations" aria-pressed={blameActive} onclick={ontoggleblame} data-testid="ide-blame-btn">
       <Icon name="commit" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="Quick fixes" title="Show quick fixes and refactorings (⌥⏎)" onclick={onopenquickfix} data-testid="ide-quickfix-btn">
+    <button type="button" class="icon-btn" aria-label="Show quick fixes and refactorings (⌥⏎)" title="Show quick fixes and refactorings (⌥⏎)" onclick={onopenquickfix} data-testid="ide-quickfix-btn">
       <Icon name="bulb" size={13} />
     </button>
-    <button type="button" class="icon-btn" aria-label="Reformat file" title="Reformat code (⌘⌥L)" disabled={activeTab.readOnly} onclick={() => void ide.formatActiveFile()}>
+    <button type="button" class="icon-btn" aria-label="Reformat code (⌘⌥L)" title="Reformat code (⌘⌥L)" disabled={activeTab.readOnly} onclick={() => void ide.formatActiveFile()}>
       <Icon name="format" size={13} />
     </button>
   </div>
@@ -280,7 +280,7 @@
     <input class="ide-ps-input" type="text" dir="ltr" aria-label="After each line" placeholder="After each line…" bind:value={lineSuffix} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); applyLineWrap(); } else if (e.key === 'Escape') { e.preventDefault(); ide.prefixSuffixOpen = false; } }} data-testid="ide-suffix-input" />
     <button type="button" class="btn small" disabled={(!linePrefix && !lineSuffix) || activeTab.readOnly} onclick={applyLineWrap} data-testid="ide-apply-prefix-suffix">Apply to lines</button>
     <span class="ide-ps-tip">Tip: Hold ⌥ and drag vertically for column selection</span>
-    <button type="button" class="icon-btn" aria-label="Close prefix and suffix bar" title="Close" onclick={() => (ide.prefixSuffixOpen = false)}><Icon name="x" size={12} /></button>
+    <button type="button" class="icon-btn" aria-label="Close prefix and suffix bar" title="Close prefix and suffix bar" onclick={() => (ide.prefixSuffixOpen = false)}><Icon name="x" size={12} /></button>
   </div>
 {/if}
 

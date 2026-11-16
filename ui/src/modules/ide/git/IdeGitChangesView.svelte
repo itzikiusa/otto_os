@@ -165,23 +165,24 @@
   }
 
   async function confirmDiscard(c: FileChange, fromStaged: boolean): Promise<void> {
-    const isUntracked = c.kind === 'untracked';
-    const keepStaged = !fromStaged && !isUntracked;
-    const ok = await confirmer.ask(
-      isUntracked
-        ? `Delete untracked file “${c.path}”? Untracked files aren’t in git yet, so deleting it cannot be undone.`
-        : keepStaged
-          ? `Discard unstaged changes in “${c.path}”? Staged hunks are kept, and unstaged edits are reverted.`
-          : `Discard all changes in “${c.path}” back to HEAD? This cannot be undone.`,
-      {
-        title: isUntracked ? 'Delete untracked file?' : 'Discard changes?',
-        confirmLabel: isUntracked ? 'Delete' : 'Discard',
-        danger: true,
-      },
-    );
-    if (!ok) return;
+    if (busyAction) return;
     busyAction = true;
     try {
+      const isUntracked = c.kind === 'untracked';
+      const keepStaged = !fromStaged && !isUntracked;
+      const ok = await confirmer.ask(
+        isUntracked
+          ? `Delete untracked file “${c.path}”? Untracked files aren’t in git yet, so deleting it cannot be undone.`
+          : keepStaged
+            ? `Discard unstaged changes in “${c.path}”? Staged hunks are kept, and unstaged edits are reverted.`
+            : `Discard all changes in “${c.path}” back to HEAD? This cannot be undone.`,
+        {
+          title: isUntracked ? 'Delete untracked file?' : 'Discard changes?',
+          confirmLabel: isUntracked ? 'Delete' : 'Discard',
+          danger: true,
+        },
+      );
+      if (!ok) return;
       await ideGit.discardPaths(repo.id, [c.path], keepStaged);
       toasts.info(`Discarded ${ideBasename(c.path)}`);
       diffRetry += 1;
@@ -389,6 +390,12 @@
                   onapplied: (r) => {
                     ideGit.applyStatus(repo.id, r.status);
                     diff = r.diff;
+                    if (selTarget === 'worktree' && selectedPath) {
+                      void ideGit.reloadIdeTabIfOpen(
+                        `${repo.path.replace(/\/+$/, '')}/${selectedPath.replace(/^\/+/, '')}`,
+                        { onlyIfChangedOnDisk: true },
+                      );
+                    }
                   },
                 }
               : undefined}

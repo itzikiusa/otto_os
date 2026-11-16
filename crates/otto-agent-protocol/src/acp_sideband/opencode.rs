@@ -81,6 +81,8 @@ pub(crate) struct OpencodeState {
     #[serde(default)]
     pub min_time_ms: i64,
     #[serde(default)]
+    pub min_part_id: String,
+    #[serde(default)]
     pub seen_text_chars: HashMap<String, usize>,
     #[serde(default)]
     pub seen_tool_status: HashMap<String, String>,
@@ -115,13 +117,17 @@ impl OpencodeState {
         if data_dir.is_empty() || !is_safe_session_id(session_id) {
             return None;
         }
-        let min_time_ms = self
-            .min_time_ms
-            .max(i64::try_from(idle_since_ms).unwrap_or(0));
+        let floor_ms = i64::try_from(idle_since_ms).unwrap_or(0);
+        let (min_time_ms, min_part_id) = if self.min_time_ms >= floor_ms {
+            (self.min_time_ms, self.min_part_id.clone())
+        } else {
+            (floor_ms, String::new())
+        };
         Some(SidebandSource::OpencodeSqlite {
             db_path: PathBuf::from(data_dir).join("opencode.db"),
             session_id: session_id.to_string(),
             min_time_ms,
+            min_part_id,
             last_stamp: self.last_stamp,
         })
     }
@@ -130,12 +136,13 @@ impl OpencodeState {
         &mut self,
         stamp: (u64, u64, u64, u64),
         rows_jsonl: &[u8],
+        has_more: bool,
         root_session_id: Option<&str>,
         idle_since_ms: u64,
         mirrored: &mut MirroredCounts,
     ) -> Vec<SidebandAction> {
-        self.last_stamp = stamp;
         let mut actions = Vec::new();
+        let mut last_cursor: Option<(i64, String)> = None;
 
         for raw in rows_jsonl.split(|b| *b == b'\n') {
             let line = trim_ascii(raw);
@@ -152,6 +159,7 @@ impl OpencodeState {
             if time_updated > self.min_time_ms {
                 self.min_time_ms = time_updated;
             }
+            last_cursor = Some((time_updated, part_id.to_string()));
             let role = row
                 .get("role")
                 .or_else(|| row.get("msg_role"))
@@ -295,6 +303,15 @@ impl OpencodeState {
                 }
                 _ => {}
             }
+        }
+        if has_more {
+            if let Some((t, pid)) = last_cursor {
+                self.min_time_ms = t;
+                self.min_part_id = pid;
+            }
+        } else {
+            self.last_stamp = stamp;
+            self.min_part_id.clear();
         }
         actions
     }

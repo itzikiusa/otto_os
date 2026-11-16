@@ -317,7 +317,7 @@ pub(super) fn search_local_sync(
     )?;
     let matcher = build_matcher(&req.query, req.regex, req.case_sensitive, req.whole_word)?;
     let compiled_glob = CompiledFileGlob::compile(req.file_glob.as_deref());
-    let q_lower = req.query.to_ascii_lowercase();
+    let q_lower = req.query.to_lowercase();
     let want_files = matches!(req.mode, IdeSearchMode::Files | IdeSearchMode::All);
     let want_symbols = matches!(req.mode, IdeSearchMode::Symbols | IdeSearchMode::All);
     let want_text = matches!(req.mode, IdeSearchMode::Text | IdeSearchMode::All);
@@ -338,7 +338,7 @@ pub(super) fn search_local_sync(
             } else if req.case_sensitive {
                 rel.contains(&req.query)
             } else {
-                rel.to_ascii_lowercase().contains(&q_lower)
+                rel.to_lowercase().contains(&q_lower)
             };
             if matched {
                 if items.len() >= limit {

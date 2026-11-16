@@ -189,10 +189,20 @@ impl Mux {
         }
         match v {
             Value::String(s) => {
-                if s.len() >= 7 && s[..7].eq_ignore_ascii_case("file://") {
-                    self.is_confined_local_file_uri(s)
+                let bytes = s.as_bytes();
+                if bytes
+                    .get(..5)
+                    .is_some_and(|p| p.eq_ignore_ascii_case(b"file:"))
+                {
+                    s.get(..7)
+                        .is_some_and(|p| p.eq_ignore_ascii_case("file://"))
+                        && self.is_confined_local_file_uri(s)
                 } else {
-                    true
+                    !(bytes.get(..4).is_some_and(|p| {
+                        p.eq_ignore_ascii_case(b"jar:") || p.eq_ignore_ascii_case(b"jdt:")
+                    }) || bytes
+                        .get(..8)
+                        .is_some_and(|p| p.eq_ignore_ascii_case(b"zipfile:")))
                 }
             }
             Value::Array(arr) => arr
@@ -219,7 +229,10 @@ impl Mux {
             if let Some(u) = str_at(msg, &["params", "textDocument", "uri"])
                 .or_else(|| str_at(msg, &["params", "uri"]))
             {
-                if u.len() < 7 || !u[..7].eq_ignore_ascii_case("file://") {
+                if !u
+                    .get(..7)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("file://"))
+                {
                     return false;
                 }
             }
@@ -275,6 +288,14 @@ impl Mux {
             } else {
                 params.remove("initializationOptions");
             }
+        } else if !self.owner_is_root && norm_lang == "rust" {
+            params.insert(
+                "initializationOptions".into(),
+                json!({
+                    "cargo": { "buildScripts": { "enable": false } },
+                    "procMacro": { "enable": false }
+                }),
+            );
         } else if !self.owner_is_root {
             params.remove("initializationOptions");
         }
@@ -298,6 +319,14 @@ impl Mux {
                 let section = it.get("section").and_then(Value::as_str).unwrap_or("");
                 if section == "gopls" || (section.is_empty() && norm_lang == "go") {
                     default_gopls_settings(&self.go_build_tags)
+                } else if !self.owner_is_root
+                    && norm_lang == "rust"
+                    && (section.is_empty() || section == "rust-analyzer")
+                {
+                    json!({
+                        "cargo": { "buildScripts": { "enable": false } },
+                        "procMacro": { "enable": false }
+                    })
                 } else if (section == "python" || section == "python.analysis") && py_path.is_some()
                 {
                     json!({ "pythonPath": py_path })
@@ -504,6 +533,13 @@ impl Mux {
             (Some(_), None) => self.to_server_raw(text),
             (None, Some(id)) => {
                 if self.server_reqs.remove(&id.to_string()).is_some() {
+                    if !self.owner_is_root
+                        && self.key.ssh.is_none()
+                        && !self.check_non_root_value_uris(&msg, 0)
+                    {
+                        self.to_server(&json!({"jsonrpc": "2.0", "id": id, "result": null}));
+                        return;
+                    }
                     self.to_server_raw(text);
                 }
             }

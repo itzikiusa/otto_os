@@ -165,7 +165,8 @@
             <div class="ide-da-callout">
               <span>Version managed in parent manifest:</span>
               <button type="button" class="btn small ghost" onclick={() => onjumplocation({ path: mLoc.path, line: mLoc.line, column: 1 })} data-testid="ide-dep-managed-jump">
-                🎯↑ {mLoc.path.split('/').pop()}:{mLoc.line}
+                <Icon name="arrowUp" size={12} />
+                <span>{mLoc.path.split('/').pop()}:{mLoc.line}</span>
               </button>
             </div>
           {/if}

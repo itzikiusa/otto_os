@@ -131,6 +131,7 @@ export type RuntimeThreadViewProps = {
   fallbackCwd?: string | null;
   hasExternalContext?: boolean;
   transformOutgoingText?: (text: string) => string;
+  transformRestoredQueuedText?: (text: string) => string;
   onExternalContextConsumed?: () => void;
   onopenpath?: (path: string, line?: number) => void;
   formatAssistantText?: (item: Extract<TurnItem, { type: 'assistant_message' }>) => string;

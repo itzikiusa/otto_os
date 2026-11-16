@@ -15,10 +15,18 @@ export interface LineDiffOp {
 
 export function splitDiffLines(text: string): string[] {
   if (!text) return [];
-  const norm = text.replace(/\r\n/g, '\n');
+  const norm = text.replace(/\r\n?/g, '\n');
   const lines = norm.split('\n');
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   return lines;
+}
+
+export function splitCompareLines(text: string): { lines: string[]; trailingNewline: boolean } {
+  if (!text) return { lines: [], trailingNewline: false };
+  const normalized = text.replace(/\r\n?/g, '\n');
+  const trailingNewline = normalized.endsWith('\n');
+  const raw = trailingNewline ? normalized.slice(0, -1) : normalized;
+  return { lines: raw.length === 0 && trailingNewline ? [''] : raw.split('\n'), trailingNewline };
 }
 
 interface RawEdit {
@@ -28,7 +36,16 @@ interface RawEdit {
 
 const MAX_EXACT_DP_CELLS = 1_600_000;
 
-function exactSliceLcs(a: readonly string[], b: readonly string[], out: RawEdit[]): void {
+interface DpBudget {
+  remainingCells: number;
+}
+
+function exactSliceLcs(
+  a: readonly string[],
+  b: readonly string[],
+  out: RawEdit[],
+  budget: DpBudget,
+): void {
   let start = 0;
   while (start < a.length && start < b.length && a[start] === b[start]) {
     out.push({ op: 'equal', line: a[start] });
@@ -58,7 +75,9 @@ function exactSliceLcs(a: readonly string[], b: readonly string[], out: RawEdit[
     return;
   }
 
-  if (m * n <= MAX_EXACT_DP_CELLS) {
+  const cells = m * n;
+  if (cells <= budget.remainingCells) {
+    budget.remainingCells -= cells;
     const cols = n + 1;
     const dp = new Int32Array((m + 1) * cols);
     for (let i = m - 1; i >= 0; i--) {
@@ -226,20 +245,21 @@ export function diffLineArrays(
 
   const midOld = oldLines.slice(prefix, endOld);
   const midNew = newLines.slice(prefix, endNew);
+  const budget: DpBudget = { remainingCells: MAX_EXACT_DP_CELLS };
   if (midOld.length * midNew.length > MAX_EXACT_DP_CELLS) {
     const anchors = findUniqueAnchors(midOld, midNew);
     let prevI = 0;
     let prevJ = 0;
     for (let idx = 0; idx < anchors.length; idx++) {
       const anc = anchors[idx];
-      exactSliceLcs(midOld.slice(prevI, anc.i), midNew.slice(prevJ, anc.j), raw);
+      exactSliceLcs(midOld.slice(prevI, anc.i), midNew.slice(prevJ, anc.j), raw, budget);
       raw.push({ op: 'equal', line: midOld[anc.i] });
       prevI = anc.i + 1;
       prevJ = anc.j + 1;
     }
-    exactSliceLcs(midOld.slice(prevI), midNew.slice(prevJ), raw);
+    exactSliceLcs(midOld.slice(prevI), midNew.slice(prevJ), raw, budget);
   } else if (midOld.length > 0 || midNew.length > 0) {
-    exactSliceLcs(midOld, midNew, raw);
+    exactSliceLcs(midOld, midNew, raw, budget);
   }
 
   for (let k = endOld; k < oldLines.length; k++) {

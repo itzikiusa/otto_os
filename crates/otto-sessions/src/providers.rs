@@ -1,7 +1,8 @@
 //! Data-driven agent provider registry: claude / codex / shell built-ins,
 //! overridable from the `providers` settings JSON.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
@@ -18,6 +19,8 @@ pub struct ProviderSpec {
     pub cmd: String,
     pub args: Vec<String>,
     pub resume_args: Option<Vec<String>>,
+    /// Extra environment variables configured on a custom provider override.
+    pub env: BTreeMap<String, String>,
     /// Shell command to run to update this provider's CLI, e.g. `"claude update"`.
     /// `None` means "no update command" (built-in shell provider, or unset custom).
     pub update_command: Option<String>,
@@ -47,9 +50,28 @@ pub struct ProviderSpec {
     pub shell_fallback: bool,
 }
 
+impl ProviderSpec {
+    /// Resolve a Claude-family provider's effective `CLAUDE_CONFIG_DIR`
+    /// (explicit `env` / inline `cmd`, wrapper script / shell rc alias, or
+    /// conventional `~/.claude-<suffix>`). Returns `None` for non-Claude
+    /// providers or built-in `claude` without a custom config dir.
+    pub fn effective_claude_config_dir(&self, slug: &str, home: &Path) -> Option<PathBuf> {
+        if self.model_family.as_deref() != Some("claude") {
+            return None;
+        }
+        otto_transcript::claude_config::resolve_claude_config_dir(
+            slug,
+            &self.cmd,
+            &self.args,
+            self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+            home,
+        )
+    }
+}
+
 /// Shape accepted from the settings override JSON
-/// (`{"<name>": {"cmd": "...", "args": [...], "resume_args": [...], "update_command": "...",
-/// "model_args": ["-m", "{model}"]}}`).
+/// (`{"<name>": {"cmd": "...", "args": [...], "resume_args": [...], "env": {...},
+/// "update_command": "...", "model_args": ["-m", "{model}"]}}`).
 #[derive(Debug, Deserialize)]
 struct ProviderOverride {
     cmd: String,
@@ -57,6 +79,8 @@ struct ProviderOverride {
     args: Vec<String>,
     #[serde(default)]
     resume_args: Option<Vec<String>>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
     #[serde(default)]
     update_command: Option<String>,
     #[serde(default)]
@@ -163,14 +187,91 @@ fn expand(template: &str, sid: &str, cwd: &str) -> String {
 /// an interactive shell.
 pub fn resolves_on_path(program: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    let is_exec = |p: &std::path::Path| {
+    let is_exec = |p: &Path| {
         std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     };
-    if program.contains('/') {
-        return is_exec(std::path::Path::new(program));
+    let expanded = crate::tool_probe::expand_tilde(program);
+    if expanded.contains('/') {
+        return is_exec(Path::new(&expanded));
     }
     std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| is_exec(&dir.join(program))))
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| is_exec(&dir.join(&expanded))))
+}
+
+fn normalize_override_command(
+    raw_cmd: &str,
+    raw_args: Vec<String>,
+    mut env: BTreeMap<String, String>,
+) -> (String, Vec<String>, Vec<String>, BTreeMap<String, String>) {
+    let trimmed = raw_cmd.trim();
+    if trimmed.is_empty() {
+        return (String::new(), Vec::new(), raw_args, env);
+    }
+    if !trimmed.chars().any(char::is_whitespace) {
+        let expanded = if trimmed.starts_with("~/") || trimmed == "~" {
+            crate::tool_probe::expand_tilde(trimmed)
+        } else {
+            trimmed.to_string()
+        };
+        return (expanded, Vec::new(), raw_args, env);
+    }
+    let whole = crate::tool_probe::expand_tilde(trimmed);
+    if !whole.contains("{cwd}") && !whole.contains("{sid}") && Path::new(&whole).is_file() {
+        return (whole, Vec::new(), raw_args, env);
+    }
+    let tokens = otto_transcript::claude_config::split_command_tokens(trimmed);
+    let mut cmd_bin: Option<String> = None;
+    let mut inline_args: Vec<String> = Vec::new();
+    for tok in tokens {
+        if cmd_bin.is_none() {
+            if tok == "env" {
+                continue;
+            }
+            if let Some((k, v)) = otto_transcript::claude_config::parse_env_assignment(&tok) {
+                env.entry(k.to_string()).or_insert_with(|| v.to_string());
+                continue;
+            }
+            let expanded_tok = if tok.starts_with("~/") || tok == "~" {
+                crate::tool_probe::expand_tilde(&tok)
+            } else {
+                tok
+            };
+            cmd_bin = Some(expanded_tok);
+        } else {
+            inline_args.push(tok);
+        }
+    }
+    let Some(bin) = cmd_bin else {
+        return (trimmed.to_string(), Vec::new(), raw_args, env);
+    };
+    let mut merged = inline_args.clone();
+    for a in raw_args {
+        let is_dup_skip = matches!(
+            a.as_str(),
+            "--dangerously-skip-permissions"
+                | "--dangerously-bypass-approvals-and-sandbox"
+                | "--yolo"
+                | "--always-approve"
+                | "--auto"
+        ) && merged.contains(&a);
+        if !is_dup_skip {
+            merged.push(a);
+        }
+    }
+    (bin, inline_args, merged, env)
+}
+
+fn prepend_missing_inline(inline: &[String], explicit: Vec<String>) -> Vec<String> {
+    if inline.is_empty() {
+        return explicit;
+    }
+    let mut out: Vec<String> = inline
+        .iter()
+        .filter(|a| !explicit.contains(a))
+        .cloned()
+        .collect();
+    out.extend(explicit);
+    out
 }
 
 /// Launch `program args…` through the user's interactive login shell
@@ -184,9 +285,20 @@ pub fn shell_wrapped(program: &str, args: Vec<String>) -> (String, Vec<String>) 
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "/bin/zsh".to_string());
+    // Keep bare command names unquoted so shell aliases expand, while quoting
+    // filesystem paths or names with whitespace/quotes safely.
+    let invoked = if program.contains('/')
+        || program
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '\'' | '"'))
+    {
+        format!("'{}'", program.replace('\'', "'\\''"))
+    } else {
+        program.to_string()
+    };
     let mut wrapped = vec![
         "-ilc".to_string(),
-        format!("{program} \"$@\""),
+        format!("{invoked} \"$@\""),
         program.to_string(),
     ];
     wrapped.extend(args);
@@ -333,6 +445,7 @@ impl ProviderRegistry {
                     a.extend(home_add_dir.iter().cloned());
                     a
                 }),
+                env: BTreeMap::new(),
                 update_command: Some("claude update".into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 model_family: Some("claude".into()),
@@ -364,6 +477,7 @@ impl ProviderRegistry {
                     a.push("{sid}".into());
                     a
                 }),
+                env: BTreeMap::new(),
                 update_command: Some("codex update".into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 model_family: Some("codex".into()),
@@ -396,6 +510,7 @@ impl ProviderRegistry {
                     a.extend(home_add_dir.iter().cloned());
                     a
                 }),
+                env: BTreeMap::new(),
                 update_command: Some("agy update".into()),
                 // Verified against the installed agy CLI: `agy --help` lists
                 // `--model  Model for the current CLI session`.
@@ -425,6 +540,7 @@ impl ProviderRegistry {
                     Vec::new()
                 },
                 resume_args: None,
+                env: BTreeMap::new(),
                 update_command: Some("opencode upgrade".into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 model_family: Some("opencode".into()),
@@ -444,6 +560,7 @@ impl ProviderRegistry {
                 cmd: "pi".into(),
                 args: pi_args.clone(),
                 resume_args: Some(pi_args),
+                env: BTreeMap::new(),
                 update_command: Some("pi update".into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 model_family: Some("pi".into()),
@@ -457,6 +574,7 @@ impl ProviderRegistry {
                 cmd: shell,
                 args: vec!["-l".into()],
                 resume_args: None,
+                env: BTreeMap::new(),
                 update_command: None,
                 model_args: None,
                 model_family: None,
@@ -470,9 +588,11 @@ impl ProviderRegistry {
                 serde_json::from_value::<HashMap<String, ProviderOverride>>(value.clone())
             {
                 for (name, o) in parsed {
+                    let (cmd, inline_args, base_args, env) =
+                        normalize_override_command(&o.cmd, o.args, o.env);
                     // Only keep a non-empty update_command string.
                     let update_command = o.update_command.filter(|s| !s.trim().is_empty());
-                    let model_family = infer_model_family(o.model_family.as_deref(), &o.cmd, &name);
+                    let model_family = infer_model_family(o.model_family.as_deref(), &cmd, &name);
                     // An explicit EMPTY template means "no model flag"; an
                     // unset one defaults to `--model {model}` for a provider of
                     // a known family (every one of them takes it — grok too).
@@ -483,28 +603,34 @@ impl ProviderRegistry {
                             .as_ref()
                             .map(|_| vec!["--model".into(), "{model}".into()]),
                     };
-                    let has_session_flag = o.args.iter().any(|a| {
+                    let has_session_flag = base_args.iter().any(|a| {
                         a == "--session-id"
                             || a == "--resume"
+                            || a == "--conversation"
                             || a.starts_with("--session-id=")
                             || a.starts_with("--resume=")
+                            || a.starts_with("--conversation=")
                     });
-                    let mut args = o.args.clone();
-                    if model_family.as_deref() == Some("claude") && !has_session_flag {
+                    let mut args = base_args.clone();
+                    if matches!(model_family.as_deref(), Some("claude" | "pi")) && !has_session_flag
+                    {
                         args.push("--session-id".into());
                         args.push("{sid}".into());
                     }
-                    let resume_args = match o.resume_args {
-                        Some(r) => Some(r),
-                        None if model_family.as_deref() == Some("claude") => {
+                    let explicit_resume = o
+                        .resume_args
+                        .map(|r| prepend_missing_inline(&inline_args, r));
+                    let resume_args = match (explicit_resume, model_family.as_deref()) {
+                        (Some(r), _) => Some(r),
+                        (None, Some("claude")) => {
                             if !has_session_flag {
-                                let mut r = o.args;
+                                let mut r = base_args;
                                 r.push("--resume".into());
                                 r.push("{sid}".into());
                                 Some(r)
-                            } else if o.args.iter().any(|a| a.contains("{sid}")) {
+                            } else if base_args.iter().any(|a| a.contains("{sid}")) {
                                 Some(
-                                    o.args
+                                    base_args
                                         .into_iter()
                                         .map(|a| {
                                             if a == "--session-id" {
@@ -523,20 +649,51 @@ impl ProviderRegistry {
                                 None
                             }
                         }
-                        None => None,
+                        (None, Some("pi")) => {
+                            if !has_session_flag || args.iter().any(|a| a.contains("{sid}")) {
+                                Some(args.clone())
+                            } else {
+                                None
+                            }
+                        }
+                        (None, Some("codex")) => {
+                            if !base_args.iter().any(|a| a.contains("{sid}")) {
+                                let mut r = vec!["resume".into()];
+                                r.extend(base_args);
+                                r.push("{sid}".into());
+                                Some(r)
+                            } else {
+                                None
+                            }
+                        }
+                        (None, Some("agy")) => {
+                            if !has_session_flag && !base_args.iter().any(|a| a.contains("{sid}")) {
+                                let mut r = vec!["--conversation".into(), "{sid}".into()];
+                                r.extend(base_args);
+                                Some(r)
+                            } else {
+                                None
+                            }
+                        }
+                        (None, _) => None,
                     };
+                    let captures_session_id =
+                        matches!(model_family.as_deref(), Some("codex" | "agy"))
+                            && !args.iter().any(|a| a.contains("{sid}"))
+                            && resume_args
+                                .as_ref()
+                                .is_some_and(|r| r.iter().any(|a| a.contains("{sid}")));
                     map.insert(
                         name,
                         ProviderSpec {
-                            cmd: o.cmd,
+                            cmd,
                             args,
                             resume_args,
+                            env,
                             update_command,
                             model_args,
                             model_family,
-                            // Custom providers use Otto-assigned ids (the `{sid}`
-                            // template); rollout-style capture is built-in only.
-                            captures_session_id: false,
+                            captures_session_id,
                             shell_fallback: true,
                         },
                     );
@@ -701,6 +858,57 @@ impl ProviderRegistry {
         otto_core::agent_runtime::RuntimeProvider::parse(&family)
     }
 
+    /// Return `(slug, ProviderSpec)` for every ENABLED provider, sorted by slug.
+    pub fn enabled_specs(&self) -> Vec<(String, ProviderSpec)> {
+        let names = self.names();
+        let map = self.map.read().expect("provider registry lock");
+        names
+            .into_iter()
+            .filter_map(|n| Some((n.clone(), map.get(&n)?.clone())))
+            .collect()
+    }
+
+    /// Resolve a custom `CLAUDE_CONFIG_DIR` for `provider` (when it belongs to
+    /// the `"claude"` family), or `None` when it uses the default `~/.claude`.
+    pub fn claude_config_dir_for(&self, provider: &str, home: &Path) -> Option<PathBuf> {
+        let spec = self.get(provider)?;
+        spec.effective_claude_config_dir(provider, home)
+    }
+
+    /// All distinct custom `CLAUDE_CONFIG_DIR` roots across ENABLED providers.
+    pub fn active_claude_config_dirs(&self, home: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for (slug, spec) in self.enabled_specs() {
+            if let Some(dir) = spec.effective_claude_config_dir(&slug, home) {
+                if !out.contains(&dir) {
+                    out.push(dir);
+                }
+            }
+        }
+        out
+    }
+
+    /// Resolve an ENABLED and installed/aliased program for CLI `family`
+    /// (`"claude"`, `"codex"`, `"agy"`, `"grok"`, `"opencode"`, `"pi"`).
+    /// Prefers the exact slug `family` when enabled and runnable on `$PATH` /
+    /// filesystem / rc alias; falls back to any enabled custom provider of that
+    /// family whose command resolves; returns `None` when disabled or missing.
+    pub fn resolved_family_program(&self, family: &str) -> Option<String> {
+        let enabled = self.enabled_specs();
+        if let Some((_, spec)) = enabled.iter().find(|(slug, _)| slug == family) {
+            if crate::tool_probe::command_resolves_fast(&spec.cmd) {
+                return Some(spec.cmd.clone());
+            }
+        } else if self.is_enabled(family) && crate::tool_probe::command_resolves_fast(family) {
+            return Some(family.to_string());
+        }
+        enabled
+            .into_iter()
+            .filter(|(slug, spec)| slug != family && spec.model_family.as_deref() == Some(family))
+            .map(|(_, spec)| spec.cmd)
+            .find(|cmd| crate::tool_probe::command_resolves_fast(cmd))
+    }
+
     /// Return the resolved program binary name for `provider`, or `None` if
     /// the provider is not registered.
     pub fn program_for(&self, name: &str) -> Option<String> {
@@ -731,8 +939,27 @@ impl ProviderRegistry {
         } else {
             &spec.args
         };
-        let program = expand(&spec.cmd, sid, cwd);
+        let raw_program = expand(&spec.cmd, sid, cwd);
+        let program =
+            if spec.shell_fallback && (raw_program == "~" || raw_program.starts_with("~/")) {
+                crate::tool_probe::expand_tilde(&raw_program)
+            } else {
+                raw_program
+            };
         let args: Vec<String> = args.iter().map(|a| expand(a, sid, cwd)).collect();
+        let env: Vec<(String, String)> = spec
+            .env
+            .iter()
+            .map(|(k, v)| {
+                let expanded = expand(v, sid, cwd);
+                let val = if expanded == "~" || expanded.starts_with("~/") {
+                    crate::tool_probe::expand_tilde(&expanded)
+                } else {
+                    expanded
+                };
+                (k.clone(), val)
+            })
+            .collect();
         // A command that isn't an executable on PATH (a shell alias/function
         // from the user's rc files) can't be exec'd directly — run it through
         // the login shell instead of failing with "No such file or directory".
@@ -745,7 +972,7 @@ impl ProviderRegistry {
             program,
             args,
             cwd: Some(cwd.to_string()),
-            env: vec![],
+            env,
         })
     }
 }

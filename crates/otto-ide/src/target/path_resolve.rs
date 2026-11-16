@@ -17,7 +17,12 @@ use super::{ResolvedTarget, TargetManager};
 
 pub(crate) fn canonicalize_local_root_dir(raw_root: &str, is_root_user: bool) -> Result<PathBuf> {
     let decoded = strip_file_uri(raw_root);
-    let expanded = otto_core::paths::expand_home_strict(&decoded).map_err(Error::Invalid)?;
+    let root_input = if !decoded.is_empty() && Path::new(&decoded).exists() {
+        decoded.as_str()
+    } else {
+        decoded.trim()
+    };
+    let expanded = otto_core::paths::expand_home_strict(root_input).map_err(Error::Invalid)?;
     let canonical = expanded
         .canonicalize()
         .map_err(|e| map_io_err("resolve workspace root", &expanded, e))?;
@@ -98,14 +103,13 @@ pub(crate) async fn resolve_local_prospective_in_roots(
     create_dirs: bool,
 ) -> Result<(PathBuf, PathBuf)> {
     let decoded = strip_file_uri(raw);
-    let trimmed = decoded.trim();
-    if trimmed.is_empty() {
+    if decoded.is_empty() || decoded == "." {
         return Err(Error::Invalid("file path must not be empty".into()));
     }
-    let abs = if trimmed.starts_with('~') {
-        otto_core::paths::expand_home_strict(trimmed).map_err(Error::Invalid)?
+    let abs = if decoded.starts_with('~') {
+        otto_core::paths::expand_home_strict(&decoded).map_err(Error::Invalid)?
     } else {
-        let p = Path::new(trimmed);
+        let p = Path::new(&decoded);
         if p.is_absolute() {
             p.to_path_buf()
         } else {
@@ -153,6 +157,21 @@ pub(crate) async fn resolve_local_prospective_in_roots(
     Ok((prospective, matched_root))
 }
 
+pub(crate) fn normalize_posix_clean_root(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    lexical_normalize_remote(trimmed).unwrap_or_else(|_| {
+        let stripped = trimmed.trim_end_matches('/');
+        if stripped.is_empty() && trimmed.starts_with('/') {
+            "/".into()
+        } else {
+            stripped.into()
+        }
+    })
+}
+
 pub(crate) fn normalize_remote_root(raw: &str) -> Result<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
@@ -163,12 +182,7 @@ pub(crate) fn normalize_remote_root(raw: &str) -> Result<String> {
             "remote SSH root path must start with '/' or '~'".into(),
         ));
     }
-    let clean = trimmed.trim_end_matches('/');
-    Ok(if clean.is_empty() {
-        "/".into()
-    } else {
-        clean.into()
-    })
+    lexical_normalize_remote(trimmed)
 }
 
 pub(crate) fn resolve_remote_in_roots(
@@ -182,22 +196,22 @@ pub(crate) fn resolve_remote_in_roots(
             "remote path contains control characters".into(),
         ));
     }
-    let trimmed = decoded.trim();
-    if trimmed.is_empty() || trimmed == "." {
+    if decoded.is_empty() || decoded == "." {
         return Ok((root.to_string(), root.to_string()));
     }
-    let combined = if trimmed.starts_with('/') || trimmed.starts_with('~') {
-        trimmed.to_string()
+    let combined = if decoded.starts_with('/') || decoded.starts_with('~') {
+        decoded
     } else {
-        join_remote(root, trimmed)
+        join_remote(root, &decoded)
     };
     let normalized = lexical_normalize_remote(&combined)?;
     for candidate_root in std::iter::once(root).chain(additional_roots.iter().map(String::as_str)) {
-        if candidate_root == "/"
-            || normalized == candidate_root
-            || normalized.starts_with(&format!("{candidate_root}/"))
+        let clean_root = normalize_posix_clean_root(candidate_root);
+        if clean_root == "/"
+            || normalized == clean_root
+            || normalized.starts_with(&format!("{clean_root}/"))
         {
-            return Ok((normalized, candidate_root.to_string()));
+            return Ok((normalized, clean_root));
         }
     }
     Err(Error::Forbidden(format!(
@@ -214,7 +228,10 @@ pub(crate) fn resolve_remote_in_roots_or_sdk(
         return Ok((p, Some(r)));
     }
     let decoded = strip_file_uri(raw);
-    let normalized = lexical_normalize_remote(decoded.trim())?;
+    if decoded.is_empty() {
+        return Err(Error::Invalid("remote path must not be empty".into()));
+    }
+    let normalized = lexical_normalize_remote(&decoded)?;
     let is_remote_sdk = [
         "/usr/local/go/",
         "/usr/lib/go",

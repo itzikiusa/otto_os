@@ -96,13 +96,15 @@ export function commandLabel(name: string): string {
   return text ? text[0].toUpperCase() + text.slice(1) : 'Action';
 }
 
-/** "Claude" / "Codex" / "Antigravity" — the agent's display name from its provider. */
+/** "Claude" / "Codex" / "Antigravity" / "Gemini" — the agent's display name from its provider. */
 export function providerName(provider: string): string {
   const p = provider.trim().toLowerCase();
   if (p === '') return 'Agent';
   if (p === 'claude') return 'Claude';
   if (p === 'codex') return 'Codex';
-  if (p === 'agy' || p === 'antigravity' || p === 'gemini') return 'Antigravity';
+  if (p === 'agy' || p === 'antigravity') return 'Antigravity';
+  if (p === 'gemini') return 'Gemini CLI';
+  if (p === 'opencode') return 'OpenCode';
   return provider.trim()[0].toUpperCase() + provider.trim().slice(1);
 }
 

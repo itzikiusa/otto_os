@@ -81,10 +81,15 @@
     void git.refsRev[repoId];
     if (mode !== 'log') return;
     let canceled = false;
-    void gitApi.readRefs(repoId).then((res) => {
-      if (canceled || !res.refs) return;
-      branches = [...res.refs.local, ...res.refs.remote];
-    });
+    void gitApi.readRefs(repoId).then(
+      (res) => {
+        if (canceled || !res.refs) return;
+        branches = [...res.refs.local, ...res.refs.remote];
+      },
+      () => {
+        if (!canceled) branches = [];
+      },
+    );
     return () => {
       canceled = true;
     };

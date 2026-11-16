@@ -187,6 +187,7 @@ pub async fn summary(
         (all, own, otto_only, summary)
     };
     let mut summary = summary.map_err(ApiError)?;
+    active_limit_providers(&ctx.manager).canonicalize_summary(&mut summary, !otto_only);
     enrich_sessions(&ctx, &mut summary.sessions, &all_sessions).await;
     summary.by_kind =
         by_kind_rollup_with(&ctx, days, otto_only, &all_sessions, own.as_deref()).await;
@@ -413,27 +414,26 @@ fn active_limit_providers(
     manager: &otto_sessions::SessionManager,
 ) -> otto_usage::limits::ActiveLimitProviders {
     let reg = manager.providers();
-    let specs: Vec<_> = reg
-        .names()
+    let specs = reg.enabled_specs();
+    let installed = ["claude", "codex", "agy", "grok"]
         .into_iter()
-        .filter_map(|name| reg.get(&name).map(|spec| (name, spec)))
-        .collect();
-    otto_usage::limits::ActiveLimitProviders::from_specs(specs.iter().map(|(name, spec)| {
-        (
-            name.as_str(),
-            spec.cmd.as_str(),
-            spec.args.as_slice(),
-            spec.model_family.as_deref(),
-        )
-    }))
+        .filter(|fam| reg.resolved_family_program(fam).is_some());
+    otto_usage::limits::ActiveLimitProviders::from_specs_with_env(specs.iter().map(
+        |(name, spec)| {
+            (
+                name.as_str(),
+                spec.cmd.as_str(),
+                spec.args.as_slice(),
+                spec.model_family.as_deref(),
+                Some(&spec.env),
+            )
+        },
+    ))
+    .with_installed_families(installed)
 }
 
 fn enabled_provider_program(manager: &otto_sessions::SessionManager, p: &str) -> Option<String> {
-    manager
-        .providers()
-        .is_enabled(p)
-        .then(|| manager.provider_program(p))
-        .flatten()
+    manager.providers().resolved_family_program(p)
 }
 
 /// `GET /usage/limits` — plan allowance left per provider login (`otto_usage::limits`).
@@ -483,7 +483,8 @@ pub async fn limits_claude_run(
     Json(req): Json<otto_usage::limits::ClaudeRunReq>,
 ) -> Limits {
     let (pool, dir) = (&ctx.pool, &ctx.data_dir);
-    let cli = ctx.manager.provider_program("claude");
+    let cli = enabled_provider_program(&ctx.manager, "claude")
+        .or_else(|| ctx.manager.provider_program("claude"));
     let active = active_limit_providers(&ctx.manager);
     let l = otto_usage::limits::run_claude_check_filtered(
         pool,

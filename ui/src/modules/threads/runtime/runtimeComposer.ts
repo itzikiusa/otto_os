@@ -10,6 +10,7 @@ import type {
   RuntimeSession,
   TurnItem,
 } from '../../../lib/api/types';
+import { sessionProviderSlug } from '../../../lib/providerRegistry';
 import type { LinkedChildThreadSummary } from './agentTasks';
 import type { RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
 import type { ComposerSlashCommand, ParsedSlashIntent } from '../../../lib/slashActions';
@@ -48,6 +49,53 @@ export async function readAttachments(files: Iterable<File>, takes: (f: File) =>
     let bin = '';
     for (let i = 0; i < data.length; i += 0x8000) bin += String.fromCharCode(...data.subarray(i, i + 0x8000));
     out.push({ name: f.name || 'pasted image', mime: f.type, data_base64: btoa(bin) });
+  }
+  return out;
+}
+
+/** Encode raw bytes as base64 in 32 KiB chunks so large screenshots/PDFs never blow the call stack. */
+export function uint8ToBase64(data: Uint8Array): string {
+  let bin = '';
+  for (let i = 0; i < data.length; i += 0x8000) {
+    bin += String.fromCharCode(...data.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+/** Re-hydrate persisted `MessageAttachment[]` from a failed, interrupted, or partial turn
+ *  back into `ComposerFile[]` so Edit / Send again preserves screenshots and PDFs. */
+export async function hydrateRetryAttachments(
+  attachments: readonly MessageAttachment[] | undefined,
+  fetchBytes: (attachmentId: string) => Promise<Uint8Array>,
+): Promise<ComposerFile[]> {
+  if (!attachments || attachments.length === 0) return [];
+  const out: ComposerFile[] = [];
+  for (let i = 0; i < attachments.length; i++) {
+    const a = attachments[i];
+    const fallbackName =
+      a.name?.trim() ||
+      (a.kind === 'image'
+        ? attachments.length > 1
+          ? `Screenshot ${i + 1}`
+          : 'Screenshot'
+        : 'Attachment');
+    if (a.preview_url?.startsWith('data:')) {
+      const comma = a.preview_url.indexOf(',');
+      if (comma > 0 && a.preview_url.slice(0, comma).includes(';base64')) {
+        out.push({
+          name: fallbackName,
+          mime: a.mime,
+          data_base64: a.preview_url.slice(comma + 1),
+        });
+        continue;
+      }
+    }
+    const bytes = await fetchBytes(a.id);
+    out.push({
+      name: fallbackName,
+      mime: a.mime,
+      data_base64: uint8ToBase64(bytes),
+    });
   }
   return out;
 }
@@ -149,7 +197,6 @@ export function buildOptimisticUserMessage(
       id: `optimistic-att-${idSeq}-${idx}`,
       kind: isImg ? 'image' : 'file',
       mime: f.mime,
-      media_type: f.mime,
       name: f.name,
       ...(isImg ? { preview_url: `data:${f.mime};base64,${f.data_base64}` } : {}),
     };
@@ -296,11 +343,10 @@ export function mapChildThreadSummaries(
   const out: LinkedChildThreadSummary[] = [];
   for (const s of Object.values(byId)) {
     if (s.parent_id !== parentSessionId) continue;
-    const rawSlug = s.meta?.provider_slug;
     out.push({
       id: s.id,
       title: s.title,
-      provider: typeof rawSlug === 'string' && rawSlug.trim() ? rawSlug.trim() : s.provider,
+      provider: sessionProviderSlug(s),
       model: s.model ?? null,
       status: s.status,
       createdAt: s.created_at,

@@ -43,6 +43,7 @@ export interface IdeFileReadResp {
   language?: string | null;
   size: number;
   sha256: string;
+  binary?: boolean;
   read_only: boolean;
   truncated: boolean;
   line_count: number;
@@ -383,7 +384,6 @@ export interface IdeProjectEnvironment {
 
 export interface IdePythonVenv {
   path: string;
-  interpreter_path?: string | null;
   version: string;
   kind: 'venv' | 'conda' | 'poetry' | 'uv' | string;
 }
@@ -394,6 +394,13 @@ export interface IdeCreatePythonVenvReq {
   venv_dir?: string | null;
   python_version?: string | null;
 }
+
+export interface IdeCreatePythonVenvResp {
+  path: string;
+  interpreter_path: string;
+  version: string;
+}
+export type IdePythonVenvResp = IdeCreatePythonVenvResp;
 
 export interface IdeRunConfig {
   id: string;
@@ -438,10 +445,17 @@ export interface IdeEnvironmentResp {
   env: IdeProjectEnvironment;
 }
 
-export interface IdePythonVenvResp {
-  path: string;
-  interpreter_path: string;
-  version: string;
+export interface IdeUpsertRunConfigReq extends IdeRunConfig {
+  target: IdeTargetSpec;
+}
+
+export interface IdeRunConfigResp {
+  config: IdeRunConfig;
+}
+
+export interface IdeRunConfigsResp {
+  configs: IdeRunConfig[];
+  detected_configs?: IdeRunConfig[];
 }
 
 export type IdeTestStatus = 'passed' | 'failed' | 'skipped' | 'running';
@@ -521,6 +535,45 @@ export interface IdeDebugLaunch {
   skip_tests?: boolean;
   offline?: boolean;
 }
+export type IdeDebugLaunchSpec = IdeDebugLaunch;
+
+export interface IdeStartDebugReq {
+  target: IdeTargetSpec;
+  language: string;
+  config_id?: string | null;
+  launch: IdeDebugLaunch;
+  breakpoints?: IdeBreakpoint[];
+  project_folders?: string[];
+  maven_profiles?: string[];
+  spring_profiles?: string[];
+  skip_tests?: boolean;
+  offline?: boolean;
+  break_on_exceptions?: boolean;
+  confirm_prod_targets?: boolean;
+}
+
+export interface IdeSetBreakpointsReq {
+  breakpoints: IdeBreakpoint[];
+  break_on_exceptions?: boolean;
+}
+
+export interface IdeDebugCommandReq {
+  action: IdeDebugAction;
+  thread_id?: number | null;
+  frame_id?: number | null;
+  path?: string | null;
+  line?: number | null;
+}
+
+export interface IdeDebugVariablesReq {
+  variables_reference: number;
+}
+
+export interface IdeDebugEvaluateReq {
+  expression: string;
+  frame_id?: number | null;
+  context?: string | null;
+}
 
 export type IdeDebugState = 'starting' | 'running' | 'paused' | 'terminated' | 'error';
 export type IdeDebugStoppedReason = 'breakpoint' | 'step' | 'exception' | 'pause' | string;
@@ -570,6 +623,8 @@ export interface IdeDebugSessionSnapshot {
   title: string;
   language: string;
   adapter: string;
+  config_id?: string | null;
+  launch?: IdeDebugLaunch | null;
   state: IdeDebugState;
   stopped_reason?: IdeDebugStoppedReason | null;
   active_thread_id?: number | null;

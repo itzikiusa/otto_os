@@ -427,6 +427,23 @@ pub(super) fn is_twin_call(name: &str) -> bool {
     !FEATURE_READ_TOOLS.contains(&name) && ROUTED_TWINS.iter().any(|(n, ..)| *n == name)
 }
 
+fn shape_twin_reply(reply: TwinReply, raw: Value, args: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    match reply {
+        TwinReply::Raw => raw,
+        TwinReply::Wrap(key) => {
+            out.insert(key.into(), raw);
+            Value::Object(out)
+        }
+        TwinReply::OkWith(key) => {
+            out.insert("ok".into(), json!(true));
+            out.insert(key.into(), raw);
+            Value::Object(out)
+        }
+        TwinReply::Trashed => json!({ "ok": true, "trashed": args.get("path") }),
+    }
+}
+
 /// Run a routed twin that is not a plain read: the `route_for` self-call as
 /// the session owner, then the native answer shape ([`TwinReply`]).
 async fn twin_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<i64>), String> {
@@ -454,6 +471,33 @@ async fn twin_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option
         ctx.session_id.as_deref(),
     )
     .ok_or_else(|| format!("unknown tool `{name}`"))??;
+    if let Some((&(_, scope, reply), short)) = ROUTED_TWINS
+        .iter()
+        .find(|(n, ..)| *n == name)
+        .zip(name.strip_prefix("otto_"))
+        .filter(|(_, s)| otto_mcp::outward::NATIVE_SESSION_WRITERS.contains(s))
+    {
+        let scoped = twin_args(
+            scope,
+            args,
+            ctx.workspace_id.as_deref(),
+            ctx.session_id.as_deref(),
+        )?;
+        let v =
+            invoke_governed_native_envelope(ctx, short, &scoped, Duration::from_secs(30)).await?;
+        let executed = v.get("executed").and_then(Value::as_bool) == Some(true);
+        let is_error = v.get("is_error").and_then(Value::as_bool) == Some(true);
+        let out_val = if executed && !is_error {
+            shape_twin_reply(
+                reply,
+                v.get("content").cloned().unwrap_or(Value::Null),
+                args,
+            )
+        } else {
+            governed_native_result(short, v)?
+        };
+        return Ok(finalize(out_val));
+    }
     let body = call.body.unwrap_or_else(|| json!({}));
     let raw = match call.method {
         Method::Get => ctx.get_json(&call.path).await?,
@@ -465,21 +509,7 @@ async fn twin_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option
             Value::Null
         }
     };
-    let mut out = serde_json::Map::new();
-    let shaped = match call.reply {
-        TwinReply::Raw => raw,
-        TwinReply::Wrap(key) => {
-            out.insert(key.into(), raw);
-            Value::Object(out)
-        }
-        TwinReply::OkWith(key) => {
-            out.insert("ok".into(), json!(true));
-            out.insert(key.into(), raw);
-            Value::Object(out)
-        }
-        TwinReply::Trashed => json!({ "ok": true, "trashed": args.get("path") }),
-    };
-    Ok(finalize(shaped))
+    Ok(finalize(shape_twin_reply(call.reply, raw, args)))
 }
 
 /// Map a feature read tool + its arguments to the upstream daemon read. Pure: no
@@ -852,12 +882,13 @@ pub(super) async fn run_tool(
             ))
         }
         "aws_sqs_peek" => {
-            // Edit-gated server-side: the receive bumps the receive count.
-            let call = read_route("aws_sqs_peek", args, None)?;
-            let raw = ctx
-                .post_json(&call.path, call.body.as_ref().unwrap_or(&json!({})))
-                .await?;
-            Ok(finalize(raw))
+            // Edit-gated & governed: receiving bumps ApproximateReceiveCount.
+            for k in ["account_id", "url"] {
+                arg_str(args, k)?;
+            }
+            Ok(finalize(
+                governed_native_write(ctx, "aws_sqs_peek", args, Duration::from_secs(30)).await?,
+            ))
         }
         "aws_athena_query" => {
             // A billed scan: approval + guardrail + audit through the governed
@@ -1998,8 +2029,16 @@ mod console_gate_tests {
         for t in OPT_IN_CONSOLE_READS {
             assert!(!FEATURE_READ_TOOLS.contains(t), "{t} has its own gated arm");
         }
-        // The billed scans run through the governed path, never as reads.
-        for t in ["aws_logs_insights", "aws_athena_query"] {
+        // The billed scans, SQS peek, and Vault writers run through the governed path, never as reads.
+        for t in [
+            "aws_logs_insights",
+            "aws_athena_query",
+            "aws_sqs_peek",
+            "vault_write",
+            "vault_write_file",
+            "vault_rename",
+            "vault_delete",
+        ] {
             assert!(!FEATURE_READ_TOOLS.contains(&t), "{t}");
             assert!(
                 otto_mcp::outward::NATIVE_SESSION_WRITERS.contains(&t),

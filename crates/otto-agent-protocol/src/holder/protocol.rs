@@ -32,12 +32,32 @@ pub const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
 /// final exit status and buffered output before cleaning itself up.
 pub const DEFAULT_EXIT_LINGER: Duration = Duration::from_secs(5 * 60);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Maximum time an unattached holder keeps a live child process alive without
+/// an active daemon connection before terminating it and cleaning up.
+pub const DEFAULT_ORPHAN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Cadence for probing whether an unattached holder's bound socket path still
+/// points to the same inode on disk.
+pub const SOCKET_WATCHDOG_INTERVAL: Duration = Duration::from_secs(15);
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct HolderChildCommand {
     pub program: String,
     pub args: Vec<String>,
     pub cwd: String,
     pub env: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for HolderChildCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env_keys: Vec<&str> = self.env.iter().map(|(k, _)| k.as_str()).collect();
+        f.debug_struct("HolderChildCommand")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("env_keys", &env_keys)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +187,8 @@ pub struct HolderSpawnSpec {
     pub initial_checkpoint: serde_json::Value,
     #[serde(default)]
     pub exit_linger_ms: Option<u64>,
+    #[serde(default)]
+    pub orphan_ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,16 +359,16 @@ pub async fn write_frame<W: AsyncWrite + Unpin, T: Serialize>(
     writer.flush().await
 }
 
-pub async fn read_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(
+async fn read_raw_frame<R: AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
     buf: &mut Vec<u8>,
-) -> io::Result<Option<T>> {
+) -> io::Result<bool> {
     buf.clear();
     loop {
         let chunk = reader.fill_buf().await?;
         if chunk.is_empty() {
             if buf.is_empty() {
-                return Ok(None);
+                return Ok(false);
             }
             break;
         }
@@ -377,9 +399,38 @@ pub async fn read_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(
     if buf.last() == Some(&b'\r') {
         buf.pop();
     }
+    Ok(true)
+}
+
+pub async fn read_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(
+    reader: &mut BufReader<R>,
+    buf: &mut Vec<u8>,
+) -> io::Result<Option<T>> {
+    if !read_raw_frame(reader, buf).await? {
+        return Ok(None);
+    }
     serde_json::from_slice(buf)
         .map(Some)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// Read one newline-delimited JSON frame, tolerating unknown or skewed JSON
+/// object frames (`Ok(Some(None))`) across binary upgrades/rollbacks while
+/// still failing on EOF (`Ok(None)`), oversized frames, or corrupt non-JSON.
+pub async fn read_tolerant_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(
+    reader: &mut BufReader<R>,
+    buf: &mut Vec<u8>,
+) -> io::Result<Option<Option<T>>> {
+    if !read_raw_frame(reader, buf).await? {
+        return Ok(None);
+    }
+    match serde_json::from_slice::<T>(buf) {
+        Ok(frame) => Ok(Some(Some(frame))),
+        Err(e) => match serde_json::from_slice::<serde_json::Value>(buf) {
+            Ok(serde_json::Value::Object(_)) => Ok(Some(None)),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
+        },
+    }
 }
 
 #[cfg(test)]

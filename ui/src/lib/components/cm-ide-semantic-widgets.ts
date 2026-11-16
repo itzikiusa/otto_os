@@ -36,12 +36,17 @@ export class CodeVisionWidget extends WidgetType {
     return this.count === o.count && this.line === o.line && this.symbol === o.symbol;
   }
   toDOM(): HTMLElement {
-    const el = document.createElement('span');
+    const el = this.onUsages ? document.createElement('button') : document.createElement('span');
+    if (el instanceof HTMLButtonElement) el.type = 'button';
     el.className = 'cm-ide-codevision';
     el.dataset.testid = 'ide-codevision-usages';
     el.textContent = `${this.count} ${this.count === 1 ? 'usage' : 'usages'}`;
     if (this.onUsages) {
       el.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      el.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
         this.onUsages?.(this.line, this.symbol);

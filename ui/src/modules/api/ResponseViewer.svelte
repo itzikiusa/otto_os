@@ -8,7 +8,7 @@
   // do; SSE / WebSocket requests get a live message console instead.
   import Icon from '../../lib/components/Icon.svelte';
   import Tabs from '../../lib/components/Tabs.svelte';
-  import CodeEditor from '../../lib/components/LazyCodeEditor.svelte';
+  import LazyCodeEditor from '../../lib/components/LazyCodeEditor.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
   import StatusChip from './StatusChip.svelte';
@@ -530,7 +530,7 @@
            It sits after the body tab's notices/filter, so the order is kept. -->
       {#if editorEligible}
         <div class="resp-editor" style:display={showEditor ? null : 'none'}>
-          <CodeEditor lsp={false} wrap={respWrap} path={respPath} content={displayBody} root={ws.current?.root_path ?? ''} language={respLang} readOnly={true} />
+          <LazyCodeEditor lsp={false} wrap={respWrap} path={respPath} content={displayBody} root={ws.current?.root_path ?? ''} language={respLang} readOnly={true} />
         </div>
       {/if}
     </div>

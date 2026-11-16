@@ -107,6 +107,9 @@ pub struct RestoreResult {
 fn invalid(message: &str) -> ApiError {
     ApiError(Error::Invalid(message.into()))
 }
+fn internal(message: &str) -> ApiError {
+    ApiError(Error::Internal(message.into()))
+}
 fn db_error(error: sqlx::Error) -> ApiError {
     ApiError(Error::Internal(format!("Archive database: {error}")))
 }
@@ -698,7 +701,7 @@ pub async fn restore_snapshot(
     let archive = std::sync::Arc::new(archive.clone());
     tokio::spawn(async move { restore_owned(&ctx, archive, options).await })
         .await
-        .map_err(|e| invalid(&format!("Restore worker: {e}")))?
+        .map_err(|e| internal(&format!("Restore worker: {e}")))?
 }
 async fn restore_owned(
     ctx: &ServerCtx,
@@ -797,16 +800,47 @@ async fn restore_owned(
             }
         }
     }
-    let _ = ctx.ide.projects.reload_from_db(&ctx.pool).await;
+    if let Err(e) = ctx.agent_runtime.settle_after_restore().await {
+        tracing::warn!("state_archive: runtime settle after restore failed: {e}");
+    }
+    if let Err(e) = ctx.ide.projects.reload_from_db(&ctx.pool).await {
+        tracing::warn!("state_archive: failed to reload IDE projects after restore: {e}");
+    }
     ctx.ide.environments.reload_from_db(&ctx.pool).await;
     if published
         .iter()
         .any(|(rel, _)| rel == "ide-plugins" || rel.starts_with("ide-plugins/"))
     {
-        let _ = ctx
-            .ide
-            .plugins
-            .disable_managed_except(&pre_existing_enabled_plugins);
+        let mut keep_enabled = pre_existing_enabled_plugins;
+        for (rel, _) in &published {
+            if let Some(rest) = rel.strip_prefix("ide-plugins/") {
+                if let Some(dir_slug) = rest.split('/').next().filter(|s| !s.is_empty()) {
+                    keep_enabled.remove(dir_slug);
+                }
+                if rest.ends_with("/otto-ide-plugin.json") {
+                    if let Ok(bytes) = std::fs::read(ctx.data_dir.join(rel)) {
+                        if let Ok(doc) = serde_json::from_slice::<Value>(&bytes) {
+                            if let Some(slug) = doc.get("slug").and_then(Value::as_str) {
+                                keep_enabled.remove(slug);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Err(e) = ctx.ide.plugins.disable_managed_except(&keep_enabled) {
+            tracing::error!("state_archive: failed to disable imported IDE plugins: {e}");
+            let plugin_files: Published = published
+                .iter()
+                .filter(|(rel, _)| rel == "ide-plugins" || rel.starts_with("ide-plugins/"))
+                .cloned()
+                .collect();
+            rollback_files(ctx, &plugin_files);
+            let _ = ctx.ide.plugins.reload();
+            return Err(internal(&format!(
+                "Failed to lock imported IDE plugins to disabled state: {e}"
+            )));
+        }
     } else {
         let _ = ctx.ide.plugins.reload();
     }
@@ -830,7 +864,7 @@ fn stage_files(data_dir: &Path, archive: &StateArchive) -> ApiResult<tempfile::T
     let stage = tempfile::Builder::new()
         .prefix("otto-restore-")
         .tempdir_in(data_dir)
-        .map_err(|e| invalid(&e.to_string()))?;
+        .map_err(|e| internal(&format!("Create restore staging directory: {e}")))?;
     for (index, file) in archive.files.iter().enumerate() {
         let bytes = STANDARD
             .decode(&file.content_base64)
@@ -845,10 +879,10 @@ fn stage_files(data_dir: &Path, archive: &StateArchive) -> ApiResult<tempfile::T
                 .mode(0o600)
                 .open(stage.path().join(index.to_string()))
         }
-        .map_err(|e| invalid(&e.to_string()))?;
+        .map_err(|e| internal(&format!("Open staged asset: {e}")))?;
         std::io::Write::write_all(&mut out, &bytes)
             .and_then(|_| out.sync_all())
-            .map_err(|e| invalid(&e.to_string()))?;
+            .map_err(|e| internal(&format!("Write staged asset: {e}")))?;
     }
     Ok(stage)
 }
@@ -874,14 +908,14 @@ fn publish_staged(
     let mut skipped = 0;
     let stage_fd = match rustix::fs::open(stage, dir_flags(), rustix::fs::Mode::empty()) {
         Ok(fd) => fd,
-        Err(error) => return Err((invalid(&error.to_string()), published)),
+        Err(error) => return Err((internal(&format!("Open stage dir: {error}")), published)),
     };
     for (relative, index) in pending {
         let name = index.to_string();
         let wrote = match publish_renamed(data_dir, &stage_fd, &name, relative) {
             Ok(Some(done)) => Ok(done),
             Ok(None) => std::fs::read(stage.join(&name))
-                .map_err(|e| invalid(&e.to_string()))
+                .map_err(|e| internal(&format!("Read staged asset: {e}")))
                 .and_then(|bytes| files::publish(data_dir, relative, &bytes)),
             Err(error) => Err(error),
         };
@@ -921,7 +955,7 @@ fn publish_renamed(
 ) -> ApiResult<Option<bool>> {
     use rustix::fs::{self as rfs, Mode, RenameFlags};
     use rustix::io::Errno;
-    let fail = |e: Errno| invalid(&e.to_string());
+    let fail = |e: Errno| internal(&format!("Publish asset '{relative}': {e}"));
     let parts = files::relative(relative)?;
     let mut fd = rfs::open(data_dir, dir_flags(), Mode::empty()).map_err(fail)?;
     for part in &parts[..parts.len() - 1] {

@@ -22,21 +22,34 @@ use super::map_io_err;
 
 /// Decode a `file://` URI into a filesystem path string, handling percent-encoded
 /// bytes such as `%20` (spaces) and `%40` (`@` in Go `$GOMODCACHE` module paths).
+/// Plain filesystem paths (not starting with `file://`) are returned verbatim
+/// without stripping leading/trailing spaces on valid POSIX filenames.
 pub(crate) fn strip_file_uri(raw: &str) -> String {
     let trimmed = raw.trim();
-    if trimmed.starts_with("file://") {
+    if trimmed
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("file://"))
+    {
         if let Some(p) = otto_core::paths::file_uri_to_path(trimmed) {
             return p.to_string_lossy().into_owned();
         }
-        let rest = trimmed
-            .strip_prefix("file://localhost/")
-            .map(|r| format!("/{r}"))
-            .or_else(|| trimmed.strip_prefix("file:///").map(|r| format!("/{r}")))
-            .or_else(|| trimmed.strip_prefix("file://").map(str::to_string))
-            .unwrap_or_else(|| trimmed.to_string());
-        return percent_decode(&rest);
+        let rest = if trimmed
+            .get(..17)
+            .is_some_and(|p| p.eq_ignore_ascii_case("file://localhost/"))
+        {
+            format!("/{}", &trimmed[17..])
+        } else if trimmed
+            .get(..8)
+            .is_some_and(|p| p.eq_ignore_ascii_case("file:///"))
+        {
+            format!("/{}", &trimmed[8..])
+        } else {
+            trimmed[7..].to_string()
+        };
+        let without_qf = rest.split(['?', '#']).next().unwrap_or(&rest);
+        return percent_decode(without_qf);
     }
-    trimmed.to_string()
+    raw.to_string()
 }
 
 pub(crate) fn percent_decode(input: &str) -> String {
@@ -287,14 +300,13 @@ pub(crate) fn resolve_local_readable(
     raw: &str,
 ) -> Result<(PathBuf, bool)> {
     let decoded = strip_file_uri(raw);
-    let trimmed = decoded.trim();
-    if trimmed.is_empty() || trimmed == "." {
+    if decoded.is_empty() || decoded == "." {
         return Err(Error::Invalid("file path must not be empty".into()));
     }
-    let candidate = if trimmed.starts_with('~') {
-        otto_core::paths::expand_home_strict(trimmed).map_err(Error::Invalid)?
+    let candidate = if decoded.starts_with('~') {
+        otto_core::paths::expand_home_strict(&decoded).map_err(Error::Invalid)?
     } else {
-        let p = Path::new(trimmed);
+        let p = Path::new(&decoded);
         if p.is_absolute() {
             p.to_path_buf()
         } else {

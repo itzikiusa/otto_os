@@ -14,29 +14,57 @@ use tokio::time::timeout;
 /// presence and letting the spawned version probe finish in the background.
 const COLD_INLINE_BUDGET: Duration = Duration::from_millis(300);
 
+/// Expand a leading `~` or `~/…` against `$HOME`.
+pub(crate) fn expand_tilde(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed == "~" || trimmed.starts_with("~/") {
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            let home_path = std::path::PathBuf::from(home);
+            return otto_transcript::claude_config::expand_home_path(trimmed, &home_path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| trimmed.to_string());
+        }
+    }
+    trimmed.to_string()
+}
+
 /// Extract the executable token from a custom provider command string,
 /// skipping leading `KEY=VALUE` environment assignments and stripping trailing
 /// arguments (including `{cwd}` / `{sid}` flag templates). Returns `None` when
 /// the executable token itself is empty or contains `{cwd}` / `{sid}`.
 pub fn extract_custom_cmd_executable(cmd: &str) -> Option<String> {
-    let is_env_assign = |tok: &str| {
-        let Some((k, _)) = tok.split_once('=') else {
-            return false;
-        };
-        let mut chars = k.chars();
-        chars
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-    };
-    let bin = cmd
-        .split_whitespace()
-        .find(|tok| !is_env_assign(tok))?
-        .trim();
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Preserve an unquoted executable path containing spaces when that exact
+    // path exists on disk (e.g. `/Applications/My Agent/agent`).
+    let whole = expand_tilde(trimmed);
+    if whole.contains(' ')
+        && !whole.contains("{cwd}")
+        && !whole.contains("{sid}")
+        && std::path::Path::new(&whole).is_file()
+    {
+        return Some(whole);
+    }
+    let tokens = otto_transcript::claude_config::split_command_tokens(trimmed);
+    let bin = tokens.into_iter().find(|tok| {
+        tok != "env" && otto_transcript::claude_config::parse_env_assignment(tok).is_none()
+    })?;
+    let bin = expand_tilde(&bin);
     if bin.is_empty() || bin.contains("{cwd}") || bin.contains("{sid}") {
         return None;
     }
-    Some(bin.to_string())
+    Some(bin)
+}
+
+/// Fast synchronous check whether `cmd` resolves to an executable file on
+/// `$PATH`/filesystem or a shell alias/function in the user's rc files.
+pub fn command_resolves_fast(cmd: &str) -> bool {
+    let Some(bin) = extract_custom_cmd_executable(cmd) else {
+        return false;
+    };
+    executable_in_path_or_fs(&bin) || (!bin.contains('/') && rc_defines_alias_or_fn(&bin))
 }
 
 /// Probe whether a custom provider command (`cmd`) is runnable on this machine:
@@ -101,15 +129,16 @@ pub fn executable_in_path_or_fs(program: &str) -> bool {
         }
     }
 
-    let p = std::path::Path::new(program);
-    if program.contains('/') {
+    let expanded = expand_tilde(program);
+    let p = std::path::Path::new(&expanded);
+    if expanded.contains('/') {
         return is_exec(p);
     }
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };
     std::env::split_paths(&path)
-        .map(|dir| dir.join(program))
+        .map(|dir| dir.join(&expanded))
         .any(|cand| is_exec(&cand))
 }
 
@@ -234,7 +263,15 @@ fn fast_tool_statuses(specs: &BTreeMap<String, String>) -> Vec<ToolStatus> {
         .collect()
 }
 /// Tools probed by name on every `/meta`.
-pub const DETECTED_TOOLS: [&str; 5] = ["claude", "codex", "agy", "git", "clickhouse"];
+pub const DETECTED_TOOLS: [&str; 7] = [
+    "claude",
+    "codex",
+    "agy",
+    "opencode",
+    "pi",
+    "git",
+    "clickhouse",
+];
 
 /// The `name → program` map to probe: [`DETECTED_TOOLS`] by name, overridden
 /// by each provider's configured executable (`None` = no executable).

@@ -21,8 +21,8 @@ import { ctxMenu } from '../contextmenu.svelte.ts';
 import { isIconName } from './Icon.svelte';
 import { createIdeCsvExtension } from './cm-ide-csv.ts';
 import {
-  createIdeGitAndAgentExtensions, selectionOrCurrentLine, setBlameLinesEffect, setSavedContentEffect,
-  type IdeEditorSelectionRange,
+  createIdeGitAndAgentExtensions, selectionOrCurrentLine, setBaselineSourceEffect, setBlameLinesEffect, setSavedContentEffect,
+  type IdeDiffBaselineSource, type IdeEditorSelectionRange,
 } from './cm-ide-git-and-agent.ts';
 import { isBpTargetGutterElement } from './cm-ide-history.ts';
 import { createIdeHoverExtension } from './cm-ide-hover.ts';
@@ -69,10 +69,10 @@ export {
   isBpTargetGutterElement, lspUriToPath, moveLineDown, moveLineUp, notifyLspDidSave,
   openReplaceInFile, previewConcreteEdits, rectangularSelection, requestIdeDiveAtPos,
   selectAllOccurrences, selectNextOccurrence, selectionOrCurrentLine,
-  setBlameLinesEffect, setDiskSavedContentEffect, setSavedContentEffect, smartExpandSelection,
+  setBaselineSourceEffect, setBlameLinesEffect, setDiskSavedContentEffect, setSavedContentEffect, smartExpandSelection,
   splitSelectionIntoLines, startNewLineBelow, toggleLineComment, wordAtCursor,
   type AttachPooledLspOptions, type ClientDiagQuickFix, type DirectLspOptions,
-  type IdeConcreteTextEdit, type IdeEditorCallbacks, type IdeEditorSelectionRange,
+  type IdeConcreteTextEdit, type IdeDiffBaselineSource, type IdeEditorCallbacks, type IdeEditorSelectionRange,
   type IdeInlineRefactorHint, type IdeQuickFixAction,
 };
 
@@ -114,6 +114,21 @@ const ideRunItemsField = StateField.define<Map<number, IdeGutterItem>>({
 
 type BpVisualKind = 'enabled' | 'disabled' | 'muted' | 'conditional' | 'logpoint' | 'paused' | 'preview';
 const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function bulbSvg(): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  for (const [k, v] of [['width', '12'], ['height', '12'], ['viewBox', '0 0 16 16'], ['fill', 'none'], ['aria-hidden', 'true']]) {
+    svg.setAttribute(k, v);
+  }
+  const p = document.createElementNS(SVG_NS, 'path');
+  p.setAttribute('d', 'M8 2a4.2 4.2 0 0 0-2.6 7.5c.4.35.6.8.6 1.3V11.5h4v-.7c0-.5.2-.95.6-1.3A4.2 4.2 0 0 0 8 2Zm-1.5 11.2h3M7 14.6h2');
+  p.setAttribute('stroke', 'currentColor');
+  p.setAttribute('stroke-width', '1.4');
+  p.setAttribute('stroke-linecap', 'round');
+  p.setAttribute('stroke-linejoin', 'round');
+  svg.appendChild(p);
+  return svg;
+}
 
 function gutterSvg(shape: 'enabled' | 'hollow' | 'diamond' | 'play', verified = false, conditional = false): SVGSVGElement {
   const svg = document.createElementNS(SVG_NS, 'svg');
@@ -204,8 +219,11 @@ class CombinedGutterMarker extends GutterMarker {
     } else if (this.showBulb) {
       const bulb = document.createElement('button');
       bulb.type = 'button'; bulb.className = 'cm-ide-lightbulb-btn'; bulb.dataset.testid = 'ide-gutter-lightbulb';
-      bulb.title = 'Show Quick Fixes (⌥⏎)'; bulb.setAttribute('aria-label', 'Show Quick Fixes'); bulb.textContent = '💡';
-      bulb.addEventListener('mousedown', (e) => {
+      const label = 'Show Quick Fixes (⌥⏎)';
+      bulb.title = label; bulb.setAttribute('aria-label', label);
+      bulb.appendChild(bulbSvg());
+      bulb.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+      bulb.addEventListener('click', (e) => {
         e.preventDefault(); e.stopPropagation();
         const r = bulb.getBoundingClientRect();
         this.getCallbacks().onQuickFix?.({ line: this.line, column: 1, clientX: r.left, clientY: r.bottom + 4 });
@@ -233,7 +251,8 @@ export interface CreateIdeExtensionsOptions {
   filePath?: string; language?: string; root?: string; connectionId?: string | null; projectFolders?: string[];
   breakpoints: IdeBreakpoint[]; breakpointsMuted?: boolean; gutterItems: IdeGutterItem[];
   pausedLine: number | null; inlineValues: IdeInlineValue[]; peerCursors: PeerCursorInput[];
-  diskSavedContent?: string | null; savedContent?: string | null; blameByLine?: Record<number, string> | null;
+  diskSavedContent?: string | null; savedContent?: string | null; baselineSource?: IdeDiffBaselineSource;
+  blameByLine?: Record<number, string> | null;
   keymapPreset: 'jetbrains' | 'standard'; getCallbacks: () => IdeEditorCallbacks;
 }
 
@@ -610,7 +629,13 @@ export function createIdeExtensions(opts: CreateIdeExtensionsOptions): Extension
       onQuickFix: (ctx) => opts.getCallbacks().onQuickFix?.(ctx),
     }),
     createCmdHoverDiveExtension(opts.getCallbacks),
-    createIdeGitAndAgentExtensions({ savedContent: opts.savedContent, blameByLine: opts.blameByLine, wordAtCursor, getCallbacks: opts.getCallbacks }),
+    createIdeGitAndAgentExtensions({
+      savedContent: opts.savedContent,
+      baselineSource: opts.baselineSource,
+      blameByLine: opts.blameByLine,
+      wordAtCursor,
+      getCallbacks: opts.getCallbacks,
+    }),
     ...(isCsv ? [createIdeCsvExtension(fPath)] : []),
     ...(isShell ? [createShellVarHighlightExtension()] : []),
     buildIdeKeymap(opts.keymapPreset, opts.getCallbacks, fPath, opts.language),

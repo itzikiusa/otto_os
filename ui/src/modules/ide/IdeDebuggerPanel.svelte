@@ -66,7 +66,11 @@
       .then((list) => {
         if (ide.activeDebug) return;
         const sessions = list.sessions ?? [];
-        const live = sessions.find((s) => s.state !== 'terminated') ?? sessions[0] ?? null;
+        const live =
+          sessions.find((s) => s.state !== 'terminated' && s.state !== 'error') ??
+          sessions.find((s) => s.state !== 'terminated') ??
+          sessions[0] ??
+          null;
         if (live) ide.applyDebugSnapshot(live);
       })
       .catch(() => {});
@@ -88,6 +92,7 @@
           const next = res.session;
           if (!next) return;
           const changed =
+            next.revision !== cur.revision ||
             next.state !== cur.state ||
             next.active_frame_id !== cur.active_frame_id ||
             next.paused_file !== cur.paused_file ||
@@ -158,23 +163,21 @@
 <div class="dbg-root" data-testid="ide-debugger-panel">
   <header class="dbg-bar">
     <div class="dbg-controls" role="toolbar" aria-label="Debugger execution controls">
-      {#if !dbg || dbg.state === 'terminated' || dbg.state === 'error'}
-        <button
-          type="button"
-          class="btn small dbg-compact-btn"
-          disabled={!ide.hasTarget || ide.debugLoading}
-          title={!ide.hasTarget ? 'Select a workspace target to start debugging' : ide.debugLoading ? 'Starting debugger…' : 'Start debugging'}
-          aria-keyshortcuts="Control+D"
-          onclick={() => void ide.startDebug()}
-        ><Icon name="bug" size={12} /><span>{ide.debugLoading ? 'Starting…' : 'Debug'}</span></button>
-      {/if}
-      <button type="button" class="icon-btn" aria-label="Resume program" title={isPaused ? 'Resume Program (⌘⌥R / F9)' : undefined} aria-keyshortcuts="Meta+Alt+R F9" disabled={!isPaused} onclick={() => void ide.resumeDebug()}><Icon name="play" size={13} /></button>
-      <button type="button" class="icon-btn" aria-label="Pause program" title={isRunning ? 'Pause program' : undefined} disabled={!isRunning} onclick={() => void ide.pauseDebug()}><Icon name="pause" size={13} /></button>
+      <button
+        type="button"
+        class="btn small dbg-compact-btn dbg-launch-btn"
+        disabled={isLive || !ide.hasTarget || ide.debugLoading}
+        title={!ide.hasTarget ? 'Select a workspace target to start debugging' : ide.debugLoading ? 'Starting debugger…' : isLive ? 'Debug session active' : 'Start debugging (⌃D)'}
+        aria-keyshortcuts="Control+D"
+        onclick={() => void ide.startDebug()}
+      ><Icon name="bug" size={12} /><span>Debug</span></button>
+      <button type="button" class="icon-btn" aria-label="Resume program (⌘⌥R / F9)" title="Resume program (⌘⌥R / F9)" aria-keyshortcuts="Meta+Alt+R F9" disabled={!isPaused} onclick={() => void ide.resumeDebug()}><Icon name="play" size={13} /></button>
+      <button type="button" class="icon-btn" aria-label="Pause program" title="Pause program" disabled={!isRunning} onclick={() => void ide.pauseDebug()}><Icon name="pause" size={13} /></button>
       <span class="dbg-sep" aria-hidden="true"></span>
-      <button type="button" class="icon-btn" aria-label="Step over" title={isPaused ? 'Step Over (F8 / ⌃⌥↓)' : undefined} aria-keyshortcuts="F8 Control+Alt+ArrowDown" disabled={!isPaused} onclick={() => void ide.stepOver()}><Icon name="stepOver" size={13} /></button>
-      <button type="button" class="icon-btn" aria-label="Step into" title={isPaused ? 'Step Into (F7 / ⌃⌥→)' : undefined} aria-keyshortcuts="F7 Control+Alt+ArrowRight" disabled={!isPaused} onclick={() => void ide.stepInto()}><Icon name="stepInto" size={13} /></button>
-      <button type="button" class="icon-btn" aria-label="Step out" title={isPaused ? 'Step Out (⇧F8 / ⌃⌥↑)' : undefined} aria-keyshortcuts="Shift+F8 Control+Alt+ArrowUp" disabled={!isPaused} onclick={() => void ide.stepOut()}><Icon name="stepOut" size={13} /></button>
-      <button type="button" class="icon-btn" aria-label="Run to cursor" title={isPaused && ide.activePath ? 'Run to Cursor (⌥F9)' : undefined} aria-keyshortcuts="Alt+F9" disabled={!isPaused || !ide.activePath} onclick={() => void ide.runToCursor()}><Icon name="target" size={13} /></button>
+      <button type="button" class="icon-btn" aria-label="Step over (F8)" title="Step over (F8)" aria-keyshortcuts="F8 Control+Alt+ArrowDown" disabled={!isPaused} onclick={() => void ide.stepOver()}><Icon name="stepOver" size={13} /></button>
+      <button type="button" class="icon-btn" aria-label="Step into (F7)" title="Step into (F7)" aria-keyshortcuts="F7 Control+Alt+ArrowRight" disabled={!isPaused} onclick={() => void ide.stepInto()}><Icon name="stepInto" size={13} /></button>
+      <button type="button" class="icon-btn" aria-label="Step out (⇧F8)" title="Step out (⇧F8)" aria-keyshortcuts="Shift+F8 Control+Alt+ArrowUp" disabled={!isPaused} onclick={() => void ide.stepOut()}><Icon name="stepOut" size={13} /></button>
+      <button type="button" class="icon-btn" aria-label="Run to cursor (⌥F9)" title="Run to cursor (⌥F9)" aria-keyshortcuts="Alt+F9" disabled={!isPaused || !ide.activePath} onclick={() => void ide.runToCursor()}><Icon name="target" size={13} /></button>
       <span class="dbg-sep" aria-hidden="true"></span>
       <button
         type="button"
@@ -185,8 +188,8 @@
         onclick={() => toggleIdeBreakpointsMuted()}
         data-testid="ide-debug-mute-bps"
       ><Icon name={areIdeBreakpointsMuted() ? 'shieldOff' : 'shield'} size={13} /></button>
-      <button type="button" class="icon-btn" aria-label="Restart debug session" title={isLive || ide.canRestartDebug ? 'Restart debug session' : undefined} disabled={(!isLive && !ide.canRestartDebug) || ide.debugLoading} onclick={() => void ide.restartDebug()} data-testid="ide-debug-restart"><Icon name="refresh" size={13} /></button>
-      <button type="button" class="icon-btn" aria-label="Stop debug session" title={isLive ? 'Stop (⌘F2)' : undefined} aria-keyshortcuts="Meta+F2" disabled={!isLive} onclick={() => void ide.stopDebug()}><Icon name="stop" size={13} /></button>
+      <button type="button" class="icon-btn" aria-label="Restart debug session" title="Restart debug session" disabled={(!isLive && !ide.canRestartDebug) || ide.debugLoading} onclick={() => void ide.restartDebug()} data-testid="ide-debug-restart"><Icon name="refresh" size={13} /></button>
+      <button type="button" class="icon-btn" aria-label="Stop debug session (⌘F2)" title="Stop debug session (⌘F2)" aria-keyshortcuts="Meta+F2" disabled={!isLive} onclick={() => void ide.stopDebug()}><Icon name="stop" size={13} /></button>
     </div>
 
     {#if dbg}

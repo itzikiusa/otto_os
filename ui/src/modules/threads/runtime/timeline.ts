@@ -9,7 +9,14 @@
 //   client-runtime/src/work-log/presentation.ts (`summarizeToolGroup`) — tool
 //   calls grouped under one summary line, approvals folded into their tool.
 
-import type { ApprovalOption, ProviderTurn, RequestKind, RuntimeRequest, TurnItem } from '../../../lib/api/types';
+import type {
+  ApprovalOption,
+  MessageAttachment,
+  ProviderTurn,
+  RequestKind,
+  RuntimeRequest,
+  TurnItem,
+} from '../../../lib/api/types';
 import type { RuntimeProjection } from './projection';
 
 export interface PendingApproval {
@@ -132,23 +139,49 @@ export function subagentChildren(items: readonly TurnItem[]): Map<string, TurnIt
 
 /** How a finished turn went, for its status line: `partial` = it answered
  *  but a step failed (Details / Retry), `stopped` = interrupted (neutral, not
- *  an error), `stalled` = the watchdog stopped it. Null while running or
- *  when it simply completed. */
-export type TurnOutcome = { kind: 'partial'; failed: TurnItem[]; retryText: string | null } | { kind: 'stopped' | 'stalled' };
+ *  an error), `stalled` = the watchdog stopped it, `failed` = terminated with
+ *  an error. Null while running or when it simply completed. */
+export type TurnOutcome =
+  | {
+      kind: 'partial';
+      failed: TurnItem[];
+      retryText: string | null;
+      retryAttachments?: MessageAttachment[];
+    }
+  | {
+      kind: 'stopped' | 'stalled' | 'failed';
+      retryText?: string;
+      retryAttachments?: MessageAttachment[];
+    };
 
 export function turnOutcome(p: RuntimeProjection, turn: ProviderTurn | null): TurnOutcome | null {
   if (!turn || turn.status === 'running' || turn.status === 'pending') return null;
   const own = p.items.filter((i) => i.turn_id === turn.id && !i.parent_item_id);
+  const first = own.find((i): i is Extract<TurnItem, { type: 'user_message' }> => i.type === 'user_message');
+  const retryFields = first
+    ? {
+        ...(first.text ? { retryText: first.text } : {}),
+        ...(first.attachments?.length ? { retryAttachments: first.attachments } : {}),
+      }
+    : {};
   if (turn.status === 'interrupted' || turn.status === 'cancelled') {
-    return { kind: own.some((i) => i.id === `${turn.id}:stalled`) ? 'stalled' : 'stopped' };
+    const kind = own.some((i) => i.id === `${turn.id}:stalled`) ? 'stalled' : 'stopped';
+    return { kind, ...retryFields };
+  }
+  if (turn.status === 'failed') {
+    return { kind: 'failed', ...retryFields };
   }
   if (turn.status !== 'completed') return null;
   const answered = own.some((i) => i.type === 'assistant_message' && i.text.trim() !== '');
   const failed = own.filter((i) => i.type !== 'system_notice' && !isLostConversation(i) && (i.status === 'failed' || i.type === 'error'));
   if (!answered || failed.length === 0) return null;
   // Retry re-sends the message that started it (none for the agent's own turn).
-  const first = own.find((i) => i.type === 'user_message');
-  return { kind: 'partial', failed, retryText: first?.type === 'user_message' ? first.text : null };
+  return {
+    kind: 'partial',
+    failed,
+    retryText: first ? first.text : null,
+    ...(first?.attachments?.length ? { retryAttachments: first.attachments } : {}),
+  };
 }
 
 /** The provider no longer has this thread's conversation (Claude's "No

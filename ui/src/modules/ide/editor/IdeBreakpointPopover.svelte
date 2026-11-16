@@ -148,7 +148,7 @@
           type="button"
           class="icon-btn"
           aria-label="Close breakpoint editor"
-          title="Close"
+          title="Close breakpoint editor"
           onclick={() => saveAndClose()}
         >
           <Icon name="x" size={12} />

@@ -60,11 +60,16 @@ const M_REQUEST_PERMISSION: &str = "session/request_permission";
 const M_SESSION_SET_MODE: &str = "session/set_mode";
 const M_SESSION_SET_MODEL: &str = "session/set_model";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Phase {
+    #[default]
     Initializing,
-    Creating { loading: bool },
-    Authenticating { load: bool },
+    Creating {
+        loading: bool,
+    },
+    Authenticating {
+        load: bool,
+    },
     Ready,
 }
 
@@ -179,10 +184,18 @@ pub(super) struct Pending {
     options: Vec<PermissionOption>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(super) struct AcpDriverState {
     pub(super) cwd: String,
     pub(super) resume: Option<String>,
+    /// Otto runtime session ID (for scoping `/tmp/otto-acp-bg/<sid>/` tails).
+    #[serde(default)]
+    pub(super) otto_session_id: Option<String>,
+    /// `agy` conversation IDs observed for this session and its spawned
+    /// subagents (caps brain-dir transcript/task-log reads to this session).
+    #[serde(default)]
+    pub(super) observed_agy_conv_ids: VecDeque<String>,
     /// Handed over in `session/new|load` (Otto's `otto` tools + the user's
     /// enabled servers — the set a terminal session gets).
     pub(super) mcp_servers: Vec<McpServerDef>,
@@ -251,6 +264,19 @@ pub(super) struct AcpDriverState {
     pub(super) sideband: crate::acp_sideband::AcpSideband,
 }
 
+impl AcpDriverState {
+    pub(super) fn note_agy_conv_id(&mut self, id: &str) {
+        let trimmed = id.trim();
+        if trimmed.is_empty() || self.observed_agy_conv_ids.iter().any(|x| x == trimmed) {
+            return;
+        }
+        while self.observed_agy_conv_ids.len() >= 64 {
+            self.observed_agy_conv_ids.pop_front();
+        }
+        self.observed_agy_conv_ids.push_back(trimmed.to_string());
+    }
+}
+
 pub struct AcpDriver {
     provider: RuntimeProvider,
     flavor: AcpFlavor,
@@ -278,6 +304,8 @@ impl AcpDriver {
             state: AcpDriverState {
                 cwd: String::new(),
                 resume: None,
+                otto_session_id: None,
+                observed_agy_conv_ids: VecDeque::new(),
                 mcp_servers: Vec::new(),
                 model: None,
                 config_req: None,
@@ -1453,6 +1481,11 @@ impl AcpDriver {
                     .and_then(|r| serde_json::from_value::<NewSessionResponse>(r).ok())
                     .map(|r| r.session_id.0.to_string())
             };
+            if self.provider == RuntimeProvider::Agy {
+                if let Some(sid) = self.state.session_id.clone() {
+                    self.state.note_agy_conv_id(&sid);
+                }
+            }
             self.state.phase = Phase::Ready;
             step.push(DriverEvent::Ready {
                 native_thread_id: self.state.session_id.clone(),
@@ -1693,6 +1726,13 @@ impl StructuredDriver for AcpDriver {
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
         self.state.cwd = ctx.cwd.clone();
         self.state.resume = ctx.resume.clone();
+        self.state.otto_session_id =
+            (!ctx.session_id.trim().is_empty()).then(|| ctx.session_id.clone());
+        if self.provider == RuntimeProvider::Agy {
+            if let Some(r) = ctx.resume.as_deref() {
+                self.state.note_agy_conv_id(r);
+            }
+        }
         self.state.mcp_servers = ctx.mcp_servers.clone();
         self.state.model = ctx.model.clone();
         self.state.access = ctx.access_mode;
@@ -2126,10 +2166,13 @@ impl StructuredDriver for AcpDriver {
         let Some(prim) = primary_payload else {
             return step;
         };
-        let actions =
-            self.state
-                .sideband
-                .on_payload(self.provider, self.state.session_id.as_deref(), prim);
+        let has_open_subagent = self.state.subagents.values().any(|a| a.status.is_open());
+        let actions = self.state.sideband.on_payload(
+            self.provider,
+            self.state.session_id.as_deref(),
+            has_open_subagent,
+            prim,
+        );
         if !ready_and_live {
             return step;
         }

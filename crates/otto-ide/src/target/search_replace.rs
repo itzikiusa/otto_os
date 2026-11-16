@@ -69,7 +69,7 @@ pub(super) fn replace_local_sync(
         let Ok(bytes) = std::fs::read(p) else {
             continue;
         };
-        if bytes[..bytes.len().min(4096)].contains(&0) {
+        if bytes.contains(&0) {
             continue;
         }
         let Ok(text) = std::str::from_utf8(&bytes) else {
@@ -83,17 +83,31 @@ pub(super) fn replace_local_sync(
         };
 
         if !req.dry_run {
-            let existing_perms = meta.permissions();
-            let tmp = p.with_extension("otto-replace-tmp");
-            std::fs::write(&tmp, replaced_text.as_bytes())
-                .map_err(|e| map_io_err("write replace temp", &tmp, e))?;
-            let _ = std::fs::set_permissions(&tmp, existing_perms);
-            if let Err(e) = std::fs::rename(&tmp, p) {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(map_io_err("commit replace", p, e));
+            use std::io::Write;
+            let Ok(canon_p) = p.canonicalize() else {
+                continue;
+            };
+            let in_roots = std::iter::once(root)
+                .chain(additional_roots.iter().map(PathBuf::as_path))
+                .any(|r| canon_p.starts_with(r));
+            if !in_roots || (restricted && super::fs_ops::enforce_non_root_path(&canon_p).is_err())
+            {
+                continue;
             }
+            let parent = canon_p.parent().ok_or_else(|| {
+                otto_core::Error::Invalid("replace target path has no parent directory".into())
+            })?;
+            let existing_perms = meta.permissions();
+            let mut tmp = tempfile::NamedTempFile::new_in(parent)
+                .map_err(|e| map_io_err("create replace temp", &canon_p, e))?;
+            tmp.write_all(replaced_text.as_bytes())
+                .map_err(|e| map_io_err("write replace temp", tmp.path(), e))?;
+            let _ = tmp.as_file().sync_all();
+            let _ = std::fs::set_permissions(tmp.path(), existing_perms);
+            tmp.persist(&canon_p)
+                .map_err(|e| map_io_err("commit replace", &canon_p, e.error))?;
             if let Some(pool) = lsp_pool {
-                pool.notify_watched_file_if_build_manifest(p, 2);
+                pool.notify_watched_file_if_build_manifest(&canon_p, 2);
             }
         }
 
@@ -257,13 +271,12 @@ pub(super) async fn search_remote_ssh(
 ) -> Result<IdeSearchResp> {
     let mut items = Vec::new();
     let mut truncated = false;
-    let q_lower = req.query.to_ascii_lowercase();
+    let q_lower = req.query.to_lowercase();
     let compiled_glob = CompiledFileGlob::compile(req.file_glob.as_deref());
     let search_roots: Vec<String> = match req
         .scope_path
         .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && *s != ".")
     {
         Some(sp) => vec![resolve_remote_in_roots(root, additional_roots, sp)?.0],
         None => std::iter::once(root.to_string())
@@ -284,7 +297,7 @@ pub(super) async fn search_remote_ssh(
             let matched = if req.case_sensitive {
                 rel.contains(&req.query)
             } else {
-                rel.to_ascii_lowercase().contains(&q_lower)
+                rel.to_lowercase().contains(&q_lower)
             };
             if matched && compiled_glob.matches(&rel) {
                 if items.len() >= limit {
@@ -317,10 +330,12 @@ pub(super) async fn search_remote_ssh(
             let q_escaped = shell_words::quote(&req.query);
             let script = format!(
                 "if command -v rg >/dev/null 2>&1; then \
-                   rg --line-number --column --no-heading --color=never {case_flag} {fixed_flag} {word_flag} -- {q_escaped} . | head -n {cap}; \
+                   rg --null --line-number --column --no-heading --color=never {case_flag} {fixed_flag} {word_flag} -- {q_escaped} . | head -n {cap}; \
                  else \
-                   grep -rnI {} {} -- {q_escaped} . | head -n {cap}; \
+                   grep -rnIZ {} {} -- {q_escaped} . 2>/dev/null || grep -rnI {} {} -- {q_escaped} . | head -n {cap}; \
                  fi",
+                if req.case_sensitive { "" } else { "-i" },
+                if req.whole_word { "-w" } else { "" },
                 if req.case_sensitive { "" } else { "-i" },
                 if req.whole_word { "-w" } else { "" }
             );
@@ -354,8 +369,28 @@ pub(super) async fn search_remote_ssh(
 }
 
 fn parse_rg_or_grep_line(root: &str, raw: &str) -> Option<IdeSearchItem> {
+    if let Some((file_raw, after_nul)) = raw.split_once('\0') {
+        let file_part = file_raw.strip_prefix("./").unwrap_or(file_raw);
+        let mut parts = after_nul.splitn(3, ':');
+        let line_no: u32 = parts.next()?.trim().parse().ok()?;
+        let second = parts.next()?;
+        let (col, preview) = match (second.trim().parse::<u32>(), parts.next()) {
+            (Ok(c), Some(rest)) => (Some(c), rest.trim()),
+            _ => (Some(1), second.trim()),
+        };
+        return Some(IdeSearchItem {
+            kind: IdeSearchItemKind::Text,
+            path: join_remote(root, file_part),
+            line: Some(line_no),
+            column: col,
+            preview: preview.chars().take(200).collect(),
+            symbol_kind: None,
+            container: None,
+        });
+    }
     let mut parts = raw.splitn(4, ':');
-    let file_part = parts.next()?.trim().trim_start_matches("./");
+    let file_raw = parts.next()?;
+    let file_part = file_raw.strip_prefix("./").unwrap_or(file_raw);
     let line_no: u32 = parts.next()?.trim().parse().ok()?;
     let third = parts.next()?;
     let (col, preview) = match (third.trim().parse::<u32>(), parts.next()) {

@@ -51,6 +51,18 @@ pub trait RuntimeHost: Send + Sync + 'static {
         None
     }
 
+    /// Whether `slug` (built-in or custom) is enabled in `ProviderRegistry`.
+    /// Defaults to `true` for unit tests without a registry.
+    fn is_provider_enabled(&self, _slug: &str) -> bool {
+        true
+    }
+
+    /// Resolved custom `CLAUDE_CONFIG_DIR` for a Claude-family provider `slug`
+    /// (including wrapper-script / `~/.zshrc` alias inference).
+    fn claude_config_dir_for(&self, _slug: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// Whether session persistence across daemon restarts is enabled.
     async fn session_persistence_enabled(&self) -> bool {
         true
@@ -169,6 +181,14 @@ impl RuntimeHost for SessionManagerHost {
 
     fn resolve_custom_provider(&self, slug: &str) -> Option<RuntimeProvider> {
         self.manager.providers().runtime_provider_for(slug)
+    }
+
+    fn is_provider_enabled(&self, slug: &str) -> bool {
+        self.manager.providers().is_enabled(slug)
+    }
+
+    fn claude_config_dir_for(&self, slug: &str) -> Option<std::path::PathBuf> {
+        self.manager.claude_config_dir_for(slug)
     }
 
     async fn session_persistence_enabled(&self) -> bool {

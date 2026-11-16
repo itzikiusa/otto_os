@@ -164,6 +164,25 @@ export interface IdeHoverResp {
   defined_in?: IdeHoverDefinedIn | null;
 }
 
+export interface IdeLspActiveServer {
+  key: string;
+  language: string;
+  root: string;
+  pid?: number | null;
+  rss_bytes?: number | null;
+  uptime_secs: number;
+}
+
+export interface IdeLspStatusResp {
+  active_server_count: number;
+  max_servers_per_owner: number;
+  max_global_servers: number;
+  total_rss_bytes: number;
+  rss_budget_bytes: number;
+  servers: IdeLspActiveServer[];
+  available_servers?: Record<string, boolean>;
+}
+
 // ── Local History & Deleted-File Recovery (`/ide/history/*`) ─────────────────
 
 export interface IdeLocalHistoryEntry {
@@ -398,12 +417,11 @@ export interface IdeCollabPeer {
   display_name: string;
   color: string;
   role: IdeCollabRole;
-  is_host?: boolean;
+  is_host: boolean;
   active_path?: string | null;
-  path?: string | null;
   active_line?: number | null;
   selections?: IdeCollabSelection[];
-  connected_at?: string | number;
+  updated_at: string;
 }
 
 export interface IdePeerCursor {
@@ -421,11 +439,18 @@ export interface IdeCollabRoom {
   title: string;
   target: IdeTargetSpec;
   default_role: IdeCollabRole;
-  host_user_id?: string | null;
-  created_at?: string | number;
+  host_user_id: string;
+  created_at: string;
   peers: IdeCollabPeer[];
   active_debug_id?: string | null;
 }
+
+export interface IdeCreateCollabRoomReq {
+  target: IdeTargetSpec;
+  title?: string | null;
+  default_role?: IdeCollabRole;
+}
+export type IdeCollabCreateReq = IdeCreateCollabRoomReq;
 
 export interface IdeCreateCollabRoomResp {
   room: IdeCollabRoom;
@@ -436,9 +461,15 @@ export interface IdeCreateCollabRoomResp {
 }
 export type IdeCollabCreateResp = IdeCreateCollabRoomResp;
 export interface IdeCollabRoomsResp { rooms: IdeCollabRoom[]; }
+export interface IdeCollabRoleReq { peer_id: string; role: IdeCollabRole; }
+export interface IdeCollabRoomResp { room: IdeCollabRoom; }
+export interface IdeCollabJoinReq { display_name: string; token: string; }
 export interface IdeCollabJoinResp { peer_id: string; peer_secret: string; color: string; room: IdeCollabRoom; }
 export interface IdeCollabSharedBuffer { content: string; version: number; }
 export interface IdeCollabStateResp { room: IdeCollabRoom; shared_buffers: Record<string, IdeCollabSharedBuffer>; active_debug?: IdeDebugSessionSnapshot | null; }
+export interface IdeCollabCursorReq { peer_id: string; peer_secret: string; path: string; selections?: IdeCollabSelection[]; active_line: number; }
+export interface IdeCollabEditReq { peer_id: string; peer_secret: string; path: string; content: string; base_version?: number | null; save?: boolean; }
+export interface IdeCollabEditResp { version: number; }
 
 export interface IdeCollabEvent {
   type:
@@ -447,10 +478,10 @@ export interface IdeCollabEvent {
     | 'role_changed'
     | 'cursor_moved'
     | 'buffer_updated'
-    | 'buffer_edited'
     | 'debug_updated'
     | 'room_closed'
     | string;
+  kind?: 'cursor' | 'edit';
   room_id?: string;
   peer_id?: string;
   display_name?: string;
@@ -465,7 +496,6 @@ export interface IdeCollabEvent {
   saved?: boolean;
   sha256?: string | null;
   session?: IdeDebugSessionSnapshot | null;
-  debug?: IdeDebugSessionSnapshot | null;
   room?: IdeCollabRoom;
 }
 
@@ -538,12 +568,17 @@ export interface IdePluginCatalogEntry {
   name: string;
   version: string;
   description: string;
-  author?: string | null;
   tags: string[];
   installed: boolean;
+  builtin?: boolean;
+  enabled?: boolean;
   languages?: string[];
-  source?: string;
+  commands_count?: number;
+  gutter_detectors_count?: number;
 }
 
 export interface IdePluginsResp { plugins: IdePluginInfo[]; catalog: IdePluginCatalogEntry[]; }
 export interface IdePluginResp { plugin: IdePluginInfo; }
+export interface IdeInstallPluginReq { source: string; }
+export interface IdeTogglePluginReq { enabled: boolean; }
+export interface IdeOkResp { ok: boolean; }

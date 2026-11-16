@@ -296,7 +296,7 @@ pub(super) async fn enrich_crates_updates(items: &mut [IdeDepItem]) {
             ENRICH_BATCH_DEADLINE,
             stream::iter(uncached)
                 .map(|name| async move {
-                    if !valid_simple_pkg_name(&name) || name.contains('.') {
+                    if !name.is_ascii() || !valid_simple_pkg_name(&name) || name.contains('.') {
                         return;
                     }
                     let lower = name.to_ascii_lowercase();

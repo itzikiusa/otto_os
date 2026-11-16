@@ -277,24 +277,37 @@ fn resolve_debug_launch_spec<'a>(
     validate_non_root_debug_request(req, ctx, &cwd, &env)?;
 
     let raw_lang = req.language.trim().to_ascii_lowercase();
-    let (canonical_lang, provisional_adapter, plugin_spec) = match raw_lang.as_str() {
-        "go" | "golang" => ("go".to_string(), "dlv".to_string(), None),
-        "python" | "py" => ("python".to_string(), "python-dap".to_string(), None),
-        "rust" | "rs" => ("rust".to_string(), "lldb".to_string(), None),
-        "javascript" | "js" => ("javascript".to_string(), "node-inspector".to_string(), None),
-        "typescript" | "ts" | "node" => {
-            ("typescript".to_string(), "node-inspector".to_string(), None)
-        }
-        "java" => ("java".to_string(), "java-jdwp".to_string(), None),
-        "shell" | "bash" | "sh" | "zsh" => ("shell".to_string(), "shell-debug".to_string(), None),
-        other => {
-            if let Some(ps) = ctx
-                .plugin_adapters
-                .iter()
-                .find(|p| p.language.eq_ignore_ascii_case(other))
-            {
-                (other.to_string(), ps.adapter_name.clone(), Some(ps))
-            } else {
+    let canonical_alias = match raw_lang.as_str() {
+        "go" | "golang" => "go",
+        "python" | "py" => "python",
+        "rust" | "rs" => "rust",
+        "javascript" | "js" => "javascript",
+        "typescript" | "ts" | "node" => "typescript",
+        "java" => "java",
+        "shell" | "bash" | "sh" | "zsh" => "shell",
+        other => other,
+    };
+    let matched_plugin = ctx.plugin_adapters.iter().find(|p| {
+        p.language.eq_ignore_ascii_case(&raw_lang)
+            || p.language.eq_ignore_ascii_case(canonical_alias)
+            || p.adapter_name.eq_ignore_ascii_case(&raw_lang)
+    });
+    let (canonical_lang, provisional_adapter, plugin_spec) = if let Some(ps) = matched_plugin {
+        (
+            canonical_alias.to_string(),
+            ps.adapter_name.clone(),
+            Some(ps),
+        )
+    } else {
+        match canonical_alias {
+            "go" => ("go".to_string(), "dlv".to_string(), None),
+            "python" => ("python".to_string(), "python-dap".to_string(), None),
+            "rust" => ("rust".to_string(), "lldb".to_string(), None),
+            "javascript" => ("javascript".to_string(), "node-inspector".to_string(), None),
+            "typescript" => ("typescript".to_string(), "node-inspector".to_string(), None),
+            "java" => ("java".to_string(), "java-jdwp".to_string(), None),
+            "shell" => ("shell".to_string(), "shell-debug".to_string(), None),
+            other => {
                 return Err(Error::Invalid(format!(
                     "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, javascript, typescript, java, or shell"
                 )));
@@ -332,7 +345,16 @@ pub(crate) async fn resolve_dap_adapter_with_manager(
 ) -> Result<ResolvedDapAdapter> {
     let spec = resolve_debug_launch_spec(data_dir, req, ctx, env_mgr)?;
     if let Some(plugin_spec) = spec.plugin_spec {
-        return resolve_plugin_adapter(&spec.raw_lang, plugin_spec, req, &spec.cwd, spec.env);
+        return resolve_plugin_adapter_with_target(
+            data_dir,
+            &spec.canonical_lang,
+            plugin_spec,
+            req,
+            ctx,
+            &spec.cwd,
+            spec.env,
+        )
+        .await;
     }
 
     match spec.canonical_lang.as_str() {
@@ -350,6 +372,77 @@ pub(crate) async fn resolve_dap_adapter_with_manager(
     }
 }
 
+fn interpolate_json_value(
+    val: &Value,
+    subst: &dyn Fn(&str) -> String,
+    attach_port: Option<u16>,
+) -> Value {
+    match val {
+        Value::String(s) => {
+            if s == "${port}" || s == "{port}" {
+                if let Some(p) = attach_port {
+                    return json!(p);
+                }
+            }
+            Value::String(subst(s))
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| interpolate_json_value(item, subst, attach_port))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (subst(k), interpolate_json_value(v, subst, attach_port)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+async fn resolve_plugin_adapter_with_target(
+    data_dir: &Path,
+    language: &str,
+    spec: &PluginDapAdapterSpec,
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    cwd: &str,
+    mut env: BTreeMap<String, String>,
+) -> Result<ResolvedDapAdapter> {
+    if req.target.kind == IdeTargetKind::Local {
+        let tc_bins = crate::lsp_host::servers::collect_toolchain_bin_dirs(data_dir);
+        if !tc_bins.is_empty() {
+            let prefix: String = tc_bins
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(":");
+            let cur_path = env.get("PATH").cloned().unwrap_or_default();
+            env.insert(
+                "PATH".into(),
+                if cur_path.is_empty() {
+                    prefix
+                } else {
+                    format!("{prefix}:{cur_path}")
+                },
+            );
+        }
+    }
+    let mut resolved = resolve_plugin_adapter(language, spec, req, cwd, env)?;
+    let (cmd_slot, env_ref) = match &mut resolved.transport {
+        DapAdapterTransport::Stdio { command, env, .. }
+        | DapAdapterTransport::TcpListen { command, env, .. } => (command, env),
+        _ => return Ok(resolved),
+    };
+    if let Some(found) =
+        locate_binary(&req.target, ctx, env_ref, std::slice::from_ref(cmd_slot)).await
+    {
+        *cmd_slot = found;
+    }
+    Ok(resolved)
+}
+
 fn resolve_plugin_adapter(
     language: &str,
     spec: &PluginDapAdapterSpec,
@@ -359,37 +452,51 @@ fn resolve_plugin_adapter(
 ) -> Result<ResolvedDapAdapter> {
     let program = normalize_target_path(&req.target, &req.launch.program);
     let test_name = req.launch.test_name.clone().unwrap_or_default();
+    let port_str = req
+        .launch
+        .attach_port
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "0".to_string());
     let subst = |s: &str| {
         s.replace("${program}", &program)
+            .replace("{program}", &program)
             .replace("${cwd}", cwd)
+            .replace("{cwd}", cwd)
             .replace("${workspaceFolder}", &req.target.root)
+            .replace("{workspaceFolder}", &req.target.root)
             .replace("${test_name}", &test_name)
+            .replace("{test_name}", &test_name)
+            .replace("${port}", &port_str)
+            .replace("{port}", &port_str)
     };
+    let command = subst(&spec.command);
     let args: Vec<String> = spec.args.iter().map(|a| subst(a)).collect();
     let launch_args = if let Some(tpl) = &spec.launch_template {
-        let raw = serde_json::to_string(tpl).unwrap_or_else(|_| "{}".into());
-        serde_json::from_str(&subst(&raw))
-            .unwrap_or_else(|_| json!({ "program": program, "cwd": cwd }))
+        interpolate_json_value(tpl, &subst, req.launch.attach_port)
     } else {
-        json!({
+        let mut base = json!({
             "program": program,
             "args": req.launch.args,
             "cwd": cwd,
-        })
+        });
+        if let Some(p) = req.launch.attach_port {
+            base["port"] = json!(p);
+        }
+        base
     };
     let is_tcp = args
         .iter()
         .any(|a| a.contains("--port") || a.contains("--listen"));
     let transport = if is_tcp {
         DapAdapterTransport::TcpListen {
-            command: spec.command.clone(),
+            command,
             args,
             cwd: cwd.to_string(),
             env,
         }
     } else {
         DapAdapterTransport::Stdio {
-            command: spec.command.clone(),
+            command,
             args,
             cwd: cwd.to_string(),
             env,
@@ -471,5 +578,55 @@ mod tests {
         assert_eq!(resolved.launch_command, "launch");
         assert_eq!(resolved.launch_args["mainClass"], "/workspace/kt/Main.kt");
         assert_eq!(resolved.launch_args["testFilter"], "testGreeting");
+    }
+
+    #[test]
+    fn plugin_dap_adapter_escapes_quotes_and_backslashes_and_overrides_builtin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let req = IdeStartDebugReq {
+            target: IdeTargetSpec::local(tmp.path().to_string_lossy()),
+            language: "py".into(),
+            launch: IdeDebugLaunchSpec {
+                program: "/ws/my \"quoted\"\\app.py".into(),
+                cwd: Some("/ws/dir\\sub".into()),
+                test_name: Some("test_\"quote\"".into()),
+                attach_port: Some(5678),
+                ..IdeDebugLaunchSpec::default()
+            },
+            ..IdeStartDebugReq::default()
+        };
+        let custom_py = PluginDapAdapterSpec {
+            language: "python".into(),
+            adapter_name: "custom-py-dap".into(),
+            command: "${workspaceFolder}/bin/custom-py-dap".into(),
+            args: vec!["--port=${port}".into()],
+            launch_template: Some(json!({
+                "program": "${program}",
+                "cwd": "${cwd}",
+                "port": "${port}",
+                "nested": ["${test_name}", "127.0.0.1:${port}"]
+            })),
+        };
+        let ctx = DapStartContext {
+            caller_is_root: true,
+            plugin_adapters: vec![custom_py.clone()],
+            ..Default::default()
+        };
+
+        let (canon, adapter) = preflight_debug_request(tmp.path(), &req, &ctx, None).unwrap();
+        assert_eq!(canon, "python");
+        assert_eq!(adapter, "custom-py-dap");
+
+        let resolved =
+            resolve_plugin_adapter("python", &custom_py, &req, "/ws/dir\\sub", BTreeMap::new())
+                .unwrap();
+        assert_eq!(resolved.launch_command, "attach");
+        assert_eq!(resolved.launch_args["program"], "/ws/my \"quoted\"\\app.py");
+        assert_eq!(resolved.launch_args["cwd"], "/ws/dir\\sub");
+        assert_eq!(resolved.launch_args["port"], json!(5678));
+        assert_eq!(
+            resolved.launch_args["nested"],
+            json!(["test_\"quote\"", "127.0.0.1:5678"])
+        );
     }
 }

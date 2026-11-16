@@ -236,7 +236,8 @@ pub(super) async fn spawn_inspected_node(
     argv.push(spec.program.clone());
     argv.extend(spec.args.clone());
 
-    let mut child = spawn_target_process(target, ssh, &spec.node_bin, &argv, &spec.cwd, &spec.env)?;
+    let mut child =
+        spawn_target_process(target, ssh, &spec.node_bin, &argv, &spec.cwd, &spec.env).await?;
     let stdout = child.stdout.take();
     let stderr = child
         .stderr

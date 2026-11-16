@@ -53,11 +53,6 @@
         accountProviders = set;
         return set;
       })
-      .catch(() => {
-        const empty = new Set<GitProviderKind>();
-        accountProviders = empty;
-        return empty;
-      })
       .finally(() => {
         accountsLoadPromise = null;
       });
@@ -65,7 +60,9 @@
   }
 
   $effect(() => {
-    void ensureAccounts();
+    void ensureAccounts().catch(() => {
+      // Handled per-load in `load()` so retry re-attempts `/git/accounts`.
+    });
   });
 
   async function load(reset: boolean): Promise<void> {
@@ -74,7 +71,14 @@
       return;
     }
     if (!repo.git_account_id) {
-      const providers = await ensureAccounts();
+      let providers: Set<GitProviderKind>;
+      try {
+        providers = await ensureAccounts();
+      } catch (e) {
+        error = loadErrorText(e);
+        if (reset) items = [];
+        return;
+      }
       if (!providers.has(repo.provider)) {
         if (reset) items = [];
         hasMore = false;

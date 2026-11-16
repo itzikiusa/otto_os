@@ -138,16 +138,24 @@ fn parse_go_require_spec(raw_line: &str, line_no: u32, strip_kw: bool) -> Option
     let mut parts = inner_work.split_whitespace();
     let mod_name = parts.next()?;
     let ver = parts.next()?;
-    if mod_name.starts_with('(') || mod_name.starts_with(')') {
+    if mod_name.starts_with('-')
+        || ver.starts_with('-')
+        || mod_name.starts_with('(')
+        || mod_name.starts_with(')')
+        || mod_name.chars().any(char::is_control)
+        || ver.chars().any(char::is_control)
+    {
         return None;
     }
     let name_byte = search_from + code_part[search_from..].find(mod_name)?;
     let ver_search_start = name_byte + mod_name.len();
     let ver_byte = ver_search_start + code_part[ver_search_start..].find(ver)?;
-    let name_col = (code_part[..name_byte].chars().count() + 1) as u32;
-    let name_end_col = name_col + mod_name.chars().count() as u32;
-    let version_col = (code_part[..ver_byte].chars().count() + 1) as u32;
-    let version_end_col = version_col + ver.chars().count() as u32;
+    let name_col = (crate::text_pos::byte_idx_to_utf16_col(code_part, name_byte) + 1) as u32;
+    let name_end_col =
+        (crate::text_pos::byte_idx_to_utf16_col(code_part, name_byte + mod_name.len()) + 1) as u32;
+    let version_col = (crate::text_pos::byte_idx_to_utf16_col(code_part, ver_byte) + 1) as u32;
+    let version_end_col =
+        (crate::text_pos::byte_idx_to_utf16_col(code_part, ver_byte + ver.len()) + 1) as u32;
 
     Some(IdeDepItem {
         name: mod_name.to_string(),
@@ -225,7 +233,11 @@ pub(super) async fn enrich_go_mod_updates(
     } else {
         items
             .iter()
-            .filter(|i| !module_matches_goprivate(&i.name, &goprivate))
+            .filter(|i| {
+                !i.name.starts_with('-')
+                    && !i.name.chars().any(char::is_control)
+                    && !module_matches_goprivate(&i.name, &goprivate)
+            })
             .map(|i| i.name.clone())
             .collect()
     };
@@ -234,7 +246,7 @@ pub(super) async fn enrich_go_mod_updates(
     }
 
     let mut cmd = tokio::process::Command::new("go");
-    cmd.args(["list", "-mod=readonly", "-m", "-u", "-json"]);
+    cmd.args(["list", "-mod=readonly", "-m", "-u", "-json", "--"]);
     if !goprivate.trim().is_empty() && non_private_mods.len() < items.len() {
         cmd.args(&non_private_mods);
     } else {
@@ -242,8 +254,17 @@ pub(super) async fn enrich_go_mod_updates(
     }
     cmd.current_dir(dir)
         .env_clear()
-        .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
-        .envs(env_map)
+        .envs(crate::environments::shell_env::collect_safe_non_root_base_env());
+    for (k, v) in env_map {
+        if !crate::environments::is_dangerous_loader_env_key(k)
+            && !k.eq_ignore_ascii_case("GOFLAGS")
+        {
+            cmd.env(k, v);
+        }
+    }
+    cmd.env("GOTOOLCHAIN", "local")
+        .env("CGO_ENABLED", "0")
+        .env("GOFLAGS", "")
         .env("GIT_TERMINAL_PROMPT", "0")
         .kill_on_drop(true);
     for go_key in [

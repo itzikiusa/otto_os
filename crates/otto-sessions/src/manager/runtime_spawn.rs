@@ -132,22 +132,51 @@ fn apply_custom_provider_spec(
         .iter()
         .chain(tail_args.iter())
         .any(|a| is_skip_flag(a.as_str()));
+    let driver_sets_perm_mode = spec
+        .args
+        .iter()
+        .chain(tail_args.iter())
+        .any(|a| a == "--permission-mode" || a.starts_with("--permission-mode="));
     spec.program = crate::providers::expand_template(&pspec.cmd, &session.id, &session.cwd);
+    let home = otto_transcript::roots::home_dir();
+    for (k, v) in &pspec.env {
+        let expanded = crate::providers::expand_template(v, &session.id, &session.cwd);
+        let expanded = if expanded.starts_with("~/") || expanded == "~" {
+            otto_transcript::claude_config::expand_home_path(&expanded, &home)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(expanded)
+        } else {
+            expanded
+        };
+        spec.env.retain(|(ek, _)| ek != k);
+        spec.env.push((k.clone(), expanded));
+    }
     let mut prefix = Vec::with_capacity(pspec.args.len());
     let mut i = 0;
     while i < pspec.args.len() {
         let raw = &pspec.args[i];
-        if raw == "--session-id" || raw == "--resume" {
+        if raw == "--session-id"
+            || raw == "--resume"
+            || raw == "--conversation"
+            || (driver_sets_perm_mode && raw == "--permission-mode")
+        {
             i += 2;
             continue;
         }
-        if raw.starts_with("--session-id=") || raw.starts_with("--resume=") {
+        if raw.starts_with("--session-id=")
+            || raw.starts_with("--resume=")
+            || raw.starts_with("--conversation=")
+            || (driver_sets_perm_mode && raw.starts_with("--permission-mode="))
+        {
             i += 1;
             continue;
         }
         let expanded = crate::providers::expand_template(raw, &session.id, &session.cwd);
         if is_skip_flag(&expanded)
-            && (!driver_allows_skip || spec.args.contains(&expanded) || prefix.contains(&expanded))
+            && (!driver_allows_skip
+                || driver_sets_perm_mode
+                || spec.args.contains(&expanded)
+                || prefix.contains(&expanded))
         {
             i += 1;
             continue;
@@ -209,14 +238,16 @@ impl SessionManager {
         let unconfined = !read_only && !self.process_sandbox_enabled().await;
         self.check_session_cwd(ws, &session.cwd, unconfined)?;
         let _ = std::fs::create_dir_all(&session.cwd);
-        let cli_family = self
-            .providers
-            .model_family_for(&session.provider)
-            .unwrap_or_else(|| session.provider.clone());
+        let cli_family = self.cli_family(&session.provider);
         let custom_spec = self.providers.get(&session.provider);
         let shell_fallback =
             apply_custom_provider_spec(custom_spec.as_ref(), session, spec, &tail_args);
-        crate::trust::ensure_trusted_async(&cli_family, &session.cwd).await;
+        crate::trust::ensure_trusted_with_claude_dir_async(
+            &cli_family,
+            &session.cwd,
+            self.claude_config_dir_for(&session.provider),
+        )
+        .await;
         // MCP before the context hook — the PTY spawn's order.
         let _mcp_activation = crate::mcp::activation_gate().read().await;
         let protocol_mcp = match delivery {
@@ -245,8 +276,16 @@ impl SessionManager {
         // from a structured driver's argv.
         spec.args
             .extend(cli_flags::read_only_args(&cli_family, &session.meta));
-        // A subcommand that must follow the injected top-level flags.
-        spec.args.extend(tail_args);
+        // A subcommand that must follow the injected top-level flags (unless a
+        // custom provider spec already carried it).
+        if !tail_args.is_empty()
+            && !spec
+                .args
+                .windows(tail_args.len())
+                .any(|w| w == tail_args.as_slice())
+        {
+            spec.args.extend(tail_args);
+        }
         // The PTY spawn's build budget (`manager/resources.rs`); priority and
         // admission stay with the runtime, which spawns the child itself.
         self.apply_machine_budget(session, spec).await;

@@ -5,7 +5,7 @@
 //! bounded 16 MiB [`LineRing`], and replays unacknowledged output on re-attach.
 
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -22,9 +22,10 @@ use crate::holder::pipes::{
     redirect_stdio_to_devnull, spawn_child_pipes, terminate_child_group, ChildPipeEvent, StdinCmd,
 };
 use crate::holder::protocol::{
-    checkpoint_acked_seq, read_frame, write_frame, DaemonFrame, HolderExitStatus, HolderFrame,
-    HolderReady, HolderSignal, HolderSpawnSpec, LineRing, DEFAULT_EXIT_LINGER, ERROR_PREFIX,
-    HOLDER_ENV, MAX_RING_BYTES, PROTO_VERSION, READY_PREFIX,
+    checkpoint_acked_seq, read_frame, read_tolerant_frame, write_frame, DaemonFrame,
+    HolderExitStatus, HolderFrame, HolderReady, HolderSignal, HolderSpawnSpec, LineRing,
+    DEFAULT_EXIT_LINGER, DEFAULT_ORPHAN_TTL, ERROR_PREFIX, HOLDER_ENV, MAX_RING_BYTES,
+    PROTO_VERSION, READY_PREFIX, SOCKET_WATCHDOG_INTERVAL,
 };
 use crate::process::signal_group;
 
@@ -153,6 +154,10 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
     tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
         .await
         .map_err(|e| format!("chmod holder socket {}: {e}", socket_path.display()))?;
+    let bound_socket_id = tokio::fs::symlink_metadata(socket_path)
+        .await
+        .ok()
+        .map(|m| (m.dev(), m.ino()));
 
     let mut cmd = Command::new(&spec.command.program);
     cmd.args(&spec.command.args)
@@ -199,6 +204,15 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
         .exit_linger_ms
         .map(Duration::from_millis)
         .unwrap_or(DEFAULT_EXIT_LINGER);
+    let orphan_dur = spec
+        .orphan_ttl_ms
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_ORPHAN_TTL);
+    let watchdog_every = SOCKET_WATCHDOG_INTERVAL.min(orphan_dur.max(Duration::from_millis(50)));
+    let mut watchdog_tick = tokio::time::interval(watchdog_every);
+    watchdog_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    watchdog_tick.tick().await;
+
     let mut ring = LineRing::new(MAX_RING_BYTES);
     let mut checkpoint: serde_json::Value = spec.initial_checkpoint;
     let mut exited: Option<HolderExitStatus> = None;
@@ -206,12 +220,19 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
     let mut next_conn_id: u64 = 1;
     let (client_in_tx, mut client_in_rx) = mpsc::unbounded_channel::<ClientIn>();
     let mut linger_deadline: Option<Instant> = None;
+    let mut orphan_deadline: Option<Instant> = Some(Instant::now() + orphan_dur);
 
     loop {
         let linger_sleep = async {
             match linger_deadline {
                 Some(at) => tokio::time::sleep_until(at).await,
                 None => std::future::pending::<()>().await,
+            }
+        };
+        let orphan_sleep = async {
+            match orphan_deadline {
+                Some(at) if active_client.is_none() => tokio::time::sleep_until(at).await,
+                _ => std::future::pending::<()>().await,
             }
         };
 
@@ -257,6 +278,7 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
                         let status = HolderExitStatus { code, stderr_tail: tail_str };
                         exited = Some(status.clone());
                         stdin_tx = None;
+                        orphan_deadline = None;
                         if let Some(client) = &active_client {
                             let _ = client.send(HolderFrame::Exit { status });
                         } else {
@@ -273,6 +295,7 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
                             prev.close();
                         }
                         linger_deadline = None;
+                        orphan_deadline = None;
                         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<HolderFrame>();
                         let _ = out_tx.send(HolderFrame::Hello {
                             proto_version: PROTO_VERSION,
@@ -296,9 +319,12 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
                         let in_tx = client_in_tx.clone();
                         let reader_task = tokio::spawn(async move {
                             let mut buf = Vec::new();
-                            while let Ok(Some(frame)) =
-                                read_frame::<_, DaemonFrame>(&mut reader, &mut buf).await
+                            while let Ok(Some(maybe_frame)) =
+                                read_tolerant_frame::<_, DaemonFrame>(&mut reader, &mut buf).await
                             {
+                                let Some(frame) = maybe_frame else {
+                                    continue;
+                                };
                                 if in_tx.send(ClientIn::Frame { conn_id, frame }).is_err() {
                                     return;
                                 }
@@ -346,6 +372,9 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
                                 }
                                 if exited.is_some() {
                                     linger_deadline = Some(Instant::now() + linger_dur);
+                                    orphan_deadline = None;
+                                } else {
+                                    orphan_deadline = Some(Instant::now() + orphan_dur);
                                 }
                             }
                             DaemonFrame::Shutdown { grace_ms } => {
@@ -375,10 +404,39 @@ async fn serve_holder(socket_path: &Path, spec: HolderSpawnSpec) -> Result<(), S
                             }
                             if exited.is_some() {
                                 linger_deadline = Some(Instant::now() + linger_dur);
+                                orphan_deadline = None;
+                            } else {
+                                orphan_deadline = Some(Instant::now() + orphan_dur);
                             }
                         }
                     }
                 }
+            }
+            _ = watchdog_tick.tick(), if active_client.is_none() => {
+                let socket_intact = match (bound_socket_id, tokio::fs::symlink_metadata(socket_path).await) {
+                    (Some((dev, ino)), Ok(m)) => m.dev() == dev && m.ino() == ino,
+                    (None, Ok(_)) => true,
+                    (_, Err(_)) => false,
+                };
+                if !socket_intact {
+                    if let Some(tx) = stdin_tx.take() {
+                        let _ = tx.send(StdinCmd::Close);
+                    }
+                    if exited.is_none() {
+                        terminate_child_group(child_pid, &mut pipe_rx, Duration::from_millis(500)).await;
+                    }
+                    break;
+                }
+            }
+            () = orphan_sleep => {
+                let _ = tokio::fs::remove_file(socket_path).await;
+                if let Some(tx) = stdin_tx.take() {
+                    let _ = tx.send(StdinCmd::Close);
+                }
+                if exited.is_none() {
+                    terminate_child_group(child_pid, &mut pipe_rx, Duration::from_millis(500)).await;
+                }
+                break;
             }
             () = linger_sleep => {
                 let _ = tokio::fs::remove_file(socket_path).await;

@@ -17,6 +17,7 @@ import {
   type BarTurn,
 } from '../floatingBar';
 import { lsGet, lsSet } from '../storage';
+import { toasts } from '../toast.svelte';
 
 const PREF_KEY = 'otto_bar_pref';
 
@@ -30,7 +31,9 @@ class BarStore {
   focusTick = $state(0);
   /** px the toast stack rises to clear the in-app bar (Toasts.svelte scopes
    *  it as `--toast-lift` on its own element — never on <html>). */
-  toastLift = $state(0);
+  get toastLift(): number {
+    return toasts.lift;
+  }
 
   constructor() {
     if (typeof window === 'undefined') return;
@@ -55,7 +58,7 @@ class BarStore {
    *  there would subscribe that effect to its own output. An equal value is
    *  already a no-op for a $state number. */
   setToastLift(px: number): void {
-    this.toastLift = px;
+    toasts.lift = px;
   }
 
   get active(): BarSpace {

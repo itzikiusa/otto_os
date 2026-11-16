@@ -547,7 +547,6 @@ export async function executeIdeDepAction(opts: {
       action: normAction,
       module: opts.dep?.name ?? undefined,
       version: opts.version ?? undefined,
-      content: opts.content,
     });
     const ok = resp.ok !== false;
     const out = resp.output ?? resp.stdout;
@@ -561,7 +560,7 @@ export async function executeIdeDepAction(opts: {
       }
     }
     return { ok, updated_content: updatedContent, output: out };
-  } catch {
+  } catch (e) {
     if (normAction === 'update_one' && opts.dep && opts.version) {
       const updated = applyFallbackManifestVersionUpdate(opts.content, opts.dep, opts.version);
       if (updated !== opts.content) {
@@ -583,7 +582,8 @@ export async function executeIdeDepAction(opts: {
         return { ok: true, updated_content: updated };
       }
     }
-    toasts.info('Dependency action queued', `Run ${normAction} when toolchain is ready.`);
+    const detail = e instanceof Error ? e.message : String(e);
+    toasts.error(`Couldn’t run ${normAction}`, detail.slice(0, 180));
     return { ok: false };
   }
 }

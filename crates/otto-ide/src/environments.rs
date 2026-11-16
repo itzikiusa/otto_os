@@ -36,13 +36,17 @@ use otto_state::DbPool;
 use crate::toolchains::system_search_dirs;
 use crate::types::{IdeEnvVarEntry, IdeProjectEnvironment, IdeShellEnvResp};
 
+pub(crate) use self::crud::local_env_mutation_requires_root;
 pub use self::db_store::parse_dotenv;
-use self::db_store::{
-    is_dangerous_loader_env_key, is_reserved_internal_env_key, is_valid_env_key,
-    load_all_stored_project_envs, load_stored_project_env, push_unique, safe_join_allowed_roots,
-    StoredEnvVar,
+pub(crate) use self::db_store::{
+    is_dangerous_loader_env_key, is_reserved_internal_env_key, is_valid_env_key, push_unique,
 };
+use self::db_store::{load_all_stored_project_envs, load_stored_project_env, StoredEnvVar};
 pub use self::discovery::discover_run_configs;
+pub(crate) use self::env_layers::{
+    apply_project_sdk_layers, extend_from_dotenv_str, insert_filtered_env_var,
+    resolve_confined_dotenv_path,
+};
 pub(crate) use self::module_sdks::effective_go_build_tags_for_paths_in_project;
 use self::module_sdks::{
     apply_module_sdk_to_project_env, effective_go_build_tags_for_paths,
@@ -179,6 +183,7 @@ fn build_cached_local_env(
     proj_opt: Option<&IdeProjectEnvironment>,
     shell_env: &Arc<ShellEnvResolver>,
     caller_is_root: bool,
+    read_dotenv_and_workspace_venv: bool,
 ) -> BTreeMap<String, String> {
     let inherit_shell = proj_opt.map(|p| p.inherit_shell_env).unwrap_or(true);
 
@@ -196,42 +201,21 @@ fn build_cached_local_env(
     let mut has_explicit_py = false;
     if caller_is_root {
         if let Some(proj) = proj_opt {
-            if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
-                map.insert("JAVA_HOME".into(), jh.to_string());
-                push_unique(&mut path_dirs, format!("{}/bin", jh.trim_end_matches('/')));
+            let (proj_dirs, explicit_py) =
+                apply_project_sdk_layers(proj, crate::types::IdeTargetKind::Local, true, &mut map);
+            has_explicit_py = explicit_py;
+            for d in proj_dirs {
+                push_unique(&mut path_dirs, d);
             }
-            if let Some(gr) = proj.go_root.as_deref().filter(|s| !s.is_empty()) {
-                map.insert("GOROOT".into(), gr.to_string());
-                push_unique(&mut path_dirs, format!("{}/bin", gr.trim_end_matches('/')));
-            }
-            if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
-                push_unique(&mut path_dirs, format!("{}/bin", nh.trim_end_matches('/')));
-            }
-            if let Some(rt) = proj.rust_toolchain.as_deref().filter(|s| !s.is_empty()) {
-                if rt.starts_with('/') {
-                    push_unique(&mut path_dirs, format!("{}/bin", rt.trim_end_matches('/')));
-                } else {
-                    map.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
-                }
-            }
-            if let Some(py) = proj.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
-                has_explicit_py = true;
-                if let Some(bin_dir) = Path::new(py).parent() {
-                    push_unique(&mut path_dirs, bin_dir.to_string_lossy().into_owned());
-                    if let Some(venv) = bin_dir.parent() {
-                        if venv.join("pyvenv.cfg").is_file() {
-                            map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
-                        }
+            if read_dotenv_and_workspace_venv {
+                if let Some(extra) = proj.extra_path.as_deref().filter(|s| !s.is_empty()) {
+                    for seg in extra.split(':').filter(|s| !s.trim().is_empty()) {
+                        push_unique(&mut path_dirs, seg.trim().to_string());
                     }
                 }
             }
-            if let Some(extra) = proj.extra_path.as_deref().filter(|s| !s.is_empty()) {
-                for seg in extra.split(':').filter(|s| !s.trim().is_empty()) {
-                    push_unique(&mut path_dirs, seg.trim().to_string());
-                }
-            }
         }
-        if !has_explicit_py {
+        if read_dotenv_and_workspace_venv && !has_explicit_py {
             for vname in [".venv", "venv", ".env"] {
                 let cand = Path::new(root).join(vname);
                 if cand.join("pyvenv.cfg").is_file() && cand.join("bin/python").is_file() {
@@ -283,11 +267,31 @@ fn build_cached_local_env(
         map.insert("PATH".into(), path_dirs.join(":"));
     }
 
+    if !read_dotenv_and_workspace_venv {
+        let keep_sdk_keys = [
+            "PATH",
+            "JAVA_HOME",
+            "GOROOT",
+            "GOPATH",
+            "RUSTUP_TOOLCHAIN",
+            "VIRTUAL_ENV",
+            "HOME",
+            "TMPDIR",
+        ];
+        map.retain(|k, _| {
+            keep_sdk_keys.iter().any(|sk| k.eq_ignore_ascii_case(sk))
+                || (!is_reserved_internal_env_key(k) && !is_dangerous_loader_env_key(k))
+        });
+        return map;
+    }
+
     let mut allowed_roots = vec![root.to_string()];
-    if let Some(proj) = proj_opt {
-        for r in &proj.additional_roots {
-            if !r.is_empty() && !allowed_roots.contains(r) {
-                allowed_roots.push(r.clone());
+    if caller_is_root {
+        if let Some(proj) = proj_opt {
+            for r in &proj.additional_roots {
+                if !r.is_empty() && !allowed_roots.contains(r) {
+                    allowed_roots.push(r.clone());
+                }
             }
         }
     }
@@ -296,33 +300,19 @@ fn build_cached_local_env(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(".env");
-    if let Some(dotenv_file) = safe_join_allowed_roots(&allowed_roots, dotenv_rel) {
-        if caller_is_root || !otto_core::secret_paths::is_denied_file(&dotenv_file) {
-            if let Ok(raw) = std::fs::read_to_string(&dotenv_file) {
-                for (k, v) in parse_dotenv(&raw) {
-                    if is_reserved_internal_env_key(&k)
-                        || (!caller_is_root && is_dangerous_loader_env_key(&k))
-                    {
-                        continue;
-                    }
-                    map.insert(k, v);
-                }
-            }
+    if let Some(dotenv_file) =
+        resolve_confined_dotenv_path(&allowed_roots, dotenv_rel, caller_is_root)
+    {
+        if let Ok(raw) = std::fs::read_to_string(&dotenv_file) {
+            extend_from_dotenv_str(&mut map, &raw);
         }
     }
 
     if let Some(proj) = proj_opt {
         for item in &proj.env_vars {
-            if is_reserved_internal_env_key(&item.key)
-                || (!caller_is_root && is_dangerous_loader_env_key(&item.key))
-            {
-                continue;
-            }
             if !item.secret {
                 if let Some(val) = &item.value {
-                    if is_valid_env_key(&item.key) {
-                        map.insert(item.key.clone(), val.clone());
-                    }
+                    insert_filtered_env_var(&mut map, &item.key, val.clone(), caller_is_root);
                 }
             }
         }
@@ -531,6 +521,26 @@ impl EnvironmentManager {
             proj_opt.as_ref(),
             &self.shell_env,
             caller_is_root,
+            true,
+        )
+    }
+
+    /// Build a safe read-only/background probe environment for `root` (LSP servers,
+    /// polyglot syntax checks, dependency inspection, formatters) without reading
+    /// workspace `.env` / `proj.env_vars` and without prepending workspace `.venv/bin`.
+    pub fn cached_probe_env_for_local_root_as(
+        &self,
+        root: &str,
+        caller_is_root: bool,
+    ) -> BTreeMap<String, String> {
+        let proj_opt = lookup_snapshot_in(&self.snapshots, root);
+        build_cached_local_env(
+            &self.data_dir,
+            root,
+            proj_opt.as_ref(),
+            &self.shell_env,
+            caller_is_root,
+            false,
         )
     }
 

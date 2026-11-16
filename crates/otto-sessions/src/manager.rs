@@ -677,11 +677,18 @@ const PROVIDER_TITLE_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 /// not-user-and-not-already-provider `meta.title_source` are worth probing. The
 /// durable `title_source` marker is what keeps a resolved session from being
 /// re-probed after a daemon restart (the in-memory cache is empty then).
+#[cfg(test)]
 fn title_eligible(s: &Session) -> bool {
+    let inferred = crate::providers::infer_model_family(None, "", &s.provider);
+    let family = inferred.as_deref().unwrap_or(s.provider.as_str());
+    title_eligible_with_family(s, family)
+}
+
+fn title_eligible_with_family(s: &Session, cli_family: &str) -> bool {
     if s.archived
         || s.status == SessionStatus::Exited
         || !s.is_foreground_agent()
-        || !matches!(s.provider.as_str(), "claude" | "codex")
+        || !matches!(cli_family, "claude" | "codex")
         || s.provider_session_id.is_none()
     {
         return false;
@@ -1871,19 +1878,11 @@ impl SessionManager {
             extra.push(account_home);
         }
         let mut policy = sandbox_policy(&cwd, &home, &data_dir, &extra, network, forced);
-        // Codex runs with `CODEX_HOME` = the shadow home in its context bundle
-        // (`~/.otto/context/codex/<cwd>/codex-home`), which the profile
-        // otherwise write-denies with the rest of `~/.otto/context`: re-open
-        // that one home, minus its config / skills / instruction files.
-        if let Some(shadow) = spec
-            .env
-            .iter()
-            .rev()
-            .find(|(k, _)| k == "CODEX_HOME")
-            .map(|(_, v)| std::path::PathBuf::from(v))
-            .filter(|p| p.is_absolute() && !p.starts_with(&data_dir))
-        {
-            policy = policy.allow_provider_home(&shadow);
+        // Provider CLI homes outside `data_dir` (`CODEX_HOME` shadow bundle,
+        // custom `CLAUDE_CONFIG_DIR` like `~/.claude-work`, `GEMINI_CLI_HOME`):
+        // re-open each one minus its executable config / hook / skill files.
+        for dir in self.custom_provider_homes(session, spec, &home) {
+            policy = policy.allow_provider_home_safe(&dir, &home, &data_dir, forced);
         }
         // Package managers / build tools cache into a private per-session dir
         // (under temp, which is writable): the user's shared caches hold code
@@ -2420,7 +2419,9 @@ impl SessionManager {
             // The legacy trust helper writes default CLI homes. Named profiles
             // let their native CLI/prompt guard persist trust in their own home.
             if account.is_none() {
-                crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
+                let fam = self.cli_family(&session.provider);
+                let cdir = self.claude_config_dir_for(&session.provider);
+                crate::trust::ensure_trusted_with_claude_dir_async(&fam, &session.cwd, cdir).await;
             }
             // Otto's first-party read-only tool server: when the workspace has
             // opted in (`otto_mcp_enabled`), mint a per-session token; the
@@ -2608,7 +2609,7 @@ impl SessionManager {
         let cwd = std::fs::canonicalize(&session.cwd)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| session.cwd.clone());
-        let provider = session.provider.clone();
+        let provider = self.cli_family(&session.provider);
         let transcript_roots = self.transcript_roots_for(session);
         let codex_root = self.codex_root_for(session);
         let probe = CaptureProbe::default();
@@ -3125,7 +3126,7 @@ impl SessionManager {
         }
         let (turn_open, artifact_age) = match self.activity_artifact(id).await {
             Some(artifact) => {
-                let provider = session.provider.clone();
+                let provider = self.cli_family(&session.provider);
                 tokio::task::spawn_blocking(move || {
                     let age = std::fs::metadata(&artifact)
                         .and_then(|m| m.modified())
@@ -3258,7 +3259,7 @@ impl SessionManager {
             // conversation — the 2026-07-21 "duplicated sessions"). Refuse; the
             // session stays reconnectable and can be reopened once the other
             // process is done (or the claim is corrected).
-            if session.provider == "codex" {
+            if self.cli_family(&session.provider) == "codex" {
                 if let Some(psid) = &session.provider_session_id {
                     if rollout_actively_written(
                         &self.codex_root_for(&session),
@@ -3572,7 +3573,8 @@ impl SessionManager {
         let floor = std::time::SystemTime::from(session.created_at)
             .checked_sub(Duration::from_secs(2))
             .unwrap_or(std::time::UNIX_EPOCH);
-        let (provider, sid) = (session.provider.clone(), session.id.clone());
+        let family = self.cli_family(&session.provider);
+        let (provider, sid) = (family.clone(), session.id.clone());
         let (session_cwd, codex_root) = (session.cwd.clone(), self.codex_root_for(session));
         let probe_text =
             (self.capture_probes.get(&session.id)).map(|p| normalize_pty_input(&p.raw));
@@ -3622,7 +3624,7 @@ impl SessionManager {
                 persist_transcript_path(
                     &self.repo,
                     &session.id,
-                    &session.provider,
+                    &family,
                     &session.cwd,
                     &psid,
                     self.transcript_roots_for(session),
@@ -4183,19 +4185,23 @@ impl SessionManager {
         // Every lookup below is filesystem work (canonicalize, a rollout-tree
         // walk, stats) — resolve the inputs here, then run it off the runtime.
         let roots = self.transcript_roots_for(&session);
-        tokio::task::spawn_blocking(move || Self::locate_activity_artifact(&session, &psid, &roots))
-            .await
-            .ok()
-            .flatten()
+        let cli_family = self.cli_family(&session.provider);
+        tokio::task::spawn_blocking(move || {
+            Self::locate_activity_artifact(&session, &cli_family, &psid, &roots)
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     /// [`Self::activity_artifact`]'s filesystem half. Blocking.
     fn locate_activity_artifact(
         session: &Session,
+        cli_family: &str,
         psid: &str,
         roots: &otto_transcript::roots::TranscriptRoots,
     ) -> Option<std::path::PathBuf> {
-        let path = match session.provider.as_str() {
+        let path = match cli_family {
             // `<claude root>/<enc(cwd)>/<psid>.jsonl`
             // ([`otto_transcript::roots::TranscriptRoots::claude_session_file`]).
             // claude symlink-resolves the spawn cwd for its transcript dir, so
@@ -4573,7 +4579,7 @@ impl SessionManager {
     async fn turn_state(&self, session: &Session) -> (Option<bool>, Option<Duration>) {
         match self.activity_artifact(&session.id).await {
             Some(artifact) => {
-                let provider = session.provider.clone();
+                let provider = self.cli_family(&session.provider);
                 tokio::task::spawn_blocking(move || {
                     let age = std::fs::metadata(&artifact)
                         .and_then(|m| m.modified())
@@ -4715,8 +4721,12 @@ impl SessionManager {
             let Some(psid) = s.provider_session_id.as_deref() else {
                 continue;
             };
-            let verdict =
-                crate::lifecycle::check_resumability_async(home, &s.provider, &s.cwd, psid).await;
+            let family = self.cli_family(&s.provider);
+            let claude_dir = self.providers.claude_config_dir_for(&s.provider, home);
+            let verdict = crate::lifecycle::check_resumability_with_claude_dir_async(
+                home, &family, &s.cwd, psid, claude_dir,
+            )
+            .await;
             match verdict {
                 crate::lifecycle::Resumability::Gone => match self.remove(&s.id).await {
                     Ok(()) => {
@@ -5123,7 +5133,9 @@ impl SessionManager {
         let _ = std::fs::create_dir_all(&session.cwd);
         if session.kind == SessionKind::Agent {
             if account.is_none() {
-                crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
+                let fam = self.cli_family(&session.provider);
+                let cdir = self.claude_config_dir_for(&session.provider);
+                crate::trust::ensure_trusted_with_claude_dir_async(&fam, &session.cwd, cdir).await;
             }
             let otto_tools = self.maybe_enable_otto_tools(&session).await;
             let codex_otto = !otto_tools.args.is_empty();

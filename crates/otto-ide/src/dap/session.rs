@@ -174,10 +174,11 @@ impl DapManager {
 
     /// List snapshots visible to `user` (all for root, owner-only otherwise).
     pub fn list_sessions_for_user(&self, user: &User) -> Vec<IdeDebugSessionSnapshot> {
+        let has_root_auth = otto_core::auth::root_authority(user);
         let mut out: Vec<IdeDebugSessionSnapshot> = self
             .sessions
             .iter()
-            .filter(|item| user.is_root || item.value().owner_user_id == user.id.as_str())
+            .filter(|item| has_root_auth || item.value().owner_user_id == user.id.as_str())
             .map(|item| item.value().read_snapshot())
             .collect();
         out.sort_by(|a, b| b.id.cmp(&a.id));
@@ -190,7 +191,7 @@ impl DapManager {
         user: &User,
         sessions: Vec<IdeDebugSessionSnapshot>,
     ) -> Vec<IdeDebugSessionSnapshot> {
-        if user.is_root {
+        if otto_core::auth::root_authority(user) {
             return sessions;
         }
         sessions
@@ -206,7 +207,7 @@ impl DapManager {
     /// Verify that `user` is authorized to inspect or control debug session `id`.
     pub fn authorize_session(&self, user: &User, id: &str) -> Result<()> {
         let entry = self.get_entry(id)?;
-        if user.is_root || entry.owner_user_id == user.id.as_str() {
+        if otto_core::auth::root_authority(user) || entry.owner_user_id == user.id.as_str() {
             Ok(())
         } else {
             Err(Error::Forbidden(
@@ -276,6 +277,22 @@ impl DapManager {
                 ctx_guard.dormant_netbridge = Some(l.dormant_handle());
             }
             ctx_guard.netbridge = lease;
+        }
+    }
+
+    /// Refresh active runtime plugin DAP adapter contributions on session `id` prior to `Restart`.
+    pub fn set_session_plugin_adapters(
+        &self,
+        id: &str,
+        adapters: Vec<crate::types::PluginDapAdapterSpec>,
+    ) {
+        if let Some(entry) = self.sessions.get(id) {
+            let mut ctx_guard = entry
+                .value()
+                .orig_ctx
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            ctx_guard.plugin_adapters = adapters;
         }
     }
 

@@ -57,8 +57,8 @@ export function attachCollabEventStream(
 ): AbortController {
   prevCtl?.abort();
   const ctl = new AbortController();
-  const path = `/ide/collab/guest/${encodeURIComponent(roomId)}/events?token=${encodeURIComponent(token)}&peer_id=${encodeURIComponent(peerId)}`;
-  void streamIdeSse(path, {}, ctl.signal, (raw) => {
+  const path = `/ide/collab/guest/${encodeURIComponent(roomId)}/events?peer_id=${encodeURIComponent(peerId)}`;
+  void streamIdeSse(path, { 'X-Ide-Collab-Token': token }, ctl.signal, (raw) => {
     try {
       const ev = JSON.parse(raw) as Record<string, unknown>;
       if (ev.type === 'room_closed') {
@@ -185,7 +185,8 @@ export async function joinCollabSession(
     store.target = joined.room.target;
     const stateResp = await laneFetch(
       'int',
-      `/ide/collab/guest/${encodeURIComponent(roomId)}/state?token=${encodeURIComponent(token)}`,
+      `/ide/collab/guest/${encodeURIComponent(roomId)}/state`,
+      { headers: { 'X-Ide-Collab-Token': token } },
     );
     if (stateResp.ok) {
       const st = (await stateResp.json()) as {

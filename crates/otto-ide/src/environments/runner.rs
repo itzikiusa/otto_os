@@ -332,7 +332,9 @@ pub(super) async fn execute_run_task(
             &args,
             &cwd,
             &env_map,
-        ) {
+        )
+        .await
+        {
             Ok(c) => c,
             Err(err) => {
                 finish_run(

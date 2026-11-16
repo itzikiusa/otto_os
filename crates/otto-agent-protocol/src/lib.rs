@@ -47,7 +47,7 @@ pub use driver::{
     SidebandPayload, SidebandPoll, SidebandResumeSeed, SidebandSource, StructuredDriver,
 };
 pub use host::{RuntimeHost, SessionManagerHost};
-pub use runtime::{AgentRuntime, RuntimeConfig};
+pub use runtime::{settle_archived_entity_json, AgentRuntime, RuntimeConfig};
 
 /// The daemon surface the `/runtime-sessions` router runs against
 /// (otto-server's impl: `modules/ctx_impls.rs`).

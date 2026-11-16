@@ -1015,12 +1015,14 @@ impl CreateRuntimeSessionBody {
     /// Convert into [`CreateRuntimeSessionReq`] for built-in [`RuntimeProvider`]
     /// names only (rejects unknown provider names with `400 Invalid`).
     pub fn into_req(self) -> crate::Result<CreateRuntimeSessionReq> {
-        self.into_req_with_resolver(|_| None)
+        self.into_req_with_resolver(RuntimeProvider::parse)
     }
 
-    /// Convert into [`CreateRuntimeSessionReq`], resolving non-built-in custom
-    /// provider slugs (e.g. `"claudework"` -> `RuntimeProvider::Claude`) via
-    /// `resolve_custom` and storing `meta.provider_slug` when resolved.
+    /// Convert into [`CreateRuntimeSessionReq`], resolving both built-in and
+    /// custom provider slugs (e.g. `"claudework"` -> `RuntimeProvider::Claude`)
+    /// via `resolve_custom` so disabled built-in providers (e.g. `"grok"`) are
+    /// rejected with `400 Invalid`, and storing `meta.provider_slug` only when
+    /// `raw` is a non-built-in custom slug.
     pub fn into_req_with_resolver<F>(
         self,
         resolve_custom: F,
@@ -1037,15 +1039,15 @@ impl CreateRuntimeSessionBody {
         {
             None => None,
             Some(raw) => {
-                if let Some(builtin) = RuntimeProvider::parse(raw) {
-                    Some(builtin)
-                } else if let Some(mapped) = resolve_custom(raw) {
-                    let obj = meta.get_or_insert_with(|| Value::Object(serde_json::Map::new()));
-                    if let Some(map) = obj.as_object_mut() {
-                        map.insert(
-                            PROVIDER_SLUG_META_KEY.into(),
-                            Value::String(raw.to_string()),
-                        );
+                if let Some(mapped) = resolve_custom(raw) {
+                    if RuntimeProvider::parse(raw).is_none() {
+                        let obj = meta.get_or_insert_with(|| Value::Object(serde_json::Map::new()));
+                        if let Some(map) = obj.as_object_mut() {
+                            map.insert(
+                                PROVIDER_SLUG_META_KEY.into(),
+                                Value::String(raw.to_string()),
+                            );
+                        }
                     }
                     Some(mapped)
                 } else {
@@ -1139,28 +1141,122 @@ pub fn embedded_auto_close_hours(setting: Option<&Value>) -> u64 {
 
 /// `POST /runtime-sessions/{id}/peers` — an agent (or its owner) opens a
 /// linked thread: same workspace, cwd and access mode as `{id}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Accepts either a built-in [`RuntimeProvider`] (`"claude"`, `"codex"`, …) or
+/// a custom provider slug (`"claudework"`) on the wire (`provider: String`),
+/// while preserving `pub provider: RuntimeProvider` for internal Rust callers.
+#[derive(Debug, Clone)]
 pub struct OpenPeerReq {
     pub provider: RuntimeProvider,
     /// The new thread's opening message (framed with who sent it).
-    #[serde(default)]
     pub prompt: Option<String>,
-    #[serde(default)]
     pub title: Option<String>,
     /// Omitted = the provider's default model.
-    #[serde(default)]
     pub model: Option<String>,
     /// Reasoning effort for the opening turn (`low` … `max`); omitted = the
     /// model's default.
-    #[serde(default)]
     pub effort: Option<String>,
     /// Daemon-only (`serde(skip)`): the linked thread's own folder (default:
     /// the opener's) and its [`RuntimeSession::meta`] — a personal agent the
     /// main agent delegates to runs in ITS persona folder, as itself.
-    #[serde(skip)]
     pub cwd: Option<String>,
-    #[serde(skip)]
     pub meta: Option<serde_json::Value>,
+}
+
+impl OpenPeerReq {
+    /// Effective provider slug requested (custom `meta.provider_slug` when
+    /// present, otherwise `self.provider.as_str()`).
+    pub fn provider_slug(&self) -> &str {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.get(PROVIDER_SLUG_META_KEY))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.provider.as_str())
+    }
+
+    /// Construct a peer request targeting either a built-in provider or a
+    /// custom provider slug (e.g. `"claudework"`).
+    pub fn with_provider_slug(slug: impl Into<String>) -> Self {
+        let raw = slug.into();
+        let (provider, custom_slug) = parse_provider_and_slug(&raw, None);
+        let meta = custom_slug.map(|s| serde_json::json!({ PROVIDER_SLUG_META_KEY: s }));
+        Self {
+            provider,
+            prompt: None,
+            title: None,
+            model: None,
+            effort: None,
+            cwd: None,
+            meta,
+        }
+    }
+}
+
+impl Serialize for OpenPeerReq {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            provider: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            prompt: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            title: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            model: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            effort: &'a Option<String>,
+        }
+        Wire {
+            provider: self.provider_slug(),
+            prompt: &self.prompt,
+            title: &self.title,
+            model: &self.model,
+            effort: &self.effort,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OpenPeerReq {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            provider: String,
+            #[serde(default)]
+            provider_slug: Option<String>,
+            #[serde(default)]
+            prompt: Option<String>,
+            #[serde(default)]
+            title: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            effort: Option<String>,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        if w.provider.trim().is_empty() {
+            return Err(serde::de::Error::custom("provider must not be empty"));
+        }
+        let (provider, custom_slug) = parse_provider_and_slug(&w.provider, w.provider_slug);
+        let meta = custom_slug.map(|s| serde_json::json!({ PROVIDER_SLUG_META_KEY: s }));
+        Ok(Self {
+            provider,
+            prompt: w.prompt,
+            title: w.title,
+            model: w.model,
+            effort: w.effort,
+            cwd: None,
+            meta,
+        })
+    }
 }
 
 /// `POST /runtime-sessions/{id}/peers/{peer}/message`.

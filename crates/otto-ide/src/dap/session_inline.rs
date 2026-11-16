@@ -250,6 +250,8 @@ impl DapManager {
             bp.path = display_target_path(&orig_req.target, &bp.path);
         }
         entry.mutate_and_broadcast(|snap| {
+            snap.config_id = orig_req.config_id.clone();
+            snap.launch = Some(orig_req.launch.clone());
             snap.state = IdeDebugState::Starting;
             snap.stopped_reason = None;
             snap.paused_file = None;
@@ -284,6 +286,15 @@ impl DapManager {
         if entry.boot_generation.load(Ordering::SeqCst) != my_gen || entry.is_terminal() {
             return Ok(entry.read_snapshot());
         }
+        for item in &resolved.initial_output {
+            entry.append_output(&item.category, item.text.clone());
+        }
+        entry.mutate_and_broadcast(|snap| {
+            snap.language = resolved.language.clone();
+            snap.adapter = resolved.adapter_name.clone();
+            snap.config_id = orig_req.config_id.clone();
+            snap.launch = Some(orig_req.launch.clone());
+        });
         if let Err(err) =
             boot_session_connection(&self.sessions, entry, resolved, &orig_req, &orig_ctx).await
         {

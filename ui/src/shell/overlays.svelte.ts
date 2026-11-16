@@ -6,6 +6,9 @@
 // ⌘N did nothing until a reload. LazyMount toasts the failure, and the hosts
 // pass `onerror` to reset their open flag so the next open retries.
 import { lazyComponent } from '../lib/lazy-component.svelte';
+import '../lib/providerRegistry';
+import '../lib/providers';
+import '../lib/uiCommands/pagePort';
 
 export const SharePageChunk = lazyComponent(() => import('../modules/share/SharePage.svelte'));
 export const HandoverChunk = lazyComponent(() => import('../modules/agents/Handover.svelte'));
@@ -17,3 +20,6 @@ export const NewWorkspaceChunk = lazyComponent(() => import('../modules/settings
 export const SlackSendChunk = lazyComponent(() => import('../lib/components/slack/SlackSendDialog.svelte'));
 /** Shared by the Navigator and the TabBar; it bundles the QR encoder. */
 export const ShareModalChunk = lazyComponent(() => import('../modules/agents/ShareModal.svelte'));
+export const PaletteChunk = lazyComponent(() => import('./Palette.svelte'));
+export const ShortcutsOverlayChunk = lazyComponent(() => import('./ShortcutsOverlay.svelte'));
+export const FloatingBarChunk = lazyComponent(() => import('../lib/components/FloatingBar.svelte'));

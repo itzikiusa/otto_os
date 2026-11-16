@@ -32,7 +32,7 @@ pub async fn diagnostics<S: IdeCtx>(
     req: IdeDiagnosticsReq,
 ) -> Result<IdeDiagnosticsResp> {
     let target_spec_opt = resolve_effective_target_spec(&req);
-    if !user.is_root && target_spec_opt.is_none() {
+    if !otto_core::auth::root_authority(user) && target_spec_opt.is_none() {
         return Err(Error::Forbidden("workspace target is required".into()));
     }
     let resolved_opt = match target_spec_opt {

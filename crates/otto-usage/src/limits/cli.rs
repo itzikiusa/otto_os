@@ -41,6 +41,137 @@ const USAGE_ID: &str = "otto-usage";
 /// Lines read before giving up on an answer (a CLI that floods stdout).
 const MAX_LINES: usize = 10_000;
 
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_./:=+@".contains(&b))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn direct_exe_exists(exe: &str) -> bool {
+    if exe.contains('/') {
+        return std::path::Path::new(exe).is_file();
+    }
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
+        .any(|dir| dir.join(exe).is_file())
+}
+
+/// Build a `tokio::process::Command` from a raw provider `program` string
+/// (supporting leading `KEY=VAL`, `~/` paths, multi-token wrapper commands,
+/// deduplicating `tail_args`, and falling back to a login shell for `~/.zshrc`
+/// aliases/functions).
+pub(super) fn build_cli_command(
+    program: &str,
+    tail_args: &[&str],
+    strip_session_flags: bool,
+) -> tokio::process::Command {
+    let home = otto_transcript::roots::home_dir();
+    let trimmed = program.trim();
+    if trimmed.contains('/') && !trimmed.contains('=') && std::path::Path::new(trimmed).is_file() {
+        let mut cmd = tokio::process::Command::new(trimmed);
+        cmd.args(tail_args);
+        return cmd;
+    }
+    let tokens = otto_transcript::claude_config::split_command_tokens(trimmed);
+    let mut env_pairs: Vec<(String, String)> = Vec::new();
+    let mut idx = 0;
+    while idx < tokens.len() {
+        if let Some((k, v)) = otto_transcript::claude_config::parse_env_assignment(&tokens[idx]) {
+            let expanded = if v.starts_with("~/") || v == "~" {
+                otto_transcript::claude_config::expand_home_path(v, &home)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| v.to_string())
+            } else {
+                v.to_string()
+            };
+            env_pairs.push((k.to_string(), expanded));
+            idx += 1;
+        } else {
+            break;
+        }
+    }
+    let exe_raw = tokens.get(idx).map(String::as_str).unwrap_or(trimmed);
+    let exe = if exe_raw.starts_with("~/") || exe_raw == "~" {
+        otto_transcript::claude_config::expand_home_path(exe_raw, &home)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| exe_raw.to_string())
+    } else {
+        exe_raw.to_string()
+    };
+    let mut prefix_args: Vec<String> = Vec::new();
+    let rest = if idx < tokens.len() {
+        &tokens[idx + 1..]
+    } else {
+        &[]
+    };
+    let mut ri = 0;
+    while ri < rest.len() {
+        let a = &rest[ri];
+        if strip_session_flags && (a == "--session-id" || a == "--resume" || a == "--conversation")
+        {
+            ri += 2;
+            continue;
+        }
+        if strip_session_flags
+            && (a.starts_with("--session-id=")
+                || a.starts_with("--resume=")
+                || a.starts_with("--conversation="))
+        {
+            ri += 1;
+            continue;
+        }
+        let expanded = if a.starts_with("~/") || a == "~" {
+            otto_transcript::claude_config::expand_home_path(a, &home)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| a.clone())
+        } else {
+            a.clone()
+        };
+        prefix_args.push(expanded);
+        ri += 1;
+    }
+    let has_tail = !tail_args.is_empty()
+        && prefix_args.len() >= tail_args.len()
+        && prefix_args
+            .windows(tail_args.len())
+            .any(|w| w.iter().map(String::as_str).eq(tail_args.iter().copied()));
+    if direct_exe_exists(&exe) {
+        let mut cmd = tokio::process::Command::new(&exe);
+        cmd.envs(env_pairs);
+        cmd.args(&prefix_args);
+        if !has_tail {
+            cmd.args(tail_args);
+        }
+        return cmd;
+    }
+    // Login-shell fallback for `~/.zshrc` aliases/functions (e.g. `claude-work`).
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_string());
+    let mut script_parts = Vec::new();
+    for (k, v) in &env_pairs {
+        script_parts.push(format!("{k}={}", shell_quote(v)));
+    }
+    script_parts.push(shell_quote(&exe));
+    for a in &prefix_args {
+        script_parts.push(shell_quote(a));
+    }
+    script_parts.push("\"$@\"".to_string());
+    let script = script_parts.join(" ");
+    let mut cmd = tokio::process::Command::new(shell);
+    cmd.args(["-lic", &script, "otto-cli-probe"]);
+    if !has_tail {
+        cmd.args(tail_args);
+    }
+    cmd
+}
+
 /// Run one `get_usage` exchange. `Err` carries a sentence the page shows.
 pub(crate) async fn query_usage(
     program: &str,
@@ -48,29 +179,32 @@ pub(crate) async fn query_usage(
     default_login: bool,
     timeout: Duration,
 ) -> Result<Value, String> {
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args([
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--input-format",
-        "stream-json",
-        "--tools=",
-        "--setting-sources=",
-        "--strict-mcp-config",
-        "--no-session-persistence",
-    ])
-    .current_dir(std::env::temp_dir())
-    // The subscription login, never an API key that happens to be exported.
-    .env_remove("ANTHROPIC_API_KEY")
-    .env_remove("ANTHROPIC_AUTH_TOKEN")
-    .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
-    .env_remove("NODE_OPTIONS")
-    .env("CLAUDE_CODE_ENTRYPOINT", "sdk-ts")
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .kill_on_drop(true);
+    let mut cmd = build_cli_command(
+        program,
+        &[
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--tools=",
+            "--setting-sources=",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+        ],
+        true,
+    );
+    cmd.current_dir(std::env::temp_dir())
+        // The subscription login, never an API key that happens to be exported.
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+        .env_remove("NODE_OPTIONS")
+        .env("CLAUDE_CODE_ENTRYPOINT", "sdk-ts")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
     if default_login {
         cmd.env_remove("CLAUDE_CONFIG_DIR");
     } else {

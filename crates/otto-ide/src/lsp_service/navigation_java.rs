@@ -87,8 +87,10 @@ pub(super) fn resolve_external_java_definition(
                         for fqn in &candidate_fqns {
                             let entry = format!("{}.java", fqn.replace('.', "/"));
                             if let Some(src_text) = unzip_single_entry(&canon_jar, &entry) {
-                                let uri =
-                                    format!("jar:file://{}!/{entry}", canon_jar.to_string_lossy());
+                                let uri = format!(
+                                    "jar:{}!/{entry}",
+                                    otto_core::paths::path_to_file_uri(&canon_jar)
+                                );
                                 let defs =
                                     find_definitions_in_content(&uri, "java", &src_text, symbol);
                                 if !defs.is_empty() {
@@ -114,8 +116,8 @@ pub(super) fn resolve_external_java_definition(
                                 let entry = format!("{}.class", fqn.replace('.', "/"));
                                 return vec![IdeReferenceLocation {
                                     path: format!(
-                                        "jar:file://{}!/{entry}",
-                                        canon_jar.to_string_lossy()
+                                        "jar:{}!/{entry}",
+                                        otto_core::paths::path_to_file_uri(&canon_jar)
                                     ),
                                     line: 1,
                                     column: 1,
@@ -162,7 +164,10 @@ pub(super) fn resolve_external_java_definition(
                 rel_java.clone(),
             ] {
                 if let Some(src_text) = unzip_single_entry(&canon_zip, &entry) {
-                    let uri = format!("jar:file://{}!/{entry}", canon_zip.to_string_lossy());
+                    let uri = format!(
+                        "jar:{}!/{entry}",
+                        otto_core::paths::path_to_file_uri(&canon_zip)
+                    );
                     let defs = find_definitions_in_content(&uri, "java", &src_text, symbol);
                     if !defs.is_empty() {
                         return defs;
@@ -183,15 +188,40 @@ pub(super) fn resolve_external_java_definition(
 
 #[allow(clippy::disallowed_methods)]
 fn unzip_single_entry(archive: &Path, entry: &str) -> Option<String> {
+    use std::io::Read as _;
+    use std::process::Stdio;
+
+    let mut escaped = String::with_capacity(entry.len() + 4);
+    for ch in entry.chars() {
+        if matches!(ch, '[' | ']' | '*' | '?' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+
     let mut cmd = Command::new("/usr/bin/unzip");
     cmd.env_clear()
         .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
         .arg("-p")
+        .arg("--")
         .arg(archive)
-        .arg(entry);
-    let out = cmd.output().ok()?;
-    if !out.status.success() || out.stdout.is_empty() {
+        .arg(escaped)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let cap = crate::target::MAX_FILE_READ_BYTES.saturating_add(1);
+    let mut buf = Vec::new();
+    let read_ok = stdout.take(cap).read_to_end(&mut buf).is_ok();
+    if !read_ok || buf.len() as u64 > crate::target::MAX_FILE_READ_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
         return None;
     }
-    String::from_utf8(out.stdout).ok()
+    let status = child.wait().ok()?;
+    if !status.success() || buf.is_empty() {
+        return None;
+    }
+    String::from_utf8(buf).ok()
 }

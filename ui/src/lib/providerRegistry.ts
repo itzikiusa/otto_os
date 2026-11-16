@@ -29,17 +29,25 @@ export const RUNTIME_PROVIDERS: readonly RuntimeProvider[] = [
   'pi',
 ];
 
+export type ProviderFamilyMeta = Pick<MetaResp, 'provider_models'> &
+  Partial<Pick<MetaResp, 'provider_families' | 'providers'>>;
+
 /** Infer the canonical agent CLI family (`'claude'`, `'codex'`, `'agy'`, `'gemini'`,
  *  `'grok'`, `'opencode'`, `'pi'`, `'shell'`) for any built-in or custom provider slug
- *  (e.g. `'claudework'` -> `'claude'`), using token-boundary matching for short names
- *  like `'pi'` (so `'pipeline'` or `'api-agent'` never false-matches `'pi'`) plus
- *  `/meta.provider_models` catalog signatures when a custom slug uses an arbitrary alias. */
+ *  (e.g. `'claudework'` -> `'claude'`), consulting `/meta.provider_families` first, then
+ *  token-boundary matching for short names like `'pi'` (so `'pipeline'` or `'api-agent'`
+ *  never false-matches `'pi'`), then `/meta.provider_models` catalog signatures. */
 export function inferProviderFamily(
   provider: string,
-  meta?: Pick<MetaResp, 'provider_models'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): string {
-  const p = provider.trim().toLowerCase();
+  const trimmed = provider.trim();
+  const p = trimmed.toLowerCase();
   if (!p) return '';
+  const serverFam = meta?.provider_families?.[trimmed] ?? meta?.provider_families?.[p];
+  if (typeof serverFam === 'string' && serverFam.trim() !== '') {
+    return serverFam.trim().toLowerCase();
+  }
   if (
     p === 'claude' ||
     p === 'codex' ||
@@ -96,7 +104,7 @@ export function inferProviderFamily(
  *  the 7 structured runtime drivers (e.g. `'claudework'` -> `'claude'`). */
 export function isRuntimeProvider(
   provider: string,
-  meta?: Pick<MetaResp, 'provider_models' | 'providers'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): provider is RuntimeProvider {
   const clean = provider.trim();
   if (!clean || clean !== clean.toLowerCase() || clean === SHELL_PROVIDER) return false;
@@ -124,7 +132,7 @@ export function sessionProviderSlug(
  *  including custom providers mapped to those families (e.g. `claudework`). */
 export function providerSupportsSteer(
   provider: string,
-  meta?: Pick<MetaResp, 'provider_models' | 'providers'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): boolean {
   if (!isRuntimeProvider(provider, meta)) return false;
   const fam = inferProviderFamily(provider, meta);
@@ -136,7 +144,7 @@ export function providerSupportsSteer(
  *  ACP agents (Antigravity, Gemini, Grok, OpenCode): images + PDFs. */
 export function attachmentSupport(
   provider: string,
-  meta?: Pick<MetaResp, 'provider_models'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): { images: boolean; files: boolean } {
   const fam = inferProviderFamily(provider, meta);
   const files =
@@ -152,7 +160,7 @@ export function attachmentSupport(
 export function takesFile(
   provider: string,
   f: Pick<File, 'type'>,
-  meta?: Pick<MetaResp, 'provider_models'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): boolean {
   const can = attachmentSupport(provider, meta);
   return (can.images && f.type.startsWith('image/')) || (can.files && f.type === 'application/pdf');
@@ -218,7 +226,7 @@ export function resolveIdeHarnesses(
 export function resolveIdeInlineProviders(
   availableProviders: readonly string[],
   registeredProviders?: readonly string[],
-  meta?: Pick<MetaResp, 'provider_models' | 'providers'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): IdeRuntimeProvider[] {
   const hasRegistry = Array.isArray(registeredProviders);
   const regSet = hasRegistry

@@ -122,7 +122,16 @@ export const placeholderEditorTheme = EditorView.theme({
   },
 });
 
-export function createIdeColdGutterPlaceholders(): { bp: Extension; diff: Extension } {
+export function isManifestFilePath(filePath: string): boolean {
+  const b = (filePath.split('?')[0].split('/').pop() ?? '').toLowerCase();
+  return (
+    b === 'go.mod' || b === 'pom.xml' || b === 'package.json' || b === 'cargo.toml' ||
+    b === 'pyproject.toml' || b === 'build.gradle' || b === 'build.gradle.kts' ||
+    /^requirements(?:[-_.][\w-]+)?\.txt$/.test(b)
+  );
+}
+
+export function createIdeColdGutterPlaceholders(): { bp: Extension; diff: Extension; deps: Extension } {
   return {
     bp: [
       gutter({ class: 'cm-ide-bp-gutter' }),
@@ -143,6 +152,18 @@ export function createIdeColdGutterPlaceholders(): { bp: Extension; diff: Extens
           inlineSize: '7px',
           minInlineSize: '7px',
           maxInlineSize: '7px',
+          padding: '0',
+          boxSizing: 'border-box',
+        },
+      }),
+    ],
+    deps: [
+      Prec.high(gutter({ class: 'cm-ide-dep-gutter' })),
+      EditorView.baseTheme({
+        '.cm-ide-dep-gutter, .cm-ide-dep-gutter .cm-gutterElement': {
+          inlineSize: '18px',
+          minInlineSize: '18px',
+          maxInlineSize: '18px',
           padding: '0',
           boxSizing: 'border-box',
         },

@@ -21,10 +21,13 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import ClusterWizard from './ClusterWizard.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import InstallPanel from './InstallPanel.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
+
+  const ClusterWizardLazy = lazyComponent(() => import('./ClusterWizard.svelte'));
 
   const isAdmin = $derived(auth.isRoot);
   let wizardOpen = $state(false);
@@ -187,7 +190,7 @@
 </div>
 
 {#if wizardOpen}
-  <ClusterWizard existing={editing} onclose={() => { wizardOpen = false; editing = null; }} />
+  <LazyMount lazy={ClusterWizardLazy} what="the cluster wizard" quiet onerror={() => { wizardOpen = false; editing = null; }} props={{ existing: editing, onclose: () => { wizardOpen = false; editing = null; } }} />
 {/if}
 
 {#if k9sSheet}

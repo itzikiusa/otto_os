@@ -28,6 +28,18 @@
 
   /** Finished tasks shown when the fold opens (newest first). */
   const FINISHED_SHOWN = 8;
+  let showAllFinished = $state(false);
+  let maxBlockPx = $state(340);
+
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    const syncHeight = (): void => {
+      maxBlockPx = Math.max(160, Math.floor((window.innerHeight || 720) * 0.48));
+    };
+    syncHeight();
+    window.addEventListener('resize', syncHeight);
+    return () => window.removeEventListener('resize', syncHeight);
+  });
 
   const p = $derived(runtimeViews.projections[sessionId] ?? null);
   const childThreads = $derived.by((): LinkedChildThreadSummary[] => {
@@ -283,7 +295,14 @@
 {/snippet}
 
 {#if any}
-  <section class="tat" aria-label="Agents and tasks" data-testid="thread-agents-tasks" tabindex="-1" bind:this={el}>
+  <section
+    class="tat"
+    style:--tat-max="{maxBlockPx}px"
+    aria-label="Agents and tasks"
+    data-testid="thread-agents-tasks"
+    tabindex="-1"
+    bind:this={el}
+  >
     <h3 class="tat-head">
       Agents &amp; tasks
       {#if tasks.running.length}<span class="tat-count">{tasks.running.length} running</span>{/if}
@@ -292,9 +311,20 @@
       <ul class="tat-list">{#each tasks.running as t (t.id)}{@render row(t)}{/each}</ul>
     {/if}
     {#if tasks.finished.length}
+      {@const visibleFinished = showAllFinished ? tasks.finished : tasks.finished.slice(0, FINISHED_SHOWN)}
       <details class="tat-done">
         <summary>{tasks.finished.length} finished</summary>
-        <ul class="tat-list">{#each tasks.finished.slice(0, FINISHED_SHOWN) as t (t.id)}{@render row(t)}{/each}</ul>
+        <ul class="tat-list">{#each visibleFinished as t (t.id)}{@render row(t)}{/each}</ul>
+        {#if tasks.finished.length > FINISHED_SHOWN}
+          <button
+            type="button"
+            class="btn small ghost tat-more"
+            onclick={() => (showAllFinished = !showAllFinished)}
+            data-testid="thread-agents-tasks-more"
+          >
+            {showAllFinished ? 'Show fewer' : `Show all (${tasks.finished.length})`}
+          </button>
+        {/if}
       </details>
     {/if}
   </section>
@@ -303,7 +333,7 @@
 <style>
   .tat {
     flex-shrink: 0;
-    max-block-size: 48vh;
+    max-block-size: var(--tat-max, 340px);
     overflow-y: auto;
     padding-block: 8px;
     padding-inline: 10px;
@@ -325,6 +355,7 @@
   .tat-count {
     font-weight: 400;
     color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
   .tat-list {
     list-style: none;
@@ -389,6 +420,10 @@
     flex-shrink: 0;
     color: var(--text-dim);
     font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .tat-more {
+    margin-block-start: 4px;
   }
   .tat-chev {
     flex-shrink: 0;

@@ -123,7 +123,12 @@ impl otto_ide::IdeCtx for ServerCtx {
         write: bool,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            if user.is_root || spec.kind != otto_ide::types::IdeTargetKind::Local {
+            let has_root = if write {
+                otto_core::auth::root_authority(user)
+            } else {
+                user.is_root
+            };
+            if has_root || spec.kind != otto_ide::types::IdeTargetKind::Local {
                 return Ok(());
             }
             let raw_root = spec.root.trim();

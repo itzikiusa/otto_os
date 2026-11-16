@@ -155,21 +155,26 @@ impl IdeTargetSpec {
 
     /// Deduplicated union of `additional_roots` and `project_folders` (excluding `root`).
     pub fn merged_extra_roots(&self) -> Vec<String> {
-        let root_trim = self.root.trim().trim_end_matches('/');
-        let mut out = Vec::new();
+        let root_key = root_equiv_key(self.kind, &self.root);
+        let mut out: Vec<String> = Vec::new();
         for raw in self
             .additional_roots
             .iter()
             .chain(self.project_folders.iter())
         {
-            let clean = raw.trim();
-            if clean.is_empty() || clean.trim_end_matches('/') == root_trim {
+            let clean = trim_root_slash(raw);
+            if clean.is_empty() {
                 continue;
             }
-            if !out.iter().any(|existing: &String| {
-                existing.trim_end_matches('/') == clean.trim_end_matches('/')
-            }) {
-                out.push(clean.to_string());
+            let cand_key = root_equiv_key(self.kind, &clean);
+            if cand_key == root_key {
+                continue;
+            }
+            if !out
+                .iter()
+                .any(|existing| root_equiv_key(self.kind, existing) == cand_key)
+            {
+                out.push(clean);
             }
         }
         out
@@ -177,13 +182,27 @@ impl IdeTargetSpec {
 
     /// Merge extra project folders into `additional_roots` in-place.
     pub fn absorb_project_folders(&mut self, extra: &[String]) {
+        self.root = trim_root_slash(&self.root);
         for raw in extra {
-            let clean = raw.trim();
-            if !clean.is_empty() && !self.project_folders.iter().any(|x| x == clean) {
-                self.project_folders.push(clean.to_string());
+            let clean = trim_root_slash(raw);
+            if clean.is_empty() {
+                continue;
+            }
+            let cand_key = root_equiv_key(self.kind, &clean);
+            if !self
+                .project_folders
+                .iter()
+                .any(|x| root_equiv_key(self.kind, x) == cand_key)
+            {
+                self.project_folders.push(clean);
             }
         }
-        self.additional_roots = self.merged_extra_roots();
+        let deduped = self.merged_extra_roots();
+        self.project_folders.retain(|x| {
+            let k = root_equiv_key(self.kind, x);
+            k != root_equiv_key(self.kind, &self.root)
+        });
+        self.additional_roots = deduped;
     }
 
     /// Validate basic structural invariants before touching local FS or SSH.
@@ -204,6 +223,22 @@ impl IdeTargetSpec {
             if extra.chars().any(char::is_control) {
                 return Err(Error::Invalid(
                     "additional_roots entry contains control characters".into(),
+                ));
+            }
+        }
+        if self.kind == IdeTargetKind::Local {
+            let rt = self.root.trim();
+            let is_win_drive = rt.len() >= 3
+                && rt.as_bytes()[0].is_ascii_alphabetic()
+                && rt.as_bytes()[1] == b':'
+                && matches!(rt.as_bytes()[2], b'/' | b'\\');
+            let is_valid_local_prefix = rt.starts_with('/')
+                || rt.starts_with('~')
+                || rt.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("file:"))
+                || is_win_drive;
+            if !is_valid_local_prefix {
+                return Err(Error::Invalid(
+                    "local target root must be an absolute or ~/ path".into(),
                 ));
             }
         }
@@ -294,13 +329,72 @@ pub struct IdePlatformInfo {
 // Shared language detection helper
 // ---------------------------------------------------------------------------
 
+pub(crate) fn trim_root_slash(raw: &str) -> String {
+    let t = raw.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let stripped = t.trim_end_matches('/');
+    if stripped.is_empty() && t.starts_with('/') {
+        "/".to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
+pub(crate) fn root_equiv_key(kind: IdeTargetKind, raw: &str) -> String {
+    let clean = trim_root_slash(raw);
+    if kind != IdeTargetKind::Local {
+        return crate::target::normalize_posix_clean_root(&clean);
+    }
+    let expanded = trim_root_slash(&otto_core::paths::expand_tilde(&clean));
+    if expanded == "/private/var" {
+        return "/var".to_string();
+    }
+    if let Some(rest) = expanded.strip_prefix("/private/var/") {
+        return format!("/var/{rest}");
+    }
+    if expanded == "/private/tmp" {
+        return "/tmp".to_string();
+    }
+    if let Some(rest) = expanded.strip_prefix("/private/tmp/") {
+        return format!("/tmp/{rest}");
+    }
+    if expanded == "/private/etc" {
+        return "/etc".to_string();
+    }
+    if let Some(rest) = expanded.strip_prefix("/private/etc/") {
+        return format!("/etc/{rest}");
+    }
+    expanded
+}
+
 /// Canonical file-path to IDE language identifier mapping.
 pub fn detect_language(path: &str) -> Option<&'static str> {
     let trimmed = path.trim();
-    if trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case("jdt://") {
+    if trimmed
+        .get(..6)
+        .is_some_and(|p| p.eq_ignore_ascii_case("jdt://"))
+    {
         return Some("java");
     }
-    let clean = trimmed.split('?').next().unwrap_or(trimmed);
+    let has_uri_scheme = trimmed
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("file://"))
+        || trimmed
+            .get(..4)
+            .is_some_and(|p| p.eq_ignore_ascii_case("jar:"))
+        || trimmed
+            .get(..8)
+            .is_some_and(|p| p.eq_ignore_ascii_case("zipfile:"))
+        || trimmed
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case("ssh://"));
+    let clean = if has_uri_scheme {
+        trimmed.split(['?', '#']).next().unwrap_or(trimmed)
+    } else {
+        path
+    };
     let base = clean.rsplit('/').next().unwrap_or(clean);
     match base {
         "Makefile" | "GNUmakefile" | "makefile" => return Some("makefile"),

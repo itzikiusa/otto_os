@@ -376,6 +376,7 @@ fn agy_gemini_opencode_and_grok_emit_subagent_children_timers_and_prehandshake_c
     let oc_sb = opencode.on_sideband(SidebandPayload::OpencodeSqlite {
         stamp: (1, 64, 0, 0),
         rows_jsonl: oc_row.into_bytes(),
+        has_more: false,
     });
     assert!(collect_items(&oc_sb.events)
         .iter()
@@ -407,4 +408,144 @@ fn agy_gemini_opencode_and_grok_emit_subagent_children_timers_and_prehandshake_c
     assert!(collect_items(&gk_sb.events)
         .iter()
         .any(|i| i.parent_item_id.as_deref() == Some("t1:tool:gk_s1")));
+}
+
+#[test]
+fn round6_pi_duration_clamp_ambiguous_parents_gemini_baseline_and_opencode_pagination() {
+    // 1. PiDriver: `DurationSeconds = i64::MAX` clamps without panic, `CronExpression`
+    //    omits `due_at`, and >1 concurrent foreground subagents do not guess-attribute children.
+    let mut pi = PiDriver::with_program("pi");
+    pi.start(&launch_ctx("/w"));
+    pi.on_line(
+        &json!({"id":"init-state","type":"response","command":"get_state","success":true,"data":{"sessionId":"pi-r6"}})
+            .to_string(),
+    );
+    pi.prompt("t1", &RuntimePromptReq::of("audit")).unwrap();
+    let s_huge = pi.on_line(
+        &json!({
+            "type":"tool_execution_start","toolCallId":"sched_huge","toolName":"schedule",
+            "args":{"DurationSeconds": i64::MAX, "Prompt":"Check later"}
+        })
+        .to_string(),
+    );
+    assert!(s_huge.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::BackgroundTasks(tasks)
+            if tasks.iter().any(|t| t.id.contains("sched_huge") && t.due_at.is_some())
+    )));
+    let s_cron = pi.on_line(
+        &json!({
+            "type":"tool_execution_start","toolCallId":"sched_cron","toolName":"schedule",
+            "args":{"DurationSeconds": 60, "CronExpression": "*/5 * * * *", "Prompt":"Recurring"}
+        })
+        .to_string(),
+    );
+    assert!(s_cron.events.iter().any(|e| matches!(
+        e,
+        DriverEvent::BackgroundTasks(tasks)
+            if tasks.iter().any(|t| t.id.contains("sched_cron") && t.due_at.is_none())
+    )));
+    pi.on_line(
+        &json!({"type":"tool_execution_start","toolCallId":"sub_a","toolName":"subagent","args":{"description":"A","prompt":"A"}})
+            .to_string(),
+    );
+    pi.on_line(
+        &json!({"type":"tool_execution_start","toolCallId":"sub_b","toolName":"subagent","args":{"description":"B","prompt":"B"}})
+            .to_string(),
+    );
+    let ambig = pi.on_line(
+        &json!({"type":"tool_execution_start","toolCallId":"child_untagged","toolName":"read","args":{"path":"/w/lib.rs"}})
+            .to_string(),
+    );
+    assert!(collect_items(&ambig.events)
+        .iter()
+        .any(|i| i.id == "t1:tool:child_untagged" && i.parent_item_id.is_none()));
+
+    // 2. AcpDriver::gemini: baseline message (`timestamp` older than `idle_since_ms`)
+    //    still surfaces child `subCalls` / `parentCallId` under an open subagent.
+    let mut gemini = AcpDriver::gemini("gemini");
+    acp_handshake_and_prompt(&mut gemini, "/w", "gem-r6-12345678");
+    gemini.on_line(
+        &json!({
+            "jsonrpc":"2.0","method":"session/update",
+            "params":{"sessionId":"gem-r6-12345678","update":{"sessionUpdate":"tool_call","toolCallId":"g_inv","title":"codebase_investigator","status":"in_progress","rawInput":{"objective":"Trace"}}}
+        })
+        .to_string(),
+    );
+    let old_ts = (Utc::now() - ChronoDuration::minutes(10)).to_rfc3339();
+    let gem_sb = gemini.on_sideband(SidebandPayload::GeminiJson {
+        resolved_path: std::path::PathBuf::from("/tmp/session-gem-r6-12345678.json"),
+        stamp: (100, 512),
+        doc: json!({
+            "sessionId": "gem-r6-12345678",
+            "messages": [
+                {
+                    "id": "m_base",
+                    "type": "gemini",
+                    "timestamp": old_ts,
+                    "toolCalls": [
+                        {
+                            "id": "g_child_base",
+                            "parentCallId": "g_inv",
+                            "name": "read_file",
+                            "status": "success",
+                            "args": {"path": "/w/src/lib.rs"}
+                        }
+                    ]
+                }
+            ]
+        }),
+    });
+    assert!(collect_items(&gem_sb.events)
+        .iter()
+        .any(|i| i.parent_item_id.as_deref() == Some("t1:tool:g_inv")));
+
+    // 3. AcpDriver::opencode: `has_more: true` (>256 rows) does NOT cache `last_stamp`,
+    //    allowing subsequent pages at the same SQLite file stamp to deliver rows >256.
+    let mut opencode = AcpDriver::opencode();
+    acp_handshake_and_prompt(&mut opencode, "/w", "ses_oc_r6");
+    opencode.on_line(
+        &json!({
+            "jsonrpc":"2.0","method":"session/update",
+            "params":{"sessionId":"ses_oc_r6","update":{"sessionUpdate":"tool_call","toolCallId":"oc_task","title":"task","status":"in_progress","rawInput":{"description":"Scan","subagent_type":"explore","prompt":"Go"}}}
+        })
+        .to_string(),
+    );
+    let base_ms = Utc::now().timestamp_millis() + 5_000;
+    let page1 = format!(
+        "{}\n",
+        json!({
+            "id":"prt_001","session_id":"ses_child_r6","message_id":"m1",
+            "time_updated": base_ms, "role":"assistant",
+            "data":{"type":"tool","tool":"bash","callID":"c_p1","state":{"status":"completed","input":{"command":"pwd"},"output":"/w"}}
+        })
+    );
+    let sb1 = opencode.on_sideband(SidebandPayload::OpencodeSqlite {
+        stamp: (77, 4096, 0, 0),
+        rows_jsonl: page1.into_bytes(),
+        has_more: true,
+    });
+    assert!(collect_items(&sb1.events)
+        .iter()
+        .any(|i| i.parent_item_id.as_deref() == Some("t1:tool:oc_task")));
+
+    let page2 = format!(
+        "{}\n",
+        json!({
+            "id":"prt_257","session_id":"ses_child_r6","message_id":"m1",
+            "time_updated": base_ms, "role":"assistant",
+            "data":{"type":"tool","tool":"bash","callID":"c_p2","state":{"status":"completed","input":{"command":"ls"},"output":"Cargo.toml"}}
+        })
+    );
+    let sb2 = opencode.on_sideband(SidebandPayload::OpencodeSqlite {
+        stamp: (77, 4096, 0, 0),
+        rows_jsonl: page2.into_bytes(),
+        has_more: false,
+    });
+    assert!(
+        collect_items(&sb2.events).iter().any(
+            |i| i.id.contains("c_p2") && i.parent_item_id.as_deref() == Some("t1:tool:oc_task")
+        ),
+        "page 2 at identical SQLite stamp must be ingested when page 1 had has_more=true"
+    );
 }

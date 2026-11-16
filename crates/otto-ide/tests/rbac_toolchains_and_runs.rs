@@ -229,8 +229,24 @@ async fn non_root_rbac_secret_paths_and_cross_user_isolation_are_enforced() {
         json!(["e2e"])
     );
 
-    let (st_cfg, cfg_body) = send_json(
+    // Local run-config creation requires `root_authority(user)`:
+    let (st_cfg_nonroot, _) = send_json(
         &app_bob,
+        Method::POST,
+        "/ide/run-configs",
+        Some(json!({
+            "target": { "kind": "local", "root": bob_str },
+            "name": "Bob Go Tests",
+            "runner": "go_test",
+            "args": ["./..."],
+            "coverage": true,
+        })),
+    )
+    .await;
+    assert_eq!(st_cfg_nonroot, StatusCode::FORBIDDEN);
+
+    let (st_cfg, cfg_body) = send_json(
+        &app_root,
         Method::POST,
         "/ide/run-configs",
         Some(json!({
@@ -245,7 +261,7 @@ async fn non_root_rbac_secret_paths_and_cross_user_isolation_are_enforced() {
     assert_eq!(
         st_cfg,
         StatusCode::OK,
-        "bob upsert config failed: {cfg_body}"
+        "root upsert config failed: {cfg_body}"
     );
     assert_eq!(cfg_body["config"]["coverage"], true);
     let bob_cfg_id = cfg_body["config"]["id"].as_str().unwrap().to_string();

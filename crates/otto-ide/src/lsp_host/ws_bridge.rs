@@ -204,8 +204,9 @@ where
     F: Fn(PathBuf) -> Fut,
     Fut: Future<Output = otto_core::Result<bool>>,
 {
+    let has_root_auth = otto_core::auth::root_authority(user);
     let ide = ctx.ide();
-    ide.lsp_pool.record_owner_privilege(&user.id, user.is_root);
+    ide.lsp_pool.record_owner_privilege(&user.id, has_root_auth);
 
     let Some(lang) = q.lang.filter(|l| !l.is_empty()) else {
         return Err(LspWsError::bad_request("missing ?lang= parameter"));
@@ -300,28 +301,10 @@ where
         None => None,
     };
 
-    // Enforce secret-path denial and live RBAC on requested `root` (and `file` hint)
-    // BEFORE probing filesystem existence or walking parent directories for module roots.
-    if !user.is_root {
-        let root_for_secret = expanded_root_buf.clone();
-        let file_for_secret = file_hint.as_ref().map(PathBuf::from);
-        let pre_secret = tokio::task::spawn_blocking(move || {
-            if let Some(why) = secret_root_denial(&canonical_or_ancestor(&root_for_secret)) {
-                return Some(why);
-            }
-            if let Some(fh) = file_for_secret {
-                if let Some(why) = secret_root_denial(&canonical_or_ancestor(&fh)) {
-                    return Some(why);
-                }
-            }
-            None
-        })
-        .await
-        .map_err(|_| LspWsError::internal("path secret check failed"))?;
-        if let Some(why) = pre_secret {
-            return Err(LspWsError::forbidden(why));
-        }
-
+    // Enforce live RBAC (and secret-path denial via `local_root_ok`, preserving
+    // read-only personal-agent persona-dir access) BEFORE probing filesystem
+    // existence or walking parent directories for module roots.
+    if !has_root_auth {
         match local_root_ok(expanded_root_buf.clone()).await {
             Ok(true) => {}
             Ok(false) => {
@@ -337,6 +320,9 @@ where
 
         if let Some(ref fh) = file_hint {
             let fh_path = Path::new(fh);
+            if otto_core::secret_paths::is_denied_file(fh_path) {
+                return Err(LspWsError::forbidden("access to secret file denied"));
+            }
             let fh_dir = fh_path.parent().unwrap_or(fh_path).to_path_buf();
             match local_root_ok(fh_dir).await {
                 Ok(true) => {}
@@ -357,14 +343,15 @@ where
         let lang_cl = lang.clone();
         let root_cl = expanded_root.clone();
         let fh_cl = file_hint.clone();
+        let plugins_cl = ide.plugins.clone();
         tokio::task::spawn_blocking(move || {
-            resolve_local_lsp_module_root(&lang_cl, &root_cl, fh_cl)
+            resolve_local_lsp_module_root(&lang_cl, &root_cl, fh_cl, &plugins_cl)
         })
         .await
         .map_err(|_| LspWsError::internal("local module root resolution failed"))??
     };
 
-    if !user.is_root && Path::new(&resolved_root) != expanded_root_buf.as_path() {
+    if !has_root_auth && Path::new(&resolved_root) != expanded_root_buf.as_path() {
         match local_root_ok(PathBuf::from(&resolved_root)).await {
             Ok(true) => {}
             Ok(false) => {
@@ -492,6 +479,7 @@ fn resolve_local_lsp_module_root(
     lang: &str,
     root: &str,
     file_hint: Option<String>,
+    plugins: &crate::plugins::IdePluginRegistry,
 ) -> std::result::Result<String, LspWsError> {
     let expanded = PathBuf::from(otto_core::paths::expand_tilde(root));
     if !expanded.exists() || !expanded.is_dir() {
@@ -499,9 +487,27 @@ fn resolve_local_lsp_module_root(
             "root does not exist or is not a directory: {root}"
         )));
     }
+    let norm = servers::normalize_lsp_lang(&lang.trim().to_ascii_lowercase()).to_string();
+    let mut extra_markers = Vec::new();
+    for ls in plugins.active_languages() {
+        if servers::normalize_lsp_lang(&ls.id.trim().to_ascii_lowercase()) == norm {
+            extra_markers.extend(ls.root_markers);
+        }
+    }
+    for sp in plugins.active_lsp_servers() {
+        if servers::normalize_lsp_lang(&sp.language.trim().to_ascii_lowercase()) == norm {
+            extra_markers.extend(sp.root_markers);
+        }
+    }
     let expanded_str = expanded.to_string_lossy();
-    servers::resolve_lsp_module_root(lang, &expanded_str, file_hint.as_deref(), &[])
-        .map_err(|e| LspWsError::bad_request(e.to_string()))
+    servers::resolve_lsp_module_root_with_markers(
+        lang,
+        &expanded_str,
+        file_hint.as_deref(),
+        &[],
+        &extra_markers,
+    )
+    .map_err(|e| LspWsError::bad_request(e.to_string()))
 }
 
 #[allow(clippy::disallowed_methods)]

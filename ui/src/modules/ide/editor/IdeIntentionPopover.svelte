@@ -65,6 +65,7 @@
       : null;
   let anchorEl = $state<HTMLSpanElement | null>(null);
   let pos = $state<AnchorPlacement>({ left: 12, top: 12, maxH: 340 });
+  let maxW = $state(560);
 
   function closePopover(restoreFocus = true): void {
     onclose();
@@ -73,6 +74,7 @@
 
   function updatePlacement(): void {
     if (typeof window === 'undefined' || !anchorEl || !popEl) return;
+    maxW = Math.min(560, Math.max(260, window.innerWidth - 16));
     pos = placeAnchored(anchorEl, popEl, { prefer: 'below', align: 'start', gap: 4 });
   }
 
@@ -331,6 +333,7 @@
   tabindex="-1"
   style:left="{pos.left}px"
   style:top="{pos.top}px"
+  style:max-inline-size="{maxW}px"
   style:max-block-size="{Math.min(340, pos.maxH)}px"
   data-testid="ide-intention-popover"
   data-dep-popover={eco ? 'true' : undefined}
@@ -379,7 +382,6 @@
   .ide-int-anchor { position: fixed; inline-size: 0; block-size: 0; pointer-events: none; }
   .ide-intention-popover {
     position: fixed; z-index: var(--z-popover); display: flex; align-items: stretch;
-    max-inline-size: min(560px, calc(100vw - 16px));
     background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-m);
     box-shadow: var(--glass-shadow); overflow: hidden; outline: none;
   }

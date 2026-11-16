@@ -218,12 +218,14 @@ impl AcpSideband {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn sideband_poll(
         &self,
         provider: RuntimeProvider,
         ready: bool,
         idle_between_prompts: bool,
         poll_child_subagents: bool,
+        has_open_bg_work: bool,
         cwd: &str,
         session_id: Option<&str>,
     ) -> Option<SidebandPoll> {
@@ -232,6 +234,16 @@ impl AcpSideband {
             return None;
         }
         let now = now_ms();
+        if idle_between_prompts
+            && !has_open_bg_work
+            && !self.is_awaiting_followup()
+            && self.custom_file.is_none()
+        {
+            let anchor = self.last_active_ms.max(self.idle_since_ms);
+            if anchor > 0 && now.saturating_sub(anchor) >= COLD_IDLE_AFTER_MS {
+                return None;
+            }
+        }
         let allow_dir_scan = now >= self.unresolved_until_ms;
         let source = self.source_for(provider, cwd, session_id, allow_dir_scan)?;
         let mut interval = if poll_child_subagents && !idle_between_prompts {
@@ -428,6 +440,7 @@ impl AcpSideband {
         &mut self,
         provider: RuntimeProvider,
         session_id: Option<&str>,
+        include_child_subcalls: bool,
         payload: SidebandPayload,
     ) -> Vec<SidebandAction> {
         let actions = match payload {
@@ -476,21 +489,29 @@ impl AcpSideband {
                     &doc,
                     session_id,
                     self.idle_since_ms,
+                    include_child_subcalls,
                     &mut self.mirrored,
                 )
             }
-            SidebandPayload::OpencodeSqlite { stamp, rows_jsonl } => {
+            SidebandPayload::OpencodeSqlite {
+                stamp,
+                rows_jsonl,
+                has_more,
+            } => {
                 self.unresolved_until_ms = 0;
                 self.opencode.parse_rows(
                     stamp,
                     &rows_jsonl,
+                    has_more,
                     session_id,
                     self.idle_since_ms,
                     &mut self.mirrored,
                 )
             }
             SidebandPayload::Batch { primary, .. } => match primary {
-                Some(inner) => return self.on_payload(provider, session_id, *inner),
+                Some(inner) => {
+                    return self.on_payload(provider, session_id, include_child_subcalls, *inner)
+                }
                 None => Vec::new(),
             },
         };

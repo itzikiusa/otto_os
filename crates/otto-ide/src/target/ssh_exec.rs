@@ -111,9 +111,12 @@ impl TargetManager {
         env: &BTreeMap<String, String>,
         timeout: Duration,
     ) -> Result<ExecOutput> {
-        let mut cmd = self.build_piped_command(target, program, args, cwd, env)?;
-        cmd.stdin(Stdio::null());
-        run_command_bounded(cmd, timeout).await
+        let (mut cmd, preamble) =
+            self.build_piped_command_with_preamble(target, program, args, cwd, env)?;
+        if preamble.is_none() {
+            cmd.stdin(Stdio::null());
+        }
+        run_command_bounded(cmd, preamble, timeout).await
     }
 
     /// Execute a bounded POSIX `sh -c <script>` command on `target`.
@@ -140,6 +143,19 @@ impl TargetManager {
         cwd: Option<&str>,
         env: &BTreeMap<String, String>,
     ) -> Result<Command> {
+        Ok(self
+            .build_piped_command_with_preamble(target, program, args, cwd, env)?
+            .0)
+    }
+
+    pub(crate) fn build_piped_command_with_preamble(
+        &self,
+        target: &ResolvedTarget,
+        program: &str,
+        args: &[String],
+        cwd: Option<&str>,
+        env: &BTreeMap<String, String>,
+    ) -> Result<(Command, Option<Vec<u8>>)> {
         if program.trim().is_empty() || program.chars().any(char::is_control) {
             return Err(Error::Invalid("invalid command program name".into()));
         }
@@ -176,7 +192,7 @@ impl TargetManager {
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .kill_on_drop(true);
-                Ok(cmd)
+                Ok((cmd, None))
             }
             ResolvedTarget::Ssh {
                 spec,
@@ -188,7 +204,8 @@ impl TargetManager {
                 let remote_cwd = cwd
                     .filter(|c| !c.trim().is_empty())
                     .unwrap_or(root.as_str());
-                let remote_cmd = build_remote_exec_line(remote_cwd, program, args, env);
+                let (remote_cmd, preamble) =
+                    build_remote_exec_with_stdin_env(remote_cwd, program, args, env);
                 let (mut ssh_args, dest) = build_ssh_cli_args(spec, Some(&ctl.ctl_path))?;
                 ssh_args.push("--".into());
                 ssh_args.push(dest);
@@ -200,7 +217,7 @@ impl TargetManager {
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .kill_on_drop(true);
-                Ok(cmd)
+                Ok((cmd, preamble))
             }
         }
     }
@@ -217,6 +234,20 @@ impl TargetManager {
         args: &[String],
         env: &BTreeMap<String, String>,
     ) -> Result<Command> {
+        Ok(self
+            .build_ssh_run_command_with_preamble(spec, actor_id, cwd, program, args, env)?
+            .0)
+    }
+
+    pub(crate) fn build_ssh_run_command_with_preamble(
+        &self,
+        spec: &IdeSshSpec,
+        actor_id: &str,
+        cwd: &str,
+        program: &str,
+        args: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Result<(Command, Option<Vec<u8>>)> {
         if program.trim().is_empty() || program.chars().any(char::is_control) {
             return Err(Error::Invalid("invalid command program name".into()));
         }
@@ -229,7 +260,11 @@ impl TargetManager {
         }
         let ctl = self.acquire_ssh_socket(actor_id, spec)?;
         let exec_line = build_remote_exec_line(cwd, program, args, env);
-        let wrapped = wrap_remote_null_stdin_with_eof_kill(&exec_line);
+        let env_preamble = build_remote_stdin_env_preamble(env);
+        let wrapped = wrap_remote_null_stdin_with_eof_kill_and_env(
+            &exec_line,
+            env_preamble.as_ref().map(|(r, _)| r.as_str()),
+        );
         let (mut ssh_args, dest) = build_ssh_cli_args(spec, Some(&ctl.ctl_path))?;
         ssh_args.push("--".into());
         ssh_args.push(dest);
@@ -241,7 +276,7 @@ impl TargetManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        Ok(cmd)
+        Ok((cmd, env_preamble.map(|(_, b)| b)))
     }
 
     /// Spawn a long-lived piped child process on either local OS or multiplexed SSH.
@@ -253,9 +288,13 @@ impl TargetManager {
         cwd: Option<&str>,
         env: &BTreeMap<String, String>,
     ) -> Result<Child> {
-        let mut cmd = self.build_piped_command(target, program, args, cwd, env)?;
-        cmd.spawn()
-            .map_err(|e| Error::Upstream(format!("failed to spawn '{program}': {e}")))
+        let (mut cmd, preamble) =
+            self.build_piped_command_with_preamble(target, program, args, cwd, env)?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| Error::Upstream(format!("failed to spawn '{program}': {e}")))?;
+        write_ssh_env_preamble(&mut child, preamble, false).await?;
+        Ok(child)
     }
 
     pub(crate) fn acquire_sftp(
@@ -413,6 +452,48 @@ fn quote_remote_home_expr(val: &str) -> String {
     shell_words::quote(val).into_owned()
 }
 
+/// Format non-`PATH` environment variables as POSIX `export KEY=VALUE` lines to be
+/// streamed over SSH `stdin` (never placed in `ssh` or remote `sh -c` `argv`).
+pub(crate) fn format_remote_env_exports(env: &BTreeMap<String, String>) -> String {
+    let mut out = String::new();
+    for (k, v) in env.iter().filter(|(k, _)| k.as_str() != "PATH") {
+        let quoted_val = if matches!(
+            k.as_str(),
+            "GOROOT"
+                | "GOPATH"
+                | "GOMODCACHE"
+                | "JAVA_HOME"
+                | "VIRTUAL_ENV"
+                | "CARGO_HOME"
+                | "RUSTUP_HOME"
+        ) {
+            quote_remote_home_expr(v)
+        } else {
+            format!("'{}'", v.replace('\'', "'\\''"))
+        };
+        out.push_str(&format!("export {k}={quoted_val}\n"));
+    }
+    out
+}
+
+/// Build a sentinel-delimited POSIX `sh` `stdin` reader preamble and matching byte
+/// payload for non-`PATH` environment variables so secret values never appear in
+/// local `ps aux` or remote `/proc/<pid>/cmdline`.
+pub(crate) fn build_remote_stdin_env_preamble(
+    env: &BTreeMap<String, String>,
+) -> Option<(String, Vec<u8>)> {
+    let exports = format_remote_env_exports(env);
+    if exports.is_empty() {
+        return None;
+    }
+    let sentinel = format!("__OTTO_ENV_{:032x}__", rand::random::<u128>());
+    let reader = format!(
+        "_oes=\"\"; while IFS= read -r _ol && [ \"$_ol\" != '{sentinel}' ]; do _oes=\"${{_oes}}${{_ol}}\n\"; done; eval \"$_oes\"; unset _oes _ol;"
+    );
+    let payload = format!("{exports}{sentinel}\n").into_bytes();
+    Some((reader, payload))
+}
+
 pub(crate) fn build_remote_exec_line(
     cwd: &str,
     program: &str,
@@ -446,29 +527,6 @@ pub(crate) fn build_remote_exec_line(
     let mut parts = Vec::new();
     parts.push(format!("export PATH={};", path_exprs.join(":")));
     parts.push(format!("cd {} &&", quote_remote_home_expr(cwd)));
-
-    let non_path_env: Vec<(&String, &String)> =
-        env.iter().filter(|(k, _)| k.as_str() != "PATH").collect();
-    if !non_path_env.is_empty() {
-        parts.push("env".into());
-        for (k, v) in non_path_env {
-            let quoted_val = if matches!(
-                k.as_str(),
-                "GOROOT"
-                    | "GOPATH"
-                    | "GOMODCACHE"
-                    | "JAVA_HOME"
-                    | "VIRTUAL_ENV"
-                    | "CARGO_HOME"
-                    | "RUSTUP_HOME"
-            ) {
-                quote_remote_home_expr(v)
-            } else {
-                shell_words::quote(v).into_owned()
-            };
-            parts.push(format!("{k}={quoted_val}"));
-        }
-    }
     parts.push("exec".into());
     let prog_expr = if program.starts_with("~/") || program.starts_with("$HOME/") {
         quote_remote_home_expr(program)
@@ -482,12 +540,37 @@ pub(crate) fn build_remote_exec_line(
     parts.join(" ")
 }
 
+pub(crate) fn build_remote_exec_with_stdin_env(
+    cwd: &str,
+    program: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> (String, Option<Vec<u8>>) {
+    let exec_line = build_remote_exec_line(cwd, program, args, env);
+    match build_remote_stdin_env_preamble(env) {
+        Some((reader, payload)) => (format!("{reader} {exec_line}"), Some(payload)),
+        None => (exec_line, None),
+    }
+}
+
 /// Wrap a remote run command whose stdin is unused (`</dev/null`): duplicates
 /// outer SSH `stdin` onto `fd 4` BEFORE spawning `&` background jobs because
 /// non-interactive POSIX `sh` implicitly redirects `fd 0` of `&` jobs to `/dev/null`.
+#[cfg(test)]
 pub(crate) fn wrap_remote_null_stdin_with_eof_kill(exec_line: &str) -> String {
+    wrap_remote_null_stdin_with_eof_kill_and_env(exec_line, None)
+}
+
+pub(crate) fn wrap_remote_null_stdin_with_eof_kill_and_env(
+    exec_line: &str,
+    env_reader: Option<&str>,
+) -> String {
+    let prefix = match env_reader {
+        Some(r) => format!("{r} "),
+        None => String::new(),
+    };
     format!(
-        "exec 4<&0; \
+        "{prefix}exec 4<&0; \
          ( exec 4<&-; {exec_line} ) </dev/null & pid=$!; \
          ( cat <&4 >/dev/null; kill -TERM \"$pid\" ) >/dev/null 2>&1 & watcher=$!; \
          exec 4<&-; wait \"$pid\"; rc=$?; kill \"$watcher\" 2>/dev/null; exit \"$rc\""
@@ -497,9 +580,21 @@ pub(crate) fn wrap_remote_null_stdin_with_eof_kill(exec_line: &str) -> String {
 /// Wrap a remote command that reads binary frames on `stdin` (DAP stdio adapters)
 /// or listens on TCP (`dlv`, JDWP, Node inspector) so closing the local `ssh` pipe
 /// cleanly terminates the remote process without `-tt` PTY newline mangling.
+#[cfg(test)]
 pub(crate) fn wrap_remote_stdio_with_eof_kill(exec_line: &str) -> String {
+    wrap_remote_stdio_with_eof_kill_and_env(exec_line, None)
+}
+
+pub(crate) fn wrap_remote_stdio_with_eof_kill_and_env(
+    exec_line: &str,
+    env_reader: Option<&str>,
+) -> String {
+    let prefix = match env_reader {
+        Some(r) => format!("{r} "),
+        None => String::new(),
+    };
     format!(
-        "exec 4<&0; \
+        "{prefix}exec 4<&0; \
          fifo=\"/tmp/.otto-ide-$$-$(date +%s 2>/dev/null || echo 0)\"; \
          mkfifo \"$fifo\" || exit 1; \
          ( exec 4<&-; {exec_line} ) <\"$fifo\" & pid=$!; \
@@ -509,10 +604,48 @@ pub(crate) fn wrap_remote_stdio_with_eof_kill(exec_line: &str) -> String {
     )
 }
 
-async fn run_command_bounded(mut cmd: Command, timeout: Duration) -> Result<ExecOutput> {
-    let child = cmd
+pub(crate) async fn write_ssh_env_preamble(
+    child: &mut Child,
+    preamble: Option<Vec<u8>>,
+    close_stdin_after: bool,
+) -> Result<()> {
+    if let Some(bytes) = preamble {
+        use tokio::io::AsyncWriteExt;
+        if close_stdin_after {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|e| Error::Upstream(format!("write ssh env preamble: {e}")))?;
+                let _ = stdin.shutdown().await;
+            }
+        } else if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(&bytes)
+                .await
+                .map_err(|e| Error::Upstream(format!("write ssh env preamble: {e}")))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| Error::Upstream(format!("flush ssh env preamble: {e}")))?;
+        }
+    } else if close_stdin_after {
+        let _ = child.stdin.take();
+    }
+    Ok(())
+}
+
+async fn run_command_bounded(
+    mut cmd: Command,
+    preamble: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<ExecOutput> {
+    let mut child = cmd
         .spawn()
         .map_err(|e| Error::Upstream(format!("failed to start process: {e}")))?;
+    if preamble.is_some() {
+        write_ssh_env_preamble(&mut child, preamble, true).await?;
+    }
     match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(out)) => Ok(ExecOutput {
             exit_code: out.status.code().unwrap_or(-1),

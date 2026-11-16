@@ -27,11 +27,18 @@ pub(super) async fn analyze_python_diagnostics(
         .unwrap_or_else(|| PathBuf::from("python3"));
     let script = "import ast,json,sys\nsrc=sys.stdin.read()\ntry:\n ast.parse(src)\nexcept SyntaxError as e:\n print(json.dumps({'line':e.lineno or 1,'col':e.offset or 1,'msg':e.msg}))\n";
     let mut cmd = Command::new(py_bin);
-    cmd.args(["-c", script])
+    // `-I` runs Python in isolated mode: ignores `PYTHONPATH` / `PYTHON*` env vars
+    // and omits CWD / user site-packages from `sys.path` so workspace `sitecustomize.py`
+    // or shadowed stdlib modules can never execute during passive syntax checks.
+    cmd.args(["-I", "-c", script])
         .env_clear()
-        .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
-        .envs(env_map)
-        .stdin(Stdio::piped())
+        .envs(crate::environments::shell_env::collect_safe_non_root_base_env());
+    for (k, v) in env_map {
+        if !crate::environments::is_dangerous_loader_env_key(k) {
+            cmd.env(k, v);
+        }
+    }
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);

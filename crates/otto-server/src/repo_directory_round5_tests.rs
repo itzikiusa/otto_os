@@ -147,3 +147,64 @@ async fn resolve_repo_rejects_broad_roots_while_resolving_nested_subrepo() {
         .expect("nested subrepo should resolve via checkout remote");
     assert_eq!(resolved.entry.repo.id, w.repo_a);
 }
+
+#[tokio::test]
+async fn tilde_nested_subrepo_beats_expanded_parent_and_visible_repos_prunes_deleted_with_forge() {
+    let home = std::env::var("HOME").expect("HOME set");
+    let home = home.trim_end_matches('/');
+    let es = vec![
+        entry(
+            "r-parent",
+            "ws-a",
+            "parent",
+            &format!("{home}/ws_parent"),
+            None,
+        ),
+        entry("r-tilde-sub", "ws-a", "sub", "~/ws_parent/sub", None),
+    ];
+    let hits = match_path(&es, &format!("{home}/ws_parent/sub/src/lib.rs"));
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].repo.id, "r-tilde-sub");
+
+    let w = world().await;
+    let owner = user("owner", false);
+    std::fs::create_dir_all(format!("{}/gh-sdk", w.root_dir)).unwrap();
+    let gh_id = w
+        .git
+        .create_repo(NewRepo {
+            workspace_id: w.ws_a.clone(),
+            name: "gh-sdk".into(),
+            path: format!("{}/gh-sdk", w.root_dir),
+            remote_url: Some("git@github.com:acme/gh-sdk.git".into()),
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let missing_id = w
+        .git
+        .create_repo(NewRepo {
+            workspace_id: w.ws_a.clone(),
+            name: "deleted-checkout".into(),
+            path: format!("{}/deleted-checkout", w.root_dir),
+            remote_url: Some("https://github.com/acme/deleted.git".into()),
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap()
+        .id;
+
+    let visible = visible_repos(&w.src(), &owner, None).await.unwrap();
+    assert!(!visible.iter().any(|e| e.repo.id == missing_id));
+    let forge_of = |id: &str| {
+        visible
+            .iter()
+            .find(|e| e.repo.id == id)
+            .and_then(|e| e.repo.forge.as_deref())
+    };
+    assert_eq!(forge_of(&w.repo_a), Some("bitbucket"));
+    assert_eq!(forge_of(&w.repo_b), Some("bitbucket"));
+    assert_eq!(forge_of(&gh_id), Some("github"));
+}

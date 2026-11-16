@@ -285,15 +285,11 @@ pub(super) fn normalize_lookup_fast(root: &str) -> Option<String> {
 }
 
 pub(super) fn stored_project_matches(entry: &StoredProject, lookup: &str) -> bool {
-    let alt = lookup
-        .strip_prefix("/var/")
-        .map(|r| format!("/private/var/{r}"))
-        .or_else(|| {
-            lookup
-                .strip_prefix("/tmp/")
-                .map(|r| format!("/private/tmp/{r}"))
-        });
-    let eq_any = |cand: &str| cand == lookup || alt.as_deref().is_some_and(|a| cand == a);
+    let lookup_key = crate::types::root_equiv_key(crate::types::IdeTargetKind::Local, lookup);
+    let eq_any = |cand: &str| {
+        cand == lookup
+            || crate::types::root_equiv_key(crate::types::IdeTargetKind::Local, cand) == lookup_key
+    };
     eq_any(&entry.project.primary_root)
         || eq_any(&entry.raw_primary_root)
         || entry.project.folders.iter().any(|f| eq_any(f))

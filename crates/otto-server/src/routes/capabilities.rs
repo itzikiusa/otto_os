@@ -194,10 +194,21 @@ async fn cap_sessions(ctx: &ServerCtx) -> ModuleCapability {
     }
 
     for name in &names {
-        let binary = ctx.manager.providers().program_for(name);
-        let binary = binary.as_deref().unwrap_or(name.as_str());
-        let found = which_async(binary).await;
-        let path = which_sync(binary).map(|p| p.to_string());
+        let raw_cmd = ctx.manager.providers().program_for(name);
+        let raw_cmd = raw_cmd.as_deref().unwrap_or(name.as_str());
+        let binary = otto_sessions::tool_probe::extract_custom_cmd_executable(raw_cmd)
+            .unwrap_or_else(|| raw_cmd.to_string());
+        let mut found = which_async(&binary).await;
+        if !found {
+            let cmd_owned = raw_cmd.to_string();
+            found = tokio::task::spawn_blocking(move || {
+                otto_sessions::tool_probe::command_resolves_fast(&cmd_owned)
+            })
+            .await
+            .unwrap_or(false);
+        }
+        let path = which_sync(&binary)
+            .or_else(|| (found && std::path::Path::new(&binary).is_file()).then(|| binary.clone()));
         if !found {
             reasons.push(format!("Agent CLI '{name}' ({binary}) not found on PATH."));
             fixes.push(format!(

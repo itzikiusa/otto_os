@@ -186,6 +186,10 @@ pub struct IdeDebugSessionSnapshot {
     pub title: String,
     pub language: String,
     pub adapter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<IdeDebugLaunchSpec>,
     pub state: IdeDebugState,
     pub stopped_reason: Option<String>,
     pub active_thread_id: Option<i64>,
@@ -457,6 +461,8 @@ pub enum IdeCollabEvent {
         content: String,
         version: u64,
         saved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
     },
     DebugUpdated {
         session: IdeDebugSessionSnapshot,
@@ -478,6 +484,8 @@ pub struct PluginLanguageSpec {
     pub extensions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_markers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -490,6 +498,8 @@ pub struct PluginLspServerSpec {
     pub extensions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_markers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

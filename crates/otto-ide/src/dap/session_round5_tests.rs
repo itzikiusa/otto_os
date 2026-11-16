@@ -10,7 +10,10 @@ use serde_json::json;
 
 use super::*;
 use crate::dap::{DapMessage, DapReader, DapWriter};
-use crate::types::{IdeDebugLaunchSpec, IdeDebugState, IdeStartDebugReq, IdeTargetSpec};
+use crate::types::{
+    IdeDebugAction, IdeDebugCommandReq, IdeDebugLaunchSpec, IdeDebugState, IdeStartDebugReq,
+    IdeTargetSpec,
+};
 
 #[tokio::test]
 async fn configuration_done_failure_marks_session_error_never_running() {
@@ -207,5 +210,120 @@ async fn terminal_states_never_revert_to_running_on_late_continued_events() {
         entry.read_snapshot().state,
         IdeDebugState::Error,
         "mark_resumed must never overwrite an Error session back to Running"
+    );
+}
+
+#[tokio::test]
+async fn restart_entry_preserves_launch_spec_and_config_id_across_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws-restart");
+    std::fs::create_dir_all(&ws).unwrap();
+    let counter_file = ws.join("runs.count");
+    let script_path = ws.join("prog.sh");
+    std::fs::write(&script_path, "#!/bin/bash\necho run >> \"$1\"\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let ws_str = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let script_str = std::fs::canonicalize(&script_path)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let counter_str = counter_file.to_string_lossy().into_owned();
+
+    let dap = DapManager::new(tmp.path().join("data"));
+    let snap = dap
+        .start_session(
+            IdeStartDebugReq {
+                target: IdeTargetSpec::local(ws_str.clone()),
+                language: "shell".into(),
+                config_id: Some("rc_demo".into()),
+                launch: IdeDebugLaunchSpec {
+                    program: script_str.clone(),
+                    args: vec![counter_str.clone()],
+                    cwd: Some(ws_str.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            DapStartContext::new()
+                .with_caller_is_root(true)
+                .with_owner_user_id("u_root"),
+        )
+        .await
+        .expect("start shell debug session");
+
+    assert_eq!(snap.config_id.as_deref(), Some("rc_demo"));
+    let init_launch = snap.launch.as_ref().expect("initial snapshot launch spec");
+    assert_eq!(init_launch.program, script_str);
+    assert_eq!(init_launch.args, vec![counter_str.clone()]);
+
+    let wait_done = |sid: String| {
+        let dap_ref = &dap;
+        async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(8);
+            loop {
+                let s = dap_ref.get_session(&sid).unwrap();
+                match s.state {
+                    IdeDebugState::Terminated => return s,
+                    IdeDebugState::Error => panic!("debug session {sid} failed: {:?}", s.error),
+                    _ => {}
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for debug session {sid} to terminate"
+                );
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        }
+    };
+
+    let after_first = wait_done(snap.id.clone()).await;
+    assert_eq!(after_first.config_id.as_deref(), Some("rc_demo"));
+    assert!(after_first.launch.is_some());
+    assert_eq!(
+        std::fs::read_to_string(&counter_file)
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+
+    let restarted = dap
+        .command(
+            &snap.id,
+            IdeDebugCommandReq {
+                action: IdeDebugAction::Restart,
+                thread_id: None,
+                frame_id: None,
+                path: None,
+                line: None,
+            },
+        )
+        .await
+        .expect("restart debug session");
+    assert_eq!(restarted.config_id.as_deref(), Some("rc_demo"));
+    let restarted_launch = restarted
+        .launch
+        .as_ref()
+        .expect("restarted snapshot must preserve launch spec");
+    assert_eq!(restarted_launch.program, script_str);
+    assert_eq!(restarted_launch.args, vec![counter_str.clone()]);
+
+    let after_second = wait_done(snap.id.clone()).await;
+    assert_eq!(after_second.config_id.as_deref(), Some("rc_demo"));
+    assert!(after_second.launch.is_some());
+    assert_eq!(
+        std::fs::read_to_string(&counter_file)
+            .unwrap()
+            .lines()
+            .count(),
+        2
     );
 }

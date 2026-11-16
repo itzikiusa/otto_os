@@ -12,6 +12,36 @@ pub(super) fn is_otto_internal_key(key: &str) -> bool {
     key.trim().starts_with("__otto_")
 }
 
+pub(super) fn disable_network_bridge_entry(obj: &mut serde_json::Map<String, Value>) {
+    if let Some(Value::String(val_str)) = obj.get_mut("value") {
+        if let Ok(Value::Object(mut bridge)) = serde_json::from_str::<Value>(val_str) {
+            bridge.insert("enabled".into(), json!(false));
+            if let Ok(serialized) = serde_json::to_string(&bridge) {
+                *val_str = serialized;
+            }
+        }
+    }
+}
+
+pub(super) fn disable_ide_network_bridge_row(row: &mut ArchiveRow) {
+    if let Some(Value::String(raw)) = row.get_mut("env_vars_json") {
+        if let Ok(Value::Array(mut entries)) = serde_json::from_str::<Value>(raw) {
+            for entry in &mut entries {
+                if let Some(obj) = entry.as_object_mut() {
+                    if obj.get("key").and_then(Value::as_str).map(str::trim)
+                        == Some("__otto_network_bridge__")
+                    {
+                        disable_network_bridge_entry(obj);
+                    }
+                }
+            }
+            if let Ok(serialized) = serde_json::to_string(&Value::Array(entries)) {
+                *raw = serialized;
+            }
+        }
+    }
+}
+
 /// Scrub `ide_project_environments.env_vars_json` (array of `{key, value, secret, secret_ref}`),
 /// preserving all `__otto_*` metadata entries (`__otto_module_sdks__`, `__otto_go_build_tags__`,
 /// `__otto_module_go_build_tags__`, `__otto_network_bridge__`) untouched.
@@ -30,6 +60,9 @@ pub(super) fn sanitize_ide_project_env_vars(document: &mut Value) -> bool {
             .unwrap_or_default()
             .to_owned();
         if is_otto_internal_key(&key_name) {
+            if key_name.trim() == "__otto_network_bridge__" {
+                disable_network_bridge_entry(obj);
+            }
             continue;
         }
         let is_sec = obj.get("secret").and_then(Value::as_bool) == Some(true);

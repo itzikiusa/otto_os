@@ -50,8 +50,9 @@ export const setSavedContentEffect = StateEffect.define<string | null>();
 export const setBlameLinesEffect = StateEffect.define<Record<number, string> | null>();
 
 export const MAX_DIFF_GUTTER_LINES = 25_000;
-const MAX_EXACT_MYERS_LINES = 6_000;
 const SVG_NS = 'http://www.w3.org/2000/svg';
+
+export type IdeDiffBaselineSource = 'git' | 'saved';
 
 export function selectionOrCurrentLine(state: EditorState): IdeEditorSelectionRange {
   const { from, to } = state.selection.main;
@@ -68,17 +69,25 @@ export function selectionOrCurrentLine(state: EditorState): IdeEditorSelectionRa
 
 class DiffGutterMarker extends GutterMarker {
   readonly kind: 'add' | 'mod' | 'del';
-  constructor(kind: 'add' | 'mod' | 'del') { super(); this.kind = kind; }
-  eq(o: DiffGutterMarker): boolean { return this.kind === o.kind; }
+  readonly baselineSource: IdeDiffBaselineSource;
+  constructor(kind: 'add' | 'mod' | 'del', baselineSource: IdeDiffBaselineSource = 'git') {
+    super();
+    this.kind = kind;
+    this.baselineSource = baselineSource;
+  }
+  eq(o: DiffGutterMarker): boolean {
+    return this.kind === o.kind && this.baselineSource === o.baselineSource;
+  }
   toDOM(): HTMLElement {
     const bar = document.createElement('span');
     bar.className = `cm-ide-diff-bar cm-ide-diff-${this.kind}`;
     bar.dataset.diffKind = this.kind;
+    const vsLabel = this.baselineSource === 'saved' ? 'vs saved file' : 'vs Git HEAD';
     bar.title = this.kind === 'add'
-      ? 'Added lines (vs Git HEAD) — click to inspect or rollback hunk'
+      ? `Added lines (${vsLabel}) — click to inspect or rollback hunk`
       : this.kind === 'del'
-        ? 'Deleted lines (vs Git HEAD) — click to inspect or restore hunk'
-        : 'Modified lines (vs Git HEAD) — click to inspect or rollback hunk';
+        ? `Deleted lines (${vsLabel}) — click to inspect or restore hunk`
+        : `Modified lines (${vsLabel}) — click to inspect or rollback hunk`;
     bar.setAttribute('aria-hidden', 'true');
     if (this.kind === 'del') {
       const svg = document.createElementNS(SVG_NS, 'svg');
@@ -96,28 +105,45 @@ class DiffGutterMarker extends GutterMarker {
   }
 }
 
-const addLineMarker = new DiffGutterMarker('add');
-const modLineMarker = new DiffGutterMarker('mod');
-const delLineMarker = new DiffGutterMarker('del');
+const MARKERS_BY_SOURCE: Record<IdeDiffBaselineSource, { add: DiffGutterMarker; mod: DiffGutterMarker; del: DiffGutterMarker }> = {
+  git: {
+    add: new DiffGutterMarker('add', 'git'),
+    mod: new DiffGutterMarker('mod', 'git'),
+    del: new DiffGutterMarker('del', 'git'),
+  },
+  saved: {
+    add: new DiffGutterMarker('add', 'saved'),
+    mod: new DiffGutterMarker('mod', 'saved'),
+    del: new DiffGutterMarker('del', 'saved'),
+  },
+};
 
 export function parseSavedLines(savedContent: string | null | undefined): string[] | null {
   if (savedContent == null) return null;
   if (savedContent === '') return [];
-  const lines = savedContent.split(/\r\n?|\n/);
+  const clean = savedContent.charCodeAt(0) === 0xfeff ? savedContent.slice(1) : savedContent;
+  const lines = clean.replace(/\r\n?/g, '\n').split('\n');
   return lines.length <= MAX_DIFF_GUTTER_LINES ? lines : null;
 }
 
-export function computeIdeDiffHunks(docText: string, savedContent: string | null | undefined): IdeDiffHunk[] {
+export function computeIdeDiffHunks(
+  docText: string,
+  savedContent: string | null | undefined,
+  baselineSource: IdeDiffBaselineSource = 'git',
+): IdeDiffHunk[] {
   const savedLines = parseSavedLines(savedContent);
   if (!savedLines) return [];
-  const st = EditorState.create({ doc: docText });
-  return buildDiffState(st.doc, savedLines).hunks;
+  const normDoc = docText.charCodeAt(0) === 0xfeff ? docText.slice(1) : docText;
+  const st = EditorState.create({ doc: normDoc });
+  return buildDiffState(st.doc, savedLines, baselineSource).hunks;
 }
 
 function buildDiffState(
   doc: EditorState['doc'],
   savedLines: string[] | null,
+  baselineSource: IdeDiffBaselineSource = 'git',
 ): { markers: RangeSet<GutterMarker>; hunks: IdeDiffHunk[] } {
+  const palette = MARKERS_BY_SOURCE[baselineSource];
   const newLen = doc.lines;
   if (!savedLines || newLen === 0 || newLen > MAX_DIFF_GUTTER_LINES) {
     return { markers: RangeSet.empty, hunks: [] };
@@ -133,7 +159,7 @@ function buildDiffState(
       oldLines: savedLines,
       newLines: [],
     };
-    return { markers: RangeSet.of([delLineMarker.range(0)], true), hunks: [h] };
+    return { markers: RangeSet.of([palette.del.range(0)], true), hunks: [h] };
   }
   const oldLen = savedLines.length;
   let prefix = 0;
@@ -185,7 +211,7 @@ function buildDiffState(
     }
   };
 
-  if (oldMid === 0 || newMid === 0 || oldMid + newMid > MAX_EXACT_MYERS_LINES) {
+  if (oldMid === 0 || newMid === 0) {
     pushHunk(prefix, prefix + oldMid, prefix, prefix + newMid);
   } else {
     const oldSlice = savedLines.slice(prefix, prefix + oldMid);
@@ -214,7 +240,7 @@ function buildDiffState(
     }
   }
   for (const [ln, kind] of [...lineKind.entries()].sort((a, b) => a[0] - b[0])) {
-    const marker = kind === 'add' ? addLineMarker : kind === 'del' ? delLineMarker : modLineMarker;
+    const marker = kind === 'add' ? palette.add : kind === 'del' ? palette.del : palette.mod;
     ranges.push(marker.range(doc.line(ln).from));
   }
   return { markers: ranges.length > 0 ? RangeSet.of(ranges, true) : RangeSet.empty, hunks };
@@ -338,8 +364,11 @@ const ideDiffGutterTheme = EditorView.baseTheme({
   },
 });
 
+export const setBaselineSourceEffect = StateEffect.define<IdeDiffBaselineSource>();
+
 export interface CreateIdeGitAndAgentOptions {
   savedContent?: string | null;
+  baselineSource?: IdeDiffBaselineSource;
   blameByLine?: Record<number, string> | null;
   wordAtCursor: (state: EditorState) => { word: string; line: number; column: number };
   getCallbacks: () => IdeAgentMenuCallbacks;
@@ -348,27 +377,37 @@ export interface CreateIdeGitAndAgentOptions {
 export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions): Extension {
   const setComputedDiffEffect = StateEffect.define<{ markers: RangeSet<GutterMarker>; hunks: IdeDiffHunk[] }>();
 
-  const diffField = StateField.define<{ savedLines: string[] | null; markers: RangeSet<GutterMarker>; hunks: IdeDiffHunk[] }>({
+  const diffField = StateField.define<{
+    savedLines: string[] | null;
+    baselineSource: IdeDiffBaselineSource;
+    markers: RangeSet<GutterMarker>;
+    hunks: IdeDiffHunk[];
+  }>({
     create(st) {
       const savedLines = parseSavedLines(opts.savedContent);
-      return { savedLines, ...buildDiffState(st.doc, savedLines) };
+      const baselineSource = opts.baselineSource ?? 'git';
+      return { savedLines, baselineSource, ...buildDiffState(st.doc, savedLines, baselineSource) };
     },
     update(cur, tr) {
       let savedLines = cur.savedLines;
+      let baselineSource = cur.baselineSource;
       let baselineChanged = false;
       for (const ef of tr.effects) {
         if (ef.is(setSavedContentEffect)) {
           savedLines = parseSavedLines(ef.value);
           baselineChanged = true;
+        } else if (ef.is(setBaselineSourceEffect) && ef.value !== baselineSource) {
+          baselineSource = ef.value;
+          baselineChanged = true;
         } else if (ef.is(setComputedDiffEffect)) {
-          return { savedLines, markers: ef.value.markers, hunks: ef.value.hunks };
+          return { savedLines, baselineSource, markers: ef.value.markers, hunks: ef.value.hunks };
         }
       }
       if (baselineChanged) {
-        return { savedLines, ...buildDiffState(tr.state.doc, savedLines) };
+        return { savedLines, baselineSource, ...buildDiffState(tr.state.doc, savedLines, baselineSource) };
       }
       if (!tr.docChanged) return cur;
-      return { savedLines, markers: cur.markers.map(tr.changes), hunks: cur.hunks };
+      return { savedLines, baselineSource, markers: cur.markers.map(tr.changes), hunks: cur.hunks };
     },
   });
 
@@ -384,7 +423,9 @@ export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions
         if (this.destroyed || !targetView.dom.isConnected) return;
         const st = targetView.state.field(diffField, false);
         if (!st) return;
-        targetView.dispatch({ effects: setComputedDiffEffect.of(buildDiffState(targetView.state.doc, st.savedLines)) });
+        targetView.dispatch({
+          effects: setComputedDiffEffect.of(buildDiffState(targetView.state.doc, st.savedLines, st.baselineSource)),
+        });
       }, 200);
     }
     destroy() {
@@ -423,7 +464,7 @@ export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions
 
   const showHunkMenu = (view: EditorView, lineFrom: number, event: MouseEvent): boolean => {
     const ln = view.state.doc.lineAt(lineFrom).number;
-    const { hunks } = view.state.field(diffField);
+    const { hunks, baselineSource } = view.state.field(diffField);
     const hunk = hunks.find((h) => ln >= h.markerStartLine && ln <= h.markerEndLine);
     if (!hunk) return false;
     event.preventDefault();
@@ -474,20 +515,24 @@ export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions
         { label: 'Previous Change', icon: 'chevronUp', action: () => jumpToHunk(hunks[(idx - 1 + hunks.length) % hunks.length]) },
       );
     }
-    items.push(
-      { separator: true },
-      {
-        label: 'Compare with Git HEAD…',
-        icon: 'git',
-        action: () => {
-          if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('otto:ide-open-compare', { detail: { mode: 'git' } }));
-          }
+    if (baselineSource === 'git') {
+      items.push(
+        { separator: true },
+        {
+          label: 'Compare with Git HEAD…',
+          icon: 'git',
+          action: () => {
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(
+                new CustomEvent('otto:ide-open-compare', { detail: { mode: 'git-revision', ref: 'HEAD' } }),
+              );
+            }
+          },
         },
-      },
-    );
+      );
+    }
     const cbs = opts.getCallbacks();
-    if (cbs.onToggleBlame) {
+    if (cbs.onToggleBlame && baselineSource === 'git') {
       items.push({ label: 'Toggle Git blame annotations', icon: 'commit', action: () => cbs.onToggleBlame?.() });
     }
     ctxMenu.show(event, items);
@@ -496,7 +541,7 @@ export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions
 
   const diffGutter = gutter({
     class: 'cm-ide-diff-gutter',
-    initialSpacer: () => addLineMarker,
+    initialSpacer: () => MARKERS_BY_SOURCE.git.add,
     markers: (view) => view.state.field(diffField).markers,
     domEventHandlers: {
       mousedown(view, line, event) {

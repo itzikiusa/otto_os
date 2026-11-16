@@ -28,8 +28,9 @@ pub async fn code_actions<S: IdeCtx>(
     req: IdeCodeActionsReq,
 ) -> Result<IdeCodeActionsResp> {
     req.target.validate()?;
+    let has_root_auth = otto_core::auth::root_authority(user);
     let resolved_opt =
-        if !req.target.root.trim().is_empty() || !user.is_root || req.content.is_none() {
+        if !req.target.root.trim().is_empty() || !has_root_auth || req.content.is_none() {
             let resolved = ctx.ide().targets.resolve(ctx, user, &req.target).await?;
             let _ = ctx
                 .ide()

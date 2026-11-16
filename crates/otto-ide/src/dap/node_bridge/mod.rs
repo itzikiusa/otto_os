@@ -110,37 +110,105 @@ impl NodeBridgeState {
 }
 
 pub(super) fn file_url_to_path(url: &str) -> Option<String> {
-    let path = otto_core::paths::file_uri_to_path(url)?;
+    if url.is_empty() || url.starts_with("node:") {
+        return None;
+    }
+    let path = if url
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("file://"))
+    {
+        let without_qf = url.split(['?', '#']).next().unwrap_or(url);
+        let normalized = format!("file://{}", &without_qf[7..]);
+        otto_core::paths::file_uri_to_path(&normalized)?
+    } else if url.starts_with('/') {
+        std::path::PathBuf::from(url)
+    } else {
+        return None;
+    };
     if let Ok(canon) = std::fs::canonicalize(&path) {
         return Some(canon.to_string_lossy().into_owned());
     }
     Some(path.to_string_lossy().into_owned())
 }
 
+fn escape_js_regex(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 8);
+    for ch in input.chars() {
+        if matches!(
+            ch,
+            '\\' | '.'
+                | '+'
+                | '*'
+                | '?'
+                | '('
+                | ')'
+                | '|'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '^'
+                | '$'
+                | '/'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn push_url_alts_for_abs_path(alts: &mut Vec<String>, abs_path: &str) {
+    let mut variants = vec![abs_path.to_string()];
+    if let Some(tail) = abs_path.strip_prefix("/private/var/") {
+        variants.push(format!("/var/{tail}"));
+    } else if let Some(tail) = abs_path.strip_prefix("/var/") {
+        variants.push(format!("/private/var/{tail}"));
+    } else if let Some(tail) = abs_path.strip_prefix("/private/tmp/") {
+        variants.push(format!("/tmp/{tail}"));
+    } else if let Some(tail) = abs_path.strip_prefix("/tmp/") {
+        variants.push(format!("/private/tmp/{tail}"));
+    }
+    for v in variants {
+        let encoded_uri = otto_core::paths::path_to_file_uri(Path::new(&v));
+        let enc_pat = format!("^{}(?:[?#].*)?$", escape_js_regex(&encoded_uri));
+        if !alts.contains(&enc_pat) {
+            alts.push(enc_pat);
+        }
+        let raw_uri = format!("file://{v}");
+        if raw_uri != encoded_uri {
+            let raw_uri_pat = format!("^{}(?:[?#].*)?$", escape_js_regex(&raw_uri));
+            if !alts.contains(&raw_uri_pat) {
+                alts.push(raw_uri_pat);
+            }
+        }
+        let raw_pat = format!("^{}$", escape_js_regex(&v));
+        if !alts.contains(&raw_pat) {
+            alts.push(raw_pat);
+        }
+    }
+}
+
 fn path_to_url_regex(path: &str) -> String {
-    let canon = std::fs::canonicalize(path)
+    let normalized = file_url_to_path(path).unwrap_or_else(|| path.to_string());
+    let canon = std::fs::canonicalize(&normalized)
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string());
+        .unwrap_or_else(|| normalized.clone());
     let mut alts = Vec::new();
-    if let Some(tail) = canon
-        .strip_prefix("/private/var/")
-        .or_else(|| canon.strip_prefix("/var/"))
-    {
-        alts.push(format!("file://(?:/private)?/var/{}", regex::escape(tail)));
-    } else if let Some(tail) = canon
-        .strip_prefix("/private/tmp/")
-        .or_else(|| canon.strip_prefix("/tmp/"))
-    {
-        alts.push(format!("file://(?:/private)?/tmp/{}", regex::escape(tail)));
+    let is_win_drive = canon.len() >= 3
+        && canon.as_bytes()[0].is_ascii_alphabetic()
+        && canon.as_bytes()[1] == b':'
+        && matches!(canon.as_bytes()[2], b'/' | b'\\');
+    if canon.starts_with('/') || is_win_drive {
+        push_url_alts_for_abs_path(&mut alts, &canon);
+        if canon != normalized && (normalized.starts_with('/') || is_win_drive) {
+            push_url_alts_for_abs_path(&mut alts, &normalized);
+        }
+    } else if let Some(name) = Path::new(&canon).file_name().and_then(|n| n.to_str()) {
+        alts.push(format!("[\\\\/]{}(?:[?#].*)?$", escape_js_regex(name)));
     } else {
-        alts.push(format!("file://{}", regex::escape(&canon)));
-    }
-    if canon != path {
-        alts.push(format!("file://{}", regex::escape(path)));
-    }
-    if let Some(name) = Path::new(&canon).file_name().and_then(|n| n.to_str()) {
-        alts.push(format!("/{}$", regex::escape(name)));
+        alts.push(escape_js_regex(&canon));
     }
     format!("(?:{})", alts.join("|"))
 }
@@ -389,10 +457,11 @@ async fn handle_node_set_bps<W: AsyncWrite + Unpin>(
         .and_then(|s| s.get("path"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    let path = std::fs::canonicalize(raw_path)
+    let decoded_raw = file_url_to_path(raw_path).unwrap_or_else(|| raw_path.to_string());
+    let path = std::fs::canonicalize(&decoded_raw)
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| raw_path.to_string());
+        .unwrap_or(decoded_raw);
     if let Some(old_ids) = st.bp_ids_by_file.remove(&path) {
         for bid in old_ids {
             let cid = st.alloc_cdp();

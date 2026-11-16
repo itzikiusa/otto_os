@@ -1,9 +1,25 @@
 //! Shared line-ending (`\r\n` vs `\n`) and UTF-16 column <-> UTF-8 byte offset
 //! conversions for IDE text edits, quick fixes, and lexical symbol scanners.
 
-/// Detect the dominant line ending in `content` (`"\r\n"` if CRLF is present, else `"\n"`).
+/// Detect the dominant line ending in `content` (`"\r\n"` when CRLF newlines
+/// outnumber or tie bare LF newlines, else `"\n"`).
 pub fn detect_eol(content: &str) -> &'static str {
-    if content.contains("\r\n") {
+    let bytes = content.as_bytes();
+    let mut crlf = 0usize;
+    let mut bare_lf = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            crlf += 1;
+            i += 2;
+        } else if bytes[i] == b'\n' {
+            bare_lf += 1;
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    if crlf > 0 && crlf >= bare_lf {
         "\r\n"
     } else {
         "\n"
@@ -61,8 +77,14 @@ pub fn byte_offset_to_line_utf16_col(text: &str, byte_offset: usize) -> (u32, u3
         if ch == '\n' {
             line += 1;
             col = 1;
-        } else if ch == '\r' && bytes.get(idx + 1) == Some(&b'\n') {
-            // Part of CRLF line terminator; do not advance column.
+        } else if ch == '\r' {
+            if bytes.get(idx + 1) == Some(&b'\n') {
+                // Part of CRLF line terminator; do not advance column.
+            } else {
+                // Bare CR line terminator (LSP 3.17 / CodeMirror).
+                line += 1;
+                col = 1;
+            }
         } else {
             col += ch.len_utf16() as u32;
         }
@@ -71,7 +93,7 @@ pub fn byte_offset_to_line_utf16_col(text: &str, byte_offset: usize) -> (u32, u3
 }
 
 /// Convert a `1`-based `(target_line, target_utf16_col)` pair in `text` into a
-/// valid UTF-8 byte offset, clamping past-end-of-line columns right before `\r\n` or `\n`.
+/// valid UTF-8 byte offset, clamping past-end-of-line columns right before `\r\n`, `\n`, or bare `\r`.
 pub fn line_utf16_col_to_byte_offset(text: &str, target_line: u32, target_col: u32) -> usize {
     let target_line = target_line.max(1);
     let target_col = target_col.max(1);
@@ -88,7 +110,7 @@ pub fn line_utf16_col_to_byte_offset(text: &str, target_line: u32, target_col: u
             }
             continue;
         }
-        if ch == '\n' {
+        if ch == '\n' || ch == '\r' {
             if line == target_line {
                 return idx;
             }

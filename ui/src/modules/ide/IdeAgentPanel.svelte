@@ -14,6 +14,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { harnessLabel } from '../../lib/providers';
   import {
     CONV_CTX,
@@ -26,6 +27,7 @@
   import IdeProposalCard from './agent/IdeProposalCard.svelte';
   import {
     buildIdeAgentPrompt,
+    extractIdeContextChipsFromPrompt,
     ideAgentEngine as ideAgent,
     stripIdeContextBlocks,
     type IdeCodeProposal,
@@ -36,7 +38,12 @@
   const PtyConversationView = lazyComponent(loadPtyConversationView);
 
   EmbeddedRuntimeView.prefetch();
-  onMount(() => ideAgent.ensureMounted());
+  onMount(() => {
+    untrack(() => {
+      if (EmbeddedRuntimeView.error) EmbeddedRuntimeView.retry();
+    });
+    return ideAgent.ensureMounted();
+  });
 
   $effect(() => {
     if (ideAgent.activeThreadKind === 'runtime') EmbeddedRuntimeView.prefetch();
@@ -111,6 +118,25 @@
       planMode: ideAgent.planMode,
       omitWhenEmpty: true,
     });
+  }
+
+  function restoreQueuedIdePrompt(rawText: string): string {
+    const { cleanText, chips } = extractIdeContextChipsFromPrompt(rawText);
+    if (chips.length > 0) {
+      const existingKeys = new Set(
+        ideAgent.contexts.map((c) => `${c.kind}:${c.label}:${c.path ?? ''}:${c.startLine ?? ''}:${c.endLine ?? ''}`),
+      );
+      const merged = [...ideAgent.contexts];
+      for (const chip of chips) {
+        const key = `${chip.kind}:${chip.label}:${chip.path ?? ''}:${chip.startLine ?? ''}:${chip.endLine ?? ''}`;
+        if (!existingKeys.has(key)) {
+          existingKeys.add(key);
+          merged.push(chip);
+        }
+      }
+      ideAgent.contexts = merged;
+    }
+    return cleanText;
   }
 
   function closeAgentPanel(): void {
@@ -252,6 +278,7 @@
             fallbackCwd={ideAgent.resolveProjectCwd()}
             hasExternalContext={ideAgent.contexts.length > 0}
             transformOutgoingText={wrapOutgoingWithIdeContext}
+            transformRestoredQueuedText={restoreQueuedIdePrompt}
             onExternalContextConsumed={() => ideAgent.clearContexts()}
             onopenpath={(path, line) => {
               void ide.openFile(ide.resolvePath(path), { line: line ?? 1, preview: false });
@@ -314,7 +341,13 @@
             {/snippet}
           </EmbeddedRuntimeView.component>
         {:else}
-          <LoadState what="thread" loading empty />
+          <LoadState
+            what="the thread"
+            loading={!EmbeddedRuntimeView.error}
+            error={EmbeddedRuntimeView.error ? loadErrorText(EmbeddedRuntimeView.error) : null}
+            empty
+            onretry={() => EmbeddedRuntimeView.retry()}
+          />
         {/if}
       {/key}
     </div>

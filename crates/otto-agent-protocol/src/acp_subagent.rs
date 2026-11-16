@@ -439,6 +439,11 @@ impl AcpDriver {
         let implied_agy_bg =
             self.provider == RuntimeProvider::Agy && canonical == "invoke_subagent";
         let is_bg = req_bg || implied_agy_bg || agy_launch.is_some() || grok_launch.is_some();
+        if is_bg && matches!(t.status, ToolCallStatus::Completed) {
+            if let Some((cid, _)) = &agy_launch {
+                self.state.note_agy_conv_id(cid);
+            }
+        }
 
         let card = self
             .state
@@ -1012,6 +1017,20 @@ impl AcpDriver {
             (!c.is_empty()).then(|| PathBuf::from(c))
         };
         let agy_brain_dir = self.state.sideband.root_dir().map(PathBuf::from);
+        let allowed_agy_conv_ids = (self.provider == RuntimeProvider::Agy).then(|| {
+            let mut ids: Vec<String> = self.state.observed_agy_conv_ids.iter().cloned().collect();
+            for extra in [
+                self.state.session_id.as_deref(),
+                self.state.resume.as_deref(),
+            ] {
+                if let Some(id) = extra.map(str::trim).filter(|s| !s.is_empty()) {
+                    if !ids.iter().any(|x| x == id) {
+                        ids.push(id.to_string());
+                    }
+                }
+            }
+            ids
+        });
         let mut out = Vec::new();
         for bg in &self.state.bg_tasks {
             let Some(meta) = self.state.bg_meta.get(&bg.id) else {
@@ -1036,6 +1055,8 @@ impl AcpDriver {
                 using_fallback: meta.tail_using_fallback,
                 allowed_cwd: allowed_cwd.clone(),
                 agy_brain_dir: agy_brain_dir.clone(),
+                allowed_agy_conv_ids: allowed_agy_conv_ids.clone(),
+                otto_session_id: self.state.otto_session_id.clone(),
             });
             if out.len() >= 8 {
                 break;
@@ -1049,15 +1070,18 @@ impl AcpDriver {
             return None;
         }
         let idle_between_prompts = self.state.prompt_id.is_none() && self.state.queued.is_none();
+        let has_open_subagent = self.state.subagents.values().any(|a| a.status.is_open());
+        let has_open_bg_work = !self.state.bg_tasks.is_empty() || has_open_subagent;
         let poll_child_subagents = matches!(
             self.provider,
-            RuntimeProvider::Opencode | RuntimeProvider::Grok
-        ) && self.state.subagents.values().any(|a| a.status.is_open());
+            RuntimeProvider::Opencode | RuntimeProvider::Grok | RuntimeProvider::Gemini
+        ) && has_open_subagent;
         let primary = self.state.sideband.sideband_poll(
             self.provider,
             true,
             idle_between_prompts,
             poll_child_subagents,
+            has_open_bg_work,
             &self.state.cwd,
             self.state.session_id.as_deref(),
         );

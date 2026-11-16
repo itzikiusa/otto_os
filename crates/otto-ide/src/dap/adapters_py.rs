@@ -13,7 +13,6 @@ use super::adapters::{
     locate_binary, normalize_target_path, resolve_debug_sdk_override, DapAdapterTransport,
     ResolvedDapAdapter,
 };
-use super::adapters_env::canonical_target_roots;
 use super::py_bridge::PY_STDLIB_DAP_BRIDGE;
 use super::{run_target_command, DapStartContext};
 use crate::types::{IdeStartDebugReq, IdeTargetKind, IdeTargetSpec};
@@ -32,41 +31,36 @@ pub(super) async fn resolve_python_adapter(
 ) -> Result<ResolvedDapAdapter> {
     let program = normalize_target_path(&req.target, &req.launch.program);
     let mut candidates = Vec::new();
-    if let Some(sdk) = resolve_debug_sdk_override(req, ctx, cwd) {
-        let trimmed = sdk.trim_end_matches('/');
-        if trimmed.ends_with("/python")
-            || trimmed.ends_with("/python3")
-            || trimmed.contains("/python3.")
-            || Path::new(trimmed).is_file()
+    let allow_workspace_venv = ctx.caller_is_root || req.target.kind == IdeTargetKind::Ssh;
+    if allow_workspace_venv {
+        if let Some(sdk) = resolve_debug_sdk_override(req, ctx, cwd) {
+            let trimmed = sdk.trim_end_matches('/');
+            if trimmed.ends_with("/python")
+                || trimmed.ends_with("/python3")
+                || trimmed.contains("/python3.")
+                || Path::new(trimmed).is_file()
+            {
+                candidates.push(trimmed.to_string());
+            } else {
+                candidates.push(format!("{trimmed}/bin/python"));
+                candidates.push(format!("{trimmed}/bin/python3"));
+            }
+        }
+        if let Some(py) = ctx
+            .project_env
+            .as_ref()
+            .and_then(|p| p.python_interpreter.as_deref())
+            .filter(|s| !s.is_empty())
         {
-            candidates.push(trimmed.to_string());
-        } else {
-            candidates.push(format!("{trimmed}/bin/python"));
-            candidates.push(format!("{trimmed}/bin/python3"));
+            candidates.push(py.to_string());
         }
     }
-    if let Some(py) = ctx
-        .project_env
-        .as_ref()
-        .and_then(|p| p.python_interpreter.as_deref())
-        .filter(|s| !s.is_empty())
-    {
-        candidates.push(py.to_string());
-    }
-    if req.target.kind == IdeTargetKind::Local && !program.is_empty() {
-        let allowed_roots = if ctx.caller_is_root {
-            Vec::new()
-        } else {
-            canonical_target_roots(&req.target)
-        };
+    if req.target.kind == IdeTargetKind::Local && ctx.caller_is_root && !program.is_empty() {
         let mut cur = Path::new(&program);
         if cur.is_file() {
             cur = cur.parent().unwrap_or(cur);
         }
         for _ in 0..8 {
-            if !allowed_roots.is_empty() && !allowed_roots.iter().any(|r| cur.starts_with(r)) {
-                break;
-            }
             for rel in [".venv/bin/python", "venv/bin/python"] {
                 let p = cur.join(rel);
                 if p.is_file() {
@@ -77,9 +71,11 @@ pub(super) async fn resolve_python_adapter(
             cur = parent;
         }
     }
-    let root_path = Path::new(&req.target.root);
-    for rel in [".venv/bin/python", "venv/bin/python"] {
-        candidates.push(root_path.join(rel).to_string_lossy().into_owned());
+    if allow_workspace_venv {
+        let root_path = Path::new(&req.target.root);
+        for rel in [".venv/bin/python", "venv/bin/python"] {
+            candidates.push(root_path.join(rel).to_string_lossy().into_owned());
+        }
     }
     if req.target.kind == IdeTargetKind::Local {
         candidates.push(

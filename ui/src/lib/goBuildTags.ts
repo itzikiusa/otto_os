@@ -7,11 +7,13 @@ import { normalizeMacPrivatePath } from './fileUri.ts';
 const GO_STD_BUILD_CONSTRAINTS = new Set([
   'linux', 'darwin', 'windows', 'freebsd', 'netbsd', 'openbsd', 'plan9', 'solaris',
   'aix', 'zos', 'js', 'wasip1', 'unix', 'android', 'ios', 'illumos', 'dragonfly',
-  'amd64', 'arm64', '386', 'arm', 'ppc64', 'ppc64le', 'mips', 'mipsle', 'mips64',
-  'mips64le', 'riscv64', 's390x', 'wasm', 'loong64', 'cgo', 'gc', 'gccgo', 'ignore',
+  'hurd', 'nacl', 'amd64', 'amd64p32', 'arm64', 'arm64be', '386', 'arm', 'armbe',
+  'ppc64', 'ppc64le', 'mips', 'mipsle', 'mips64', 'mips64le', 'mips64p32',
+  'mips64p32le', 'riscv', 'riscv64', 's390', 's390x', 'sparc', 'sparc64', 'wasm',
+  'loong64', 'cgo', 'gc', 'gccgo', 'ignore',
 ]);
 
-export const VALID_GO_BUILD_TAG_RE = /^[A-Za-z0-9_.-]+$/;
+export const VALID_GO_BUILD_TAG_RE = /^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63}$/;
 
 export function sanitizeGoBuildTags(tags: readonly string[] | null | undefined): string[] {
   if (!tags || tags.length === 0) return [];
@@ -130,7 +132,7 @@ export function mergeGoTagsCliArgs(rawArgs: readonly string[], extraTags: readon
       break;
     }
     if (arg === '-tags' || arg === '--tags') {
-      if (i + 1 < rawArgs.length && rawArgs[i + 1] !== '--') {
+      if (i + 1 < rawArgs.length && rawArgs[i + 1] !== '--' && !rawArgs[i + 1].startsWith('-')) {
         existingTags.push(...sanitizeGoBuildTags([rawArgs[i + 1]]));
         i++;
       }
@@ -196,7 +198,7 @@ export function resolveEffectiveRepoGoBuildTags(
 }
 
 export const GO_BUILD_TAG_DIAG_RE =
-  /No packages found for open file|build constraints exclude all Go files|no buildable Go source files/i;
+  /No packages found for open file|build constraints exclude all Go files|no buildable Go source files|excluded due to its build tags/i;
 
 export function rewriteGoBuildTagDiagnostic(
   rawMessage: string,

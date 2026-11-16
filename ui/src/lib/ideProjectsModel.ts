@@ -148,6 +148,12 @@ export function resetIdeProjectsFetchCacheForTests(): void {
   cachedServerProjectsAt = 0;
 }
 
+if (typeof window !== 'undefined') {
+  window.addEventListener('otto:ide-storage-cleared', () => {
+    resetIdeProjectsFetchCacheForTests();
+  });
+}
+
 export function normalizeNamedIdeProjects(
   projects: ReadonlyArray<NamedIdeProject | Record<string, unknown>>,
 ): NamedIdeProject[] {

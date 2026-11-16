@@ -313,6 +313,10 @@ function makeEditorSurfaceTheme(
         pointerEvents: 'none',
       },
       '.cm-ide-codevision': {
+        appearance: 'none',
+        border: 'none',
+        background: 'transparent',
+        padding: '0',
         display: 'inline-block',
         marginInlineStart: 'var(--sp-4)',
         color: 'var(--syn-inlay-fg)',
@@ -326,8 +330,10 @@ function makeEditorSurfaceTheme(
         backgroundColor: 'color-mix(in srgb, var(--danger) 9%, transparent)',
       },
       '&.cm-editor .cm-line.cm-ide-exec-line, &.cm-editor .cm-activeLine.cm-ide-exec-line, &.cm-editor .cm-line.cm-ide-paused-line, &.cm-editor .cm-activeLine.cm-ide-paused-line': {
-        backgroundColor: dark ? 'rgba(46, 107, 214, 0.38)' : 'rgba(53, 116, 240, 0.24)',
-        boxShadow: 'inset 3px 0 0 #4dabf7',
+        backgroundColor: dark
+          ? 'color-mix(in srgb, var(--accent-solid) 34%, transparent)'
+          : 'color-mix(in srgb, var(--accent-solid) 22%, transparent)',
+        boxShadow: 'inset 3px 0 0 var(--accent-text)',
       },
       '.cm-ide-reveal-pulse': {
         backgroundColor: 'color-mix(in srgb, var(--accent-solid) 18%, transparent)',

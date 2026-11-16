@@ -24,7 +24,7 @@ use otto_agent_protocol::{
 };
 use otto_core::agent_runtime::{
     AskChildReq, AskChildTarget, CouncilSeatReq, CreateCouncilReq, CreateRuntimeSessionBody,
-    CreateRuntimeSessionReq, PromptDelivery, PromptImage, ProviderSessionStatus,
+    CreateRuntimeSessionReq, OpenPeerReq, PromptDelivery, PromptImage, ProviderSessionStatus,
     ProviderTurnStatus, RuntimeEvent, RuntimeEventBody, RuntimePromptReq, RuntimeProvider,
     RuntimeSession, SynthesizeCouncilReq, TurnTerminalStatus, PROVIDER_SLUG_META_KEY,
 };
@@ -47,6 +47,7 @@ const VALID_PNG_B64: &str =
 struct ParityHost {
     root: String,
     persistence: AtomicBool,
+    grok_enabled: AtomicBool,
     retired: AtomicUsize,
     events: Mutex<Vec<Arc<RuntimeEvent>>>,
     notify: tokio::sync::Notify,
@@ -89,6 +90,13 @@ impl RuntimeHost for ParityHost {
         (slug.trim() == "claudework").then_some(RuntimeProvider::Claude)
     }
 
+    fn is_provider_enabled(&self, slug: &str) -> bool {
+        if slug.trim().eq_ignore_ascii_case("grok") {
+            return self.grok_enabled.load(Ordering::SeqCst);
+        }
+        true
+    }
+
     async fn session_persistence_enabled(&self) -> bool {
         self.persistence.load(Ordering::SeqCst)
     }
@@ -104,6 +112,7 @@ impl ParityHost {
         Arc::new(Self {
             root: root.to_string_lossy().into_owned(),
             persistence: AtomicBool::new(persistence),
+            grok_enabled: AtomicBool::new(true),
             retired: AtomicUsize::new(0),
             events: Mutex::default(),
             notify: tokio::sync::Notify::new(),
@@ -280,6 +289,50 @@ async fn claudework_custom_provider_create_children_council_and_agent_session_pa
         .await
         .unwrap();
     assert_eq!(judge.provider_slug(), "claudework");
+
+    // `OpenPeerReq` deserializes & round-trips custom slug `"claudework"`, and
+    // `open_peer` preserves `provider_slug` on the spawned linked session.
+    let peer_req: OpenPeerReq = serde_json::from_value(json!({
+        "provider": "claudework",
+        "prompt": "Pair on tests",
+        "title": "Linked Work Peer"
+    }))
+    .unwrap();
+    assert_eq!(peer_req.provider_slug(), "claudework");
+    assert_eq!(
+        serde_json::to_value(&peer_req).unwrap()["provider"],
+        "claudework"
+    );
+    let peer = rt.open_peer(&s.id, peer_req).await.unwrap();
+    assert_eq!(peer.provider_slug(), "claudework");
+    assert_eq!(as_agent_session(&peer).provider, "claudework");
+
+    // Disabling built-in `"grok"` rejects session creation, `open_peer`, and `ask_children`.
+    host.grok_enabled.store(false, Ordering::SeqCst);
+    let grok_body: CreateRuntimeSessionBody =
+        serde_json::from_value(json!({"provider": "grok"})).unwrap();
+    assert!(grok_body
+        .into_req_with_resolver(|slug| rt.resolve_runtime_provider(slug))
+        .is_err());
+    let grok_peer: OpenPeerReq = serde_json::from_value(json!({"provider": "grok"})).unwrap();
+    assert!(rt.open_peer(&s.id, grok_peer).await.is_err());
+    assert!(rt
+        .ask_children(
+            &s.id,
+            AskChildReq {
+                prompt: "Should fail".into(),
+                targets: vec![AskChildTarget {
+                    provider: RuntimeProvider::Grok,
+                    provider_slug: None,
+                    model: None,
+                    effort: None,
+                }],
+                ..AskChildReq::default()
+            },
+        )
+        .await
+        .is_err());
+
     rt.shutdown().await;
 }
 
@@ -289,7 +342,7 @@ fn sideband_path_confinement_blocks_secrets_traversals_and_symlinks() {
     let cwd = dir.path().join("workspace");
     let brain = dir.path().join("agy-brain");
     let outside = dir.path().join("outside");
-    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
     std::fs::create_dir_all(&outside).unwrap();
 
     let conv_logs = brain
@@ -305,6 +358,12 @@ fn sideband_path_confinement_blocks_secrets_traversals_and_symlinks() {
 
     let otto_db = cwd.join("otto.db");
     std::fs::write(&otto_db, "sqlite").unwrap();
+    let dotenv = cwd.join(".env");
+    std::fs::write(&dotenv, "API_KEY=secret\n").unwrap();
+    let dotenv_local = cwd.join(".env.local");
+    std::fs::write(&dotenv_local, "TOKEN=secret\n").unwrap();
+    let git_config = cwd.join(".git/config");
+    std::fs::write(&git_config, "[remote \"origin\"]\n").unwrap();
     let outside_secret = outside.join("id_rsa");
     std::fs::write(&outside_secret, "PRIVATE KEY").unwrap();
     let symlink_escape = cwd.join("escape.log");
@@ -329,6 +388,9 @@ fn sideband_path_confinement_blocks_secrets_traversals_and_symlinks() {
         Path::new("/Users/victim/.ssh/id_rsa"),
         Path::new("/Users/victim/.aws/credentials"),
         otto_db.as_path(),
+        dotenv.as_path(),
+        dotenv_local.as_path(),
+        git_config.as_path(),
         outside_secret.as_path(),
         symlink_escape.as_path(),
         &cwd.join("../outside/id_rsa"),

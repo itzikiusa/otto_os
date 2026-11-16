@@ -67,7 +67,7 @@ pub(super) fn require_root_user(user: &otto_core::domain::User) -> Result<()> {
     if otto_core::auth::root_authority(user) {
         Ok(())
     } else {
-        Err(Error::Forbidden("root authority required".into()))
+        Err(otto_core::auth::root_refusal())
     }
 }
 
@@ -419,8 +419,8 @@ async fn detect_gutter<S: IdeCtx>(
                 .content
         }
     };
-    let extra = ctx.ide().plugins.active_gutter_detectors();
-    let items = crate::gutter::detect_gutter_items(&req.path, &content, &extra);
+    let items =
+        crate::gutter::detect_gutter_items_with_plugins(&req.path, &content, &ctx.ide().plugins);
     Ok(Json(IdeGutterResp { items }))
 }
 
@@ -447,6 +447,11 @@ mod tests {
 
         headers.insert("x-ide-collab-token", HeaderValue::from_static("tok_hdr"));
         assert_eq!(extract_collab_token(&headers, None).unwrap(), "tok_hdr");
+        assert_eq!(
+            extract_collab_token(&headers, Some("tok_q")).unwrap(),
+            "tok_hdr",
+            "explicit x-ide-collab-token header takes highest precedence"
+        );
 
         let mut bearer_headers = HeaderMap::new();
         bearer_headers.insert(
@@ -456,6 +461,11 @@ mod tests {
         assert_eq!(
             extract_collab_token(&bearer_headers, None).unwrap(),
             "tok_bearer"
+        );
+        assert_eq!(
+            extract_collab_token(&bearer_headers, Some("tok_invite_q")).unwrap(),
+            "tok_invite_q",
+            "?token= query parameter must win over daemon Authorization: Bearer header"
         );
     }
 
@@ -483,6 +493,7 @@ mod tests {
             content: "fn main() {}\n".into(),
             version: 2,
             saved: false,
+            sha256: None,
         };
         let edit_raw = String::from_utf8(format_collab_event_frame(&edit_ev).to_vec()).unwrap();
         let edit_val: Value =

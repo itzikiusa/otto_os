@@ -1,7 +1,12 @@
 // Provider model catalogs, reasoning-effort levels, and interaction modes
 // shared between NewThreadStage and the live thread Composer.
 import type { MetaResp, ProviderModelOption, Session } from './api/types';
-import { inferProviderFamily } from './providerRegistry.ts';
+import {
+  inferProviderFamily,
+  KNOWN_AGENT_FAMILIES,
+  sessionProviderSlug,
+  type ProviderFamilyMeta,
+} from './providerRegistry.ts';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export type InteractionMode = 'full' | 'accept-edits' | 'plan';
@@ -167,7 +172,7 @@ const unifiedCatalogMemo = new WeakMap<readonly ProviderModelOption[], Map<strin
 
 export function providerFamily(
   provider: string,
-  meta?: Pick<MetaResp, 'provider_models'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): string {
   return inferProviderFamily(provider, meta);
 }
@@ -283,25 +288,19 @@ export function unifyModelCatalog(
 
 export function supportsModelSelection(
   provider: string,
-  meta?: Pick<MetaResp, 'model_flags' | 'provider_models'> | null,
+  meta?: (ProviderFamilyMeta & Partial<Pick<MetaResp, 'model_flags'>>) | null,
 ): boolean {
   if (!provider || provider === 'shell') return false;
   if (meta?.model_flags && provider in meta.model_flags) {
     return meta.model_flags[provider] === true;
   }
   const fam = providerFamily(provider, meta);
-  return (
-    fam === 'claude' ||
-    fam === 'codex' ||
-    fam === 'agy' ||
-    fam === 'opencode' ||
-    fam === 'pi'
-  );
+  return (KNOWN_AGENT_FAMILIES as readonly string[]).includes(fam);
 }
 
 export function supportsEffortSelection(
   provider: string,
-  meta?: Pick<MetaResp, 'provider_models'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): boolean {
   const fam = providerFamily(provider, meta);
   if (fam === 'claude' || fam === 'codex' || fam === 'agy' || fam === 'pi') {
@@ -314,7 +313,7 @@ export function supportsEffortSelection(
 
 export function supportsInteractionMode(
   provider: string,
-  meta?: Pick<MetaResp, 'provider_models'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): boolean {
   const fam = providerFamily(provider, meta);
   return fam === 'claude' || fam === 'codex' || fam === 'agy';
@@ -322,7 +321,7 @@ export function supportsInteractionMode(
 
 export function modelsForProvider(
   provider: string,
-  meta?: Pick<MetaResp, 'provider_models'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): ProviderModelOption[] {
   const live = meta?.provider_models?.[provider];
   if (live && live.length > 0) return unifyModelCatalog(provider, live, meta);
@@ -335,7 +334,7 @@ export function modelsForProvider(
 export function canonicalModelId(
   provider: string,
   modelId: string | null | undefined,
-  meta?: Pick<MetaResp, 'provider_models'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): string | null {
   const trimmed = (modelId ?? '').trim();
   if (!trimmed) return null;
@@ -352,7 +351,7 @@ export function canonicalizeModelSelection(
   provider: string,
   modelId: string | null | undefined,
   effort: EffortLevel | null = null,
-  meta?: Pick<MetaResp, 'provider_models'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): { model: string | null; effort: EffortLevel | null } {
   const trimmed = (modelId ?? '').trim();
   if (!trimmed) return { model: null, effort };
@@ -446,7 +445,7 @@ export function formatEffortShort(effort: string | null | undefined): string {
 export function formatModelLabel(
   provider: string,
   modelId: string | null | undefined,
-  meta?: Pick<MetaResp, 'provider_models'> | null,
+  meta?: ProviderFamilyMeta | null,
 ): string {
   const trimmed = (modelId ?? '').trim();
   if (!trimmed) return 'Default model';
@@ -456,7 +455,7 @@ export function formatModelLabel(
     modelsForProvider(provider, meta).find((m) => m.id === resolved) ??
     FALLBACK_PROVIDER_MODELS[provider]?.find((m) => m.id === resolved);
   if (found) return found.label;
-  if (providerFamily(provider) === 'agy') {
+  if (providerFamily(provider, meta) === 'agy') {
     const labelTier = LABEL_TIER_RE.exec(trimmed);
     if (labelTier && labelTier[1].trim()) return labelTier[1].trim();
   }
@@ -494,7 +493,10 @@ export function resolveSessionThreadConfig(
       : null;
   const effectiveModel = pinned ?? fallback;
   let effort = normalizeEffort(m.effort);
-  if (!effort && session?.provider === 'agy' && pinned) {
+  const effectiveProvider = session
+    ? sessionProviderSlug({ provider: session.provider ?? '', meta: m })
+    : '';
+  if (!effort && providerFamily(effectiveProvider) === 'agy' && pinned) {
     const tier = ID_TIER_RE.exec(pinned);
     if (tier) effort = mapRawTier(tier[2]);
   }

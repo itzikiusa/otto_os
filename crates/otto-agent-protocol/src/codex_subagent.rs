@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use otto_core::agent_runtime::{
-    BackgroundTask, TaskSettlement, TurnItem, TurnItemKind, TurnItemStatus,
+    BackgroundTask, TaskSettlement, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -64,6 +64,8 @@ pub(crate) struct CodexSubagent {
     pub seen_child_tools: HashSet<String>,
     #[serde(default)]
     pub settled: bool,
+    #[serde(default)]
+    pub settlement_seq: u32,
 }
 
 impl CodexSubagent {
@@ -231,6 +233,7 @@ impl CodexDriver {
                 completed_at: None,
                 seen_child_tools: HashSet::new(),
                 settled: false,
+                settlement_seq: 0,
             });
         if card.description.is_none() && description.is_some() {
             card.description = description;
@@ -423,7 +426,24 @@ impl CodexDriver {
                     if card.settled {
                         card.settled = false;
                         card.status = TurnItemStatus::Running;
+                        card.completed_at = None;
+                        card.error = None;
+                        let bg_id = card.bg_id();
+                        let label = card.label();
+                        let started_at = card.started_at;
+                        let item_id = card.item_id.clone();
                         step.push(DriverEvent::TurnItem(card.to_turn_item()));
+                        if !self.bg_tasks.iter().any(|t| t.id == bg_id) {
+                            self.bg_tasks.push(BackgroundTask {
+                                id: bg_id,
+                                kind: "agent".into(),
+                                label,
+                                started_at,
+                                item_id: Some(item_id),
+                                due_at: None,
+                            });
+                            step.push(DriverEvent::BackgroundTasks(self.bg_tasks.clone()));
+                        }
                     }
                 }
             }
@@ -631,6 +651,33 @@ impl CodexDriver {
         }
     }
 
+    pub(crate) fn settle_open_subagents_on_parent_abort(
+        &mut self,
+        step: &mut DriverStep,
+        terminal: TurnTerminalStatus,
+    ) {
+        let item_status = match terminal {
+            TurnTerminalStatus::Failed => TurnItemStatus::Failed,
+            TurnTerminalStatus::Interrupted | TurnTerminalStatus::Cancelled => {
+                TurnItemStatus::Interrupted
+            }
+            TurnTerminalStatus::Completed => return,
+        };
+        let open_keys: Vec<String> = self
+            .subagents
+            .iter()
+            .filter(|(_, c)| c.status.is_open() || !c.settled)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in open_keys {
+            self.settle_subagent_by_key(step, &key, item_status, None, None);
+        }
+        if !self.bg_tasks.is_empty() {
+            self.bg_tasks.clear();
+            step.push(DriverEvent::BackgroundTasks(Vec::new()));
+        }
+    }
+
     fn settle_subagent_by_key(
         &mut self,
         step: &mut DriverStep,
@@ -639,7 +686,7 @@ impl CodexDriver {
         output: Option<String>,
         error: Option<String>,
     ) {
-        let (was_settled, bg_id, key_id, label, turn_id, updated_item) = {
+        let (was_settled, seq, bg_id, key_id, label, turn_id, updated_item) = {
             let Some(card) = self.subagents.get_mut(key) else {
                 return;
             };
@@ -654,6 +701,8 @@ impl CodexDriver {
                 return;
             }
             card.settled = true;
+            card.settlement_seq = card.settlement_seq.saturating_add(1);
+            let seq = card.settlement_seq;
             card.status = status;
             card.completed_at = Some(Utc::now());
             if let Some(out) = output.or_else(|| card.last_message.clone()) {
@@ -668,6 +717,7 @@ impl CodexDriver {
             }
             (
                 was_settled,
+                seq,
                 card.bg_id(),
                 card.key.clone(),
                 card.label(),
@@ -685,8 +735,13 @@ impl CodexDriver {
             TurnItemStatus::Cancelled | TurnItemStatus::Interrupted => ("stopped", "stopped"),
             _ => ("finished", "completed"),
         };
+        let notice_id = if seq <= 1 {
+            format!("bg:{bg_id}")
+        } else {
+            format!("bg:{bg_id}:{seq}")
+        };
         let mut notice = item(
-            format!("bg:{bg_id}"),
+            notice_id,
             status,
             None,
             TurnItemKind::SystemNotice {
@@ -701,6 +756,37 @@ impl CodexDriver {
         );
         notice.turn_id = turn_id;
         step.push(DriverEvent::TurnItem(notice));
+        self.evict_settled_subagents();
+    }
+
+    fn evict_settled_subagents(&mut self) {
+        const MAX_SETTLED_SUBAGENTS: usize = 64;
+        let mut settled: Vec<(String, Option<String>, DateTime<Utc>)> = self
+            .subagents
+            .iter()
+            .filter(|(_, c)| c.settled && !c.status.is_open())
+            .map(|(k, c)| {
+                (
+                    k.clone(),
+                    c.child_thread_id.clone(),
+                    c.completed_at.unwrap_or(c.started_at),
+                )
+            })
+            .collect();
+        if settled.len() <= MAX_SETTLED_SUBAGENTS {
+            return;
+        }
+        settled.sort_by_key(|(_, _, ts)| *ts);
+        let drop_count = settled.len() - MAX_SETTLED_SUBAGENTS;
+        for (k, child_tid, _) in settled.into_iter().take(drop_count) {
+            self.subagents.remove(&k);
+            if let Some(tid) = child_tid {
+                if self.child_thread_to_key.get(&tid) == Some(&k) {
+                    self.child_thread_to_key.remove(&tid);
+                }
+                self.child_items.remove(&tid);
+            }
+        }
     }
 
     fn remove_bg_task_ids(&mut self, ids: &[String]) -> bool {

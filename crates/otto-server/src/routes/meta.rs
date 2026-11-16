@@ -75,6 +75,7 @@ pub async fn meta(
             default_provider: None,
             model_flags: Default::default(),
             provider_models: Default::default(),
+            provider_families: Default::default(),
             alt_loopback_base: None,
         }));
     }
@@ -121,7 +122,14 @@ pub async fn meta(
             .map(|name| (name.as_str(), ctx.manager.providers().program_for(name))),
     );
     let families = ctx.manager.providers().model_families();
-    let probe = otto_sessions::provider_models::ModelProbe::from_tool_specs(families, &tool_specs);
+    let provider_families: std::collections::HashMap<String, String> =
+        families.iter().cloned().collect();
+    let claude_dirs = ctx
+        .manager
+        .providers()
+        .active_claude_config_dirs(&otto_transcript::roots::home_dir());
+    let probe = otto_sessions::provider_models::ModelProbe::from_tool_specs(families, &tool_specs)
+        .with_claude_config_dirs(claude_dirs);
     let (tools, provider_models) = tokio::join!(
         otto_sessions::tool_probe::probe_tools_cached(tool_specs),
         otto_sessions::provider_models::probe_provider_models_cached(&probe),
@@ -137,6 +145,7 @@ pub async fn meta(
         default_provider,
         model_flags,
         provider_models,
+        provider_families,
         alt_loopback_base: crate::transport::alt_loopback_base(),
     }))
 }

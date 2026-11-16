@@ -131,7 +131,8 @@ async fn connect_adapter_transport(
             env,
         } => {
             let mut child =
-                spawn_target_process(&req.target, ctx.ssh.as_ref(), &command, &args, &cwd, &env)?;
+                spawn_target_process(&req.target, ctx.ssh.as_ref(), &command, &args, &cwd, &env)
+                    .await?;
             let stdin = child
                 .stdin
                 .take()
@@ -199,7 +200,8 @@ async fn spawn_tcp_listen_adapter(
     ctx: &DapStartContext,
     guard: Arc<BridgeGuard>,
 ) -> Result<(BoxRead, BoxWrite, Arc<BridgeGuard>)> {
-    let mut child = spawn_target_process(&req.target, ctx.ssh.as_ref(), command, args, cwd, env)?;
+    let mut child =
+        spawn_target_process(&req.target, ctx.ssh.as_ref(), command, args, cwd, env).await?;
     let (port_tx, mut port_rx) = mpsc::unbounded_channel::<(String, String)>();
     if let Some(out) = child.stdout.take() {
         let tx = port_tx.clone();

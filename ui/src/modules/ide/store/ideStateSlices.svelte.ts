@@ -44,6 +44,9 @@ export interface IdeDebugLaunchMemo {
     test_name?: string;
     attach_port?: number;
     env?: Record<string, string>;
+    env_file?: string | null;
+    inherit_shell_env?: boolean;
+    sdk_path?: string | null;
   };
 }
 
@@ -267,6 +270,12 @@ export interface IdeTreeTabsHost extends ProjectHelperHost {
   syncWorkspacePort(): void;
 }
 
+const targetResetHooks: Array<() => void> = [];
+
+export function onIdeTargetReset(fn: () => void): void {
+  targetResetHooks.push(fn);
+}
+
 export function resetTargetLifecycleState(
   host: IdeTreeTabsHost,
   next: IdeTargetSpec,
@@ -274,6 +283,7 @@ export function resetTargetLifecycleState(
   overrideAdditionalRoots?: string[],
 ): void {
   host.collabState.reset();
+  for (let i = 0; i < targetResetHooks.length; i++) targetResetHooks[i]();
   host.target = next;
   const primaryKey = canonicalRootKey(next.root);
   const rawSaved = overrideAdditionalRoots
@@ -364,6 +374,7 @@ export async function fetchIdeWorkspaceTree(
   host: IdeTreeTabsHost,
   dirPath: string | undefined,
   onProbeBuildTool: () => void,
+  opts: { deferTabRestore?: boolean } = {},
 ): Promise<void> {
   if (!host.target.root || host.collabIsGuest) return;
   const primary = normalizeRootPath(host.target.root);
@@ -409,7 +420,7 @@ export async function fetchIdeWorkspaceTree(
       }
       host.syncWorkspacePort();
       onProbeBuildTool();
-      void restoreWorkspaceTabsOrInitial(host);
+      if (!opts.deferTabRestore) void restoreWorkspaceTabsOrInitial(host);
     } else if (normDir) {
       const rawEntries = resp.entries ?? [];
       const entries = host.target.kind === 'local'

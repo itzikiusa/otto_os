@@ -166,6 +166,66 @@ export interface MemberAccessContext {
   qualifierChain: string | null;
   enclosingReceiverIdent: string | null;
   enclosingReceiverType: string | null;
+  enclosingFuncDeclLine: number | null;
+  /** Inferred Go struct field / parameter / local receiver type when statically visible in `docText`. */
+  inferredTargetType: string | null;
+}
+
+function inferGoQualifierTargetType(
+  docText: string,
+  qualifierChain: string | null,
+  enclosingReceiverIdent: string | null,
+  enclosingReceiverType: string | null,
+  enclosingFuncDeclLine: number | null,
+  identLine: number,
+): string | null {
+  if (!qualifierChain) return null;
+  if (enclosingReceiverIdent && qualifierChain === enclosingReceiverIdent) {
+    return enclosingReceiverType;
+  }
+  const lines = docText.split(/\r?\n/);
+  // Field access on enclosing receiver (`g.pool` inside `func (g *GoRoutineConcurrencyHelper) ...`)
+  if (
+    enclosingReceiverIdent &&
+    enclosingReceiverType &&
+    qualifierChain.startsWith(`${enclosingReceiverIdent}.`)
+  ) {
+    const rest = qualifierChain.slice(enclosingReceiverIdent.length + 1);
+    if (/^[A-Za-z_]\w*$/.test(rest)) {
+      const structRe = new RegExp(`^\\s*type\\s+${enclosingReceiverType}\\s+struct\\s*\\{`);
+      const sIdx = lines.findIndex((l) => structRe.test(l));
+      if (sIdx >= 0) {
+        const fieldRe = new RegExp(`^\\s*${rest}\\s+(?:\\*|\\[\\])*([A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)?)\\b`);
+        for (let i = sIdx + 1; i < lines.length; i++) {
+          const t = lines[i].trim();
+          if (t.startsWith('}')) break;
+          const mField = fieldRe.exec(lines[i]);
+          if (mField) return mField[1];
+        }
+      }
+    }
+    return null;
+  }
+  // Simple identifier (`pool.Submit`): inspect enclosing function header & local `var x *Type` / `x := &Type{}` / `NewType(`
+  if (/^[A-Za-z_]\w*$/.test(qualifierChain) && enclosingFuncDeclLine != null) {
+    const startIdx = Math.max(0, enclosingFuncDeclLine - 1);
+    const endIdx = Math.min(lines.length - 1, Math.max(startIdx, identLine - 1));
+    const headerLine = lines[startIdx] ?? '';
+    const paramRe = new RegExp(`\\b${qualifierChain}\\s+\\*?([A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)?)\\b`);
+    const mParam = paramRe.exec(headerLine);
+    if (mParam && mParam[1] !== 'func' && mParam[1] !== 'interface' && mParam[1] !== 'struct') {
+      return mParam[1];
+    }
+    const varRe = new RegExp(`^\\s*var\\s+${qualifierChain}\\s+\\*?([A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)?)\\b`);
+    const litRe = new RegExp(`\\b${qualifierChain}\\s*:=\\s*&?([A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)?)\\s*\\{`);
+    for (let i = startIdx + 1; i <= endIdx; i++) {
+      const mv = varRe.exec(lines[i]);
+      if (mv) return mv[1];
+      const ml = litRe.exec(lines[i]);
+      if (ml) return ml[1];
+    }
+  }
+  return null;
 }
 
 export function inspectMemberAccessAtOffset(
@@ -186,21 +246,58 @@ export function inspectMemberAccessAtOffset(
 
   let enclosingReceiverIdent: string | null = null;
   let enclosingReceiverType: string | null = null;
+  let enclosingFuncDeclLine: number | null = null;
+  const prefix = docText.slice(0, Math.max(0, identFrom));
+  const prefixLines = prefix.split(/\r?\n/);
+  const identLine = prefixLines.length;
   if (lang === 'go') {
-    const prefix = docText.slice(0, Math.max(0, identFrom));
-    const prefixLines = prefix.split(/\r?\n/);
     for (let i = prefixLines.length - 1; i >= 0; i--) {
       const t = prefixLines[i].trim();
       const mRecv = /^func\s*\(\s*(?:([A-Za-z_]\w*)\s+)?\*?([A-Za-z_]\w*)(?:\[[^\]]*\])?\s*\)/.exec(t);
       if (mRecv) {
         enclosingReceiverIdent = mRecv[1] ?? null;
         enclosingReceiverType = mRecv[2] ?? null;
+        enclosingFuncDeclLine = i + 1;
         break;
       }
-      if (/^func\s+[A-Za-z_]\w*\s*(?:\[[^\]]*\])?\s*\(/.test(t)) break;
+      if (/^func\s+[A-Za-z_]\w*\s*(?:\[[^\]]*\])?\s*\(/.test(t)) {
+        enclosingFuncDeclLine = i + 1;
+        break;
+      }
+    }
+  } else if (lang === 'java' || lang === 'ts' || lang === 'python' || lang === 'rust') {
+    for (let i = prefixLines.length - 1; i >= 0; i--) {
+      const t = prefixLines[i].trim();
+      if (
+        (lang === 'python' && /^(?:async\s+)?def\s+[A-Za-z_]\w*\s*\(/.test(t)) ||
+        (lang === 'rust' && /^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+[A-Za-z_]\w*/.test(t)) ||
+        (lang === 'ts' && /^(?:export\s+)?(?:public|private|protected|Async|async|static|\s)*(?:function\s+)?[A-Za-z_$][\w$]*\s*(?:<[^>]*>)?\s*\(/.test(t) && !/^(?:if|for|while|switch|catch)\b/.test(t)) ||
+        (lang === 'java' && /^(?:public|protected|private|static|final|synchronized|default|abstract|\s)+(?:<[^>{};]+>\s+)?[\w.$?[\]<>]+\s+[A-Za-z_$][\w$]*\s*\(/.test(t))
+      ) {
+        enclosingFuncDeclLine = i + 1;
+        break;
+      }
     }
   }
-  return { isSelector: isDot, qualifierChain, enclosingReceiverIdent, enclosingReceiverType };
+  const inferredTargetType =
+    lang === 'go' && isDot
+      ? inferGoQualifierTargetType(
+          docText,
+          qualifierChain,
+          enclosingReceiverIdent,
+          enclosingReceiverType,
+          enclosingFuncDeclLine,
+          identLine,
+        )
+      : null;
+  return {
+    isSelector: isDot,
+    qualifierChain,
+    enclosingReceiverIdent,
+    enclosingReceiverType,
+    enclosingFuncDeclLine,
+    inferredTargetType,
+  };
 }
 
 function canSelectorMatchSameFileDecl(
@@ -208,20 +305,43 @@ function canSelectorMatchSameFileDecl(
   lang: SemanticLangKind,
   candidateKind: string,
   candidateGoRecvType: string | null,
+  candidateDeclLine?: number | null,
 ): boolean {
   if (!access.isSelector) return true;
   if (candidateKind !== 'method' && candidateKind !== 'field') return false;
   const q = access.qualifierChain ?? '';
   if (!q) return false;
   if (lang === 'go') {
-    // Chained member call like `g.pool.Submit` NEVER resolves to a method on `g` (`GoRoutineConcurrencyHelper`).
-    if (q.includes('.') || q.includes('(') || q.includes('[')) return false;
     if (access.enclosingReceiverIdent && q === access.enclosingReceiverIdent) {
       return !candidateGoRecvType || !access.enclosingReceiverType || candidateGoRecvType === access.enclosingReceiverType;
     }
-    return Boolean(candidateGoRecvType && q === candidateGoRecvType);
+    if (access.inferredTargetType) {
+      if (access.inferredTargetType.includes('.')) return false;
+      return candidateGoRecvType === access.inferredTargetType;
+    }
+    if (
+      candidateDeclLine != null &&
+      access.enclosingFuncDeclLine != null &&
+      candidateDeclLine === access.enclosingFuncDeclLine
+    ) {
+      return false;
+    }
+    // Chained or non-receiver call (`g.pool.Submit`, `pool.Submit`) inside `(g *GoRoutineConcurrencyHelper)`
+    // NEVER resolves to `GoRoutineConcurrencyHelper.Submit`, while still allowing same-file `Pool.Submit`!
+    if (access.enclosingReceiverType && candidateGoRecvType === access.enclosingReceiverType && q !== access.enclosingReceiverType) {
+      return false;
+    }
+    return Boolean(candidateGoRecvType);
   }
-  return q === 'this' || q === 'self' || q === 'super' || q === 'cls';
+  if (q === 'this' || q === 'self' || q === 'super' || q === 'cls') return true;
+  if (
+    candidateDeclLine != null &&
+    access.enclosingFuncDeclLine != null &&
+    candidateDeclLine === access.enclosingFuncDeclLine
+  ) {
+    return false;
+  }
+  return true;
 }
 
 export function extractCleanSymbolHoverFromSource(
@@ -234,7 +354,14 @@ export function extractCleanSymbolHoverFromSource(
   if (!docText || !symbol) return null;
   const access: MemberAccessContext = identFrom != null
     ? inspectMemberAccessAtOffset(docText, identFrom, lang)
-    : { isSelector: false, qualifierChain: null, enclosingReceiverIdent: null, enclosingReceiverType: null };
+    : {
+        isSelector: false,
+        qualifierChain: null,
+        enclosingReceiverIdent: null,
+        enclosingReceiverType: null,
+        enclosingFuncDeclLine: null,
+        inferredTargetType: null,
+      };
   const lines = docText.split(/\r?\n/);
   const esc = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   let pkgName: string | null = null;
@@ -267,7 +394,7 @@ export function extractCleanSymbolHoverFromSource(
       }
       const mMeth = new RegExp(`^func\\s*\\(\\s*(?:[A-Za-z_]\\w*\\s+)?\\*?([A-Za-z_]\\w*)(?:\\[[^\\]]*\\])?\\s*\\)\\s*${esc}\\s*(?:\\[[^\\]]*\\])?\\s*\\(`).exec(trimmed);
       if (mMeth) {
-        if (canSelectorMatchSameFileDecl(access, lang, 'method', mMeth[1])) {
+        if (canSelectorMatchSameFileDecl(access, lang, 'method', mMeth[1], i + 1)) {
           declIdx = i;
           sig = trimmed.replace(/\s*\{\s*$/, '');
           kind = 'method';
@@ -289,13 +416,13 @@ export function extractCleanSymbolHoverFromSource(
         declIdx = i; sig = trimmed.replace(/\s*\{\s*$/, ''); kind = 'type'; break;
       }
       if (new RegExp(`^(?:public|protected|private|static|final|synchronized|default|abstract|\\s)+(?:<[^>{};]+>\\s+)?(?:[\\w.$?[\\]]+(?:<[^>{};]+>)?(?:\\[\\])*)\\s+${esc}\\s*\\(`).test(trimmed)) {
-        if (canSelectorMatchSameFileDecl(access, lang, 'method', null)) {
+        if (canSelectorMatchSameFileDecl(access, lang, 'method', null, i + 1)) {
           declIdx = i; sig = trimmed.replace(/\s*\{\s*$/, ''); kind = 'method'; break;
         }
         continue;
       }
       if (new RegExp(`^(?:private|protected|public)\\s+(?:static\\s+|final\\s+)*(?:[\\w.$?[\\]]+(?:<[^>{};]+>)?(?:\\[\\])*)\\s+${esc}\\s*[;=]`).test(trimmed)) {
-        if (canSelectorMatchSameFileDecl(access, lang, 'field', null)) {
+        if (canSelectorMatchSameFileDecl(access, lang, 'field', null, i + 1)) {
           declIdx = i; sig = trimmed.replace(/;\s*$/, ''); kind = 'field'; break;
         }
         continue;
@@ -305,6 +432,23 @@ export function extractCleanSymbolHoverFromSource(
         `^(?:export\\s+)?(?:pub\\s+)?(?:async\\s+)?(?:function|fn|def|class|interface|type|struct|enum|trait|const|let)\\s+${esc}\\b`,
       ).exec(trimmed);
       if (mGen) { declIdx = i; sig = trimmed.replace(/\s*[:{]\s*$/, ''); kind = inferKindFromSignature(sig); break; }
+    } else {
+      const mMember =
+        lang === 'python'
+          ? new RegExp(`^(?:async\\s+)?def\\s+${esc}\\s*\\(`).exec(trimmed)
+          : lang === 'rust'
+            ? new RegExp(`^(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${esc}\\b`).exec(trimmed)
+            : lang === 'ts'
+              ? new RegExp(`^(?:public|private|protected|readonly|static|async|\\s)*${esc}\\s*(?:<[^>]*>)?\\s*\\(`).exec(trimmed)
+              : null;
+      if (mMember && !/^(?:if|for|while|switch|catch|return)\b/.test(trimmed)) {
+        if (canSelectorMatchSameFileDecl(access, lang, 'method', null, i + 1)) {
+          declIdx = i;
+          sig = trimmed.replace(/\s*[:{]\s*$/, '');
+          kind = 'method';
+          break;
+        }
+      }
     }
   }
 
@@ -494,7 +638,16 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
     const ln = view.state.doc.lineAt(pos), lineNo = ln.number, char0 = pos - ln.from, docText = view.state.doc.toString();
     const span = tokenSpanAtPos(view.state, pos);
     const word = span && !span.isStringPath && span.word && !/^\d+$/.test(span.word) ? span.word : '';
-    const access = span ? inspectMemberAccessAtOffset(docText, span.from, lang) : { isSelector: false, qualifierChain: null, enclosingReceiverIdent: null, enclosingReceiverType: null };
+    const access: MemberAccessContext = span
+      ? inspectMemberAccessAtOffset(docText, span.from, lang)
+      : {
+          isSelector: false,
+          qualifierChain: null,
+          enclosingReceiverIdent: null,
+          enclosingReceiverType: null,
+          enclosingFuncDeclLine: null,
+          inferredTargetType: null,
+        };
     const lineFixes = getIdeQuickFixesAtLine(view.state, lineNo);
     const detFixes = computeDeterministicQuickFixes(docText, opts.filePath, opts.language, lineNo, word || undefined);
     const primaryLineFix = lineFixes[0] ?? null;
@@ -535,7 +688,13 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
             const mismatchedSameFile =
               respSameFile &&
               access.isSelector &&
-              !canSelectorMatchSameFileDecl(access, lang, resp.kind || (mGoRecv ? 'method' : 'symbol'), mGoRecv?.[1] ?? null);
+              !canSelectorMatchSameFileDecl(
+                access,
+                lang,
+                resp.kind || (mGoRecv ? 'method' : 'symbol'),
+                mGoRecv?.[1] ?? null,
+                resp.defined_in?.line ?? null,
+              );
             const mismatchedAuthoritativeDef =
               Boolean(authoritativeDef && resp.defined_in?.path && authoritativeDef.path !== resp.defined_in.path);
             if (!mismatchedSameFile && !mismatchedAuthoritativeDef) {
@@ -600,8 +759,9 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
         if (primaryLineFix || primaryDetFix) {
           const qfBtn = document.createElement('button'); qfBtn.type = 'button'; qfBtn.className = 'cm-ide-qdoc-act cm-ide-qdoc-qf'; qfBtn.dataset.testid = 'ide-hover-quickfix-btn';
           const title = (primaryLineFix ?? primaryDetFix)!.title;
-          qfBtn.textContent = `💡 Quick Fix: ${title} (⌥⏎)`;
-          qfBtn.addEventListener('mousedown', (e) => {
+          qfBtn.textContent = `Quick Fix: ${title} (⌥⏎)`;
+          qfBtn.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+          qfBtn.addEventListener('click', (e) => {
             e.preventDefault(); e.stopPropagation();
             if (primaryLineFix) applyClientQuickFix(view, primaryLineFix);
             else if (primaryDetFix) applyConcreteEditsToView(view, primaryDetFix.edits, opts.filePath);
@@ -609,7 +769,8 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
           foot.appendChild(qfBtn);
           if (opts.onQuickFix) {
             const moreQf = document.createElement('button'); moreQf.type = 'button'; moreQf.className = 'cm-ide-qdoc-act'; moreQf.textContent = 'More actions... (⌥⏎)';
-            moreQf.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); opts.onQuickFix?.({ line: lineNo, column: char0 + 1, symbol: word || undefined }); });
+            moreQf.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+            moreQf.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); opts.onQuickFix?.({ line: lineNo, column: char0 + 1, symbol: word || undefined }); });
             foot.appendChild(moreQf);
           }
         }

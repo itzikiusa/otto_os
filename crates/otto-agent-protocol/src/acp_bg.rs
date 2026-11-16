@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use agent_client_protocol::v1::schema::ToolCallStatus;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::Utc;
 use otto_core::agent_runtime::{BackgroundTask, TurnItemStatus};
 use serde_json::Value;
 
@@ -157,7 +157,7 @@ impl AcpDriver {
             })
         {
             let now = Utc::now();
-            let due_at = one_shot_due_at(t.raw_input.as_ref(), now);
+            let due_at = crate::driver::one_shot_due_at(t.raw_input.as_ref(), now);
             let timer_condition = t
                 .raw_input
                 .as_ref()
@@ -388,30 +388,6 @@ fn extract_task_log_path(output: &str) -> Option<PathBuf> {
                     return Some(p);
                 }
             }
-        }
-    }
-    None
-}
-
-fn one_shot_due_at(
-    raw: Option<&Value>,
-    now: chrono::DateTime<Utc>,
-) -> Option<chrono::DateTime<Utc>> {
-    let v = raw?;
-    let has_cron = v
-        .get("CronExpression")
-        .and_then(Value::as_str)
-        .is_some_and(|s| !s.trim().is_empty());
-    if has_cron {
-        return None;
-    }
-    if let Some(secs) = v.get("DurationSeconds").and_then(Value::as_u64) {
-        return Some(now + ChronoDuration::seconds(secs.min(86_400 * 365) as i64));
-    }
-    if let Some(secs_f) = v.get("DurationSeconds").and_then(Value::as_f64) {
-        if secs_f.is_finite() && secs_f >= 0.0 {
-            let ms = (secs_f.min((86_400 * 365) as f64) * 1_000.0) as i64;
-            return Some(now + ChronoDuration::milliseconds(ms));
         }
     }
     None

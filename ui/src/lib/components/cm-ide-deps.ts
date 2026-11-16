@@ -84,6 +84,27 @@ export function getManifestDepAtLine(state: EditorState, line: number): IdeDepIt
   );
 }
 
+const DEP_SVG_NS = 'http://www.w3.org/2000/svg';
+
+function depGutterIconSvg(kind: 'managed' | 'shield'): SVGSVGElement {
+  const svg = document.createElementNS(DEP_SVG_NS, 'svg');
+  for (const [k, v] of [['width', '12'], ['height', '12'], ['viewBox', '0 0 16 16'], ['fill', 'none'], ['aria-hidden', 'true']]) {
+    svg.setAttribute(k, v);
+  }
+  const p = document.createElementNS(DEP_SVG_NS, 'path');
+  if (kind === 'managed') {
+    p.setAttribute('d', 'M8 13V3m0 0L4.5 6.5M8 3l3.5 3.5');
+  } else {
+    p.setAttribute('d', 'M8 2 3 4.2v4.1c0 3.1 2.1 5.3 5 5.9 2.9-.6 5-2.8 5-5.9V4.2L8 2Zm0 4v3m0 2.2h.01');
+  }
+  p.setAttribute('stroke', 'currentColor');
+  p.setAttribute('stroke-width', '1.5');
+  p.setAttribute('stroke-linecap', 'round');
+  p.setAttribute('stroke-linejoin', 'round');
+  svg.appendChild(p);
+  return svg;
+}
+
 class ManifestCodeVisionWidget extends WidgetType {
   actions: Array<{ label: string; action: string }>;
   onRun: (action: string) => void;
@@ -109,6 +130,10 @@ class ManifestCodeVisionWidget extends WidgetType {
       btn.textContent = act.label;
       btn.dataset.depAction = act.action;
       btn.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
         this.onRun(act.action);
@@ -142,8 +167,12 @@ class ManagedDepGutterMarker extends GutterMarker {
     const tip = `Navigate to managed dependency in ${baseName}:${this.target.line}`;
     btn.title = tip;
     btn.setAttribute('aria-label', tip);
-    btn.textContent = '🎯↑';
+    btn.appendChild(depGutterIconSvg('managed'));
     btn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    btn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
       this.onJump(this.target);
@@ -171,10 +200,19 @@ class VulnShieldGutterMarker extends GutterMarker {
     s.title = this.tip;
     s.setAttribute('role', 'img');
     s.setAttribute('aria-label', this.tip);
-    s.textContent = '🛡';
+    s.appendChild(depGutterIconSvg('shield'));
     return s;
   }
 }
+
+const depSpacerMarker = new (class extends GutterMarker {
+  toDOM(): HTMLElement {
+    const s = document.createElement('span');
+    s.className = 'cm-ide-dep-spacer';
+    s.setAttribute('aria-hidden', 'true');
+    return s;
+  }
+})();
 
 export interface CreateIdeDepsExtensionOptions {
   filePath: string;
@@ -217,17 +255,50 @@ const depTheme = EditorView.baseTheme({
     padding: '0 2px',
   },
   '.cm-ide-dep-cv-link:hover': { textDecoration: 'underline' },
-  '.cm-ide-dep-gutter': { width: '18px', userSelect: 'none' },
+  '.cm-ide-dep-gutter': {
+    inlineSize: '18px',
+    minInlineSize: '18px',
+    maxInlineSize: '18px',
+    padding: '0',
+    boxSizing: 'border-box',
+    userSelect: 'none',
+  },
+  '.cm-ide-dep-gutter .cm-gutterElement': {
+    inlineSize: '18px',
+    minInlineSize: '18px',
+    maxInlineSize: '18px',
+    padding: '0',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    boxSizing: 'border-box',
+  },
   '.cm-ide-dep-gutter-btn': {
     appearance: 'none',
     border: 'none',
     background: 'transparent',
-    fontSize: 'var(--fs-xs)',
+    color: 'var(--accent-text)',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     padding: '0',
     cursor: 'pointer',
     lineHeight: '1',
   },
-  '.cm-ide-dep-shield-marker': { fontSize: 'var(--fs-xs)', lineHeight: '1', cursor: 'help' },
+  '.cm-ide-dep-shield-marker': {
+    color: 'var(--danger)',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    lineHeight: '1',
+    cursor: 'help',
+  },
+  '.cm-ide-dep-spacer': {
+    display: 'inline-block',
+    inlineSize: '12px',
+    blockSize: '12px',
+    visibility: 'hidden',
+  },
 });
 
 export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Extension {
@@ -260,6 +331,7 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
 
   const depGutter = gutter({
     class: 'cm-ide-dep-gutter',
+    initialSpacer: () => depSpacerMarker,
     markers(view) {
       const deps = getManifestAllDeps(view.state);
       if (!deps.length) {
@@ -365,23 +437,23 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
           const t = lineObj.text.trim();
           if (eco === 'go' && (/^require\s*\(/.test(t) || /^require\s+\S+/.test(t))) {
             pushCv(lineObj.to, [
-              { label: '↻ Update all dependencies', action: 'update_all_latest' },
-              { label: '↻ Update direct dependencies', action: 'update_direct_latest' },
-              { label: '🧹 Go Mod Tidy', action: 'tidy' },
+              { label: 'Update all dependencies', action: 'update_all_latest' },
+              { label: 'Update direct dependencies', action: 'update_direct_latest' },
+              { label: 'Go Mod Tidy', action: 'tidy' },
             ]);
             break;
           }
           if (eco === 'maven' && t === '<dependencies>') {
             pushCv(lineObj.to, [
-              { label: '↻ Sync Maven', action: 'maven_sync' },
-              { label: '🛡 Vulnerability Scan', action: 'vuln_scan' },
+              { label: 'Sync Maven', action: 'maven_sync' },
+              { label: 'Vulnerability Scan', action: 'vuln_scan' },
             ]);
             break;
           }
           if (eco === 'gradle' && /^dependencies\s*\{/.test(t)) {
             pushCv(lineObj.to, [
-              { label: '↻ Sync Gradle', action: 'gradle_sync' },
-              { label: '🛡 Vulnerability Scan', action: 'vuln_scan' },
+              { label: 'Sync Gradle', action: 'gradle_sync' },
+              { label: 'Vulnerability Scan', action: 'vuln_scan' },
             ]);
             break;
           }
@@ -392,8 +464,8 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
               (ln === 1 || /^dependencies\s*=/.test(t) || /^\[tool\.poetry\.dependencies\]/.test(t)));
           if (isGenericBlock) {
             pushCv(lineObj.to, [
-              { label: '↻ Update dependencies', action: 'update_all_latest' },
-              { label: '🛡 Vulnerability Scan', action: 'vuln_scan' },
+              { label: 'Update dependencies', action: 'update_all_latest' },
+              { label: 'Vulnerability Scan', action: 'vuln_scan' },
             ]);
             break;
           }
@@ -492,11 +564,11 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
           }
           for (const v of dep.vulnerabilities ?? []) {
             const fixedSuffix = v.fixed_version ? ` — Fixed in ${v.fixed_version}` : '';
-            notes.push(`🛡 ${v.id} (${v.severity}): ${v.summary}${fixedSuffix}`);
+            notes.push(`Advisory ${v.id} (${v.severity}): ${v.summary}${fixedSuffix}`);
           }
           if (dep.managed_in) {
             const managedFile = dep.managed_in.path.split('/').pop() ?? dep.managed_in.path;
-            notes.push(`🎯↑ Managed in ${managedFile}:${dep.managed_in.line}`);
+            notes.push(`Managed in ${managedFile}:${dep.managed_in.line}`);
           }
           body.textContent = notes.length
             ? notes.join('\n')
@@ -510,6 +582,9 @@ export function createIdeDepsExtension(opts: CreateIdeDepsExtensionOptions): Ext
             b.className = 'cm-ide-qd-btn';
             b.textContent = label;
             b.addEventListener('mousedown', (e) => {
+              e.preventDefault();
+            });
+            b.addEventListener('click', (e) => {
               e.preventDefault();
               e.stopPropagation();
               fn();

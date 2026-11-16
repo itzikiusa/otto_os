@@ -45,7 +45,9 @@ pub(super) async fn lsp_symbols<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeSymbolsReq>,
 ) -> ApiResult<Json<IdeSymbolsResp>> {
-    if !user.is_root && req.target.kind == crate::types::IdeTargetKind::Local {
+    if !otto_core::auth::root_authority(&user)
+        && req.target.kind == crate::types::IdeTargetKind::Local
+    {
         ctx.authorize_local_target(&user, &req.target, false)
             .await?;
     }
@@ -136,7 +138,9 @@ pub(super) async fn lsp_code_actions<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeCodeActionsReq>,
 ) -> ApiResult<Json<IdeCodeActionsResp>> {
-    if !user.is_root && req.target.kind == crate::types::IdeTargetKind::Local {
+    if !otto_core::auth::root_authority(&user)
+        && req.target.kind == crate::types::IdeTargetKind::Local
+    {
         ctx.authorize_local_target(&user, &req.target, false)
             .await?;
     }
@@ -192,7 +196,8 @@ pub(super) async fn fs_complete<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeFsCompleteReq>,
 ) -> ApiResult<Json<IdeFsCompleteResp>> {
-    let auth_roots = if !user.is_root {
+    let has_root_auth = otto_core::auth::root_authority(&user);
+    let auth_roots = if !has_root_auth {
         let mut authorized_any = false;
         let mut allowed_dirs: Vec<PathBuf> = Vec::new();
         if let Some(ref t) = req.target {
@@ -255,9 +260,12 @@ pub(super) async fn fs_complete<S: IdeCtx>(
         None
     };
 
-    let is_root = user.is_root;
     let resp = tokio::task::spawn_blocking(move || {
-        crate::target::complete::complete_fs_paths_for_roots(&req, is_root, auth_roots.as_deref())
+        crate::target::complete::complete_fs_paths_for_roots(
+            &req,
+            has_root_auth,
+            auth_roots.as_deref(),
+        )
     })
     .await
     .map_err(|e| Error::Internal(format!("fs complete worker failed: {e}")))?;
@@ -300,14 +308,14 @@ pub(super) async fn history_list<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeHistoryListQuery>,
 ) -> ApiResult<Json<IdeHistoryListResp>> {
+    let has_root_auth = otto_core::auth::root_authority(&user);
     let (canon_root, extra_roots) = authorize_history_root(&ctx, &user, &q.root, false).await?;
     let store = ctx.ide().history.clone();
-    let is_root = user.is_root;
     let resp = tokio::task::spawn_blocking(move || {
         store.list_entries(
             &canon_root,
             &extra_roots,
-            is_root,
+            has_root_auth,
             q.path.as_deref(),
             q.include_deleted,
             q.limit,
@@ -324,11 +332,11 @@ pub(super) async fn history_entry<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeHistoryEntryQuery>,
 ) -> ApiResult<Json<IdeHistoryEntryResp>> {
+    let has_root_auth = otto_core::auth::root_authority(&user);
     let (canon_root, extra_roots) = authorize_history_root(&ctx, &user, &q.root, false).await?;
     let store = ctx.ide().history.clone();
-    let is_root = user.is_root;
     let resp = tokio::task::spawn_blocking(move || {
-        store.get_entry(&canon_root, &extra_roots, is_root, &q.id)
+        store.get_entry(&canon_root, &extra_roots, has_root_auth, &q.id)
     })
     .await
     .map_err(|e| Error::Internal(format!("history entry worker failed: {e}")))??;
@@ -347,12 +355,12 @@ pub(super) async fn history_restore<S: IdeCtx>(
     {
         return Err(Error::Invalid("local history requires a local target".into()).into());
     }
+    let has_root_auth = otto_core::auth::root_authority(&user);
     let (canon_root, extra_roots) =
         authorize_history_root(&ctx, &user, req.effective_root(), true).await?;
     let store = ctx.ide().history.clone();
-    let is_root = user.is_root;
     let resp = tokio::task::spawn_blocking(move || {
-        store.restore_entry(&canon_root, &extra_roots, is_root, &req.id)
+        store.restore_entry(&canon_root, &extra_roots, has_root_auth, &req.id)
     })
     .await
     .map_err(|e| Error::Internal(format!("history restore worker failed: {e}")))??;
@@ -375,10 +383,11 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
         return Err(Error::Invalid("local history is disabled in preferences".into()).into());
     }
     let retention_days = req.local_history_retention_days;
+    let has_root_auth = otto_core::auth::root_authority(&user);
     let (canon_root, extra_roots) =
         authorize_history_root(&ctx, &user, req.effective_root(), true).await?;
     let store = ctx.ide().history.clone();
-    let is_root = user.is_root;
+    let is_root = has_root_auth;
     let entry = tokio::task::spawn_blocking(move || -> Result<_> {
         let raw_path = req.path.trim();
         let target_candidate = if raw_path.is_empty() || raw_path == "." {
@@ -472,7 +481,22 @@ pub(super) async fn history_snapshot<S: IdeCtx>(
 
         let bytes = match req.content {
             Some(buf) => buf.into_bytes(),
-            None if resolved_path.is_file() => std::fs::read(&resolved_path).unwrap_or_default(),
+            None if resolved_path.is_file() => {
+                std::fs::read(&resolved_path).map_err(|e| match e.kind() {
+                    std::io::ErrorKind::NotFound => Error::NotFound(format!(
+                        "snapshot target '{}' not found",
+                        resolved_path.display()
+                    )),
+                    std::io::ErrorKind::PermissionDenied => Error::Forbidden(format!(
+                        "permission denied reading '{}'",
+                        resolved_path.display()
+                    )),
+                    _ => Error::Internal(format!(
+                        "failed to read '{}': {e}",
+                        resolved_path.display()
+                    )),
+                })?
+            }
             None => Vec::new(),
         };
         store

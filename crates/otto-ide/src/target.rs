@@ -32,6 +32,7 @@ use crate::types::{IdePlatformInfo, IdeSshSpec, IdeTargetKind, IdeTargetSpec};
 use crate::IdeCtx;
 
 pub use self::fs_ops::{enforce_non_root_path, HistoryWriteOpts};
+pub(crate) use self::path_resolve::normalize_posix_clean_root;
 use self::sdk_paths::{
     collect_base_readonly_sdk_roots, collect_readonly_sdk_roots_with_env,
     discover_local_go_replace_roots,
@@ -261,10 +262,11 @@ impl TargetManager {
                 let pool = ctx.pool();
                 let _ = ctx.ide().projects.ensure_hydrated(&pool).await;
                 ctx.ide().environments.ensure_hydrated(&pool).await;
+                let has_root_auth = otto_core::auth::root_authority(user);
 
                 let cache_key = LocalResolveCacheKey {
                     actor_id: user.id.as_str().to_string(),
-                    is_root_user: user.is_root,
+                    is_root_user: has_root_auth,
                     write,
                     root: spec.root.clone(),
                     req_extra_roots: spec.merged_extra_roots(),
@@ -311,7 +313,7 @@ impl TargetManager {
                 for legacy_ar in ctx
                     .ide()
                     .projects
-                    .legacy_unowned_folders_for_root(&spec.root, user.is_root)
+                    .legacy_unowned_folders_for_root(&spec.root, has_root_auth)
                 {
                     if !legacy_ar.trim().is_empty() && !server_candidates.contains(&legacy_ar) {
                         server_candidates.push(legacy_ar);
@@ -324,7 +326,7 @@ impl TargetManager {
                     if merged_spec.additional_roots.contains(&cand_ar) {
                         continue;
                     }
-                    if user.is_root
+                    if has_root_auth
                         || ctx
                             .authorize_local_target(user, &IdeTargetSpec::local(&cand_ar), write)
                             .await
@@ -345,7 +347,7 @@ impl TargetManager {
                     }
                     extra_sdk_dirs.push(p);
                 }
-                if !user.is_root {
+                if !has_root_auth {
                     if let Ok(tc_canon) = extra_sdk_dirs[0].canonicalize() {
                         trusted_sdk_bases[0] = tc_canon;
                     }
@@ -371,7 +373,7 @@ impl TargetManager {
                     }
                     for custom in custom_sdks {
                         let p = PathBuf::from(&custom);
-                        if user.is_root
+                        if has_root_auth
                             || path_within_any(&p, &trusted_sdk_bases)
                             || ctx
                                 .authorize_local_target(user, &IdeTargetSpec::local(&custom), false)
@@ -383,7 +385,7 @@ impl TargetManager {
                     }
                 }
 
-                let is_root = user.is_root;
+                let is_root = has_root_auth;
                 let actor_id = user.id.as_str().to_string();
                 let shell_snap = if is_root {
                     Some(ctx.ide().toolchains.shell_env_snapshot())
@@ -436,7 +438,7 @@ impl TargetManager {
 
                 // Non-root callers only gain read-only access to discovered Go parent/replace
                 // roots that explicitly pass workspace RBAC authorization.
-                if !user.is_root && !go_candidates.is_empty() {
+                if !has_root_auth && !go_candidates.is_empty() {
                     if let ResolvedTarget::Local {
                         ref root,
                         ref additional_roots,
@@ -483,7 +485,32 @@ impl TargetManager {
                     Error::Invalid("connection_id is required for SSH targets".into())
                 })?;
                 let ssh_spec = ctx.resolve_ssh_connection(user, conn_id).await?;
-                self.resolve_with_ssh(spec, user.id.as_str(), ssh_spec)
+                let pool = ctx.pool();
+                ctx.ide().environments.ensure_hydrated(&pool).await;
+                let norm_root = self::path_resolve::normalize_remote_root(&spec.root)?;
+                let mut merged_spec = spec.clone();
+                merged_spec.root = norm_root.clone();
+                let norm_key = format!("ssh:{conn_id}:{norm_root}");
+                for key in [spec.project_key(), norm_key] {
+                    let stored_env =
+                        ctx.ide().environments.cached_project_env(&key).or_else(|| {
+                            self.environments
+                                .as_ref()
+                                .and_then(|e| e.cached_project_env(&key))
+                        });
+                    if let Some(proj_env) = stored_env {
+                        for ar in proj_env.additional_roots {
+                            if let Ok(clean_ar) = self::path_resolve::normalize_remote_root(&ar) {
+                                if clean_ar != norm_root
+                                    && !merged_spec.additional_roots.contains(&clean_ar)
+                                {
+                                    merged_spec.additional_roots.push(clean_ar);
+                                }
+                            }
+                        }
+                    }
+                }
+                self.resolve_with_ssh(&merged_spec, user.id.as_str(), ssh_spec)
             }
         }
     }

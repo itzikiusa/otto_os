@@ -71,6 +71,16 @@ async fn catalog_fallback(provider: &str) -> Result<Vec<(String, String)>, Strin
     }
 }
 
+fn enabled_catalog_keys(reg: &otto_sessions::ProviderRegistry) -> Vec<String> {
+    let mut keys = reg.names();
+    for (_slug, family) in reg.model_families() {
+        if !keys.contains(&family) {
+            keys.push(family);
+        }
+    }
+    keys
+}
+
 /// Run the source chain for one provider and persist the first success.
 pub async fn refresh_provider(ctx: &ServerCtx, provider: &str) {
     let repo = ProviderModelsRepo::new(ctx.pool.clone());
@@ -78,7 +88,8 @@ pub async fn refresh_provider(ctx: &ServerCtx, provider: &str) {
     let program = ctx
         .manager
         .providers()
-        .program_for(provider)
+        .resolved_family_program(provider)
+        .or_else(|| ctx.manager.providers().program_for(provider))
         .unwrap_or_else(|| provider.to_string());
 
     for source in ["cli", "scrape", "catalog"] {
@@ -117,7 +128,7 @@ pub async fn refresh_provider(ctx: &ServerCtx, provider: &str) {
 
 /// Refresh every enabled known provider sequentially.
 pub async fn refresh_all(ctx: &ServerCtx) {
-    let enabled = ctx.manager.providers().names();
+    let enabled = enabled_catalog_keys(ctx.manager.providers());
     for p in KNOWN_CATALOG_PROVIDERS {
         if enabled.iter().any(|e| e == p) {
             refresh_provider(ctx, p).await;
@@ -220,7 +231,7 @@ fn group(rows: Vec<ProviderModel>, enabled: &[String]) -> HashMap<String, Provid
 
 async fn payload(ctx: &ServerCtx) -> ApiResult<ModelsResp> {
     let rows = ProviderModelsRepo::new(ctx.pool.clone()).list_all().await?;
-    let enabled = ctx.manager.providers().names();
+    let enabled = enabled_catalog_keys(ctx.manager.providers());
     Ok(ModelsResp {
         providers: group(rows, &enabled),
     })

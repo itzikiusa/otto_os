@@ -164,7 +164,12 @@ pub async fn ide_local_root_authorized(
     root: &std::path::Path,
     write: bool,
 ) -> otto_core::Result<bool> {
-    if user.is_root {
+    let has_root = if write {
+        otto_core::auth::root_authority(user)
+    } else {
+        user.is_root
+    };
+    if has_root {
         return Ok(true);
     }
     let canon_root = tokio::task::spawn_blocking({
@@ -174,12 +179,12 @@ pub async fn ide_local_root_authorized(
     .await
     .map_err(|e| otto_core::Error::Internal(format!("ide root check: {e}")))?;
 
-    if secret_root_denial(&canon_root).is_some() {
-        return Ok(false);
-    }
     if !write && crate::routes::session_files::lsp_root_in_own_session(ctx, user, &canon_root).await
     {
         return Ok(true);
+    }
+    if secret_root_denial(&canon_root).is_some() {
+        return Ok(false);
     }
 
     let min_role = if write {

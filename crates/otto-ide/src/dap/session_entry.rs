@@ -193,6 +193,8 @@ impl SessionEntry {
             title,
             language,
             adapter,
+            config_id: req.config_id.clone(),
+            launch: Some(req.launch.clone()),
             state: IdeDebugState::Starting,
             stopped_reason: None,
             active_thread_id: None,

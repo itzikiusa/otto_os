@@ -891,22 +891,22 @@
       sel !== null && sel.path === file.path && sel.hunk === hi && sel.lines.size > 0
         ? [...sel.lines].sort((a, b) => a - b)
         : undefined;
-    if (op === 'discard') {
-      const what = picked ? plural(picked.length, 'changed line') : 'this whole hunk';
-      const ok = await confirmer.ask(
-        `Discard ${what}? This rewrites the working file and cannot be undone from the file — a backup stash \`otto: backup before hunk discard\` is kept.`,
-        { title: picked ? 'Discard lines' : 'Discard hunk', confirmLabel: 'Discard', danger: true },
-      );
-      if (!ok) return;
-      // The diff changed under the dialog: the pick and the hunk index may no
-      // longer mean what the user confirmed. Re-pick instead of guessing.
-      if (diff !== shown) {
-        toasts.info('Diff changed', 'The file changed while you were confirming — nothing was discarded. Pick the lines again.');
-        return;
-      }
-    }
     applying = true;
     try {
+      if (op === 'discard') {
+        const what = picked ? plural(picked.length, 'changed line') : 'this whole hunk';
+        const ok = await confirmer.ask(
+          `Discard ${what}? This rewrites the working file and cannot be undone from the file — a backup stash \`otto: backup before hunk discard\` is kept.`,
+          { title: picked ? 'Discard lines' : 'Discard hunk', confirmLabel: 'Discard', danger: true },
+        );
+        if (!ok) return;
+        // The diff changed under the dialog: the pick and the hunk index may no
+        // longer mean what the user confirmed. Re-pick instead of guessing.
+        if (diff !== shown) {
+          toasts.info('Diff changed', 'The file changed while you were confirming — nothing was discarded. Pick the lines again.');
+          return;
+        }
+      }
       const r = await api.post<StageHunkResp>(`/repos/${repoId}/stage-hunk`, {
         path: file.path,
         hunk_index: hi,
@@ -918,6 +918,7 @@
       });
       selRaw = { for: null, s: null };
       wip.onapplied(r);
+      if (op === 'discard' && typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('otto:git-worktree-discarded', { detail: { repoId, paths: [file.path] } }));
     } catch (e) {
       stageErrorToast(e);
     } finally {
@@ -925,16 +926,7 @@
     }
   }
 
-  /** File header ⋯ — the diff is the only place a path is at hand, so this is
-   *  where History / Blame hang off. The panels live in RepoView; `gitBridge`
-   *  carries the request there without prop-drilling the whole graph.
-   *
-   *  Offered only with `repoId`, i.e. the WORKING-TREE diff (WipPanel), where
-   *  the local HEAD is the right revision — so no `rev` is sent. A commit
-   *  diff in the graph opens Blame at its own sha (GraphView's file menu); a
-   *  PR diff has no drawer to open into and passes no `repoId` (S15-309: a
-   *  `rev` prop that no caller set was removed rather than left as dead
-   *  plumbing). */
+  /** File header ⋯ — History / Blame for the working-tree diff (`repoId` set; local HEAD is the revision). */
   function fileToolsMenu(e: MouseEvent, file: FileDiff): void {
     if (!repoId) return;
     ctxMenu.show(e, [

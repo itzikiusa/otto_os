@@ -85,12 +85,6 @@ struct IdeShutdownOnDrop(Arc<otto_ide::IdeEngine>);
 impl Drop for IdeShutdownOnDrop {
     fn drop(&mut self) {
         self.0.lsp_pool.shutdown();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let ide = Arc::clone(&self.0);
-            handle.spawn(async move {
-                ide.shutdown().await;
-            });
-        }
     }
 }
 
@@ -159,11 +153,6 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
 
 fn spawn_ide_shutdown_watcher(ctx: &ServerCtx, bg: &mut Background) {
     bg.keep(IdeShutdownOnDrop(Arc::clone(&ctx.ide)));
-    let ide = Arc::clone(&ctx.ide);
-    tokio::spawn(async move {
-        crate::shutdown::cancelled().await;
-        ide.shutdown().await;
-    });
 }
 
 /// Reconcile the memory FTS index off the request path: it used to run
@@ -209,16 +198,13 @@ fn spawn_boot_warmups(ctx: &ServerCtx) {
                 .map(|name| (name.as_str(), manager.providers().program_for(name))),
         );
         let families = manager.providers().model_families();
-        let probe = otto_sessions::provider_models::ModelProbe::from_tool_specs(families, &specs);
-        let enabled_program = |p: &str| {
-            manager
-                .providers()
-                .is_enabled(p)
-                .then(|| manager.provider_program(p))
-                .flatten()
-        };
-        let agy = enabled_program("agy");
-        let grok = enabled_program("grok");
+        let claude_dirs = manager
+            .providers()
+            .active_claude_config_dirs(&otto_transcript::roots::home_dir());
+        let probe = otto_sessions::provider_models::ModelProbe::from_tool_specs(families, &specs)
+            .with_claude_config_dirs(claude_dirs);
+        let agy = manager.providers().resolved_family_program("agy");
+        let grok = manager.providers().resolved_family_program("grok");
         let _ = tokio::join!(
             otto_sessions::tool_probe::probe_tools_cached(specs),
             otto_sessions::provider_models::probe_provider_models_cached(&probe),
@@ -463,6 +449,7 @@ fn spawn_data_retention(ctx: &ServerCtx) {
         let (pool, manager) = (ctx.pool.clone(), Arc::clone(&ctx.manager));
         let settings = SettingsRepo::new(pool.clone());
         let auth = otto_rbac::AuthRepo::with_cache(pool.clone(), ctx.auth_cache.clone());
+        let runtime_repo = otto_state::AgentRuntimeRepo::new(pool.clone());
         let maint_pool = pool.clone();
         let repo = otto_state::RetentionRepo::new(pool);
         let (mut compaction_logged, mut deferred) = (false, None);
@@ -505,6 +492,9 @@ fn spawn_data_retention(ctx: &ServerCtx) {
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!("expired auth-session purge failed: {e}"),
+            }
+            if let Err(e) = runtime_repo.expire_drafts().await {
+                tracing::warn!("runtime composer draft expiry failed: {e}");
             }
             // SQLite housekeeping (P3): planner stats, WAL truncate, and
             // incremental vacuum once the DB was compacted by an admin.

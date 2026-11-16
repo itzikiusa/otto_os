@@ -561,6 +561,7 @@ test('ideContextBuilders exposes active draft builders without unused selection 
   const builders = loadSource(
     new URL('../src/modules/ide/agent/ideContextBuilders.ts', import.meta.url),
     {
+      svelte: { untrack: <T>(fn: () => T) => fn() },
       'lib/api/client': { api: { get: async () => ({ content: '', language: '' }) } },
       'lib/stores/auth.svelte': { auth: { meta: null } },
       'lib/stores/workspace.svelte': { SCRATCH_WORKSPACE_ID: 'scratch', ws: { workspaces: [], currentId: 'w1' } },

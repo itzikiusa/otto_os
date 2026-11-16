@@ -98,8 +98,12 @@ export function pathToFileUri(filePath: string): string {
  *  or plain path back into a normalized filesystem path with full UTF-8 percent-decoding. */
 export function fileUriToPath(uriOrPath: string): string {
   if (!uriOrPath) return '';
-  if (!uriOrPath.startsWith('file:')) return uriOrPath;
+  if (!/^file:/i.test(uriOrPath)) return uriOrPath;
   let rest = uriOrPath.slice('file:'.length);
+  const qIdx = rest.indexOf('?');
+  const hIdx = rest.indexOf('#');
+  const cutIdx = qIdx >= 0 && hIdx >= 0 ? Math.min(qIdx, hIdx) : qIdx >= 0 ? qIdx : hIdx;
+  if (cutIdx >= 0) rest = rest.slice(0, cutIdx);
   if (rest.startsWith('//localhost/')) {
     rest = rest.slice('//localhost'.length);
   } else if (rest.startsWith('///')) {
@@ -154,6 +158,7 @@ export function isBroadNonProjectRootClient(rawPath: string | null | undefined):
 /** Normalize macOS `/private/var` <-> `/var` and `/private/tmp` <-> `/tmp` firmlink/symlink
  *  prefixes for path prefix comparisons in the UI. */
 export function normalizeMacPrivatePath(p: string): string {
+  if (!p) return '';
   const trimmed = p.replace(/\/+$/, '') || '/';
   if (trimmed === '/private/tmp' || trimmed.startsWith('/private/tmp/')) {
     return trimmed.slice('/private'.length);

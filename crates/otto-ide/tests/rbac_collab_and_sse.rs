@@ -37,7 +37,7 @@ async fn run_config_scope_complete_confinement_history_sse_and_lsp_status() {
     )
     .unwrap();
 
-    let (ctx, _) = build_test_app(data_dir.clone(), &tmp.path().join("db.sqlite")).await;
+    let (ctx, app_root) = build_test_app(data_dir.clone(), &tmp.path().join("db.sqlite")).await;
     let app_alice = router_as(&ctx, non_root_user("u_alice"), vec![ws_alice.clone()]);
     let app_bob = router_as(&ctx, non_root_user("u_bob"), vec![ws_bob.clone()]);
 
@@ -66,8 +66,24 @@ async fn run_config_scope_complete_confinement_history_sse_and_lsp_status() {
     .await;
     assert_eq!(st_rc_custom_forbid, StatusCode::FORBIDDEN);
 
-    let (st_rc_b, _) = send_json(
+    // Local run-config mutations require `root_authority(user)`:
+    let (st_rc_b_nonroot, _) = send_json(
         &app_bob,
+        Method::POST,
+        "/ide/run-configs",
+        Some(json!({
+            "target": { "kind": "local", "root": bob_str },
+            "id": "rc_shared",
+            "name": "Bob Config",
+            "runner": "go_test",
+            "args": ["./..."],
+        })),
+    )
+    .await;
+    assert_eq!(st_rc_b_nonroot, StatusCode::FORBIDDEN);
+
+    let (st_rc_b, _) = send_json(
+        &app_root,
         Method::POST,
         "/ide/run-configs",
         Some(json!({
@@ -96,8 +112,17 @@ async fn run_config_scope_complete_confinement_history_sse_and_lsp_status() {
     .await;
     assert_eq!(st_rc_a, StatusCode::FORBIDDEN);
 
-    let (st_del_scoped, _) = send_json(
+    let (st_del_nonroot, _) = send_json(
         &app_alice,
+        Method::DELETE,
+        &format!("/ide/run-configs/rc_shared?root={}", urlencode(&alice_str)),
+        None,
+    )
+    .await;
+    assert_eq!(st_del_nonroot, StatusCode::FORBIDDEN);
+
+    let (st_del_scoped, _) = send_json(
+        &app_root,
         Method::DELETE,
         &format!("/ide/run-configs/rc_shared?root={}", urlencode(&alice_str)),
         None,

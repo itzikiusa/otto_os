@@ -8,12 +8,23 @@ import { pollWhileVisible, type Poller } from '../../../lib/poll';
 import { auth } from '../../../lib/stores/auth.svelte';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
-import { canonicalizeLocalProjectPath } from '../shell/ideProjectHelpers';
+import {
+  attachDebugSessionStream,
+  normalizeIncomingDebugSnapshot,
+  refreshWatchValues,
+  syncSnapshotBreakpointsToStore,
+} from './ideDebugSnapshotSync';
 import {
   mergeGoBuildTagsIntoFlags,
   resolveRepoGoBuildTags,
   resolveRepoRootForPath,
 } from './ideRepoTestAndBuildTags';
+export {
+  attachDebugSessionStream,
+  normalizeIncomingDebugSnapshot,
+  refreshWatchValues,
+  syncSnapshotBreakpointsToStore,
+};
 import {
   collabGuestPost, defaultRunnerForLanguage, streamIdeSse, type IdeBottomTab,
   type IdeBreakpoint, type IdeCollabRoom, type IdeDebugSessionSnapshot, type IdeDetectedSdk,
@@ -64,7 +75,18 @@ export interface DebugAndEnvHost {
   lastDebugLaunch?: {
     configId?: string;
     language?: string;
-    launch?: { program: string; args?: string[]; build_flags?: string[]; cwd?: string; test_name?: string; attach_port?: number; env?: Record<string, string> };
+    launch?: {
+      program: string;
+      args?: string[];
+      build_flags?: string[];
+      cwd?: string;
+      test_name?: string;
+      attach_port?: number;
+      env?: Record<string, string>;
+      env_file?: string | null;
+      inherit_shell_env?: boolean;
+      sdk_path?: string | null;
+    };
   } | null;
   recordRunLaunch?(runId: string, memo: { configId?: string; adhoc?: Partial<IdeRunConfig>; keepTestcontainers?: boolean; coverage?: boolean }): void;
   activeMavenProfiles: string[];
@@ -326,6 +348,7 @@ export async function upsertRunConfig(host: DebugAndEnvHost, cfg: Partial<IdeRun
       spring_profiles: cfg.spring_profiles ?? existing?.spring_profiles ?? [],
       skip_tests: cfg.skip_tests ?? existing?.skip_tests ?? false,
       offline: cfg.offline ?? existing?.offline ?? false,
+      coverage: cfg.coverage ?? existing?.coverage ?? false,
     });
     const saved = (resp.config ?? resp) as IdeRunConfig;
     await fetchEnvironments(host);
@@ -413,7 +436,10 @@ export async function launchIdeRun(
     });
     host.activeRun = resp.run;
     host.recordRunLaunch?.(resp.run.id, {
-      configId: opts.configId, adhoc: opts.adhoc, keepTestcontainers: opts.keepTestcontainers, coverage: opts.coverage,
+      configId: cfgId,
+      adhoc,
+      keepTestcontainers: keepTc,
+      coverage: wantCoverage || undefined,
     });
     prevPoller?.stop();
     prevSseCtl?.abort();
@@ -555,38 +581,30 @@ export async function launchDebugSession(
     const mergedBuildFlags = goTags.length > 0
       ? mergeGoBuildTagsIntoFlags(baseLaunch.build_flags, goTags)
       : baseLaunch.build_flags;
+    const effectiveLaunch = {
+      ...baseLaunch,
+      ...(mergedBuildFlags && mergedBuildFlags.length > 0 ? { build_flags: mergedBuildFlags } : {}),
+      sdk_path: baseLaunch.sdk_path ?? modSdk ?? null,
+      env: { ...springEnv, ...tcEnv, ...(baseLaunch.env ?? {}) },
+    };
     const resp = await api.post<{ session: IdeDebugSessionSnapshot }>('/ide/debug/sessions', {
       target: host.targetPayload,
       project_folders: host.projectRoots.map((r) => r.path),
       language,
       config_id: persistedConfigId,
-      launch: {
-        ...baseLaunch,
-        ...(mergedBuildFlags && mergedBuildFlags.length > 0 ? { build_flags: mergedBuildFlags } : {}),
-        sdk_path: baseLaunch.sdk_path ?? modSdk ?? null,
-        env: { ...springEnv, ...tcEnv, ...(baseLaunch.env ?? {}) },
-      },
+      launch: effectiveLaunch,
       maven_profiles: host.activeMavenProfiles,
       spring_profiles: host.activeSpringProfiles,
       skip_tests: host.buildSkipTests,
       offline: host.buildOffline,
       breakpoints: host.effectiveBreakpoints,
+      break_on_exceptions: Boolean(host.breakOnExceptions),
       ...(opts.confirmProdTargets ? { confirm_prod_targets: true } : {}),
     });
-    host.lastDebugLaunch = { configId: opts.configId, language: opts.language, launch: opts.launch };
+    host.lastDebugLaunch = { configId: persistedConfigId, language, launch: effectiveLaunch };
     host.expandedVariables = {};
     onSnapshot(resp.session);
-    prevCtl?.abort();
-    const ctl = new AbortController();
-    host.debugStreamActive = false;
-    void streamIdeSse(`/ide/debug/sessions/${encodeURIComponent(resp.session.id)}/events`, {}, ctl.signal, (raw) => {
-      try {
-        const parsed = JSON.parse(raw) as { session?: IdeDebugSessionSnapshot } & Partial<IdeDebugSessionSnapshot>;
-        const snap = (parsed.session ?? parsed) as IdeDebugSessionSnapshot;
-        if (snap?.id) onSnapshot(snap);
-      } catch { /* heartbeat */ }
-    }, () => { host.debugStreamActive = true; }).catch(() => {}).finally(() => { host.debugStreamActive = false; });
-    return ctl;
+    return attachDebugSessionStream(host, resp.session.id, prevCtl, onSnapshot);
   } catch (e) {
     toastError('Couldn’t start debugger', e);
     return prevCtl;
@@ -621,21 +639,6 @@ export async function sendDebugAction(
     );
     onSnapshot(resp.session);
   } catch (e) { toastError(`Couldn’t run debugger ${action.replace('_', ' ')}`, e); }
-}
-
-export async function refreshWatchValues(host: DebugAndEnvHost): Promise<void> {
-  if (!host.activeDebug || host.activeDebug.state !== 'paused' || host.watches.length === 0) return;
-  const updated: IdeWatch[] = [];
-  for (const w of host.watches) {
-    try {
-      const resp = await api.bg.post<{ result: string; var_type?: string }>(
-        `/ide/debug/sessions/${encodeURIComponent(host.activeDebug.id)}/evaluate`,
-        { expression: w.expression, frame_id: host.activeDebug.active_frame_id ?? undefined, context: 'watch' },
-      );
-      updated.push({ ...w, value: resp.result, var_type: resp.var_type, error: null });
-    } catch (e) { updated.push({ ...w, value: '', error: loadErrorText(e) }); }
-  }
-  host.watches = updated;
 }
 
 export async function installToolchainJob(
@@ -699,93 +702,4 @@ export async function removeSavedRunConfig(
   } catch (e) {
     toastError('Couldn’t delete run configuration', e);
   }
-}
-
-export function normalizeIncomingDebugSnapshot(
-  host: { target: IdeTargetSpec; readonly projectRoots: IdeProjectRoot[]; resolvePath(p: string): string },
-  raw: IdeDebugSessionSnapshot,
-): { snap: IdeDebugSessionSnapshot; paused: string | null } {
-  const normPath = (p?: string | null): string | null => {
-    if (!p) return null;
-    const resolved = host.resolvePath(p);
-    return host.target.kind === 'local'
-      ? canonicalizeLocalProjectPath(resolved, host.projectRoots)
-      : resolved;
-  };
-  const stack_frames = (raw.stack_frames ?? []).map((f) =>
-    f.path ? { ...f, path: normPath(f.path) } : f,
-  );
-  const rawPaused = raw.paused_file || raw.stopped_file || (raw.state === 'paused' ? stack_frames[0]?.path : null);
-  const paused = normPath(rawPaused);
-  const pausedLine = raw.paused_line || raw.stopped_line || (raw.state === 'paused' ? (stack_frames[0]?.line ?? null) : null);
-  const breakpoints = (raw.breakpoints ?? []).map((bp) =>
-    bp.path ? { ...bp, path: normPath(bp.path) ?? bp.path } : bp,
-  );
-  const output = raw.output?.length > 1000 ? raw.output.slice(-1000) : (raw.output ?? []);
-  const snap: IdeDebugSessionSnapshot = {
-    ...raw,
-    paused_file: paused,
-    paused_line: pausedLine,
-    stack_frames,
-    breakpoints,
-    output,
-  };
-  return { snap, paused };
-}
-
-export function syncSnapshotBreakpointsToStore(
-  host: { breakpointsByPath: Record<string, IdeBreakpoint[]>; resolvePath?(p: string): string },
-  snap: IdeDebugSessionSnapshot,
-): void {
-  if (snap.state === 'terminated' || snap.state === 'error') {
-    let changed = false;
-    const cleared: Record<string, IdeBreakpoint[]> = {};
-    for (const [p, list] of Object.entries(host.breakpointsByPath)) {
-      cleared[p] = list.map((bp) => {
-        if (bp.verified !== undefined || bp.message !== undefined) {
-          changed = true;
-          const { verified: _v, message: _m, ...rest } = bp;
-          return rest;
-        }
-        return bp;
-      });
-    }
-    if (changed) host.breakpointsByPath = cleared;
-    return;
-  }
-
-  if (!snap.breakpoints || snap.breakpoints.length === 0) return;
-  const incomingByPath = new Map<string, IdeBreakpoint[]>();
-  for (let i = 0; i < snap.breakpoints.length; i++) {
-    const bp = snap.breakpoints[i];
-    if (!bp.path) continue;
-    const key = host.resolvePath ? host.resolvePath(bp.path) : bp.path;
-    const arr = incomingByPath.get(key);
-    if (arr) arr.push(bp);
-    else incomingByPath.set(key, [bp]);
-  }
-  if (incomingByPath.size === 0) return;
-
-  let changed = false;
-  const nextMap: Record<string, IdeBreakpoint[]> = { ...host.breakpointsByPath };
-  for (const [path, incoming] of incomingByPath.entries()) {
-    const existing = nextMap[path];
-    if (!existing || existing.length === 0) continue;
-    const updated = existing.map((ubp, idx) => {
-      const match =
-        incoming.find((abp) => abp.line === ubp.line) ??
-        (incoming.length === existing.length ? incoming[idx] : undefined);
-      if (!match) return ubp;
-      const nextVerified = typeof match.verified === 'boolean' ? match.verified : ubp.verified;
-      const nextMsg = match.message !== undefined ? match.message : ubp.message;
-      const nextLine = match.line > 0 ? match.line : ubp.line;
-      if (nextVerified !== ubp.verified || nextMsg !== ubp.message || nextLine !== ubp.line) {
-        changed = true;
-        return { ...ubp, line: nextLine, verified: nextVerified, message: nextMsg };
-      }
-      return ubp;
-    });
-    nextMap[path] = updated;
-  }
-  if (changed) host.breakpointsByPath = nextMap;
 }

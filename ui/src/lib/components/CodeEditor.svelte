@@ -40,7 +40,7 @@
     applyLinePrefixSuffixSync, buildEditorFindProviderSpec,
     buildReadOnlyExtension, clampSelectionToDoc, computeCursorChangeInfo, computeMinimalTextUpdate,
     createCompletionExtension, createCopyRecorder, createEditorStateCache, createIdeColdGutterPlaceholders, createPlainLineWatch,
-    foldMarkerGutter, hasLongLine, langExtOf,
+    foldMarkerGutter, hasLongLine, isManifestFilePath, langExtOf,
     lightEditorTheme, parkEditorHistory, placeholderEditorTheme,
     restoreOrCreateEditorState, revealEditorLine,
     splitSelectionIntoLinesSync, type CursorChangeInfo,
@@ -167,10 +167,13 @@
   const effectiveDiffBaseline = (): string | null =>
     gitBaseContent !== undefined ? gitBaseContent : savedContent;
 
+  const effectiveDiffBaselineSource = (): 'git' | 'saved' =>
+    gitBaseContent !== undefined ? 'git' : 'saved';
+
   const buildIdeOpts = (forPath?: string): CmIdeMod.CreateIdeExtensionsOptions => ({
     filePath: forPath ?? (livePath || path), language, root, connectionId, projectFolders,
     breakpoints, breakpointsMuted, gutterItems, pausedLine: effectivePausedLine, inlineValues, peerCursors,
-    diskSavedContent: savedContent, savedContent: effectiveDiffBaseline(), blameByLine, keymapPreset, getCallbacks: getIdeCallbacks,
+    diskSavedContent: savedContent, savedContent: effectiveDiffBaseline(), baselineSource: effectiveDiffBaselineSource(), blameByLine, keymapPreset, getCallbacks: getIdeCallbacks,
   });
 
   const coldGutters = createIdeColdGutterPlaceholders();
@@ -254,7 +257,7 @@
   });
   let lastEmitted: string | null = null;
   const changes = createChangeEmitter({
-    threshold: 256 * 1024, delayMs: 150,
+    threshold: 32 * 1024, delayMs: 120,
     read: () => view?.state.doc.toString() ?? null,
     emit: (value) => { lastEmitted = value; onchange?.(value); },
   });
@@ -336,8 +339,8 @@
     return ideMod ? ideMod.selectionOrCurrentLine(view.state) : (coreHistMod ? coreHistMod.fallbackSelectionRange(view.state) : null);
   }
 
-  export function applyAgentEdit(nextContent: string, range?: { from: number; to: number }): boolean {
-    if (!view || readOnly) return false;
+  export function replaceBufferContent(nextContent: string, range?: { from: number; to: number }): boolean {
+    if (!view) return false;
     const normInsert = nextContent.indexOf('\r') >= 0 ? nextContent.replace(/\r\n?/g, '\n') : nextContent;
     const docLen = view.state.doc.length;
     const from = range ? Math.max(0, Math.min(docLen, range.from)) : 0;
@@ -355,6 +358,11 @@
     });
     changes.flush(); parkLive();
     return true;
+  }
+
+  export function applyAgentEdit(nextContent: string, range?: { from: number; to: number }): boolean {
+    if (!view || readOnly) return false;
+    return replaceBufferContent(nextContent, range);
   }
 
   export function applyQuickFixEdits(edits: CmIdeMod.IdeConcreteTextEdit[]): boolean {
@@ -456,7 +464,9 @@
     const baseExtensions: Extension[] = [
       ...(minimal ? [] : [lineNumbers(), ideBpCompartment.of(buildIdeBpExtIfLoaded(filePath)), foldMarkerGutter()]),
       indentOnInput(), indentCompartment.of(indentExt(filePath)), bracketMatching(), lintGutter(),
-      ideCompartment.of(buildIdeExtIfLoaded(filePath)), ideDepsCompartment.of([]), drawSelection(),
+      ideCompartment.of(buildIdeExtIfLoaded(filePath)),
+      ideDepsCompartment.of(ideMode && isManifestFilePath(filePath) ? coldGutters.deps : []),
+      drawSelection(),
       readOnlyCompartment.of(readOnlyExt(readOnly, hk)), completionCompartment.of(completionExt()),
       placeholderCompartment.of(placeholderExt((appliedPlaceholder = placeholder))),
       wrapCompartment.of(wrapExt((appliedWrap = wrap || Boolean(ideMode && idePrefs?.wordWrap)))),
@@ -583,8 +593,9 @@
     const prevScrollTop = view.scrollDOM.scrollTop, prevSel = view.state.selection.main, outgoingSaved = liveSavedContent;
     stateCache.saveLightMeta(fromPath, prevScrollTop, prevSel.anchor, prevSel.head);
     coreSmartMod?.saveIdeViewPosition(root, fromPath, { anchor: prevSel.anchor, head: prevSel.head, scrollTop: prevScrollTop }, { immediate: true });
-    attachedLspRoot = ''; attachedLspPath = ''; ++lspAttachSeq;
-    view.dispatch({ effects: [lspCompartment.reconfigure([]), ideDepsCompartment.reconfigure([])] });
+    attachedLspRoot = ''; attachedLspPath = ''; appliedManifestDepsPath = ''; ++lspAttachSeq;
+    const nextColdDeps = ideMode && isManifestFilePath(toPath) ? coldGutters.deps : [];
+    view.dispatch({ effects: [lspCompartment.reconfigure([]), ideDepsCompartment.reconfigure(nextColdDeps)] });
 
     parkHistory(fromPath, view.state, prevScrollTop, outgoingSaved);
     stateCache.stashOutgoing(
@@ -621,6 +632,7 @@
         placeholderCompartment.reconfigure(placeholderExt((appliedPlaceholder = placeholder))),
         wrapCompartment.reconfigure(wrapExt((appliedWrap = wrap || Boolean(ideMode && idePrefs?.wordWrap)))),
         themeCompartment.reconfigure(themeExt(ui.resolvedScheme, appliedPlain)),
+        ideDepsCompartment.reconfigure(nextColdDeps),
         ...(!stale ? [kept.scroll] : []),
       ];
       if (ideMod && isIdeActive()) {
@@ -704,10 +716,15 @@
   $effect(() => {
     const diskSaved = savedContent;
     const diffBase = gitBaseContent !== undefined ? gitBaseContent : diskSaved;
+    const baseSrc: 'git' | 'saved' = gitBaseContent !== undefined ? 'git' : 'saved';
     if (livePath === path) liveSavedContent = diskSaved;
     syncIdeEffect(
       diffBase != null || diskSaved != null,
-      (m) => [m.setSavedContentEffect.of(diffBase), m.setDiskSavedContentEffect.of(diskSaved)],
+      (m) => [
+        m.setSavedContentEffect.of(diffBase),
+        m.setDiskSavedContentEffect.of(diskSaved),
+        m.setBaselineSourceEffect.of(baseSrc),
+      ],
     );
   });
   $effect(() => { const v = blameByLine; syncIdeEffect(v != null, (m) => m.setBlameLinesEffect.of(v)); });

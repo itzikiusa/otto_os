@@ -19,6 +19,18 @@ impl AgentRuntime {
         self.inner.host.resolve_custom_provider(slug)
     }
 
+    /// Resolve a built-in or custom provider slug while enforcing
+    /// `RuntimeHost::is_provider_enabled` (so disabled built-ins like `"grok"`
+    /// return `None`).
+    pub fn resolve_runtime_provider(&self, slug: &str) -> Option<RuntimeProvider> {
+        let trimmed = slug.trim();
+        if trimmed.is_empty() || !self.inner.host.is_provider_enabled(trimmed) {
+            return None;
+        }
+        self.resolve_custom_provider(trimmed)
+            .or_else(|| RuntimeProvider::parse(trimmed))
+    }
+
     /// Resolve an optional `provider_slug` override against built-in and custom
     /// providers, returning `(effective_provider, custom_slug_for_meta)`.
     pub(super) fn resolve_target_provider(
@@ -27,15 +39,31 @@ impl AgentRuntime {
         provider_slug: Option<&str>,
     ) -> Result<(RuntimeProvider, Option<String>)> {
         let Some(slug) = provider_slug.map(str::trim).filter(|s| !s.is_empty()) else {
+            if !self.inner.host.is_provider_enabled(fallback.as_str()) {
+                return Err(Error::Invalid(format!(
+                    "unknown or disabled provider '{}'",
+                    fallback.as_str()
+                )));
+            }
             return Ok((fallback, None));
         };
+        if !self.inner.host.is_provider_enabled(slug) {
+            return Err(Error::Invalid(format!(
+                "unknown or disabled provider '{slug}'"
+            )));
+        }
+        if let Some(custom) = self.resolve_custom_provider(slug) {
+            let meta_slug = RuntimeProvider::parse(slug)
+                .is_none()
+                .then(|| slug.to_string());
+            return Ok((custom, meta_slug));
+        }
         if let Some(builtin) = RuntimeProvider::parse(slug) {
             return Ok((builtin, None));
         }
-        let resolved = self
-            .resolve_custom_provider(slug)
-            .ok_or_else(|| Error::Invalid(format!("unknown or disabled provider '{slug}'")))?;
-        Ok((resolved, Some(slug.to_string())))
+        Err(Error::Invalid(format!(
+            "unknown or disabled provider '{slug}'"
+        )))
     }
 
     /// The linked group `caller` belongs to: its root and every thread opened
@@ -104,7 +132,7 @@ impl AgentRuntime {
             "[{verb} thread \"{}\" ({}, id {}). Answer it with the otto_thread_message tool \
              (session_id {}); see every linked thread with otto_thread_list.]",
             from.title,
-            from.provider.as_str(),
+            from.provider_slug(),
             from.id,
             from.id
         )
@@ -114,11 +142,21 @@ impl AgentRuntime {
     /// access mode (never wider than the opener's), grouped under the
     /// caller's root; the opening prompt (if any) is sent framed.
     pub async fn open_peer(&self, caller: &Id, mut req: OpenPeerReq) -> Result<RuntimeSession> {
-        if req.meta.is_none() {
-            req.meta = Some(children::child_meta(
-                caller,
-                otto_core::agent_runtime::ChildOpener::Agent,
-            ));
+        let only_slug_meta = req.meta.as_ref().is_none_or(|m| {
+            m.as_object().is_some_and(|o| {
+                o.keys()
+                    .all(|k| k == otto_core::agent_runtime::PROVIDER_SLUG_META_KEY)
+            })
+        });
+        if only_slug_meta {
+            let child_obj =
+                children::child_meta(caller, otto_core::agent_runtime::ChildOpener::Agent);
+            let target = req.meta.get_or_insert_with(|| serde_json::json!({}));
+            if let (Some(dst), Some(src)) = (target.as_object_mut(), child_obj.as_object()) {
+                for (k, v) in src {
+                    dst.insert(k.clone(), v.clone());
+                }
+            }
         }
         self.open_linked(caller, req, true).await
     }
@@ -136,9 +174,23 @@ impl AgentRuntime {
         if c.status == RuntimeSessionStatus::Closed {
             return Err(Error::Conflict("the session is closed".into()));
         }
+        let requested_slug = req.provider_slug().to_string();
+        let (provider, custom_slug) =
+            self.resolve_target_provider(req.provider, Some(&requested_slug))?;
         self.ensure_group_room(&c).await?;
         let root = c.parent_id.clone().unwrap_or_else(|| c.id.clone());
         let mut meta = req.meta;
+        if let Some(slug) = custom_slug {
+            let m = meta.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(o) = m.as_object_mut() {
+                o.insert(
+                    otto_core::agent_runtime::PROVIDER_SLUG_META_KEY.into(),
+                    serde_json::Value::String(slug),
+                );
+            }
+        } else if let Some(o) = meta.as_mut().and_then(|m| m.as_object_mut()) {
+            o.remove(otto_core::agent_runtime::PROVIDER_SLUG_META_KEY);
+        }
         if c.meta_flag("read_only") {
             let m = meta.get_or_insert_with(|| serde_json::json!({}));
             if let Some(o) = m.as_object_mut() {
@@ -151,7 +203,7 @@ impl AgentRuntime {
                 &c.created_by,
                 &c.workspace_id,
                 CreateRuntimeSessionReq {
-                    provider: Some(req.provider),
+                    provider: Some(provider),
                     cwd: Some(req.cwd.unwrap_or_else(|| c.cwd.clone())),
                     title: req.title,
                     model: req.model,

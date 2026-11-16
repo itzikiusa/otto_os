@@ -10,6 +10,8 @@
 //! - Plus `round5_env` submodule: `DormantNetBridge` debug restart, non-root `Editor` RBAC &
 //!   loader-env hardening, and `module_go_build_tags: []` + Run Config wire parity.
 
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 mod round5_env;
 
@@ -437,5 +439,353 @@ async fn go_gutter_on_main_go_alongside_test_file_emits_main_go_debug_program() 
     assert!(
         dbg_prog.ends_with("/main.go"),
         "debug_program must point to main.go (not parent directory): {dbg_prog}"
+    );
+}
+
+#[tokio::test]
+async fn round6_git_base_secondary_multiroot_worktree_readonly_gitdir_and_cat_file_500() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_ctx, app) = build_test_app(tmp.path().join("data"), &tmp.path().join("state.db")).await;
+
+    // 1. Primary repo `repo_a` + attached secondary folder `repo_b` (each with its own independent `.git`):
+    //    `GET /ide/fs/git-base?root=<repo_a>&path=<repo_b/sec.go>` must resolve `repo_b`'s HEAD!
+    let repo_a = tmp.path().join("repo-a");
+    let repo_b = tmp.path().join("repo-b");
+    std::fs::create_dir_all(&repo_a).unwrap();
+    std::fs::create_dir_all(&repo_b).unwrap();
+    git(&repo_a, &["init"]);
+    git(&repo_b, &["init"]);
+
+    let file_a = repo_a.join("main.go");
+    std::fs::write(&file_a, "package main\nfunc main() {}\n").unwrap();
+    git(&repo_a, &["add", "main.go"]);
+    git(&repo_a, &["commit", "-m", "init a"]);
+
+    let file_b = repo_b.join("sec.go");
+    std::fs::write(&file_b, "package sec\n// head-from-repo-b\n").unwrap();
+    git(&repo_b, &["add", "sec.go"]);
+    git(&repo_b, &["commit", "-m", "init b"]);
+    std::fs::write(&file_b, "package sec\n// dirty-working-tree\n").unwrap();
+
+    let a_str = std::fs::canonicalize(&repo_a)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let b_str = std::fs::canonicalize(&repo_b)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let file_b_str = std::fs::canonicalize(&file_b)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let (st_attach, attach_body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/projects/folders",
+        Some(json!({
+            "target": { "kind": "local", "root": a_str },
+            "folder_path": b_str,
+        })),
+    )
+    .await;
+    assert_eq!(st_attach, StatusCode::OK, "attach repo_b: {attach_body}");
+
+    let (st_sec, sec_resp) = send_json(
+        &app,
+        Method::GET,
+        &format!(
+            "/ide/fs/git-base?root={}&path={}",
+            urlencode(&a_str),
+            urlencode(&file_b_str)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(st_sec, StatusCode::OK, "secondary git-base: {sec_resp}");
+    assert_eq!(sec_resp["in_repo"], json!(true));
+    assert_eq!(sec_resp["repo_root"], json!(b_str));
+    assert_eq!(sec_resp["rel_path"], json!("sec.go"));
+    assert_eq!(sec_resp["head_exists"], json!(true));
+    assert_eq!(
+        sec_resp["content"],
+        json!("package sec\n// head-from-repo-b\n")
+    );
+
+    // 2. Linked `git worktree` (`.git` is a regular file `gitdir: ...`):
+    //    both `GET /ide/fs/git-base` and `POST /ide/fs/complete` must succeed.
+    let wt_dir = tmp.path().join("repo-a-wt");
+    git(
+        &repo_a,
+        &["worktree", "add", wt_dir.to_str().unwrap(), "-b", "wt-feat"],
+    );
+    assert!(
+        wt_dir.join(".git").is_file(),
+        "linked git worktree .git must be a regular file"
+    );
+    let wt_str = std::fs::canonicalize(&wt_dir)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let wt_main = wt_dir.join("main.go");
+    std::fs::write(&wt_main, "package main\nfunc main() { println(1) }\n").unwrap();
+
+    let (st_wt, wt_resp) = send_json(
+        &app,
+        Method::GET,
+        &format!(
+            "/ide/fs/git-base?root={}&path={}",
+            urlencode(&wt_str),
+            urlencode(&wt_main.to_string_lossy())
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(st_wt, StatusCode::OK, "worktree git-base: {wt_resp}");
+    assert_eq!(wt_resp["in_repo"], json!(true));
+    assert_eq!(wt_resp["head_exists"], json!(true));
+    assert_eq!(wt_resp["content"], json!("package main\nfunc main() {}\n"));
+
+    let (st_wt_comp, wt_comp) = send_json(
+        &app,
+        Method::POST,
+        "/ide/fs/complete",
+        Some(json!({
+            "target": { "kind": "local", "root": wt_str },
+            "query": "@main"
+        })),
+    )
+    .await;
+    assert_eq!(st_wt_comp, StatusCode::OK);
+    assert!(wt_comp["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["name"] == "main.go"));
+
+    // 3. Read-only `.git` directory (`0555`): `GIT_OPTIONAL_LOCKS=0` prevents `index.lock` failure.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(repo_b.join(".git"), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+        let (st_ro, ro_resp) = send_json(
+            &app,
+            Method::GET,
+            &format!(
+                "/ide/fs/git-base?root={}&path={}",
+                urlencode(&b_str),
+                urlencode(&file_b_str)
+            ),
+            None,
+        )
+        .await;
+        std::fs::set_permissions(repo_b.join(".git"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        assert_eq!(st_ro, StatusCode::OK, "0555 .git git-base: {ro_resp}");
+        assert_eq!(ro_resp["head_exists"], json!(true));
+    }
+
+    // 4. Corrupt loose git blob object: non-missing `git cat-file` failure must return `500`,
+    //    never silently reporting `head_exists: false`.
+    let blob_sha_out = Command::new("git")
+        .arg("-C")
+        .arg(&repo_b)
+        .args(["rev-parse", "HEAD:sec.go"])
+        .output()
+        .unwrap();
+    let blob_sha = String::from_utf8_lossy(&blob_sha_out.stdout)
+        .trim()
+        .to_string();
+    let obj_path = repo_b
+        .join(".git/objects")
+        .join(&blob_sha[..2])
+        .join(&blob_sha[2..]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&obj_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    std::fs::write(&obj_path, b"corrupted-loose-git-object").unwrap();
+
+    let (st_corrupt, corrupt_resp) = send_json(
+        &app,
+        Method::GET,
+        &format!(
+            "/ide/fs/git-base?root={}&path={}",
+            urlencode(&b_str),
+            urlencode(&file_b_str)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(
+        st_corrupt,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "corrupt git object must propagate 500 instead of fake head_exists=false: {corrupt_resp}"
+    );
+}
+
+#[tokio::test]
+async fn round6_go_chained_struct_field_receiver_non_utf8_after_8kib_and_spaced_filenames() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws-r6");
+    std::fs::create_dir_all(&ws).unwrap();
+    let (ctx, app) = build_test_app(tmp.path().join("data"), &tmp.path().join("state.db")).await;
+    let ws_str = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    // 1. Go same-package struct field receiver disambiguation (`g.pool.Submit` -> `(*Pool).Submit`,
+    //    NOT `(*GoRoutineConcurrencyHelper).Submit`).
+    std::fs::write(ws.join("go.mod"), "module example.com/r6\n\ngo 1.23\n").unwrap();
+    let helper_src = concat!(
+        "package worker\n\n",
+        "type GoRoutineConcurrencyHelper struct {\n",
+        "\tpool *Pool\n",
+        "}\n\n",
+        "func (g *GoRoutineConcurrencyHelper) Submit() {}\n\n",
+        "func (g *GoRoutineConcurrencyHelper) Run() {\n",
+        "\tg.pool.Submit()\n",
+        "}\n",
+    );
+    let pool_src = concat!(
+        "package worker\n\n",
+        "type Pool struct{}\n\n",
+        "func (p *Pool) Submit() {}\n",
+    );
+    let helper_go = ws.join("helper.go");
+    let pool_go = ws.join("pool.go");
+    std::fs::write(&helper_go, helper_src).unwrap();
+    std::fs::write(&pool_go, pool_src).unwrap();
+    let canon_pool_str = std::fs::canonicalize(&pool_go)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    // Line 10 is `\tg.pool.Submit()`: `\t` (col 1), `g` (2), `.` (3), `pool` (4..7), `.` (8), `Submit` starts at col 9.
+    let (st_def, def_resp) = send_json(
+        &app,
+        Method::POST,
+        "/ide/lsp/definition",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "path": helper_go.to_string_lossy(),
+            "line": 10,
+            "column": 9,
+            "content": helper_src,
+        })),
+    )
+    .await;
+    assert_eq!(st_def, StatusCode::OK, "go definition: {def_resp}");
+    let locs = def_resp["locations"].as_array().unwrap();
+    assert!(
+        !locs.is_empty(),
+        "expected definition for g.pool.Submit: {def_resp}"
+    );
+    assert_eq!(
+        locs[0]["path"],
+        json!(canon_pool_str),
+        "g.pool.Submit() must resolve (*Pool).Submit in pool.go, not helper.go: {locs:?}"
+    );
+    assert_eq!(locs[0]["line"], json!(5));
+
+    // 2. Non-UTF-8 byte after 8 KiB (`10 KiB` ASCII + `\xFF\xFE`) marks `binary: true` & `read_only: true`.
+    let mut late_non_utf8 = vec![b'x'; 10 * 1024];
+    late_non_utf8.extend_from_slice(&[0xFF, 0xFE, b'\n']);
+    let bin_tail_path = ws.join("late_latin1.dat");
+    std::fs::write(&bin_tail_path, &late_non_utf8).unwrap();
+
+    let (st_bin, bin_resp) = send_json(
+        &app,
+        Method::GET,
+        &format!(
+            "/ide/fs/file?root={}&path=late_latin1.dat",
+            urlencode(&ws_str)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(st_bin, StatusCode::OK);
+    assert_eq!(bin_resp["binary"], json!(true));
+    assert_eq!(bin_resp["read_only"], json!(true));
+
+    // 3. Relative filenames with leading/trailing spaces round-trip without `.trim()` mangling.
+    let spaced_rel = " padded name.txt ";
+    let (st_put_sp, put_sp_resp) = send_json(
+        &app,
+        Method::PUT,
+        "/ide/fs/file",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "path": spaced_rel,
+            "content": "exact spaces preserved\n",
+        })),
+    )
+    .await;
+    assert_eq!(st_put_sp, StatusCode::OK, "put spaced file: {put_sp_resp}");
+    assert!(
+        ws.join(spaced_rel).is_file(),
+        "exact leading/trailing spaces must be preserved on disk"
+    );
+
+    let (st_get_sp, get_sp_resp) = send_json(
+        &app,
+        Method::GET,
+        &format!(
+            "/ide/fs/file?root={}&path={}",
+            urlencode(&ws_str),
+            urlencode(spaced_rel)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(st_get_sp, StatusCode::OK, "get spaced file: {get_sp_resp}");
+    assert_eq!(get_sp_resp["content"], json!("exact spaces preserved\n"));
+
+    // 4. Unified DAP env builder strips dangerous loader/compiler/HOME vars from `.env` and `launch.env`.
+    std::fs::write(
+        ws.join("debug.vars"),
+        "SAFE_DEBUG_KEY=ok\nHOME=/tmp/evil_dap_home\nGOCACHEPROG=/tmp/evil_prog\nCC=/tmp/evil_cc\nCGO_LDFLAGS=-L/tmp/evil\nLD_PRELOAD=/tmp/evil.so\n",
+    )
+    .unwrap();
+    let mut launch_env = std::collections::BTreeMap::new();
+    launch_env.insert("SAFE_LAUNCH_KEY".into(), "1".into());
+    launch_env.insert("GOTOOLCHAIN".into(), "path".into());
+    launch_env.insert("JAVA_OPTS".into(), "-javaagent:/tmp/evil.jar".into());
+    let dbg_req = otto_ide::types::IdeStartDebugReq {
+        target: otto_ide::types::IdeTargetSpec::local(ws_str.clone()),
+        language: "go".into(),
+        launch: otto_ide::types::IdeDebugLaunchSpec {
+            program: ".".into(),
+            cwd: Some(ws_str.clone()),
+            env_file: Some("debug.vars".into()),
+            env: launch_env,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let dbg_ctx = otto_ide::dap::DapStartContext::new().with_caller_is_root(false);
+    let eff = otto_ide::dap::adapters::build_effective_env(&ctx.data_dir, &dbg_req, &dbg_ctx);
+    assert_eq!(eff.get("SAFE_DEBUG_KEY").map(String::as_str), Some("ok"));
+    assert_eq!(eff.get("SAFE_LAUNCH_KEY").map(String::as_str), Some("1"));
+    for blocked in [
+        "GOCACHEPROG",
+        "CC",
+        "CGO_LDFLAGS",
+        "LD_PRELOAD",
+        "GOTOOLCHAIN",
+        "JAVA_OPTS",
+    ] {
+        assert!(
+            !eff.contains_key(blocked),
+            "DAP effective env must strip dangerous key {blocked}: {eff:?}"
+        );
+    }
+    assert_ne!(
+        eff.get("HOME").map(String::as_str),
+        Some("/tmp/evil_dap_home")
     );
 }

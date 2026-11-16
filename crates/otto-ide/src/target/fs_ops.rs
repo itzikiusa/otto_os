@@ -7,10 +7,10 @@
 //! - File reads stream bounded slices (`<= 4 MiB`) and drop buffers immediately.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use otto_core::{Error, Result};
 use otto_ssh::SftpSession;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
 pub(super) use crate::jsonrpc_framing::sha256_hex;
@@ -45,13 +45,12 @@ pub(crate) fn resolve_local_existing_in_roots(
     raw: &str,
 ) -> Result<(PathBuf, PathBuf)> {
     let decoded = strip_file_uri(raw);
-    let trimmed = decoded.trim();
-    let candidate = if trimmed.is_empty() || trimmed == "." {
+    let candidate = if decoded.is_empty() || decoded == "." {
         root.to_path_buf()
-    } else if trimmed.starts_with('~') {
-        otto_core::paths::expand_home_strict(trimmed).map_err(Error::Invalid)?
+    } else if decoded.starts_with('~') {
+        otto_core::paths::expand_home_strict(&decoded).map_err(Error::Invalid)?
     } else {
-        let p = Path::new(trimmed);
+        let p = Path::new(&decoded);
         if p.is_absolute() {
             p.to_path_buf()
         } else {
@@ -309,8 +308,7 @@ pub(crate) fn build_file_read_resp(
     read_only: bool,
     truncated: bool,
 ) -> Result<IdeFileReadResp> {
-    let sample_len = bytes.len().min(8192);
-    let is_binary = bytes[..sample_len].contains(&0);
+    let is_binary = bytes.contains(&0);
     let language = detect_entry_language(&path).unwrap_or_else(|| "plaintext".to_string());
     if is_binary {
         let sha256 = sha256_hex(bytes);
@@ -320,6 +318,7 @@ pub(crate) fn build_file_read_resp(
             language,
             size,
             sha256,
+            binary: true,
             read_only: true,
             truncated: true,
             line_count: 0,
@@ -331,9 +330,9 @@ pub(crate) fn build_file_read_resp(
         bytes
     };
     let sha256 = sha256_hex(effective_bytes);
-    let content = match std::str::from_utf8(effective_bytes) {
-        Ok(s) => s.to_owned(),
-        Err(_) => String::from_utf8_lossy(effective_bytes).into_owned(),
+    let (content, invalid_utf8) = match std::str::from_utf8(effective_bytes) {
+        Ok(s) => (s.to_owned(), false),
+        Err(_) => (String::from_utf8_lossy(effective_bytes).into_owned(), true),
     };
     let line_count = if content.is_empty() {
         0
@@ -346,7 +345,8 @@ pub(crate) fn build_file_read_resp(
         language,
         size,
         sha256,
-        read_only: read_only || truncated,
+        binary: invalid_utf8,
+        read_only: read_only || truncated || invalid_utf8,
         truncated,
         line_count,
     })
@@ -364,17 +364,9 @@ pub(super) fn is_remote_sftp_not_found(err: &Error) -> bool {
 }
 
 pub(super) async fn verify_local_expected_sha(dest: &Path, expected: &str) -> Result<()> {
-    match tokio::fs::read(dest).await {
-        Ok(existing) => {
-            let actual = sha256_hex(&existing);
-            if !actual.eq_ignore_ascii_case(expected) {
-                return Err(Error::Conflict(format!(
-                    "file '{}' changed on disk (expected sha256 {expected}, actual {actual})",
-                    dest.display()
-                )));
-            }
-            Ok(())
-        }
+    const MAX_HASH_CHECK_BYTES: u64 = 256 * 1024 * 1024;
+    let mut file = match tokio::fs::File::open(dest).await {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let empty_sha = sha256_hex(&[]);
             if !expected.eq_ignore_ascii_case(&empty_sha) {
@@ -383,10 +375,38 @@ pub(super) async fn verify_local_expected_sha(dest: &Path, expected: &str) -> Re
                     dest.display()
                 )));
             }
-            Ok(())
+            return Ok(());
         }
-        Err(e) => Err(map_io_err("read existing file for conflict check", dest, e)),
+        Err(e) => return Err(map_io_err("read existing file for conflict check", dest, e)),
+    };
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| map_io_err("read existing file for conflict check", dest, e))?;
+        if n == 0 {
+            break;
+        }
+        total = total.saturating_add(n as u64);
+        if total > MAX_HASH_CHECK_BYTES {
+            return Err(Error::Invalid(format!(
+                "file '{}' exceeds maximum conflict-check size ({MAX_HASH_CHECK_BYTES} bytes)",
+                dest.display()
+            )));
+        }
+        hasher.update(&buf[..n]);
     }
+    let actual = hex::encode(hasher.finalize());
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(Error::Conflict(format!(
+            "file '{}' changed on disk (expected sha256 {expected}, actual {actual})",
+            dest.display()
+        )));
+    }
+    Ok(())
 }
 
 pub(super) async fn verify_remote_expected_sha(
@@ -428,28 +448,28 @@ pub(super) async fn write_local_atomic(
     bytes: &[u8],
     lsp_pool: Option<&LspPool>,
 ) -> Result<()> {
-    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
-    let parent = dest
-        .parent()
-        .ok_or_else(|| Error::Invalid("file path has no parent directory".into()))?;
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".otto-ide-save-{}-{seq}.tmp", std::process::id());
-    let tmp_path = parent.join(tmp_name);
-    // Preserve existing file permissions when overwriting an executable script.
-    let existing_perms = tokio::fs::metadata(dest)
-        .await
-        .ok()
-        .map(|m| m.permissions());
-    tokio::fs::write(&tmp_path, bytes)
-        .await
-        .map_err(|e| map_io_err("write temporary file", &tmp_path, e))?;
-    if let Some(perms) = existing_perms {
-        let _ = tokio::fs::set_permissions(&tmp_path, perms).await;
-    }
-    if let Err(e) = tokio::fs::rename(&tmp_path, dest).await {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
-        return Err(map_io_err("commit file save", dest, e));
-    }
+    let dest_buf = dest.to_path_buf();
+    let payload = bytes.to_vec();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        use std::io::Write;
+        let parent = dest_buf
+            .parent()
+            .ok_or_else(|| Error::Invalid("file path has no parent directory".into()))?;
+        let existing_perms = std::fs::metadata(&dest_buf).ok().map(|m| m.permissions());
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| map_io_err("create temporary save file", &dest_buf, e))?;
+        tmp.write_all(&payload)
+            .map_err(|e| map_io_err("write temporary file", tmp.path(), e))?;
+        let _ = tmp.as_file().sync_all();
+        if let Some(perms) = existing_perms {
+            let _ = std::fs::set_permissions(tmp.path(), perms);
+        }
+        tmp.persist(&dest_buf)
+            .map_err(|e| map_io_err("commit file save", &dest_buf, e.error))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("atomic save worker failed: {e}")))??;
     if let Some(pool) = lsp_pool {
         pool.notify_watched_file_if_build_manifest(dest, 2);
     }

@@ -445,7 +445,7 @@ impl EnvironmentManager {
             cfg.coverage = true;
         }
 
-        let caller_is_root = user.map(|u| u.is_root).unwrap_or(true);
+        let caller_is_root = user.map(otto_core::auth::root_authority).unwrap_or(true);
         if !caller_is_root {
             validate_run_config_for_non_root(&req.target, &cfg)?;
         }
@@ -556,7 +556,8 @@ impl EnvironmentManager {
 }
 
 fn can_access_run(handle: &ActiveRunHandle, user: &User) -> bool {
-    user.is_root || (!handle.owner_user_id.is_empty() && handle.owner_user_id == user.id)
+    otto_core::auth::root_authority(user)
+        || (!handle.owner_user_id.is_empty() && handle.owner_user_id == user.id)
 }
 
 fn apply_project_go_build_tags_to_cfg(cfg: &mut IdeRunConfig, tags: &[String]) {

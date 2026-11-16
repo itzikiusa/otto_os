@@ -26,7 +26,7 @@ pub async fn hover<S: IdeCtx>(ctx: &S, user: &User, req: IdeHoverReq) -> Result<
     }
 
     let target_spec_opt = resolve_hover_target(&req);
-    if !user.is_root && target_spec_opt.is_none() {
+    if !otto_core::auth::root_authority(user) && target_spec_opt.is_none() {
         return Err(Error::Forbidden("workspace target is required".into()));
     }
     let resolved_opt = match &target_spec_opt {
@@ -183,25 +183,39 @@ fn resolve_hover_col_1based(content: &str, line: u32, req: &IdeHoverReq) -> u32 
     normalize_hover_column(content, line, req.effective_character())
 }
 
-/// Accept both 1-based `column` and 0-based `character` seamlessly.
+/// Accept both 1-based `column` and 0-based UTF-16 `character` seamlessly.
 fn normalize_hover_column(content: &str, line: u32, character: u32) -> u32 {
     if character == 0 {
         return 1;
     }
-    let Some(line_str) = content.lines().nth(line.saturating_sub(1) as usize) else {
+    let Some(raw_line) = content.lines().nth(line.saturating_sub(1) as usize) else {
         return character;
     };
-    let chars: Vec<char> = line_str.chars().collect();
+    let line_str = crate::text_pos::strip_cr(raw_line);
+    let u16_len: usize = line_str.chars().map(char::len_utf16).sum();
     let idx0 = character as usize;
     let idx1 = character.saturating_sub(1) as usize;
-    if idx0 < chars.len()
-        && is_ident_char(chars[idx0])
-        && idx1 < chars.len()
-        && !is_ident_char(chars[idx1])
-    {
+    let ch0 = (idx0 < u16_len)
+        .then(|| {
+            let b0 = crate::text_pos::utf16_col_to_byte_idx(line_str, idx0);
+            line_str[b0..].chars().next()
+        })
+        .flatten();
+    let ch1 = (idx1 < u16_len)
+        .then(|| {
+            let b1 = crate::text_pos::utf16_col_to_byte_idx(line_str, idx1);
+            line_str[b1..].chars().next()
+        })
+        .flatten();
+    if ch0.is_some_and(is_ident_char) && ch1.is_none_or(|c| !is_ident_char(c)) {
         return character + 1;
     }
-    if extract_identifier_at(content, line, character).is_some() {
+    if ch1.is_some_and(is_ident_char) {
+        return character;
+    }
+    if extract_identifier_at(content, line, character + 1).is_some() {
+        character + 1
+    } else if extract_identifier_at(content, line, character).is_some() {
         character
     } else {
         character + 1

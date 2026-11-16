@@ -206,16 +206,31 @@ pub fn path_to_file_uri(path: &Path) -> String {
     out
 }
 
-/// Decode an RFC 3986 `file://` URI (`file:///path`, `file://localhost/path`,
-/// or `file:///C:/path`) into a `PathBuf` with full UTF-8 percent-decoding.
-/// Returns `None` if `uri` is not a `file:` URI or decodes to invalid UTF-8 /
-/// NUL bytes.
+/// Decode an RFC 3986 / RFC 8089 `file:` URI (`file:///path`,
+/// `file://localhost/path`, `file:/path`, or `file:///C:/path`, with
+/// ASCII-case-insensitive scheme and `localhost` authority) into a `PathBuf`
+/// with full UTF-8 percent-decoding. Returns `None` if `uri` is not a local
+/// `file:` URI or decodes to invalid UTF-8 / NUL bytes.
 pub fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    let path_part = if let Some(after_host) = rest.strip_prefix("localhost/") {
-        format!("/{after_host}")
-    } else if rest.starts_with('/') {
-        rest.to_string()
+    let after_scheme = uri
+        .as_bytes()
+        .get(..5)
+        .filter(|p| p.eq_ignore_ascii_case(b"file:"))
+        .map(|_| &uri[5..])?;
+    let path_part = if let Some(rest) = after_scheme.strip_prefix("//") {
+        if rest.starts_with('/') {
+            rest.to_string()
+        } else if rest
+            .as_bytes()
+            .get(..10)
+            .is_some_and(|p| p.eq_ignore_ascii_case(b"localhost/"))
+        {
+            format!("/{}", &rest[10..])
+        } else {
+            return None;
+        }
+    } else if after_scheme.starts_with('/') {
+        after_scheme.to_string()
     } else {
         return None;
     };
@@ -361,6 +376,15 @@ mod tests {
             file_uri_to_path("file:///C:/Users/dev/main.go").as_deref(),
             Some(Path::new("C:/Users/dev/main.go"))
         );
+        assert_eq!(
+            file_uri_to_path("file:/tmp/rfc8089%20single.go").as_deref(),
+            Some(Path::new("/tmp/rfc8089 single.go"))
+        );
+        assert_eq!(
+            file_uri_to_path("FILE://LOCALHOST/tmp/case.rs").as_deref(),
+            Some(Path::new("/tmp/case.rs"))
+        );
+        assert!(file_uri_to_path("file://evil.example/tmp/a").is_none());
         assert!(file_uri_to_path("https://example.com/a").is_none());
     }
 }

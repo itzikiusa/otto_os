@@ -108,7 +108,9 @@ impl IdeCtx for TestIdeCtx {
                 .get(cid.as_str())
                 .cloned()
                 .ok_or_else(|| Error::NotFound(format!("ssh connection {cid}")))?;
-            if !user.is_root && entry.owner_user_id.as_deref() != Some(user.id.as_str()) {
+            if !otto_core::auth::root_authority(user)
+                && entry.owner_user_id.as_deref() != Some(user.id.as_str())
+            {
                 return Err(Error::Forbidden(
                     "SSH connection belongs to another user or workspace".into(),
                 ));
@@ -139,7 +141,8 @@ impl IdeCtx for TestIdeCtx {
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&entry.spec.namespace)
                 .to_ascii_lowercase();
-            if !user.is_root {
+            let has_root_auth = otto_core::auth::root_authority(user);
+            if !has_root_auth {
                 if entry.owner_user_id.as_deref() != Some(user.id.as_str()) {
                     return Err(Error::Forbidden(
                         "Kubernetes cluster belongs to another user or workspace".into(),
@@ -153,7 +156,7 @@ impl IdeCtx for TestIdeCtx {
                     )));
                 }
             }
-            let allow_cross_namespace = user.is_root || entry.allowed_namespaces.is_empty();
+            let allow_cross_namespace = has_root_auth || entry.allowed_namespaces.is_empty();
             Ok(IdeK8sSpec {
                 namespace: effective_ns,
                 allow_cross_namespace,
@@ -169,7 +172,8 @@ impl IdeCtx for TestIdeCtx {
         write: bool,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            if user.is_root || spec.kind != otto_ide::types::IdeTargetKind::Local {
+            let has_root_auth = otto_core::auth::root_authority(user);
+            if has_root_auth || spec.kind != otto_ide::types::IdeTargetKind::Local {
                 return Ok(());
             }
             let raw_root = spec.root.trim();
@@ -199,7 +203,7 @@ impl IdeCtx for TestIdeCtx {
                 let expanded =
                     otto_core::paths::expand_home_strict(&raw).map_err(Error::Invalid)?;
                 let canon = std::fs::canonicalize(&expanded).unwrap_or_else(|_| expanded.clone());
-                if !user.is_root {
+                if !has_root_auth {
                     otto_ide::target::enforce_non_root_path(&canon)?;
                     if canon.starts_with(&data_canon) {
                         return Err(Error::Forbidden(

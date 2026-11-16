@@ -160,6 +160,11 @@ pub(super) fn extract_collab_token(
             return Ok(trimmed.to_string());
         }
     }
+    // Check `?token=` BEFORE `Authorization: Bearer` so an authenticated browser
+    // session sending its daemon auth header never shadows the room's invite token.
+    if let Some(tok) = query_token.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(tok.to_string());
+    }
     if let Some(auth) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -171,9 +176,6 @@ pub(super) fn extract_collab_token(
         {
             return Ok(tok.to_string());
         }
-    }
-    if let Some(tok) = query_token.map(str::trim).filter(|s| !s.is_empty()) {
-        return Ok(tok.to_string());
     }
     Err(Error::Unauthorized)
 }
@@ -223,7 +225,7 @@ pub(super) async fn collab_guest_state<S: IdeCtx>(
             .is_some_and(|(owner, _)| owner == state.room.host_user_id);
         if belongs_to_host {
             if let Ok(fresh) = ctx.ide().dap.get_session(debug_id) {
-                state.active_debug = Some(fresh);
+                state.active_debug = Some(crate::collab::redact_guest_debug_snapshot(&fresh));
             }
         } else {
             state.active_debug = None;
@@ -321,12 +323,12 @@ pub(super) async fn collab_guest_debug_action<S: IdeCtx>(
     Json(mut req): Json<IdeCollabDebugActionReq>,
 ) -> ApiResult<Json<IdeDebugSessionResp>> {
     fill_peer_secret_from_headers(&headers, &mut req.peer_secret);
-    let (target, host_user_id) = ctx.ide().collab.authorize_debug_action(&room_id, &req)?;
+    let (target, host_user) = ctx.ide().collab.authorize_debug_action(&room_id, &req)?;
     let owns_session = ctx
         .ide()
         .dap
         .session_owner_and_target(&req.debug_id)
-        .is_some_and(|(owner, _)| owner == host_user_id);
+        .is_some_and(|(owner, _)| owner == host_user.id);
     if !owns_session {
         return Err(Error::Forbidden("debug session is not owned by the room host".into()).into());
     }
@@ -380,25 +382,28 @@ pub(super) async fn collab_guest_debug_action<S: IdeCtx>(
         && req.action == IdeDebugAction::SelectFrame
         && req.frame_id.is_none();
     let session = if skip_cmd {
-        latest_snap.unwrap()
-    } else {
+        let snap = latest_snap.unwrap();
         ctx.ide()
-            .dap
-            .command(
-                &req.debug_id,
-                IdeDebugCommandReq {
-                    action: req.action,
-                    thread_id: req.thread_id,
-                    frame_id: req.frame_id,
-                    path: req.path,
-                    line: req.line,
-                },
-            )
-            .await?
+            .collab
+            .publish_debug_snapshot(Some(&target), Some(host_user.id.as_str()), &snap);
+        snap
+    } else {
+        super::runtime_debug::execute_debug_command_with_netbridge(
+            &ctx,
+            &host_user,
+            &req.debug_id,
+            IdeDebugCommandReq {
+                action: req.action,
+                thread_id: req.thread_id,
+                frame_id: req.frame_id,
+                path: req.path,
+                line: req.line,
+            },
+        )
+        .await?
     };
 
-    ctx.ide()
-        .collab
-        .publish_debug_snapshot(Some(&target), Some(host_user_id.as_str()), &session);
-    Ok(Json(IdeDebugSessionResp { session }))
+    Ok(Json(IdeDebugSessionResp {
+        session: crate::collab::redact_guest_debug_snapshot(&session),
+    }))
 }

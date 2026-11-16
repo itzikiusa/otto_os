@@ -13,7 +13,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use super::burst::now_ms;
 use super::confinement::{
-    is_forbidden_tail_target, validate_confined_tail_path, validate_existing_or_pending_tail_path,
+    is_forbidden_tail_target, validate_confined_tail_path_scoped,
+    validate_existing_or_pending_tail_path_scoped,
 };
 use crate::driver::{
     ActiveTailChunk, ActiveTailKind, ActiveTailSource, SidebandPayload, SidebandPoll,
@@ -155,11 +156,17 @@ async fn fetch_primary_sideband(source: &SidebandSource) -> (Option<SidebandPayl
             db_path,
             session_id,
             min_time_ms,
+            min_part_id,
             last_stamp,
         } => {
             let payload =
-                fetch_opencode_sqlite(db_path, session_id, *min_time_ms, *last_stamp).await;
-            (payload, false)
+                fetch_opencode_sqlite(db_path, session_id, *min_time_ms, min_part_id, *last_stamp)
+                    .await;
+            let more = matches!(
+                &payload,
+                Some(SidebandPayload::OpencodeSqlite { has_more: true, .. })
+            );
+            (payload, more)
         }
     }
 }
@@ -167,22 +174,34 @@ async fn fetch_primary_sideband(source: &SidebandSource) -> (Option<SidebandPayl
 async fn fetch_active_tail(tail: &ActiveTailSource) -> (Option<ActiveTailChunk>, bool) {
     match tail.kind {
         ActiveTailKind::AgySubagentTranscript => {
-            let Some(valid_primary) = validate_existing_or_pending_tail_path(
-                &tail.path,
-                tail.kind,
-                tail.allowed_cwd.as_deref(),
-                tail.agy_brain_dir.as_deref(),
-            ) else {
+            let tail_cl = tail.clone();
+            let validated = tokio::task::spawn_blocking(move || {
+                let valid_primary = validate_existing_or_pending_tail_path_scoped(
+                    &tail_cl.path,
+                    tail_cl.kind,
+                    tail_cl.allowed_cwd.as_deref(),
+                    tail_cl.agy_brain_dir.as_deref(),
+                    tail_cl.allowed_agy_conv_ids.as_deref(),
+                    tail_cl.otto_session_id.as_deref(),
+                )?;
+                let valid_fallback = tail_cl.fallback_path.as_deref().and_then(|fb| {
+                    validate_existing_or_pending_tail_path_scoped(
+                        fb,
+                        tail_cl.kind,
+                        tail_cl.allowed_cwd.as_deref(),
+                        tail_cl.agy_brain_dir.as_deref(),
+                        tail_cl.allowed_agy_conv_ids.as_deref(),
+                        tail_cl.otto_session_id.as_deref(),
+                    )
+                });
+                Some((valid_primary, valid_fallback))
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some((valid_primary, valid_fallback)) = validated else {
                 return (None, false);
             };
-            let valid_fallback = tail.fallback_path.as_deref().and_then(|fb| {
-                validate_existing_or_pending_tail_path(
-                    fb,
-                    tail.kind,
-                    tail.allowed_cwd.as_deref(),
-                    tail.agy_brain_dir.as_deref(),
-                )
-            });
             let (payload, more) = fetch_append_lines(
                 &valid_primary,
                 valid_fallback.as_deref(),
@@ -216,12 +235,20 @@ async fn fetch_active_tail(tail: &ActiveTailSource) -> (Option<ActiveTailChunk>,
 }
 
 async fn fetch_raw_log_chunk(tail: &ActiveTailSource) -> (Option<ActiveTailChunk>, bool) {
-    let Some(canon_path) = validate_confined_tail_path(
-        &tail.path,
-        ActiveTailKind::CommandLog,
-        tail.allowed_cwd.as_deref(),
-        tail.agy_brain_dir.as_deref(),
-    ) else {
+    let tail_cl = tail.clone();
+    let Some(canon_path) = tokio::task::spawn_blocking(move || {
+        validate_confined_tail_path_scoped(
+            &tail_cl.path,
+            ActiveTailKind::CommandLog,
+            tail_cl.allowed_cwd.as_deref(),
+            tail_cl.agy_brain_dir.as_deref(),
+            tail_cl.allowed_agy_conv_ids.as_deref(),
+            tail_cl.otto_session_id.as_deref(),
+        )
+    })
+    .await
+    .ok()
+    .flatten() else {
         return (None, false);
     };
     let Ok(mut file) = tokio::fs::File::open(&canon_path).await else {
@@ -461,7 +488,14 @@ async fn fetch_gemini_json(
         return None;
     }
     let bytes = tokio::fs::read(&target).await.ok()?;
-    let doc = serde_json::from_slice::<Value>(&bytes).ok()?;
+    let doc = if bytes.len() > 64 * 1024 {
+        tokio::task::spawn_blocking(move || serde_json::from_slice::<Value>(&bytes))
+            .await
+            .ok()?
+            .ok()?
+    } else {
+        serde_json::from_slice::<Value>(&bytes).ok()?
+    };
     Some(SidebandPayload::GeminiJson {
         resolved_path: target,
         stamp,
@@ -532,6 +566,7 @@ async fn fetch_opencode_sqlite(
     db_path: &Path,
     session_id: &str,
     min_time_ms: i64,
+    min_part_id: &str,
     last_stamp: (u64, u64, u64, u64),
 ) -> Option<SidebandPayload> {
     let db_meta = tokio::fs::metadata(db_path).await.ok()?;
@@ -550,6 +585,7 @@ async fn fetch_opencode_sqlite(
         return None;
     }
 
+    const PAGE_LIMIT: usize = 256;
     let pool = super::opencode::readonly_opencode_pool(db_path).await?;
     let rows_res = sqlx::query(
         "SELECT p.id, p.message_id, p.time_created, p.time_updated, p.data, \
@@ -559,12 +595,13 @@ async fn fetch_opencode_sqlite(
          FROM part p \
          JOIN message m ON p.message_id = m.id \
          WHERE (p.session_id = ?1 OR p.session_id IN (SELECT id FROM session WHERE parent_id = ?1)) \
-           AND p.time_updated >= ?2 \
-         ORDER BY p.time_created ASC, p.id ASC \
-         LIMIT 256",
+           AND (p.time_updated > ?2 OR (p.time_updated = ?2 AND p.id > ?3)) \
+         ORDER BY p.time_updated ASC, p.id ASC \
+         LIMIT 257",
     )
     .bind(session_id)
     .bind(min_time_ms)
+    .bind(min_part_id)
     .fetch_all(&pool)
     .await;
 
@@ -578,12 +615,14 @@ async fn fetch_opencode_sqlite(
                  p.session_id \
                  FROM part p \
                  JOIN message m ON p.message_id = m.id \
-                 WHERE p.session_id = ?1 AND p.time_updated >= ?2 \
-                 ORDER BY p.time_created ASC, p.id ASC \
-                 LIMIT 256",
+                 WHERE p.session_id = ?1 \
+                   AND (p.time_updated > ?2 OR (p.time_updated = ?2 AND p.id > ?3)) \
+                 ORDER BY p.time_updated ASC, p.id ASC \
+                 LIMIT 257",
             )
             .bind(session_id)
             .bind(min_time_ms)
+            .bind(min_part_id)
             .fetch_all(&pool)
             .await;
             match fallback_res {
@@ -596,8 +635,9 @@ async fn fetch_opencode_sqlite(
         }
     };
 
+    let has_more = rows.len() > PAGE_LIMIT;
     let mut rows_jsonl = Vec::new();
-    for r in rows {
+    for r in rows.into_iter().take(PAGE_LIMIT) {
         let rec = json!({
             "id": r.try_get::<String, _>(0).unwrap_or_default(),
             "message_id": r.try_get::<String, _>(1).unwrap_or_default(),
@@ -612,7 +652,11 @@ async fn fetch_opencode_sqlite(
         rows_jsonl.push(b'\n');
     }
 
-    Some(SidebandPayload::OpencodeSqlite { stamp, rows_jsonl })
+    Some(SidebandPayload::OpencodeSqlite {
+        stamp,
+        rows_jsonl,
+        has_more,
+    })
 }
 
 fn file_stamp(meta: &std::fs::Metadata) -> (u64, u64) {

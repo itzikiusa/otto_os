@@ -21,6 +21,7 @@ import {
   type IdeTestResult,
   type IdeVariable,
 } from '../ideStore.svelte';
+import { findContainingRoot } from '../shell/ideProjectHelpers';
 import {
   detectProposalLanguage,
   matchesIdeProjectThread,
@@ -108,7 +109,11 @@ export async function buildFileDraftChip(
   if (openTab) {
     content = readBuf(fullPath);
   } else {
-    const res = await api.get<IdeFileReadResp>(`/ide/fs/file?${ide.targetQuery({ path: fullPath })}`);
+    const containing = ide.target.kind === 'local' ? findContainingRoot(fullPath, ide.projectRoots) : null;
+    const q = containing && !containing.isPrimary && ide.target.kind === 'local'
+      ? ide.targetQuery({ root: containing.path, path: fullPath })
+      : ide.targetQuery({ path: fullPath });
+    const res = await api.get<IdeFileReadResp>(`/ide/fs/file?${q}`);
     content = res.content ?? '';
     language = res.language ?? '';
   }

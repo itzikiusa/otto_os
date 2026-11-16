@@ -157,11 +157,11 @@ async fn non_root_security_blocks_local_venv_dotenv_escape_and_loader_env_hijack
     std::fs::write(ws.join(".env"), "SECRET_DOTENV=1\n").unwrap();
     std::fs::write(
         ws.join("app.vars"),
-        "SAFE_APP_FLAG=enabled\nPATH=/tmp/evil\nDYLD_INSERT_LIBRARIES=/tmp/evil.dylib\nPYTHONPATH=/tmp/evil_py\n",
+        "SAFE_APP_FLAG=enabled\nPATH=/tmp/evil\nDYLD_INSERT_LIBRARIES=/tmp/evil.dylib\nPYTHONPATH=/tmp/evil_py\nHOME=/tmp/evil_home\nGOCACHEPROG=/tmp/evil_gocache\nGOTOOLCHAIN=path\nCC=/tmp/evil_cc\nCGO_LDFLAGS=-L/tmp/evil\nJAVA_OPTS=-javaagent:/tmp/evil.jar\n__PYVENV_LAUNCHER__=/tmp/evil_py\n",
     )
     .unwrap();
 
-    let (ctx, _root_app) =
+    let (ctx, root_app) =
         build_test_app(tmp.path().join("data"), &tmp.path().join("state.db")).await;
     let editor = non_root_user("u_editor_r5");
     let editor_app = router_as(&ctx, editor, vec![ws.clone()]);
@@ -208,7 +208,7 @@ async fn non_root_security_blocks_local_venv_dotenv_escape_and_loader_env_hijack
         "out-of-workspace dotenv_path must be rejected for non-root: {st_escape} {escape_body}"
     );
 
-    // 3. Non-root `PUT /ide/environments` with dangerous loader/PATH env keys -> rejected!
+    // 3. Non-root `PUT /ide/environments` with dangerous loader/PATH/compiler/HOME env keys -> rejected!
     for bad_key in [
         "PATH",
         "VIRTUAL_ENV",
@@ -216,6 +216,13 @@ async fn non_root_security_blocks_local_venv_dotenv_escape_and_loader_env_hijack
         "NODE_OPTIONS",
         "PYTHONPATH",
         "GIT_SSH_COMMAND",
+        "HOME",
+        "GOCACHEPROG",
+        "GOTOOLCHAIN",
+        "CC",
+        "CGO_LDFLAGS",
+        "JAVA_OPTS",
+        "__PYVENV_LAUNCHER__",
     ] {
         let (st_bad, bad_body) = send_json(
             &editor_app,
@@ -247,9 +254,24 @@ async fn non_root_security_blocks_local_venv_dotenv_escape_and_loader_env_hijack
     .await;
     assert_eq!(st_secret_dotenv, StatusCode::FORBIDDEN);
 
-    // 4b. Valid non-secret in-workspace `app.vars` loads `SAFE_APP_FLAG` while stripping `PATH` / `DYLD_*` / `PYTHONPATH` for non-root!
-    let (st_ok, ok_body) = send_json(
+    // 4b. Non-root mutating `dotenv_path` / `inherit_shell_env` on `Local` requires `root_authority(user)`:
+    let (st_nonroot_dotenv, _) = send_json(
         &editor_app,
+        Method::PUT,
+        "/ide/environments",
+        Some(json!({
+            "target": { "kind": "local", "root": ws_str },
+            "dotenv_path": "app.vars",
+            "inherit_shell_env": false
+        })),
+    )
+    .await;
+    assert_eq!(st_nonroot_dotenv, StatusCode::FORBIDDEN);
+
+    // 4c. Root configures `app.vars`; non-root `GET /ide/environments` loads `SAFE_APP_FLAG`
+    //     while stripping `PATH`, `DYLD_*`, `PYTHONPATH`, `HOME`, `GOCACHEPROG`, `CC`, `CGO_LDFLAGS`, `JAVA_OPTS`, `__PYVENV_LAUNCHER__`!
+    let (st_ok, ok_body) = send_json(
+        &root_app,
         Method::PUT,
         "/ide/environments",
         Some(json!({
@@ -273,6 +295,13 @@ async fn non_root_security_blocks_local_venv_dotenv_escape_and_loader_env_hijack
     assert_eq!(eff["SAFE_APP_FLAG"], json!("enabled"));
     assert!(eff.get("DYLD_INSERT_LIBRARIES").is_none());
     assert!(eff.get("PYTHONPATH").is_none());
+    assert!(eff.get("GOCACHEPROG").is_none());
+    assert!(eff.get("GOTOOLCHAIN").is_none());
+    assert!(eff.get("CC").is_none());
+    assert!(eff.get("CGO_LDFLAGS").is_none());
+    assert!(eff.get("JAVA_OPTS").is_none());
+    assert!(eff.get("__PYVENV_LAUNCHER__").is_none());
+    assert_ne!(eff.get("HOME"), Some(&json!("/tmp/evil_home")));
     assert_ne!(eff.get("PATH"), Some(&json!("/tmp/evil")));
 }
 

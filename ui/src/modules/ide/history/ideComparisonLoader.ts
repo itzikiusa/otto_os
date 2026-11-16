@@ -1,7 +1,8 @@
 // Data loaders and live disk/editor sync helpers for `IdeComparisonModal.svelte`.
 
 import { api } from '../../../lib/api/client';
-import type { DiffResp, Repo } from '../../../lib/api/types';
+import { gitApi } from '../../../lib/api/git';
+import type { Repo } from '../../../lib/api/types';
 import type {
   IdeHistoryEntryResp,
   IdeHistoryListResp,
@@ -15,7 +16,6 @@ import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { ideGit } from '../git/ideGitController.svelte';
 import { ide, ideBasename, type IdeFileReadResp } from '../ideStore.svelte';
-import { reconstructFileFromDiff } from './ideCompareEngine';
 
 export type IdeCompareMode =
   | 'local-history'
@@ -31,7 +31,7 @@ export type {
   IdeHistoryRestoreResp as HistoryRestoreResp,
 };
 
-export async function readDiskFileOnly(
+async function readDiskFile(
   absPath: string,
   signal?: AbortSignal,
 ): Promise<{ content: string; exists: boolean }> {
@@ -57,7 +57,7 @@ export async function readCurrentDiskOrTab(
   if (openTab) {
     return { content: ide.getBuffer(clean), exists: true };
   }
-  return readDiskFileOnly(clean, signal);
+  return readDiskFile(clean, signal);
 }
 
 export async function refreshTreeForRestoredPath(
@@ -100,8 +100,9 @@ export async function writeCurrentAndSyncIde(
     });
     const tab = ide.tabs.find((t) => t.path === clean);
     if (tab) {
-      if (ide.activePath === clean) {
-        await ide.applyAgentEdit(clean, nextContent);
+      if (ide.activePath === clean || ide.splitPath === clean) {
+        const applied = await ide.replaceBufferContent(clean, nextContent);
+        if (!applied) ide.updateBuffer(clean, nextContent);
       } else {
         ide.updateBuffer(clean, nextContent);
       }
@@ -130,35 +131,20 @@ export async function fetchGitRefFileContent(
   ref: string,
   signal?: AbortSignal,
 ): Promise<{ leftText: string; rightText: string; rightExists: boolean }> {
-  const [cur, disk] = await Promise.all([
-    readCurrentDiskOrTab(absPath, signal),
-    readDiskFileOnly(absPath, signal),
-  ]);
+  const cur = await readCurrentDiskOrTab(absPath, signal);
   const relPath = ideGit.repoRelativePath(repo, absPath);
   if (!relPath) {
-    return { leftText: disk.content, rightText: cur.content, rightExists: cur.exists };
+    return { leftText: cur.content, rightText: cur.content, rightExists: cur.exists };
   }
-  const encRepo = encodeURIComponent(repo.id);
-  const encPath = encodeURIComponent(relPath);
-  let headText = disk.content;
-  try {
-    const workingDiff = await api.get<DiffResp>(
-      `/repos/${encRepo}/diff?target=working&path=${encPath}&full=true`,
-      signal,
-    );
-    headText = reconstructFileFromDiff(disk.content, workingDiff, 'reverse');
-  } catch {
-    /* working tree already matches HEAD */
+  const revResp = await gitApi.fileAtRev(repo.id, relPath, ref || 'HEAD', signal);
+  if (revResp.binary) {
+    throw new Error('Binary files cannot be compared as text.');
   }
-  if (!ref || ref === 'HEAD') {
-    return { leftText: headText, rightText: cur.content, rightExists: cur.exists };
+  if (revResp.truncated) {
+    throw new Error('Revision file exceeds the 4 MiB comparison limit.');
   }
-  const rangeDiff = await api.get<DiffResp>(
-    `/repos/${encRepo}/diff?target=${encodeURIComponent(`range:HEAD..${ref}`)}&path=${encPath}&full=true`,
-    signal,
-  );
-  const refText = reconstructFileFromDiff(headText, rangeDiff, 'forward');
-  return { leftText: refText, rightText: cur.content, rightExists: cur.exists };
+  const leftText = revResp.exists ? (revResp.content ?? '') : '';
+  return { leftText, rightText: cur.content, rightExists: cur.exists };
 }
 
 export async function promptPutLocalHistoryLabel(

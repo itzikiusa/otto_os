@@ -2,7 +2,7 @@
 //! for [`super::EnvironmentManager`].
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +17,120 @@ use super::{shell_env, EnvironmentManager, SecretAccess};
 use crate::target::TargetManager;
 use crate::toolchains::system_search_dirs;
 use crate::types::{IdeProjectEnvironment, IdeRunConfig, IdeSshSpec, IdeTargetKind, IdeTargetSpec};
+
+/// Insert an explicit environment variable (`env_vars`, `env_overrides`, `launch.env`)
+/// while always blocking reserved internal keys, malformed names, and (when `!caller_is_root`)
+/// dangerous loader/compiler/PATH hijack keys.
+pub(crate) fn insert_filtered_env_var(
+    map: &mut BTreeMap<String, String>,
+    key: &str,
+    val: String,
+    caller_is_root: bool,
+) {
+    if is_reserved_internal_env_key(key)
+        || !is_valid_env_key(key)
+        || (!caller_is_root && is_dangerous_loader_env_key(key))
+    {
+        return;
+    }
+    map.insert(key.to_string(), val);
+}
+
+/// Resolve a `.env` / `env_file` path confined inside `allowed_roots` (preventing
+/// symlink escape even on default `.env`), rejecting protected credential directories
+/// unconditionally and enforcing non-root secret-file checks when `!caller_is_root`.
+pub(crate) fn resolve_confined_dotenv_path(
+    allowed_roots: &[String],
+    rel_or_abs: &str,
+    caller_is_root: bool,
+) -> Option<PathBuf> {
+    let trimmed = rel_or_abs.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+        return None;
+    }
+    let canon = safe_join_allowed_roots(allowed_roots, trimmed)?;
+    if !canon.is_file() || otto_core::secret_paths::in_protected_dir(&canon) {
+        return None;
+    }
+    if !caller_is_root
+        && (otto_core::secret_paths::is_denied_file(&canon)
+            || crate::target::enforce_non_root_path(&canon).is_err())
+    {
+        return None;
+    }
+    Some(canon)
+}
+
+/// Merge parsed `.env` key-values into `map`, unconditionally blocking reserved internal
+/// keys and dangerous loader/compiler/PATH hijack keys from repo-controlled `.env` files.
+pub(crate) fn extend_from_dotenv_str(map: &mut BTreeMap<String, String>, raw: &str) {
+    for (k, v) in parse_dotenv(raw) {
+        if is_reserved_internal_env_key(&k)
+            || !is_valid_env_key(&k)
+            || is_dangerous_loader_env_key(&k)
+        {
+            continue;
+        }
+        map.insert(k, v);
+    }
+}
+
+/// Apply configured project SDK homes (`JAVA_HOME`, `GOROOT`, `RUSTUP_TOOLCHAIN`,
+/// `VIRTUAL_ENV`, `node_home`) onto `map` and return prepended `PATH` directories.
+pub(crate) fn apply_project_sdk_layers(
+    proj: &IdeProjectEnvironment,
+    target_kind: IdeTargetKind,
+    allow_sdk_and_path_overrides: bool,
+    map: &mut BTreeMap<String, String>,
+) -> (Vec<String>, bool) {
+    let mut proj_path_dirs: Vec<String> = Vec::new();
+    let mut has_explicit_py = false;
+    if !allow_sdk_and_path_overrides {
+        return (proj_path_dirs, has_explicit_py);
+    }
+    if let Some(py) = proj.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
+        has_explicit_py = true;
+        if let Some(bin_dir) = Path::new(py).parent() {
+            push_unique(&mut proj_path_dirs, bin_dir.to_string_lossy().into_owned());
+            if let Some(venv) = bin_dir.parent() {
+                if venv.join("pyvenv.cfg").is_file() || target_kind == IdeTargetKind::Ssh {
+                    map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
+        map.insert("JAVA_HOME".into(), jh.to_string());
+        push_unique(
+            &mut proj_path_dirs,
+            format!("{}/bin", jh.trim_end_matches('/')),
+        );
+    }
+    if let Some(gr) = proj.go_root.as_deref().filter(|s| !s.is_empty()) {
+        map.insert("GOROOT".into(), gr.to_string());
+        push_unique(
+            &mut proj_path_dirs,
+            format!("{}/bin", gr.trim_end_matches('/')),
+        );
+    }
+    if let Some(rt) = proj.rust_toolchain.as_deref().filter(|s| !s.is_empty()) {
+        if rt.starts_with('/') {
+            push_unique(
+                &mut proj_path_dirs,
+                format!("{}/bin", rt.trim_end_matches('/')),
+            );
+        } else {
+            map.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
+        }
+    }
+    if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
+        push_unique(
+            &mut proj_path_dirs,
+            format!("{}/bin", nh.trim_end_matches('/')),
+        );
+    }
+    (proj_path_dirs, has_explicit_py)
+}
 
 impl EnvironmentManager {
     #[allow(clippy::too_many_arguments)]
@@ -54,58 +168,14 @@ impl EnvironmentManager {
         let mut path_dirs: Vec<String> = Vec::new();
         if allow_sdk_and_path_overrides {
             if let Some(extra) = proj.extra_path.as_deref().filter(|s| !s.is_empty()) {
-                path_dirs.extend(
-                    extra
-                        .split(':')
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string),
-                );
+                for seg in extra.split(':').filter(|s| !s.trim().is_empty()) {
+                    push_unique(&mut path_dirs, seg.trim().to_string());
+                }
             }
         }
 
-        let mut proj_path_dirs: Vec<String> = Vec::new();
-        if allow_sdk_and_path_overrides {
-            if let Some(py) = proj.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
-                if let Some(bin_dir) = Path::new(py).parent() {
-                    push_unique(&mut proj_path_dirs, bin_dir.to_string_lossy().into_owned());
-                    if let Some(venv) = bin_dir.parent() {
-                        if venv.join("pyvenv.cfg").is_file() || target.kind == IdeTargetKind::Ssh {
-                            map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
-                        }
-                    }
-                }
-            }
-            if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
-                map.insert("JAVA_HOME".into(), jh.to_string());
-                push_unique(
-                    &mut proj_path_dirs,
-                    format!("{}/bin", jh.trim_end_matches('/')),
-                );
-            }
-            if let Some(gr) = proj.go_root.as_deref().filter(|s| !s.is_empty()) {
-                map.insert("GOROOT".into(), gr.to_string());
-                push_unique(
-                    &mut proj_path_dirs,
-                    format!("{}/bin", gr.trim_end_matches('/')),
-                );
-            }
-            if let Some(rt) = proj.rust_toolchain.as_deref().filter(|s| !s.is_empty()) {
-                if rt.starts_with('/') {
-                    push_unique(
-                        &mut proj_path_dirs,
-                        format!("{}/bin", rt.trim_end_matches('/')),
-                    );
-                } else {
-                    map.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
-                }
-            }
-            if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
-                push_unique(
-                    &mut proj_path_dirs,
-                    format!("{}/bin", nh.trim_end_matches('/')),
-                );
-            }
-        }
+        let (proj_path_dirs, _) =
+            apply_project_sdk_layers(proj, target.kind, allow_sdk_and_path_overrides, &mut map);
 
         let cfg_sdk = cfg
             .filter(|_| allow_sdk_and_path_overrides)
@@ -180,33 +250,17 @@ impl EnvironmentManager {
                 }
             }
 
-            let extend_dotenv = |map: &mut BTreeMap<String, String>, raw: &str| {
-                for (k, v) in parse_dotenv(raw) {
-                    if is_reserved_internal_env_key(&k)
-                        || (!caller_is_root && is_dangerous_loader_env_key(&k))
-                    {
-                        continue;
-                    }
-                    map.insert(k, v);
-                }
-            };
-
-            if let Some(dotenv_rel) = proj.dotenv_path.as_deref().filter(|s| !s.is_empty()) {
-                if let Some(dotenv_file) = safe_join_allowed_roots(&all_roots, dotenv_rel) {
-                    if caller_is_root || !otto_core::secret_paths::is_denied_file(&dotenv_file) {
-                        if let Ok(raw) = tokio::fs::read_to_string(&dotenv_file).await {
-                            extend_dotenv(&mut map, &raw);
-                        }
-                    }
-                }
-            } else {
-                let default_dotenv = Path::new(&target.root).join(".env");
-                if default_dotenv.is_file()
-                    && (caller_is_root || !otto_core::secret_paths::is_denied_file(&default_dotenv))
-                {
-                    if let Ok(raw) = tokio::fs::read_to_string(&default_dotenv).await {
-                        extend_dotenv(&mut map, &raw);
-                    }
+            let dotenv_rel = proj
+                .dotenv_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(".env");
+            if let Some(dotenv_file) =
+                resolve_confined_dotenv_path(&all_roots, dotenv_rel, caller_is_root)
+            {
+                if let Ok(raw) = tokio::fs::read_to_string(&dotenv_file).await {
+                    extend_from_dotenv_str(&mut map, &raw);
                 }
             }
 
@@ -215,11 +269,11 @@ impl EnvironmentManager {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                if let Some(resolved_ef) = safe_join_allowed_roots(&all_roots, cfg_env_file) {
-                    if caller_is_root || !otto_core::secret_paths::is_denied_file(&resolved_ef) {
-                        if let Ok(raw) = tokio::fs::read_to_string(&resolved_ef).await {
-                            extend_dotenv(&mut map, &raw);
-                        }
+                if let Some(resolved_ef) =
+                    resolve_confined_dotenv_path(&all_roots, cfg_env_file, caller_is_root)
+                {
+                    if let Ok(raw) = tokio::fs::read_to_string(&resolved_ef).await {
+                        extend_from_dotenv_str(&mut map, &raw);
                     }
                 }
             }
@@ -227,6 +281,7 @@ impl EnvironmentManager {
 
         for item in stored_vars {
             if is_reserved_internal_env_key(&item.key)
+                || !is_valid_env_key(&item.key)
                 || (!caller_is_root && is_dangerous_loader_env_key(&item.key))
             {
                 continue;
@@ -264,14 +319,7 @@ impl EnvironmentManager {
 
         if let Some(c) = cfg {
             for (k, v) in &c.env_overrides {
-                if is_reserved_internal_env_key(k)
-                    || (!caller_is_root && is_dangerous_loader_env_key(k))
-                {
-                    continue;
-                }
-                if is_valid_env_key(k) {
-                    map.insert(k.clone(), v.clone());
-                }
+                insert_filtered_env_var(&mut map, k, v.clone(), caller_is_root);
             }
         }
 

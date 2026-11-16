@@ -18,6 +18,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { fileUriToPath, normalizeMacPrivatePath } from '../../lib/fileUri';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ide, type IdeCodeAction, type IdeEditorHandle, type IdeOpenTab, type IdeSymbolNode } from './ideStore.svelte';
@@ -75,6 +76,7 @@
     notifyDidSave?: () => void;
     reconnectLspClients?: (rootPath?: string) => void;
     disposeLspClients?: (rootPath?: string) => void;
+    replaceBufferContent?: (nextContent: string, range?: { from: number; to: number }) => boolean;
     applyQuickFixEdits?: (edits: CmIdeMod.IdeConcreteTextEdit[]) => boolean;
     applyClientDiagFix?: (fix: CmIdeMod.ClientDiagQuickFix) => boolean;
     getAvailableQuickFixes?: (line?: number, symbol?: string) => {
@@ -101,7 +103,7 @@
   let manifestDepsByPath = $state<Record<string, CmIdeDepsMod.IdeDepItem[]>>({});
   let blameEnabledByPath = $state<Record<string, boolean>>({});
   let blameByPath = $state<Record<string, Record<number, string> | null>>({});
-  let gitBaseByPath = $state<Record<string, string | null>>(getPersistedIdeGitBaseSnapshot());
+  let gitBaseByPath = $state<Record<string, string | null | undefined>>(getPersistedIdeGitBaseSnapshot());
   const gitBaseCtlByPath = new Map<string, AbortController>();
   let splitRatio = $state(readSavedSplitRatio());
   let prefs = $state(readIdePreferences());
@@ -158,6 +160,12 @@
     untrack(() => refreshGitBaseForTab(s));
   });
 
+  // Subscribe to repo status digests even when the Git tool panel is closed so
+  // external `git restore` / `git checkout` reloads clean open tabs immediately.
+  $effect(() => {
+    if (liveGit) liveGit.syncExternalRepoChanges();
+  });
+
   $effect(() => {
     if (typeof window === 'undefined') return;
     const onPrefs = () => { prefs = readIdePreferences(); };
@@ -169,7 +177,9 @@
     };
     const onApplyFixes = (e: Event) => {
       const det = (e as CustomEvent<{ path?: string; edits?: CmIdeMod.IdeConcreteTextEdit[] }>).detail;
-      if (det?.edits?.length && (!det.path || det.path === stagedPrimaryTab?.path)) primaryEditorRef?.applyQuickFixEdits?.(det.edits);
+      if (!det?.edits?.length) return;
+      if (!det.path || det.path === stagedPrimaryTab?.path) primaryEditorRef?.applyQuickFixEdits?.(det.edits);
+      else if (det.path === stagedSplitTab?.path) splitEditorRef?.applyQuickFixEdits?.(det.edits);
     };
     const onEnableGoTag = (e: Event) => {
       const det = (e as CustomEvent<{ tags?: string[]; filePath?: string }>).detail;
@@ -345,10 +355,8 @@
   const warnCount = $derived(activeDiags.filter((d) => d.severity === 'warning').length);
 
   function canonDebugPath(raw: string): string {
-    const clean = raw.replace(/^file:\/\//, '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
-    if (clean.startsWith('/private/var/')) return `/var/${clean.slice('/private/var/'.length)}`;
-    if (clean.startsWith('/private/tmp/')) return `/tmp/${clean.slice('/private/tmp/'.length)}`;
-    return clean;
+    const clean = fileUriToPath(raw).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+    return normalizeMacPrivatePath(clean);
   }
 
   function matchesPausedDebugPath(pausedFile: string | null | undefined, tabPath: string): boolean {
@@ -381,6 +389,7 @@
       goToLine: (line, col) => ref.goToLine(line, col),
       focus: () => ref.focus(),
       getSelectionRange: () => ref.getSelectionRange?.() ?? null,
+      replaceBufferContent: (nextContent, range) => ref.replaceBufferContent?.(nextContent, range) ?? false,
       applyAgentEdit: (nextContent, range) => ref.applyAgentEdit?.(nextContent, range) ?? false,
       applyQuickFixEdits: (edits) => ref.applyQuickFixEdits?.(edits) ?? false,
     };

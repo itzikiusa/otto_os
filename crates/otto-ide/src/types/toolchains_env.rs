@@ -394,7 +394,7 @@ pub struct IdeUpdateEnvironmentReq {
     pub node_home: Option<String>,
     #[serde(default)]
     pub python_interpreter: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "env_file")]
     pub dotenv_path: Option<String>,
     #[serde(default)]
     pub extra_path: Option<String>,
@@ -410,7 +410,7 @@ pub struct IdeUpdateEnvironmentReq {
     pub module_go_build_tags: Option<BTreeMap<String, Vec<String>>>,
     #[serde(default)]
     pub network_bridge: Option<IdeNetworkBridgeConfig>,
-    #[serde(default, alias = "vars")]
+    #[serde(default, alias = "vars", alias = "env")]
     pub env_vars: Vec<IdeEnvVarEntry>,
     #[serde(default, alias = "confirmProdTargets")]
     pub confirm_prod_targets: bool,

@@ -14,9 +14,9 @@ use tokio::task::JoinHandle;
 
 use crate::holder::paths::HolderLauncher;
 use crate::holder::protocol::{
-    read_frame, write_frame, DaemonFrame, HolderCheckpoint, HolderExitStatus, HolderFrame,
-    HolderReady, HolderSignal, HolderSpawnSpec, SequencedLine, ERROR_PREFIX, HOLDER_ENV,
-    PROTO_VERSION, READY_PREFIX,
+    read_frame, read_tolerant_frame, write_frame, DaemonFrame, HolderCheckpoint, HolderExitStatus,
+    HolderFrame, HolderReady, HolderSignal, HolderSpawnSpec, SequencedLine, ERROR_PREFIX,
+    HOLDER_ENV, PROTO_VERSION, READY_PREFIX,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -229,20 +229,35 @@ pub async fn best_effort_shutdown_socket(socket_path: &Path) {
         }
         _ => None,
     };
-    let _ = write_frame(&mut write_half, &DaemonFrame::Shutdown { grace_ms: 500 }).await;
+    const SHUTDOWN_GRACE_MS: u64 = 500;
+    let _ = write_frame(
+        &mut write_half,
+        &DaemonFrame::Shutdown {
+            grace_ms: SHUTDOWN_GRACE_MS,
+        },
+    )
+    .await;
     let _ = write_half.shutdown().await;
-    if let Some((Some(hpid), cpid)) = pids {
-        if hpid > 1 && hpid != std::process::id() {
-            tokio::time::sleep(Duration::from_millis(120)).await;
+    if let Some((hpid, cpid)) = pids {
+        tokio::time::sleep(Duration::from_millis(SHUTDOWN_GRACE_MS + 150)).await;
+        if let Some(cpid) = cpid.filter(|&p| p > 1 && p != std::process::id()) {
             // SAFETY: `kill(pid, 0)` only probes process existence.
-            let still_alive = unsafe { libc::kill(hpid as libc::pid_t, 0) == 0 };
-            if still_alive {
-                if let Some(cpid) = cpid.filter(|&p| p > 1) {
-                    crate::process::signal_group(cpid, libc::SIGTERM);
-                }
+            if unsafe { libc::kill(cpid as libc::pid_t, 0) == 0 } {
+                crate::process::signal_group(cpid, libc::SIGKILL);
+            }
+        }
+        if let Some(hpid) = hpid.filter(|&p| p > 1 && p != std::process::id()) {
+            // SAFETY: `kill(pid, 0)` only probes process existence.
+            if unsafe { libc::kill(hpid as libc::pid_t, 0) == 0 } {
                 // SAFETY: `hpid` came directly from the connected live holder's HELLO frame.
                 unsafe {
                     let _ = libc::kill(hpid as libc::pid_t, libc::SIGTERM);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if unsafe { libc::kill(hpid as libc::pid_t, 0) == 0 } {
+                    unsafe {
+                        let _ = libc::kill(hpid as libc::pid_t, libc::SIGKILL);
+                    }
                 }
             }
         }
@@ -304,11 +319,14 @@ async fn adopt_socket_inner(
             let cp = HolderCheckpoint::from_wire_value(checkpoint)?;
             let mut replay = Vec::new();
             loop {
-                let frame = read_frame::<_, HolderFrame>(&mut reader, &mut buf)
+                let maybe_frame = read_tolerant_frame::<_, HolderFrame>(&mut reader, &mut buf)
                     .await?
                     .ok_or_else(|| {
                         io::Error::new(io::ErrorKind::UnexpectedEof, "holder closed during replay")
                     })?;
+                let Some(frame) = maybe_frame else {
+                    continue;
+                };
                 match frame {
                     HolderFrame::ReplayLine { entry } => replay.push(entry),
                     HolderFrame::ReplayDone => break,
@@ -439,7 +457,12 @@ async fn stream_holder_events(
         return;
     }
     let mut buf = Vec::new();
-    while let Ok(Some(frame)) = read_frame::<_, HolderFrame>(&mut reader, &mut buf).await {
+    while let Ok(Some(maybe_frame)) =
+        read_tolerant_frame::<_, HolderFrame>(&mut reader, &mut buf).await
+    {
+        let Some(frame) = maybe_frame else {
+            continue;
+        };
         match frame {
             HolderFrame::Line { entry } | HolderFrame::ReplayLine { entry } => {
                 if ev_tx.send(HolderEvent::Line(entry)).await.is_err() {
@@ -476,7 +499,15 @@ async fn read_ready_line(
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()));
         }
         if let Some(err) = line.strip_prefix(ERROR_PREFIX) {
-            return Err(io::Error::other(format!("runtime-holder failed: {err}")));
+            let kind = if err.starts_with("spawn child ") {
+                io::ErrorKind::NotFound
+            } else {
+                io::ErrorKind::Other
+            };
+            return Err(io::Error::new(
+                kind,
+                format!("runtime-holder failed: {err}"),
+            ));
         }
     }
     let mut err_buf = String::new();

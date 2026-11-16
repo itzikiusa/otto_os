@@ -366,10 +366,11 @@ async fn ssh_eof_kill_wrappers_stay_alive_while_stdin_open_and_terminate_on_eof(
 }
 
 #[test]
-fn build_remote_exec_line_expands_remote_home_and_preserves_remote_path() {
+fn build_remote_exec_line_omits_secrets_from_argv_and_formats_stdin_preamble() {
     let mut env = BTreeMap::new();
     env.insert("GOROOT".into(), "$HOME/.otto/toolchains/go/current".into());
     env.insert("CUSTOM_LITERAL".into(), "$DO_NOT_EXPAND".into());
+    env.insert("DB_SECRET_TOKEN".into(), "s3cr3t-value-123".into());
     let line = ssh_exec::build_remote_exec_line("/srv/app", "go", &["env".into()], &env);
     assert!(
         line.contains("\"$HOME\"/.otto/toolchains/go/current/bin"),
@@ -380,12 +381,58 @@ fn build_remote_exec_line_expands_remote_home_and_preserves_remote_path() {
         "expected remote login $PATH preserved at tail: {line}"
     );
     assert!(
-        line.contains("GOROOT=\"$HOME\"/'.otto/toolchains/go/current'")
-            || line.contains("GOROOT=\"$HOME\"/.otto/toolchains/go/current"),
-        "expected unquoted $HOME prefix in GOROOT: {line}"
+        !line.contains("s3cr3t-value-123")
+            && !line.contains("DB_SECRET_TOKEN")
+            && !line.contains("$DO_NOT_EXPAND"),
+        "non-PATH env vars must never leak onto remote ssh argv: {line}"
+    );
+
+    let exports = ssh_exec::format_remote_env_exports(&env);
+    assert!(
+        exports.contains("export GOROOT=\"$HOME\"/'.otto/toolchains/go/current'")
+            || exports.contains("export GOROOT=\"$HOME\"/.otto/toolchains/go/current"),
+        "expected unquoted $HOME prefix in GOROOT export: {exports}"
     );
     assert!(
-        line.contains("CUSTOM_LITERAL='$DO_NOT_EXPAND'"),
-        "arbitrary env vars must remain single-quoted: {line}"
+        exports.contains("export CUSTOM_LITERAL='$DO_NOT_EXPAND'"),
+        "arbitrary env vars must remain single-quoted in stdin preamble: {exports}"
+    );
+    assert!(exports.contains("export DB_SECRET_TOKEN='s3cr3t-value-123'"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_stdin_env_preamble_exports_secrets_without_leaking_or_corrupting_stdio() {
+    let mut env = BTreeMap::new();
+    env.insert("SECRET_KEY".into(), "top-secret-value-$Literal".into());
+    let (reader, payload) = ssh_exec::build_remote_stdin_env_preamble(&env).unwrap();
+    assert!(!reader.contains("top-secret-value"));
+    let wrapped = ssh_exec::wrap_remote_stdio_with_eof_kill_and_env(
+        "read line && printf '%s|%s\\n' \"$SECRET_KEY\" \"$line\"",
+        Some(&reader),
+    );
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", &wrapped])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    ssh_exec::write_ssh_env_preamble(&mut child, Some(payload), false)
+        .await
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"dap-body\n").await.unwrap();
+        stdin.flush().await.unwrap();
+    }
+    let _ = child.stdin.take();
+    let out = tokio::time::timeout(Duration::from_secs(3), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "top-secret-value-$Literal|dap-body"
     );
 }

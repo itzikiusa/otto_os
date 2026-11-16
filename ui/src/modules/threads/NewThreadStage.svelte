@@ -41,6 +41,7 @@
   import { addComposerContext, assembleComposerMessage, fileMentionContext, type ComposerContext } from './runtime/composerContext';
   import CouncilStagePicker from './runtime/CouncilStagePicker.svelte';
   import { council, councilAgentLabel } from './runtime/councilStore.svelte';
+  import { handleSlashMenuKey } from './runtime/runtimeComposer';
   import RuntimeContextChips from './runtime/RuntimeContextChips.svelte';
   import type { PickedAgentMention, PickedFileMention } from './runtime/RuntimeMentionMenu.svelte';
   import { isRuntimeProvider, runtimeThreads } from './runtime/runtimeThreads.svelte';
@@ -403,26 +404,18 @@
         return;
       }
     }
-    if (cmdOpen) {
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        const n = slashSuggestions.length;
-        cmdIdx = (cmdIdx + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
-        return;
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        cmdDismissed = true;
-        return;
-      }
-      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
-        const pick = slashSuggestions[cmdIdx];
-        if (pick) {
-          e.preventDefault();
-          acceptStageCmd(pick);
-          return;
-        }
-      }
+    if (
+      cmdOpen &&
+      handleSlashMenuKey(
+        e,
+        slashSuggestions,
+        cmdIdx,
+        (i) => (cmdIdx = i),
+        () => (cmdDismissed = true),
+        acceptStageCmd,
+      )
+    ) {
+      return;
     }
     if (e.key === 'Escape' && threads.paneIds.length > 0 && !prompt) {
       e.preventDefault();

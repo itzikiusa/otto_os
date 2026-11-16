@@ -232,23 +232,28 @@ pub(crate) fn build_process_spawner(
             c
         } else {
             let mut effective_env = match &environments {
-                Some(envs) => envs.cached_effective_env_for_local_root_as(&key.root, owner_is_root),
+                Some(envs) => envs.cached_probe_env_for_local_root_as(&key.root, owner_is_root),
                 None => collect_safe_non_root_base_env(),
             };
-            effective_env.retain(|k, _| !is_daemon_internal_secret_key(k));
-            for go_key in ["GOPRIVATE", "GONOSUMDB", "GOPATH", "GOMODCACHE"] {
-                if !effective_env.contains_key(go_key) {
-                    if let Ok(val) = std::env::var(go_key) {
-                        if !val.is_empty() {
-                            effective_env.insert(go_key.to_string(), val);
+            effective_env.retain(|k, _| {
+                !is_daemon_internal_secret_key(k)
+                    && !crate::environments::is_dangerous_loader_env_key(k)
+            });
+            if owner_is_root {
+                for go_key in ["GOPRIVATE", "GONOSUMDB", "GOPATH", "GOMODCACHE"] {
+                    if !effective_env.contains_key(go_key) {
+                        if let Ok(val) = std::env::var(go_key) {
+                            if !val.is_empty() {
+                                effective_env.insert(go_key.to_string(), val);
+                            }
                         }
                     }
                 }
-            }
-            if owner_is_root && !effective_env.contains_key("SSH_AUTH_SOCK") {
-                if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
-                    if !sock.is_empty() {
-                        effective_env.insert("SSH_AUTH_SOCK".to_string(), sock);
+                if !effective_env.contains_key("SSH_AUTH_SOCK") {
+                    if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
+                        if !sock.is_empty() {
+                            effective_env.insert("SSH_AUTH_SOCK".to_string(), sock);
+                        }
                     }
                 }
             }
@@ -263,10 +268,33 @@ pub(crate) fn build_process_spawner(
                 shell_snap.as_ref(),
                 owner_is_root,
             );
-            let merged_path = match effective_env.get("PATH") {
-                Some(ep) if !ep.is_empty() => format!("{ep}:{aug_path}"),
+            let root_path = std::path::Path::new(&key.root);
+            #[allow(clippy::disallowed_methods)]
+            let canon_ws = std::fs::canonicalize(root_path).ok();
+            let mut safe_path_parts: Vec<String> = Vec::with_capacity(32);
+            let combined_raw = match effective_env.get("PATH") {
+                Some(ep) if !ep.is_empty() => format!("{aug_path}:{ep}"),
                 _ => aug_path,
             };
+            for seg in combined_raw.split(':').filter(|s| !s.is_empty()) {
+                let sp = std::path::Path::new(seg);
+                if !sp.is_absolute() || sp.starts_with(root_path) {
+                    continue;
+                }
+                if let Some(ref cw) = canon_ws {
+                    if sp.starts_with(cw) {
+                        continue;
+                    }
+                    #[allow(clippy::disallowed_methods)]
+                    if std::fs::canonicalize(sp).is_ok_and(|cs| cs.starts_with(cw)) {
+                        continue;
+                    }
+                }
+                if !safe_path_parts.iter().any(|existing| existing == seg) {
+                    safe_path_parts.push(seg.to_string());
+                }
+            }
+            let merged_path = safe_path_parts.join(":");
 
             let mut c = tokio::process::Command::new(&launch.cmd);
             c.env_clear();

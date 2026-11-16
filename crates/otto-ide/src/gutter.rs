@@ -10,7 +10,24 @@ mod scripting;
 #[cfg(test)]
 mod tests;
 
+use crate::plugins::IdePluginRegistry;
 use crate::types::{detect_language, IdeGutterItem, IdeRunnerKind, PluginGutterDetector};
+
+/// Detect runnable and debuggable gutter items (`main`, unit tests, suites,
+/// benchmarks, `package.json` scripts, and active plugin detectors), consulting
+/// runtime plugin language contributions before static extension fallback.
+pub fn detect_gutter_items_with_plugins(
+    path: &str,
+    content: &str,
+    plugins: &IdePluginRegistry,
+) -> Vec<IdeGutterItem> {
+    let normalized_path = path.replace('\\', "/");
+    let plugin_lang = plugins
+        .detect_language_for_path(&normalized_path)
+        .map(|l| l.id);
+    let extra = plugins.active_gutter_detectors();
+    detect_gutter_items_inner(&normalized_path, content, plugin_lang.as_deref(), &extra)
+}
 
 /// Detect runnable and debuggable gutter items (`main`, unit tests, suites,
 /// benchmarks, `package.json` scripts, and active plugin detectors).
@@ -20,21 +37,32 @@ pub fn detect_gutter_items(
     extra_detectors: &[PluginGutterDetector],
 ) -> Vec<IdeGutterItem> {
     let normalized_path = path.replace('\\', "/");
+    detect_gutter_items_inner(&normalized_path, content, None, extra_detectors)
+}
+
+fn detect_gutter_items_inner(
+    normalized_path: &str,
+    content: &str,
+    plugin_lang: Option<&str>,
+    extra_detectors: &[PluginGutterDetector],
+) -> Vec<IdeGutterItem> {
     let base_name = normalized_path
         .rsplit('/')
         .next()
-        .unwrap_or(&normalized_path);
-    let dir = parent_dir(&normalized_path);
-    let lang = detect_language(&normalized_path).unwrap_or("");
+        .unwrap_or(normalized_path);
+    let dir = parent_dir(normalized_path);
+    let lang = plugin_lang
+        .or_else(|| detect_language(normalized_path))
+        .unwrap_or("");
 
     let mut items = Vec::new();
     match base_name {
         "package.json" => {
-            scripting::detect_package_json_scripts(&normalized_path, &dir, content, &mut items);
+            scripting::detect_package_json_scripts(normalized_path, &dir, content, &mut items);
         }
         "deno.json" | "deno.jsonc" => {
             scripting::detect_json_task_map(
-                &normalized_path,
+                normalized_path,
                 &dir,
                 content,
                 "tasks",
@@ -46,7 +74,7 @@ pub fn detect_gutter_items(
         }
         "composer.json" => {
             scripting::detect_json_task_map(
-                &normalized_path,
+                normalized_path,
                 &dir,
                 content,
                 "scripts",
@@ -57,15 +85,15 @@ pub fn detect_gutter_items(
             );
         }
         _ => match lang {
-            "go" => compiled::detect_go(&normalized_path, &dir, content, &mut items),
-            "java" => compiled::detect_java(&normalized_path, &dir, content, &mut items),
-            "rust" => compiled::detect_rust(&normalized_path, &dir, content, &mut items),
-            "python" => scripting::detect_python(&normalized_path, &dir, content, &mut items),
+            "go" => compiled::detect_go(normalized_path, &dir, content, &mut items),
+            "java" => compiled::detect_java(normalized_path, &dir, content, &mut items),
+            "rust" => compiled::detect_rust(normalized_path, &dir, content, &mut items),
+            "python" => scripting::detect_python(normalized_path, &dir, content, &mut items),
             "javascript" | "typescript" => {
-                scripting::detect_js_ts(&normalized_path, &dir, lang, content, &mut items);
+                scripting::detect_js_ts(normalized_path, &dir, lang, content, &mut items);
             }
             "shell" => {
-                scripting::detect_shell(&normalized_path, &dir, base_name, content, &mut items);
+                scripting::detect_shell(normalized_path, &dir, base_name, content, &mut items);
             }
             _ => {}
         },
@@ -73,7 +101,7 @@ pub fn detect_gutter_items(
 
     if !extra_detectors.is_empty() {
         scripting::apply_plugin_detectors(
-            &normalized_path,
+            normalized_path,
             &dir,
             base_name,
             lang,

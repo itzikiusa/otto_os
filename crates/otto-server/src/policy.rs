@@ -1512,6 +1512,10 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
             || p.starts_with("/plugin-admin/")
             || p == "/ide/plugins"
             || p.starts_with("/ide/plugins/")
+            || p == "/ide/run-configs"
+            || p.starts_with("/ide/run-configs/")
+            || p == "/ide/debug/sessions"
+            || p.starts_with("/ide/debug/sessions/")
             || matches!(
                 p,
                 "/settings"

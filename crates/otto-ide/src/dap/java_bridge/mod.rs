@@ -136,7 +136,7 @@ async fn spawn_jdwp_jvm(
     jvm_args.extend(spec.args.clone());
 
     let mut jvm =
-        spawn_target_process(target, ssh, &spec.java_bin, &jvm_args, &spec.cwd, &spec.env)?;
+        spawn_target_process(target, ssh, &spec.java_bin, &jvm_args, &spec.cwd, &spec.env).await?;
     let jvm_out = jvm
         .stdout
         .take()

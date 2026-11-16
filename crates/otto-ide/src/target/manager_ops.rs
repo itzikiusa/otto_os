@@ -256,7 +256,7 @@ impl TargetManager {
         target: &ResolvedTarget,
         path: &str,
     ) -> Result<IdeGitBaseResp> {
-        super::git_base::read_git_base_for_target(target, path).await
+        super::git_base::read_git_base_for_target(self, target, path).await
     }
 
     /// Atomically write a UTF-8 file honoring explicit [`HistoryWriteOpts`] preferences.

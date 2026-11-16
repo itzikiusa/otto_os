@@ -814,23 +814,23 @@
     },
     "requests": [
       [
-        "PUT",
-        "/workspaces/ws-test/vault/vaults/3/note",
+        "POST",
+        "/mcp/otto-tools/invoke",
         {
-          "path": "a.md",
-          "content": "x",
-          "if_hash": "h"
+          "tool": "otto.vault_write",
+          "arguments": {
+            "vault_id": 3,
+            "path": "a.md",
+            "content": "x",
+            "if_hash": "h",
+            "workspace_id": "ws-test"
+          },
+          "wait_seconds": 15
         }
       ]
     ],
     "result": {
-      "ok": {
-        "ok": true,
-        "meta": {
-          "ok": true
-        }
-      },
-      "rows": 0
+      "err": "vault_write failed: {\"ok\":true}"
     }
   },
   "otto_vault_write_file {\"vault_id\":3,\"path\":\"a.txt\",\"content\":\"\"}": {
@@ -841,22 +841,22 @@
     },
     "requests": [
       [
-        "PUT",
-        "/workspaces/ws-test/vault/vaults/3/file",
+        "POST",
+        "/mcp/otto-tools/invoke",
         {
-          "path": "a.txt",
-          "content": ""
+          "tool": "otto.vault_write_file",
+          "arguments": {
+            "vault_id": 3,
+            "path": "a.txt",
+            "content": "",
+            "workspace_id": "ws-test"
+          },
+          "wait_seconds": 15
         }
       ]
     ],
     "result": {
-      "ok": {
-        "ok": true,
-        "file": {
-          "ok": true
-        }
-      },
-      "rows": 0
+      "err": "vault_write_file failed: {\"ok\":true}"
     }
   },
   "otto_vault_rename {\"vault_id\":3,\"from\":\"a.md\",\"to\":\"b.md\"}": {
@@ -868,18 +868,21 @@
     "requests": [
       [
         "POST",
-        "/workspaces/ws-test/vault/vaults/3/rename",
+        "/mcp/otto-tools/invoke",
         {
-          "from": "a.md",
-          "to": "b.md"
+          "tool": "otto.vault_rename",
+          "arguments": {
+            "vault_id": 3,
+            "from": "a.md",
+            "to": "b.md",
+            "workspace_id": "ws-test"
+          },
+          "wait_seconds": 15
         }
       ]
     ],
     "result": {
-      "ok": {
-        "ok": true
-      },
-      "rows": 0
+      "err": "vault_rename failed: {\"ok\":true}"
     }
   },
   "otto_vault_delete {\"vault_id\":3,\"path\":\"a.md\"}": {
@@ -889,17 +892,21 @@
     },
     "requests": [
       [
-        "DELETE",
-        "/workspaces/ws-test/vault/vaults/3/note?path=a.md",
-        null
+        "POST",
+        "/mcp/otto-tools/invoke",
+        {
+          "tool": "otto.vault_delete",
+          "arguments": {
+            "vault_id": 3,
+            "path": "a.md",
+            "workspace_id": "ws-test"
+          },
+          "wait_seconds": 15
+        }
       ]
     ],
     "result": {
-      "ok": {
-        "ok": true,
-        "trashed": "a.md"
-      },
-      "rows": 0
+      "err": "vault_delete failed: {\"ok\":true}"
     }
   },
   "otto_list_agent_rooms {}": {

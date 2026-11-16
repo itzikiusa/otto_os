@@ -431,8 +431,8 @@ class RuntimeThreads {
     queuedId: string,
   ): Promise<{ text?: string; attachments: { name: string; mime: string; data_base64: string }[] }> {
     const cached = this.queuedAttachments.get(queuedId);
-    this.queuedAttachments.delete(queuedId);
     const resp = await api.del<UnqueuePromptResp | void>(`/runtime-sessions/${id}/queue/${queuedId}`);
+    this.queuedAttachments.delete(queuedId);
     if (cached && cached.length > 0) {
       return { text: resp && typeof resp === 'object' ? resp.text : undefined, attachments: cached };
     }

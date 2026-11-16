@@ -437,10 +437,9 @@ Auth: `Sec-WebSocket-Protocol: otto-bearer, <token>` (echoed as `otto-bearer`;
 `?token=` → 401). Scoped share tokens, MCP-only tokens and agent-session
 credentials are refused with 403 (`RootRoute::Lsp`).
 
-- **Local target (`connection_id` omitted or empty):** `root` must be an
-  existing directory inside a workspace or repository the caller can access (or
-  an authorized agent worktree under `AGENT_DATA_SUBDIRS`), never Otto's data
-  dir or a secret directory (`~/.ssh`, key files). When optional `file` is
+- **Local target (`connection_id` omitted or empty):** Requires human root
+  authority (`root_authority`), and `root` must be an existing directory
+  outside Otto's data dir and secret directories (`~/.ssh`, key files). When optional `file` is
   supplied inside an authorized directory, the bridge walks up from `file` to
   the nearest module manifest (`go.mod`, `Cargo.toml`, `pom.xml`, `build.gradle*`,
   `package.json`, `pyproject.toml`) so multi-repo workspaces always bind to the

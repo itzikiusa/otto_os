@@ -4,6 +4,7 @@
 import { getToken, laneFetch } from '../../../lib/api/client';
 import type {
   IdeBridgedServiceSummary,
+  IdeDebugLaunch,
   IdeEnvironmentResp,
   IdeHostMapping,
   IdeNetBridgeStatusResp,
@@ -94,7 +95,7 @@ export interface IdeFsTreeResp {
 
 export interface IdeFileReadResp {
   path: string; content: string; language?: string | null; size: number;
-  sha256: string; read_only: boolean; truncated: boolean; line_count: number;
+  sha256: string; binary?: boolean; read_only: boolean; truncated: boolean; line_count: number;
 }
 
 export interface IdeOpenTab {
@@ -282,6 +283,7 @@ export interface IdeDebugOutputEntry { category: 'stdout' | 'stderr' | 'console'
 
 export interface IdeDebugSessionSnapshot {
   id: string; revision?: number; title: string; language: string; adapter: string;
+  config_id?: string | null; launch?: IdeDebugLaunch | null;
   state: 'starting' | 'running' | 'paused' | 'terminated' | 'error'; stopped_reason?: string | null;
   active_thread_id?: number | null; active_frame_id?: number | null;
   paused_file?: string | null; paused_line?: number | null;
@@ -322,6 +324,7 @@ export interface IdeEditorHandle {
   goToLine: (line: number, col?: number) => void;
   focus: () => void;
   getSelectionRange?: () => IdeEditorSelectionRange | null;
+  replaceBufferContent?: (nextContent: string, range?: { from: number; to: number }) => boolean;
   applyAgentEdit?: (nextContent: string, range?: { from: number; to: number }) => boolean;
 }
 
@@ -400,7 +403,8 @@ export function buildNewFileTemplate(fullPath: string, rootPath: string, sibling
 }
 
 export async function streamIdeSse(path: string, headers: Record<string, string>, signal: AbortSignal, onData: (raw: string) => void, onConnected?: () => void): Promise<void> {
-  const token = getToken();
+  const isCollabGuest = path.startsWith('/ide/collab/guest/') || Boolean(headers['X-Ide-Collab-Token']);
+  const token = isCollabGuest ? null : getToken();
   const reqHeaders: Record<string, string> = { Accept: 'text/event-stream', ...headers };
   if (token && !reqHeaders['Authorization']) reqHeaders['Authorization'] = `Bearer ${token}`;
   const resp = await laneFetch('long', path, { method: 'GET', headers: reqHeaders, signal });
@@ -426,8 +430,7 @@ export async function streamIdeSse(path: string, headers: Record<string, string>
 
 export async function collabGuestPost<T>(path: string, guestToken: string | null, body: unknown): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  const bearer = getToken() || guestToken;
-  if (bearer) headers['Authorization'] = `Bearer ${bearer}`;
+  if (guestToken) headers['X-Ide-Collab-Token'] = guestToken;
   const resp = await laneFetch('int', path, { method: 'POST', headers, body: JSON.stringify(body) });
   if (!resp.ok) throw new Error(await resp.text());
   return (await resp.json()) as T;

@@ -101,9 +101,14 @@ pub(crate) async fn spawn_shell_dap_bridge(
     }
 
     let ipc_dir = std::env::temp_dir().join(format!("otto-sh-dap-{}", new_id()));
-    tokio::fs::create_dir_all(&ipc_dir)
-        .await
-        .map_err(|e| Error::Internal(format!("create shell debug ipc dir: {e}")))?;
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder
+            .create(&ipc_dir)
+            .map_err(|e| Error::Internal(format!("create shell debug ipc dir: {e}")))?;
+    }
     let cmd_fifo = ipc_dir.join("cmd.fifo");
     let evt_fifo = ipc_dir.join("evt.fifo");
     let bps_file = ipc_dir.join("bps.txt");
@@ -116,11 +121,9 @@ pub(crate) async fn spawn_shell_dap_bridge(
 
     make_fifo(&cmd_fifo).await?;
     make_fifo(&evt_fifo).await?;
-    tokio::fs::write(&bps_file, "|\n")
-        .await
+    write_ipc_file_0600(&ipc_dir, &bps_file, b"|\n")
         .map_err(|e| Error::Internal(format!("write shell bps file: {e}")))?;
-    tokio::fs::write(&prelude_file, prelude_body)
-        .await
+    write_ipc_file_0600(&ipc_dir, &prelude_file, prelude_body.as_bytes())
         .map_err(|e| Error::Internal(format!("write shell debug prelude: {e}")))?;
 
     let evt_pipe = pipe::OpenOptions::new()
@@ -199,6 +202,18 @@ pub(crate) async fn spawn_shell_dap_bridge(
 }
 
 #[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+fn write_ipc_file_0600(ipc_dir: &Path, dst: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut tmp = tempfile::NamedTempFile::new_in(ipc_dir)?;
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o600))?;
+    tmp.write_all(bytes)?;
+    tmp.persist(dst).map(|_| ()).map_err(|e| e.error)
+}
+
+#[cfg(unix)]
 async fn make_fifo(path: &Path) -> Result<()> {
     let status = Command::new("mkfifo")
         .arg("-m")
@@ -249,7 +264,6 @@ async fn run_shell_bridge_loop(
     let mut dap_in = DapReader::new(r_half);
     let mut dap_out = DapWriter::new(w_half);
     let bps_file = ipc_dir.join("bps.txt");
-    let bps_tmp = ipc_dir.join("bps.tmp");
     let pause_file = ipc_dir.join("pause.flag");
 
     let (trap_tx, mut trap_rx) = mpsc::unbounded_channel::<TrapMsg>();
@@ -304,9 +318,7 @@ async fn run_shell_bridge_loop(
                         }
                         bps_by_file.insert(canon, file_bps);
                         let encoded = encode_bp_list(&bps_by_file);
-                        if tokio::fs::write(&bps_tmp, format!("{encoded}\n")).await.is_ok() {
-                            let _ = tokio::fs::rename(&bps_tmp, &bps_file).await;
-                        }
+                        let _ = write_ipc_file_0600(&ipc_dir, &bps_file, format!("{encoded}\n").as_bytes());
                         if !started || paused.is_some() {
                             let _ = cmd_pipe.write_all(format!("BPS{encoded}\n").as_bytes()).await;
                         }
@@ -318,7 +330,7 @@ async fn run_shell_bridge_loop(
                         let _ = dap_out.send_response(req.seq, "configurationDone", Ok(Some(json!({})))).await;
                     }
                     "pause" => {
-                        let _ = tokio::fs::write(&pause_file, b"1").await;
+                        let _ = write_ipc_file_0600(&ipc_dir, &pause_file, b"1");
                         let _ = dap_out.send_response(req.seq, "pause", Ok(Some(json!({})))).await;
                     }
                     "threads" => {

@@ -144,6 +144,27 @@ pub struct ActiveLimitProviders {
     enabled_families: HashSet<String>,
     claude_tokens: HashSet<String>,
     claude_dir_hints: HashSet<String>,
+    explicit_claude_dirs: Vec<std::path::PathBuf>,
+    claude_dir_to_slug: Vec<(std::path::PathBuf, String)>,
+    claude_norm_to_slug: std::collections::HashMap<String, Option<String>>,
+    installed_families: Option<HashSet<String>>,
+}
+
+fn record_unambiguous_slug(
+    map: &mut std::collections::HashMap<String, Option<String>>,
+    key: String,
+    slug: &str,
+) {
+    if key.is_empty() || key == "claude" {
+        return;
+    }
+    match map.get_mut(&key) {
+        None => {
+            map.insert(key, Some(slug.to_string()));
+        }
+        Some(Some(existing)) if existing == slug => {}
+        Some(slot) => *slot = None,
+    }
 }
 
 fn norm_alnum(s: &str) -> String {
@@ -158,8 +179,47 @@ impl ActiveLimitProviders {
     pub fn from_specs<'a>(
         specs: impl IntoIterator<Item = (&'a str, &'a str, &'a [String], Option<&'a str>)>,
     ) -> Self {
+        Self::from_specs_with_env_in(
+            specs
+                .into_iter()
+                .map(|(slug, cmd, args, family)| (slug, cmd, args, family, None)),
+            &home_dir(),
+        )
+    }
+
+    /// Build from `(slug, cmd, args, model_family, env)` tuples of enabled providers.
+    #[allow(clippy::type_complexity)]
+    pub fn from_specs_with_env<'a>(
+        specs: impl IntoIterator<
+            Item = (
+                &'a str,
+                &'a str,
+                &'a [String],
+                Option<&'a str>,
+                Option<&'a std::collections::BTreeMap<String, String>>,
+            ),
+        >,
+    ) -> Self {
+        Self::from_specs_with_env_in(specs, &home_dir())
+    }
+
+    /// Testable variant of [`Self::from_specs_with_env`] with an explicit `home`.
+    #[allow(clippy::type_complexity)]
+    pub fn from_specs_with_env_in<'a>(
+        specs: impl IntoIterator<
+            Item = (
+                &'a str,
+                &'a str,
+                &'a [String],
+                Option<&'a str>,
+                Option<&'a std::collections::BTreeMap<String, String>>,
+            ),
+        >,
+        home: &Path,
+    ) -> Self {
+        let empty_env = std::collections::BTreeMap::new();
         let mut out = Self::default();
-        for (slug, cmd, args, family) in specs {
+        for (slug, cmd, args, family, env_opt) in specs {
             let slug_lc = slug.trim().to_ascii_lowercase();
             if slug_lc.is_empty() {
                 continue;
@@ -175,6 +235,18 @@ impl ActiveLimitProviders {
                 .rsplit('/')
                 .next()
                 .unwrap_or("");
+            let cmd_lc = cmd_base.to_ascii_lowercase();
+            for (prefix, fam) in [
+                ("claude", "claude"),
+                ("codex", "codex"),
+                ("agy", "agy"),
+                ("gemini", "agy"),
+                ("grok", "grok"),
+            ] {
+                if slug_lc.starts_with(prefix) || cmd_lc.starts_with(prefix) {
+                    out.enabled_families.insert(fam.to_string());
+                }
+            }
             for tok in cmd
                 .split_whitespace()
                 .chain(args.iter().map(String::as_str))
@@ -191,8 +263,52 @@ impl ActiveLimitProviders {
             }
             let is_claude = family.is_some_and(|f| f.eq_ignore_ascii_case("claude"))
                 || slug_lc.starts_with("claude")
-                || cmd_base.to_ascii_lowercase().starts_with("claude");
+                || cmd_lc.starts_with("claude");
+            if is_claude || family.is_none() {
+                let env_map = env_opt.unwrap_or(&empty_env);
+                if let Some(resolved_dir) =
+                    otto_transcript::claude_config::resolve_claude_config_dir(
+                        slug,
+                        cmd,
+                        args,
+                        env_map.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+                        home,
+                    )
+                {
+                    out.enabled_families.insert("claude".to_string());
+                    if let Some(name) = resolved_dir.file_name().and_then(|n| n.to_str()) {
+                        if name.starts_with(".claude-") {
+                            out.claude_dir_hints.insert(name.to_string());
+                            let norm = norm_alnum(name.trim_start_matches('.'));
+                            if !norm.is_empty() && norm != "claude" {
+                                out.claude_tokens.insert(norm.clone());
+                                if slug_lc != "claude" {
+                                    record_unambiguous_slug(
+                                        &mut out.claude_norm_to_slug,
+                                        norm,
+                                        &slug_lc,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if slug_lc != "claude" {
+                        out.claude_dir_to_slug
+                            .push((resolved_dir.clone(), slug_lc.clone()));
+                    }
+                    if !out.explicit_claude_dirs.contains(&resolved_dir) {
+                        out.explicit_claude_dirs.push(resolved_dir);
+                    }
+                }
+            }
             if is_claude {
+                if slug_lc != "claude" {
+                    record_unambiguous_slug(
+                        &mut out.claude_norm_to_slug,
+                        norm_alnum(&slug_lc),
+                        &slug_lc,
+                    );
+                }
                 for candidate in [slug_lc.as_str(), cmd_base] {
                     let norm = norm_alnum(candidate);
                     if !norm.is_empty() && norm != "claude" {
@@ -204,30 +320,260 @@ impl ActiveLimitProviders {
         out
     }
 
-    /// Whether `provider` (`claude`, `codex`, `agy`, `grok`, …) is enabled.
+    /// Restrict CLI-probed providers (`agy`, `grok`) to families whose binary
+    /// or shell alias actually resolves on this machine.
+    pub fn with_installed_families<I, S>(mut self, families: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.installed_families = Some(
+            families
+                .into_iter()
+                .map(|s| s.into().trim().to_ascii_lowercase())
+                .collect(),
+        );
+        self
+    }
+
+    /// Whether the exact provider slug (`"claude"`, `"claudework"`, …) is enabled.
+    pub fn is_builtin_slug_enabled(&self, slug: &str) -> bool {
+        self.enabled_slugs
+            .contains(&slug.trim().to_ascii_lowercase())
+    }
+
+    /// Whether any provider in `family` (`"claude"`, `"codex"`, `"agy"`, `"grok"`) is enabled.
+    pub fn is_family_enabled(&self, family: &str) -> bool {
+        let lc = family.trim().to_ascii_lowercase();
+        self.enabled_slugs.contains(&lc) || self.enabled_families.contains(&lc)
+    }
+
+    /// Whether `provider` (`claude`, `codex`, `agy`, `grok`, …) is enabled at the family level.
     pub fn is_enabled(&self, provider: &str) -> bool {
-        let lc = provider.trim().to_ascii_lowercase();
-        if lc == "claude" {
-            self.enabled_slugs.contains("claude")
-        } else {
-            self.enabled_slugs.contains(&lc) || self.enabled_families.contains(&lc)
-        }
+        self.is_family_enabled(provider)
+    }
+
+    /// Whether `family`'s CLI is installed/resolvable (defaults to `true` when unset).
+    pub fn is_installed(&self, family: &str) -> bool {
+        let lc = family.trim().to_ascii_lowercase();
+        self.installed_families
+            .as_ref()
+            .is_none_or(|set| set.contains(&lc))
+    }
+
+    /// Whether the default `~/.claude` login should be shown: when built-in
+    /// `"claude"` is enabled OR a custom provider explicitly points at `default_dir`.
+    pub fn is_default_claude_enabled(&self, default_dir: &Path) -> bool {
+        self.is_builtin_slug_enabled("claude")
+            || self.explicit_claude_dirs.iter().any(|d| d == default_dir)
+    }
+
+    /// Explicit/inferred custom `CLAUDE_CONFIG_DIR` paths of enabled providers.
+    pub fn explicit_claude_dirs(&self) -> &[std::path::PathBuf] {
+        &self.explicit_claude_dirs
     }
 
     /// Whether a non-default Claude config dir (`~/.claude-*` or
     /// `~/.config/claude`) corresponds to an enabled provider.
     pub fn matches_claude_config_dir(&self, dir: &Path) -> bool {
+        if self.explicit_claude_dirs.iter().any(|d| d == dir) {
+            return true;
+        }
         let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
             return false;
         };
         if !name.starts_with(".claude-") {
-            return self.is_enabled("claude");
+            return self.is_builtin_slug_enabled("claude");
         }
         if self.claude_dir_hints.contains(name) {
             return true;
         }
         let norm = norm_alnum(name.trim_start_matches('.'));
         !norm.is_empty() && norm != "claude" && self.claude_tokens.contains(&norm)
+    }
+
+    /// Resolve a recorded `usage_events.provider` label (`"claude-work"`,
+    /// `"claude:~/.claude-work"`, `"grok"`, …) to its canonical active slug,
+    /// or `None` when `filter_inactive` is set and the provider is disabled or
+    /// belongs to an orphan `~/.claude-*` directory.
+    pub fn resolve_usage_provider_in(
+        &self,
+        raw: &str,
+        filter_inactive: bool,
+        home: &Path,
+    ) -> Option<String> {
+        let trimmed = raw.trim();
+        let lc = trimmed.to_ascii_lowercase();
+        if self.enabled_slugs.contains(&lc) {
+            return Some(lc);
+        }
+        if let Some(rest) = trimmed
+            .strip_prefix("claude:")
+            .or_else(|| trimmed.strip_prefix("CLAUDE:"))
+            .map(str::trim)
+        {
+            if !rest.starts_with("account:") {
+                let dir = if let Some(rel) = rest.strip_prefix("~/") {
+                    home.join(rel)
+                } else if rest == "~" {
+                    home.to_path_buf()
+                } else {
+                    std::path::PathBuf::from(rest)
+                };
+                let mut matched_slug: Option<&str> = None;
+                let mut ambiguous = false;
+                for (cand, slug) in &self.claude_dir_to_slug {
+                    if cand == &dir {
+                        match matched_slug {
+                            None => matched_slug = Some(slug.as_str()),
+                            Some(prev) if prev == slug => {}
+                            Some(_) => ambiguous = true,
+                        }
+                    }
+                }
+                if let Some(slug) = matched_slug.filter(|_| !ambiguous) {
+                    return Some(slug.to_string());
+                }
+                if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+                    let norm = norm_alnum(name.trim_start_matches('.'));
+                    if let Some(Some(slug)) = self.claude_norm_to_slug.get(&norm) {
+                        return Some(slug.clone());
+                    }
+                }
+                let default_dir = home.join(".claude");
+                let active = if dir == default_dir {
+                    self.is_default_claude_enabled(&default_dir)
+                } else {
+                    self.matches_claude_config_dir(&dir)
+                };
+                return (!filter_inactive || active).then_some(lc);
+            }
+        }
+        if lc.starts_with("claude-") {
+            let norm = norm_alnum(&lc);
+            if let Some(Some(slug)) = self.claude_norm_to_slug.get(&norm) {
+                return Some(slug.clone());
+            }
+            let active = self.claude_dir_hints.contains(&format!(".{lc}"))
+                || self.claude_tokens.contains(&norm);
+            return (!filter_inactive || active).then_some(lc);
+        }
+        if filter_inactive {
+            match lc.as_str() {
+                "claude" if !self.is_default_claude_enabled(&home.join(".claude")) => {
+                    return None;
+                }
+                "codex" | "agy" | "grok" | "opencode" | "pi" if !self.is_family_enabled(&lc) => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        Some(lc)
+    }
+
+    /// Canonicalize `claude-work` / `claude:<dir>` rows onto their matching
+    /// custom provider slug (e.g. `claudework`) and, when `filter_inactive` is
+    /// true (`otto_only = false`), hide disabled built-ins and orphan
+    /// `~/.claude-*` directories from `summary`.
+    pub fn canonicalize_summary(&self, summary: &mut crate::UsageSummary, filter_inactive: bool) {
+        self.canonicalize_summary_in(summary, filter_inactive, &home_dir());
+    }
+
+    pub fn canonicalize_summary_in(
+        &self,
+        summary: &mut crate::UsageSummary,
+        filter_inactive: bool,
+        home: &Path,
+    ) {
+        let mut merged_providers: Vec<crate::ProviderUsage> =
+            Vec::with_capacity(summary.providers.len());
+        for mut row in std::mem::take(&mut summary.providers) {
+            let Some(canon) = self.resolve_usage_provider_in(&row.provider, filter_inactive, home)
+            else {
+                summary.total_events = summary.total_events.saturating_sub(row.events);
+                summary.total_input_tokens =
+                    summary.total_input_tokens.saturating_sub(row.input_tokens);
+                summary.total_output_tokens = summary
+                    .total_output_tokens
+                    .saturating_sub(row.output_tokens);
+                summary.total_cache_read_tokens = summary
+                    .total_cache_read_tokens
+                    .saturating_sub(row.cache_read_tokens);
+                summary.total_cache_write_tokens = summary
+                    .total_cache_write_tokens
+                    .saturating_sub(row.cache_write_tokens);
+                summary.total_tokens = summary.total_tokens.saturating_sub(row.total_tokens);
+                summary.total_cost_usd = (summary.total_cost_usd - row.cost_usd).max(0.0);
+                continue;
+            };
+            row.provider = canon;
+            if let Some(existing) = merged_providers
+                .iter_mut()
+                .find(|p| p.provider == row.provider)
+            {
+                existing.events += row.events;
+                existing.input_tokens += row.input_tokens;
+                existing.output_tokens += row.output_tokens;
+                existing.cache_read_tokens += row.cache_read_tokens;
+                existing.cache_write_tokens += row.cache_write_tokens;
+                existing.total_tokens += row.total_tokens;
+                existing.cost_usd += row.cost_usd;
+            } else {
+                merged_providers.push(row);
+            }
+        }
+        merged_providers.sort_by_key(|a| std::cmp::Reverse(a.total_tokens));
+        summary.providers = merged_providers;
+
+        let mut merged_models: Vec<crate::ModelUsage> = Vec::with_capacity(summary.models.len());
+        for mut m in std::mem::take(&mut summary.models) {
+            let Some(canon) = self.resolve_usage_provider_in(&m.provider, filter_inactive, home)
+            else {
+                continue;
+            };
+            m.provider = canon;
+            if let Some(existing) = merged_models
+                .iter_mut()
+                .find(|x| x.provider == m.provider && x.model == m.model)
+            {
+                existing.events += m.events;
+                existing.input_tokens += m.input_tokens;
+                existing.output_tokens += m.output_tokens;
+                existing.cache_read_tokens += m.cache_read_tokens;
+                existing.cache_write_tokens += m.cache_write_tokens;
+                existing.total_tokens += m.total_tokens;
+                existing.cost_usd += m.cost_usd;
+            } else {
+                merged_models.push(m);
+            }
+        }
+        merged_models.sort_by_key(|a| std::cmp::Reverse(a.total_tokens));
+        summary.models = merged_models;
+
+        let mut merged_daily_models: Vec<crate::DailyModelUsage> =
+            Vec::with_capacity(summary.daily_models.len());
+        for mut dm in std::mem::take(&mut summary.daily_models) {
+            let Some(canon) = self.resolve_usage_provider_in(&dm.provider, filter_inactive, home)
+            else {
+                continue;
+            };
+            dm.provider = canon;
+            if let Some(existing) = merged_daily_models
+                .iter_mut()
+                .find(|x| x.day == dm.day && x.provider == dm.provider && x.model == dm.model)
+            {
+                existing.input_tokens += dm.input_tokens;
+                existing.output_tokens += dm.output_tokens;
+                existing.cache_read_tokens += dm.cache_read_tokens;
+                existing.cache_write_tokens += dm.cache_write_tokens;
+                existing.total_tokens += dm.total_tokens;
+                existing.cost_usd += dm.cost_usd;
+            } else {
+                merged_daily_models.push(dm);
+            }
+        }
+        summary.daily_models = merged_daily_models;
     }
 }
 
@@ -338,11 +684,12 @@ fn build_filtered(
                 rows.push(codex_row(key, None, label, "default", &root.dir, now));
             }
         }
-        if active.is_none_or(|a| a.is_enabled("agy"))
-            && roots
-                .agy
-                .iter()
-                .any(|r| r.kind != RootKind::Account && r.dir.is_dir())
+        if active.is_none_or(|a| {
+            a.is_enabled("agy") && (readings.contains_key("agy") || a.is_installed("agy"))
+        }) && roots
+            .agy
+            .iter()
+            .any(|r| r.kind != RootKind::Account && r.dir.is_dir())
         {
             rows.push(match readings.get("agy") {
                 Some(r) => probes::agy_row(r, now),
@@ -358,7 +705,7 @@ fn build_filtered(
         }
         // A reading is shown only when `grok` is enabled in Settings (hiding
         // `grok` immediately drops any cached reading from earlier in the run).
-        if active.is_none_or(|a| a.is_enabled("grok")) {
+        if active.is_none_or(|a| a.is_enabled("grok") && a.is_installed("grok")) {
             if let Some(r) = readings.get("grok") {
                 rows.push(probes::grok_row(r, now));
             }
@@ -837,12 +1184,21 @@ mod tests {
             },
         )]);
         let args = vec!["--dangerously-skip-permissions".to_string()];
-        let active = ActiveLimitProviders::from_specs([
-            ("codex", "codex", &[][..], Some("codex")),
-            ("claude", "claude", args.as_slice(), Some("claude")),
-            ("claudework", "claude-work", args.as_slice(), Some("claude")),
-            ("agy", "agy", &[][..], Some("agy")),
-        ]);
+        let active = ActiveLimitProviders::from_specs_with_env_in(
+            [
+                ("codex", "codex", &[][..], Some("codex"), None),
+                ("claude", "claude", args.as_slice(), Some("claude"), None),
+                (
+                    "claudework",
+                    "claude-work",
+                    args.as_slice(),
+                    Some("claude"),
+                    None,
+                ),
+                ("agy", "agy", &[][..], Some("agy"), None),
+            ],
+            &home,
+        );
         let rows = build_filtered(
             &[],
             true,
@@ -864,5 +1220,142 @@ mod tests {
                 "agy:default",
             ]
         );
+    }
+
+    #[test]
+    fn custom_only_claudework_hides_default_claude_uninstalled_agy_and_merges_summary_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".claude/projects")).unwrap();
+        // Freshly logged-in `~/.claude-work` with `.credentials.json` before its first session.
+        std::fs::create_dir_all(home.join(".claude-work")).unwrap();
+        std::fs::write(home.join(".claude-work/.credentials.json"), "{}").unwrap();
+        std::fs::create_dir_all(home.join(".claude-sub/projects")).unwrap();
+        std::fs::create_dir_all(home.join(".codex/sessions")).unwrap();
+        std::fs::create_dir_all(home.join(".gemini/antigravity-cli/brain")).unwrap();
+
+        let active = ActiveLimitProviders::from_specs_with_env_in(
+            [
+                ("codex", "codex", &[][..], Some("codex"), None),
+                ("claudework", "claude-work", &[][..], Some("claude"), None),
+                ("agy", "agy", &[][..], Some("agy"), None),
+            ],
+            &home,
+        )
+        .with_installed_families(["codex", "claude"]);
+
+        assert!(!active.is_builtin_slug_enabled("claude"));
+        assert!(active.is_family_enabled("claude"));
+        assert!(active.is_enabled("claude"));
+        assert!(active.is_enabled("agy"));
+        assert!(!active.is_installed("agy"));
+
+        let env = RootsEnv {
+            explicit: None,
+            isolated: false,
+            codex_home: None,
+        };
+        let rows = build_filtered(
+            &[],
+            true,
+            dir.path(),
+            &home,
+            &env,
+            &Default::default(),
+            &Default::default(),
+            at("2026-11-15T20:00:00Z"),
+            Some(&active),
+        );
+        let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["codex:default", "claude:~/.claude-work"],
+            "disabled default ~/.claude, orphan ~/.claude-sub, and uninstalled agy must stay hidden"
+        );
+
+        let mut summary = crate::UsageSummary {
+            days: 7,
+            total_events: 10,
+            total_input_tokens: 1_000,
+            total_output_tokens: 500,
+            total_tokens: 1_500,
+            total_cost_usd: 1.50,
+            providers: vec![
+                crate::ProviderUsage {
+                    provider: "claudework".into(),
+                    events: 3,
+                    input_tokens: 300,
+                    output_tokens: 150,
+                    total_tokens: 450,
+                    cost_usd: 0.45,
+                    ..Default::default()
+                },
+                crate::ProviderUsage {
+                    provider: "claude-work".into(),
+                    events: 4,
+                    input_tokens: 400,
+                    output_tokens: 200,
+                    total_tokens: 600,
+                    cost_usd: 0.60,
+                    ..Default::default()
+                },
+                crate::ProviderUsage {
+                    provider: "claude-sub".into(),
+                    events: 2,
+                    input_tokens: 200,
+                    output_tokens: 100,
+                    total_tokens: 300,
+                    cost_usd: 0.30,
+                    ..Default::default()
+                },
+                crate::ProviderUsage {
+                    provider: "grok".into(),
+                    events: 1,
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    total_tokens: 150,
+                    cost_usd: 0.15,
+                    ..Default::default()
+                },
+            ],
+            models: vec![
+                crate::ModelUsage {
+                    provider: "claudework".into(),
+                    model: "claude-sonnet-4-5".into(),
+                    events: 3,
+                    total_tokens: 450,
+                    cost_usd: 0.45,
+                    ..Default::default()
+                },
+                crate::ModelUsage {
+                    provider: "claude:~/.claude-work".into(),
+                    model: "claude-sonnet-4-5".into(),
+                    events: 4,
+                    total_tokens: 600,
+                    cost_usd: 0.60,
+                    ..Default::default()
+                },
+                crate::ModelUsage {
+                    provider: "claude-sub".into(),
+                    model: "claude-sonnet-4-5".into(),
+                    events: 2,
+                    total_tokens: 300,
+                    cost_usd: 0.30,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        active.canonicalize_summary_in(&mut summary, true, &home);
+        assert_eq!(summary.providers.len(), 1);
+        assert_eq!(summary.providers[0].provider, "claudework");
+        assert_eq!(summary.providers[0].events, 7);
+        assert_eq!(summary.providers[0].total_tokens, 1_050);
+        assert_eq!(summary.total_events, 7);
+        assert_eq!(summary.total_tokens, 1_050);
+        assert_eq!(summary.models.len(), 1);
+        assert_eq!(summary.models[0].provider, "claudework");
+        assert_eq!(summary.models[0].total_tokens, 1_050);
     }
 }

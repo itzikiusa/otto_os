@@ -3,7 +3,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use otto_core::{Error, Result};
@@ -60,13 +59,17 @@ pub(super) fn normalize_target_filter(
     canon_root: &Path,
     raw: Option<&str>,
 ) -> Result<Option<String>> {
-    let Some(trimmed) = raw.map(str::trim).filter(|s| !s.is_empty() && *s != ".") else {
+    let Some(raw_str) = raw.filter(|s| !s.is_empty() && *s != ".") else {
         return Ok(None);
     };
-    let candidate = if trimmed.starts_with('~') {
-        otto_core::paths::expand_home_strict(trimmed).map_err(Error::Invalid)?
+    let decoded = crate::target::sdk_paths::strip_file_uri(raw_str);
+    if decoded.is_empty() || decoded == "." {
+        return Ok(None);
+    }
+    let candidate = if decoded.starts_with('~') {
+        otto_core::paths::expand_home_strict(&decoded).map_err(Error::Invalid)?
     } else {
-        let p = Path::new(trimmed);
+        let p = Path::new(&decoded);
         if p.is_absolute() {
             p.to_path_buf()
         } else {
@@ -130,8 +133,7 @@ pub(super) fn entry_path_allowed(
 }
 
 pub(super) fn is_binary_or_invalid_utf8(bytes: &[u8]) -> bool {
-    let sample = &bytes[..bytes.len().min(8192)];
-    sample.contains(&0) || std::str::from_utf8(bytes).is_err()
+    bytes.contains(&0) || std::str::from_utf8(bytes).is_err()
 }
 
 pub(super) fn now_ms() -> u64 {
@@ -189,31 +191,26 @@ pub(super) fn write_index(root_dir: &Path, idx: &RootIndex) -> Result<()> {
 }
 
 pub(super) fn write_atomic_sync(dest: &Path, bytes: &[u8]) -> Result<()> {
-    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    use std::io::Write;
     let parent = dest
         .parent()
         .ok_or_else(|| Error::Invalid("path has no parent directory".into()))?;
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = parent.join(format!(".otto-lh-{}-{seq}.tmp", std::process::id()));
     let existing_perms = std::fs::metadata(dest).ok().map(|m| m.permissions());
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)
-            .map_err(|e| Error::Internal(format!("create temp file '{}': {e}", tmp.display())))?;
-        f.write_all(bytes)
-            .map_err(|e| Error::Internal(format!("write temp file '{}': {e}", tmp.display())))?;
-        let _ = f.sync_all();
-    }
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| Error::Internal(format!("create temp file in '{}': {e}", parent.display())))?;
+    tmp.write_all(bytes)
+        .map_err(|e| Error::Internal(format!("write temp file '{}': {e}", tmp.path().display())))?;
+    let _ = tmp.as_file().sync_all();
     if let Some(perms) = existing_perms {
-        let _ = std::fs::set_permissions(&tmp, perms);
+        let _ = std::fs::set_permissions(tmp.path(), perms);
     }
-    if let Err(e) = std::fs::rename(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(Error::Internal(format!(
-            "commit atomic write '{}': {e}",
-            dest.display()
-        )));
-    }
+    tmp.persist(dest).map_err(|e| {
+        Error::Internal(format!(
+            "commit atomic write '{}': {}",
+            dest.display(),
+            e.error
+        ))
+    })?;
     Ok(())
 }
 

@@ -114,6 +114,7 @@
     gap: 4px;
     flex: none;
     font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
   .ar[data-tone='live'] .ar-state {

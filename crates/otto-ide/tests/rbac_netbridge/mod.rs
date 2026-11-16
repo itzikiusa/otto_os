@@ -234,13 +234,28 @@ async fn non_root_netbridge_cross_tenant_ssh_k8s_and_namespace_rbac() {
         .unwrap()
         .owner_user_id = Some("u_bob".into());
 
-    let (st_env_edit, body_env_edit) = send_json(
+    // Non-root mutating `env_vars` on `Local` requires `root_authority(user)`:
+    let (st_local_env_forbid, _) = send_json(
         &app_alice,
         Method::PUT,
         "/ide/environments",
         Some(json!({
             "target": { "kind": "local", "root": alice_root },
             "env_vars": [{ "key": "LOG_LEVEL", "value": "debug", "secret": false }],
+        })),
+    )
+    .await;
+    assert_eq!(st_local_env_forbid, StatusCode::FORBIDDEN);
+
+    // Saving permitted non-root Local settings (`go_build_tags`) alongside an unchanged
+    // disabled stale `network_bridge` must NOT 403, whereas re-enabling the stale bridge MUST 403.
+    let (st_env_edit, body_env_edit) = send_json(
+        &app_alice,
+        Method::PUT,
+        "/ide/environments",
+        Some(json!({
+            "target": { "kind": "local", "root": alice_root },
+            "go_build_tags": ["integration"],
             "network_bridge": {
                 "enabled": false,
                 "k8s_cluster_id": "k8s_alice",
@@ -252,7 +267,7 @@ async fn non_root_netbridge_cross_tenant_ssh_k8s_and_namespace_rbac() {
     assert_eq!(
         st_env_edit,
         StatusCode::OK,
-        "saving unrelated env_vars with unchanged disabled stale bridge must succeed: {body_env_edit}"
+        "saving unrelated go_build_tags with unchanged disabled stale bridge must succeed: {body_env_edit}"
     );
 
     let (st_reenable, _) = send_json(

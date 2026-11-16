@@ -317,12 +317,13 @@ pub(super) async fn add_project_folder<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Json(req): Json<IdeProjectFolderReq>,
 ) -> ApiResult<Json<IdeEnvironmentResp>> {
+    let has_root_auth = otto_core::auth::root_authority(&user);
     let _ = ctx
         .ide()
         .targets
         .resolve_write(&ctx, &user, &req.target)
         .await?;
-    if req.target.kind == IdeTargetKind::Local && !user.is_root {
+    if req.target.kind == IdeTargetKind::Local && !has_root_auth {
         ctx.authorize_local_target(&user, &IdeTargetSpec::local(req.folder_path.clone()), true)
             .await?;
     }
@@ -360,6 +361,7 @@ pub(super) async fn get_environments<S: IdeCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<IdeTargetQuery>,
 ) -> ApiResult<Json<IdeEnvironmentsResp>> {
+    let has_root_auth = otto_core::auth::root_authority(&user);
     let mut target = q.into_target_spec()?;
     let ssh = ctx
         .ide()
@@ -380,7 +382,7 @@ pub(super) async fn get_environments<S: IdeCtx>(
             &ctx.ide().targets,
             &target,
             ssh.as_ref(),
-            user.is_root,
+            has_root_auth,
         )
         .await?;
     Ok(Json(resp))
@@ -389,15 +391,25 @@ pub(super) async fn get_environments<S: IdeCtx>(
 pub(super) async fn put_environments<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
-    Json(mut req): Json<IdeUpdateEnvironmentReq>,
+    Json(raw_body): Json<serde_json::Value>,
 ) -> ApiResult<Json<IdeEnvironmentResp>> {
+    let has_root_auth = otto_core::auth::root_authority(&user);
+    let has_env_vars_key = raw_body.as_object().is_some_and(|o| {
+        o.contains_key("env_vars") || o.contains_key("vars") || o.contains_key("env")
+    });
+    let has_dotenv_key = raw_body
+        .as_object()
+        .is_some_and(|o| o.contains_key("dotenv_path") || o.contains_key("env_file"));
+    let mut req: IdeUpdateEnvironmentReq =
+        serde_json::from_value(raw_body.clone()).map_err(|e| Error::Invalid(e.to_string()))?;
+    req.target.validate()?;
     let _ = ctx
         .ide()
         .targets
         .resolve_write(&ctx, &user, &req.target)
         .await?;
     if let Some(ref extra_roots) = req.additional_roots {
-        if req.target.kind == IdeTargetKind::Local && !user.is_root {
+        if req.target.kind == IdeTargetKind::Local && !has_root_auth {
             for r in extra_roots {
                 if !r.trim().is_empty() {
                     ctx.authorize_local_target(&user, &IdeTargetSpec::local(r.clone()), true)
@@ -410,13 +422,27 @@ pub(super) async fn put_environments<S: IdeCtx>(
         .environments
         .enrich_target_roots_authorized(&ctx, &user, &mut req.target, true)
         .await;
-    let prev_nb = ctx
+    let prev_env = ctx
         .ide()
         .environments
         .get_project_env(&ctx.pool(), &req.target)
-        .await
-        .ok()
-        .and_then(|p| p.network_bridge);
+        .await?;
+    if req.target.kind == IdeTargetKind::Local && !has_root_auth {
+        if crate::environments::local_env_mutation_requires_root(
+            raw_body.as_object(),
+            &req,
+            &prev_env,
+        ) {
+            return Err(otto_core::auth::root_refusal().into());
+        }
+        if !has_env_vars_key {
+            req.env_vars = prev_env.env_vars.clone();
+        }
+        if !has_dotenv_key {
+            req.dotenv_path = prev_env.dotenv_path.clone();
+        }
+    }
+    let prev_nb = prev_env.network_bridge;
     let mut should_evict_nb = false;
     if let Some(ref raw_nb) = req.network_bridge {
         let clean_nb_opt = crate::netbridge::sanitize_network_bridge(Some(raw_nb.clone()))?;
@@ -474,7 +500,7 @@ pub(super) async fn put_environments<S: IdeCtx>(
     let env = ctx
         .ide()
         .environments
-        .update_environment_for_user(&ctx.pool(), ctx.secrets(), req, user.is_root)
+        .update_environment_for_user(&ctx.pool(), ctx.secrets(), req, has_root_auth)
         .await?;
     if go_tags_updated && req_target.kind == IdeTargetKind::Local {
         ctx.ide()

@@ -150,3 +150,75 @@ test('buildIdeHoverRequest matches backend IdeHoverReq without duplicate column 
   assert.equal(buildIdeHoverRequest({ root: '/ws/app', filePath: '.env.production', content: '', line: 1, character: 0 }), null);
   assert.equal(buildIdeHoverRequest({ root: '/ws/app', filePath: '~/.ssh/id_ed25519', content: '', line: 1, character: 0 }), null);
 });
+
+test('extractCleanSymbolHoverFromSource disambiguates selector calls (g.pool.Submit) vs enclosing method and external receivers', () => {
+  // 1. Same-file Pool struct + GoRoutineConcurrencyHelper struct both defining `Submit`:
+  // Hovering `g.pool.Submit(f)` MUST resolve to `func (p *Pool) Submit`, NEVER `GoRoutineConcurrencyHelper.Submit`!
+  const sameFilePoolSrc = [
+    'package concurrency',
+    '',
+    'type Pool struct{}',
+    '',
+    '// Submit enqueues work onto the underlying goroutine pool.',
+    'func (p *Pool) Submit(task func()) error {',
+    '\treturn nil',
+    '}',
+    '',
+    'type GoRoutineConcurrencyHelper struct {',
+    '\tpool *Pool',
+    '}',
+    '',
+    '// Submit submits a task to the goroutine pool for execution.',
+    'func (g *GoRoutineConcurrencyHelper) Submit(ctx context.Context, f func()) {',
+    '\terr := g.pool.Submit(f)',
+    '\t_ = err',
+    '}',
+  ].join('\n');
+
+  const callOffsetSameFile = sameFilePoolSrc.indexOf('g.pool.Submit(f)') + 'g.pool.'.length;
+  const sameFileHover = extractCleanSymbolHoverFromSource(
+    sameFilePoolSrc,
+    'Submit',
+    'go',
+    true,
+    callOffsetSameFile,
+  );
+  assert.ok(sameFileHover, 'same-file target receiver Pool.Submit should resolve cleanly');
+  assert.equal(sameFileHover.signature, 'func (p *Pool) Submit(task func()) error');
+  assert.equal(sameFileHover.summary, 'Submit enqueues work onto the underlying goroutine pool.');
+  assert.ok(!sameFileHover.signature.includes('GoRoutineConcurrencyHelper'));
+
+  // 2. External package receiver (`pool *ants.Pool`) alongside an unrelated same-file `Worker.Submit`:
+  // Hovering `g.pool.Submit(f)` MUST return `null` from same-file fallback so neither enclosing
+  // `GoRoutineConcurrencyHelper.Submit` nor unrelated `Worker.Submit` hijacks the hover!
+  const externalPoolSrc = [
+    'package concurrency',
+    '',
+    'type Worker struct{}',
+    'func (w *Worker) Submit(job int) {}',
+    '',
+    'type GoRoutineConcurrencyHelper struct {',
+    '\tpool *ants.Pool',
+    '}',
+    '',
+    '// Submit submits a task to the goroutine pool for execution.',
+    'func (g *GoRoutineConcurrencyHelper) Submit(ctx context.Context, f func()) {',
+    '\terr := g.pool.Submit(f)',
+    '\t_ = err',
+    '}',
+  ].join('\n');
+
+  const callOffsetExternal = externalPoolSrc.indexOf('g.pool.Submit(f)') + 'g.pool.'.length;
+  const externalHover = extractCleanSymbolHoverFromSource(
+    externalPoolSrc,
+    'Submit',
+    'go',
+    true,
+    callOffsetExternal,
+  );
+  assert.equal(
+    externalHover,
+    null,
+    'external *ants.Pool selector call must never match enclosing GoRoutineConcurrencyHelper.Submit or unrelated Worker.Submit',
+  );
+});

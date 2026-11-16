@@ -67,7 +67,7 @@ export function applyConcreteEditsToView(view: EditorView, edits: IdeConcreteTex
     let to: number;
     if (ed.end_line > doc.lines || (ed.new_text === '' && ed.end_line > ed.start_line && ed.end_col === 1)) {
       const prevLn = doc.line(Math.max(1, Math.min(doc.lines, ed.end_line - 1)));
-      to = Math.min(doc.length, prevLn.to + 1);
+      to = Math.max(from, Math.min(doc.length, prevLn.to + 1));
     } else {
       to = Math.max(from, Math.min(doc.length, eLine.from + Math.max(0, (ed.end_col || 1) - 1)));
     }

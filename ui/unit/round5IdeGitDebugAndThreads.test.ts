@@ -166,7 +166,7 @@ describe('Round 5 — Bug U1: Editor Git HEAD diff gutter & persisted baseline a
     mode = 'outside';
     assert.equal(
       await lazyMod.runResolveIdeGitBaseContent('/Users/dev/scratch/notes.txt', 'disk text'),
-      'disk text',
+      undefined,
     );
 
     mode = 'binary';
@@ -179,6 +179,28 @@ describe('Round 5 — Bug U1: Editor Git HEAD diff gutter & persisted baseline a
     await assert.rejects(() =>
       lazyMod.runResolveIdeGitBaseContent('/Users/dev/koala-svc/main.go', 'disk text'),
     );
+  });
+
+  it('diffs 5,000-line files with UTF-8 BOM, CRLF, and bare CR accurately without marking all rows changed', () => {
+    const baseRows = Array.from({ length: 5000 }, (_, idx) => `property.key.${idx}=value_${idx}`);
+    const headWithBomAndCrlf = `\uFEFF${baseRows.join('\r\n')}\r\n`;
+    const editedRows = [...baseRows];
+    editedRows[2499] = 'property.key.2499=updated_value';
+    const editorLf = `${editedRows.join('\n')}\n`;
+
+    const hunks = computeIdeDiffHunks(editorLf, headWithBomAndCrlf);
+    assert.equal(hunks.length, 1, 'editing 1 line in a 5,000-line BOM+CRLF file must produce exactly 1 hunk');
+    assert.equal(hunks[0].kind, 'mod');
+    assert.equal(hunks[0].markerStartLine, 2500);
+    assert.equal(hunks[0].markerEndLine, 2500);
+
+    // Trailing-newline-only difference marks only the final line, never all 5,000 rows!
+    const noTrailingNl = baseRows.join('\n');
+    const nlHunks = computeIdeDiffHunks(noTrailingNl, headWithBomAndCrlf);
+    assert.ok(nlHunks.length <= 1);
+    if (nlHunks.length === 1) {
+      assert.equal(nlHunks[0].markerStartLine, 5000);
+    }
   });
 });
 
@@ -315,20 +337,32 @@ describe('Round 5 — Bugs U3, U5 & U6: Zero-shift IDE gutter, Open in Git Modul
     const upserted: string[] = [];
     const openedTabs: Array<[string, string]> = [];
     const routes: string[] = [];
+    const infos: string[] = [];
+    const selectedWs: string[] = [];
 
-    const makePanel = (repo: { id: string; name: string; path: string } | null) =>
+    const makePanel = (repo: { id: string; name: string; path: string; workspace_id?: string } | null) =>
       componentFunctions(
         new URL('../src/modules/ide/git/IdeGitToolPanel.svelte', import.meta.url),
         ['openInGitModule'],
         {
-          ide: { activePath: repo?.path ?? '/Users/itziklavon', target: { root: '/Users/itziklavon' } },
+          ide: { activePath: repo?.path ?? '/Users/itziklavon', target: { kind: 'local', root: '/Users/itziklavon' } },
           ideGit: {
             activeRoot: null,
             resolveRepoForPath: async () => repo,
           },
           activeRepo: repo,
           isBroadNonProjectRootClient,
+          SCRATCH_WORKSPACE_ID: '__scratch__',
+          ws: {
+            workspaces: [{ id: 'ws_main' }, { id: 'ws_other' }],
+            currentId: 'ws_main',
+            select: (id: string) => selectedWs.push(id),
+          },
+          toasts: {
+            info: (title: string) => infos.push(title),
+          },
           git: {
+            initializeOpenTabs: async () => {},
             upsertRepo: (r: { id: string }) => upserted.push(r.id),
             openRepoTab: (id: string, sub: string) => openedTabs.push([id, sub]),
           },
@@ -338,16 +372,18 @@ describe('Round 5 — Bugs U3, U5 & U6: Zero-shift IDE gutter, Open in Git Modul
         },
       );
 
-    // Broad `$HOME` repo must NOT be upserted or opened as a tab, yet still routes directly to `git` (never `focus`).
+    // Broad `$HOME` repo must NOT be upserted or opened as a tab, surfaces an info toast, yet still routes directly to `git` (never `focus`).
     await makePanel({ id: 'r_home', name: 'itziklavon', path: '/Users/itziklavon' }).openInGitModule();
     assert.deepEqual(upserted, []);
     assert.deepEqual(openedTabs, []);
+    assert.deepEqual(infos, ['No Git repository detected for the current project folder.']);
     assert.deepEqual(routes, ['git']);
 
-    // Real project repo upserts, opens `'graph'` tab additively, and navigates via `router.go('git')`.
-    await makePanel({ id: 'r_svc', name: 'koala-svc', path: '/Users/itziklavon/koala-svc' }).openInGitModule();
-    assert.deepEqual(upserted, ['r_svc']);
+    // Real project repo (including cross-workspace) upserts, opens `'graph'` tab additively, switches workspace, and navigates via `router.go('git')`.
+    await makePanel({ id: 'r_svc', name: 'koala-svc', path: '/Users/itziklavon/koala-svc', workspace_id: 'ws_other' }).openInGitModule();
+    assert.deepEqual(upserted, ['r_svc', 'r_svc']);
     assert.deepEqual(openedTabs, [['r_svc', 'graph']]);
+    assert.deepEqual(selectedWs, ['ws_other']);
     assert.deepEqual(routes, ['git', 'git']);
   });
 
@@ -476,6 +512,41 @@ describe('Round 5 — Bugs U3, U5 & U6: Zero-shift IDE gutter, Open in Git Modul
     assert.equal(posted[3].url, '/ide/debug/sessions');
     assert.equal(posted[3].body.launch.program, '/ws/promotions/main.go');
     assert.deepEqual(posted[3].body.launch.args ? [...posted[3].body.launch.args] : [], ['--port=8080']);
+
+    // 3. Toolbar `{}` launch (no explicit opts) followed by switching activeTab to README.md:
+    // Rerun MUST still replay the resolved `main.go` launch + `break_on_exceptions`, NEVER `{}` -> README.md!
+    host.breakOnExceptions = true;
+    host.activePath = '/ws/promotions/cmd/api/server.go';
+    host.activeTab = {
+      path: '/ws/promotions/cmd/api/server.go',
+      name: 'server.go',
+      language: 'go',
+      content: 'package main\nfunc main() {}\n',
+    };
+    const rToolbar = await debugEnvMod.launchIdeRun(host, {}, null, null);
+    rToolbar.poller?.stop();
+    rToolbar.sseCtl?.abort();
+    const dToolbar = await debugEnvMod.launchDebugSession(host, {}, null, () => {});
+    dToolbar?.abort();
+    assert.equal(posted[5].body.break_on_exceptions, true);
+    assert.equal(host.lastDebugLaunch?.launch?.program, '/ws/promotions/cmd/api/server.go');
+
+    // User switches editor tab to `README.md` before pressing Rerun:
+    host.activePath = '/ws/promotions/README.md';
+    host.activeTab = {
+      path: '/ws/promotions/README.md',
+      name: 'README.md',
+      language: 'markdown',
+      content: '# Docs\n',
+    };
+    const rReplay = await debugEnvMod.launchIdeRun(host, lastRunMemo, null, null);
+    rReplay.poller?.stop();
+    rReplay.sseCtl?.abort();
+    assert.equal(posted[6].body.adhoc.target_path, '/ws/promotions/cmd/api/server.go');
+    const dReplay = await debugEnvMod.launchDebugSession(host, host.lastDebugLaunch, null, () => {});
+    dReplay?.abort();
+    assert.equal(posted[7].body.launch.program, '/ws/promotions/cmd/api/server.go');
+    assert.equal(posted[7].body.language, 'go');
   });
 });
 
@@ -543,11 +614,12 @@ describe('Round 5 — Custom provider parity (`claudework`) & token-boundary saf
 });
 
 describe('Round 5 — Queued message Edit attachment preservation, MAX_DRAFT_IMAGES cap, and model override', () => {
-  it('restores screenshots and PDFs with filenames on queued Edit, deduplicates existing items, and caps at 20', () => {
+  it('restores screenshots and PDFs with filenames on queued Edit, deduplicates existing items, and caps at 20', async () => {
     const toastErrors: string[] = [];
     const composerMod = loadSource(
       new URL('../src/modules/threads/runtime/runtimeComposer.ts', import.meta.url),
       {
+        '../../../lib/providerRegistry': { sessionProviderSlug },
         '../../../lib/toastError': {
           toastError: (title: string, err: unknown) => toastErrors.push(`${title}: ${String(err)}`),
         },
@@ -593,6 +665,35 @@ describe('Round 5 — Queued message Edit attachment preservation, MAX_DRAFT_IMA
     assert.equal(composerMod.resolvePromptModelOverride(null, 'claude-opus-4-6'), '');
     assert.equal(composerMod.resolvePromptModelOverride(null, null), undefined);
     assert.equal(composerMod.resolvePromptModelOverride('claude-sonnet-4-6', 'claude-opus-4-6'), 'claude-sonnet-4-6');
+
+    // IDE Agent Dock `<ide_context>` round-trip: Edit/Resend strips XML wrapper and restores chips cleanly!
+    const diffApplierMod = await import('../src/modules/ide/store/ideDiffApplier.ts');
+    const wrappedPrompt = diffApplierMod.buildIdeAgentPrompt(
+      'Fix nil pointer in Submit',
+      [
+        {
+          id: 'chip-1',
+          key: 'selection:/ws/app/pool.go:10-14',
+          kind: 'selection',
+          label: 'pool.go:10-14',
+          path: '/ws/app/pool.go',
+          startLine: 10,
+          endLine: 14,
+          language: 'go',
+          snippet: 'func (p *Pool) Submit(f func()) error {\n\treturn p.q.Push(f)\n}',
+        },
+      ],
+      { workspaceRoot: '/ws/app', activePath: '/ws/app/pool.go', omitWhenEmpty: true },
+    );
+    assert.ok(wrappedPrompt.includes('<ide_context>'));
+    const restored = diffApplierMod.extractIdeContextChipsFromPrompt(wrappedPrompt);
+    assert.equal(restored.cleanText, 'Fix nil pointer in Submit');
+    assert.equal(restored.chips.length, 1);
+    assert.equal(restored.chips[0].label, 'pool.go:10-14');
+    assert.equal(restored.chips[0].path, '/ws/app/pool.go');
+    assert.equal(restored.chips[0].startLine, 10);
+    assert.equal(restored.chips[0].endLine, 14);
+    assert.ok(restored.chips[0].snippet.includes('p.q.Push(f)'));
   });
 });
 

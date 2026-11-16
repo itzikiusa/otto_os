@@ -150,6 +150,13 @@ fn update_config(
 
 /// Mark `cwd` as trusted for `provider`. Failures are logged, never fatal.
 pub fn ensure_trusted(provider: &str, cwd: &str) {
+    ensure_trusted_with_claude_dir(provider, cwd, None);
+}
+
+/// Mark `cwd` as trusted for `provider`, also writing `<claude_config_dir>/.claude.json`
+/// alongside `~/.claude.json` when a custom `CLAUDE_CONFIG_DIR` (e.g. `~/.claude-work`)
+/// is active for a Claude-family provider.
+pub fn ensure_trusted_with_claude_dir(provider: &str, cwd: &str, claude_config_dir: Option<&Path>) {
     // The throwaway E2E daemon (`OTTO_E2E=1`) runs with the user's REAL `HOME`;
     // a test must never write trust grants into their real agent configs
     // (`~/.claude.json` holds their OAuth/account state and MCP settings).
@@ -157,7 +164,7 @@ pub fn ensure_trusted(provider: &str, cwd: &str) {
         return;
     }
     let result = match provider {
-        "claude" => trust_claude(cwd),
+        "claude" => trust_claude(cwd, claude_config_dir),
         "codex" => trust_codex(cwd),
         "grok" => trust_grok(cwd),
         _ => Ok(()),
@@ -173,8 +180,20 @@ pub fn ensure_trusted(provider: &str, cwd: &str) {
 /// [`CONFIG_LOCK`] — inline, that parked the tokio worker (and, in a review or
 /// workflow fan-out, every worker queued on the lock) for the whole parse.
 pub async fn ensure_trusted_async(provider: &str, cwd: &str) {
+    ensure_trusted_with_claude_dir_async(provider, cwd, None).await;
+}
+
+/// [`ensure_trusted_with_claude_dir`] off the async runtime.
+pub async fn ensure_trusted_with_claude_dir_async(
+    provider: &str,
+    cwd: &str,
+    claude_config_dir: Option<PathBuf>,
+) {
     let (provider, cwd) = (provider.to_string(), cwd.to_string());
-    let _ = tokio::task::spawn_blocking(move || ensure_trusted(&provider, &cwd)).await;
+    let _ = tokio::task::spawn_blocking(move || {
+        ensure_trusted_with_claude_dir(&provider, &cwd, claude_config_dir.as_deref())
+    })
+    .await;
 }
 
 /// Pre-trust a THROWAWAY `cwd` created under the stable Otto scratch `root`
@@ -229,14 +248,36 @@ fn home() -> Result<PathBuf, String> {
         .map_err(|_| "HOME not set".to_string())
 }
 
-fn trust_claude(cwd: &str) -> Result<(), String> {
-    let path = home()?.join(".claude.json");
+fn trust_claude(cwd: &str, custom_dir: Option<&Path>) -> Result<(), String> {
+    let h = home()?;
+    trust_claude_in(&h, cwd, custom_dir)
+}
+
+fn trust_claude_in(h: &Path, cwd: &str, custom_dir: Option<&Path>) -> Result<(), String> {
+    let default_path = h.join(".claude.json");
     let variants = path_variants(cwd);
-    let written = update_config(&path, cwd, |current| {
-        claude_with_trust(current, &variants).map_err(|e| format!("{}: {e}", path.display()))
+    let written = update_config(&default_path, cwd, |current| {
+        claude_with_trust(current, &variants)
+            .map_err(|e| format!("{}: {e}", default_path.display()))
     })?;
     if written {
         tracing::info!(cwd, "pre-trusted folder for claude");
+    }
+    if let Some(dir) = custom_dir.filter(|d| !d.as_os_str().is_empty() && *d != h.join(".claude")) {
+        let custom_path = dir.join(".claude.json");
+        if custom_path != default_path {
+            let custom_written = update_config(&custom_path, cwd, |current| {
+                claude_with_trust(current, &variants)
+                    .map_err(|e| format!("{}: {e}", custom_path.display()))
+            })?;
+            if custom_written {
+                tracing::info!(
+                    cwd,
+                    config = %custom_path.display(),
+                    "pre-trusted folder for custom claude config dir"
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -552,5 +593,34 @@ mod tests {
         // A CLI stripping the grant changes the file too → re-granted.
         std::fs::write(&path, "").unwrap();
         assert!(update_config(&path, "/memo", merge).unwrap());
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn trust_claude_in_grants_both_default_and_custom_claude_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let custom = home.join(".claude-work");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+
+        trust_claude_in(&home, &cwd_str, Some(&custom)).unwrap();
+
+        let default_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap())
+                .unwrap();
+        let custom_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(custom.join(".claude.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            default_json["projects"][&cwd_str]["hasTrustDialogAccepted"],
+            true
+        );
+        assert_eq!(
+            custom_json["projects"][&cwd_str]["hasTrustDialogAccepted"],
+            true
+        );
     }
 }

@@ -109,13 +109,14 @@ impl ProjectStore {
 
     pub async fn list_for_user(&self, pool: &DbPool, user: &User) -> Result<Vec<IdeNamedProject>> {
         self.ensure_hydrated(pool).await?;
+        let has_root_auth = otto_core::auth::root_authority(user);
         let guard = self.cache.read().unwrap_or_else(|e| e.into_inner());
         let mut items = Vec::with_capacity(guard.items.len());
         for entry in &guard.items {
-            if !can_access_owned_project(entry, &user.id, user.is_root) {
+            if !can_access_owned_project(entry, &user.id, has_root_auth) {
                 continue;
             }
-            if let Some(proj) = project_for_caller(entry, user.is_root) {
+            if let Some(proj) = project_for_caller(entry, has_root_auth) {
                 items.push(proj);
             }
         }
@@ -132,6 +133,7 @@ impl ProjectStore {
     ) -> Result<Vec<IdeNamedProject>> {
         let pool = ctx.pool();
         self.ensure_hydrated(&pool).await?;
+        let has_root_auth = otto_core::auth::root_authority(user);
         let snapshot: Vec<StoredProject> = self
             .cache
             .read()
@@ -141,10 +143,10 @@ impl ProjectStore {
 
         let mut items = Vec::with_capacity(snapshot.len());
         for entry in snapshot {
-            let Some(proj) = project_for_caller(&entry, user.is_root) else {
+            let Some(proj) = project_for_caller(&entry, has_root_auth) else {
                 continue;
             };
-            if can_access_owned_project(&entry, &user.id, user.is_root)
+            if can_access_owned_project(&entry, &user.id, has_root_auth)
                 || (entry.owner_user_id.is_empty()
                     && legacy_project_authorized(ctx, user, &proj, false).await)
             {
@@ -157,13 +159,14 @@ impl ProjectStore {
 
     /// Return all folders across Named Projects owned by `user` (from the hydrated cache).
     pub fn allowed_roots_for_user(&self, user: &User) -> Vec<String> {
+        let has_root_auth = otto_core::auth::root_authority(user);
         let guard = self.cache.read().unwrap_or_else(|e| e.into_inner());
         let mut out = Vec::new();
         for entry in &guard.items {
-            if !can_access_owned_project(entry, &user.id, user.is_root) {
+            if !can_access_owned_project(entry, &user.id, has_root_auth) {
                 continue;
             }
-            let Some(proj) = project_for_caller(entry, user.is_root) else {
+            let Some(proj) = project_for_caller(entry, has_root_auth) else {
                 continue;
             };
             if !proj.primary_root.trim().is_empty() && !out.contains(&proj.primary_root) {
@@ -185,13 +188,14 @@ impl ProjectStore {
         let Some(lookup) = normalize_lookup_fast(root) else {
             return Vec::new();
         };
+        let has_root_auth = otto_core::auth::root_authority(user);
         let guard = self.cache.read().unwrap_or_else(|e| e.into_inner());
         for entry in &guard.items {
-            if !can_access_owned_project(entry, &user.id, user.is_root) {
+            if !can_access_owned_project(entry, &user.id, has_root_auth) {
                 continue;
             }
             if stored_project_matches(entry, &lookup) {
-                if let Some(proj) = project_for_caller(entry, user.is_root) {
+                if let Some(proj) = project_for_caller(entry, has_root_auth) {
                     return proj.folders;
                 }
             }
@@ -259,7 +263,7 @@ impl ProjectStore {
     ) -> Result<IdeNamedProject> {
         let pool = ctx.pool();
         self.ensure_hydrated(&pool).await?;
-        let mut allow_claim = user.is_root;
+        let mut allow_claim = otto_core::auth::root_authority(user);
         if !allow_claim {
             if let Some(req_id) = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                 if let Some((owner, proj)) = fetch_project_owner_row(&pool, req_id).await? {
@@ -282,14 +286,14 @@ impl ProjectStore {
         allow_claim_unowned: bool,
     ) -> Result<IdeNamedProject> {
         self.ensure_hydrated(pool).await?;
-        let is_root = user.is_root;
+        let has_root_auth = otto_core::auth::root_authority(user);
         let NormalizedUpsertProject {
             name,
             primary_root: primary_str,
             folders,
             pinned,
             explicit_id,
-        } = tokio::task::spawn_blocking(move || normalize_upsert_req(req, is_root))
+        } = tokio::task::spawn_blocking(move || normalize_upsert_req(req, has_root_auth))
             .await
             .map_err(|e| Error::Internal(format!("upsert project worker failed: {e}")))??;
 
@@ -302,7 +306,7 @@ impl ProjectStore {
                     .map_err(|e| Error::Internal(format!("query ide_named_projects owner: {e}")))?;
             if let Some(owner) = &existing_owner {
                 let unowned_claim_ok = owner.is_empty() && allow_claim_unowned;
-                if !user.is_root && owner != &user.id && !unowned_claim_ok {
+                if !has_root_auth && owner != &user.id && !unowned_claim_ok {
                     return Err(Error::Forbidden(
                         "cannot overwrite a Named IDE Project owned by another user".into(),
                     ));
@@ -319,7 +323,7 @@ impl ProjectStore {
             .bind(&user.id)
             .bind(&primary_str)
             .bind(&name)
-            .bind(if user.is_root || allow_claim_unowned {
+            .bind(if has_root_auth || allow_claim_unowned {
                 1_i64
             } else {
                 0_i64
@@ -387,7 +391,7 @@ impl ProjectStore {
         let Some((owner, _)) = fetch_project_owner_row(pool, target_id).await? else {
             return Ok(false);
         };
-        if !user.is_root && owner != user.id {
+        if !otto_core::auth::root_authority(user) && owner != user.id {
             return Err(Error::Forbidden(
                 "cannot delete a Named IDE Project owned by another user".into(),
             ));
@@ -407,7 +411,7 @@ impl ProjectStore {
         let Some((owner, proj)) = fetch_project_owner_row(&pool, target_id).await? else {
             return Ok(false);
         };
-        if !user.is_root && owner != user.id {
+        if !otto_core::auth::root_authority(user) && owner != user.id {
             let legacy_ok =
                 owner.is_empty() && legacy_project_authorized(ctx, user, &proj, true).await;
             if !legacy_ok {

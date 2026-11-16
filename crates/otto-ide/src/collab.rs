@@ -20,6 +20,7 @@ use otto_core::domain::User;
 use otto_core::{new_id, Error, Result};
 use tokio::sync::broadcast;
 
+pub(crate) use self::ops::redact_guest_debug_snapshot;
 use self::ops::{ct_eq_32, mint_hex_secret_64, now_rfc3339, sha256_bytes};
 use crate::target::ResolvedTarget;
 use crate::types::{
@@ -82,6 +83,7 @@ pub(super) struct RoomState {
     pub(super) shared_buffers: BTreeMap<String, SharedBufferRecord>,
     pub(super) buffer_seq: u64,
     pub(super) active_debug: Option<IdeDebugSessionSnapshot>,
+    pub(super) last_debug_id: Option<String>,
     pub(super) created_at: String,
     pub(super) last_activity_at: Instant,
     pub(super) events_tx: broadcast::Sender<IdeCollabEvent>,
@@ -282,6 +284,8 @@ impl CollabHub {
             secret_hash: host_peer_secret_hash,
         };
 
+        let last_debug_id = initial_debug.as_ref().map(|d| d.id.clone());
+        let active_debug = initial_debug.as_ref().map(ops::redact_guest_debug_snapshot);
         let (events_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let state = RoomState {
             id: room_id.clone(),
@@ -296,7 +300,8 @@ impl CollabHub {
             peers: vec![host_peer],
             shared_buffers: BTreeMap::new(),
             buffer_seq: 0,
-            active_debug: initial_debug,
+            active_debug,
+            last_debug_id,
             created_at: now,
             last_activity_at: now_inst,
             events_tx,
@@ -358,9 +363,10 @@ impl CollabHub {
             .rooms
             .read()
             .map_err(|_| Error::Internal("collab lock poisoned".into()))?;
+        let has_root_auth = otto_core::auth::root_authority(user);
         let mut out: Vec<IdeCollabRoom> = guard
             .values()
-            .filter(|r| user.is_root || r.host_user_id == user.id)
+            .filter(|r| has_root_auth || r.host_user_id == user.id)
             .map(RoomState::snapshot)
             .collect();
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -375,6 +381,7 @@ impl CollabHub {
         peer_id: &str,
         role: IdeCollabRole,
     ) -> Result<IdeCollabRoom> {
+        let has_root_auth = otto_core::auth::root_authority(user);
         let mut guard = self
             .rooms
             .write()
@@ -382,7 +389,7 @@ impl CollabHub {
         let room = guard
             .get_mut(room_id)
             .ok_or_else(|| Error::NotFound(format!("collab room '{room_id}' not found")))?;
-        if !user.is_root && room.host_user_id != user.id {
+        if !has_root_auth && room.host_user_id != user.id {
             return Err(Error::Forbidden(
                 "only the room host may change peer permissions".into(),
             ));
@@ -411,6 +418,7 @@ impl CollabHub {
 
     /// Host closes/revokes a collaboration room immediately.
     pub fn close_room(&self, user: &User, room_id: &str) -> Result<()> {
+        let has_root_auth = otto_core::auth::root_authority(user);
         let mut guard = self
             .rooms
             .write()
@@ -418,7 +426,7 @@ impl CollabHub {
         let room = guard
             .get(room_id)
             .ok_or_else(|| Error::NotFound(format!("collab room '{room_id}' not found")))?;
-        if !user.is_root && room.host_user_id != user.id {
+        if !has_root_auth && room.host_user_id != user.id {
             return Err(Error::Forbidden(
                 "only the room host may close this collaboration room".into(),
             ));

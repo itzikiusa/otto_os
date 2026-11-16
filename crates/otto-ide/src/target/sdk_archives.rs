@@ -37,11 +37,17 @@ pub(crate) async fn read_virtual_java_archive(
         .await;
     }
 
-    let without_jar = trimmed.strip_prefix("jar:").unwrap_or(trimmed);
-    let without_query = without_jar.split('?').next().unwrap_or(without_jar);
-    let (archive_raw, inner_raw) = without_query
-        .split_once("!/")
+    let without_jar = trimmed
+        .get(..4)
+        .filter(|p| p.eq_ignore_ascii_case("jar:"))
+        .map(|_| &trimmed[4..])
+        .unwrap_or(trimmed);
+    let (archive_raw, inner_with_qf) = split_archive_bang_slash(without_jar)
         .ok_or_else(|| Error::Invalid(format!("malformed archive URI '{trimmed}'")))?;
+    let inner_raw = inner_with_qf
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(inner_with_qf);
 
     let inner = validate_archive_entry(inner_raw)?;
     let (canonical_archive, _) = resolve_local_readable(
@@ -59,6 +65,22 @@ pub(crate) async fn read_virtual_java_archive(
         is_root_user,
     )
     .await
+}
+
+fn split_archive_bang_slash(s: &str) -> Option<(&str, &str)> {
+    if let Some(pair) = s.split_once("!/") {
+        return Some(pair);
+    }
+    if let Some(pair) = s.split_once("%21/") {
+        return Some(pair);
+    }
+    let bytes = s.as_bytes();
+    for i in 0..bytes.len().saturating_sub(5) {
+        if bytes[i..i + 6].eq_ignore_ascii_case(b"%21%2f") {
+            return Some((&s[..i], &s[i + 6..]));
+        }
+    }
+    None
 }
 
 fn validate_archive_entry(raw: &str) -> Result<String> {
@@ -85,7 +107,7 @@ async fn read_jdt_uri(
     original_uri: &str,
     rest: &str,
 ) -> Result<IdeFileReadResp> {
-    let path_part = percent_decode(rest.split('?').next().unwrap_or(rest));
+    let path_part = percent_decode(rest.split(['?', '#']).next().unwrap_or(rest));
     let stripped = path_part
         .strip_prefix("contents/")
         .unwrap_or(path_part.as_str());
@@ -222,6 +244,8 @@ fn apply_helper_env(cmd: &mut Command, is_root_user: bool) {
 }
 
 async fn extract_zip_entry(archive: &Path, entry: &str, is_root_user: bool) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+
     let escaped = escape_unzip_wildcards(entry);
     let mut cmd = Command::new("unzip");
     apply_helper_env(&mut cmd, is_root_user);
@@ -231,21 +255,54 @@ async fn extract_zip_entry(archive: &Path, entry: &str, is_root_user: bool) -> R
         .arg(escaped)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .kill_on_drop(true);
 
-    let out = tokio::time::timeout(Duration::from_secs(5), cmd.output())
-        .await
-        .map_err(|_| Error::Upstream("unzip timed out".into()))?
-        .map_err(|e| Error::Upstream(format!("unzip failed: {e}")))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| Error::Upstream(format!("unzip spawn failed: {e}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::Upstream("unzip stdout missing".into()))?;
+    let cap = MAX_FILE_READ_BYTES.saturating_add(1);
 
-    if !out.status.success() || out.stdout.is_empty() {
-        return Err(Error::NotFound(format!(
+    let read_res = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut limited = stdout.take(cap);
+        let mut buf = Vec::new();
+        limited
+            .read_to_end(&mut buf)
+            .await
+            .map_err(|e| Error::Upstream(format!("unzip read failed: {e}")))?;
+        if buf.len() as u64 > MAX_FILE_READ_BYTES {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Ok::<Option<Vec<u8>>, Error>(Some(buf));
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| Error::Upstream(format!("unzip wait failed: {e}")))?;
+        if !status.success() || buf.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(buf))
+    })
+    .await;
+
+    match read_res {
+        Ok(Ok(Some(buf))) => Ok(buf),
+        Ok(Ok(None)) => Err(Error::NotFound(format!(
             "archive entry '{entry}' missing in '{}'",
             archive.display()
-        )));
+        ))),
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err(Error::Upstream("unzip timed out".into()))
+        }
     }
-    Ok(out.stdout)
 }
 
 async fn run_javap_signature(archive: &Path, fqcn: &str, is_root_user: bool) -> Result<String> {

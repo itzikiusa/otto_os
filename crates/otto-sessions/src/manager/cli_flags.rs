@@ -125,30 +125,54 @@ pub(super) fn interaction_mode_apply(
     else {
         return;
     };
+    let strip_opt = |args: &mut Vec<String>, flag: &str| {
+        let eq = format!("{flag}=");
+        let mut out = Vec::with_capacity(args.len());
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == flag {
+                i += 2;
+                continue;
+            }
+            if args[i].starts_with(&eq) {
+                i += 1;
+                continue;
+            }
+            out.push(args[i].clone());
+            i += 1;
+        }
+        *args = out;
+    };
     let fam = effective_cli_family(provider);
     match (fam.as_str(), mode) {
         ("claude", "plan") => {
             args.retain(|a| a != "--dangerously-skip-permissions");
+            strip_opt(args, "--permission-mode");
             args.extend(["--permission-mode".to_string(), "plan".to_string()]);
         }
         ("claude", "accept-edits" | "standard") => {
             args.retain(|a| a != "--dangerously-skip-permissions");
+            strip_opt(args, "--permission-mode");
             args.extend(["--permission-mode".to_string(), "acceptEdits".to_string()]);
         }
         ("claude", "auto") => {
             args.retain(|a| a != "--dangerously-skip-permissions");
+            strip_opt(args, "--permission-mode");
             args.extend(["--permission-mode".to_string(), "auto".to_string()]);
         }
         ("agy", "plan") => {
             args.retain(|a| a != "--dangerously-skip-permissions");
+            strip_opt(args, "--mode");
             args.extend(["--mode".to_string(), "plan".to_string()]);
         }
         ("agy", "accept-edits" | "standard") => {
             args.retain(|a| a != "--dangerously-skip-permissions");
+            strip_opt(args, "--mode");
             args.extend(["--mode".to_string(), "accept-edits".to_string()]);
         }
         ("agy", "auto") => {
             args.retain(|a| a != "--dangerously-skip-permissions");
+            strip_opt(args, "--mode");
             args.extend(["--mode".to_string(), "auto".to_string()]);
         }
         ("codex", "plan") => {

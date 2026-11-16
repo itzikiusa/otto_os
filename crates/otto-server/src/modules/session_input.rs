@@ -536,8 +536,9 @@ pub(crate) async fn send_input(
     // treat the newline as pasted content, so the message lands but is never
     // sent (docs/design/conversation-view.md §1). `submit: false`: the text
     // verbatim, for the user to inspect/edit before pressing Enter.
+    let family = ctx.manager.cli_family(&session.provider);
     let bracketed_tui = session.kind == otto_core::domain::SessionKind::Agent
-        && matches!(session.provider.as_str(), "claude" | "codex" | "agy");
+        && matches!(family.as_str(), "claude" | "codex" | "agy");
     if req.submit.unwrap_or(true) && bracketed_tui {
         ctx.manager
             .human_submit_text(&session_id, &user.id, auth.scope.is_some(), &req.text)

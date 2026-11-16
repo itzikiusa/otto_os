@@ -49,7 +49,8 @@ pub(super) fn has_fresh_git_ls_cache(canon_repo: &Path) -> bool {
 
 async fn run_git_ls_files_bounded(canon_repo: &Path) -> Option<Vec<u8>> {
     let mut cmd = otto_git_cmd::hardened_command();
-    cmd.arg("-C")
+    cmd.env("GIT_OPTIONAL_LOCKS", "0")
+        .arg("-C")
         .arg(canon_repo)
         .args([
             "ls-files",
@@ -109,12 +110,35 @@ fn query_git_ls_files_sync(canon_repo: &Path) -> Option<Vec<u8>> {
     .flatten()
 }
 
+fn resolve_git_index_path(canon_repo: &Path) -> PathBuf {
+    let dot_git = canon_repo.join(".git");
+    if dot_git.is_dir() {
+        return dot_git.join("index");
+    }
+    if dot_git.is_file() {
+        if let Ok(raw) = fs::read_to_string(&dot_git) {
+            for line in raw.lines() {
+                if let Some(rest) = line.trim().strip_prefix("gitdir:") {
+                    let gd = Path::new(rest.trim());
+                    let resolved = if gd.is_absolute() {
+                        gd.to_path_buf()
+                    } else {
+                        canon_repo.join(gd)
+                    };
+                    return resolved.join("index");
+                }
+            }
+        }
+    }
+    dot_git.join("index")
+}
+
 fn load_or_query_git_ls_files(repo_root: &Path) -> Option<(PathBuf, Arc<Vec<String>>)> {
     let canon_repo = fs::canonicalize(repo_root).ok()?;
     if otto_core::paths::is_broad_non_project_root(&canon_repo) {
         return None;
     }
-    let index_mtime = fs::metadata(canon_repo.join(".git/index"))
+    let index_mtime = fs::metadata(resolve_git_index_path(&canon_repo))
         .and_then(|m| m.modified())
         .ok();
     let cache = git_ls_cache();

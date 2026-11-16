@@ -233,6 +233,8 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
         title: "Stranger Debug".into(),
         language: "go".into(),
         adapter: "dlv".into(),
+        config_id: None,
+        launch: None,
         state: IdeDebugState::Paused,
         stopped_reason: Some("breakpoint".into()),
         active_thread_id: Some(1),
@@ -266,6 +268,8 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
         title: "Debug main.go".into(),
         language: "go".into(),
         adapter: "dlv".into(),
+        config_id: None,
+        launch: None,
         state: IdeDebugState::Paused,
         stopped_reason: Some("breakpoint".into()),
         active_thread_id: Some(1),
@@ -327,6 +331,56 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
         .expect("get state");
     assert_eq!(state.shared_buffers.get("main.go").unwrap().version, 2);
     assert_eq!(state.active_debug.unwrap().id, "dbg_99");
+
+    // Once the debugged target finishes (`Terminated`), `active_debug` clears to `None`,
+    // non-restart actions are rejected, and an `Editor` peer can still trigger `Restart`.
+    let mut term_snap = dbg_snap.clone();
+    term_snap.revision = 2;
+    term_snap.state = IdeDebugState::Terminated;
+    hub.publish_debug_snapshot(
+        Some(&IdeTargetSpec::local("/tmp/shared-repo")),
+        Some("u_host"),
+        &term_snap,
+    );
+    let _ = rx.recv().await.expect("terminated debug event");
+    assert!(hub
+        .get_state(&created.room.id, &created.invite_token)
+        .unwrap()
+        .active_debug
+        .is_none());
+    assert!(matches!(
+        hub.authorize_debug_action(
+            &created.room.id,
+            &IdeCollabDebugActionReq {
+                peer_id: joined.peer_id.clone(),
+                peer_secret: joined.peer_secret.clone(),
+                debug_id: "dbg_99".into(),
+                action: IdeDebugAction::StepOver,
+                thread_id: None,
+                frame_id: None,
+                path: None,
+                line: None,
+                breakpoints: None,
+            },
+        ),
+        Err(Error::Forbidden(_))
+    ));
+    assert!(hub
+        .authorize_debug_action(
+            &created.room.id,
+            &IdeCollabDebugActionReq {
+                peer_id: joined.peer_id.clone(),
+                peer_secret: joined.peer_secret.clone(),
+                debug_id: "dbg_99".into(),
+                action: IdeDebugAction::Restart,
+                thread_id: None,
+                frame_id: None,
+                path: None,
+                line: None,
+                breakpoints: None,
+            },
+        )
+        .is_ok());
 
     hub.close_room(&host, &created.room.id).expect("close room");
     let ev = rx.recv().await.expect("room closed event");

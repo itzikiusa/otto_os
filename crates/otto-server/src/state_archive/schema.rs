@@ -616,6 +616,38 @@ pub fn inert(table: &str, row: &mut ArchiveRow) {
         row.insert("status".into(), json!("exited"));
         row.insert("provider_session_id".into(), Value::Null);
     }
+    if table == "agent_runtime_sessions" {
+        for col in ["ui_control", "ui_control_json", "native_thread_id"] {
+            if row.contains_key(col) {
+                row.insert(col.into(), Value::Null);
+            }
+        }
+    }
+    if table == "agent_runtime_entities" {
+        let kind = row
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let payload_col = if row.contains_key("payload_json") {
+            Some("payload_json")
+        } else if row.contains_key("payload") {
+            Some("payload")
+        } else {
+            None
+        };
+        if let Some(col) = payload_col {
+            if let Some(Value::String(raw)) = row.get_mut(col) {
+                if let Some(settled) = otto_agent_protocol::settle_archived_entity_json(&kind, raw)
+                {
+                    *raw = settled;
+                }
+            }
+        }
+    }
+    if table == "ide_project_environments" {
+        schema_ide::disable_ide_network_bridge_row(row);
+    }
     if (table == "goal_loops" && row.get("status") == Some(&json!("running")))
         || (matches!(table, "swarms" | "swarm_agents")
             && row.get("status") == Some(&json!("active")))
@@ -885,6 +917,8 @@ pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> ApiResult<Ve
     let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).fetch(conn);
     let mut output = Vec::new();
     let mut size = 0;
+    let draft_cutoff = (table == "runtime_composer_drafts")
+        .then(|| (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339());
     while let Some(row) = rows.try_next().await.map_err(super::db_error)? {
         let mut values = ArchiveRow::new();
         for column in row.columns() {
@@ -908,6 +942,15 @@ pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> ApiResult<Ve
                 }
             };
             values.insert(column.name().into(), value);
+        }
+        if let Some(cutoff) = draft_cutoff.as_deref() {
+            if values
+                .get("updated_at")
+                .and_then(Value::as_str)
+                .is_some_and(|ts| ts < cutoff)
+            {
+                continue;
+            }
         }
         size += serde_json::to_vec(&values)
             .map_err(|e| invalid(&e.to_string()))?

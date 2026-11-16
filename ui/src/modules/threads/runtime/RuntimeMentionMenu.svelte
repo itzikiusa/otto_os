@@ -3,7 +3,7 @@
   // searches files & folders (`POST /ide/fs/complete` with `/ide/search` +
   // `/ide/fs/tree` fallback and 0ms open-tab matches) alongside `@agent`
   // provider/model mentions (`askAgents.ts`). Viewport-clamped with zero CLS.
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import { formatModelLabel, modelsForProvider } from '../../../lib/providerModels';
@@ -44,8 +44,11 @@
   let loadingFiles = $state(false);
   let fileResults = $state<RankedFileMention[]>([]);
   let caretPos = $state<number | null>(null);
+  let composerFocused = $state(false);
   let placeBelow = $state(false);
   let maxBlockPx = $state(300);
+  let menuEl = $state<HTMLDivElement | null>(null);
+  let listEl = $state<HTMLDivElement | null>(null);
 
   const hasAtChar = $derived(text.includes('@'));
 
@@ -54,9 +57,13 @@
       if (caretPos !== null) caretPos = null;
       return;
     }
-    if (textareaEl && typeof document !== 'undefined' && document.activeElement === textareaEl) {
-      caretPos = textareaEl.selectionStart ?? text.length;
+    if (textareaEl && typeof document !== 'undefined') {
+      composerFocused = document.activeElement === textareaEl;
+      if (composerFocused) {
+        caretPos = textareaEl.selectionStart ?? text.length;
+      }
     } else {
+      composerFocused = true;
       caretPos = text.length;
     }
   }
@@ -72,22 +79,35 @@
 
   $effect(() => {
     const el = textareaEl;
-    if (!el || !hasAtChar) return;
-    const handler = (): void => syncCaret();
-    el.addEventListener('keyup', handler);
-    el.addEventListener('click', handler);
-    el.addEventListener('focus', handler);
+    if (!el) {
+      composerFocused = true;
+      return;
+    }
+    composerFocused = typeof document !== 'undefined' && document.activeElement === el;
+    const onCaret = (): void => syncCaret();
+    const onFocus = (): void => {
+      composerFocused = true;
+      syncCaret();
+    };
+    const onBlur = (): void => {
+      composerFocused = false;
+    };
+    el.addEventListener('keyup', onCaret);
+    el.addEventListener('click', onCaret);
+    el.addEventListener('focus', onFocus);
+    el.addEventListener('blur', onBlur);
     return () => {
-      el.removeEventListener('keyup', handler);
-      el.removeEventListener('click', handler);
-      el.removeEventListener('focus', handler);
+      el.removeEventListener('keyup', onCaret);
+      el.removeEventListener('click', onCaret);
+      el.removeEventListener('focus', onFocus);
+      el.removeEventListener('blur', onBlur);
     };
   });
 
   const effectiveCaret = $derived(
     caretPos !== null && caretPos <= text.length ? caretPos : text.length,
   );
-  const token = $derived(atMentionTokenAt(text, effectiveCaret));
+  const token = $derived(composerFocused ? atMentionTokenAt(text, effectiveCaret) : null);
   const tokenKey = $derived(token ? `${token.start}:${token.query}` : null);
   const isDismissed = $derived(tokenKey !== null && dismissedKey === tokenKey);
 
@@ -199,15 +219,32 @@
     const below = spaceAbove < 180 && spaceBelow > spaceAbove;
     placeBelow = below;
     const avail = below ? spaceBelow : spaceAbove;
-    maxBlockPx = Math.max(110, Math.min(320, Math.floor(vh * 0.5), Math.floor(avail)));
+    maxBlockPx = Math.max(0, Math.min(320, Math.floor(vh * 0.5), Math.floor(avail)));
   }
 
   $effect(() => {
     if (!menuOpen || typeof window === 'undefined') return;
     recomputeClamp();
+    const onPointerDown = (ev: PointerEvent): void => {
+      const target = ev.target as Node | null;
+      if (!target) return;
+      if (menuEl?.contains(target) || textareaEl?.contains(target)) return;
+      dismissedKey = tokenKey;
+    };
     window.addEventListener('resize', recomputeClamp);
-    return () => window.removeEventListener('resize', recomputeClamp);
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => {
+      window.removeEventListener('resize', recomputeClamp);
+      document.removeEventListener('pointerdown', onPointerDown, true);
+    };
   });
+
+  function scrollActiveIntoView(): void {
+    void tick().then(() => {
+      const activeEl = listEl?.querySelector<HTMLElement>(`[data-mention-idx="${activeIdx}"]`);
+      activeEl?.scrollIntoView({ block: 'nearest' });
+    });
+  }
 
   function applyCaret(nextCaret: number): void {
     caretPos = nextCaret;
@@ -273,6 +310,7 @@
     if (total === 0) return false;
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       activeIdx = (activeIdx + (e.key === 'ArrowDown' ? 1 : total - 1)) % total;
+      scrollActiveIntoView();
       e.preventDefault();
       return true;
     }
@@ -303,32 +341,38 @@
       {#each unified.files as f, idx (f.key)}
         {@const flatIndex = fileOffset + idx}
         <div
-          class="rmm-row" class:active={flatIndex === activeIdx} role="option" tabindex="-1"
-          aria-selected={flatIndex === activeIdx}
+          class="rmm-item"
+          role="presentation"
+          class:active={flatIndex === activeIdx}
+          data-mention-idx={flatIndex}
           onmouseenter={() => (activeIdx = flatIndex)}
-          onmousedown={(ev) => ev.preventDefault()}
-          onclick={() => selectFileItem(f, false)}
-          onkeydown={(ev) => {
-            if (ev.target === ev.currentTarget && (ev.key === 'Enter' || ev.key === ' ')) {
-              ev.preventDefault();
-              selectFileItem(f, false);
-            }
-          }}
         >
-          <span class="rmm-ico" class:dir={f.isDir}><Icon name={f.isDir ? 'folder' : 'file'} size={13} /></span>
-          <span class="rmm-name mono ellipsis" dir="ltr">
-            {#each f.nameParts as part, pi (pi)}
-              {#if part.hit}<mark class="rmm-hit">{part.text}</mark>{:else}{part.text}{/if}
-            {/each}
-          </span>
-          {#if f.openTab}<span class="rmm-tag">Open</span>{/if}
-          <span class="rmm-meta mono ellipsis" dir="ltr" title={f.path}>{f.dirHint || f.display}</span>
+          <button
+            type="button"
+            class="rmm-row"
+            role="option"
+            aria-selected={flatIndex === activeIdx}
+            onmousedown={(ev) => ev.preventDefault()}
+            onclick={() => selectFileItem(f, false)}
+          >
+            <span class="rmm-ico" class:dir={f.isDir}><Icon name={f.isDir ? 'folder' : 'file'} size={13} /></span>
+            <span class="rmm-name mono ellipsis" dir="ltr">
+              {#each f.nameParts as part, pi (pi)}
+                {#if part.hit}<mark class="rmm-hit">{part.text}</mark>{:else}{part.text}{/if}
+              {/each}
+            </span>
+            {#if f.openTab}<span class="rmm-tag">Open</span>{/if}
+            <span class="rmm-meta mono ellipsis" dir="ltr" title={f.path}>{f.dirHint || f.display}</span>
+          </button>
           {#if f.isDir}
             <button
-              type="button" class="rmm-attach-dir" aria-label="Attach folder {f.display}"
-              title="Attach folder reference" data-testid="at-mention-attach-folder"
+              type="button"
+              class="rmm-attach-dir"
+              aria-label="Attach folder {f.display}"
+              title="Attach folder {f.display}"
+              data-testid="at-mention-attach-folder"
               onmousedown={(ev) => ev.preventDefault()}
-              onclick={(ev) => { ev.stopPropagation(); selectFileItem(f, true); }}
+              onclick={() => selectFileItem(f, true)}
             >Attach</button>
           {/if}
         </div>
@@ -346,23 +390,26 @@
       {#each unified.agents as a, idx (`${a.provider}:${a.model ?? ''}`)}
         {@const flatIndex = agentOffset + idx}
         <div
-          class="rmm-row" class:active={flatIndex === activeIdx} role="option" tabindex="-1"
-          aria-selected={flatIndex === activeIdx}
+          class="rmm-item"
+          role="presentation"
+          class:active={flatIndex === activeIdx}
+          data-mention-idx={flatIndex}
           onmouseenter={() => (activeIdx = flatIndex)}
-          onmousedown={(ev) => ev.preventDefault()}
-          onclick={() => selectAgentItem(a)}
-          onkeydown={(ev) => {
-            if (ev.key === 'Enter' || ev.key === ' ') {
-              ev.preventDefault();
-              selectAgentItem(a);
-            }
-          }}
         >
-          <span class="rmm-ico">
-            {#if hasProviderIcon(a.provider)}<ProviderIcon provider={a.provider} size={13} />{:else}<Icon name="assistant" size={13} />{/if}
-          </span>
-          <span class="rmm-name ellipsis">{a.label}</span>
-          <span class="rmm-meta ellipsis">{a.detail}</span>
+          <button
+            type="button"
+            class="rmm-row"
+            role="option"
+            aria-selected={flatIndex === activeIdx}
+            onmousedown={(ev) => ev.preventDefault()}
+            onclick={() => selectAgentItem(a)}
+          >
+            <span class="rmm-ico">
+              {#if hasProviderIcon(a.provider)}<ProviderIcon provider={a.provider} size={13} />{:else}<Icon name="assistant" size={13} />{/if}
+            </span>
+            <span class="rmm-name ellipsis">{a.label}</span>
+            <span class="rmm-meta ellipsis">{a.detail}</span>
+          </button>
         </div>
       {:else}
         <p class="rmm-empty">No matching agents</p>
@@ -372,7 +419,7 @@
 {/snippet}
 
 {#if menuOpen}
-  <div class="rmm" class:below={placeBelow} style:--rmm-max="{maxBlockPx}px" data-testid="runtime-at-mention-menu">
+  <div bind:this={menuEl} class="rmm" class:below={placeBelow} style:--rmm-max="{maxBlockPx}px" data-testid="runtime-at-mention-menu">
     <div class="rmm-bar">
       <div class="rmm-filters" role="group" aria-label="Filter mentions">
         <button type="button" class="rmm-pill" class:on={filter === 'all'} aria-pressed={filter === 'all'} onmousedown={(e) => e.preventDefault()} onclick={() => (filter = 'all')}>All</button>
@@ -384,7 +431,7 @@
       <span class="rmm-hint">↑↓ navigate · ⇥ open folder · ↵ select</span>
     </div>
 
-    <div class="rmm-scroll scroll-thin" role="listbox" aria-label="Mentions" data-testid="runtime-ask-mentions">
+    <div bind:this={listEl} class="rmm-scroll scroll-thin" role="listbox" aria-label="Mentions" data-testid="runtime-ask-mentions">
       {#if unified.agentsFirst}
         {@render agentsSection()}
         {@render filesSection()}
@@ -404,7 +451,7 @@
 <style>
   .rmm {
     position: absolute; inset-inline: 0; inset-block-end: calc(100% + 6px); z-index: var(--z-popover);
-    display: flex; flex-direction: column; max-block-size: min(var(--rmm-max, 320px), 320px, 50vh);
+    display: flex; flex-direction: column; max-block-size: min(var(--rmm-max, 320px), 320px);
     border: 1px solid var(--border-strong); border-radius: var(--radius-m);
     background: var(--surface); box-shadow: var(--glass-shadow); overflow: hidden;
   }
@@ -434,11 +481,16 @@
     padding: 2px 8px; font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim);
   }
   .rmm-status { font-weight: 400; }
-  .rmm-row {
-    display: flex; align-items: center; gap: 6px; min-inline-size: 0;
-    padding: 4px 8px; border-radius: var(--radius-s); font-size: var(--fs-s); color: var(--text); cursor: pointer;
+  .rmm-item {
+    display: flex; align-items: center; gap: 4px; min-inline-size: 0;
+    padding-inline-end: 4px; border-radius: var(--radius-s);
   }
-  .rmm-row.active { background: var(--accent-soft); }
+  .rmm-item.active { background: var(--accent-soft); }
+  .rmm-row {
+    flex: 1; display: flex; align-items: center; gap: 6px; min-inline-size: 0;
+    padding: 4px 8px; border: 0; border-radius: var(--radius-s); background: transparent;
+    font: inherit; font-size: var(--fs-s); color: var(--text); text-align: start; cursor: pointer;
+  }
   .rmm-ico { display: inline-flex; align-items: center; color: var(--text-dim); flex-shrink: 0; }
   .rmm-ico.dir { color: var(--accent-text); }
   .rmm-name { min-inline-size: 0; flex-shrink: 1; }

@@ -86,6 +86,13 @@ class IdeWorkspacePort {
           this.rootsRev = untrack(() => this.rootsRev) + 1;
         }
       });
+      window.addEventListener('otto:ide-storage-cleared', () => {
+        this.current = { root: null, additionalRoots: [], activePath: null, tabs: [] };
+        this.lastRoot = null;
+        this.agentDockOpen = false;
+        this.rootsCache.clear();
+        this.rootsRev = untrack(() => this.rootsRev) + 1;
+      });
     }
   }
 

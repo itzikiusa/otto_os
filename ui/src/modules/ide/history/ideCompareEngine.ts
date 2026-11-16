@@ -1,9 +1,10 @@
-// Side-by-side comparison engine, per-hunk `>>` (`Revert ⌃⌘→`) patcher, and Git
-// revision file-content reconstructor for `IdeComparisonModal.svelte`.
+// Side-by-side comparison engine and per-hunk `>>` (`Revert ⌃⌘→`) patcher
+// for `IdeComparisonModal.svelte`.
 
-import type { DiffResp, Hunk } from '../../../lib/api/types';
-import { diffLineArrays } from '../../../lib/lineDiff.ts';
+import { diffLineArrays, splitCompareLines } from '../../../lib/lineDiff.ts';
 import { wordDiff, type WordRange } from '../../../lib/diff/diff-words.ts';
+
+export { splitCompareLines };
 
 export interface CompareHunk {
   index: number;
@@ -38,21 +39,13 @@ export interface SideBySideComparison {
   hunks: CompareHunk[];
 }
 
-export function splitCompareLines(text: string): { lines: string[]; trailingNewline: boolean } {
-  if (!text) return { lines: [], trailingNewline: false };
-  const normalized = text.replace(/\r\n/g, '\n');
-  const trailingNewline = normalized.endsWith('\n');
-  const raw = trailingNewline ? normalized.slice(0, -1) : normalized;
-  return { lines: raw.length === 0 && trailingNewline ? [''] : raw.split('\n'), trailingNewline };
-}
-
 /** Build aligned side-by-side rows, word-level marks, and addressable hunks. */
 export function computeSideBySideComparison(
   leftText: string,
   rightText: string,
 ): SideBySideComparison {
-  const normL = leftText.replace(/\r\n/g, '\n');
-  const normR = rightText.replace(/\r\n/g, '\n');
+  const normL = leftText.replace(/\r\n?/g, '\n');
+  const normR = rightText.replace(/\r\n?/g, '\n');
   const left = splitCompareLines(normL).lines;
   const right = splitCompareLines(normR).lines;
 
@@ -188,7 +181,7 @@ export function applyLeftHunkToRight(
   const hunk = cmp.hunks[hunkIndex];
   if (!hunk) return rightText;
   if (cmp.hunks.length === 1 && hunk.leftCount === cmp.leftLineCount && hunk.rightCount === cmp.rightLineCount) {
-    return leftText.replace(/\r\n/g, '\n');
+    return leftText.replace(/\r\n?/g, '\n');
   }
   const rightParsed = splitCompareLines(rightText);
   const leftParsed = splitCompareLines(leftText);
@@ -197,71 +190,4 @@ export function applyLeftHunkToRight(
   if (nextLines.length === 0) return '';
   const keepTrailing = rightText ? rightParsed.trailingNewline : leftParsed.trailingNewline;
   return keepTrailing ? `${nextLines.join('\n')}\n` : nextLines.join('\n');
-}
-
-const HUNK_HDR_RE = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/;
-
-function parseHunkStarts(hunk: Hunk): { oldStart: number; newStart: number } {
-  const m = HUNK_HDR_RE.exec(hunk.header);
-  if (m) return { oldStart: Number(m[1]) || 1, newStart: Number(m[2]) || 1 };
-  let oldStart = 1;
-  let newStart = 1;
-  for (let i = 0; i < hunk.lines.length; i++) {
-    if (hunk.lines[i].old_line != null) {
-      oldStart = hunk.lines[i].old_line!;
-      break;
-    }
-  }
-  for (let i = 0; i < hunk.lines.length; i++) {
-    if (hunk.lines[i].new_line != null) {
-      newStart = hunk.lines[i].new_line!;
-      break;
-    }
-  }
-  return { oldStart, newStart };
-}
-
-/** Reconstruct file content by applying a `DiffResp` forward (`old -> new`) or in reverse (`new -> old`). */
-export function reconstructFileFromDiff(
-  sourceText: string,
-  diff: DiffResp | null,
-  direction: 'forward' | 'reverse',
-): string {
-  const fileDiff = diff?.files?.[0];
-  if (!fileDiff) return sourceText;
-  if (direction === 'reverse' && fileDiff.status === 'added') return '';
-  if (direction === 'forward' && fileDiff.status === 'deleted') return '';
-  if (fileDiff.hunks.length === 0) return sourceText;
-
-  const parsed = splitCompareLines(sourceText);
-  const lines = [...parsed.lines];
-  const entries = fileDiff.hunks.map((h) => ({ hunk: h, starts: parseHunkStarts(h) }));
-  entries.sort((a, b) =>
-    direction === 'reverse' ? b.starts.newStart - a.starts.newStart : b.starts.oldStart - a.starts.oldStart,
-  );
-
-  for (let h = 0; h < entries.length; h++) {
-    const { hunk, starts } = entries[h];
-    const startOneBased = direction === 'reverse' ? starts.newStart : starts.oldStart;
-    const removeOrigin = direction === 'reverse' ? 'add' : 'del';
-    const keepOrigin = direction === 'reverse' ? 'del' : 'add';
-    let removeCount = 0;
-    const replacement: string[] = [];
-    for (let i = 0; i < hunk.lines.length; i++) {
-      const ln = hunk.lines[i];
-      if (ln.origin === 'context') {
-        removeCount += 1;
-        replacement.push(ln.content);
-      } else if (ln.origin === removeOrigin) {
-        removeCount += 1;
-      } else if (ln.origin === keepOrigin) {
-        replacement.push(ln.content);
-      }
-    }
-    const startIdx = Math.max(0, startOneBased - 1);
-    lines.splice(startIdx, removeCount, ...replacement);
-  }
-
-  if (lines.length === 0) return '';
-  return parsed.trailingNewline || sourceText === '' ? `${lines.join('\n')}\n` : lines.join('\n');
 }

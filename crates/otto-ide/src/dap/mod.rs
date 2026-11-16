@@ -157,13 +157,27 @@ fn build_ssh_remote_command(
     cwd: &str,
     env: &BTreeMap<String, String>,
     kill_on_stdin_eof: bool,
-) -> Result<Command> {
+) -> Result<(Command, Option<Vec<u8>>)> {
+    for k in env.keys() {
+        if !crate::target::ssh_exec::valid_env_key(k) {
+            return Err(Error::Invalid(format!(
+                "invalid environment variable name '{k}'"
+            )));
+        }
+    }
     let (mut ssh_args, dest) = crate::target::ssh_exec::build_ssh_cli_args(ssh, None)?;
     let exec_line = crate::target::ssh_exec::build_remote_exec_line(cwd, command, args, env);
+    let env_preamble = crate::target::ssh_exec::build_remote_stdin_env_preamble(env);
     let remote_body = if kill_on_stdin_eof {
-        crate::target::ssh_exec::wrap_remote_stdio_with_eof_kill(&exec_line)
+        crate::target::ssh_exec::wrap_remote_stdio_with_eof_kill_and_env(
+            &exec_line,
+            env_preamble.as_ref().map(|(r, _)| r.as_str()),
+        )
     } else {
-        exec_line
+        match env_preamble.as_ref() {
+            Some((reader, _)) => format!("{reader} {exec_line}"),
+            None => exec_line,
+        }
     };
     ssh_args.push("--".into());
     ssh_args.push(dest);
@@ -172,14 +186,14 @@ fn build_ssh_remote_command(
     cmd.args(&ssh_args).kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
-    Ok(cmd)
+    Ok((cmd, env_preamble.map(|(_, b)| b)))
 }
 
 /// Spawn a child process with piped stdio on either a Local or Remote SSH target.
 ///
 /// Clears ambient daemon environment variables before applying `env` so non-root
 /// debug subprocesses never inherit daemon credentials or cloud tokens.
-pub(crate) fn spawn_target_process(
+pub(crate) async fn spawn_target_process(
     target: &IdeTargetSpec,
     ssh: Option<&IdeSshSpec>,
     command: &str,
@@ -209,13 +223,16 @@ pub(crate) fn spawn_target_process(
             let spec = ssh.ok_or_else(|| {
                 Error::Invalid("SSH connection metadata required for remote debug target".into())
             })?;
-            let mut cmd = build_ssh_remote_command(spec, command, args, cwd, env, true)?;
+            let (mut cmd, preamble) =
+                build_ssh_remote_command(spec, command, args, cwd, env, true)?;
             cmd.stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            cmd.spawn().map_err(|e| {
+            let mut child = cmd.spawn().map_err(|e| {
                 Error::Upstream(format!("failed to spawn remote '{command}' via ssh: {e}"))
-            })
+            })?;
+            crate::target::ssh_exec::write_ssh_env_preamble(&mut child, preamble, false).await?;
+            Ok(child)
         }
     }
 }
@@ -252,13 +269,21 @@ pub(crate) async fn run_target_command(
             let spec = ssh.ok_or_else(|| {
                 Error::Invalid("SSH connection metadata required for remote debug target".into())
             })?;
-            let mut cmd = build_ssh_remote_command(spec, command, args, cwd, env, false)?;
-            cmd.stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            cmd.spawn().map_err(|e| {
+            let (mut cmd, preamble) =
+                build_ssh_remote_command(spec, command, args, cwd, env, false)?;
+            if preamble.is_some() {
+                cmd.stdin(Stdio::piped());
+            } else {
+                cmd.stdin(Stdio::null());
+            }
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut c = cmd.spawn().map_err(|e| {
                 Error::Upstream(format!("failed to spawn remote '{command}' via ssh: {e}"))
-            })?
+            })?;
+            if preamble.is_some() {
+                crate::target::ssh_exec::write_ssh_env_preamble(&mut c, preamble, true).await?;
+            }
+            c
         }
     };
     match tokio::time::timeout(timeout, child.wait_with_output()).await {

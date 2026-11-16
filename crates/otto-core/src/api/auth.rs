@@ -33,6 +33,11 @@ pub struct MetaResp {
     /// curated fallbacks). Empty when unauthenticated after onboarding.
     #[serde(default)]
     pub provider_models: std::collections::HashMap<String, Vec<ProviderModelOption>>,
+    /// Per-provider CLI/model family (`slug -> family`, e.g. `"claudework" -> "claude"`),
+    /// for every enabled provider that resolves to a known family. Empty when
+    /// unauthenticated after onboarding.
+    #[serde(default)]
+    pub provider_families: std::collections::HashMap<String, String>,
     /// A second LOOPBACK base for the same daemon (`http://localhost:<port>`
     /// — `ottod` holds both `127.0.0.1` and `[::1]` on the port), or `null`
     /// when it could not bind `[::1]` (IPv6 off / port taken). Browsers pool

@@ -13,8 +13,10 @@ export interface ProviderDef {
   resume_args?: string[] | null;
   update_command?: string | null;
   /** Model-flag template, `{model}` substituted at spawn (e.g. `--model {model}`).
-   *  Unset = the CLI takes no model flag; pickers hide the model control. */
+   *  Unset = default/no model flag; `[]` = explicitly opt out of inherited model flags. */
   model_args?: string[] | null;
+  /** Canonical CLI model family (`claude`, `codex`, `agy`, `gemini`, `grok`, `opencode`, `pi`). */
+  model_family?: string | null;
 }
 
 export interface ProviderFormValues {
@@ -23,6 +25,7 @@ export interface ProviderFormValues {
   resumeArgs: string;
   updateCmd: string;
   modelArgs: string;
+  modelFamily?: string;
 }
 
 /** One argv element as a shell word: bare when it has nothing to quote,
@@ -79,6 +82,7 @@ export function providerToForm(p: ProviderDef): ProviderFormValues {
     resumeArgs: joinArgs(p.resume_args),
     updateCmd: p.update_command ?? '',
     modelArgs: joinArgs(p.model_args),
+    ...(p.model_family !== undefined ? { modelFamily: p.model_family ?? '' } : {}),
   };
 }
 
@@ -94,6 +98,12 @@ export function formToProvider(f: ProviderFormValues, prev?: ProviderDef): Provi
   else delete def.update_command;
   const ma = splitArgs(f.modelArgs);
   if (ma.length) def.model_args = ma;
+  else if (Array.isArray(prev?.model_args) && prev.model_args.length === 0) def.model_args = [];
   else delete def.model_args;
+  if (f.modelFamily !== undefined) {
+    const mf = f.modelFamily.trim().toLowerCase();
+    if (mf !== '') def.model_family = mf;
+    else delete def.model_family;
+  }
   return def;
 }

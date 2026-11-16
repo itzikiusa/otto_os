@@ -62,6 +62,7 @@ pub const KNOWN_MODULES: &[&str] = &[
     "shell",
     "home",
     "agents",
+    "threads",
     "rooms",
     "loops",
     "workflows",
@@ -69,6 +70,7 @@ pub const KNOWN_MODULES: &[&str] = &[
     "git",
     "product",
     "vault",
+    "ide",
     "workbench",
     "skills-eval",
     "connections",
@@ -201,6 +203,7 @@ pub fn pane_key(route: &str) -> String {
         "database" | "brokers" => "connections".into(),
         "design" | "canvas" => "product".into(),
         "personal-agents" => "scheduled-tasks".into(),
+        "workbench" => "ide".into(),
         other => other.into(),
     }
 }
@@ -491,6 +494,9 @@ mod tests {
         assert_eq!(pane_key("git/repo?x=1"), "git");
         assert_eq!(pane_key("kubernetes"), "kubernetes");
         assert_eq!(pane_key("scheduled-tasks"), "scheduled-tasks");
+        assert_eq!(pane_key("workbench"), "ide");
+        assert_eq!(pane_key("ide"), "ide");
+        assert_eq!(pane_key("threads"), "threads");
     }
 
     fn spec(

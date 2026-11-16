@@ -213,24 +213,27 @@ impl CollabHub {
         );
         room.enforce_buffer_caps(&req.path);
 
+        let sha256 = saved_to_target.then(|| hex::encode(Sha256::digest(req.content.as_bytes())));
         let _ = room.events_tx.send(IdeCollabEvent::BufferUpdated {
             peer_id: req.peer_id.clone(),
             path: req.path.clone(),
             content: req.content.clone(),
             version: next_version,
             saved: saved_to_target,
+            sha256,
         });
 
         Ok(next_version)
     }
 
     /// Authorize a co-debugger guest action (`IdeCollabDebugActionReq`), verifying `Editor` role
-    /// and that `req.debug_id` matches the room's active debug session.
+    /// and that `req.debug_id` matches the room's active debug session (or `last_debug_id` when
+    /// restarting a terminated session).
     pub fn authorize_debug_action(
         &self,
         room_id: &str,
         req: &IdeCollabDebugActionReq,
-    ) -> Result<(IdeTargetSpec, String)> {
+    ) -> Result<(IdeTargetSpec, User)> {
         let mut guard = self
             .rooms
             .write()
@@ -239,11 +242,13 @@ impl CollabHub {
             .get_mut(room_id)
             .ok_or_else(|| Error::NotFound(format!("collab room '{room_id}' not found")))?;
         let target = room.target.clone();
-        let host_user_id = room.host_user_id.clone();
+        let host_user = room.host_user.clone();
         let matches_room_debug = room
             .active_debug
             .as_ref()
-            .is_some_and(|d| d.id == req.debug_id);
+            .is_some_and(|d| d.id == req.debug_id)
+            || (req.action == crate::types::IdeDebugAction::Restart
+                && room.last_debug_id.as_deref() == Some(req.debug_id.as_str()));
         let rec = room.find_authenticated_peer_mut(&req.peer_id, &req.peer_secret)?;
         if rec.peer.role != IdeCollabRole::Editor {
             return Err(Error::Forbidden(
@@ -256,7 +261,7 @@ impl CollabHub {
             ));
         }
         room.last_activity_at = Instant::now();
-        Ok((target, host_user_id))
+        Ok((target, host_user))
     }
 
     /// Publish an updated `IdeDebugSessionSnapshot` ONLY to collaboration rooms owned by
@@ -272,23 +277,26 @@ impl CollabHub {
             return;
         };
         let target_key = target.map(IdeTargetSpec::project_key);
+        let guest_snap = redact_guest_debug_snapshot(snapshot);
         for room in guard.values_mut() {
             let matches_session = room
                 .active_debug
                 .as_ref()
-                .is_some_and(|d| d.id == snapshot.id);
+                .is_some_and(|d| d.id == snapshot.id)
+                || room.last_debug_id.as_deref() == Some(snapshot.id.as_str());
             let matches_owner_and_target = target_key
                 .as_ref()
                 .is_some_and(|tk| room.target.project_key() == *tk)
                 && owner_user_id.is_some_and(|uid| room.host_user_id.as_str() == uid);
             if matches_session || matches_owner_and_target {
+                room.last_debug_id = Some(snapshot.id.clone());
                 if snapshot.state == IdeDebugState::Terminated {
                     room.active_debug = None;
                 } else {
-                    room.active_debug = Some(snapshot.clone());
+                    room.active_debug = Some(guest_snap.clone());
                 }
                 let _ = room.events_tx.send(IdeCollabEvent::DebugUpdated {
-                    session: snapshot.clone(),
+                    session: guest_snap.clone(),
                 });
             }
         }
@@ -340,4 +348,15 @@ pub(super) fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
 
 pub(super) fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
+}
+
+pub(crate) fn redact_guest_debug_snapshot(
+    snapshot: &IdeDebugSessionSnapshot,
+) -> IdeDebugSessionSnapshot {
+    let mut sanitized = snapshot.clone();
+    if let Some(ref mut launch) = sanitized.launch {
+        launch.env.clear();
+        launch.env_file = None;
+    }
+    sanitized
 }

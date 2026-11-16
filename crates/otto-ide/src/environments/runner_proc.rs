@@ -156,7 +156,7 @@ pub(super) async fn run_before_launch(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn spawn_run_child(
+pub(super) async fn spawn_run_child(
     targets: &TargetManager,
     target: &IdeTargetSpec,
     ssh: Option<&IdeSshSpec>,
@@ -197,12 +197,16 @@ pub(super) fn spawn_run_child(
         }
         IdeTargetKind::Ssh => {
             let spec = ssh.ok_or("missing SSH connection spec for remote run")?;
-            let mut cmd = targets
-                .build_ssh_run_command(spec, actor_id, cwd, program, args, env_map)
+            let (mut cmd, preamble) = targets
+                .build_ssh_run_command_with_preamble(spec, actor_id, cwd, program, args, env_map)
                 .map_err(|e| e.to_string())?;
             #[cfg(unix)]
             cmd.process_group(0);
-            cmd.spawn().map_err(|e| format!("spawn ssh: {e}"))
+            let mut child = cmd.spawn().map_err(|e| format!("spawn ssh: {e}"))?;
+            crate::target::ssh_exec::write_ssh_env_preamble(&mut child, preamble, false)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(child)
         }
     }
 }

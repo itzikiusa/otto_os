@@ -1346,7 +1346,7 @@ async fn governed_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, bo
 /// name; `args` its governed arguments. Executed → the tool's own result;
 /// pending → the envelope (approval id, "resubmit after it is approved");
 /// denied / failed → an error.
-async fn governed_native_write(
+async fn invoke_governed_native_envelope(
     ctx: &Ctx,
     tool: &str,
     args: &Value,
@@ -1357,13 +1357,21 @@ async fn governed_native_write(
         "arguments": args,
         "wait_seconds": GOVERNED_WAIT_SECS,
     });
-    let v = ctx
-        .post_json_within(
-            "/mcp/otto-tools/invoke",
-            &body,
-            Duration::from_secs(GOVERNED_WAIT_SECS) + run_budget,
-        )
-        .await?;
+    ctx.post_json_within(
+        "/mcp/otto-tools/invoke",
+        &body,
+        Duration::from_secs(GOVERNED_WAIT_SECS) + run_budget,
+    )
+    .await
+}
+
+async fn governed_native_write(
+    ctx: &Ctx,
+    tool: &str,
+    args: &Value,
+    run_budget: Duration,
+) -> Result<Value, String> {
+    let v = invoke_governed_native_envelope(ctx, tool, args, run_budget).await?;
     governed_native_result(tool, v)
 }
 

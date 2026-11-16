@@ -166,6 +166,8 @@ pub struct IdeFileReadResp {
     pub language: String,
     pub size: u64,
     pub sha256: String,
+    #[serde(default)]
+    pub binary: bool,
     pub read_only: bool,
     pub truncated: bool,
     pub line_count: usize,

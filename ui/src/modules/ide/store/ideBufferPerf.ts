@@ -14,7 +14,7 @@ import { normalizeMacPrivatePath } from '../../../lib/fileUri';
 import { loadErrorText } from '../../../lib/loadError';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
-import { isPathExternal } from '../shell/ideProjectHelpers';
+import { findContainingRoot, isPathExternal } from '../shell/ideProjectHelpers';
 import {
   detectIdeLanguage, detectTextEol, ideBasename, isReadOnlySdkOrCachePath,
   normalizeEditorLf, serializeTabDiskContent,
@@ -91,12 +91,14 @@ function notifySaved(path: string, content: string): void {
 }
 
 export interface IdeBufferHost {
-  target: IdeTargetSpec; readonly targetPayload: IdeTargetSpec; tabs: IdeOpenTab[]; hasClosedAllTabs: boolean;
+  target: IdeTargetSpec; readonly targetPayload: IdeTargetSpec; readonly projectRoots?: IdeProjectRoot[];
+  tabs: IdeOpenTab[]; hasClosedAllTabs: boolean;
   activePath: string | null; splitPath: string | null; readonly activeTab: IdeOpenTab | null;
   gutterByPath: Record<string, IdeGutterItem[]>; symbolsByPath: Record<string, IdeSymbolNode[]>;
   symbolsLoading: boolean; problems: IdeDiagnostic[]; collabIsGuest: boolean; readonly canEditCollab: boolean;
   cursorInfo: { line: number; col: number; cursors: number; selections: { anchor: number; head: number }[] };
   resolvePath(p: string): string; targetQuery(extra?: Record<string, string | boolean | null | undefined>): string;
+  replaceBufferContent?(path: string, nextContent: string, range?: { from: number; to: number }): boolean;
   openFile(rawPath: string, opts?: { line?: number; col?: number; preview?: boolean; inSplit?: boolean; reload?: boolean; background?: boolean }): Promise<void>;
   closeSplit(): void; saveFile(path?: string, forceOverwrite?: boolean, opts?: { silent?: boolean }): Promise<boolean>;
   updateBuffer(path: string, content: string): void; sendCollabEdit(path: string, content: string, save?: boolean): Promise<boolean>;
@@ -429,9 +431,13 @@ export async function performOpenFile(
   const external = isPathExternal(fullPath, host.projectRoots);
   const sdkReadOnly = isReadOnlySdkOrCachePath(fullPath);
   const parentDir = fullPath.lastIndexOf('/') > 0 ? fullPath.slice(0, fullPath.lastIndexOf('/')) : host.target.root;
+  const containingRoot = host.target.kind === 'local' ? findContainingRoot(fullPath, host.projectRoots) : null;
   const readFileUrl = () => {
     if (external && !sdkReadOnly && host.target.kind === 'local' && fullPath.startsWith('/')) {
       return `/ide/fs/file?${new URLSearchParams({ kind: 'local', root: parentDir, path: fullPath }).toString()}`;
+    }
+    if (containingRoot && !containingRoot.isPrimary && host.target.kind === 'local') {
+      return `/ide/fs/file?${host.targetQuery({ root: containingRoot.path, path: fullPath })}`;
     }
     return `/ide/fs/file?${host.targetQuery({ path: fullPath })}`;
   };
@@ -591,13 +597,20 @@ export async function reloadTabsFromDisk(host: IdeBufferHost, perf: IdeBufferPer
   );
   await Promise.allSettled(
     matching.map(async (tab) => {
-      const fresh = await api.get<IdeFileReadResp>(`/ide/fs/file?${host.targetQuery({ path: tab.path })}`);
+      const containing = host.target.kind === 'local' && host.projectRoots
+        ? findContainingRoot(tab.path, host.projectRoots)
+        : null;
+      const query = containing && !containing.isPrimary && host.target.kind === 'local'
+        ? host.targetQuery({ root: containing.path, path: tab.path })
+        : host.targetQuery({ path: tab.path });
+      const fresh = await api.get<IdeFileReadResp>(`/ide/fs/file?${query}`);
       const eol = detectTextEol(fresh.content);
       const normContent = normalizeEditorLf(fresh.content);
       tab.eol = eol;
       tab.truncated = Boolean(fresh.truncated);
       tab.readOnly = Boolean(fresh.read_only) || Boolean(fresh.truncated) || isReadOnlySdkOrCachePath(tab.path);
       tab.error = null;
+      host.replaceBufferContent?.(tab.path, normContent);
       perf.markClean(tab, normContent, fresh.sha256);
       notifySaved(tab.path, normContent);
       if (tab.path === host.activePath || tab.path === host.splitPath) {
@@ -637,16 +650,16 @@ export function applyFallbackPrefixSuffix(cur: string, cursorInfo: IdeBufferHost
 }
 
 export async function performAgentEdit(
-  host: IdeBufferHost, perf: IdeBufferPerfController, primaryHandle: () => IdeEditorHandle | null,
+  host: IdeBufferHost, perf: IdeBufferPerfController, handleForPath: (resolvedPath: string) => IdeEditorHandle | null,
   rawPath: string, nextContent: string, range?: { from: number; to: number },
 ): Promise<boolean> {
   const fullPath = host.resolvePath(rawPath);
-  const wasActive = host.activePath === fullPath && host.tabs.some((t) => t.path === fullPath && !t.loading);
-  await host.openFile(fullPath, { preview: false });
+  const wasMounted = (host.activePath === fullPath || host.splitPath === fullPath) && host.tabs.some((t) => t.path === fullPath && !t.loading);
+  if (host.splitPath !== fullPath) await host.openFile(fullPath, { preview: false });
   const tab = host.tabs.find((t) => t.path === fullPath);
   if (!tab || tab.readOnly || !host.canEditCollab) return false;
-  if (!wasActive) await tick();
-  if (host.activePath === fullPath && primaryHandle()?.applyAgentEdit?.(nextContent, range)) { perf.flush(host, fullPath); return true; }
+  if (!wasMounted) await tick();
+  if (handleForPath(fullPath)?.applyAgentEdit?.(nextContent, range)) { perf.flush(host, fullPath); return true; }
   const cur = perf.getBuffer(host, fullPath);
   const from = range ? Math.max(0, Math.min(cur.length, range.from)) : 0;
   const to = range ? Math.max(from, Math.min(cur.length, range.to)) : cur.length;

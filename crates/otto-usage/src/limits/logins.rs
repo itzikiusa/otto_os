@@ -101,7 +101,7 @@ pub(crate) fn claude_logins_filtered(
             let dir = root.dir.parent().unwrap_or(&root.dir).to_path_buf();
             if let Some(active) = active {
                 let allowed = if root.kind == RootKind::Default {
-                    active.is_enabled("claude")
+                    active.is_default_claude_enabled(&dir)
                 } else {
                     active.matches_claude_config_dir(&dir)
                 };
@@ -121,6 +121,24 @@ pub(crate) fn claude_logins_filtered(
                 source,
                 dir,
             });
+        }
+        if let Some(active) = active.filter(|_| !env.is_overridden(Some(data_dir))) {
+            let default_dir = home.join(".claude");
+            for dir in active.explicit_claude_dirs() {
+                if *dir == default_dir || out.iter().any(|l| l.dir == *dir) {
+                    continue;
+                }
+                if otto_transcript::roots::is_claude_config_dir(dir) {
+                    let t = tilde(dir, home);
+                    out.push(ClaudeLogin {
+                        key: format!("claude:{t}"),
+                        account_id: None,
+                        label: t,
+                        source: "config_dir",
+                        dir: dir.clone(),
+                    });
+                }
+            }
         }
     }
     if active.is_none_or(|a| a.is_enabled("claude")) {
@@ -771,11 +789,20 @@ mod tests {
             codex_home: None,
         };
         let args = vec!["--dangerously-skip-permissions".to_string()];
-        let active = ActiveLimitProviders::from_specs([
-            ("claude", "claude", args.as_slice(), Some("claude")),
-            ("claudework", "claude-work", args.as_slice(), Some("claude")),
-            ("codex", "codex", &[][..], Some("codex")),
-        ]);
+        let active = ActiveLimitProviders::from_specs_with_env_in(
+            [
+                ("claude", "claude", args.as_slice(), Some("claude"), None),
+                (
+                    "claudework",
+                    "claude-work",
+                    args.as_slice(),
+                    Some("claude"),
+                    None,
+                ),
+                ("codex", "codex", &[][..], Some("codex"), None),
+            ],
+            &home,
+        );
         let logins = claude_logins_filtered(&[], true, dir.path(), &home, &env, Some(&active));
         let keys: Vec<&str> = logins.iter().map(|l| l.key.as_str()).collect();
         assert_eq!(keys, ["claude:~/.claude", "claude:~/.claude-work"]);

@@ -61,6 +61,7 @@ impl RepoEntry {
             "path": self.repo.path,
             "remote_url": self.repo.remote_url,
             "provider": self.repo.provider,
+            "forge": self.repo.forge,
             "workspace_id": self.repo.workspace_id,
             "workspace_name": self.workspace_name,
             "current": current == Some(self.repo.workspace_id.as_str()),
@@ -149,8 +150,19 @@ pub(crate) async fn visible_repos(
     if cap < Capability::View {
         return Err(Error::Forbidden("requires git:view".into()));
     }
-    let all = src.git.list_all_repos().await?;
-    let ws_ids: HashSet<Id> = all
+    let mut all = src.git.list_all_repos().await?;
+    let mut on_disk = Vec::with_capacity(all.len());
+    for mut repo in all.drain(..) {
+        let probe = normalize_path(&repo.path).unwrap_or_else(|| repo.path.clone());
+        if tokio::fs::metadata(&probe).await.is_ok() {
+            repo.forge = repo
+                .remote_url
+                .as_deref()
+                .map(|u| otto_git::detect::forge(u).to_string());
+            on_disk.push(repo);
+        }
+    }
+    let ws_ids: HashSet<Id> = on_disk
         .iter()
         .map(|r| r.workspace_id.clone())
         .filter(|ws| pin.is_none_or(|p| p == ws.as_str()))
@@ -173,7 +185,7 @@ pub(crate) async fn visible_repos(
             .unwrap_or_else(|_| ws.clone());
         names.insert(ws, name);
     }
-    Ok(all
+    Ok(on_disk
         .into_iter()
         .filter_map(|repo| {
             let workspace_name = names.get(&repo.workspace_id)?.clone();
@@ -265,11 +277,23 @@ fn normalize_path(p: &str) -> Option<String> {
     }
     let expanded = otto_core::paths::expand_tilde(p);
     let trimmed = expanded.trim_end_matches('/');
-    Some(if trimmed.is_empty() {
-        "/".into()
-    } else {
-        trimmed.to_string()
-    })
+    if trimmed.is_empty() {
+        return Some("/".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for (priv_prefix, pub_prefix) in [("/private/var", "/var"), ("/private/tmp", "/tmp")] {
+            if trimmed == priv_prefix {
+                return Some(pub_prefix.to_string());
+            }
+            if let Some(rest) = trimmed.strip_prefix(priv_prefix) {
+                if rest.starts_with('/') {
+                    return Some(format!("{pub_prefix}{rest}"));
+                }
+            }
+        }
+    }
+    Some(trimmed.to_string())
 }
 
 /// Entries whose registered path IS `path` or an ancestor of it — keeping only
@@ -282,18 +306,19 @@ fn match_path<'a>(entries: &'a [RepoEntry], path: &str) -> Vec<&'a RepoEntry> {
     if otto_core::paths::is_broad_non_project_root(std::path::Path::new(&path)) {
         return Vec::new();
     }
-    let hits: Vec<&RepoEntry> = entries
+    let hits: Vec<(usize, &RepoEntry)> = entries
         .iter()
-        .filter(|e| {
-            normalize_path(&e.repo.path).is_some_and(|root| {
-                !otto_core::paths::is_broad_non_project_root(std::path::Path::new(&root))
-                    && (path == root || path.starts_with(&format!("{root}/")))
-            })
+        .filter_map(|e| {
+            let root = normalize_path(&e.repo.path)?;
+            if otto_core::paths::is_broad_non_project_root(std::path::Path::new(&root)) {
+                return None;
+            }
+            (path == root || path.starts_with(&format!("{root}/"))).then_some((root.len(), e))
         })
         .collect();
-    let deepest = hits.iter().map(|e| e.repo.path.len()).max().unwrap_or(0);
+    let deepest = hits.iter().map(|(len, _)| *len).max().unwrap_or(0);
     hits.into_iter()
-        .filter(|e| e.repo.path.len() == deepest)
+        .filter_map(|(len, e)| (len == deepest).then_some(e))
         .collect()
 }
 
@@ -956,6 +981,8 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     pub(super) struct World {
+        pub(super) _tmp: tempfile::TempDir,
+        pub(super) root_dir: String,
         pool: DbPool,
         pub(super) git: GitStore,
         roles: otto_rbac::RbacRoleChecker,
@@ -1066,11 +1093,16 @@ mod tests {
                 .await
                 .unwrap();
         }
+        let tmp = tempfile::tempdir().unwrap();
+        let root_dir = tmp.path().to_string_lossy().to_string();
+        for name in ["tools", "games"] {
+            std::fs::create_dir_all(tmp.path().join(name)).unwrap();
+        }
         let git = GitStore::new(pool.clone());
         let mk = |ws: &Id, name: &str, remote: &str| NewRepo {
             workspace_id: ws.clone(),
             name: name.into(),
-            path: format!("/nonexistent/otto-repo-dir-test/{name}"),
+            path: format!("{root_dir}/{name}"),
             remote_url: Some(remote.into()),
             provider: None,
             git_account_id: None,
@@ -1086,6 +1118,8 @@ mod tests {
             .unwrap()
             .id;
         World {
+            _tmp: tmp,
+            root_dir,
             roles: otto_rbac::RbacRoleChecker::new(pool.clone()),
             git,
             workspaces,
@@ -1133,10 +1167,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, Error::NotFound(_)), "{err}");
         // No reference and the session cwd inside a registered checkout → it.
-        let cwd = Some((
-            "/nonexistent/otto-repo-dir-test/tools/src/deep".to_string(),
-            w.ws_b.clone(),
-        ));
+        let cwd = Some((format!("{}/tools/src/deep", w.root_dir), w.ws_b.clone()));
         let r = resolve_repo_in(&w.src(), &owner, cwd, None, None)
             .await
             .unwrap();

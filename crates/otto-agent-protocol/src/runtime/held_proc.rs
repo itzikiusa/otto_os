@@ -232,17 +232,12 @@ pub(super) async fn spawn_via_holder(
         }
         .to_wire_value(),
         exit_linger_ms: None,
+        orphan_ttl_ms: None,
     };
 
     let held = spawn_held(launcher, &socket_path, &spec)
         .await
-        .map_err(|e| {
-            Error::Invalid(format!(
-                "could not start {} ({}): {e}",
-                session.provider.as_str(),
-                cmd.program
-            ))
-        })?;
+        .map_err(|e| super::map_spawn_error(session.provider.as_str(), &cmd.program, e))?;
     let cli_pid = held.child_pid;
     let sid = session.id.clone();
     let (epoch, flushed) = {

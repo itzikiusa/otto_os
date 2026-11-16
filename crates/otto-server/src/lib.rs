@@ -5,6 +5,7 @@
 
 pub mod agent_refs;
 pub use otto_agent_run::agent_run;
+pub use otto_ide;
 pub mod agent_session;
 pub mod agent_tasks_nudge;
 pub mod api_helpers;

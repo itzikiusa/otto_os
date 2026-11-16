@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub use super::servers_root::{
     is_lightweight_non_lsp_lang, is_multi_repo_umbrella_dir, resolve_lsp_module_root,
+    resolve_lsp_module_root_with_markers,
 };
 use crate::plugins::IdePluginRegistry;
 use crate::types::PluginLspServerSpec;
@@ -37,6 +38,10 @@ pub fn normalize_lsp_lang(lang: &str) -> &str {
         "yml" => "yaml",
         "tsx" | "typescriptreact" => "typescript",
         "jsx" | "javascriptreact" => "javascript",
+        "proto" => "protobuf",
+        "gql" => "graphql",
+        "containerfile" => "dockerfile",
+        "kt" | "kts" => "kotlin",
         other => other,
     }
 }
@@ -482,12 +487,12 @@ pub fn detect_all_with_ide(data_dir: &Path, plugins: &IdePluginRegistry) -> Vec<
         .map(|def| resolve_def(def, &extra))
         .collect();
 
-    for spec in active_specs {
-        if is_lightweight_non_lsp_lang(&spec.language) {
-            continue;
-        }
+    for mut spec in active_specs {
+        let lower_spec_lang = spec.language.trim().to_ascii_lowercase();
+        let norm_spec_lang = normalize_lsp_lang(&lower_spec_lang).to_string();
+        spec.language = norm_spec_lang.clone();
         let plugin_resolved = resolve_plugin_spec(&spec, &extra);
-        if let Some(existing) = out.iter_mut().find(|r| r.lang == spec.language) {
+        if let Some(existing) = out.iter_mut().find(|r| r.lang == norm_spec_lang) {
             if !existing.available || plugin_resolved.available {
                 *existing = plugin_resolved;
             }
@@ -515,7 +520,8 @@ pub fn resolve_lang(lang: &str) -> Option<Resolved> {
     if is_lightweight_non_lsp_lang(lang) {
         return None;
     }
-    let norm = normalize_lsp_lang(lang);
+    let lower = lang.trim().to_ascii_lowercase();
+    let norm = normalize_lsp_lang(&lower);
     detect_all().into_iter().find(|r| r.lang == norm)
 }
 
@@ -526,10 +532,15 @@ pub fn resolve_lang_with_ide(
     data_dir: &Path,
     plugins: &IdePluginRegistry,
 ) -> Option<Resolved> {
-    if is_lightweight_non_lsp_lang(lang) {
+    let lower = lang.trim().to_ascii_lowercase();
+    let norm = normalize_lsp_lang(&lower);
+    let has_active_plugin = plugins.active_lsp_servers().iter().any(|s| {
+        let sl = s.language.trim().to_ascii_lowercase();
+        normalize_lsp_lang(&sl) == norm
+    });
+    if is_lightweight_non_lsp_lang(norm) && !has_active_plugin {
         return None;
     }
-    let norm = normalize_lsp_lang(lang);
     detect_all_with_ide(data_dir, plugins)
         .into_iter()
         .find(|r| r.lang == norm)
@@ -537,20 +548,23 @@ pub fn resolve_lang_with_ide(
 
 /// Resolve remote command metadata for a language when launching over SSH.
 pub fn resolve_remote_lang(lang: &str, plugins: &IdePluginRegistry) -> Option<RemoteLspSpec> {
-    if is_lightweight_non_lsp_lang(lang) {
-        return None;
-    }
-    let norm = normalize_lsp_lang(lang);
+    let lower = lang.trim().to_ascii_lowercase();
+    let norm = normalize_lsp_lang(&lower);
     for spec in plugins.active_lsp_servers() {
-        if spec.language == norm {
+        let spec_lower = spec.language.trim().to_ascii_lowercase();
+        let spec_norm = normalize_lsp_lang(&spec_lower);
+        if spec_norm == norm {
             return Some(RemoteLspSpec {
-                lang: spec.language,
+                lang: spec_norm.to_string(),
                 primary_cmd: spec.command,
                 primary_args: spec.args,
                 fallback_cmd: None,
                 fallback_args: Vec::new(),
             });
         }
+    }
+    if is_lightweight_non_lsp_lang(norm) {
+        return None;
     }
     REGISTRY
         .iter()

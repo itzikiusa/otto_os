@@ -254,21 +254,21 @@
     <div class="tree-panel" role="tabpanel" id="ide-explorer-panel-files" aria-labelledby="ide-explorer-tab-files">
       <div class="tree-toolbar">
         <input class="tree-filter" type="search" dir="ltr" aria-label="Filter files" placeholder="Filter…" bind:value={ide.treeFilter} data-testid="ide-tree-filter" />
-        <button type="button" class="tree-act" aria-label="New file" title="New file…" onclick={() => triggerNewTreeEntry(ide.target.root || selectedDirPath || '', 'create_file')}>
+        <button type="button" class="tree-act" aria-label="New file…" title="New file…" onclick={() => triggerNewTreeEntry(ide.target.root || selectedDirPath || '', 'create_file')}>
           <Icon name="plus" size={12} />
         </button>
         {#if ide.target.kind === 'local'}
-          <button type="button" class="tree-act" aria-label="Add folder to project" title="Add folder to project…" onclick={() => (addFolderPickerOpen = true)} data-testid="ide-add-folder-btn">
+          <button type="button" class="tree-act" aria-label="Add folder to project…" title="Add folder to project…" onclick={() => (addFolderPickerOpen = true)} data-testid="ide-add-folder-btn">
             <Icon name="worktree" size={12} />
           </button>
-          <button type="button" class="tree-act" aria-label="Show project local history" title="Show project local history and deleted files" onclick={() => openCompareModal({ mode: 'local-history', path: ide.target.root || selectedDirPath || '', isDir: true, filter: 'all' })} data-testid="ide-tree-local-history-btn">
+          <button type="button" class="tree-act" aria-label="Show project local history and deleted files" title="Show project local history and deleted files" onclick={() => openCompareModal({ mode: 'local-history', path: ide.target.root || selectedDirPath || '', isDir: true, filter: 'all' })} data-testid="ide-tree-local-history-btn">
             <Icon name="clock" size={12} />
           </button>
         {/if}
-        <button type="button" class="tree-act" aria-label="Select opened file" title="Select opened file in tree" disabled={!ide.activePath} onclick={() => void ide.revealInProjectTree()} data-testid="ide-select-opened-file">
+        <button type="button" class="tree-act" aria-label="Select opened file in tree" title="Select opened file in tree" disabled={!ide.activePath} onclick={() => void ide.revealInProjectTree()} data-testid="ide-select-opened-file">
           <Icon name="target" size={12} />
         </button>
-        <button type="button" class="tree-act" aria-label="Collapse all" title="Collapse all folders" onclick={() => ide.collapseAllDirs()} data-testid="ide-collapse-all">
+        <button type="button" class="tree-act" aria-label="Collapse all folders" title="Collapse all folders" onclick={() => ide.collapseAllDirs()} data-testid="ide-collapse-all">
           <Icon name="fold" size={12} />
         </button>
         <button type="button" class="tree-act" aria-label={ide.showHidden ? 'Hide dotfiles' : 'Show dotfiles'} title={ide.showHidden ? 'Hide dotfiles' : 'Show dotfiles'} aria-pressed={ide.showHidden} onclick={() => { ide.showHidden = !ide.showHidden; void ide.loadTree(); }}>
@@ -333,7 +333,7 @@
                   {#if dirtyDir}<span class="tree-dirty-dot" title="Contains uncommitted Git changes" aria-hidden="true"></span>{/if}
                   {#if gitLetter}<span class="tree-git-mark mono" data-git={gitLetter} data-testid="ide-tree-git-status">{gitLetter === 'U' ? '?' : gitLetter}</span>{/if}
                 </button>
-                <button type="button" class="tree-act tree-more" aria-label="Actions for {node.entry.name}" title="More actions" onclick={(e) => openNodeMenu(e, node)}>
+                <button type="button" class="tree-act tree-more" aria-label="Actions for {node.entry.name}" title="Actions for {node.entry.name}" onclick={(e) => openNodeMenu(e, node)}>
                   <Icon name="more" size={12} />
                 </button>
               </div>
@@ -360,7 +360,11 @@
 
 {#if manifestTreeModal}
   <Modal title={manifestTreeModal.title} width={720} onclose={() => (manifestTreeModal = null)}>
-    <pre class="dep-tree-pre mono" dir="ltr">{manifestTreeModal.output}</pre>
+    <pre
+      class="dep-tree-pre mono"
+      dir="ltr"
+      style:max-block-size="{typeof window !== 'undefined' ? Math.max(240, Math.floor(window.innerHeight * 0.6)) : 420}px"
+    >{manifestTreeModal.output}</pre>
   </Modal>
 {/if}
 
@@ -417,6 +421,6 @@
   .tree-root-sub { flex: 1; min-inline-size: 0; font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tree-more { opacity: 0; block-size: 20px; inline-size: 20px; }
   .tree-row:hover .tree-more, .tree-row:focus-within .tree-more { opacity: 1; }
-  .dep-tree-pre { max-block-size: 60vh; overflow: auto; padding: 10px; background: var(--surface-2); border-radius: var(--radius-s); font-size: var(--fs-xs); white-space: pre; }
+  .dep-tree-pre { overflow: auto; padding: 10px; background: var(--surface-2); border-radius: var(--radius-s); font-size: var(--fs-xs); white-space: pre; }
   @media (hover: none) { .tree-more { opacity: 1; } }
 </style>

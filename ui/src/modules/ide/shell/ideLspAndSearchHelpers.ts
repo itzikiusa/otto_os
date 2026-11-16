@@ -7,6 +7,7 @@ import { loadErrorText } from '../../../lib/loadError';
 import { plural } from '../../../lib/plural';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
+import { findContainingRoot } from './ideProjectHelpers';
 import {
   type IdeBufferHost,
   type IdeBufferPerfController,
@@ -368,7 +369,13 @@ export async function runFetchCodeActions(
   let content = bufPerf.flush(host, resolved);
   if (!content && !host.tabs.some((t) => t.path === resolved)) {
     try {
-      const read = await api.get<IdeFileReadResp>(`/ide/fs/file?${host.targetQuery({ path: resolved })}`);
+      const containing = host.target.kind === 'local' && host.projectRoots
+        ? findContainingRoot(resolved, host.projectRoots)
+        : null;
+      const q = containing && !containing.isPrimary && host.target.kind === 'local'
+        ? host.targetQuery({ root: containing.path, path: resolved })
+        : host.targetQuery({ path: resolved });
+      const read = await api.get<IdeFileReadResp>(`/ide/fs/file?${q}`);
       content = read.content ?? '';
     } catch { /* ignore */ }
   }
@@ -426,18 +433,27 @@ export async function runApplyQuickFixEdits(
     } else {
       try {
         const prefs = readIdePreferences();
-        const read = await api.get<IdeFileReadResp>(`/ide/fs/file?${host.targetQuery({ path: filePath })}`);
+        const containing = host.target.kind === 'local' && host.projectRoots
+          ? findContainingRoot(filePath, host.projectRoots)
+          : null;
+        const readQuery = containing && !containing.isPrimary && host.target.kind === 'local'
+          ? host.targetQuery({ root: containing.path, path: filePath })
+          : host.targetQuery({ path: filePath });
+        const fileTarget = containing && !containing.isPrimary && host.target.kind === 'local'
+          ? { ...host.targetPayload, root: containing.path }
+          : host.targetPayload;
+        const read = await api.get<IdeFileReadResp>(`/ide/fs/file?${readQuery}`);
         if (read.truncated || read.read_only) continue;
         const rawPrev = read.content ?? '';
         const eol = detectTextEol(rawPrev);
         const prevLf = normalizeEditorLf(rawPrev);
         if (prefs.localHistoryEnabled) {
-          void api.post('/ide/history/snapshot', { target: host.targetPayload, path: filePath, content: rawPrev, label: 'Before Quick Fix' }).catch(() => {});
+          void api.post('/ide/history/snapshot', { target: fileTarget, path: filePath, content: rawPrev, label: 'Before Quick Fix' }).catch(() => {});
         }
         const nextLf = applyTextEditsToString(prevLf, fileEdits);
         const nextDisk = serializeTabDiskContent({ eol }, nextLf);
         await api.put('/ide/fs/file', {
-          target: host.targetPayload,
+          target: fileTarget,
           path: filePath,
           content: nextDisk,
           expected_sha256: read.sha256 || undefined,

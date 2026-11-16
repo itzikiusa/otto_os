@@ -252,6 +252,7 @@ pub enum SidebandSource {
         db_path: std::path::PathBuf,
         session_id: String,
         min_time_ms: i64,
+        min_part_id: String,
         last_stamp: (u64, u64, u64, u64),
     },
 }
@@ -276,6 +277,8 @@ pub struct ActiveTailSource {
     pub using_fallback: bool,
     pub allowed_cwd: Option<std::path::PathBuf>,
     pub agy_brain_dir: Option<std::path::PathBuf>,
+    pub allowed_agy_conv_ids: Option<Vec<String>>,
+    pub otto_session_id: Option<String>,
 }
 
 /// Off-lock read chunk from an [`ActiveTailSource`].
@@ -327,6 +330,7 @@ pub enum SidebandPayload {
     OpencodeSqlite {
         stamp: (u64, u64, u64, u64),
         rows_jsonl: Vec<u8>,
+        has_more: bool,
     },
     /// Directory scan attempted to locate an unresolved transcript file and
     /// found no matching file; arms a negative-lookup backoff on the driver.
@@ -379,10 +383,22 @@ pub trait StructuredDriver: Send + 'static {
         false
     }
 
+    /// Whether `steer` can switch `req.model` mid-turn without queuing for the
+    /// next turn boundary.
+    fn steers_model_live(&self) -> bool {
+        false
+    }
+
     /// Whether the running process can switch to access mode `to` (its next
     /// `prompt` carries it). Otherwise the runtime restarts the child in the
     /// new mode, resuming its thread.
     fn switches_access_live(&self, _to: RuntimeAccessMode) -> bool {
+        false
+    }
+
+    /// Whether `steer` can switch to access mode `to` mid-turn without queuing
+    /// for the next turn boundary.
+    fn steers_access_live(&self, _to: RuntimeAccessMode) -> bool {
         false
     }
 
@@ -490,4 +506,44 @@ where
     fn create(&self, provider: RuntimeProvider) -> Option<Box<dyn StructuredDriver>> {
         self(provider)
     }
+}
+
+/// Extract a clamped one-shot timer `due_at` (`0..=365d`) from tool arguments,
+/// returning `None` when a recurring `CronExpression` / `cron_expression` is set
+/// or when the duration is missing/negative.
+pub fn one_shot_due_at(
+    raw: Option<&serde_json::Value>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    const MAX_TIMER_SECS: i64 = 86_400 * 365;
+    let v = raw?;
+    let has_cron = v
+        .get("CronExpression")
+        .or_else(|| v.get("cron_expression"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+    if has_cron {
+        return None;
+    }
+    let dur = v
+        .get("DurationSeconds")
+        .or_else(|| v.get("duration_seconds"))
+        .or_else(|| v.get("delay_seconds"))?;
+    if let Some(secs) = dur.as_i64() {
+        if secs < 0 {
+            return None;
+        }
+        return Some(now + chrono::Duration::seconds(secs.clamp(0, MAX_TIMER_SECS)));
+    }
+    if let Some(secs) = dur.as_u64() {
+        let clamped = secs.min(MAX_TIMER_SECS as u64) as i64;
+        return Some(now + chrono::Duration::seconds(clamped));
+    }
+    if let Some(secs_f) = dur.as_f64() {
+        if secs_f.is_finite() && secs_f >= 0.0 {
+            let ms = (secs_f.min(MAX_TIMER_SECS as f64) * 1_000.0) as i64;
+            return Some(now + chrono::Duration::milliseconds(ms));
+        }
+    }
+    None
 }

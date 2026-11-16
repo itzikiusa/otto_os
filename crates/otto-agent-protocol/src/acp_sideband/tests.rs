@@ -460,6 +460,7 @@ fn opencode_sideband_diffs_in_place_part_updates_and_deduplicates_burst() {
     let s1 = d.on_sideband(SidebandPayload::OpencodeSqlite {
         stamp: (1, 100, 1, 50),
         rows_jsonl: batch1.into_bytes(),
+        has_more: false,
     });
     assert!(s1
         .events
@@ -507,6 +508,7 @@ fn opencode_sideband_diffs_in_place_part_updates_and_deduplicates_burst() {
     let s2 = d.on_sideband(SidebandPayload::OpencodeSqlite {
         stamp: (1, 100, 2, 120),
         rows_jsonl: batch2.into_bytes(),
+        has_more: false,
     });
     assert!(s2.events.iter().any(|e| matches!(
         e,
@@ -874,6 +876,7 @@ fn p1_1_grace_window_and_turn_ownership_suppress_prompted_tail_flushes() {
         oc.on_sideband(SidebandPayload::OpencodeSqlite {
             stamp: (1, 100, 1, 50),
             rows_jsonl: oc_prompted.into_bytes(),
+            has_more: false,
         })
         .events
         .is_empty(),
@@ -894,6 +897,7 @@ fn p1_1_grace_window_and_turn_ownership_suppress_prompted_tail_flushes() {
     let oc_step = oc.on_sideband(SidebandPayload::OpencodeSqlite {
         stamp: (1, 100, 2, 100),
         rows_jsonl: oc_auto.into_bytes(),
+        has_more: false,
     });
     assert!(oc_step
         .events

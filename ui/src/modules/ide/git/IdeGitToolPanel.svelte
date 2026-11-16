@@ -2,12 +2,15 @@
   // Integrated Git tool window inside the IDE bottom dock (`Local Changes` |
   // `Log` | `File History / Blame` + closable `History: <filename> ×` tabs),
   // powered directly by Otto's `git` store and shared `DiffViewer` / `BlamePanel`.
+  import { untrack } from 'svelte';
   import Badge from '../../../lib/components/Badge.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { isBroadNonProjectRootClient } from '../../../lib/fileUri';
   import { router } from '../../../lib/router.svelte';
   import { git } from '../../../lib/stores/git.svelte';
+  import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
+  import { toasts } from '../../../lib/toast.svelte';
   import { ide, ideBasename } from '../ideStore.svelte';
   import IdeGitChangesView from './IdeGitChangesView.svelte';
   import { ideGit } from './ideGitController.svelte';
@@ -27,9 +30,11 @@
     void ide.projectRoots.length;
     void ide.treeRootEntries.length;
     void ide.activePath;
-    ideGit.syncVisibleRoots({ probeAll: false });
-    const root = ideGit.activeRoot;
-    if (root) void ideGit.ensureRootDetected(root.path);
+    untrack(() => {
+      ideGit.syncVisibleRoots({ probeAll: false });
+      const root = ideGit.activeRoot;
+      if (root) void ideGit.ensureRootDetected(root.path);
+    });
   });
 
   const activeRepo = $derived(ideGit.activeRepo);
@@ -55,11 +60,28 @@
   }
 
   async function openInGitModule(): Promise<void> {
+    if (ide.target.kind !== 'local') {
+      toasts.info('Git module manages local repositories — use the integrated SSH terminal for remote targets.');
+      return;
+    }
     const targetPath = ide.activePath || ideGit.activeRoot?.path || ide.target.root;
     const repo = activeRepo ?? (targetPath ? await ideGit.resolveRepoForPath(targetPath) : null);
-    if (repo && !isBroadNonProjectRootClient(repo.path)) {
-      git.upsertRepo(repo);
-      git.openRepoTab(repo.id, 'graph');
+    if (!repo || isBroadNonProjectRootClient(repo.path)) {
+      toasts.info('No Git repository detected for the current project folder.');
+      router.go('git');
+      return;
+    }
+    git.upsertRepo(repo);
+    await git.initializeOpenTabs();
+    git.upsertRepo(repo);
+    git.openRepoTab(repo.id, 'graph');
+    if (
+      repo.workspace_id &&
+      repo.workspace_id !== SCRATCH_WORKSPACE_ID &&
+      ws.workspaces.some((w) => w.id === repo.workspace_id) &&
+      ws.currentId !== repo.workspace_id
+    ) {
+      ws.select(repo.workspace_id);
     }
     router.go('git');
   }

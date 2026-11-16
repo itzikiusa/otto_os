@@ -33,13 +33,14 @@ pub fn is_lightweight_non_lsp_lang(lang: &str) -> bool {
             | "diff"
             | "dockerfile"
             | "proto"
+            | "protobuf"
     )
 }
 
 fn manifest_names_for_lang(norm_lang: &str) -> &'static [&'static str] {
     match norm_lang {
         "go" => &["go.work", "go.mod"],
-        "java" => &[
+        "java" | "kotlin" => &[
             "pom.xml",
             "build.gradle",
             "build.gradle.kts",
@@ -55,12 +56,32 @@ fn manifest_names_for_lang(norm_lang: &str) -> &'static [&'static str] {
             "requirements.txt",
             "Pipfile",
         ],
+        "protobuf" | "proto" => &["buf.work.yaml", "buf.yaml"],
+        "graphql" => &[
+            "graphql.config.json",
+            "graphql.config.yml",
+            "graphql.config.yaml",
+            ".graphqlrc",
+            ".graphqlrc.json",
+            ".graphqlrc.yml",
+            ".graphqlrc.yaml",
+            "package.json",
+        ],
+        "makefile" => &["Makefile", "GNUmakefile", "makefile"],
+        "dockerfile" => &["docker-compose.yml", "docker-compose.yaml", "compose.yaml"],
         _ => &[],
     }
 }
 
-fn dir_has_any_manifest(dir: &Path, names: &[&str]) -> bool {
-    names.iter().any(|m| dir.join(m).is_file())
+fn dir_has_any_manifest(dir: &Path, names: &[&str], extra_markers: &[String]) -> bool {
+    names
+        .iter()
+        .any(|m| dir.join(m).is_file() || dir.join(m).is_dir())
+        || extra_markers
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('\\') && *s != "..")
+            .any(|m| dir.join(m).exists())
 }
 
 fn dir_looks_like_child_repo(dir: &Path) -> bool {
@@ -127,12 +148,25 @@ fn canonical_or_existing_ancestor(path: &Path) -> PathBuf {
 
 /// Scope an LSP root strictly to the nearest module manifest directory for `lang`
 /// and refuse spawning on a multi-repository umbrella folder.
-#[allow(clippy::disallowed_methods)]
 pub fn resolve_lsp_module_root(
     lang: &str,
     raw_root: &str,
     file_hint: Option<&str>,
     allowed_roots: &[PathBuf],
+) -> std::io::Result<String> {
+    resolve_lsp_module_root_with_markers(lang, raw_root, file_hint, allowed_roots, &[])
+}
+
+/// Scope an LSP root strictly to the nearest module manifest (built-in or plugin
+/// `extra_markers`), falling back to the nearest `.git` root or `canon_root` for
+/// custom plugin languages so leaf subdirectories do not spawn duplicate servers.
+#[allow(clippy::disallowed_methods)]
+pub fn resolve_lsp_module_root_with_markers(
+    lang: &str,
+    raw_root: &str,
+    file_hint: Option<&str>,
+    allowed_roots: &[PathBuf],
+    extra_markers: &[String],
 ) -> std::io::Result<String> {
     let trimmed = raw_root.trim();
     if trimmed.is_empty() {
@@ -193,15 +227,16 @@ pub fn resolve_lsp_module_root(
         }
     };
 
-    let norm_lang = normalize_lsp_lang(lang);
+    let lower_lang = lang.trim().to_ascii_lowercase();
+    let norm_lang = normalize_lsp_lang(&lower_lang);
     let manifests = manifest_names_for_lang(norm_lang);
-    if !manifests.is_empty() {
+    if !manifests.is_empty() || !extra_markers.is_empty() {
         let mut cur = start_dir.as_path();
         for _ in 0..16 {
             if !within_allowed(cur) {
                 break;
             }
-            if dir_has_any_manifest(cur, manifests) {
+            if dir_has_any_manifest(cur, manifests, extra_markers) {
                 return Ok(cur.to_string_lossy().into_owned());
             }
             let Some(parent) = cur.parent() else {
@@ -211,7 +246,35 @@ pub fn resolve_lsp_module_root(
         }
     }
 
-    if (manifests.is_empty() || !dir_has_any_manifest(&start_dir, manifests))
+    // No language manifest matched: walk up for `.git` first, otherwise fall back
+    // to `canon_root` (when `start_dir` is nested inside a non-umbrella `canon_root`)
+    // so custom plugin LSP servers bind to the workspace root rather than every leaf dir.
+    {
+        let mut cur = start_dir.as_path();
+        for _ in 0..16 {
+            if !within_allowed(cur) {
+                break;
+            }
+            if cur.join(".git").exists() {
+                return Ok(cur.to_string_lossy().into_owned());
+            }
+            let Some(parent) = cur.parent() else {
+                break;
+            };
+            cur = parent;
+        }
+    }
+
+    if start_dir != canon_root
+        && start_dir.starts_with(&canon_root)
+        && canon_root.is_dir()
+        && within_allowed(&canon_root)
+        && !is_multi_repo_umbrella_dir(&canon_root)
+    {
+        return Ok(canon_root.to_string_lossy().into_owned());
+    }
+
+    if !dir_has_any_manifest(&start_dir, manifests, extra_markers)
         && is_multi_repo_umbrella_dir(&start_dir)
     {
         return Err(std::io::Error::new(
@@ -292,9 +355,62 @@ mod tests {
         .unwrap();
 
         let reg = IdePluginRegistry::with_dirs(tmp.path().to_path_buf(), None);
+        assert!(
+            resolve_lang_with_ide("kotlin", tmp.path(), &reg).is_none(),
+            "unrecorded on-disk plugin directory must remain disabled until explicitly toggled"
+        );
+        reg.toggle("kotlin-ide", true).unwrap();
         let resolved = resolve_lang_with_ide("kotlin", tmp.path(), &reg).unwrap();
         assert!(resolved.available);
         assert_eq!(resolved.command, fake_kls.to_string_lossy());
+    }
+
+    #[test]
+    fn plugin_lsp_overrides_lightweight_filter_and_falls_back_to_canon_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("ide-plugins/docker-lsp");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let fake_bin_dir = tmp.path().join("toolchains/docker/bin");
+        std::fs::create_dir_all(&fake_bin_dir).unwrap();
+        let fake_dls = fake_bin_dir.join("docker-langserver");
+        std::fs::write(&fake_dls, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            plugin_dir.join("otto-ide-plugin.json"),
+            r#"{
+                "slug": "docker-lsp",
+                "name": "Docker LSP",
+                "version": "1.0.0",
+                "contributions": {
+                    "lsp_servers": [{
+                        "language": "dockerfile",
+                        "command": "docker-langserver",
+                        "args": ["--stdio"],
+                        "extensions": ["Dockerfile"]
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let reg = IdePluginRegistry::with_dirs(tmp.path().to_path_buf(), None);
+        assert!(resolve_lang_with_ide("dockerfile", tmp.path(), &reg).is_none());
+        reg.toggle("docker-lsp", true).unwrap();
+        let resolved = resolve_lang_with_ide("dockerfile", tmp.path(), &reg).unwrap();
+        assert!(resolved.available);
+        assert_eq!(resolved.command, fake_dls.to_string_lossy());
+
+        let ws = tmp.path().join("cue-workspace");
+        let nested = ws.join("pkg/policy/sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        let canon_ws = std::fs::canonicalize(&ws).unwrap();
+        let scoped = resolve_lsp_module_root(
+            "cue",
+            &ws.to_string_lossy(),
+            Some(&nested.join("rules.cue").to_string_lossy()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(PathBuf::from(scoped), canon_ws);
     }
 
     #[test]

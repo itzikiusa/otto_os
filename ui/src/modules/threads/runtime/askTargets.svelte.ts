@@ -38,6 +38,12 @@ export const askTargets = new AskTargets();
 export async function askFromComposer(parentId: string, draft: RuntimeComposerDraft, text: string, access: RuntimeAccessMode | null): Promise<void> {
   const targets = askTargets.for(parentId);
   if (targets.length === 0 || draft.sending) return;
+  const nonImages = draft.images.filter((f) => !f.mime.startsWith('image/'));
+  if (nonImages.length > 0) {
+    draft.startError =
+      'PDF attachments can only be sent directly to this thread — remove the PDF or clear the @agent chips first.';
+    return;
+  }
   const pics = draft.images.filter((f) => f.mime.startsWith('image/'));
   draft.sending = true;
   try {

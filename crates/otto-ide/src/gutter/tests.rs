@@ -349,3 +349,45 @@ func TestAssignFrbToPlayers(t *testing.T) {}
         items[0].run_spec.args
     );
 }
+
+#[test]
+fn plugin_registered_language_resolves_gutter_detector_without_hardcoded_match() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugin_dir = tmp.path().join("ide-plugins/elixir-pack");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("otto-ide-plugin.json"),
+        r#"{
+            "slug": "elixir-pack",
+            "name": "Elixir Pack",
+            "version": "1.0.0",
+            "contributions": {
+                "languages": [{
+                    "id": "elixir",
+                    "display_name": "Elixir",
+                    "extensions": [".exs"]
+                }],
+                "gutter_detectors": [{
+                    "language": "elixir",
+                    "extensions": [],
+                    "pattern": "^\\s*test\\s+\"([^\"]+)\"",
+                    "kind": "test",
+                    "runner": "custom",
+                    "command_template": "mix",
+                    "args_template": ["test", "{file}"],
+                    "label_prefix": "Mix"
+                }]
+            }
+        }"#,
+    )
+    .unwrap();
+    let reg = crate::plugins::IdePluginRegistry::with_dirs(tmp.path().to_path_buf(), None);
+    reg.toggle("elixir-pack", true).unwrap();
+
+    let src = "defmodule MathTest do\n  test \"adds two numbers\" do\n    assert 1 + 1 == 2\n  end\nend\n";
+    let items = detect_gutter_items_with_plugins("/ws/test/math_test.exs", src, &reg);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].line, 2);
+    assert_eq!(items[0].language, "elixir");
+    assert_eq!(items[0].label, "Mix adds two numbers");
+}

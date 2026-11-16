@@ -12,10 +12,8 @@
   import './lib/status';
   import './lib/live';
   import './lib/components/Icon.svelte';
-  import './lib/components/Skeleton.svelte';
   import './lib/components/StatusDot.svelte';
   import './lib/components/Badge.svelte';
-  import './lib/components/LoadState.svelte';
   import { getToken } from './lib/api/client';
   import { auth } from './lib/stores/auth.svelte';
   import { appLive } from './lib/live';

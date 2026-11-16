@@ -340,7 +340,7 @@ test('image-only optimistic send populates immediate preview_url attachments ins
     assert.equal(direct.item.attachments?.length, 2);
     assert.equal(direct.item.attachments?.[0]?.kind, 'image');
     assert.equal(direct.item.attachments?.[0]?.name, 'shot.png');
-    assert.equal(direct.item.attachments?.[0]?.media_type, 'image/png');
+    assert.equal(direct.item.attachments?.[0]?.mime, 'image/png');
     assert.equal(direct.item.attachments?.[0]?.preview_url, 'data:image/png;base64,QUJD');
     assert.equal(direct.item.attachments?.[1]?.kind, 'file');
     assert.equal(direct.item.attachments?.[1]?.preview_url, undefined);

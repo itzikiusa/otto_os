@@ -259,9 +259,16 @@ impl IntoResponse for ApiError {
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!(error = %self.0, "git router internal error");
+        }
+        let message = match &self.0 {
+            Error::Internal(_) => "internal server error".to_string(),
+            other => other.to_string(),
+        };
         let body = Problem {
             code: self.0.code().to_string(),
-            message: self.0.to_string(),
+            message,
         };
         (status, Json(body)).into_response()
     }

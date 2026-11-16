@@ -3,7 +3,8 @@
   // elapsed timer while running ("Working · Running npm test · 14s" or
   // "Background wakeup · Thinking… · 4s"), a calm waiting line when idle with
   // scheduled/background tasks ("Waiting on 1 background task: …"), or outcome
-  // ("Stopped", "Stopped · no progress", "Partly done").
+  // ("Stopped", "Stopped · no progress", "Failed", "Partly done").
+  import type { MessageAttachment } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
   import type { AgentTask } from './agentTasks';
   import { deriveLiveFooter } from './liveStatus';
@@ -19,7 +20,8 @@
     background?: readonly AgentTask[];
     outcome: TurnOutcome | null;
     disabled?: boolean;
-    onresend: (text: string) => void;
+    onresend: (text: string, attachments?: readonly MessageAttachment[]) => void;
+    onedit?: (text: string, attachments?: readonly MessageAttachment[]) => void;
   }
   let {
     projection = null,
@@ -29,10 +31,41 @@
     outcome,
     disabled = false,
     onresend,
+    onedit,
   }: Props = $props();
   let showFailed = $state(false);
   const live = $derived(deriveLiveFooter(projection, workingFor, ownTurn, background));
+  const retryText = $derived(outcome?.retryText ?? '');
+  const retryAttachments = $derived(outcome?.retryAttachments);
+  const canRetry = $derived(Boolean(retryText || (retryAttachments && retryAttachments.length > 0)));
 </script>
+
+{#snippet retryActions()}
+  {#if canRetry}
+    {#if onedit}
+      <button
+        type="button"
+        class="btn small"
+        {disabled}
+        title="Restore this message and its attachments into the composer"
+        data-testid="runtime-turn-edit"
+        onclick={() => onedit(retryText, retryAttachments)}
+      >
+        Edit
+      </button>
+    {/if}
+    <button
+      type="button"
+      class="btn small"
+      {disabled}
+      title="Send the same message and attachments again"
+      data-testid="runtime-turn-resend"
+      onclick={() => onresend(retryText, retryAttachments)}
+    >
+      Send again
+    </button>
+  {/if}
+{/snippet}
 
 {#if live?.mode === 'working'}
   <p class="ts" data-testid="runtime-working">
@@ -45,17 +78,26 @@
     <span>{live.text}</span>
   </p>
 {:else if outcome?.kind === 'stopped'}
-  <p class="ts">Stopped</p>
+  <div class="ts" data-testid="runtime-stopped">
+    <span>Stopped</span>
+    {@render retryActions()}
+  </div>
 {:else if outcome?.kind === 'stalled'}
-  <p class="ts" title="No output for a long while, so Otto stopped the turn">Stopped · no progress</p>
+  <div class="ts" data-testid="runtime-stalled" title="No output for a long while, so Otto stopped the turn">
+    <span>Stopped · no progress</span>
+    {@render retryActions()}
+  </div>
+{:else if outcome?.kind === 'failed'}
+  <div class="ts" data-testid="runtime-failed">
+    <Icon name="warning" size={12} />
+    <span>Turn failed</span>
+    {@render retryActions()}
+  </div>
 {:else if outcome?.kind === 'partial'}
   <div class="ts" data-testid="runtime-partial">
     <Icon name="info" size={12} />Partly done
     <button type="button" class="btn small" aria-expanded={showFailed} onclick={() => (showFailed = !showFailed)}>Details</button>
-    {#if outcome.retryText}
-      {@const again = outcome.retryText}
-      <button type="button" class="btn small" {disabled} title="Send the same message again" onclick={() => onresend(again)}>Send again</button>
-    {/if}
+    {@render retryActions()}
   </div>
   {#if showFailed}
     <ul class="ts-failed" aria-label="Steps that failed">
@@ -68,10 +110,12 @@
   .ts {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 6px;
     margin: 4px 0 0;
     color: var(--text-dim);
     font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums;
   }
   .ts .spinner {
     --spinner-size: 11px;

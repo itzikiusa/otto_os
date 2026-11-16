@@ -24,6 +24,7 @@ import {
   type IdeFileReadResp,
   type IdeProjectRoot,
 } from '../ideStore.svelte';
+import { onIdeTargetReset } from '../store/ideStateSlices.svelte';
 import { detectTextEol, normalizeEditorLf } from '../store/ideTypes';
 
 export type IdeGitLetter = 'M' | 'A' | 'D' | 'U' | 'R' | 'C';
@@ -71,12 +72,81 @@ class IdeGitController {
   focusedChangePath = $state<string | null>(null);
   focusCommitSeq = $state(0);
 
-  private inFlightRoots = new Set<string>();
+  private inFlightRoots = new Map<string, Promise<Repo | null>>();
   private nonRepoRoots = new Set<string>();
+  private lastHandledLiveRev: Record<string, number> = {};
   private activeProbes = 0;
   private probeQueue: Array<() => void> = [];
   private histModeSeq = 0;
   private manualRepoForActivePath: string | null = null;
+
+  constructor() {
+    onIdeTargetReset(() => this.reset());
+    if (typeof window !== 'undefined') {
+      window.addEventListener('otto:git-worktree-discarded', (ev: Event) => {
+        const det = (ev as CustomEvent<{ repoId?: string; paths?: string[] }>).detail;
+        if (!det?.repoId) return;
+        const repo = [
+          ...this.repos,
+          ...Object.values(this.repoByRoot),
+          ...git.repos,
+          ...git.allRepos,
+        ].find((r) => r?.id === det.repoId);
+        if (!repo) return;
+        const base = normSlash(repo.path);
+        if (det.paths && det.paths.length > 0) {
+          for (let i = 0; i < det.paths.length; i++) {
+            const abs = `${base}/${det.paths[i].replace(/^\/+/, '')}`;
+            const tab = ide.tabs.find((t) => normSlash(t.path) === normSlash(abs));
+            if (tab && !tab.dirty) void this.reloadIdeTabIfOpen(tab.path, { onlyIfChangedOnDisk: true });
+          }
+        } else {
+          void this.reloadCleanOpenTabsForRepo(repo.path);
+        }
+      });
+    }
+  }
+
+  reset(): void {
+    this.repoByRoot = {};
+    this.selectedRootPath = null;
+    this.selectedRepoId = null;
+    this.activeSubTab = 'changes';
+    this.historyTabs = [];
+    this.focusedChangePath = null;
+    this.nonRepoRoots.clear();
+    this.lastHandledLiveRev = {};
+    this.manualRepoForActivePath = null;
+  }
+
+  /** Reactive bridge invoked from `IdeEditorArea` so external `git restore` / CLI checkouts sync clean open IDE tabs. */
+  syncExternalRepoChanges(): void {
+    if (ide.target.kind !== 'local' || ide.tabs.length === 0) return;
+    const seen = new Set<string>();
+    const candidates = [...Object.values(this.repoByRoot), ...this.repos];
+    for (let i = 0; i < ide.tabs.length; i++) {
+      const known = this.findKnownRepoForPath(ide.tabs[i].path);
+      if (known) candidates.push(known);
+    }
+    for (let i = 0; i < candidates.length; i++) {
+      const repo = candidates[i];
+      if (!repo || seen.has(repo.id)) continue;
+      seen.add(repo.id);
+      const rev = git.liveRev[repo.id];
+      if (rev === undefined) continue;
+      const prev = this.lastHandledLiveRev[repo.id];
+      this.lastHandledLiveRev[repo.id] = rev;
+      if (prev === undefined || rev <= prev) continue;
+      for (let j = 0; j < ide.tabs.length; j++) {
+        const tab = ide.tabs[j];
+        if (tab.dirty || tab.loading || tab.path.startsWith('untitled:')) continue;
+        const rel = this.repoRelativePath(repo, tab.path);
+        if (rel && git.liveTouches(repo.id, rel)) {
+          void this.reloadIdeTabIfOpen(tab.path, { onlyIfChangedOnDisk: true });
+        }
+      }
+    }
+  }
 
   /** All unique detected Otto `Repo` objects across attached IDE project folders (including nested repos). */
   readonly repos = $derived.by((): Repo[] => {
@@ -386,8 +456,12 @@ class IdeGitController {
       git.ensureStatus(this.repoByRoot[rootPath].id);
       return this.repoByRoot[rootPath];
     }
-    if (!force && (this.nonRepoRoots.has(rootPath) || this.inFlightRoots.has(rootPath))) {
+    if (!force && this.nonRepoRoots.has(rootPath)) {
       return this.repoByRoot[rootPath] ?? null;
+    }
+    const existingProbe = !force ? this.inFlightRoots.get(rootPath) : undefined;
+    if (existingProbe) {
+      return existingProbe;
     }
 
     // Only short-circuit on EXACT repo root match so nested repositories and
@@ -402,72 +476,89 @@ class IdeGitController {
       return exactKnown;
     }
 
-    this.inFlightRoots.add(rootPath);
-    this.detectingCount += 1;
-    try {
-      let sawDefinitiveNonRepo = false;
-      const detected = await this.enqueueProbe(async () => {
-        const wsId =
-          ide.target.workspace_id ||
-          ws.current?.id ||
-          ws.workspaces.find((w) => w.id !== SCRATCH_WORKSPACE_ID)?.id ||
-          ws.workspaces[0]?.id ||
-          null;
-        if (wsId) {
-          try {
-            return await api.bg.post<Repo>(`/workspaces/${encodeURIComponent(wsId)}/repos/detect`, {
-              path: rootPath,
-            });
-          } catch (err) {
-            if (err instanceof ApiError && (err.status === 400 || err.status === 404 || err.status === 422)) {
-              sawDefinitiveNonRepo = true;
+    let probePromise: Promise<Repo | null> | null = null;
+    probePromise = (async (): Promise<Repo | null> => {
+      this.detectingCount += 1;
+      try {
+        let sawDefinitiveNonRepo = false;
+        let hadWorkspaceForDetect = false;
+        const detected = await this.enqueueProbe(async () => {
+          const wsId =
+            ide.target.workspace_id ||
+            ws.current?.id ||
+            ws.workspaces.find((w) => w.id !== SCRATCH_WORKSPACE_ID)?.id ||
+            ws.workspaces[0]?.id ||
+            null;
+          if (wsId) {
+            hadWorkspaceForDetect = true;
+            try {
+              return await api.bg.post<Repo>(`/workspaces/${encodeURIComponent(wsId)}/repos/detect`, {
+                path: rootPath,
+              });
+            } catch (err) {
+              if (err instanceof ApiError && (err.status === 400 || err.status === 404 || err.status === 422)) {
+                sawDefinitiveNonRepo = true;
+              }
             }
           }
-        }
-        try {
-          const resolved = await api.bg.get<RepoResolveResp>(
-            `/git/repos/resolve?ref=${encodeURIComponent(rootPath)}`,
-          );
-          const r = resolved.repo;
-          return {
-            id: r.id,
-            workspace_id: r.workspace_id,
-            name: r.name || ideBasename(r.path),
-            path: r.path,
-            remote_url: r.remote_url,
-            provider: r.provider,
-            git_account_id: null,
-            created_at: '',
-          };
-        } catch (err) {
-          if (err instanceof ApiError && (err.status === 400 || err.status === 404 || err.status === 422)) {
-            sawDefinitiveNonRepo = true;
+          try {
+            const resolved = await api.bg.get<RepoResolveResp>(
+              `/git/repos/resolve?ref=${encodeURIComponent(rootPath)}`,
+            );
+            const r = resolved.repo;
+            const rp = normSlash(r.path);
+            if (resolved.matched_by !== 'path' || (rootPath !== rp && !rootPath.startsWith(`${rp}/`))) {
+              return null;
+            }
+            return {
+              id: r.id,
+              workspace_id: r.workspace_id,
+              name: r.name || ideBasename(r.path),
+              path: r.path,
+              remote_url: r.remote_url,
+              provider: r.provider,
+              git_account_id: null,
+              created_at: '',
+            };
+          } catch (err) {
+            if (
+              hadWorkspaceForDetect &&
+              err instanceof ApiError &&
+              (err.status === 400 || err.status === 404 || err.status === 422)
+            ) {
+              sawDefinitiveNonRepo = true;
+            }
+            return null;
           }
-          return null;
-        }
-      });
+        });
 
-      if (detected && !isBroadNonProjectRootClient(detected.path)) {
-        this.nonRepoRoots.delete(rootPath);
-        const canonRepoRoot = normSlash(detected.path);
-        this.repoByRoot = {
-          ...this.repoByRoot,
-          [rootPath]: detected,
-          [canonRepoRoot]: detected,
-        };
-        git.upsertRepo(detected);
-        void git.refreshStatus(detected.id, { force });
-        return detected;
+        if (detected && !isBroadNonProjectRootClient(detected.path)) {
+          this.nonRepoRoots.delete(rootPath);
+          const canonRepoRoot = normSlash(detected.path);
+          this.repoByRoot = {
+            ...this.repoByRoot,
+            [rootPath]: detected,
+            [canonRepoRoot]: detected,
+          };
+          git.upsertRepo(detected);
+          void git.refreshStatus(detected.id, { force });
+          return detected;
+        }
+        if ((sawDefinitiveNonRepo && hadWorkspaceForDetect) || (detected && isBroadNonProjectRootClient(detected.path))) {
+          this.nonRepoRoots.add(rootPath);
+          this.probeUmbrellaChildren(rootPath);
+        }
+        return null;
+      } finally {
+        if (this.inFlightRoots.get(rootPath) === probePromise) {
+          this.inFlightRoots.delete(rootPath);
+        }
+        this.detectingCount = Math.max(0, this.detectingCount - 1);
       }
-      if (sawDefinitiveNonRepo || (detected && isBroadNonProjectRootClient(detected.path))) {
-        this.nonRepoRoots.add(rootPath);
-        this.probeUmbrellaChildren(rootPath);
-      }
-      return null;
-    } finally {
-      this.inFlightRoots.delete(rootPath);
-      this.detectingCount = Math.max(0, this.detectingCount - 1);
-    }
+    })();
+
+    this.inFlightRoots.set(rootPath, probePromise);
+    return probePromise;
   }
 
   /** When an attached folder is a multi-repo umbrella (not itself a Git repo), probe its immediate child dirs. */
@@ -576,7 +667,10 @@ class IdeGitController {
   }
 
   /** Refresh an open IDE tab in place from disk (or close it if deleted by discard). */
-  async reloadIdeTabIfOpen(absPath: string): Promise<void> {
+  async reloadIdeTabIfOpen(
+    absPath: string,
+    opts: { onlyIfChangedOnDisk?: boolean } = {},
+  ): Promise<void> {
     const clean = normSlash(ide.resolvePath(absPath));
     const existing = ide.tabs.find((t) => normSlash(t.path) === clean);
     if (!existing) return;
@@ -603,11 +697,20 @@ class IdeGitController {
 
     const detectedEol = detectTextEol(fresh.content);
     const lfContent = normalizeEditorLf(fresh.content);
+    if (
+      opts.onlyIfChangedOnDisk &&
+      !existing.dirty &&
+      existing.sha256 &&
+      fresh.sha256 === existing.sha256 &&
+      existing.content === lfContent
+    ) {
+      return;
+    }
     existing.error = null;
     existing.eol = detectedEol;
     try {
       if (ide.activePath === existing.path || ide.splitPath === existing.path) {
-        const applied = await ide.applyAgentEdit(existing.path, lfContent);
+        const applied = await ide.replaceBufferContent(existing.path, lfContent);
         if (!applied) ide.updateBuffer(existing.path, lfContent);
       } else {
         ide.updateBuffer(existing.path, lfContent);

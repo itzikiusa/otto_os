@@ -11,7 +11,6 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 /// Built-in providers covered by the dynamic model catalog and refresher.
@@ -268,8 +267,8 @@ pub async fn probe_catalog_cli(
         _ => return None,
     };
     let cmd_label = format!("{provider} {}", args.join(" "));
-    let out = Command::new(program)
-        .args(args)
+    let mut cmd = super::cli_models_command(program, args);
+    let out = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
