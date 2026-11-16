@@ -290,8 +290,8 @@ async fn by_kind_rollup_with(
     let own: Option<std::collections::HashSet<&str>> =
         own.map(|ids| ids.iter().map(String::as_str).collect());
     // Resolve feature labels in one SQLite scan (list_all) instead of one GET
-    // per session (the original N+1). Sessions absent from the map fall back
-    // to "external". `feature_usage` issues its own `session_totals` query
+    // per session (the original N+1); see [`feature_label`] for a miss.
+    // `feature_usage` issues its own `session_totals` query
     // internally, so we skip the pre-check and go straight to building the map.
     let labels: std::collections::HashMap<String, String> = all_sessions
         .iter()
@@ -305,16 +305,23 @@ async fn by_kind_rollup_with(
             {
                 return SKIP.to_string();
             }
-            labels
-                .get(&t.session_id)
-                .cloned()
-                .unwrap_or_else(|| "external".to_string())
+            feature_label(&labels, t)
         })
         .await
         .unwrap_or_default()
         .into_iter()
         .filter(|f| f.feature != SKIP)
         .collect()
+}
+
+/// A session's by-kind bucket: its label, else `external` (run outside Otto)
+/// or `deleted` (an Otto session or thread whose row was removed).
+fn feature_label(labels: &std::collections::HashMap<String, String>, t: &SessionTotals) -> String {
+    match labels.get(&t.session_id) {
+        Some(label) => label.clone(),
+        None if t.workspace_id == otto_usage::EXTERNAL_WORKSPACE => "external".to_string(),
+        None => "deleted".to_string(),
+    }
 }
 
 /// Enrich top-session rows with the Otto session title (pane name), kind
@@ -360,7 +367,8 @@ async fn enrich_sessions(
         // Mark rows whose cost was estimated via the conservative FALLBACK rate
         // card (unrecognised model). The `model` field comes from ClickHouse via
         // `any(model)`; non-empty + not-priced → "estimated".
-        if !s.model.is_empty() {
+        // An unpriced provider (Muse) records tokens only: nothing estimated.
+        if !s.model.is_empty() && s.cost_usd > 0.0 {
             s.fallback_priced = !otto_usage::is_priced(&s.model);
         }
         let wsid = sess.workspace_id.clone();
@@ -981,7 +989,7 @@ mod session_usage_tests {
 
 #[cfg(test)]
 mod kind_label_tests {
-    use super::session_kind_label;
+    use super::{feature_label, session_kind_label};
 
     fn label(kind: &str, source: Option<&str>) -> String {
         session_kind_label(&otto_state::UsageLabelRow {
@@ -1001,6 +1009,36 @@ mod kind_label_tests {
         assert_eq!(label("agent", Some("product-plan")), "product");
         assert_eq!(label("agent", Some("channel")), "channel");
         assert_eq!(label("connection", None), "connection");
+    }
+
+    /// A Threads session is labelled by its row (`thread`, or its source); a
+    /// session with no row is `external` only when it ran outside Otto.
+    #[test]
+    fn threads_are_labelled_and_removed_sessions_are_not_external() {
+        let totals = |session: &str, workspace: &str| otto_usage::SessionTotals {
+            session_id: session.into(),
+            workspace_id: workspace.into(),
+            provider: "agy".into(),
+            ..Default::default()
+        };
+        let labels: std::collections::HashMap<String, String> = [
+            ("thread-1".to_string(), label("thread", None)),
+            (
+                "thread-2".to_string(),
+                label("thread", Some("personal-agent")),
+            ),
+        ]
+        .into();
+        assert_eq!(feature_label(&labels, &totals("thread-1", "ws")), "thread");
+        assert_eq!(
+            feature_label(&labels, &totals("thread-2", "ws")),
+            "personal-agent"
+        );
+        assert_eq!(feature_label(&labels, &totals("gone", "ws")), "deleted");
+        assert_eq!(
+            feature_label(&labels, &totals("cli-uuid", otto_usage::EXTERNAL_WORKSPACE)),
+            "external"
+        );
     }
 }
 

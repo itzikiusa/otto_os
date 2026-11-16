@@ -120,7 +120,9 @@ Cache-read uses `cached_input_tokens`, and cache-write is zero.
 
 ### 3.3 Attribution (which session a turn belongs to)
 
-The tailer keeps an attribution index built from the SQLite `sessions` table.
+The tailer keeps an attribution index built from the SQLite `sessions` table
+(by `provider_session_id`) and the Threads `agent_runtime_sessions` table (by
+`native_thread_id`, the provider's own session id — closed threads included).
 It is built on the first pass that actually reads new lines and **reused across
 passes** (event-driven passes run every ~2 s while an agent streams): it is
 re-read only when it is older than 60 s, or when a lookup misses **and** a
@@ -143,7 +145,7 @@ as `claude-work`. Unmatched transcripts in `~/.claude-work/projects` use the
 A turn that maps to an Otto session inherits that session's `workspace_id` and id.
 A turn that maps to nothing is recorded under the special workspace id
 **`external`** (constant `EXTERNAL_WORKSPACE`) with the transcript UUID as the
-session id. External usage gives a complete machine-wide picture but is excluded by
+session id: a CLI run outside Otto. External usage gives a complete machine-wide picture but is excluded by
 default in the dashboard (the **Otto / All** toggle — see §6).
 
 **Codex / Antigravity owner grace.** Their provider session id is learnt only
@@ -448,9 +450,13 @@ providers.
   folds every session's raw sums into per-feature buckets using a classifier over the
   session's SQLite metadata. Labels: `review` (Code review), `product` (Product AI),
   `channel` (Channels), `agent` (Ad-hoc agents), `connection` (Connections), `swarm`
-  (Swarm), `external` (External). The label prefers the session meta `source` tag set
-  by the review/product/channel runners, else the session kind. The review
-  summarizer's sessions (`source: review_summarizer`) count as `review`.
+  (Swarm), `thread` (Threads), `external` (External), `deleted` (Deleted sessions).
+  The label prefers the session meta `source` tag set by the review/product/channel
+  runners, else the session kind (`thread` for a Threads session). The review
+  summarizer's sessions (`source: review_summarizer`) count as `review`. A session
+  with no row is `external` only when it ran outside Otto (workspace `external`,
+  shown only in the **All** view); an Otto session or thread whose row was deleted
+  keeps its workspace and counts as `deleted`.
 
 ### 6.1 Work-graph attribution & forecast (the drilldown)
 
