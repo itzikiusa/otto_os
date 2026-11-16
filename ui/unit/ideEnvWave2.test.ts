@@ -113,3 +113,35 @@ test('V6: after a dependency action the daemon wrote, the manifest tab reloads f
   }
   assert.match(read('IdeEditorArea.svelte'), /reloadIdeTabIfOpen\(path\)/);
 });
+
+test('V9: a plugin switch in Settings waits for Apply, and Cancel drops it', async () => {
+  const toggles: [string, boolean][] = [];
+  const ide = {
+    plugins: [{ slug: 'kotlin', enabled: true }],
+    projectEnv: null, projectRoots: [], target: { root: '' }, hasTarget: false, activeProject: null, settingsOpen: true,
+    setKeymapPreset: () => {}, setFormatOnSave: () => {},
+    togglePlugin: async (slug: string, enabled: boolean) => {
+      toggles.push([slug, enabled]);
+      ide.plugins = ide.plugins.map((p) => (p.slug === slug ? { ...p, enabled } : p));
+      return true;
+    },
+  };
+  const prefs = { theme: 'x', moduleSdkMap: {} };
+  const load = () => loadSource(ideUrl('settings/ideSettingsStore.svelte.ts'), {
+    '../../../lib/idePreferences.svelte': {
+      cloneIdePreferences: (p: object) => ({ ...p }), DEFAULT_IDE_PREFERENCES: prefs, IDE_COLOR_SCHEME_OPTIONS: [],
+      IDE_PREFS_STORAGE_KEY: 'k', readIdePreferences: () => prefs, writeIdePreferences: (p: object) => p, loadIdePreferences: () => prefs,
+    },
+    '../ideStore.svelte': { ide, ideBasename: (p: string) => p },
+  });
+  const { ideSettings } = load();
+  ideSettings.stagePlugin('kotlin', false);
+  assert.deepEqual(toggles, [], 'switching it off posts nothing yet');
+  assert.equal(ideSettings.pluginDraft.kotlin, false, 'staged');
+  ideSettings.cancel();
+  assert.deepEqual(toggles, [], 'Cancel leaves the plugin on');
+  ideSettings.stagePlugin('kotlin', false);
+  await ideSettings.apply();
+  assert.deepEqual(toggles, [['kotlin', false]], 'Apply turns it off');
+  assert.equal(Object.keys(ideSettings.pluginDraft).length, 0);
+});

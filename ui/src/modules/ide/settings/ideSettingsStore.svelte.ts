@@ -240,9 +240,12 @@ class IdeSettingsController {
   envDirty = $state(false);
   projectNameDraft = $state('');
   initialProjectName = $state('');
+  /** Plugin on/off switches staged until Apply (Cancel drops them), by slug. */
+  pluginDraft = $state<Record<string, boolean>>({});
 
   readonly isDirty = $derived(
     this.envDirty ||
+      Object.keys(this.pluginDraft).length > 0 ||
       this.projectNameDraft.trim() !== this.initialProjectName.trim() ||
       JSON.stringify(this.draft) !== JSON.stringify(this.committed),
   );
@@ -253,6 +256,7 @@ class IdeSettingsController {
     this.draft = clonePrefs(loaded);
     this.envDraft = emptyEnvDraft(ide.projectEnv);
     this.envDirty = false;
+    this.pluginDraft = {};
     const pname = ide.activeProject?.name || (ide.target.root ? ideBasename(ide.target.root) : '');
     this.projectNameDraft = pname;
     this.initialProjectName = pname;
@@ -262,6 +266,13 @@ class IdeSettingsController {
     if (!this.envDirty && ide.projectEnv) {
       this.envDraft = emptyEnvDraft(ide.projectEnv);
     }
+  }
+
+  /** Stage a plugin switch; switching it back to the installed state unstages it. */
+  stagePlugin(slug: string, enabled: boolean): void {
+    const { [slug]: _, ...rest } = this.pluginDraft;
+    const installed = ide.plugins.find((p) => p.slug === slug)?.enabled;
+    this.pluginDraft = installed === enabled ? rest : { ...rest, [slug]: enabled };
   }
 
   patchEnv(patch: Partial<EnvDraftState>): void {
@@ -307,6 +318,10 @@ class IdeSettingsController {
       if (envOk) this.envDirty = false;
       else ok = false;
     }
+    for (const [slug, enabled] of Object.entries(this.pluginDraft)) {
+      if (await ide.togglePlugin(slug, enabled)) this.stagePlugin(slug, enabled);
+      else ok = false;
+    }
     return ok;
   }
 
@@ -314,6 +329,7 @@ class IdeSettingsController {
     this.draft = clonePrefs(this.committed);
     this.envDraft = emptyEnvDraft(ide.projectEnv);
     this.envDirty = false;
+    this.pluginDraft = {};
     this.projectNameDraft = this.initialProjectName;
     ide.settingsOpen = false;
   }

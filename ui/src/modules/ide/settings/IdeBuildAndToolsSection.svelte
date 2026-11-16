@@ -344,6 +344,16 @@
             {/if}
           </div>
         {/each}
+        <!-- Servers an enabled plugin starts: Otto doesn't install these, the plugin says how. -->
+        {#each ide.plugins.filter((p) => p.enabled).flatMap((p) => (p.contributions?.lsp_servers ?? []).map((s) => ({ ...s, plugin: p.name }))) as srv (`${srv.plugin}:${srv.command}`)}
+          <div class="srv-row">
+            <div class="srv-copy">
+              <span class="srv-name" dir="ltr">{srv.command}</span>
+              <span class="srv-sub" title={srv.install_hint ?? undefined}>{srv.language} · {srv.install_hint || `from the ${srv.plugin} plugin`}</span>
+            </div>
+            <Badge tone="neutral" variant="outline" label="Plugin" />
+          </div>
+        {/each}
       </div>
     </div>
 
@@ -356,7 +366,7 @@
         {:else}
           {#each ide.plugins as pl (pl.slug)}
             <div class="srv-row pl-item">
-              <Switch checked={pl.enabled} label={`Enable plugin ${pl.name}`} onchange={(v) => void ide.togglePlugin(pl.slug, v)} />
+              <Switch checked={ideSettings.pluginDraft[pl.slug] ?? pl.enabled} label={`Enable plugin ${pl.name}`} onchange={(v) => ideSettings.stagePlugin(pl.slug, v)} />
               <div class="srv-copy">
                 <span class="srv-name">{pl.name} <Badge tone="neutral" variant="outline" label={`v${pl.version}`} /></span>
                 <span class="srv-sub">{pl.description}</span>
