@@ -1758,26 +1758,6 @@ impl SessionManager {
         self
     }
 
-    /// Wire the IDE terminal env source (see [`Self::ide_terminal_env`]).
-    pub fn set_terminal_env(&self, source: Arc<dyn otto_core::hooks::TerminalEnvSource>) {
-        let _ = self.terminal_env.set(source);
-    }
-
-    /// An IDE terminal's project environment: the IDE project's merged Run env,
-    /// so `.env` vars, project vars and the SDK reach the shell as they reach a
-    /// Run. Empty for every other session.
-    async fn ide_terminal_env(&self, session: &Session) -> Vec<(String, String)> {
-        let root = session.meta.get("ide_root").and_then(|v| v.as_str());
-        let is_ide_terminal = session.provider == "shell"
-            && session.meta.get("ide_terminal").and_then(|v| v.as_bool()) == Some(true);
-        match (self.terminal_env.get(), root) {
-            (Some(source), Some(root)) if is_ide_terminal && !root.is_empty() => {
-                source.ide_terminal_env(&session.created_by, root).await
-            }
-            _ => Vec::new(),
-        }
-    }
-
     /// Attach the user-configured MCP-server resolver, merged into `.mcp.json`
     /// on agent spawn. Builder-style; without it no user servers are written.
     pub fn with_mcp_servers(mut self, provider: Arc<dyn crate::mcp::McpServerSource>) -> Self {
@@ -6180,6 +6160,8 @@ mod cli_flags;
 #[path = "manager/codex_rollout.rs"]
 mod codex_rollout;
 use codex_rollout::codex_rollout_first_user_message;
+#[path = "manager/ide_terminal_env.rs"]
+mod ide_terminal_env;
 #[path = "manager/input_timeout.rs"]
 mod input_timeout;
 use input_timeout::{input_write_timeout, INPUT_WRITE_TIMEOUT};

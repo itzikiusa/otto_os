@@ -56,7 +56,7 @@ use otto_review::worktree::{teardown_pr_worktree, PrWorktree};
 // through `use super::*`; this module wires their routes in `module_routers`
 // and re-exports, by name, what the rest of the crate imports from here.
 mod browser_proxy;
-pub(crate) mod ctx_impls;
+mod ctx_impls;
 mod pr_draft;
 pub(crate) mod review;
 mod session_input;
