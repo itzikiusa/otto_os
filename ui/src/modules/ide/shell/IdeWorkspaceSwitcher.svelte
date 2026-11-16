@@ -9,6 +9,7 @@
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
+  import { onScratches } from './ideScratches.svelte';
 
   const IdeWorkspacePopoverLazy = lazyComponent(() => import('./IdeWorkspacePopover.svelte'));
 
@@ -31,6 +32,7 @@
       const host = ide.target.connection_name || 'SSH';
       return `${host}:${ideBasename(ide.target.root)}`;
     }
+    if (onScratches()) return 'Scratches';
     if (ide.activeProject) return ide.activeProject.name;
     const matchedWs = ws.workspaces.find(
       (w) => w.id !== SCRATCH_WORKSPACE_ID && w.root_path === ide.target.root,
@@ -135,7 +137,7 @@
       data-testid="ide-target-switcher"
     >
       <span class="ws-icon" aria-hidden="true">
-        <Icon name={ide.target.kind === 'ssh' ? 'server' : 'folder'} size={13} />
+        <Icon name={ide.target.kind === 'ssh' ? 'server' : onScratches() ? 'workbench' : 'folder'} size={13} />
       </span>
       <span class="ws-name" dir="ltr">{primaryLabel}</span>
       {#if ide.projectRoots.length > 1}

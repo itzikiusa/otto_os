@@ -45,7 +45,7 @@ pub use engine::runtime_turns::{
 };
 pub use engine::{ReportOptions, UsageEngine, UsageScope};
 pub use metrics::{Metric, MetricsSampler};
-pub use pricing::{estimate_cost, is_priced, PRICED_AS_OF};
+pub use pricing::{estimate_cost, estimate_cost_with_1h, is_priced, PRICED_AS_OF};
 pub use tailer::{
     codex_model_name, merge_max, parse_claude_line, parse_codex_line, parse_codex_session_meta,
     seen_key_hash, ClaudeLine, CodexCounterStore, CodexMeta, CursorStore, HeldResponse,

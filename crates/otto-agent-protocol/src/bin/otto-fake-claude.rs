@@ -13,6 +13,8 @@
 //! * `slow <secs>` — "Working…", then waits `<secs>`; a user message arriving
 //!   meanwhile (a steer) is answered in the same turn: "steered: <text>".
 //! * `silent`      — emits nothing until interrupted.
+//! * `retrying <secs>` — an `api_retry` frame every 200 ms for `<secs>`,
+//!   nothing else, until interrupted.
 //! * `stream <n> <ms>` — `c0 `…`c<n-1> ` as text deltas, one per `<ms>`.
 //! * `ask`         — a `can_use_tool` request for Bash `ls`; the answer
 //!   decides: "allowed" or "denied", then `result`.
@@ -422,6 +424,19 @@ fn main() {
                         waiting = Some((Some(later), true));
                     }
                     "silent" => {
+                        waiting = Some((None, false));
+                    }
+                    "retrying" => {
+                        std::thread::spawn(move || {
+                            let mut attempt = 0;
+                            while Instant::now() < later {
+                                attempt += 1;
+                                out(
+                                    json!({"type":"system","subtype":"api_retry","attempt":attempt,"max_retries":10,"retry_delay_ms":200,"error_status":529,"error":"overloaded"}),
+                                );
+                                std::thread::sleep(Duration::from_millis(200));
+                            }
+                        });
                         waiting = Some((None, false));
                     }
                     "escape" => {

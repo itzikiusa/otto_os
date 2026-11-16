@@ -822,3 +822,34 @@ fn a_read_image_result_keeps_its_image() {
         DriverEvent::TurnItem(i) if matches!(&i.kind, TurnItemKind::DynamicTool { images, output: Some(o), .. } if images.len() == 1 && o == "Read image file [image/png]")
     ));
 }
+
+/// T3 Code #33151: pi's auto-retry is the turn's retry row; its compaction
+/// one row that settles when it ends.
+#[test]
+fn pi_retries_and_compactions_are_one_row_each() {
+    let mut d = PiDriver::with_program("pi");
+    d.start(&ctx(None, RuntimeAccessMode::FullAccess));
+    d.prompt("t1", &RuntimePromptReq::of("hi")).unwrap();
+    let s = d.on_line(
+        r#"{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000,"errorMessage":"529 overloaded"}"#,
+    );
+    let DriverEvent::TurnItem(row) = &s.events[0] else {
+        panic!("{:?}", s.events)
+    };
+    assert!(row.id.ends_with(crate::driver::RETRY_NOTICE_SUFFIX));
+    assert!(
+        matches!(&row.kind, TurnItemKind::SystemNotice { message, .. }
+        if message == "Provider retry 1 of 3 · 529 overloaded")
+    );
+    let start = d.on_line(r#"{"type":"auto_compaction_start","reason":"threshold"}"#);
+    let end = d.on_line(r#"{"type":"auto_compaction_end","aborted":false,"willRetry":false}"#);
+    let (DriverEvent::TurnItem(a), DriverEvent::TurnItem(b)) = (&start.events[0], &end.events[0])
+    else {
+        panic!()
+    };
+    assert_eq!(a.id, b.id);
+    assert_eq!(
+        (a.status, b.status),
+        (TurnItemStatus::Running, TurnItemStatus::Completed)
+    );
+}

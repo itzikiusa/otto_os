@@ -267,6 +267,7 @@ export interface RuntimeComposerUiPort {
     start(
       workspaceId: string,
       req: { prompt: string; title: string; cwd: string | null; images?: PromptImage[] },
+      open: 'panes' | 'background',
     ): Promise<RuntimeSession[]>;
   };
   councilAgentLabel(meta?: MetaResp | null): string;

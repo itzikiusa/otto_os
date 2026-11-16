@@ -52,7 +52,8 @@ const LOADERS: Record<string, Loader> = {
   git: () => import('../modules/git/GitPage.svelte'),
   database: () => import('../modules/database/DatabasePage.svelte'),
   vault: () => import('../modules/vault/VaultPage.svelte'),
-  workbench: () => import('../modules/workbench/WorkbenchPage.svelte'),
+  // The old Scratches page: forwards to the IDE's Scratches project.
+  workbench: () => import('../modules/ide/ScratchesRedirect.svelte'),
   api: () => import('../modules/api/ApiPage.svelte'),
   rooms: () => import('./RoomsRoute.svelte'),
   workflows: () => import('../modules/workflows/WorkflowsPage.svelte'),

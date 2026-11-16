@@ -26,9 +26,30 @@ pub struct Inbound {
     pub edited: bool,
 }
 
+/// The earlier messages of a thread, written to a private file for a fresh
+/// agent to read before it answers ([`Adapter::thread_history`]).
+#[derive(Debug, Clone)]
+pub struct ThreadHistory {
+    pub path: std::path::PathBuf,
+    pub messages: usize,
+}
+
 /// Sending/editing abstraction for a messaging channel.
 #[async_trait::async_trait]
 pub trait Adapter: Send + Sync {
+    /// Every earlier message of `thread` — all of them, up to the inbound
+    /// message this adapter carries — for a NEW agent joining the thread.
+    /// `Ok(None)`: nothing earlier, or a transport with no readable history
+    /// (Telegram's Bot API, webhooks). An error means the history exists but
+    /// could not be read completely; it is never to be treated as empty.
+    async fn thread_history(
+        &self,
+        _chat: &str,
+        _thread: Option<&str>,
+    ) -> anyhow::Result<Option<ThreadHistory>> {
+        Ok(None)
+    }
+
     /// Post a new message to `chat` (optionally in `thread`).
     /// Returns the channel-native message id of the new message.
     async fn send(&self, chat: &str, thread: Option<&str>, text: &str) -> anyhow::Result<String>;

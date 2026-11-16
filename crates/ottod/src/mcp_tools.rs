@@ -3,7 +3,7 @@
 //! `canvas_create_scene` / `canvas_update_scene` (Task B5), the Vault v3
 //! doc writers `otto_vault_write` / `otto_vault_rename` / `otto_vault_delete`,
 //! `browser_navigate` (Task 6, opens a reader-mode browser tab), `workbench_write`
-//! (writes the owner's Workbench scratch file as a new history revision), and the three
+//! (writes a file in the owner's Scratches folder), and the three
 //! cloud-console writers `aws_athena_query` (starts an Athena query execution),
 //! `aws_sqs_send` (produces one SQS message) and `k8s_action` (a kubectl
 //! rollout/scale/delete/Argo verb, see `docs/design/aws-k8s-consoles.md` §4.6),
@@ -2808,94 +2808,77 @@ mod tests {
         }
     }
 
-    #[test]
-    fn workbench_history_catalog_exposes_bounded_paging() {
-        let catalog = tool_catalog();
-        let spec = catalog["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|tool| tool["name"] == "workbench_get")
-            .unwrap();
-        let props = &spec["inputSchema"]["properties"];
-        assert_eq!(props["history_limit"]["type"], "integer");
-        assert_eq!(props["history_limit"]["default"], 100);
-        assert_eq!(props["history_limit"]["maximum"], 200);
-        assert_eq!(props["before_seq"]["type"], "integer");
-        assert_eq!(props["revision"]["type"], "integer");
-    }
-
     #[tokio::test]
-    async fn workbench_history_handler_forwards_cursor_and_preserves_direct_revision() {
+    async fn workbench_tools_call_the_owners_scratches_routes() {
         use axum::extract::OriginalUri;
+        use axum::http::Method;
         let requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let captured = requests.clone();
         // A fallback avoids adding fictitious routes to the route-inventory scanner.
-        let app = axum::Router::new().fallback(move |OriginalUri(uri): OriginalUri| {
-            let captured = captured.clone();
-            async move {
-                captured.lock().unwrap().push(uri.to_string());
-                if uri.path().ends_with("/revisions") {
-                    let query: std::collections::HashMap<String, String> =
-                        reqwest::Url::parse(&format!("http://fixture{uri}"))
-                            .unwrap()
-                            .query_pairs()
-                            .into_owned()
-                            .collect();
-                    let before = query
-                        .get("before_seq")
-                        .and_then(|s| s.parse::<i64>().ok())
-                        .unwrap_or(1000);
-                    let rows = if before == 2 {
-                        json!([{ "seq": 1 }])
-                    } else {
-                        json!([{ "seq": before - 1 }, { "seq": before - 2 }])
-                    };
-                    axum::Json(rows)
-                } else {
-                    axum::Json(json!({"id": "doc", "seq": 1, "content": "oldest"}))
+        let app = axum::Router::new().fallback(
+            move |method: Method, OriginalUri(uri): OriginalUri, body: String| {
+                let captured = captured.clone();
+                async move {
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push(format!("{method} {uri} {body}"));
+                    axum::Json(json!({ "path": "q/daily.sql", "content": "SELECT 1" }))
                 }
-            }
-        });
+            },
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let mut ctx = test_ctx();
         ctx.base = format!("http://{addr}");
-        let result = run_tool(
+        let list = run_tool(&ctx, "workbench_list", &json!({ "query": "daily" })).await;
+        let get = run_tool(&ctx, "workbench_get", &json!({ "path": "q/daily.sql" })).await;
+        let write = run_tool(
             &ctx,
-            "workbench_get",
-            &json!({
-                "doc_id": "doc", "revision": 1, "history": true,
-                "history_limit": 2, "before_seq": 500
-            }),
+            "workbench_write",
+            &json!({ "path": "q/notes", "content": "# hi", "language": "md" }),
         )
         .await;
-        let short = run_tool(
+        let keep = run_tool(
             &ctx,
-            "workbench_get",
-            &json!({
-                "doc_id": "doc", "history": true, "history_limit": 2, "before_seq": 2
-            }),
+            "workbench_write",
+            &json!({ "path": "a.sql", "content": "", "language": "md" }),
         )
         .await;
         server.abort();
-        let (result, _) = result.unwrap();
-        let (short, _) = short.unwrap();
+        let (get, _) = get.unwrap();
+        let (write, _) = write.unwrap();
+        list.unwrap();
+        keep.unwrap();
         let requests = requests.lock().unwrap();
         assert!(
-            requests[0].ends_with("/revisions/1"),
-            "direct lookup must stay addressable"
+            requests[0].starts_with("GET /api/v1/scratches?query=daily "),
+            "{}",
+            requests[0]
         );
-        let url = reqwest::Url::parse(&format!("http://fixture{}", requests[1])).unwrap();
-        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-        assert_eq!(query.get("limit").map(String::as_str), Some("2"));
-        assert_eq!(query.get("before_seq").map(String::as_str), Some("500"));
-        assert_eq!(result["content"], "oldest");
-        assert_eq!(result["revisions"].as_array().unwrap().len(), 2);
-        assert_eq!(result["next_before_seq"], 498);
-        assert_eq!(short["revisions"], json!([{ "seq": 1 }]));
-        assert!(short["next_before_seq"].is_null());
+        assert!(
+            requests[1].starts_with("GET /api/v1/scratches/file?path=q%2Fdaily.sql "),
+            "{}",
+            requests[1]
+        );
+        assert!(
+            requests[2].starts_with("PUT /api/v1/scratches/file "),
+            "{}",
+            requests[2]
+        );
+        assert!(
+            requests[2].contains(r#""path":"q/notes.md""#),
+            "language adds the extension: {}",
+            requests[2]
+        );
+        assert!(
+            requests[3].contains(r#""path":"a.sql""#),
+            "an extension is kept: {}",
+            requests[3]
+        );
+        assert_eq!(get["content"], "SELECT 1");
+        assert_eq!(write["ok"], true);
     }
 
     #[test]
@@ -4236,7 +4219,8 @@ mod tests {
     /// hidden from narrow sessions).
     const TOOLS_LIST_BYTE_BUDGET: usize = 96_500;
     /// A review-type session (R2 per-source scoping): 52_595 after slim-app cleanup.
-    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 56_800; // +otto_thread_*, +otto_personal_agent_*
+    /// 56_895 with otto_request_secret (a thread's private secret card).
+    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 57_000; // +otto_thread_*, +otto_personal_agent_*, +otto_request_secret
 
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above
     /// (which never actually call out). Audit disabled.

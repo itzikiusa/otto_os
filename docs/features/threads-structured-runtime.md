@@ -176,7 +176,13 @@ count that was interrupted after the first delta, then `close`.
    A model or effort picked with it switches first (`set_model` /
    `apply_flag_settings`), so the rest of the turn uses it (T3 Code #34564);
    the session's stored model follows on the next prompt.
-   The other drivers do not steer; such a message is queued instead.
+   Codex steers with `turn/steer`, pi with its RPC `steer`, and Grok with
+   `_x.ai/interject` (`{sessionId, text, content?: [image blocks]}`; the
+   running tool finishes and the model reads the message at its next step;
+   only a `{status: "queued"}` answer is a delivery, anything else shows as
+   a failed row — T3 Code #37335). The driver reports it as
+   `capabilities.steer`, which is all the UI's "Send now" reads. The other
+   ACP agents do not steer; such a message is queued instead.
 10. **Resume.** A resumed CLI (`--resume`) gets
    `MCP_CONNECTION_NONBLOCKING=0` unless the daemon's environment sets it:
    Claude Code then connects its MCP servers before the first request
@@ -283,7 +289,8 @@ plus `adapter.ts`.
    | `stopReason` | Turn status |
    |---|---|
    | `cancelled` | interrupted |
-   | `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` | completed (the last three also as `reason`) |
+   | `end_turn` | completed |
+   | `max_tokens`, `max_turn_requests`, `refusal` | failed, with a `provider_error` failure whose `code` (and the turn's `reason`) is the stop reason and whose message says why; a refusal also says the agent won't remember the message (T3 Code #28797) |
 
    T3 Code: `adapter.ts:8181-8230`.
 5. **Permission round-trip** (`adapter.ts:6353-6527`).
@@ -637,6 +644,23 @@ streaming upsert of an item to one per `RuntimeConfig::stream_coalesce`
 - the latest held text is flushed when the window ends, or before any other
   event;
 - text only grows.
+
+### Provider retries and compactions
+
+Every driver reports a provider retry and a context compaction the same way
+(T3 Code #33151, #29208, #24334): as `system_notice` work rows, so the
+person sees why a turn is waiting instead of a bare "Working".
+
+| Provider | Retry (one row per turn, `<turn>:provider-retry`, updated in place) | Compaction (one row, `<turn>:compaction`) |
+|---|---|---|
+| Claude | `system` `api_retry` → "Provider retry 2 of 10 · overloaded" | `system` `status: compacting` → "Compacting context…" (running), `compact_boundary` → "Context compacted" |
+| Codex | `error` with `willRetry: true` → "Provider retry · <message>" (a final `error` still fails the turn) | the `contextCompaction` item → "Context compacted" |
+| pi | `auto_retry_start` → "Provider retry 1 of 3 · <errorMessage>" | `auto_compaction_start` / `_end` |
+| ACP (Gemini, Grok, agy, opencode, Muse) | none reported by the protocol | none reported |
+
+A retry row is not progress: its updates do not reset the 15-minute stall
+watchdog, so a provider stuck retrying is still stopped as stalled
+(`RETRY_NOTICE_SUFFIX`, `runtime.rs` `emit`).
 
 ### Typed provider questions
 
@@ -1041,7 +1065,7 @@ secret question forms are refused instead of being collected into history.
 | `ui/src/modules/threads/runtime/Runtime{Questions,QuestionCard,ToolImages,ContextChips,DraftStatus}.svelte` | typed questions, image enlargement, context preview/removal and save status |
 | `ui/src/modules/threads/runtime/composerContext.ts` | attributed review conversations and file/hunk/line excerpts assembled on send |
 | `ui/src/modules/threads/runtime/runtimeMenu.ts` | the thread menu: Reopen, Close, Delete (confirmed unless "Closing a session tab" is Always delete) |
-| `crates/otto-agent-protocol/src/runtime/council.rs` (+ `council/rounds.rs`), `ui/src/modules/threads/runtime/{council.ts,councilRounds.ts,councilStore.svelte.ts,Council*.svelte}` | Council: seats created all or none, follow-up rounds, the judge's prompt per round; the stage multi-select, columns, rounds strip, composer, sidebar row |
+| `crates/otto-agent-protocol/src/runtime/council.rs`, `ui/src/modules/threads/runtime/{council.ts,councilStore.svelte.ts,CouncilStagePicker.svelte}` | Council: seats created all or none, the judge's prompt from each seat's latest exchange; the stage multi-select, seats opened in panes, the ⋯ council items |
 | `ui/e2e/desktop-threads-runtime.spec.ts` | E2E against `otto-fake-codex` and `otto-fake-claude` (global-setup's shims exec them for `app-server` / `--input-format stream-json`) |
 
 ## 9. Gaps and next steps
@@ -1055,10 +1079,27 @@ secret question forms are refused instead of being collected into history.
   commands). The thread's terminal drawer is a plain shell in its folder
   (`meta.terminal_of`). The composer's model / effort pick and attached
   images ride `POST …/prompt` (`model`, `effort`, `images`).
-- **Idle live-entry eviction** remains a runtime lifecycle follow-up. Daemon
-  shutdown already calls `AgentRuntime::shutdown()`.
+- **Idle agent processes are released** (T3 Code #32325, #34934): every
+  minute, a loaded thread whose agent has been quiet for
+  `thread_idle_release_minutes` (daemon setting, `PUT /settings`; default
+  `30`, `0` = never) has its CLI process and MCP servers stopped the way a
+  Close stops them, and its spawn credential revoked. A finished child
+  thread goes after at most 5 minutes. The thread stays open (`dormant`;
+  "Agent stopped. Your next message resumes it.") and its next message
+  respawns the agent with the provider's resume (`--resume`,
+  `session/load`, …). Never while a turn, background work, an approval or
+  question, a starting prompt or a queued message is pending. A held child's
+  holder exits with it, so a daemon restart adopts nothing for it.
+  (`runtime/auto_close.rs`; evicting the in-memory projection itself
+  remains a follow-up.)
+- **Keeping the Mac awake** (T3 Code #34128): while any thread's turn runs
+  or starts, or any terminal agent session is `working`, the daemon holds one
+  `caffeinate -i -w <ottod pid>` and releases it 60 s after the last one ends
+  (polled every 15 s; `crates/otto-agent-protocol/src/runtime/keep_awake.rs`). `-i` blocks
+  idle sleep only, so closing the lid still sleeps, and `-w` ends the hold
+  with the daemon.
 - **Features T3 Code has that Otto does not yet:** restart continuation
-  (Otto keeps the process instead, §4), steering for Codex (`turn/steer`) and ACP, Codex `thread/unarchive`,
+  (Otto keeps the process instead, §4), steering for ACP agents other than Grok, Codex `thread/unarchive`,
   Claude thinking summaries, subagent / background tracking for the other
   providers, ACP v2.
 - **Known limits.** A Claude resume key is persisted once the CLI answers its
@@ -1115,85 +1156,55 @@ effort). One model is today's single thread, unchanged.
 - the prompt goes to every seat at once. No new WebSocket events: each seat
   streams on its own session channel.
 
-**The view.** A thread with `meta.council` opens as columns
-(`ui/src/modules/threads/runtime/CouncilView.svelte`): 2–4 compact embeds,
-each headed by the provider, model, effort, status, elapsed time and tokens
-(tokens, not cost — most people run on subscriptions), with **Continue
-here** to take that seat on as a normal thread (the sidebar's council row
-brings the columns back). A seat that did not finish the current round
-(its turn failed, a Stop or a daemon restart cut it off, or the follow-up was
-removed from its queue) says so and offers **Ask again**, which sends the
-round's question to that seat once more (queued if it is busy). On a phone the columns become a segmented control, one seat at a
-time. The sidebar shows the council as one row, "Council · 3" with the
-seats' provider icons, that unfolds into the seats and the synthesis.
+**Where the answers appear.** A council is a linked group of normal
+threads, as in T3 Code: there is no council view. After **Ask N** the seats
+open side by side in the Threads panes (2 in Split, 3–4 in the Grid, seat 1
+focused), each a full thread with its own timeline, status, Stop, approvals,
+queue bar and composer, so a follow-up to one seat is typed in that seat.
+⌘↵ starts the council in the background instead: the stage stays and a toast
+"Started N threads" offers **Show**. In the sidebar the seats nest under
+seat 1 like any child thread (each child row reads as its agent); the
+family's dot speaks for them all. The header's **Related threads** chip lists
+the other seats and the synthesis with their status — on a phone that is how
+you switch seats — and the parent chip leads seats 2–4 back to seat 1.
 
-**Rounds: keep talking to the council.** Under the columns sits one
-composer (`CouncilComposer.svelte`) with a target chooser — **All seats**
-(the default) or one seat; clicking a seat's name in its header aims the
-next follow-up at that seat only. **Ask round N** sends it
-(`POST /runtime-sessions/{id}/council/rounds`, `council/rounds.rs`): each
-chosen seat gets the text as its own thread's next turn, so every seat keeps
-its own context, with the seat's effort; a seat still working **queues** it
-exactly like a message sent mid-turn (the seat's queue bar shows it). A
-closed seat is listed as not reached, with the reason. **Ask the others** on
-a seat that answered the round drafts "Seat X answered: <its answer>. Where
-do you disagree, and why?" for the other seats — the person reads and can
-edit it before sending: the cheap way to get real cross-examination. Each
-column shows the new question and answer under the earlier ones (the seat's
-own thread, newest in view); above the columns, from round 2, a **Rounds**
-strip lists "Round 2 · <question>" with every seat's state in that round
-(working, queued, done, interrupted, failed, not delivered, not reached, sat
-out) and time on it, and the syntheses judged on it. **Stop all** stops the
-round's working seats. A council runs at most **10 rounds**; the composer
-then says so and asks for a new council. Nothing is ever sent by itself:
-every round starts with a click (the tokens are the person's).
+**The ⋯ thread menu** of any council thread holds the three council actions
+(`councilMenuItems` in `runtime/councilStore.svelte.ts`):
 
-The rounds are one `council_rounds` entity on seat 1
-(`GET /runtime-sessions/{id}/council/rounds`), so they survive a reload and
-a daemon restart without a migration; a council from before rounds reads as
-one round. Which message answers which round is read off each seat's own
-timeline by the round's text (a re-ask of the same text before the next
-round takes its place), in the daemon for the judge and in
-`councilRounds.ts` for the view. After a restart a seat that was mid-turn
-shows **interrupted** and the round can be asked again.
+- **Open council side by side** — every seat (and the synthesis, if any; at
+  most 4 panes) in Split or Grid;
+- **Ask every seat…** — one prompt dialog, then the same text to each open
+  seat as its next turn (`POST …/prompt` with `delivery: "queue"`, so a seat
+  still working queues it);
+- **Synthesize with ▸ <judge>** — seat 1's provider first, any runtime
+  provider can judge; disabled while a seat works. The judge opens as a
+  linked child thread in a pane beside the seats. A refusal from the daemon
+  shows as a toast with its reason.
 
-**Synthesis.** The footer's one primary action is **Synthesize with
-<judge>** — from round 2 **Synthesize round N with <judge>** (the judge
-defaults to seat 1's provider; any runtime provider can judge). It judges
-the CURRENT round: it is disabled, with the daemon's own reason, while a
-seat of that round or an earlier synthesis still works, while seat 1 is
-closed, or while no seat has an answer in the round. **What counts as an
-answer:** any answer text the seat has on record in the round, whole or cut
-off by a Stop (the judge is told it may be incomplete). Text still streaming
-when the daemon stopped is not kept, so a seat a restart cut mid-answer has
-none: a round a restart cut for every seat reads "No seat has answered round
-N yet — nothing to synthesize", and **Ask again** (or a new round) is the way
-on; a seat that finished before the restart keeps its answer and counts. `POST /runtime-sessions/{id}/council/synthesize` opens a thread linked
-to seat 1 (`role: "synthesis"`, read-only, titled "… · synthesis of round
-N" after round 1, recorded under the round) whose prompt the daemon builds:
-the round's question (after round 1 with the council's first question), each
-of the round's seats' answer in that round, a line naming every seat of the
-round **without** an answer (no reply, never reached, still queued) — never
-silently dropped; the footer shows the same list before you click — and the
-task: where they agree, where they disagree and who is right, a pick or a
-merge, open questions. A cut-off answer is marked as possibly incomplete. It
-is sent without the "Opened by …" header (the daemon wrote it, not an
-agent). In the Synthesis column that prompt folds to one quiet line —
-"Asked the judge to compare N answers · Show prompt" (a button; it unfolds
-the full prompt) — so the column opens on the verdict. The answer is the
-last, full-width column, labelled with its round;
-earlier syntheses stay in the Rounds strip, one click away.
+**Synthesis** (`POST /runtime-sessions/{id}/council/synthesize`) judges each
+seat's **latest exchange**: its last message from a person and the answer
+after it, so a follow-up typed in one seat counts. The judge thread is linked
+to seat 1 (`role: "synthesis"`, read-only, titled "… · synthesis") and its
+prompt is built by the daemon: the question (or each seat's own question
+when they differ), each seat's answer (≤ 24 000 characters; one cut off by
+a Stop or a restart is marked as possibly incomplete), a line naming every
+seat **without** an answer — never silently dropped — and the task: where
+they agree, where they disagree and who is right, a pick or a merge, open
+questions. It is sent without the "Opened by …" header (the daemon wrote it,
+not an agent). **409** while a seat or an earlier synthesis still works,
+while seat 1 is closed, before any seat has answered, or when the group is
+full.
 
-**Limits.** 4 seats, 10 rounds; seats + syntheses count against the group
-cap (`MAX_LINKED_OPEN`, 8 besides the root), so close an old synthesis to
-judge again once the group is full. A council is started and watched by a
-person, so it is not a background source and takes no admission slot. The
-Rounds strip loads when the council opens and after your own sends; a round
-sent from another device shows after a reopen.
+**Limits.** 4 seats; seats + syntheses count against the group cap
+(`MAX_LINKED_OPEN`, 8 besides the root), so close an old synthesis to judge
+again once the group is full. A council is started and watched by a person,
+so it is not a background source and takes no admission slot. Councils from
+before this layout may still carry a `council_rounds` entity on seat 1; it is
+no longer read.
 
-**Left for later, on purpose:** a worktree per seat so seats can edit;
-scored rubrics; merging the chosen seat's work back; an `otto.council` MCP
-tool; cost in dollars.
+**Left for later, on purpose:** letting seats edit, each in its own
+worktree (T3 Code's writable fan-out); scored rubrics; merging the chosen
+seat's work back; an `otto.council` MCP tool; cost in dollars.
 
 ### Threads inside a thread
 
@@ -1260,7 +1271,7 @@ opencode, pi) alike:
   dot speaks for the family (one needs you → needs you, one works →
   working), and its chevron folds them. A child whose parent is closed,
   archived or filtered out still shows, marked **detached**. A council's
-  seats nest the same way under its "Council · N" row. History and search
+  seats nest the same way under seat 1. History and search
   are unchanged.
 - **Hearing back** — each child turn's end writes one line in the parent:
   "Codex finished: <first line> · Open". When the parent's **agent** opened

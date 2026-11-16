@@ -521,8 +521,35 @@ Either way, **the agent never posts to the chat itself and never touches tokens*
   restart, a listener generation that never saw the thread), finds the thread's
   newest live session by the `channel` / `chat` / `thread` stamped in its
   `meta` — so a thread keeps its agent for as long as that agent is alive.
-- A new message on a thread whose session has **exited or been archived** starts a
-  **fresh** agent. Channel sessions are auto-archived by the daemon after **1 h
+- A new message on a thread whose session has **exited, been archived or
+  deleted, or can no longer resume** (no provider conversation to reopen, the
+  resume failed, or its process died before the message was sent) starts a
+  **fresh** agent.
+- **A fresh Slack agent reads the thread first.** Before it is started, Otto
+  reads every page of the thread (`conversations.replies` as the bot, the
+  reader the `otto.slack_*` tools use): people, other bots and Otto's own
+  replies, up to but not including the new message. It writes them to a
+  private (`0600`) `$TMPDIR/otto-slack-thread-<id>.md` — message text, author
+  names and attachment names only, never a token; swept with the downloaded
+  attachments once over 24 h old, when a listener starts — and the new agent's
+  trusted context tells it to read
+  that file before answering. The new message is submitted on its own, once.
+  If the thread cannot be read completely (a failed page, a missing history
+  scope, pagination that doesn't add up), **no agent is started** and the
+  thread is told so. The bot needs the history scopes already in the manifest
+  (`channels:history`, `groups:history`, `im:history`, `mpim:history`). Each
+  message's text is read up to 4,000 characters, like the `otto.slack_*` tools.
+- A session that is gone before a message reaches it is **replaced once**,
+  before delivery (it is detached like `/new`); a second failure is reported in
+  the thread. A message that may already have reached a still-running agent is
+  never replayed into a new one, and a resume refused because the conversation
+  is running in another process reports a failure instead of splitting the
+  thread. Messages in a thread keep their order across the replacement: the
+  turn queue belongs to the conversation, not its session.
+- **Telegram has no equivalent:** the Bot API cannot read a chat's earlier
+  messages (bots only receive updates as they arrive), so a fresh Telegram agent
+  starts with the new message alone.
+- Channel sessions are auto-archived by the daemon after **1 h
   with no activity**, swept every 10 min — but never while the session is
   `working`, and every follow-up the bridge hands to a session counts as
   activity (a long-running turn that keeps receiving replies is not idle).
@@ -540,7 +567,7 @@ Send these as a message in the chat/thread:
 | `/sessions` | List the live agent sessions **this chat** started + status (never other sessions' titles). |
 | `/who` | Show which session this conversation is mapped to (same map-then-meta lookup as routing, so it survives a daemon restart). |
 | `/stop` | Kill the session bound to this chat/thread and drop the mapping. |
-| `/new` | Detach the bound session (`meta.channel_detached = true`, it keeps running in the app and is reaped later) so the **next** message starts a fresh session. |
+| `/new` | Detach the bound session (`meta.channel_detached = true`, it keeps running in the app and is reaped later) so the **next** message starts a fresh session (in Slack, one that reads the thread first). |
 | `/restart` | Same as `/new` (next message starts fresh). |
 
 ---

@@ -106,6 +106,9 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     // Embedded threads (PR / connection pages) close after their idle hours.
     ctx.agent_runtime
         .spawn_embedded_auto_close(SettingsRepo::new(ctx.pool.clone()));
+    // Hold off idle sleep while any agent turn runs.
+    ctx.agent_runtime
+        .spawn_keep_awake(otto_state::SessionsRepo::new(ctx.pool.clone()));
     spawn_provider_title_namer(ctx);
     spawn_dead_session_pruner(ctx);
     spawn_activity_trail_pruner(ctx);

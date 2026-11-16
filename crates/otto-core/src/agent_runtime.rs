@@ -1367,6 +1367,22 @@ pub fn embedded_auto_close_hours(setting: Option<&Value>) -> u64 {
         .unwrap_or(EMBEDDED_THREAD_AUTO_CLOSE_DEFAULT_HOURS)
 }
 
+/// The daemon setting (`PUT /settings`) after how many idle minutes a
+/// thread's agent process (and its MCP servers) is stopped; the thread stays
+/// open and its next message resumes the provider's conversation. Absent or
+/// not a non-negative integer = the default (30), `0` = never. A finished
+/// child thread is released after at most [`CHILD_THREAD_IDLE_RELEASE_MINUTES`].
+pub const THREAD_IDLE_RELEASE_KEY: &str = "thread_idle_release_minutes";
+pub const THREAD_IDLE_RELEASE_DEFAULT_MINUTES: u64 = 30;
+pub const CHILD_THREAD_IDLE_RELEASE_MINUTES: u64 = 5;
+
+/// The idle-release setting's minutes (see [`THREAD_IDLE_RELEASE_KEY`]).
+pub fn thread_idle_release_minutes(setting: Option<&Value>) -> u64 {
+    setting
+        .and_then(Value::as_u64)
+        .unwrap_or(THREAD_IDLE_RELEASE_DEFAULT_MINUTES)
+}
+
 /// `POST /runtime-sessions/{id}/peers` — an agent (or its owner) opens a
 /// linked thread: same workspace, cwd and access mode as `{id}`.
 ///

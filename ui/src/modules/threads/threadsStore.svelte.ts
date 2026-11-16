@@ -442,12 +442,14 @@ class ThreadsStore {
     this.focusPane(id, syncRoute);
   }
 
-  openPairInSplit(idA: string, idB: string): void {
+  /** `ids` (≤ 4) side by side, the first focused: a child and its parent, a council. */
+  openGroup(ids: readonly string[]): void {
+    const unique = [...new Set(ids)].slice(0, MAX_PANES);
+    if (!unique.length) return;
     this.newDraftMode = false;
-    const unique = idA === idB ? [idA] : [idA, idB];
     this.paneIds = unique;
-    this.layoutMode = unique.length === 2 ? 'split' : 'single';
-    this.focusPane(idA, true);
+    this.layoutMode = unique.length === 1 ? 'single' : unique.length === 2 ? 'split' : 'grid';
+    this.focusPane(unique[0], true);
   }
 
   closePane(id: string): void {

@@ -42,12 +42,3 @@ test('toolbar ⋯ on the stage and on a phone; Related appears once', () => {
   const legacy = threadsPageMenu({ threadItems: [{ label: RELATED_LABEL }], layout: 'single', terminalOpen: false, cardOn: true, threadId: 'x' }, acts);
   assert.equal(legacy.filter((i) => i.label === RELATED_LABEL).length, 1);
 });
-
-test('inside a council the other seats are not "related": sameCouncil', async () => {
-  const { sameCouncil } = await import('../src/modules/threads/runtime/council.ts');
-  const seat = (id: string, cid: string, n: number, role = 'seat') => ({ id, meta: { council: { id: cid, seat: n, role } } }) as never;
-  assert.equal(sameCouncil(seat('a', 'c1', 1), seat('b', 'c1', 2)), true);
-  assert.equal(sameCouncil(seat('a', 'c1', 1), seat('j', 'c1', 0, 'synthesis')), true);
-  assert.equal(sameCouncil(seat('a', 'c1', 1), seat('x', 'c2', 1)), false);
-  assert.equal(sameCouncil({ id: 'plain', meta: null } as never, seat('b', 'c1', 2)), false);
-});

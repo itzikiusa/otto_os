@@ -22,7 +22,6 @@
   let springProfiles = $state<string[]>([]);
   let modules = $state<IdeBuildToolModule[]>([]);
   let expanded = $state<Record<string, boolean>>({ profiles: false });
-  let hoveredMod = $state<IdeBuildToolModule | null>(null);
 
   const labelTitle = $derived((ide.buildToolKind ?? tool) === 'gradle' ? 'Gradle' : 'Maven');
   const badgeMark = $derived((ide.buildToolKind ?? tool) === 'gradle' ? 'G' : 'm');
@@ -128,10 +127,6 @@
           type="button"
           class="bt-row-main"
           aria-expanded={isOpen}
-          onmouseenter={() => (hoveredMod = mod)}
-          onmouseleave={() => { if (hoveredMod?.root_dir === mod.root_dir) hoveredMod = null; }}
-          onfocus={() => (hoveredMod = mod)}
-          onblur={() => { if (hoveredMod?.root_dir === mod.root_dir) hoveredMod = null; }}
           onclick={() => toggleNode(modKey)}
           ondblclick={() => void ide.openFile(mod.manifest_path, { preview: false })}
           title={`Project: ${mod.project_coord || [mod.group_id, mod.artifact_id].filter(Boolean).join(':') || mod.name}\nLocation: ${mod.location_display || shortenHomePath(mod.root_dir)}`}
@@ -307,13 +302,6 @@
     <input class="bt-filter-in" type="search" dir="ltr" aria-label={`Filter ${labelTitle} modules and goals`} placeholder="Filter goals, modules, profiles…" bind:value={filter} />
   </div>
 
-  {#if hoveredMod}
-    <div class="bt-hover-card" data-testid="ide-bt-module-card">
-      <div class="bt-hc-line"><strong>Project:</strong> <span dir="ltr">{hoveredMod.project_coord || [hoveredMod.group_id, hoveredMod.artifact_id].filter(Boolean).join(':') || hoveredMod.name}</span></div>
-      <div class="bt-hc-line"><strong>Location:</strong> <span dir="ltr">{hoveredMod.location_display || shortenHomePath(hoveredMod.root_dir)}</span></div>
-    </div>
-  {/if}
-
   <div class="bt-body">
     <LoadState
       what={`${labelTitle} modules`}
@@ -379,9 +367,6 @@
   .bt-filter-row { display: flex; align-items: center; gap: 6px; padding-block: 6px; padding-inline: 10px; border-block-end: 1px solid var(--border); color: var(--text-dim); }
   .bt-filter-row:focus-within { border-color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }
   .bt-filter-in { flex: 1; min-inline-size: 0; border: 0; background: transparent; color: var(--text); font-size: var(--fs-xs); outline: none; }
-  .bt-hover-card { padding-block: 6px; padding-inline: 10px; background: var(--surface-2); border-block-end: 1px solid var(--border); font-size: var(--fs-xs); color: var(--text-dim); display: flex; flex-direction: column; gap: 2px; }
-  .bt-hc-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bt-hc-line strong { color: var(--text); font-weight: 600; }
   .bt-body { flex: 1; min-block-size: 0; overflow-y: auto; padding-block: 6px; padding-inline: 6px; display: flex; flex-direction: column; gap: 2px; }
   .bt-state { padding: 14px 10px; font-size: var(--fs-xs); color: var(--text-dim); }
   .bt-row { display: flex; align-items: center; gap: 6px; inline-size: 100%; border: 0; border-radius: var(--radius-s); background: transparent; color: var(--text); font-size: var(--fs-xs); padding-block: 4px; padding-inline: 4px; text-align: start; cursor: pointer; }

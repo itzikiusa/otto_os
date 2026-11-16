@@ -12,6 +12,7 @@ pub mod lifecycle;
 pub mod machine_load;
 pub mod manager;
 pub mod mcp;
+mod muse;
 pub mod names;
 pub mod nested;
 pub mod prompt_guard;

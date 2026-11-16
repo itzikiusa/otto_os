@@ -663,8 +663,8 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `workspace_id`; other **workspace-scoped events** (improvement,
 `api_history_appended`) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
-**owner-scoped events** (`ui_control_requested`,
-`notifications_changed`, `workbench_doc_changed`) reach only the user named by their `user_id` (not root);
+**owner-scoped events** (`ui_control_requested`, `secret_request_updated`,
+`notifications_changed`) reach only the user named by their `user_id` (not root);
 **broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
 `mcp_approval_changed`) reach every authenticated client. The sections below
 cover every variant (`Event::type_name()` in
@@ -1848,6 +1848,21 @@ proceeds on Allow and otherwise answers `pending_grant`.
 `module` is the paneKey the command targets (`shell` for navigation), `command`
 the bare catalog name. Emitted by `crates/otto-server/src/ui_bridge.rs`.
 
+### `secret_request_updated`
+
+A thread's agent called `otto.request_secret` (`api.md` UI5–UI6).
+**Owner-scoped** like `ui_control_requested`. `pending: true` (with `prompt`,
+optional `name`) shows the private card in that thread; `pending: false` (the
+call ended: answered, declined or timed out) removes it. It never carries the
+value.
+
+```json
+{"type":"secret_request_updated","user_id":"…","workspace_id":"…","session_id":"…","request_id":"…","pending":true,"prompt":"A GitHub token to push the release","name":"GH_TOKEN"}
+```
+
+Emitted by `crates/otto-agent-protocol/src/runtime/secret_request.rs`
+(routes: `crates/otto-server/src/secret_request.rs`).
+
 ### `mcp_approval_changed` / `resource_access_changed` / `notifications_changed`
 
 Invalidation cues (TRANSPORT_PLAN stage 2) that let the UI drop its pollers:
@@ -1884,29 +1899,6 @@ each says "the list you cached changed — refetch it"; none carries the data.
   `POST /notifications/read` / `POST /notifications/dismiss` — ONE event per
   batch, none when the batch changed nothing). **Owner-scoped**
   (`user_id` only). Consumer: the tray's "needs you" glyph.
-
-### `workbench_doc_changed`
-
-A Workbench scratch file changed. **Owner-scoped** (`user_id` only — docs are
-per-user). Invalidation cue: refetch `GET /workspaces/{ws}/workbench/docs`
-and, if the doc is open in this window and `client_id` is not this window's
-own (the `client_id` the PATCH sent), refetch the doc.
-
-```json
-{"type":"workbench_doc_changed","workspace_id":"01J…","user_id":"01J…","doc_id":"01J…","scope":"global","action":"updated","rev":7,"content_hash":"9f2c…","updated_at":"2026-10-03T17:02:11Z","client_id":"w-3f2a"}
-```
-
-`scope` is the doc's scope after the change (`workspace` | `global`). A window
-bound to another workspace than `workspace_id` still refetches when the doc is
-`global`, or when it currently lists that doc (it just moved away).
-
-`content_hash` is the doc's hash after the change: a coalesced autosave keeps
-`rev`, so a window compares the hash (not just `rev`) to know its copy is stale.
-
-`action` ∈ `created` | `updated` (content, metadata or a revision restore) |
-`trashed` | `restored` | `deleted` (permanent). `client_id` is omitted unless
-the mutating request carried one. Emitted by
-`crates/otto-server/src/routes/workbench.rs`.
 
 Clients keep a slow safety poll (Otto: 5 min, `ui/src/lib/live.ts` `liveQuery`)
 and refetch after a reconnect / `resync`; while the socket is down they fall

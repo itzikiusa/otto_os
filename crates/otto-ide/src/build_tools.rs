@@ -196,6 +196,7 @@ fn scan_maven_tree(
     let props = parse_pom_properties_scoped(&stripped, dir, st.canon_roots, st.is_root_user);
     let (ws_mod, submodules) = parse_pom_module_scoped(dir, &raw, st.canon_roots, st.is_root_user);
 
+    // Every <project> child that nests its own <name>, so only the project's <name> is left.
     let mut header = stripped.clone();
     for tag in [
         "parent",
@@ -203,6 +204,14 @@ fn scan_maven_tree(
         "dependencyManagement",
         "build",
         "profiles",
+        "distributionManagement",
+        "repositories",
+        "pluginRepositories",
+        "organization",
+        "developers",
+        "contributors",
+        "licenses",
+        "mailingLists",
     ] {
         header = remove_all_tag_blocks(&header, tag);
     }
@@ -356,5 +365,26 @@ mod tests {
             resp.projects[0].modules.is_empty(),
             "parent-traversal and symlinked modules outside authorized roots must be skipped"
         );
+    }
+
+    #[test]
+    fn project_name_ignores_names_nested_in_deploy_repositories() {
+        let ws = tempfile::tempdir().unwrap();
+        let repos = "<distributionManagement><repository><id>releases</id><name>Corp Releases</name></repository></distributionManagement>\
+             <repositories><repository><id>releases</id><name>Corp Releases</name></repository></repositories>";
+        fs::write(
+            ws.path().join("pom.xml"),
+            format!("<project><groupId>com.corp</groupId><artifactId>config-client</artifactId>{repos}</project>"),
+        )
+        .unwrap();
+
+        let resp = build_tools_model(
+            &IdeBuildToolsModelReq {
+                target: None,
+                roots: vec![ws.path().to_string_lossy().into_owned()],
+            },
+            false,
+        );
+        assert_eq!(resp.projects[0].name, "config-client");
     }
 }

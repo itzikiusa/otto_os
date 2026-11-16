@@ -142,7 +142,7 @@
 {/each}
 {#if closed || dormant}
   <div class="qb" data-testid="runtime-closed">
-    <span class="ellipsis">{closed ? 'Closed — in History.' : 'Agent stopped.'} Revive to continue this conversation.</span>
+    <span class="ellipsis">{closed ? 'Closed — in History. Revive to continue this conversation.' : 'Agent stopped. Your next message resumes it.'}</span>
     <button type="button" class="btn small" disabled={reopening} onclick={onreopen} data-testid="runtime-reopen">{reopening ? 'Reviving…' : 'Revive'}</button>
   </div>
 {/if}

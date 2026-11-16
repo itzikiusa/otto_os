@@ -14,6 +14,8 @@ export interface StartLaunch {
   runtime: boolean;
   /** Ask several agents (Threads only). */
   council: boolean;
+  /** ⌘↵: a council's seats start in the background instead of opening in panes. */
+  background: boolean;
   model: string | null;
   /** Null when the provider takes no effort. */
   effort: EffortLevel | null;

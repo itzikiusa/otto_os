@@ -227,6 +227,50 @@ pub fn notice(id: String, message: String) -> TurnItem {
     )
 }
 
+/// The id suffix of a turn's provider-retry notice. Its updates are not
+/// activity: the stall watchdog keeps counting while a provider retries, so a
+/// retry loop cannot keep a turn alive forever (T3 Code #29208).
+pub const RETRY_NOTICE_SUFFIX: &str = ":provider-retry";
+
+/// The turn's one provider-retry row (updated in place on every attempt),
+/// worded the same for every provider (T3 Code #33151).
+pub fn retry_notice(
+    turn: &str,
+    attempt: Option<u64>,
+    max: Option<u64>,
+    why: Option<&str>,
+) -> TurnItem {
+    let mut message = match (attempt, max) {
+        (Some(a), Some(m)) => format!("Provider retry {a} of {m}"),
+        (Some(a), None) => format!("Provider retry {a}"),
+        _ => "Provider retry".to_string(),
+    };
+    if let Some(why) = why.map(str::trim).filter(|w| !w.is_empty()) {
+        message.push_str(" · ");
+        message.push_str(why);
+    }
+    notice(format!("{turn}{RETRY_NOTICE_SUFFIX}"), message)
+}
+
+/// The turn's compaction row: "Compacting context…" while it runs (`done`
+/// false), then "Context compacted" — the wording Codex's own item uses.
+pub fn compaction_notice(turn: &str, done: bool) -> TurnItem {
+    let (status, message) = if done {
+        (TurnItemStatus::Completed, "Context compacted")
+    } else {
+        (TurnItemStatus::Running, "Compacting context…")
+    };
+    item(
+        format!("{turn}:compaction"),
+        status,
+        None,
+        TurnItemKind::SystemNotice {
+            message: message.into(),
+            task_settlement: None,
+        },
+    )
+}
+
 /// `req` without an effort `provider` does not take, plus the notice that
 /// says so: an unsupported level runs the turn at the agent's default
 /// instead of refusing the whole prompt (an "Ask another agent" create).

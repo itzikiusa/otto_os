@@ -18,13 +18,16 @@ mod admission;
 mod auto_close;
 mod children;
 pub mod council;
+pub use secret_request::{answer_secret_request, pending_secret_requests};
 mod descendants;
 mod fresh;
 mod held_adopt;
 mod held_proc;
+mod keep_awake;
 mod paging;
 mod peers;
 mod request_ids;
+mod secret_request;
 mod selection;
 mod task_stop;
 mod usage_hook;
@@ -456,6 +459,9 @@ pub(super) struct State {
     /// once it runs (T3 Code #34912) instead of finding nothing to stop.
     starting: u32,
     stop_requested: bool,
+    /// Values the person gave through a private secret request: masked in
+    /// every event before it is projected, persisted or published.
+    secrets: Vec<String>,
     /// `session.model` is what the agent reported, not a pin (a "Default
     /// model" thread): it is shown, never re-launched as `--model`.
     pub(super) model_from_provider: bool,
@@ -764,6 +770,31 @@ impl AgentRuntime {
         }
     }
 
+    /// Keep `value` (a secret the person gave through a private request) out
+    /// of this thread's timeline and database: from now on every event of
+    /// the loaded session masks it (values under 4 characters are left
+    /// alone, so short words are not mangled).
+    pub async fn redact_value(&self, id: &Id, value: &str) -> Result<()> {
+        let value = value.trim();
+        if value.chars().count() >= 4 {
+            let live = self.live(id).await?;
+            let mut st = live.lock();
+            if !st.secrets.iter().any(|s| s == value) {
+                st.secrets.push(value.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether any loaded session has a turn running or starting (the
+    /// daemon's keep-awake hold reads this).
+    pub fn any_turn_running(&self) -> bool {
+        self.inner.live.iter().any(|e| {
+            let st = e.value().lock();
+            st.turn.is_some() || st.starting > 0
+        })
+    }
+
     /// Evict all cached in-memory [`Live`] sessions (stopping any live child
     /// processes first) and reconcile the persisted projection after a
     /// portable state-archive restore.
@@ -1016,6 +1047,7 @@ impl AgentRuntime {
                     last_activity: Instant::now(),
                     starting: 0,
                     stop_requested: false,
+                    secrets: Vec::new(),
                     model_from_provider: false,
                     switch_from: None,
                 }),
@@ -2756,6 +2788,11 @@ fn stop_child(p: Proc, grace: Duration) {
 fn emit(inner: &Inner, live: &Live, st: &mut State, body: RuntimeEventBody) -> u64 {
     // Held streaming text goes out before anything that follows it.
     flush_held(inner, live, st);
+    let body = if st.secrets.is_empty() {
+        body
+    } else {
+        mask_secrets(body, &st.secrets)
+    };
     let seq = st.next_seq;
     st.next_seq += 1;
     if seq >= st.reserved {
@@ -2765,7 +2802,12 @@ fn emit(inner: &Inner, live: &Live, st: &mut State, body: RuntimeEventBody) -> u
     if let Some(row) = st.proj.apply(&body, seq) {
         let _ = live.persist.send(PersistOp::Upsert(vec![row]));
     }
-    st.last_activity = Instant::now();
+    // A provider retry is not progress (`RETRY_NOTICE_SUFFIX`).
+    let retry = matches!(&body, RuntimeEventBody::TurnItemUpdated { turn_item }
+        if turn_item.id.ends_with(crate::driver::RETRY_NOTICE_SUFFIX));
+    if !retry {
+        st.last_activity = Instant::now();
+    }
     // Prompt admission and request responses need not produce child stdout.
     // Broadcast: a superseded process pump must not consume the new one's wake.
     live.deadline_changed.notify_waiters();
@@ -2779,6 +2821,29 @@ fn emit(inner: &Inner, live: &Live, st: &mut State, body: RuntimeEventBody) -> u
     st.session.last_sequence = seq;
     inner.host.publish(&st.session, ev);
     seq
+}
+
+/// `body` with every occurrence of each secret replaced by a mask.
+fn mask_secrets(body: RuntimeEventBody, secrets: &[String]) -> RuntimeEventBody {
+    fn walk(v: &mut serde_json::Value, secrets: &[String]) {
+        match v {
+            serde_json::Value::String(s) => {
+                for secret in secrets {
+                    if s.contains(secret.as_str()) {
+                        *s = s.replace(secret.as_str(), "••••••");
+                    }
+                }
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|x| walk(x, secrets)),
+            serde_json::Value::Object(o) => o.values_mut().for_each(|x| walk(x, secrets)),
+            _ => {}
+        }
+    }
+    let Ok(mut v) = serde_json::to_value(&body) else {
+        return body;
+    };
+    walk(&mut v, secrets);
+    serde_json::from_value(v).unwrap_or(body)
 }
 
 /// Map the provider session status onto Otto's session status and emit

@@ -15,7 +15,15 @@ conversation), #34505 (jobs that left the CLI's process group are stopped),
 #34771 (Codex MCP startup failures as notices), #34782 (a failed ACP config
 write is retried), #33604 (a resumed ACP message keeps its text), #34867
 (an ACP choice and its `__other` field are one question) and the open
-#31370 (Claude's context meter uses the window Claude enforces). Threads
+#31370 (Claude's context meter uses the window Claude enforces). Ported
+from T3 Code main on 2026-11-16 (behaviour only): #28797 (an ACP refusal or
+limit stop fails the turn), #34128 (the Mac stays awake while a turn runs), #32325 and #34934 (idle and
+finished child threads release their agent process), #33151, #29208 and
+#24334 (provider retries and compactions as one row each; retries are not
+progress for the stall watchdog), #37335 (Grok steering through
+`_x.ai/interject`), #33124 and #34181 (quote a passage of an answer into
+the composer), #10439 (find in a thread), #15907 and #30257 (a private secret request card).
+Threads
 inside a thread (`src/runtime/children.rs` and Otto's Threads UI) follow
 `apps/web/src/components/chat/V2LifecycleRow.tsx` (`SubagentTimelineLink`,
 `SubagentNotificationLink`), `ThreadLineageWorkflowRow.tsx`,

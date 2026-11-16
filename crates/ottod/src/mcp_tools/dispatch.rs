@@ -1547,140 +1547,42 @@ async fn run_canvas_tool(
 
             Ok(finalize(json!({ "ok": true, "format": format })))
         }
-        // Workbench: the session owner's scratch files (owner-scoped routes).
-        // `workbench_write` is Editor-gated by the daemon route and always
-        // lands as a checkpoint revision, so an agent write never folds into
-        // (or hides) the user's own autosave burst.
-        "workbench_list" | "workbench_get" | "workbench_write" => {
-            let ws = ctx
-                .workspace_id
-                .clone()
-                .filter(|s| !s.is_empty())
-                .ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
-            let base = format!("/workspaces/{}/workbench/docs", seg(&ws));
-            let find_by_name = |docs: &Value, want: &str| -> Option<String> {
-                docs.as_array()?
-                    .iter()
-                    .find(|d| d["name"].as_str() == Some(want))
-                    .and_then(|d| d["id"].as_str().map(str::to_string))
-            };
-            match name {
-                "workbench_list" => {
-                    let trash = args.get("trash").and_then(Value::as_bool).unwrap_or(false);
-                    let mut docs = ctx
-                        .get_json(&if trash {
-                            format!("{base}?trash=true")
-                        } else {
-                            base.clone()
-                        })
-                        .await?;
-                    if let (Some(q), Some(arr)) = (
-                        arg_optional_string(args, "query")?.filter(|q| !q.is_empty()),
-                        docs.as_array_mut(),
-                    ) {
-                        let q = q.to_lowercase();
-                        arr.retain(|d| {
-                            d["name"]
-                                .as_str()
-                                .is_some_and(|n| n.to_lowercase().contains(&q))
-                        });
-                    }
-                    Ok(finalize(json!({ "workspace_id": ws, "docs": docs })))
-                }
-                "workbench_get" => {
-                    let id = match arg_optional_string(args, "doc_id")?.filter(|s| !s.is_empty()) {
-                        Some(id) => id,
-                        None => {
-                            let want = arg_str(args, "name")?;
-                            let docs = ctx.get_json(&base).await?;
-                            find_by_name(&docs, &want)
-                                .ok_or_else(|| format!("no workbench file named `{want}`"))?
-                        }
-                    };
-                    let doc_path = format!("{base}/{}", seg(&id));
-                    let mut out = match args.get("revision").and_then(Value::as_i64) {
-                        Some(seq) => ctx.get_json(&format!("{doc_path}/revisions/{seq}")).await?,
-                        None => ctx.get_json(&doc_path).await?,
-                    };
-                    if args
-                        .get("history")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                    {
-                        let limit = match args.get("history_limit") {
-                            None => 100,
-                            Some(value) => value
-                                .as_i64()
-                                .ok_or("history_limit must be an integer")?
-                                .clamp(1, 200),
-                        };
-                        let before = args
-                            .get("before_seq")
-                            .map(|value| value.as_i64().ok_or("before_seq must be an integer"))
-                            .transpose()?;
-                        let mut path = format!("{doc_path}/revisions?limit={limit}");
-                        if let Some(before) = before {
-                            path.push_str(&format!("&before_seq={before}"));
-                        }
-                        let revisions = ctx.get_json(&path).await?;
-                        let rows = revisions
-                            .as_array()
-                            .ok_or("invalid workbench history response")?;
-                        // A full page offers a continuation hint, not proof of
-                        // more rows; the final request can legitimately be empty.
-                        out["next_before_seq"] = if rows.len() == limit as usize {
-                            rows.last()
-                                .and_then(|row| row.get("seq"))
-                                .cloned()
-                                .unwrap_or(Value::Null)
-                        } else {
-                            Value::Null
-                        };
-                        out["revisions"] = revisions;
-                    }
-                    Ok(finalize(out))
-                }
-                _ => {
-                    let content = arg_string_allow_empty(args, "content")?;
-                    let language = arg_optional_string(args, "language")?.filter(|s| !s.is_empty());
-                    let mut id = arg_optional_string(args, "doc_id")?.filter(|s| !s.is_empty());
-                    let doc_name = arg_optional_string(args, "name")?.filter(|s| !s.is_empty());
-                    if id.is_none() {
-                        let want = doc_name.clone().ok_or("pass `doc_id` or `name`")?;
-                        let docs = ctx.get_json(&base).await?;
-                        id = find_by_name(&docs, &want);
-                    }
-                    match id {
-                        Some(id) => {
-                            let mut body = json!({ "content": content, "checkpoint": true });
-                            if let Some(l) = language {
-                                body["language"] = json!(l);
-                            }
-                            let doc = ctx
-                                .patch_json(&format!("{base}/{}", seg(&id)), &body)
-                                .await?;
-                            Ok(finalize(
-                                json!({ "ok": true, "created": false, "doc": doc }),
-                            ))
-                        }
-                        None => {
-                            let mut body = json!({
-                                "name": doc_name.unwrap_or_default(),
-                                "content": content, "scope": arg_optional_string(args, "scope")?.filter(|s| !s.is_empty()),
-                            });
-                            if let Some(l) = language {
-                                body["language"] = json!(l);
-                            }
-                            let mut doc = ctx.post_json(&base, &body).await?;
-                            // Don't echo the content back into the transcript.
-                            if let Some(o) = doc.as_object_mut() {
-                                o.remove("content");
-                            }
-                            Ok(finalize(json!({ "ok": true, "created": true, "doc": doc })))
-                        }
-                    }
+        // Scratches: the session owner's own scratch folder (`/scratches`,
+        // not workspace-scoped). `workbench_write` is Agents-Edit-gated by the
+        // daemon route, which also keeps the old content in Local History.
+        "workbench_list" => {
+            let mut path = "/scratches".to_string();
+            if let Some(q) = arg_optional_string(args, "query")?.filter(|q| !q.is_empty()) {
+                path.push_str(&format!("?query={}", seg(&q)));
+            }
+            Ok(finalize(ctx.get_json(&path).await?))
+        }
+        "workbench_get" => {
+            let file = arg_str(args, "path")?;
+            Ok(finalize(
+                ctx.get_json(&format!("/scratches/file?path={}", seg(&file)))
+                    .await?,
+            ))
+        }
+        "workbench_write" => {
+            let mut file = arg_str(args, "path")?;
+            let content = arg_string_allow_empty(args, "content")?;
+            let has_ext = file
+                .rsplit('/')
+                .next()
+                .is_some_and(|n| n.rsplit_once('.').is_some_and(|(s, _)| !s.is_empty()));
+            if let Some(lang) = arg_optional_string(args, "language")?.filter(|l| !l.is_empty()) {
+                if !has_ext {
+                    file = format!("{file}.{}", lang.trim_start_matches('.'));
                 }
             }
+            let out = ctx
+                .put_json(
+                    "/scratches/file",
+                    &json!({ "path": file, "content": content }),
+                )
+                .await?;
+            Ok(finalize(json!({ "ok": true, "file": out })))
         }
         other => Err(format!("unknown tool `{other}`")),
     }

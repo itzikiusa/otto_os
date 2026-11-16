@@ -116,6 +116,9 @@ pub struct AcpFlavor {
     /// (agy: `session/set_config_option {configId: "thought_level"}`), that
     /// option's id.
     pub effort_config_id: Option<&'static str>,
+    /// A native method that adds a message to the running prompt (Grok's
+    /// `_x.ai/interject`, T3 Code #37335): steering, `capabilities().steer`.
+    pub interject: Option<&'static str>,
     /// The env var naming an Otto context bundle (`AGENTS.md` +
     /// `.agents/skills`) to send as `_meta.antigravity.systemPrompt.append`
     /// instead of a workspace root (otto-context `AGY_BUNDLE_ENV`).
@@ -247,6 +250,9 @@ pub(super) struct AcpDriverState {
     pub(super) access: RuntimeAccessMode,
     pub(super) mode_req: Option<u64>,
     pub(super) effort_req: Option<u64>,
+    /// In-flight interjections (`AcpFlavor::interject`).
+    #[serde(default)]
+    pub(super) interject_reqs: Vec<u64>,
     /// The bundle text for `_meta.antigravity.systemPrompt.append`.
     pub(super) system_append: Option<String>,
     pub(super) queued: Option<(String, RuntimePromptReq)>,
@@ -356,6 +362,7 @@ impl AcpDriver {
                 access: RuntimeAccessMode::default(),
                 mode_req: None,
                 effort_req: None,
+                interject_reqs: Vec::new(),
                 system_append: None,
                 queued: None,
                 prompt_id: None,
@@ -537,6 +544,7 @@ impl AcpDriver {
                 auth_preference: Some(auth.into()),
                 initialize_meta: Some(json!({"clientType": "extension"})),
                 cancel_meta: Some(json!({"cancelTrigger": "ctrl_c"})),
+                interject: Some("_x.ai/interject"),
                 ..AcpFlavor::default()
             },
         )
@@ -1825,6 +1833,28 @@ impl AcpDriver {
                 }
                 step.push(DriverEvent::Error(failure));
             }
+        } else if let Some(pos) = self.state.interject_reqs.iter().position(|r| *r == id) {
+            self.state.interject_reqs.swap_remove(pos);
+            // Only `{status: "queued"}` reaches the running turn.
+            let queued = result
+                .as_ref()
+                .and_then(|r| r.get("status"))
+                .and_then(Value::as_str)
+                == Some("queued");
+            if !queued {
+                step.push(DriverEvent::Error(ProviderFailure {
+                    class: "provider_error".into(),
+                    message: format!(
+                        "{} did not take the message mid-turn; send it again once the turn ends.",
+                        self.provider.as_str()
+                    ),
+                    code: error
+                        .as_ref()
+                        .and_then(|e| e.get("code"))
+                        .map(|c| c.to_string()),
+                    retryable: Some(true),
+                }));
+            }
         } else if Some(id) == self.state.effort_req {
             self.state.effort_req = None;
             if let Some(r) = &result {
@@ -1880,25 +1910,42 @@ impl AcpDriver {
                     let stop = serde_json::from_value::<PromptResponse>(r)
                         .map(|p| p.stop_reason)
                         .unwrap_or(StopReason::EndTurn);
-                    let (status, reason) = if was_cancelling {
-                        (TurnTerminalStatus::Interrupted, None)
-                    } else {
-                        match stop {
-                            StopReason::Cancelled => (TurnTerminalStatus::Interrupted, None),
-                            StopReason::MaxTokens => {
-                                (TurnTerminalStatus::Completed, Some("max_tokens"))
-                            }
-                            StopReason::MaxTurnRequests => {
-                                (TurnTerminalStatus::Completed, Some("max_turn_requests"))
-                            }
-                            StopReason::Refusal => (TurnTerminalStatus::Completed, Some("refusal")),
-                            _ => (TurnTerminalStatus::Completed, None),
-                        }
+                    // T3 Code #28797: a refusal or a limit stop is not a
+                    // finished answer, so it fails the turn with a reason.
+                    let stopped = |code: &str, message: &str| DriverEvent::Terminal {
+                        status: TurnTerminalStatus::Failed,
+                        failure: Some(ProviderFailure {
+                            class: "provider_error".into(),
+                            message: message.into(),
+                            code: Some(code.into()),
+                            retryable: None,
+                        }),
+                        reason: Some(code.into()),
                     };
-                    DriverEvent::Terminal {
+                    let done = |status| DriverEvent::Terminal {
                         status,
                         failure: None,
-                        reason: reason.map(str::to_string),
+                        reason: None,
+                    };
+                    if was_cancelling {
+                        done(TurnTerminalStatus::Interrupted)
+                    } else {
+                        match stop {
+                            StopReason::Cancelled => done(TurnTerminalStatus::Interrupted),
+                            StopReason::MaxTokens => stopped(
+                                "max_tokens",
+                                "The agent stopped: the reply hit the model's output token limit.",
+                            ),
+                            StopReason::MaxTurnRequests => stopped(
+                                "max_turn_requests",
+                                "The agent stopped: the turn hit its limit of model requests.",
+                            ),
+                            StopReason::Refusal => stopped(
+                                "refusal",
+                                "The agent refused this request. It won't remember this message.",
+                            ),
+                            _ => done(TurnTerminalStatus::Completed),
+                        }
                     }
                 }
                 (None, None) => DriverEvent::Terminal {
@@ -2022,7 +2069,44 @@ impl StructuredDriver for AcpDriver {
             }
             c.plan = self.state.modes.iter().any(|m| m == "plan");
         }
+        c.steer = self.flavor.interject.is_some();
         c
+    }
+
+    /// Steering through the flavor's `interject` method: text and images
+    /// join the running prompt; the running tool keeps going.
+    fn steer(&mut self, req: &RuntimePromptReq) -> Result<DriverStep, DriverError> {
+        let Some(method) = self.flavor.interject else {
+            return Err(DriverError(
+                "this agent cannot take a message mid-turn".into(),
+            ));
+        };
+        let Some(sid) = self
+            .state
+            .session_id
+            .clone()
+            .filter(|_| self.state.prompt_id.is_some())
+        else {
+            return Err(DriverError("no prompt is running".into()));
+        };
+        if req.text.trim().is_empty() || !req.files.is_empty() {
+            return Err(DriverError(
+                "only text and images join a running turn".into(),
+            ));
+        }
+        let mut params = json!({"sessionId": sid, "text": req.text});
+        if !req.images.is_empty() {
+            params["content"] = req
+                .images
+                .iter()
+                .map(|i| json!({"type": "image", "data": i.data_base64, "mimeType": i.mime}))
+                .collect();
+        }
+        let (id, line) = self.request(method, params);
+        self.state.interject_reqs.push(id);
+        let mut step = DriverStep::default();
+        step.write(line);
+        Ok(step)
     }
 
     fn launch(&self, ctx: &LaunchContext) -> LaunchSpec {
@@ -3162,6 +3246,87 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// T3 Code #37335: Grok steers through `_x.ai/interject` (text and
+    /// images); anything but `queued` is reported; other ACP agents refuse.
+    #[test]
+    fn grok_steers_into_the_running_prompt_through_interject() {
+        let mut g = AcpDriver::gemini("gemini");
+        assert!(!g.capabilities().steer);
+        assert!(g.steer(&RuntimePromptReq::of("x")).is_err());
+
+        let mut d = AcpDriver::grok();
+        assert!(d.capabilities().steer);
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+        assert!(
+            d.steer(&RuntimePromptReq::of("early")).is_err(),
+            "no prompt yet"
+        );
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let mut req = RuntimePromptReq::of("Look at this");
+        req.images.push(otto_core::agent_runtime::PromptImage {
+            mime: "image/png".into(),
+            data_base64: "aGk=".into(),
+            name: None,
+        });
+        let s = d.steer(&req).unwrap();
+        let w = sent(&s, 0);
+        assert_eq!(w["method"], "_x.ai/interject");
+        assert_eq!(w["params"]["sessionId"], "s1");
+        assert_eq!(w["params"]["text"], "Look at this");
+        assert_eq!(w["params"]["content"][0]["mimeType"], "image/png");
+        let ok = d.on_line(
+            &json!({"jsonrpc":"2.0","id":w["id"],"result":{"status":"queued"}}).to_string(),
+        );
+        assert!(ok.events.is_empty());
+        let w = sent(&d.steer(&RuntimePromptReq::of("Late")).unwrap(), 0);
+        assert!(w["params"].get("content").is_none());
+        let no = d.on_line(
+            &json!({"jsonrpc":"2.0","id":w["id"],"result":{"status":"rejected"}}).to_string(),
+        );
+        assert!(matches!(&no.events[0], DriverEvent::Error(f) if f.message.contains("mid-turn")));
+    }
+
+    /// T3 Code #28797: a refusal or a limit stop fails the turn with a
+    /// visible reason; `end_turn` still completes.
+    #[test]
+    fn refusal_and_limit_stops_fail_the_turn_with_a_reason() {
+        for (stop, failed) in [
+            ("refusal", true),
+            ("max_tokens", true),
+            ("max_turn_requests", true),
+            ("end_turn", false),
+        ] {
+            let mut d = AcpDriver::gemini("gemini");
+            d.start(&ctx(None));
+            d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+            d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+            d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+            let end = d.on_line(&format!(
+                r#"{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"{stop}"}}}}"#
+            ));
+            let Some(DriverEvent::Terminal {
+                status,
+                failure,
+                reason,
+            }) = end.events.last()
+            else {
+                panic!("{stop}: no terminal")
+            };
+            if failed {
+                assert_eq!(*status, TurnTerminalStatus::Failed, "{stop}");
+                let f = failure.as_ref().expect(stop);
+                assert_eq!(f.code.as_deref(), Some(stop));
+                assert!(!f.message.is_empty());
+                assert_eq!(reason.as_deref(), Some(stop));
+            } else {
+                assert_eq!(*status, TurnTerminalStatus::Completed);
+                assert!(failure.is_none() && reason.is_none());
+            }
+        }
     }
 
     #[test]

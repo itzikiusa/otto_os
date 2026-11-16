@@ -28,6 +28,7 @@ pub mod grok_usage;
 pub mod images;
 pub mod limits;
 pub mod model;
+pub mod muse_usage;
 pub mod peek;
 pub mod records;
 pub mod roots;

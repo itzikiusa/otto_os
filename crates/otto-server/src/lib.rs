@@ -77,6 +77,7 @@ pub use otto_automation::scheduled_tasks_scheduler;
 #[cfg(test)]
 #[path = "../tests/unit/scheduled_tasks_engine.rs"]
 mod scheduled_tasks_engine_tests;
+pub mod secret_request;
 mod self_call;
 pub mod shutdown;
 pub mod skill_eval;

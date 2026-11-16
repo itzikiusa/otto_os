@@ -46,7 +46,7 @@ export function loadEventsModule(file: string, ctx: Record<string, unknown> = {}
 }
 
 /** Every `type: '…'` member of the `OttoEvent` union (types.ts or the split
- *  types/ directory), following named members (`| WorkbenchDocChangedEvent`). */
+ *  types/ directory), following named members (`| SomeNamedEvent`). */
 function ottoEventTypes(): string[] {
   const files = [new URL('api/types.ts', LIB)];
   const dir = new URL('api/types/', LIB);

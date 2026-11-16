@@ -27,6 +27,7 @@ pub mod netbridge;
 pub mod plugins;
 pub mod proc_group;
 pub mod projects;
+pub mod scratches;
 pub mod target;
 pub mod text_pos;
 pub mod toolchains;

@@ -12,17 +12,11 @@
   import { harnessLabel } from '../../../lib/providers';
   import { router } from '../../../lib/router.svelte';
   import { relatedStatus } from '../relatedThreads';
-  import { sameCouncil } from './council';
   import ThreadPopover from '../ThreadPopover.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
 
   let { sessionId, onswitch }: { sessionId: string; onswitch?: (id: string) => void } = $props();
-  // A council seat's group is its council: the other seats sit beside it in
-  // their own columns, so only threads an agent opened count as linked.
-  const linked = $derived.by(() => {
-    const self = runtimeThreads.get(sessionId);
-    return runtimeThreads.group(sessionId).filter((t) => t.id === sessionId || !sameCouncil(self, t));
-  });
+  const linked = $derived(runtimeThreads.group(sessionId));
   let open = $state(false);
   let btn = $state<HTMLButtonElement | null>(null);
 

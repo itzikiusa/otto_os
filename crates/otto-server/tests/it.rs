@@ -82,6 +82,8 @@ mod route_inventory;
 mod router_mount;
 #[path = "runtime_lag.rs"]
 mod runtime_lag;
+#[path = "scratches_api.rs"]
+mod scratches_api;
 #[path = "session_files.rs"]
 mod session_files;
 #[path = "session_screen.rs"]
@@ -96,8 +98,6 @@ mod share_scope_guard;
 mod slack_as_me;
 #[path = "ui_control.rs"]
 mod ui_control;
-#[path = "workbench_api.rs"]
-mod workbench_api;
 #[path = "workflow_run_files.rs"]
 mod workflow_run_files;
 

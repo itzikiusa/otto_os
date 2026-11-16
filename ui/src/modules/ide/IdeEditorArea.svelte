@@ -19,11 +19,11 @@
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { isIdeManifestPath } from '../../lib/components/cm-ide-manifest';
-  import { fileUriToPath, normalizeMacPrivatePath } from '../../lib/fileUri';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ide, type IdeCodeAction, type IdeEditorHandle, type IdeOpenTab, type IdeSymbolNode } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
+  import { matchesPausedDebugPath as matchesPausedPath } from './editor/idePausedPath';
   import { subscribeIdeBufferEvictions, subscribeIdeFileSaved } from './store/ideBufferPerf';
   import IdeBreadcrumbsBar from './editor/IdeBreadcrumbsBar.svelte';
   import IdeTabBar from './editor/IdeTabBar.svelte';
@@ -355,33 +355,8 @@
   const errorCount = $derived(activeDiags.filter((d) => d.severity === 'error').length);
   const warnCount = $derived(activeDiags.filter((d) => d.severity === 'warning').length);
 
-  function canonDebugPath(raw: string): string {
-    const clean = fileUriToPath(raw).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
-    return normalizeMacPrivatePath(clean);
-  }
-
-  function matchesPausedDebugPath(pausedFile: string | null | undefined, tabPath: string): boolean {
-    if (!pausedFile || !tabPath) return false;
-    if (pausedFile === tabPath) return true;
-    const p = canonDebugPath(pausedFile);
-    const t = canonDebugPath(tabPath);
-    if (!p || !t) return false;
-    if (p === t) return true;
-    const roots = [ide.target.root, ...ide.additionalRoots].filter(Boolean).map(canonDebugPath);
-    if (!p.startsWith('/')) {
-      for (const r of roots) {
-        if (`${r}/${p}` === t) return true;
-      }
-      return t.endsWith(`/${p}`);
-    }
-    if (!t.startsWith('/')) {
-      for (const r of roots) {
-        if (`${r}/${t}` === p) return true;
-      }
-      return p.endsWith(`/${t}`);
-    }
-    return false;
-  }
+  const matchesPausedDebugPath = (pausedFile: string | null | undefined, tabPath: string): boolean =>
+    matchesPausedPath(pausedFile, tabPath, [ide.target.root, ...ide.additionalRoots]);
 
   function toEditorHandle(ref: ExtendedEditorRef): IdeEditorHandle {
     const h: IdeEditorHandle & { applyQuickFixEdits?: (edits: CmIdeMod.IdeConcreteTextEdit[]) => boolean } = {

@@ -18,7 +18,7 @@
 //! `(message.id, requestId)` exactly like `otto-usage`; `cost-state` is only a
 //! fallback when no usage was seen.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde_json::Value;
 
@@ -70,7 +70,7 @@ impl<'a> ClaudeFolder<'a> {
             st: ClaudeState {
                 f: Fold::new(Provider::Claude, opts),
                 req_turn: HashMap::new(),
-                usage_seen: HashSet::new(),
+                usage_seen: HashMap::new(),
                 tasks: Vec::new(),
                 task_creates: HashMap::new(),
             },
@@ -137,8 +137,11 @@ struct ClaudeState<'a> {
     f: Fold<'a>,
     /// `requestId` → assistant turn index.
     req_turn: HashMap<String, usize>,
-    /// `(message.id, requestId)` keys already counted.
-    usage_seen: HashSet<String>,
+    /// `(message.id, requestId)` → the usage counted for it so far: the
+    /// field-wise max of its copies. A streamed response's early copies carry
+    /// a partial `output_tokens` (8 → 257 on subagent transcripts), so a later
+    /// bigger copy adds the difference instead of being dropped.
+    usage_seen: HashMap<String, TurnUsage>,
     /// Running task-list state (`TodoWrite` replaces, `TaskCreate`/`TaskUpdate`
     /// mutate); each task tool call emits a snapshot AFTER the call.
     tasks: Vec<TaskItem>,
@@ -504,23 +507,25 @@ impl ClaudeState<'_> {
                 str_of(msg, "id").unwrap_or(""),
                 str_of(v, "requestId").unwrap_or("")
             );
-            let count = if key == ":" {
-                true
-            } else {
-                self.usage_seen.insert(key)
+            let copy = TurnUsage {
+                input_tokens: u64_of(usage, "input_tokens").unwrap_or(0),
+                output_tokens: u64_of(usage, "output_tokens").unwrap_or(0),
+                thinking_tokens: usage
+                    .get("output_tokens_details")
+                    .and_then(|d| u64_of(d, "thinking_tokens"))
+                    .unwrap_or(0),
+                cache_read_tokens: u64_of(usage, "cache_read_input_tokens").unwrap_or(0),
+                cache_creation_tokens: u64_of(usage, "cache_creation_input_tokens").unwrap_or(0),
             };
-            if count {
-                let u = TurnUsage {
-                    input_tokens: u64_of(usage, "input_tokens").unwrap_or(0),
-                    output_tokens: u64_of(usage, "output_tokens").unwrap_or(0),
-                    thinking_tokens: usage
-                        .get("output_tokens_details")
-                        .and_then(|d| u64_of(d, "thinking_tokens"))
-                        .unwrap_or(0),
-                    cache_read_tokens: u64_of(usage, "cache_read_input_tokens").unwrap_or(0),
-                    cache_creation_tokens: u64_of(usage, "cache_creation_input_tokens")
-                        .unwrap_or(0),
-                };
+            // Count a response once: its first copy in full, a later copy only
+            // by what it grew.
+            let fresh = key == ":" || !self.usage_seen.contains_key(&key);
+            let u = if key == ":" {
+                copy
+            } else {
+                self.usage_seen.entry(key).or_default().grow_to(&copy)
+            };
+            if fresh || u != TurnUsage::default() {
                 self.f.usage(
                     model.as_deref().unwrap_or(""),
                     u.input_tokens,
@@ -960,6 +965,25 @@ mod tests {
         assert_eq!(v["usage"]["thinking_tokens"], 14);
         assert_eq!(v["usage"]["cache_creation_tokens"], 38854);
         assert!(serde_json::to_value(&f.turns[3].turn).unwrap()["usage"].is_null());
+    }
+
+    /// A streamed subagent response: the early copy carries a partial
+    /// `output_tokens` (real 8 → 257). The turn keeps the max, counted once.
+    #[test]
+    fn a_later_bigger_copy_of_a_response_adds_what_grew() {
+        let jsonl = r#"{"type":"assistant","uuid":"a1","requestId":"r","message":{"id":"m1","model":"m","stop_reason":null,"content":[{"type":"text","text":"x"}],"usage":{"input_tokens":3,"output_tokens":8,"cache_read_input_tokens":500}}}
+{"type":"assistant","uuid":"a2","requestId":"r","message":{"id":"m1","model":"m","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":3,"output_tokens":257,"cache_read_input_tokens":500}}}
+{"type":"assistant","uuid":"a3","requestId":"r","message":{"id":"m1","model":"m","content":[{"type":"text","text":"y"}],"usage":{"input_tokens":3,"output_tokens":8,"cache_read_input_tokens":500}}}
+"#;
+        let f = fold(jsonl);
+        assert_eq!(f.turns.len(), 1);
+        let u = f.turns[0].turn.usage.unwrap();
+        assert_eq!(
+            (u.input_tokens, u.output_tokens, u.cache_read_tokens),
+            (3, 257, 500)
+        );
+        assert_eq!(f.stats.output_tokens, Some(257));
+        assert_eq!(f.stats.input_tokens, Some(503));
     }
 
     #[test]

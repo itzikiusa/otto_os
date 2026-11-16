@@ -1,12 +1,12 @@
 //! Settled turns → the Usage store (review I-03).
 //!
 //! The runtime knows each turn's token usage (`ProviderTurn.turn_token_usage`)
-//! but nothing billed it, so Usage showed no tokens for Muse, opencode, pi or
+//! but nothing billed it, so Usage showed no tokens for opencode, pi or
 //! gemini threads. When a turn settles, its final usage (a running total
 //! overwritten as the turn went, so the settled value IS the turn's total) is
 //! handed to otto-usage once, which records it for the providers whose
 //! transcripts the tailer does not read and ignores the rest (Claude, Codex,
-//! Grok, agy: their CLIs' own records are billed, attributed to the thread).
+//! Grok, agy, Muse: their CLIs' own records are billed, attributed to the thread).
 //! The row is keyed by session + turn, so a repeat never counts twice.
 
 use std::sync::Arc;

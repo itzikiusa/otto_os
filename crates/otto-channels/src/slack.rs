@@ -459,6 +459,9 @@ fn seen_window(bot_token: &str) -> Arc<Mutex<DedupWindow>> {
 pub struct SlackAdapter {
     bot_token: String,
     http: reqwest::Client,
+    /// The inbound message this adapter answers ([`Self::for_message`]): the
+    /// exclusive end of [`Adapter::thread_history`].
+    message_ts: Option<String>,
 }
 
 impl SlackAdapter {
@@ -466,12 +469,38 @@ impl SlackAdapter {
         Self {
             bot_token: bot_token.into(),
             http: build_http_client(),
+            message_ts: None,
         }
+    }
+
+    /// The adapter for one inbound message (its `ts`), so a fresh agent's
+    /// thread history stops right before it.
+    pub fn for_message(mut self, ts: Option<&str>) -> Self {
+        self.message_ts = ts.map(str::to_owned);
+        self
     }
 }
 
 #[async_trait::async_trait]
 impl Adapter for SlackAdapter {
+    async fn thread_history(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+    ) -> anyhow::Result<Option<crate::adapter::ThreadHistory>> {
+        let (Some(thread), Some(before)) = (thread, self.message_ts.as_deref()) else {
+            return Ok(None);
+        };
+        crate::slack_history::read_thread(
+            &crate::slack_api::SlackApi::new(self.bot_token.clone()),
+            chat,
+            thread,
+            before,
+            &std::env::temp_dir(),
+        )
+        .await
+    }
+
     async fn send(&self, chat: &str, thread: Option<&str>, text: &str) -> anyhow::Result<String> {
         let mut body = serde_json::json!({
             "channel": chat,
@@ -1036,6 +1065,10 @@ pub async fn run(
                                     event["subtype"].as_str() == Some("message_changed"),
                                 )
                                 .await;
+                            let ts = content["ts"]
+                                .as_str()
+                                .or_else(|| event["ts"].as_str())
+                                .map(str::to_owned);
                             let event = event.clone();
                             let integ = integ.clone();
                             let bot_token = bot_token.clone();
@@ -1045,8 +1078,9 @@ pub async fn run(
                                     Some(q) => Some(q.acquire().await),
                                     None => None,
                                 };
-                                let adapter = Arc::new(SlackAdapter::new(bot_token.clone()))
-                                    as Arc<dyn Adapter>;
+                                let adapter = Arc::new(
+                                    SlackAdapter::new(bot_token.clone()).for_message(ts.as_deref()),
+                                ) as Arc<dyn Adapter>;
                                 handle_event(&event, &integ, &bot_token, adapter, bridge, permit)
                                     .await;
                             });

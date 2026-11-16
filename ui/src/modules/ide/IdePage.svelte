@@ -4,7 +4,6 @@
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import IdeModeTabs from '../../lib/components/IdeModeTabs.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -23,6 +22,7 @@
   import IdeEditorArea from './IdeEditorArea.svelte';
   import { ide } from './ideStore.svelte';
   import IdeWorkspaceSwitcher from './shell/IdeWorkspaceSwitcher.svelte';
+  import { loadScratchesRoot, newScratchFile, openScratches } from './shell/ideScratches.svelte';
   import IdeHeaderActions from './shell/IdeHeaderActions.svelte';
   import IdeStackSwitcher from './shell/IdeStackSwitcher.svelte';
   import { ideLayout, paneAfterFileOpen, STACK_MAX_H, type IdeStackPane } from './shell/ideLayout.svelte';
@@ -245,6 +245,10 @@
     untrack(() => ide.attachDefaultWorkspace());
   });
 
+  // Know the Scratches folder up front: the switcher names it "Scratches"
+  // (a reload may restore it as the last project).
+  loadScratchesRoot().catch(() => {});
+
   let lastHandledQuery = '';
   $effect(() => {
     void router.parts;
@@ -262,6 +266,7 @@
     const projectParam = params.get('project');
     const rootParam = params.get('root');
     const fileParam = params.get('file');
+    const scratchesParam = params.get('scratches');
     const lineParam = Number(params.get('line') || '0') || undefined;
 
     untrack(() => {
@@ -273,7 +278,9 @@
       }
       void (async () => {
         try {
-          if (projectParam) await ide.activateProject(projectParam);
+          if (scratchesParam === 'new') await newScratchFile();
+          else if (scratchesParam) await openScratches();
+          else if (projectParam) await ide.activateProject(projectParam);
           // A root already attached to the open (multi-folder) project keeps that project and its tabs.
           else if (rootParam && !(ide.target.kind === 'local' && ide.projectRoots.some((r) => r.path.replace(/\/+$/, '') === rootParam.replace(/\/+$/, '')))) {
             if (!(await ide.setLocalTarget(rootParam, null, { skipAutoOpen: Boolean(fileParam) }))) return;
@@ -391,11 +398,12 @@
 >
   <!-- One toolbar row (G13). Stacked: the pane switcher takes the tabs slot
        (below the bar when the page is tall, inline when it is short). -->
-  <PageHeader title={stack ? 'IDE' : 'IDE (Beta)'} tabsPlacement={stack && ideLayout.height >= STACK_MAX_H ? 'below' : 'inline'}>
-    {#snippet tabs()}
-      {#if stack && ide.hasTarget}<IdeStackSwitcher onshow={showPane} />{:else}<IdeModeTabs active="project" />{/if}
-    {/snippet}
-
+  {#snippet stackTabs()}<IdeStackSwitcher onshow={showPane} />{/snippet}
+  <PageHeader
+    title={stack ? 'IDE' : 'IDE (Beta)'}
+    tabs={stack && ide.hasTarget ? stackTabs : undefined}
+    tabsPlacement={stack && ideLayout.height >= STACK_MAX_H ? 'below' : 'inline'}
+  >
     {#snippet badge()}
       <IdeWorkspaceSwitcher onpickfolder={(m) => (folderPickerMode = m)} />
     {/snippet}
@@ -409,7 +417,7 @@
         onTriggerAgent={() => triggerAgentShortcut()}
         onAttachFolder={() => (folderPickerMode = 'attach')}
         onShowPane={showPane}
-        onOpenScratches={() => router.go('workbench')}
+        onOpenScratches={() => void openScratches()}
         onToggleAgentDock={() => { ideAgent.togglePanel(); if (ideAgent.panelOpen) focusAgentComposer(); }}
       />
     {/snippet}
@@ -471,7 +479,7 @@
           <Icon name="server" size={13} />
           Connect over SSH…
         </button>
-        <button type="button" class="btn ghost" onclick={() => router.go('workbench')} data-testid="ide-open-scratches">
+        <button type="button" class="btn ghost" onclick={() => void openScratches()} data-testid="ide-open-scratches">
           <Icon name="workbench" size={13} />
           Open Scratches
         </button>

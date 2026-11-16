@@ -8,8 +8,9 @@ inline **Gutter Run/Debug**, a full **Debug Adapter Protocol (DAP) debugger**,
 the selection) & Inline Edit (`⌘I`)**, **Share with Friends** live collaborative editing, and
 zero-rebuild **runtime IDE plugins**.
 
-- Route: `#/ide` (**Project** mode) and `#/workbench` (**Scratches** mode,
-  switched in the `IDE` header via `Project | Scratches`). Sidebar entry **IDE**
+- Route: `#/ide`. The project switcher always lists **Scratches** first — the
+  user's own scratch folder, the same in every workspace ([Scratches](./scratches.md));
+  `#/workbench` opens it. Sidebar entry **IDE**
   (Build group). ⌘K: "Go to IDE", "Toggle IDE AI Agent", "IDE: Inline Edit with Agent".
 - RBAC:
   - Protected workspace `/api/v1/ide/*` routes require **Agents: Edit** (`Require(Agents, Edit)`),
@@ -399,7 +400,7 @@ composer capability parity, the shared `ModelPicker`, and the thread switcher:
   root }` (`server_cap`, `build_tags_changed`, `shutdown`; see
   `docs/contracts/ws.md` §1c) before the socket closes.
 
-### 12. Preview (Markdown, HTML, images, JSON, Mermaid, tables)
+### 12. Preview (Markdown, HTML, images, JSON, Mermaid, D2, tables)
 
 A previewable file gets three icon buttons at the end of the tab strip:
 **Editor**, **Editor and preview** (Split) and **Preview**. The pressed one is
@@ -411,7 +412,8 @@ IDE and `⌘K` opens the app's command bar, so a `⌘K V` chord can't exist.
 
 - **Formats:** Markdown (`.md .markdown .mdx`), HTML (`.html .htm`), SVG,
   images (`png jpg jpeg gif webp avif ico bmp`), PDF, JSON (`.json
-  .geojson`), Mermaid (`.mmd .mermaid`), CSV/TSV/JSONL. Code files have no
+  .geojson`), Mermaid (`.mmd .mermaid`), D2 (`.d2`, drawn by Canvas' D2
+  renderer in `ide/editor/IdeD2Preview.svelte`), CSV/TSV/JSONL. Code files have no
   control; build manifests (`package.json`, `go.mod`, …) keep their own Text |
   Dependency Analyzer switch.
 - **Defaults and memory:** text formats open in Editor; images, PDF, SVG and

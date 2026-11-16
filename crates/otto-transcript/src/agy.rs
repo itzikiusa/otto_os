@@ -502,6 +502,7 @@ pub fn parse_agy_transcript_line(line: &str) -> Option<ClaudeLine> {
         },
         dedup_key,
         timestamp: v.created_at.map(|s| s.into_owned()),
+        cache_write_1h: 0,
         complete: v.status.as_deref() == Some("DONE"),
     })
 }

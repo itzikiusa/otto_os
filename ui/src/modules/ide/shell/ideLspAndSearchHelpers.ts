@@ -213,14 +213,17 @@ export async function runFormatActiveFile(
   if (!tab || tab.readOnly || tab.truncated) return;
   const targetPath = tab.path;
   const content = bufPerf.flush(host, targetPath);
+  const local = opts.organizeImports ? null : /\.(sql|xml|svg)$/i.exec(targetPath)?.[1].toLowerCase(); // no daemon formatter
   try {
-    const resp = await api.post<IdeFormatAnswer & { formatted: string; changed: boolean; formatter: string }>('/ide/lsp/format', {
-      target: host.targetPayload,
-      path: targetPath,
-      content,
-      language: tab.language,
-      organize_imports: Boolean(opts.organizeImports),
-    });
+    const resp: IdeFormatAnswer & { formatted: string; changed: boolean; formatter: string } = local
+      ? await (await import('../filetools/lib/format')).formatForIde(local, content)
+      : await api.post('/ide/lsp/format', {
+          target: host.targetPayload,
+          path: targetPath,
+          content,
+          language: tab.language,
+          organize_imports: Boolean(opts.organizeImports),
+        });
     if (noteFormatSkipped(targetPath, resp)) return; // on purpose, not an error: buffer untouched
     if (resp.changed && typeof resp.formatted === 'string') {
       if (bufPerf.getBuffer(host, targetPath) !== content || !host.tabs.some((t) => t.path === targetPath)) {

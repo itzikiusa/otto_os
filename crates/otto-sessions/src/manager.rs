@@ -5736,6 +5736,31 @@ impl SessionManager {
         }
     }
 
+    /// Learn a Muse terminal session's own id (for usage attribution) from the
+    /// `.session.lock` naming its process, written as Muse starts. Every
+    /// spawn, restart and re-adoption runs it: a restarted Muse is a new
+    /// session (no resume argv), so its id replaces the previous one.
+    fn spawn_muse_id_capture(&self, id: Id, pid: u32) {
+        let repo = self.repo.clone();
+        tokio::spawn(async move {
+            for _ in 0..60 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let found = tokio::task::spawn_blocking(move || {
+                    crate::muse::session_for_pid(&crate::muse::muse_root(), pid)
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some(psid) = found {
+                    if let Err(e) = repo.set_provider_session(&id, &psid).await {
+                        tracing::warn!(session = %id, "muse id capture: persist failed: {e}");
+                    }
+                    return;
+                }
+            }
+        });
+    }
+
     /// Per-session status task: every 2s classify working/idle
     /// ([`status_classify`]); on exit mark `exited` and stop. When an [`OutputScanner`] is
     /// configured, also spawns a sibling task that streams the PTY's live
@@ -5747,6 +5772,11 @@ impl SessionManager {
     fn start_status_task(&self, session: &Session, handle: Arc<PtyHandle>, readopted: bool) {
         let (id, workspace_id) = (session.id.clone(), session.workspace_id.clone());
         let provider = session.provider.clone();
+        if self.cli_family(&provider) == "muse" {
+            if let Some(pid) = handle.pid() {
+                self.spawn_muse_id_capture(id.clone(), pid);
+            }
+        }
         let mut classifier =
             status_classify::StatusClassifier::new(self, session, Arc::clone(&handle));
         // Mid-session output scan: subscribe to the PTY broadcast and forward

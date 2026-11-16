@@ -1,7 +1,8 @@
 <!--
   "‹ <parent title>" beside a child thread's title while the thread it was
   opened from is not on screen (a phone, or a child opened in place): one
-  click back. The "Back to council" chip's pattern, for every child thread.
+  click back. A council's seats 2–4 and its synthesis count as children of
+  seat 1.
 -->
 <script lang="ts">
   import Icon from '../../../lib/components/Icon.svelte';
@@ -14,9 +15,9 @@
 
   const parent = $derived.by(() => {
     const me = runtimeThreads.get(threadId);
-    const of = childOf(me);
-    if (!of || councilOf(me)) return null;
-    const p = runtimeThreads.get(of.id);
+    const of = childOf(me)?.id ?? (councilOf(me) ? me?.parent_id : null);
+    if (!of) return null;
+    const p = runtimeThreads.get(of);
     return p && !threads.paneIds.includes(p.id) ? p : null;
   });
 </script>

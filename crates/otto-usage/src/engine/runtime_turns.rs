@@ -1,5 +1,5 @@
 //! Usage of structured-runtime (Threads) turns whose CLI leaves no transcript
-//! the tailer reads — gemini, opencode, pi, muse (review I-03).
+//! the tailer reads — gemini, opencode, pi (review I-03).
 //!
 //! The runtime settles each turn with the agent's own token counts
 //! (`ProviderTurn.turn_token_usage`: the prompt response's `usage`, pi's
@@ -7,7 +7,7 @@
 //! the turn's TOTAL — drivers that report running totals overwrite it as the
 //! turn goes — so one row per turn, written once it settles, is exact.
 //!
-//! Claude, Codex, Grok and Antigravity are NOT recorded here: their CLIs
+//! Claude, Codex, Grok, Antigravity and Muse are NOT recorded here: their CLIs
 //! write their usual transcripts / stores in runtime mode too, and the tailer
 //! bills those (attributing them to the thread through its native id). A row
 //! from both paths would count the turn twice.
@@ -28,8 +28,9 @@ use crate::ingestion::DurableEvent;
 use crate::UsageEvent;
 
 /// Providers whose own on-disk records the tailer already bills
-/// (`tailer/driver.rs`: Claude, Codex; `tailer/driver/native.rs`: Grok, agy).
-pub const TRANSCRIPT_TAILED_PROVIDERS: [&str; 4] = ["claude", "codex", "grok", "agy"];
+/// (`tailer/driver.rs`: Claude, Codex; `tailer/driver/native.rs`: Grok, agy,
+/// Muse).
+pub const TRANSCRIPT_TAILED_PROVIDERS: [&str; 5] = ["claude", "codex", "grok", "agy", "muse"];
 
 /// Whether `provider`'s usage reaches the store through the transcript
 /// tailer (so a runtime turn on it must not be recorded again).
@@ -46,7 +47,7 @@ pub struct RuntimeTurnUsage {
     /// The runtime thread's id (what the Threads page and the usage rows key on).
     pub session_id: String,
     pub workspace_id: String,
-    /// `RuntimeProvider::as_str` (`gemini`, `opencode`, `pi`, `muse`, …).
+    /// `RuntimeProvider::as_str` (`gemini`, `opencode`, `pi`, …).
     pub provider: String,
     /// The model the turn ran on (empty = the provider's unreported default).
     pub model: String,
@@ -219,10 +220,10 @@ mod tests {
         for p in TRANSCRIPT_TAILED_PROVIDERS {
             assert!(runtime_turn_event(&turn(p)).is_none(), "{p}");
         }
-        for p in ["gemini", "opencode", "pi", "muse"] {
+        for p in ["gemini", "opencode", "pi"] {
             assert!(runtime_turn_event(&turn(p)).is_some(), "{p}");
         }
-        let mut empty = turn("muse");
+        let mut empty = turn("pi");
         empty.usage = TurnTokenUsage::default();
         assert!(runtime_turn_event(&empty).is_none());
         // A cost-only turn (an ACP `usage_update` without a `usage` object)
@@ -235,7 +236,7 @@ mod tests {
 
     #[test]
     fn runtime_usage_cost_is_reported_else_rate_card_else_zero() {
-        let mut t = turn("muse");
+        let mut t = turn("pi");
         t.usage.cost_usd = Some(0.5);
         assert_eq!(runtime_turn_event(&t).unwrap().1.cost_usd, 0.5);
         t.usage.cost_usd = Some(f64::NAN);

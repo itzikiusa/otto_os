@@ -38,7 +38,6 @@ export const PAGES = [
   'mcp',
   'scheduled-tasks',
   'personal-agents',
-  'workbench',
   'ide',
 ] as const;
 

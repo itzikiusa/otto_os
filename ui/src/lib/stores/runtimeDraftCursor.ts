@@ -1,5 +1,5 @@
 // Per-composer caret (`selectionStart`, `selectionEnd`) and `scrollTop` memory
-// shared across session tabs, Council follow-ups, New-Thread stage, and `#/ide`
+// shared across session tabs, the New-Thread stage, and `#/ide`
 // <-> `#/threads` navigation. Stored in bounded in-memory maps cleared on auth
 // identity transitions (`otto:ide-storage-cleared`).
 

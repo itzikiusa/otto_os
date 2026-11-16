@@ -419,12 +419,15 @@ async fn interrupt_ends_the_turn_and_cancels_pending_requests() {
     let rt = runtime(&pool, &host, RuntimeConfig::default());
     let s = create(&rt, dir.path().to_str().unwrap()).await;
 
+    assert!(!rt.any_turn_running(), "idle before the prompt");
     rt.prompt(&s.id, "hang").await.unwrap();
     host.wait(is_type("turn_item.updated")).await;
     host.wait_n(is_type("turn_item.updated"), 2).await; // user + streaming chunk
+    assert!(rt.any_turn_running(), "the keep-awake hold sees the turn");
     assert!(rt.interrupt(&s.id).await.unwrap());
     let fin = host.wait(is_terminal).await;
     assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Interrupted));
+    assert!(!rt.any_turn_running(), "released once the turn ends");
     assert!(
         !rt.interrupt(&s.id).await.unwrap(),
         "nothing left to interrupt"
@@ -3695,18 +3698,6 @@ async fn synthesis_waits_for_every_seat_and_respects_the_group_cap() {
     assert!(verdict.text.contains("working"), "{}", verdict.text);
 }
 
-// ---- council rounds: follow-ups, per-round synthesis, restart ----
-
-fn follow_up(
-    text: &str,
-    seats: &[u32],
-) -> otto_agent_protocol::runtime::council::CouncilFollowUpReq {
-    otto_agent_protocol::runtime::council::CouncilFollowUpReq {
-        text: text.into(),
-        seats: seats.to_vec(),
-    }
-}
-
 fn gemini_judge() -> otto_core::agent_runtime::SynthesizeCouncilReq {
     otto_core::agent_runtime::SynthesizeCouncilReq {
         provider: RuntimeProvider::Gemini,
@@ -3717,11 +3708,10 @@ fn gemini_judge() -> otto_core::agent_runtime::SynthesizeCouncilReq {
     }
 }
 
-/// A follow-up goes to every seat (or only the named one) as its own
-/// thread's next turn; the judge reads the CURRENT round only, with the
-/// council's first question, and is recorded under that round.
+/// A follow-up typed in one seat's own thread is that seat's latest
+/// exchange: the judge reads each seat's last question with its answer.
 #[tokio::test]
-async fn council_follow_ups_reach_every_seat_or_one_and_the_judge_reads_the_current_round() {
+async fn the_judge_reads_each_seat_s_latest_exchange() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap();
     let pool = pool().await;
@@ -3739,295 +3729,22 @@ async fn council_follow_ups_reach_every_seat_or_one_and_the_judge_reads_the_curr
     for s in &seats {
         assert!(!rt.latest_reply(&s.id, WAIT).await.unwrap().busy);
     }
-    let one = rt.council_rounds(&seats[1].id).await.unwrap();
-    assert_eq!(one.max_rounds, 10);
-    assert_eq!(one.rounds.len(), 1);
-    assert_eq!(
-        (
-            one.rounds[0].n,
-            one.rounds[0].text.as_str(),
-            one.rounds[0].seats.clone()
-        ),
-        (1, "which cache?", vec![1, 2])
-    );
-
-    // Round 2 to every seat (no seats named), sent through seat 2.
-    let two = rt
-        .follow_up_council(&seats[1].id, follow_up("why redis?", &[]))
-        .await
-        .unwrap();
-    assert_eq!(two.rounds.len(), 2);
-    assert_eq!(two.rounds[1].seats, vec![1, 2]);
-    assert!(two.rounds[1].refused.is_empty());
-    for s in &seats {
-        let r = rt.latest_reply(&s.id, WAIT).await.unwrap();
-        assert!(r.text.contains("why redis?"), "{}", r.text);
-    }
-    // Round 3 to seat 2 only: seat 1 keeps its round-2 answer.
-    let three = rt
-        .follow_up_council(&seats[0].id, follow_up("only you", &[2]))
-        .await
-        .unwrap();
-    assert_eq!(three.rounds[2].seats, vec![2]);
+    rt.prompt(&seats[1].id, "only you").await.unwrap();
     assert!(rt
         .latest_reply(&seats[1].id, WAIT)
         .await
         .unwrap()
         .text
         .contains("only you"));
-    assert!(rt
-        .latest_reply(&seats[0].id, WAIT)
-        .await
-        .unwrap()
-        .text
-        .contains("why redis?"));
-
     let judge = rt
         .synthesize_council(&seats[0].id, gemini_judge())
         .await
         .unwrap();
-    assert_eq!(judge.title, "which cache? · synthesis of round 3");
+    assert_eq!(judge.title, "which cache? · synthesis");
     let verdict = rt.latest_reply(&judge.id, WAIT).await.unwrap();
     for want in [
-        "## The council's first question\n\nwhich cache?",
-        "## The question (round 3)\n\nonly you",
-        "## Seat 2 — gemini",
-    ] {
-        assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
-    }
-    assert!(
-        !verdict.text.contains("## Seat 1 —"),
-        "seat 1 sat out round 3: {}",
-        verdict.text
-    );
-    let after = rt.council_rounds(&judge.id).await.unwrap();
-    assert_eq!(after.rounds[2].syntheses, vec![judge.id.clone()]);
-    assert!(after.rounds[1].syntheses.is_empty());
-
-    for bad in [follow_up("x", &[7]), follow_up("   ", &[])] {
-        assert!(matches!(
-            rt.follow_up_council(&seats[0].id, bad).await,
-            Err(Error::Invalid(_))
-        ));
-    }
-    let plain = create(&rt, cwd).await;
-    assert!(matches!(
-        rt.follow_up_council(&plain.id, follow_up("x", &[])).await,
-        Err(Error::Invalid(_))
-    ));
-}
-
-/// A closed seat is listed as refused for the round and the judge names it
-/// as missing; a round no seat takes is not recorded; ten rounds is the cap.
-#[tokio::test]
-async fn a_round_names_the_seat_it_never_reached_and_stops_at_the_cap() {
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = dir.path().to_str().unwrap();
-    let pool = pool().await;
-    let host = TestHost::new(cwd, false);
-    let rt = runtime(&pool, &host, RuntimeConfig::default());
-    let g = || seat(RuntimeProvider::Gemini, None);
-    let seats = rt
-        .create_council(
-            &"u1".into(),
-            &"w1".into(),
-            council_req("q1", vec![g(), g()]),
-        )
-        .await
-        .unwrap();
-    for s in &seats {
-        assert!(!rt.latest_reply(&s.id, WAIT).await.unwrap().busy);
-    }
-    rt.close(&seats[1].id).await.unwrap();
-    let two = rt
-        .follow_up_council(&seats[0].id, follow_up("q2", &[]))
-        .await
-        .unwrap();
-    let r2 = &two.rounds[1];
-    assert_eq!(r2.seats, vec![1, 2]);
-    assert_eq!(r2.refused.len(), 1);
-    assert_eq!(r2.refused[0].seat, 2);
-    assert!(r2.refused[0].reason.contains("closed"), "{:?}", r2.refused);
-    assert!(rt
-        .latest_reply(&seats[0].id, WAIT)
-        .await
-        .unwrap()
-        .text
-        .contains("q2"));
-    let judge = rt
-        .synthesize_council(&seats[0].id, gemini_judge())
-        .await
-        .unwrap();
-    let verdict = rt.latest_reply(&judge.id, WAIT).await.unwrap();
-    assert!(
-        verdict
-            .text
-            .contains("No answer in this round from: seat 2 (the question never reached it"),
-        "{}",
-        verdict.text
-    );
-
-    // Only the closed seat: nothing takes it, nothing is recorded.
-    let none = rt
-        .follow_up_council(&seats[0].id, follow_up("q3", &[2]))
-        .await
-        .expect_err("seat 2 is closed");
-    assert!(
-        matches!(&none, Error::Conflict(m) if m.contains("no seat took the follow-up")),
-        "{none:?}"
-    );
-    assert_eq!(
-        rt.council_rounds(&seats[0].id).await.unwrap().rounds.len(),
-        2
-    );
-
-    // Up to ten rounds (queued behind each other at seat 1), then 409.
-    for i in 3..=10 {
-        rt.follow_up_council(&seats[0].id, follow_up(&format!("r{i}"), &[1]))
-            .await
-            .unwrap();
-    }
-    let cap = rt
-        .follow_up_council(&seats[0].id, follow_up("r11", &[1]))
-        .await
-        .expect_err("the cap");
-    assert!(
-        matches!(&cap, Error::Conflict(m) if m.contains("10 rounds")),
-        "{cap:?}"
-    );
-    // The queued rounds drain in order; the last one is answered last.
-    let deadline = std::time::Instant::now() + WAIT;
-    while !rt
-        .latest_reply(&seats[0].id, WAIT)
-        .await
-        .unwrap()
-        .text
-        .contains("r10")
-    {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "round 10 never answered"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-/// The rounds live on seat 1 and survive a daemon restart. What counts as a
-/// seat's answer in a round: any assistant text it has on record there,
-/// whole or cut off. A restart loses text still streaming (it is never
-/// persisted mid-stream), so a seat cut mid-answer has none; a seat that
-/// finished before the restart keeps its answer and counts. A round no seat
-/// answered is refused (409, nothing opened) and the person asks again.
-#[tokio::test]
-async fn council_rounds_survive_a_restart_and_a_cut_round_can_be_asked_again() {
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = dir.path().to_str().unwrap();
-    let pool = pool().await;
-    let host = TestHost::new(cwd, false);
-    let rt = runtime(&pool, &host, RuntimeConfig::default());
-    let g = || seat(RuntimeProvider::Gemini, None);
-    // Council A: both seats hang on round 2. Council B: the Claude seat
-    // answers "hang" at once (its fake echoes it), the Gemini seat hangs.
-    let a = rt
-        .create_council(
-            &"u1".into(),
-            &"w1".into(),
-            council_req("q1", vec![g(), g()]),
-        )
-        .await
-        .unwrap();
-    let b = rt
-        .create_council(
-            &"u1".into(),
-            &"w1".into(),
-            council_req("q1", vec![g(), seat(RuntimeProvider::Claude, None)]),
-        )
-        .await
-        .unwrap();
-    for s in a.iter().chain(&b) {
-        assert!(!rt.latest_reply(&s.id, WAIT).await.unwrap().busy);
-    }
-    for c in [&a, &b] {
-        rt.follow_up_council(&c[0].id, follow_up("hang", &[]))
-            .await
-            .unwrap();
-    }
-    for s in [&a[0], &a[1], &b[0]] {
-        host.wait(|e| {
-            e.session_id == s.id
-                && matches!(&e.body, RuntimeEventBody::TurnItemUpdated { turn_item }
-                    if matches!(&turn_item.kind, TurnItemKind::AssistantMessage { text, .. } if text == "working"))
-        })
-        .await;
-    }
-    let done = rt.latest_reply(&b[1].id, WAIT).await.unwrap();
-    assert!(
-        !done.busy && done.text.contains("echo: hang"),
-        "{}",
-        done.text
-    );
-    for s in a.iter().chain(&b) {
-        rt.flush(&s.id).await;
-    }
-    rt.shutdown().await;
-    drop(rt);
-
-    let host2 = TestHost::new(cwd, false);
-    let rt2 = runtime(&pool, &host2, RuntimeConfig::default());
-    rt2.recover().await.unwrap();
-    let rounds = rt2.council_rounds(&a[1].id).await.unwrap();
-    assert_eq!(rounds.rounds.len(), 2);
-    assert_eq!(rounds.rounds[1].text, "hang");
-
-    // A: no seat answered round 2 — refused, with the reason, nothing opened.
-    let none = rt2
-        .synthesize_council(&a[0].id, gemini_judge())
-        .await
-        .expect_err("round 2 has no answer");
-    assert!(
-        matches!(&none, Error::Conflict(m) if m == "no seat has answered round 2 yet — nothing to synthesize"),
-        "{none:?}"
-    );
-    assert!(rt2.council_rounds(&a[0].id).await.unwrap().rounds[1]
-        .syntheses
-        .is_empty());
-    // Asked again (a new round): answered, then it synthesizes.
-    let three = rt2
-        .follow_up_council(&a[0].id, follow_up("again", &[]))
-        .await
-        .unwrap();
-    assert_eq!(three.rounds.len(), 3);
-    for s in &a {
-        assert!(rt2
-            .latest_reply(&s.id, WAIT)
-            .await
-            .unwrap()
-            .text
-            .contains("again"));
-    }
-    let judge = rt2
-        .synthesize_council(&a[0].id, gemini_judge())
-        .await
-        .unwrap();
-    assert!(rt2
-        .latest_reply(&judge.id, WAIT)
-        .await
-        .unwrap()
-        .text
-        .contains("## The question (round 3)"));
-
-    // B: the seat that finished before the restart counts; the cut one is
-    // named as missing, never dropped.
-    let judge = rt2
-        .synthesize_council(&b[0].id, gemini_judge())
-        .await
-        .unwrap();
-    let verdict = rt2.latest_reply(&judge.id, WAIT).await.unwrap();
-    for want in [
-        "## The question (round 2)",
-        "No answer in this round from: seat 1 (",
-        "## Seat 2 — claude",
-        "echo: hang",
+        "## Seat 1 — gemini\n\nAsked: which cache?",
+        "## Seat 2 — gemini\n\nAsked: only you",
     ] {
         assert!(verdict.text.contains(want), "{want}: {}", verdict.text);
     }
@@ -4813,6 +4530,161 @@ async fn a_codex_generated_image_is_served_from_disk_and_nothing_else_is() {
         Err(Error::NotFound(_))
     ));
     rt.close(&c.id).await.unwrap();
+}
+
+/// T3 Code #32325 / #34934: an idle thread's agent process is released
+/// (the thread stays open, dormant) and its next message resumes it; a
+/// finished child thread is released sooner.
+#[tokio::test]
+async fn idle_agent_processes_are_released_and_the_next_prompt_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    let child = rt
+        .create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                title_auto: false,
+                provider: Some(RuntimeProvider::Gemini),
+                cwd: Some(cwd.into()),
+                title: None,
+                model: None,
+                access_mode: None,
+                meta: Some(serde_json::json!({"child_of": {"id": s.id, "by": "agent"}})),
+            },
+        )
+        .await
+        .unwrap();
+    host.wait_n(is_ready, 2).await;
+    rt.prompt(&s.id, "hello").await.unwrap();
+    host.wait(is_terminal).await;
+
+    let now = Utc::now();
+    assert!(
+        rt.release_idle_processes(30, now).await.is_empty(),
+        "nothing is idle yet"
+    );
+    assert!(
+        rt.release_idle_processes(0, now + chrono::TimeDelta::days(9))
+            .await
+            .is_empty(),
+        "0 = never"
+    );
+    let soon = now + chrono::TimeDelta::minutes(6);
+    assert_eq!(
+        rt.release_idle_processes(30, soon).await,
+        vec![child.id.clone()],
+        "a finished child goes after 5 minutes"
+    );
+    let later = now + chrono::TimeDelta::minutes(31);
+    assert_eq!(
+        rt.release_idle_processes(30, later).await,
+        vec![s.id.clone()]
+    );
+    let got = rt.get(&s.id).await.unwrap();
+    assert_eq!(
+        got.status,
+        RuntimeSessionStatus::Dormant,
+        "open, not closed"
+    );
+
+    rt.prompt(&s.id, "after release").await.unwrap();
+    let fin = host.wait_n(is_terminal, 2).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    assert!(last_assistant_text(&host).contains("after release"));
+    assert_eq!(
+        host.prepared.lock().unwrap().len(),
+        3,
+        "the message respawned it"
+    );
+    let resumed = rt.get(&s.id).await.unwrap();
+    assert_eq!(
+        resumed.native_thread_id, got.native_thread_id,
+        "same conversation"
+    );
+    rt.close(&s.id).await.unwrap();
+    rt.close(&child.id).await.unwrap();
+}
+
+/// T3 Code #29208: provider retries show as one row but are not progress,
+/// so a turn stuck retrying is still stopped as stalled.
+#[tokio::test]
+async fn provider_retries_do_not_reset_the_stall_watchdog() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(
+        &pool,
+        &host,
+        RuntimeConfig {
+            stall_after: Duration::from_millis(1200),
+            stall_tool_after: Duration::from_millis(1200),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    host.wait(is_ready).await;
+    let started = std::time::Instant::now();
+    rt.prompt(&s.id, "retrying 6").await.unwrap();
+    let t = host.wait(is_terminal).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "stopped while the retries still came ({:?})",
+        started.elapsed()
+    );
+    assert!(
+        matches!(&t.body, RuntimeEventBody::TurnTerminal { reason: Some(r), .. } if r == "stalled")
+    );
+    let retry_rows: Vec<TurnItem> = host
+        .items()
+        .into_iter()
+        .filter(|i| i.id.ends_with(":provider-retry"))
+        .collect();
+    assert!(!retry_rows.is_empty(), "the retries were shown");
+    assert!(
+        retry_rows.iter().all(|i| i.id == retry_rows[0].id),
+        "as one row"
+    );
+    rt.close(&s.id).await.unwrap();
+}
+
+/// T3 Code #15907: a secret the person gave privately never reaches the
+/// timeline, the event stream or the persisted projection.
+#[tokio::test]
+async fn a_privately_given_secret_is_masked_everywhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    host.wait(is_ready).await;
+    rt.redact_value(&s.id, "hunter2-token").await.unwrap();
+    rt.redact_value(&s.id, "abc").await.unwrap(); // too short to mask
+    rt.prompt(&s.id, "use hunter2-token abc").await.unwrap();
+    host.wait(is_terminal).await;
+    rt.flush(&s.id).await;
+    let published =
+        serde_json::to_string(&host.all().iter().map(|e| &e.body).collect::<Vec<_>>()).unwrap();
+    assert!(!published.contains("hunter2-token"), "published events");
+    assert!(published.contains("use •••••• abc"));
+    let replay = serde_json::to_string(&rt.replay(&s.id, 0).await.unwrap()).unwrap();
+    assert!(!replay.contains("hunter2-token"), "replay / snapshot");
+    let rows: Vec<String> = sqlx::query_scalar("SELECT payload_json FROM agent_runtime_entities")
+        .fetch_all(pool.writer())
+        .await
+        .unwrap();
+    assert!(
+        rows.iter().all(|r| !r.contains("hunter2-token")),
+        "persisted rows"
+    );
+    assert!(rows.iter().any(|r| r.contains("••••••")));
+    rt.close(&s.id).await.unwrap();
 }
 
 // ---- usage: settled turns reach the Usage store (review I-03) -------------

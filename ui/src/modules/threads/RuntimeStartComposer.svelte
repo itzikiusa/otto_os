@@ -211,10 +211,10 @@
   /** Start with a message the host wrote (a suggestion, a menu ask) and the
    *  composer's picks; `access` overrides the chip for this start. */
   export function launchText(text: string, access?: RuntimeAccessMode): Promise<boolean> {
-    return run({ withPrompt: true, message: text, titleSeed: text, raw: true, access });
+    return run({ withPrompt: true, message: text, titleSeed: text, raw: true, access, background: false });
   }
 
-  async function run(o: { withPrompt: boolean; message: string; titleSeed: string; raw: boolean; access?: RuntimeAccessMode }): Promise<boolean> {
+  async function run(o: { withPrompt: boolean; message: string; titleSeed: string; raw: boolean; access?: RuntimeAccessMode; background: boolean }): Promise<boolean> {
     if (busy) return false;
     const readiness = providerReadiness(provider);
     if (!provider || !readiness.available) {
@@ -228,6 +228,7 @@
         provider,
         runtime,
         council: o.withPrompt && councilReady,
+        background: o.background,
         model: selectedModel,
         effort: takesEffort ? selectedEffort : null,
         interactionMode,
@@ -251,7 +252,7 @@
     }
   }
 
-  async function launch(withPrompt: boolean, overridePrompt?: string): Promise<void> {
+  async function launch(withPrompt: boolean, overridePrompt?: string, background = false): Promise<void> {
     if (busy) return;
     const rawPrompt = overridePrompt ?? (withPrompt ? prompt.trim() : '');
     if (withPrompt && overridePrompt === undefined) {
@@ -296,7 +297,7 @@
       return;
     }
     const message = withPrompt ? assembleComposerMessage(rawTrimmed, stageContext) : '';
-    await run({ withPrompt, message, titleSeed: rawTrimmed || stageContext[0]?.label || '', raw: false });
+    await run({ withPrompt, message, titleSeed: rawTrimmed || stageContext[0]?.label || '', raw: false, background });
   }
 
   let cmdIdx = $state(0);
@@ -373,7 +374,7 @@
     }
     if (enterSends(e)) {
       e.preventDefault();
-      void launch(!((e.metaKey || e.ctrlKey) && !prompt.trim() && stageContext.length === 0 && files.list.length === 0));
+      void launch(!((e.metaKey || e.ctrlKey) && !prompt.trim() && stageContext.length === 0 && files.list.length === 0), undefined, e.metaKey || e.ctrlKey);
     }
   }
 
@@ -501,7 +502,7 @@
       class="nt-send"
       class:ask={councilReady}
       aria-label={busy ? 'Starting thread' : councilReady ? `Ask ${council.seats.length} agents` : 'Start thread'}
-      title="Start thread (↵) — ⌘↵ with no text opens an empty one"
+      title={councilReady ? 'Ask every agent (↵) — ⌘↵ starts them in the background' : 'Start thread (↵) — ⌘↵ with no text opens an empty one'}
       data-testid="new-thread-send-btn"
       disabled={busy || (!prompt.trim() && stageContext.length === 0 && files.list.length === 0)}
       onclick={() => void launch(true)}

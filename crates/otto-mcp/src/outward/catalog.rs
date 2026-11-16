@@ -13,6 +13,9 @@ use super::ui_commands;
 pub const DEFAULT_ENABLED: &[&str] = &[
     "get_context_packet",
     "ask_human_approval",
+    // Asks the thread's owner for a secret in a private card: the value goes
+    // only to the calling agent's tool result (never the DB or the timeline).
+    "request_secret",
     // Scheduled-tasks reads are safe to expose by default so an agent can inspect
     // existing jobs; the write tools below stay off until an admin enables them.
     "list_scheduled_tasks",
@@ -648,17 +651,9 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Draft a PR title + description from a repo's diff vs a base branch. Drafts text only — does NOT open/publish a PR.",
             "inputSchema":{"type":"object","required":["base"],"properties":{
                 "repo_id":{"type":"string","description":REPO_REF_DESC},"base":{"type":"string"}}}}),
-        json!({"name":"otto.list_workspaces","mutating":false,"category":"Code & Context",
-            "description":"List the Otto workspaces you can read — `{items}` with id, name, root_path, my_role. Every `workspace_id` argument accepts one of these ids OR the workspace's name. Read-only.",
-            "inputSchema":{"type":"object","properties":{}}}),
-        json!({"name":"otto.list_goal_loops","mutating":false,"category":"Agents",
-            "description":"List goal loops across EVERY workspace you can read — `{items, …}` with id, name, repo_path, status, workspace_id + workspace_name. Read-only.",
-            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
-        json!({"name":"otto.ask_human_approval","mutating":false,"category":"Approvals",
-            "description":"Request a human's approval for an action and (optionally) wait for the decision. Creates a pending item in the MCP approval queue.",
-            "inputSchema":{"type":"object","required":["title"],"properties":{
-                "workspace_id":{"type":"string"},"title":{"type":"string"},
-                "detail":{"type":"string"},"wait_seconds":{"type":"integer"}}}}),
+    ];
+    specs.extend(approval_specs());
+    specs.extend([
         // ================= Workflows =================
         json!({"name":"otto.list_workflows","mutating":false,"category":"Workflows",
             "description":"List workflows (visual node-graph automations) across EVERY workspace you can read — `{items, current_workspace_id, workspace_count}`, each item id, name, description, version, workspace_id + workspace_name (graph omitted: use otto.get_workflow). Pass a workflow's id OR its name as `workflow_id` to the other workflow tools. Read-only.",
@@ -805,7 +800,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer","description":PR_NUMBER_DESC},
                 "pr_number":{"type":"integer","description":"Alias of `number`."},
                 "strategy":{"type":"string","enum":["merge","squash","rebase"]},"delete_source_branch":{"type":"boolean"}}}}),
-    ];
+    ]);
     // DB query pair before `open_pr_draft`, threads `wait_session`, Slack usage.
     splice_before(&mut specs, "otto.open_pr_draft", database_query_specs());
     splice_session_specs(&mut specs);
@@ -1506,6 +1501,30 @@ fn own_tool_specs() -> [Value; 6] {
             "description":"Propose a new version of your standing instructions (the FULL new text + why). The user sees From/To and decides — never claim it is applied.",
             "inputSchema":{"type":"object","required":["instructions","reason"],"properties":{
                 "instructions":{"type":"string"},"reason":{"type":"string"},"session_id":sid}}}),
+    ]
+}
+
+/// The workspace / goal-loop directory reads and the Approvals slice of
+/// [`otto_tool_specs`] — asking the person for an approval or, privately,
+/// for a secret (split out to keep that function under the size ratchet).
+fn approval_specs() -> [Value; 4] {
+    [
+        json!({"name":"otto.list_workspaces","mutating":false,"category":"Code & Context",
+            "description":"List the Otto workspaces you can read — `{items}` with id, name, root_path, my_role. Every `workspace_id` argument accepts one of these ids OR the workspace's name. Read-only.",
+            "inputSchema":{"type":"object","properties":{}}}),
+        json!({"name":"otto.list_goal_loops","mutating":false,"category":"Agents",
+            "description":"List goal loops across EVERY workspace you can read — `{items, …}` with id, name, repo_path, status, workspace_id + workspace_name. Read-only.",
+            "inputSchema":{"type":"object","properties":{"workspace_id":{"type":"string","description":WS_DIR_DESC}}}}),
+        json!({"name":"otto.ask_human_approval","mutating":false,"category":"Approvals",
+            "description":"Request a human's approval for an action and (optionally) wait for the decision. Creates a pending item in the MCP approval queue.",
+            "inputSchema":{"type":"object","required":["title"],"properties":{
+                "workspace_id":{"type":"string"},"title":{"type":"string"},
+                "detail":{"type":"string"},"wait_seconds":{"type":"integer"}}}}),
+        json!({"name":"otto.request_secret","mutating":false,"category":"Approvals",
+            "description":"Ask the person for a secret (token, password) in a private Otto card, never the chat. Waits ≤3 min: `{status: provided, value}` (only here; don't echo it), `declined` or `no_answer`.",
+            "inputSchema":{"type":"object","required":["prompt"],"properties":{
+                "prompt":{"type":"string","description":"What it is for."},
+                "name":{"type":"string"}}}}),
     ]
 }
 

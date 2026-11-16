@@ -200,12 +200,9 @@ pub mod workflow_progress;
 pub mod network_profiles;
 pub mod pool;
 
-// --- Workbench (scratch files with full history) ------------------------------
+// --- Workbench archive (pre-file scratch docs, copied to Scratches once) -----
 pub mod workbench;
-pub use workbench::{
-    NewWorkbenchDoc, WorkbenchAsset, WorkbenchDiff, WorkbenchDoc, WorkbenchDocFull, WorkbenchPatch,
-    WorkbenchRepo, WorkbenchRevision, WorkbenchRevisionDetail,
-};
+pub use workbench::{ArchivedDoc, WorkbenchArchive};
 
 /// Escape a SQLite `LIKE` pattern for `ESCAPE '\\'` (backslash first, then `%` and `_`).
 pub fn like_escape(s: &str) -> String {

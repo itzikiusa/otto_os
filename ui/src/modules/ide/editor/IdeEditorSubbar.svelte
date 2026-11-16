@@ -20,6 +20,7 @@
   import { ideEditorChrome } from './ideEditorChrome.svelte';
   import { pushIdeNavLocation, revealInIdeProjectTree, toggleFormatOnSave } from './ideEditorStoreBridge.svelte';
   import type { IdeOutlineNode } from './ideLangAnalyzer';
+  import SendToButton from '../filetools/send/SendToButton.svelte';
 
   interface Props {
     activeTab: IdeOpenTab;
@@ -288,6 +289,7 @@
       {/if}
     </button>
 
+    <SendToButton name={activeTab.name} content={activeTab.content} lang={activeTab.path.split('.').pop()?.toLowerCase() ?? ''} />
     <button type="button" class="icon-btn" aria-label="Color Scheme & Editor Appearance" title="Color Scheme & Editor Appearance" onclick={openSchemePickerMenu} data-testid="ide-scheme-picker-btn">
       <Icon name="palette" size={13} />
     </button>

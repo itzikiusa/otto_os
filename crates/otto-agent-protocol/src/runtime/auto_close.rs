@@ -9,17 +9,30 @@
 //! approval / question waits on the person (closing it would throw their
 //! answer away). One pass closes at most [`AUTO_CLOSE_MAX_PER_PASS`]; the
 //! rest wait for the next hour.
+//!
+//! Idle agent processes are released (T3 Code #32325, #34934): every minute,
+//! a loaded thread whose agent process has been quiet for
+//! `thread_idle_release_minutes` (default 30, `0` = never; a finished child
+//! thread after at most 5) has that process — and its MCP servers — stopped,
+//! as a Close stops it, but the thread stays open: its next message respawns
+//! the agent, resuming the provider's conversation. The same guards hold,
+//! plus nothing starting or queued.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use otto_core::agent_runtime::{
-    embedded_auto_close_hours, RuntimeSessionStatus, EMBEDDED_THREAD_AUTO_CLOSE_KEY,
-    EMBEDDED_THREAD_SOURCES,
+    embedded_auto_close_hours, thread_idle_release_minutes, ProviderSessionStatus,
+    RuntimeSessionStatus, CHILD_THREAD_IDLE_RELEASE_MINUTES, EMBEDDED_THREAD_AUTO_CLOSE_KEY,
+    EMBEDDED_THREAD_SOURCES, THREAD_IDLE_RELEASE_KEY,
 };
 use otto_core::{Id, Result};
 
-use super::{close_locked, has_pending, AgentRuntime, State};
+use super::{
+    close_locked, has_pending, retire, set_session_status, stop_child, AgentRuntime, Inner, Live,
+    State,
+};
 
 /// Candidate rows read per page.
 const PAGE: u32 = 64;
@@ -29,6 +42,7 @@ const AUTO_CLOSE_MAX_PER_PASS: usize = 50;
 /// still sweeps), then hourly.
 const FIRST_PASS_AFTER: Duration = Duration::from_secs(5 * 60);
 const PASS_EVERY: Duration = Duration::from_secs(60 * 60);
+const RELEASE_EVERY: Duration = Duration::from_secs(60);
 
 /// `now - hours`; `None` = never (`0`, or a count past chrono's range).
 fn idle_cutoff(now: DateTime<Utc>, hours: u64) -> Option<DateTime<Utc>> {
@@ -49,7 +63,68 @@ fn idle_enough(st: &State, cutoff: DateTime<Utc>) -> bool {
         && st.session.last_active_at < cutoff
 }
 
+/// Whether a thread's agent process may be released now: it has one, nothing
+/// is starting or queued, and [`idle_enough`] for its cutoff (`minutes` idle,
+/// a child thread at most [`CHILD_THREAD_IDLE_RELEASE_MINUTES`]).
+fn releasable(st: &State, minutes: u64, now: DateTime<Utc>) -> bool {
+    let minutes = if st.session.child_of().is_some() {
+        minutes.min(CHILD_THREAD_IDLE_RELEASE_MINUTES)
+    } else {
+        minutes
+    };
+    let cutoff = (minutes > 0)
+        .then(|| i64::try_from(minutes).ok())
+        .flatten()
+        .and_then(chrono::TimeDelta::try_minutes)
+        .and_then(|d| now.checked_sub_signed(d));
+    st.proc.is_some()
+        && st.starting == 0
+        && st.proj.queue.is_empty()
+        && cutoff.is_some_and(|c| idle_enough(st, c))
+}
+
+/// Stop the agent process the way a Close does (stdin EOF, then SIGTERM /
+/// SIGKILL past the grace; a held child's holder exits with it, so a restart
+/// finds nothing to adopt) and revoke its per-spawn credential, leaving the
+/// thread open and `dormant`.
+fn release_locked(inner: &Arc<Inner>, live: &Live, st: &mut State) {
+    let Some(p) = st.proc.take() else {
+        return;
+    };
+    live.proc_ended.notify_waiters();
+    stop_child(p, inner.config.close_grace);
+    retire(inner, &st.session);
+    set_session_status(inner, live, st, ProviderSessionStatus::Stopped, None);
+}
+
 impl AgentRuntime {
+    /// One idle-release pass over the loaded threads (only those can hold a
+    /// process) as of `now`. Returns the ids whose process it stopped.
+    pub async fn release_idle_processes(&self, minutes: u64, now: DateTime<Utc>) -> Vec<Id> {
+        let candidates: Vec<(Id, Arc<Live>)> = self
+            .inner
+            .live
+            .iter()
+            .filter(|e| releasable(&e.value().lock(), minutes, now))
+            .map(|e| (e.key().clone(), Arc::clone(e.value())))
+            .collect();
+        let mut released = Vec::new();
+        for (id, live) in candidates {
+            // Under the prompt lock: a message arriving now either lands
+            // first (and the process stays) or respawns it.
+            let _prompt = live.prompt_lock.lock().await;
+            let mut st = live.lock();
+            if releasable(&st, minutes, now) {
+                release_locked(&self.inner, &live, &mut st);
+                released.push(id);
+            }
+        }
+        if !released.is_empty() {
+            tracing::info!(n = released.len(), "released idle thread agent processes");
+        }
+        released
+    }
+
     /// One auto-close pass: close every open embedded thread idle for
     /// `hours` as of `now` (injected, so tests need no clock), at most
     /// [`AUTO_CLOSE_MAX_PER_PASS`]. Returns the ids it closed.
@@ -119,7 +194,23 @@ impl AgentRuntime {
 
     /// The daemon's auto-close loop: a pass shortly after boot, then hourly,
     /// each reading `embedded_thread_auto_close_hours` afresh.
+    /// Also starts the idle-release loop (every minute, reading
+    /// `thread_idle_release_minutes` afresh).
     pub fn spawn_embedded_auto_close(&self, settings: otto_state::SettingsRepo) {
+        let rt = self.clone();
+        let release_settings = settings.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(RELEASE_EVERY).await;
+                match release_settings.get(THREAD_IDLE_RELEASE_KEY).await {
+                    Ok(v) => {
+                        let minutes = thread_idle_release_minutes(v.as_ref());
+                        rt.release_idle_processes(minutes, Utc::now()).await;
+                    }
+                    Err(e) => tracing::warn!("idle release: settings unreadable: {e}"),
+                }
+            }
+        });
         let rt = self.clone();
         tokio::spawn(async move {
             let mut wait = FIRST_PASS_AFTER;

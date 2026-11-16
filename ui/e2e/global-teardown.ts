@@ -46,6 +46,7 @@ export default async function globalTeardown(): Promise<void> {
       killClickhouseFor(meta.dataDir);
       try {
         rmSync(meta.dataDir, { recursive: true, force: true });
+        rmSync(`${meta.dataDir}-scratches`, { recursive: true, force: true });
       } catch {
         /* ignore */
       }

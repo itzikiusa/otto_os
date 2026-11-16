@@ -553,12 +553,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Agents, if get { View } else { Edit });
     }
 
-    // ---- Workbench (per-user scratch files with full history) ----------------
+    // ---- Scratches (each user's own scratch folder) ---------------------------
     // Rides the Agents feature like Snips (scratch scripts feed sessions, DB
-    // runs and API requests): every GET (list, doc, revisions, diff, asset) =
-    // View; create/autosave/trash/restore/purge/upload = Edit. Handlers add the
-    // per-owner scoping. Root bypasses.
-    if p.starts_with("/workspaces/{ws}/workbench/") {
+    // runs and API requests): list/read = View; write = Edit. The handlers only
+    // ever touch the caller's own folder. Root bypasses.
+    if p == "/scratches" || p.starts_with("/scratches/") {
         return Require(Agents, if get { View } else { Edit });
     }
 
@@ -676,6 +675,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // {scene_id}` (remove).
     if p.starts_with("/sessions/") && p.contains("/canvas-refs") {
         return Require(Canvas, if get { View } else { Edit });
+    }
+    if p == "/secret-requests" || p == "/secret-requests/{id}" {
+        // A thread's private secret request: the handlers answer only the
+        // owner's own sign-in, for the owner's own threads.
+        return Require(Agents, if get { View } else { Edit });
     }
     if p == "/sessions/{id}/ui-control" {
         // Agent UI control grant / revoke: a session-control write (the
@@ -2485,6 +2489,15 @@ mod tests {
         // The grant is a session-control write.
         assert_eq!(
             pol(Method::POST, "/api/v1/sessions/{id}/ui-control"),
+            Require(Agents, Edit)
+        );
+        // A private secret request is answered like a session-control write.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/secret-requests"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/secret-requests/{id}"),
             Require(Agents, Edit)
         );
         // Per-user email sender (Gmail App Password → Keychain): self-owned.

@@ -10,7 +10,8 @@
   //   • relative links open the file in the IDE; images and other bytes come
   //     through the daemon's authenticated file route (local projects only —
   //     a remote SSH project says so instead of a broken image).
-  // The shared renderer (lib/components/FilePreview.svelte) is lazy-loaded.
+  // The shared renderer (lib/components/FilePreview.svelte) is lazy-loaded;
+  // D2 (a module's renderer) draws in IdeD2Preview.
   import { authedBlobUrl } from '../../../lib/api/client';
   import {
     headingOrdinalAtLine,
@@ -27,6 +28,7 @@
   import { idePreviewMode } from './idePreviewMode.svelte';
 
   const FilePreviewLazy = lazyComponent(() => import('../../../lib/components/FilePreview.svelte'));
+  const IdeD2PreviewLazy = lazyComponent(() => import('./IdeD2Preview.svelte'));
 
   interface Props {
     tab: IdeOpenTab;
@@ -117,7 +119,9 @@
         </button>
       </div>
     {/if}
-    {#if previewText !== null}
+    {#if previewText !== null && kind === 'd2'}
+      <LazyMount lazy={IdeD2PreviewLazy} what="the preview" variant="panel" props={{ text: previewText }} />
+    {:else if previewText !== null}
       <LazyMount
         lazy={FilePreviewLazy}
         what="the preview"

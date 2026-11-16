@@ -89,7 +89,7 @@ export function buildThreadMenu(s: Session): MenuItem[] {
     relatedThreadsItem(id),
     ...phoneHandoff.menuItem(`threads/${id}`, 'this thread'),
     ...(parentId
-      ? [{ label: 'Open with parent in Split', icon: 'split', action: () => threads.openPairInSplit(parentId, id) }]
+      ? [{ label: 'Open with parent in Split', icon: 'split', action: () => threads.openGroup([parentId, id]) }]
       : []),
     ...legacyReviveItem(s),
     { separator: true },

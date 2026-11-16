@@ -19,7 +19,7 @@ test('filePreviewKind: the renderer each file gets, by name', () => {
     ['/r/index.html', 'html'], ['/r/a.htm', 'html'], ['/r/logo.svg', 'svg'],
     ['/r/a.png', 'image'], ['/r/a.JPG', 'image'], ['/r/a.jpeg', 'image'], ['/r/a.gif', 'image'], ['/r/a.webp', 'image'],
     ['/r/a.avif', 'image'], ['/r/favicon.ico', 'image'], ['/r/a.bmp', 'image'], ['/r/spec.pdf', 'pdf'],
-    ['/r/data.json', 'json'], ['/r/map.geojson', 'json'], ['/r/flow.mmd', 'mermaid'], ['/r/flow.mermaid', 'mermaid'],
+    ['/r/data.json', 'json'], ['/r/map.geojson', 'json'], ['/r/flow.mmd', 'mermaid'], ['/r/flow.mermaid', 'mermaid'], ['/r/arch.d2', 'd2'],
     ['/r/t.csv', 'csv'], ['/r/t.tsv', 'tsv'], ['/r/l.jsonl', 'jsonl'], ['/r/l.ndjson', 'jsonl'],
     ['/r/main.go', null], ['/r/Makefile', null], ['/r/md', null], ['/r/a.md.go', null], ['/r/x.html?v=1', 'html'],
   ];

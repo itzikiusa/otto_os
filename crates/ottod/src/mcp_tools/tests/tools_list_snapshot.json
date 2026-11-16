@@ -128,6 +128,7 @@
     "otto_query_db",
     "otto_reject_improvement_edit",
     "otto_remove_personal_agent_schedule",
+    "otto_request_secret",
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
@@ -266,6 +267,7 @@
     "otto_product_story",
     "otto_query_db",
     "otto_reject_improvement_edit",
+    "otto_request_secret",
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
@@ -435,6 +437,7 @@
     "otto_query_db",
     "otto_reject_improvement_edit",
     "otto_remove_personal_agent_schedule",
+    "otto_request_secret",
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
@@ -547,6 +550,7 @@
     "otto_query_db",
     "otto_reject_improvement_edit",
     "otto_remove_personal_agent_schedule",
+    "otto_request_secret",
     "otto_rollback_improvement_edit",
     "otto_run_goal_loop",
     "otto_run_personal_agent",
@@ -662,6 +666,7 @@
     "otto_product_story",
     "otto_query_db",
     "otto_reject_improvement_edit",
+    "otto_request_secret",
     "otto_rollback_improvement_edit",
     "otto_room_post",
     "otto_room_read",
@@ -877,70 +882,38 @@
       "properties": {
         "query": {
           "type": "string",
-          "description": "Optional case-insensitive name substring."
-        },
-        "trash": {
-          "type": "boolean",
-          "description": "List trashed files instead of live ones."
+          "description": "Optional case-insensitive path substring."
         }
       }
     },
     "workbench_get": {
       "type": "object",
       "properties": {
-        "doc_id": {
-          "type": "string"
-        },
-        "name": {
+        "path": {
           "type": "string",
-          "description": "Exact file name (used when doc_id is omitted)."
-        },
-        "revision": {
-          "type": "integer",
-          "description": "Optional revision seq to read."
-        },
-        "history": {
-          "type": "boolean",
-          "description": "Include one newest-first revision metadata page."
-        },
-        "history_limit": {
-          "type": "integer",
-          "default": 100,
-          "minimum": 1,
-          "maximum": 200,
-          "description": "Metadata rows per history page, clamped 1–200."
-        },
-        "before_seq": {
-          "type": "integer",
-          "description": "Exclusive revision cursor for an older history page."
+          "description": "File path relative to the Scratches folder, e.g. `queries/daily.sql`."
         }
-      }
+      },
+      "required": [
+        "path"
+      ]
     },
     "workbench_write": {
       "type": "object",
       "properties": {
-        "doc_id": {
-          "type": "string"
-        },
-        "name": {
+        "path": {
           "type": "string",
-          "description": "File name; required when doc_id is omitted."
+          "description": "File path relative to the Scratches folder."
         },
         "content": {
           "type": "string"
         },
         "language": {
           "type": "string"
-        },
-        "scope": {
-          "type": "string",
-          "enum": [
-            "workspace",
-            "global"
-          ]
         }
       },
       "required": [
+        "path",
         "content"
       ]
     },
@@ -2843,6 +2816,21 @@
         },
         "wait_seconds": {
           "type": "integer"
+        }
+      }
+    },
+    "otto_request_secret": {
+      "type": "object",
+      "required": [
+        "prompt"
+      ],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "description": "What it is for."
+        },
+        "name": {
+          "type": "string"
         }
       }
     },

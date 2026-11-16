@@ -1,8 +1,8 @@
 // Which providers' tokens Usage can measure, and how to name them.
 //
 // Usage reads the CLIs' own records (transcripts / session stores) for Claude,
-// Codex, Grok and Antigravity — terminal sessions and Threads alike. Gemini,
-// OpenCode, Pi and Muse keep no record Otto reads, so only their Threads
+// Codex, Grok, Antigravity and Muse — terminal sessions and Threads alike.
+// Gemini, OpenCode and Pi keep no record Otto reads, so only their Threads
 // (structured runtime) turns are counted, from the usage each turn reports.
 // Their terminal sessions are not measured at all: the page says so instead of
 // letting a missing bar read as "used nothing". Mirrors
@@ -11,7 +11,7 @@
 import { harnessLabel, KNOWN_AGENT_FAMILIES } from '../../lib/providerRegistry.ts';
 
 /** Providers whose own on-disk records the usage tailer reads. */
-export const TRANSCRIPT_TAILED: readonly string[] = ['claude', 'codex', 'grok', 'agy'];
+export const TRANSCRIPT_TAILED: readonly string[] = ['claude', 'codex', 'grok', 'agy', 'muse'];
 
 /** A known agent CLI whose TERMINAL sessions Usage cannot measure. */
 export function terminalUnmeasured(provider: string): boolean {
@@ -23,7 +23,7 @@ export function usageProviderLabel(provider: string): string {
   return (KNOWN_AGENT_FAMILIES as readonly string[]).includes(provider) ? harnessLabel(provider) : provider;
 }
 
-/** "Gemini and Muse tokens count in Threads only: …" for the unmeasured
+/** "Gemini and Pi tokens count in Threads only: …" for the unmeasured
  *  providers among `providers` (used or installed), in registry order;
  *  `null` when none. */
 export function unmeasuredTerminalNote(providers: readonly string[]): string | null {

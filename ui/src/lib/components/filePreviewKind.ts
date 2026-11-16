@@ -3,7 +3,9 @@
 // IDE's Editor | Split | Preview control follows. Pure and import-free, so
 // unit/filePreview.test.ts loads it directly.
 
-export type FilePreviewKind = 'markdown' | 'html' | 'svg' | 'image' | 'pdf' | 'json' | 'mermaid' | 'csv' | 'tsv' | 'jsonl';
+// `d2` is the IDE's own (its renderer, Canvas' D2 bridge, is a module): the IDE
+// preview pane renders it; FilePreview itself never gets it.
+export type FilePreviewKind = 'markdown' | 'html' | 'svg' | 'image' | 'pdf' | 'json' | 'mermaid' | 'd2' | 'csv' | 'tsv' | 'jsonl';
 export type FilePreviewMode = 'source' | 'split' | 'preview';
 
 function baseOf(path: string): string {
@@ -21,6 +23,7 @@ export function filePreviewKind(path: string): FilePreviewKind | null {
   if (b.endsWith('.pdf')) return 'pdf';
   if (/\.(json|geojson)$/.test(b)) return 'json';
   if (/\.(mmd|mermaid)$/.test(b)) return 'mermaid';
+  if (b.endsWith('.d2')) return 'd2';
   if (b.endsWith('.csv')) return 'csv';
   if (b.endsWith('.tsv')) return 'tsv';
   if (/\.(jsonl|ndjson)$/.test(b)) return 'jsonl';
@@ -125,7 +128,7 @@ export function effectivePreviewMode(kind: FilePreviewKind | null, saved: FilePr
 }
 
 const MODES: readonly FilePreviewMode[] = ['source', 'split', 'preview'];
-const KINDS: readonly FilePreviewKind[] = ['markdown', 'html', 'svg', 'image', 'pdf', 'json', 'mermaid', 'csv', 'tsv', 'jsonl'];
+const KINDS: readonly FilePreviewKind[] = ['markdown', 'html', 'svg', 'image', 'pdf', 'json', 'mermaid', 'd2', 'csv', 'tsv', 'jsonl'];
 
 /** The remembered mode per kind (localStorage JSON); junk entries are dropped. */
 export function parsePreviewModes(raw: string | null | undefined): Partial<Record<FilePreviewKind, FilePreviewMode>> {

@@ -199,7 +199,7 @@ test('Canvas is no separate destination: #/canvas is gated by Design Hall and hi
   assert.ok(!goToEntries(all()).some((e) => /canvas/i.test(e.title)), 'no "Go to Canvas" in ⌘K');
 });
 
-test('Workbench folded into IDE: #/workbench is gated by agents and highlights IDE', () => {
+test('Scratches live in the IDE: #/workbench is gated by agents and highlights IDE', () => {
   assert.equal(routeAllowed('workbench', (f) => f === 'agents'), true);
   assert.equal(routeAllowed('workbench', (f) => f === 'git'), false);
   assert.equal(routeAllowed('workbench/doc-1', (f) => f === 'agents'), true);

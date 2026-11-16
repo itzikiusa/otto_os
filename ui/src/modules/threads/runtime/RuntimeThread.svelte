@@ -15,7 +15,7 @@
   import { personalAgentOf } from '../../../lib/personalAgentBadges';
   import { formatEffortShort, formatModelLabel, supportsEffortSelection } from '../../../lib/providerModels';
   import { harnessLabel, runtimeBaselineCaps, sessionProviderSlug } from '../../../lib/providers';
-  import type { RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
+  import type { RuntimeComposerTestIds, RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
   import { INTERACTIVE_SLASH_COMMANDS, isImmediateSlashCommand, parseInteractiveSlashInput, type ComposerSlashCommand } from '../../../lib/slashActions';
   import { auth } from '../../../lib/stores/auth.svelte';
   import { now } from '../../../lib/stores/now.svelte';
@@ -45,12 +45,16 @@
   import RuntimeContextChips from './RuntimeContextChips.svelte';
   import RuntimeDraftStatus from './RuntimeDraftStatus.svelte';
   import RuntimeFollow from './RuntimeFollow.svelte';
+  import RuntimeStreamTools from './RuntimeStreamTools.svelte';
   import RuntimeFreshStop from './RuntimeFreshStop.svelte';
   import { interruptTurn } from './taskStops.svelte';
   import RuntimeHistoryBar from './RuntimeHistoryBar.svelte';
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimePlan from './RuntimePlan.svelte';
   import RuntimeQueueBar from './RuntimeQueueBar.svelte';
+  import { linkedChildren } from './council';
+  import RuntimeSecretCard from './RuntimeSecretCard.svelte';
+  import { secretRequests } from '../../../lib/stores/secretRequests.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import RuntimeTimelineRows from './RuntimeTimelineRows.svelte';
   import RuntimeTurnStatus from './RuntimeTurnStatus.svelte';
@@ -65,7 +69,6 @@
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
 
   export type { RuntimeComposerTestIds } from '../../../lib/runtimeThreadPort';
-  import type { RuntimeComposerTestIds } from '../../../lib/runtimeThreadPort';
 
   interface Props {
     sessionId: string;
@@ -127,7 +130,7 @@
   const closed = $derived(session?.status === 'closed');
   const dormant = $derived(session?.status === 'dormant');
   const needsRevive = $derived(closed || dormant);
-  const childThreads = $derived(mapChildThreadSummaries(runtimeThreads.byId, sessionId));
+  const childThreads = $derived(mapChildThreadSummaries(linkedChildren(Object.values(runtimeThreads.byId), sessionId)));
   const tasks = $derived(
     agentTasks(
       p?.items ?? [],
@@ -139,15 +142,14 @@
   const sessionError = $derived(deriveSessionError(draft.startError, p));
   const plan = $derived(deriveActivePlan(p, turn));
   const uiAsk = $derived(!!session && !closed && !auth.isImpersonating && session.created_by === auth.me?.id && !!uiControl.promptFor(sessionId));
+  // The owner's own sign-in answers a private secret request.
+  const secretAsk = $derived(session && !auth.isImpersonating && session.created_by === auth.me?.id ? (secretRequests.bySession[sessionId] ?? null) : null);
+  $effect(() => void secretRequests.load());
   const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || needsRevive);
   const banners = $derived(buildRuntimeBanners({
-    sessionError,
-    uiAsk,
+    sessionError, uiAsk, secretAsk: !!secretAsk, queueShown, needsRevive, freshContext: draft.freshContext,
     hasQuestions: Boolean(p?.requests.some((r) => r.kind === 'question')),
     hasPlan: Boolean(plan),
-    queueShown,
-    needsRevive,
-    freshContext: draft.freshContext,
   }));
 
   let scroller = $state<HTMLDivElement | null>(null);
@@ -355,13 +357,8 @@
     }
   }
 
-  async function respond(requestId: string, decision: ApprovalDecision): Promise<void> {
-    try {
-      await runtimeThreads.respond(ownerId, requestId, decision);
-    } catch (e) {
-      toastError('Couldn’t answer the approval', e);
-    }
-  }
+  const respond = (requestId: string, decision: ApprovalDecision): Promise<void> =>
+    runtimeThreads.respond(ownerId, requestId, decision).catch((e: unknown) => void toastError('Couldn’t answer the approval', e));
 
   let askEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   function onKeydown(e: KeyboardEvent): void {
@@ -443,6 +440,7 @@
     </div>
   </div>
   <RuntimeFollow bind:this={followRef} {scroller} seq={p?.lastSequence} {messageIds} firstRow={visibleRows[0] ? timelineRowKey(visibleRows[0]) : null} bind:holdFrom />
+  <RuntimeStreamTools root={streamEl} {rows} bind:rowCap bind:text={draft.text} composer={composerEl} />
 
   <div class="rt-dock">
     <RuntimeBannerStack blocks={banners}>
@@ -452,6 +450,8 @@
           <RuntimeFreshStop show={draft.freshContext && background.some((b) => b.stopId) && freshStopBg === ''} count={background.length} onstop={() => { freshStopBg = 'next'; submit(); }} />
         {:else if key === 'ui'}
           <RuntimeUiControl {sessionId} />
+        {:else if key === 'secret' && secretAsk}
+          <RuntimeSecretCard request={secretAsk} />
         {:else if key === 'questions' && p}
           <LazyMount lazy={RuntimeQuestions} what="the questions" variant="compact" props={{ requests: p.requests, sessionId, agent: agentName, onanswered: focusComposer }} />
         {:else if key === 'plan' && plan}

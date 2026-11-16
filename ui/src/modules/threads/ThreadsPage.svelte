@@ -33,8 +33,6 @@
   import ThreadParentChip from './runtime/ThreadParentChip.svelte';
   import RelatedThreadsChip from './RelatedThreadsChip.svelte';
   import { relatedPopover } from './relatedPopover.svelte';
-  import { councilOf } from './runtime/council';
-  import { council } from './runtime/councilStore.svelte';
   import { threadsPageMenu } from './threadsPageMenu';
   import { prepareDeepLink } from '../../lib/deepLinkOpen';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
@@ -305,13 +303,7 @@
     const cwd = focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null;
     return cwd ? projectNameFromCwd(cwd, ws.current?.name ?? 'Workspace') : (ws.current?.name ?? 'Scratch');
   });
-  /** The focused thread is a council shown as its columns: its title without the seat's agent. */
-  const councilShown = $derived(!!focused && council.showsCouncil(focused.id));
-  /** A council seat continued as a plain thread ("Continue here"): the header offers the way back. */
-  const councilLeft = $derived(!!focused && !councilShown && !!councilOf(runtimeThreads.get(focused.id)));
-  const crumbTitle = $derived(
-    showWelcomeStage ? 'New thread' : councilShown ? (focused?.title ?? 'Council').replace(/ · [^·]*$/, '') : (focused?.title ?? 'Thread'),
-  );
+  const crumbTitle = $derived(showWelcomeStage ? 'New thread' : (focused?.title ?? 'Thread'));
   const rightOpen = $derived(threads.inspectorVisible);
   const contextCwd = $derived(
     focused?.cwd ?? (showWelcomeStage ? threads.stageCwd : null) ?? ws.current?.root_path ?? null,
@@ -415,12 +407,6 @@
         {#if focusedState}<StatusDot state={focusedState} />{/if}
         <span class="th-crumb-title ellipsis" dir="auto">{crumbTitle}</span>
         {#if focused}<RelatedThreadsChip threadId={focused.id} onstartroom={(sid) => (roomSessionId = sid)} /><ThreadParentChip threadId={focused.id} />{/if}
-        {#if focused && councilLeft}
-          {@const id = focused.id}
-          <button type="button" class="th-council-back" title="Back to the council’s columns" data-testid="threads-back-to-council" onclick={() => council.showCouncil(id)}>
-            <Icon name="people" size={12} />Back to council
-          </button>
-        {/if}
       </span>
     {/snippet}
 
@@ -557,35 +543,6 @@
   }
   .th-crumb-sep {
     color: var(--text-dim);
-  }
-  .th-council-back {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    flex: none;
-    block-size: 24px;
-    padding-inline: 8px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--fs-xs);
-    font-weight: 400;
-    cursor: pointer;
-  }
-  .th-council-back:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .th-council-back:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: 1px;
-  }
-  @media (pointer: coarse) {
-    .th-council-back {
-      min-block-size: var(--hit-min);
-    }
   }
   .th-crumb-title {
     color: var(--text);

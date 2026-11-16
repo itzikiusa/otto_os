@@ -139,7 +139,7 @@
       const title = placeholderTitle(req.titleSeed, `${harnessLabel(provider)} thread`);
       const opts = { scratch: scratchActive && ws.currentId !== SCRATCH_WORKSPACE_ID };
       const created = req.council
-        ? (await council.start(targetWs, { prompt: firstMsg, title, cwd: dir || null }))[0]
+        ? (await council.start(targetWs, { prompt: firstMsg, title, cwd: dir || null }, req.background ? 'background' : 'panes'))[0]
         : req.runtime && isRuntimeProvider(provider, auth.meta)
           ? await runtimeThreads.start(targetWs, {
               provider,
@@ -158,8 +158,8 @@
       if (firstMsg && !req.runtime && !req.council) transcript.recordOptimisticPrompt(created.id, firstMsg);
       threads.draftCwd = null;
       threads.rememberProject(dir || null);
-      if (openInBeside && threads.paneIds.length > 0) threads.openBeside(created.id);
-      else threads.selectThread(created.id);
+      if (openInBeside && threads.paneIds.length > 0 && !req.council) threads.openBeside(created.id);
+      else if (!req.council) threads.selectThread(created.id);
       return true;
     } catch (e) {
       toastError('Couldn’t start thread', e);

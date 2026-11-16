@@ -18,6 +18,7 @@ pub mod slack;
 pub mod slack_api;
 pub mod slack_as_me;
 pub mod slack_directory;
+mod slack_history;
 pub mod slack_tools;
 pub mod slack_user_tokens;
 pub mod telegram;

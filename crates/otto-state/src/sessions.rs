@@ -23,7 +23,7 @@ pub struct SessionsRepo {
 
 /// Bumped by every repo write that can change what
 /// [`SessionsRepo::list_usage_attribution`] returns (insert, provider-session
-/// id, delete). The usage tailer caches its attribution index across passes
+/// id, delete; a Threads session's native thread id). The usage tailer caches its attribution index across passes
 /// and only re-reads `sessions` on a lookup miss when this moved — so an
 /// external (non-Otto) transcript streaming every 2 s never re-queries.
 /// Process-wide, monotonic; a spurious bump only costs one extra rebuild.
@@ -594,6 +594,14 @@ impl SessionsRepo {
             .collect())
     }
 
+    /// Whether any terminal session is `working` (an agent mid-turn).
+    pub async fn any_working(&self) -> Result<bool> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE status = 'working')")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("any working session"))
+    }
+
     pub async fn update_status(&self, id: &Id, status: SessionStatus) -> Result<()> {
         sqlx::query("UPDATE sessions SET status = ?, last_active_at = ? WHERE id = ?")
             .bind(status.as_str())
@@ -993,6 +1001,8 @@ impl SessionsRepo {
     /// Narrow projection for the usage routes' session labels (R4): just
     /// what the leaderboard enrichment, the per-kind rollup and the non-root
     /// scope read — no `meta_json` decode, only its `source` string.
+    /// Threads (structured-runtime) sessions are included with kind `thread`,
+    /// closed ones too.
     pub async fn list_usage_labels(&self) -> sqlx::Result<Vec<UsageLabelRow>> {
         let rows = sqlx::query(
             "SELECT id, workspace_id, title, created_by, kind, \
@@ -1027,10 +1037,17 @@ impl SessionsRepo {
     /// Every row the usage tailer can attribute to: only a provider-session id
     /// is ever looked up, so rows without one (most of a long install's
     /// history) are not read at all. Not filtered by status or `archived`
-    /// (see [`UsageAttrRow`]).
+    /// (see [`UsageAttrRow`]). Threads sessions attribute by their native
+    /// thread id (the provider's own session id), closed ones too. They come
+    /// first, so a terminal session holding the same id (a thread continued
+    /// in a terminal) wins the tailer's last-insert-wins index.
     pub async fn list_usage_attribution(&self) -> sqlx::Result<Vec<UsageAttrRow>> {
         let rows = sqlx::query(
-            "SELECT id, workspace_id, provider, cwd, provider_session_id FROM sessions \
+            "SELECT id, workspace_id, provider, cwd, native_thread_id AS provider_session_id \
+             FROM agent_runtime_sessions \
+             WHERE native_thread_id IS NOT NULL AND native_thread_id <> '' \
+             UNION ALL \
+             SELECT id, workspace_id, provider, cwd, provider_session_id FROM sessions \
              WHERE provider_session_id IS NOT NULL AND provider_session_id <> ''",
         )
         .fetch_all(&self.pool)
@@ -1534,6 +1551,64 @@ mod tests {
         let exited_row = got.iter().find(|r| r.id == exited).unwrap();
         assert_eq!(exited_row.provider, "codex");
         assert_eq!(exited_row.provider_session_id.as_deref(), Some("psid-2"));
+    }
+
+    /// Threads sessions live in `agent_runtime_sessions`: they attribute by
+    /// their native thread id and label as `thread` with their title, closed
+    /// ones too; a thread without a native id yet attributes nothing.
+    #[tokio::test]
+    async fn usage_attribution_and_labels_include_threads_sessions() {
+        use crate::agent_runtime::{AgentRuntimeRepo, NewRuntimeSession};
+        use otto_core::agent_runtime::{RuntimeAccessMode, RuntimeProvider};
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let runtime = AgentRuntimeRepo::new(pool.clone());
+        for (id, provider) in [
+            ("t-agy", RuntimeProvider::Agy),
+            ("t-new", RuntimeProvider::Claude),
+        ] {
+            runtime
+                .create(NewRuntimeSession {
+                    id: id.into(),
+                    workspace_id: ws.clone(),
+                    provider,
+                    title: format!("{id} title"),
+                    cwd: "/tmp".into(),
+                    model: None,
+                    access_mode: RuntimeAccessMode::ApprovalRequired,
+                    created_by: user.clone(),
+                    parent_id: None,
+                    meta: Some(serde_json::json!({"source": "personal_agent"})),
+                })
+                .await
+                .unwrap();
+        }
+        let before = attribution_generation();
+        runtime
+            .set_native_thread_id(&"t-agy".into(), "conv-1")
+            .await
+            .unwrap();
+        assert!(
+            attribution_generation() > before,
+            "a native id must re-arm the tailer index"
+        );
+        runtime.set_closed(&"t-agy".into()).await.unwrap();
+
+        let repo = SessionsRepo::new(pool.clone());
+        let attr = repo.list_usage_attribution().await.unwrap();
+        assert_eq!(attr.len(), 1, "only the thread with a native id: {attr:?}");
+        assert_eq!(attr[0].id, "t-agy");
+        assert_eq!(attr[0].provider, "agy");
+        assert_eq!(attr[0].workspace_id, ws);
+        assert_eq!(attr[0].provider_session_id.as_deref(), Some("conv-1"));
+
+        let labels = repo.list_usage_labels().await.unwrap();
+        let closed = labels.iter().find(|l| l.id == "t-agy").unwrap();
+        assert_eq!(closed.kind, "thread");
+        assert_eq!(closed.title, "t-agy title");
+        assert_eq!(closed.source.as_deref(), Some("personal_agent"));
+        assert_eq!(closed.created_by, user);
+        assert!(labels.iter().any(|l| l.id == "t-new"));
     }
 
     /// Seed an extra user into an existing pool and return its id.

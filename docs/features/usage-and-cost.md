@@ -118,9 +118,21 @@ records only the increase from the last committed session total. Input excludes
 `cached_input_tokens`; output uses `output_tokens` (reasoning is already included).
 Cache-read uses `cached_input_tokens`, and cache-write is zero.
 
+**Muse Code** (`otto_transcript::muse_usage`) reads its append-only session logs,
+`~/.local/share/muse/sessions/YYYY/MM/DD/<session-id>/session.jsonl` (a subagent's
+under `<session-id>/subagent/<child>/`, billed to the parent). Each model call is
+one `payload.event.kind = "model_completed"` record with OpenAI-style usage: input
+excludes `cache_read_tokens` (Muse's `input_tokens` includes them), output is
+`output_tokens`. The `goal_usage_attribution` record that repeats the numbers is
+ignored. Muse reports no cost and its model catalog no price, so Muse rows are
+**tokens-only** (`cost_usd` 0, never flagged "est."). New logs backfill from the
+start with the calls' own `recorded_at` times; the cursor counts each line once.
+
 ### 3.3 Attribution (which session a turn belongs to)
 
-The tailer keeps an attribution index built from the SQLite `sessions` table.
+The tailer keeps an attribution index built from the SQLite `sessions` table
+(by `provider_session_id`) and the Threads `agent_runtime_sessions` table (by
+`native_thread_id`, the provider's own session id — closed threads included).
 It is built on the first pass that actually reads new lines and **reused across
 passes** (event-driven passes run every ~2 s while an agent streams): it is
 re-read only when it is older than 60 s, or when a lookup misses **and** a
@@ -133,13 +145,16 @@ simply not Otto's (external) never re-queries. Indexes:
 - **Codex** — by the exact `session_meta` provider session ID.
 - **Grok** — by the exact `params.sessionId` (or session-directory fallback).
 - **Antigravity** — by conversation UUID, then recorded parent/root conversation.
+- **Muse** — by the session directory name. A Threads session's ACP `sessionId`
+  is that name; a terminal session learns it from the `.session.lock` naming its
+  PTY child's pid (`otto-sessions` `muse.rs`, every spawn/restart/re-adoption).
 
 Shared working directories do not establish ownership.
 
 **Threads (structured runtime).** A thread's CLI still writes its usual
 transcript / store under its own id, the thread's `native_thread_id`
 (`agent_runtime_sessions`). The index also holds those ids, so a Claude, Codex,
-Grok or Antigravity thread's turns bill to the thread and its workspace instead
+Grok, Antigravity or Muse thread's turns bill to the thread and its workspace instead
 of `external`. A terminal session that holds the same id keeps it.
 
 Custom Claude sessions keep the provider name stored on their Otto session, such
@@ -149,7 +164,7 @@ as `claude-work`. Unmatched transcripts in `~/.claude-work/projects` use the
 A turn that maps to an Otto session inherits that session's `workspace_id` and id.
 A turn that maps to nothing is recorded under the special workspace id
 **`external`** (constant `EXTERNAL_WORKSPACE`) with the transcript UUID as the
-session id. External usage gives a complete machine-wide picture but is excluded by
+session id: a CLI run outside Otto. External usage gives a complete machine-wide picture but is excluded by
 default in the dashboard (the **Otto / All** toggle — see §6).
 
 **Codex / Antigravity owner grace.** Their provider session id is learnt only
@@ -162,7 +177,7 @@ session that started it (and to the `review` bucket for review agents) instead o
 landing in `external`. A transcript nobody claims within that window is external
 as before; nothing is read twice.
 
-### 3.3.1 Threads on providers without a readable record (gemini, opencode, pi, muse)
+### 3.3.1 Threads on providers without a readable record (gemini, opencode, pi)
 
 Nothing on disk is tailed for these CLIs. Their **Threads** turns are recorded
 from the runtime instead: when a turn settles, its `turn_token_usage` (the
@@ -184,13 +199,13 @@ agent's own counts — an ACP prompt response's `usage`, pi's summed
 The row goes through the durable outbox under the id
 `runtime-turn:<thread>:<turn>`: a repeated hand-over is ignored while the row
 is queued, and one after delivery lands on the same `usage_events_durable` key,
-which the FINAL read counts once. Turns of Claude, Codex, Grok and Antigravity
+which the FINAL read counts once. Turns of Claude, Codex, Grok, Antigravity and Muse
 threads are never recorded this way — their transcripts are (§3.3); both would
 count the turn twice. A turn that reports no tokens and no cost (an agent that
 sends neither) records nothing. A turn cut off by a daemon restart is not
 recorded.
 
-**Terminal sessions** on gemini, opencode, pi and muse are **not measured**: the
+**Terminal sessions** on gemini, opencode and pi are **not measured**: the
 Usage page's *By provider* panel names those providers (when used or installed)
 instead of letting a missing bar read as zero.
 
@@ -398,9 +413,12 @@ prices as of **`PRICED_AS_OF` = `2026-09-25`** (surfaced in the UI as
 - **output** — model output rate.
 - **cache read** — `0.1 ×` the base input rate, except where the model lists its
   own: Opus 5.5 **$0.20** (0.05×), Fable/Mythos 5.1 **$0.25** (0.025×).
-- **cache write** — `1.25 ×` the base input rate (the 5-minute-TTL cache rate the
-  CLIs use; the transcripts report a single un-typed `cache_creation` count, so the
-  common case is priced).
+- **cache write** — `1.25 ×` the base input rate for the 5-minute TTL and `2 ×` for
+  the 1-hour TTL. Claude Code reports the split
+  (`usage.cache_creation.ephemeral_1h_input_tokens`) and writes most of its cache at
+  1 h; a write with no split is priced at the 5-minute rate. The cost is fixed when a
+  turn is recorded, and stored rows keep no split, so turns recorded before this
+  priced every write at 1.25× (under by about 37 % on 1-hour writes).
 
 Rate card (per 1M, input / output), matched **case-insensitively, most-specific-first**:
 
@@ -486,9 +504,13 @@ providers.
   folds every session's raw sums into per-feature buckets using a classifier over the
   session's SQLite metadata. Labels: `review` (Code review), `product` (Product AI),
   `channel` (Channels), `agent` (Ad-hoc agents), `connection` (Connections), `swarm`
-  (Swarm), `external` (External). The label prefers the session meta `source` tag set
-  by the review/product/channel runners, else the session kind. The review
-  summarizer's sessions (`source: review_summarizer`) count as `review`.
+  (Swarm), `thread` (Threads), `external` (External), `deleted` (Deleted sessions).
+  The label prefers the session meta `source` tag set by the review/product/channel
+  runners, else the session kind (`thread` for a Threads session). The review
+  summarizer's sessions (`source: review_summarizer`) count as `review`. A session
+  with no row is `external` only when it ran outside Otto (workspace `external`,
+  shown only in the **All** view); an Otto session or thread whose row was deleted
+  keeps its workspace and counts as `deleted`.
 
 ### 6.1 Work-graph attribution & forecast (the drilldown)
 
@@ -715,9 +737,9 @@ last fetch) so sparklines update in near-real-time without blind polling.
 
 **Capabilities**
 
-- Real per-turn token capture for Claude Code, custom Claude accounts, Codex, Grok, and Antigravity with **zero manual
+- Real per-turn token capture for Claude Code, custom Claude accounts, Codex, Grok, Antigravity and Muse with **zero manual
   instrumentation** — survives resumes, channel sessions, and restarts — and for
-  Threads on gemini, opencode, pi and muse from the turn usage the agent reports.
+  Threads on gemini, opencode and pi from the turn usage the agent reports.
 - Four-class token breakdown + per-model USD cost estimate; attribution by provider,
   day, session, feature, and nine work-graph dimensions; pre-launch cost forecast.
 - Live retention changes, live system-metrics sparklines, and opt-in spend budgets
@@ -733,7 +755,7 @@ last fetch) so sparklines update in near-real-time without blind polling.
 - **No backfill.** Only turns that occur after the engine is up are counted; pre-existing
   transcript history is seeded out.
 - Legacy Antigravity `.pb` archives are not imported; SQLite conversation histories are supported.
-- **gemini / opencode / pi / muse terminal sessions are not measured** (only their
+- **gemini / opencode / pi terminal sessions are not measured** (only their
   Threads are, §3.3.1). Threads rows are not in a non-root person's *own* view yet:
   that view, the session titles and the per-kind rollup read the terminal
   `sessions` table only, so a thread's row shows untitled and under `external`.
