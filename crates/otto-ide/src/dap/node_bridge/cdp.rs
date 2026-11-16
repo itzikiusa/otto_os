@@ -258,7 +258,13 @@ pub(super) async fn spawn_inspected_node(
     guard: &BridgeGuard,
     out_tx: &mpsc::UnboundedSender<(String, String)>,
 ) -> Result<(u16, String)> {
-    let mut argv = vec!["--inspect-brk=127.0.0.1:0".to_string()];
+    // A runner that opens the inspector in its own worker (vitest `--inspect-brk`) gets none
+    // here: the bridge attaches to the worker's endpoint instead.
+    let runner_inspects = spec.args.iter().any(|a| a.starts_with("--inspect-brk"));
+    let mut argv = Vec::new();
+    if !runner_inspects {
+        argv.push("--inspect-brk=127.0.0.1:0".to_string());
+    }
     argv.extend(spec.node_flags.clone());
     argv.push(spec.program.clone());
     argv.extend(spec.args.clone());

@@ -530,3 +530,54 @@ fn python_package_main_runs_as_a_module_from_above_the_package() {
     let items = detect_gutter_items(&plain, main_src, &[]);
     assert_eq!(items[0].run_spec.args, [plain]);
 }
+
+#[test]
+fn js_test_items_use_the_packages_runner_from_its_root_with_an_escaped_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let web = tmp.path().join("apps/web");
+    let api = tmp.path().join("apps/api");
+    std::fs::create_dir_all(web.join("src")).unwrap();
+    std::fs::create_dir_all(api.join("test")).unwrap();
+    std::fs::write(
+        web.join("package.json"),
+        r#"{"devDependencies":{"vitest":"^3"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        api.join("package.json"),
+        r#"{"devDependencies":{"jest":"^29"}}"#,
+    )
+    .unwrap();
+    let src = "it('returns 5xx (retry)', () => {});\n";
+
+    let vt = detect_gutter_items(&web.join("src/a.test.ts").to_string_lossy(), src, &[]);
+    let spec = &vt[0].run_spec;
+    assert_eq!(spec.runner, IdeRunnerKind::Vitest);
+    assert_eq!(spec.command.as_deref(), Some("npx"));
+    assert_eq!(
+        spec.args,
+        [
+            "--no-install",
+            "vitest",
+            "run",
+            "src/a.test.ts",
+            "-t",
+            r"returns 5xx \(retry\)"
+        ]
+    );
+    assert_eq!(spec.cwd.as_deref(), Some(&*web.to_string_lossy()));
+
+    let jest = detect_gutter_items(&api.join("test/a.test.js").to_string_lossy(), src, &[]);
+    let spec = &jest[0].run_spec;
+    assert_eq!(
+        spec.args,
+        [
+            "--no-install",
+            "jest",
+            "test/a.test.js",
+            "-t",
+            r"returns 5xx \(retry\)"
+        ]
+    );
+    assert_eq!(spec.cwd.as_deref(), Some(&*api.to_string_lossy()));
+}

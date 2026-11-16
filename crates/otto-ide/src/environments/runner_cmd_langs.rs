@@ -176,7 +176,8 @@ pub(super) fn build_vitest_cmd(
     build_flags: Vec<String>,
 ) -> (String, Vec<String>) {
     let prog = cmd_opt.unwrap_or("npx").to_string();
-    if args.first().map(String::as_str) != Some("vitest") {
+    // `npx --no-install vitest …` (a gutter item) is already a full command line.
+    if !args.iter().take(2).any(|a| a == "vitest") {
         let mut v = vec!["vitest".into(), "run".into()];
         v.extend(build_flags);
         v.extend(args);

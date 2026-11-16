@@ -201,6 +201,25 @@ pub(super) fn detect_js_ts(
     }
 }
 
+/// The JS test runner that owns a test file: its nearest `package.json` folder and whether
+/// that package uses Jest (a `jest` dependency and no `vitest`) rather than Vitest.
+pub(crate) struct JsTestPackage {
+    pub dir: std::path::PathBuf,
+    pub jest: bool,
+}
+
+pub(crate) fn js_test_package(file: &str) -> Option<JsTestPackage> {
+    let dir = std::path::Path::new(file)
+        .ancestors()
+        .skip(1)
+        .find(|d| d.join("package.json").is_file())?;
+    let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap_or_default();
+    Some(JsTestPackage {
+        dir: dir.to_path_buf(),
+        jest: manifest.contains("\"jest\"") && !manifest.contains("vitest"),
+    })
+}
+
 fn build_js_test_item(
     path: &str,
     dir: &str,
@@ -210,26 +229,53 @@ fn build_js_test_item(
     title: &str,
     uses_node_test: bool,
 ) -> IdeGutterItem {
+    // Runners take the name as a regex: "returns 5xx (retry)" must match literally.
+    let pattern = regex::escape(title);
+    let package = js_test_package(path);
+    // Run from the package root so its config (`include`, environment) applies.
+    let (cwd, file) = match &package {
+        Some(pkg) => (
+            pkg.dir.to_string_lossy().into_owned(),
+            std::path::Path::new(path)
+                .strip_prefix(&pkg.dir)
+                .map_or_else(|_| path.to_string(), |r| r.to_string_lossy().into_owned()),
+        ),
+        None => (dir.to_string(), path.to_string()),
+    };
+    // `--no-install`: a missing runner fails instead of downloading one from the registry.
     let (runner, command, args) = if uses_node_test {
         (
             IdeRunnerKind::Node,
-            Some("node".into()),
+            "node",
             vec![
                 "--test".into(),
-                format!("--test-name-pattern={title}"),
-                path.to_string(),
+                format!("--test-name-pattern={pattern}"),
+                file,
+            ],
+        )
+    } else if package.as_ref().is_some_and(|p| p.jest) {
+        (
+            IdeRunnerKind::Node,
+            "npx",
+            vec![
+                "--no-install".into(),
+                "jest".into(),
+                file,
+                "-t".into(),
+                pattern,
             ],
         )
     } else {
         (
             IdeRunnerKind::Vitest,
-            Some("npx".into()),
+            "npx",
             vec![
+                "--no-install".into(),
                 "vitest".into(),
                 "run".into(),
-                path.to_string(),
+                file,
                 "-t".into(),
-                title.to_string(),
+                pattern,
             ],
         )
     };
@@ -240,9 +286,9 @@ fn build_js_test_item(
         language: lang.to_string(),
         run_spec: IdeQuickRunSpec {
             runner,
-            command,
+            command: Some(command.into()),
             args,
-            cwd: Some(dir.to_string()),
+            cwd: Some(cwd),
             target_path: Some(path.to_string()),
             test_filter: Some(title.to_string()),
             debug_program: Some(path.to_string()),

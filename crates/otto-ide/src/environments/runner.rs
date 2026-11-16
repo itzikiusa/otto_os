@@ -502,6 +502,7 @@ fn is_test_runner(runner: IdeRunnerKind) -> bool {
             | IdeRunnerKind::CargoTest
             | IdeRunnerKind::Pytest
             | IdeRunnerKind::Vitest
+            | IdeRunnerKind::Node
             | IdeRunnerKind::JavaJunit
             | IdeRunnerKind::Maven
             | IdeRunnerKind::Gradle

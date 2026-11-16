@@ -11,6 +11,8 @@ mod scripting;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use scripting::js_test_package;
+
 use crate::plugins::IdePluginRegistry;
 use crate::types::{detect_language, IdeGutterItem, IdeRunnerKind, PluginGutterDetector};
 

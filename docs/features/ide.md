@@ -262,6 +262,16 @@ How each item runs:
   without a `program` (debugpy rejects both). pyright gets the workspace venv
   through `workspace/configuration`, which Otto now advertises for Python
   (root-owned sessions only).
+- **JS / TS:** a test runs from its nearest `package.json` folder with that
+  package's runner: Jest when it depends on `jest` and not `vitest`, else
+  Vitest, always through `npx --no-install` (a missing runner fails instead of
+  downloading one). The name is regex-escaped for `-t` /
+  `--test-name-pattern`. Debug launches the runner's own entry
+  (`node_modules/jest/bin/jest.js --runInBand` or `node_modules/vitest/vitest.mjs
+  run --no-file-parallelism` with Vitest's `--inspect-brk`, so the bridge attaches
+  to the worker that runs the test); only `node:test` files use `node --test`.
+  Vitest transforms the file, and the Node bridge doesn't read source maps yet, so
+  a breakpoint in a Vitest test may not stop on the line you set it.
 - **Shell:** `Run fn()` sources the script and calls the function, so it is
   offered only when sourcing runs nothing else: the top level holds just function
   definitions, assignments, `set`/`shopt`/`export`/`readonly`/`declare`,
