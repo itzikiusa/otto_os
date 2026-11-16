@@ -1162,7 +1162,15 @@ fn breakpoint_relocation_on_one_line_is_skipped_but_a_loop_revisit_is_not() {
     // A loop coming back to the line restarts at the first address.
     assert!(!is_same_line_relocation(Some(&first), &key, 0x950));
     // Another line, another depth (recursion) or no previous stop: a real stop.
-    assert!(!is_same_line_relocation(Some(&first), &(1, 3, key.2.clone(), 9), 0x960));
-    assert!(!is_same_line_relocation(Some(&first), &(1, 4, key.2.clone(), 8), 0x960));
+    assert!(!is_same_line_relocation(
+        Some(&first),
+        &(1, 3, key.2.clone(), 9),
+        0x960
+    ));
+    assert!(!is_same_line_relocation(
+        Some(&first),
+        &(1, 4, key.2.clone(), 8),
+        0x960
+    ));
     assert!(!is_same_line_relocation(None, &key, 0x95c));
 }

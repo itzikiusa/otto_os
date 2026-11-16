@@ -411,7 +411,9 @@ pub(super) async fn select_frame_and_refresh(
         || frame_id.is_some_and(|fid| !snap.stack_frames.iter().any(|f| f.id == fid));
 
     let frames = if need_refetch_frames {
-        fetch_stack_frames(&conn.wire, &target, effective_tid).await?.0
+        fetch_stack_frames(&conn.wire, &target, effective_tid)
+            .await?
+            .0
     } else {
         snap.stack_frames
     };
@@ -481,7 +483,11 @@ pub(super) type BpStopKey = (i64, usize, Option<String>, u32);
 /// line. A stop is such a relocation when it follows a breakpoint stop at the same
 /// place and depth at a HIGHER address; a loop coming back to the line restarts at
 /// its first (lowest) address, so it still stops.
-pub(super) fn is_same_line_relocation(prev: Option<&(BpStopKey, u64)>, key: &BpStopKey, ip: u64) -> bool {
+pub(super) fn is_same_line_relocation(
+    prev: Option<&(BpStopKey, u64)>,
+    key: &BpStopKey,
+    ip: u64,
+) -> bool {
     prev.is_some_and(|(k, prev_ip)| k == key && ip > *prev_ip)
 }
 

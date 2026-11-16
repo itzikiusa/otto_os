@@ -419,7 +419,10 @@ fn vitest_runs_list_each_test_unless_a_reporter_is_chosen() {
         "/w",
         &BTreeMap::new(),
     );
-    assert!(!args.iter().any(|a| a == "--reporter=verbose"), "args={args:?}");
+    assert!(
+        !args.iter().any(|a| a == "--reporter=verbose"),
+        "args={args:?}"
+    );
 }
 
 #[test]

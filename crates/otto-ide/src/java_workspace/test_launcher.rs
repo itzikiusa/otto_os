@@ -66,10 +66,16 @@ pub fn use_junit_launcher(
 ) -> Result<Vec<String>> {
     let sep = if cfg!(windows) { ";" } else { ":" };
     let mut cp: Vec<String> = plan.classpath.split(sep).map(str::to_string).collect();
-    let source = if let Some(engine) = cp.iter().find(|j| jar_name(j).starts_with("junit-platform-engine-")) {
+    let source = if let Some(engine) = cp
+        .iter()
+        .find(|j| jar_name(j).starts_with("junit-platform-engine-"))
+    {
         // Surefire supplies the Launcher API at test time, so a module rarely
         // declares it: take the one matching its platform version from ~/.m2.
-        if !cp.iter().any(|j| jar_name(j).starts_with("junit-platform-launcher-")) {
+        if !cp
+            .iter()
+            .any(|j| jar_name(j).starts_with("junit-platform-launcher-"))
+        {
             let version = jar_name(engine)
                 .trim_start_matches("junit-platform-engine-")
                 .trim_end_matches(".jar")
@@ -93,7 +99,14 @@ pub fn use_junit_launcher(
     let src = dir.join("OttoJUnitLauncher.java");
     fs::write(&src, source).map_err(|e| Error::Internal(format!("write launcher: {e}")))?;
     let classpath = cp.join(sep);
-    run_javac(javac_bin, &dir, &classpath, &[src], env_map, &mut Vec::new())?;
+    run_javac(
+        javac_bin,
+        &dir,
+        &classpath,
+        &[src],
+        env_map,
+        &mut Vec::new(),
+    )?;
     plan.classpath = format!("{}{sep}{classpath}", dir.display());
     plan.main_class = "OttoJUnitLauncher".into();
     Ok(vec![selector.to_string()])

@@ -338,9 +338,13 @@ pub(super) async fn resolve_java_adapter(
         // A test selector (`com.acme.CalcTest#adds`) runs through a JUnit launcher,
         // unless the class is an app with its own `main` (the gutter's main item also
         // names its class as the filter).
-        let has_main = std::fs::read_to_string(&program)
-            .is_ok_and(|src| src.contains("static void main("));
-        let test_selector = req.launch.test_name.clone().filter(|_| include_tests && !has_main);
+        let has_main =
+            std::fs::read_to_string(&program).is_ok_and(|src| src.contains("static void main("));
+        let test_selector = req
+            .launch
+            .test_name
+            .clone()
+            .filter(|_| include_tests && !has_main);
         let mut cwd_hash: u64 = 0xcbf29ce484222325;
         for b in cwd.as_bytes() {
             cwd_hash ^= u64::from(*b);
