@@ -11,7 +11,7 @@
   import type { CommitInfo } from '../../lib/api/types';
   import { toastError } from '../../lib/toastError';
   import { api, isAbortError } from '../../lib/api/client';
-  import { gitBridge } from './gitBridge.svelte';
+  import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { componentFunctions } from './componentFunctions.ts';
 import { fileIsCrlf, markAction } from '../src/modules/git/conflictEdit.ts';
-import { carryViewState, carryViewed, fileStamp, unchangedPaths } from '../src/modules/git/diff-viewstate.ts';
+import { carryViewState, carryViewed, fileStamp, unchangedPaths } from '../src/lib/diff/diff-viewstate.ts';
 import { amendPublishedAt } from '../src/modules/git/refTracking.ts';
 import { pinnedHead } from '../src/modules/git/pr-cache.ts';
 

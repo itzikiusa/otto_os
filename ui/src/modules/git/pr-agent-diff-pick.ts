@@ -4,7 +4,7 @@
 // buildFileRows) and its numbers in the `.gut.old` / `.gut.new` cells, so the
 // selection's rows, file and line range come straight off the DOM. Rows are
 // windowed, so a selection only ever spans mounted rows.
-import { ROW_KEY_SEP } from './diff-model';
+import { ROW_KEY_SEP } from '../../lib/diff/diff-model';
 import { linePickFrom, type LinePick, type PickedRow } from './pr-agent-context';
 
 /** A row key's file path and row kind (`l` line, `s` split, `f` file, …). */

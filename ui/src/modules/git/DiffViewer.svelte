@@ -23,7 +23,7 @@
   import { loadViewed, saveViewed, staleViewed } from './diff-viewed-store';
   import { prFeedKey, publishPrFiles } from './prFilesBridge.svelte';
   import { PrefetchScheduler, SEARCH_CAP, neighbours, searchPlan } from './diff-prefetch';
-  import { lineWords, markWords, type WordRange } from './diff-words';
+  import { lineWords, markWords, type WordRange } from '../../lib/diff/diff-words';
   import { fileNavDelta, lineTapRow, revealComposer, stageErrorToast } from './diff-dom';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { PREF_HIDE_TESTS, PREF_SPLIT, PREF_TREE, PREF_WRAP, buildNavTree, fileStatus, readPref, writePref } from './diff-pr';
@@ -31,13 +31,13 @@
   const DiffNavLazy = lazyComponent(() => import('./DiffNav.svelte'));
   import './diff-pr.css';
   import type { DiffResp, FileDiff, DiffLine, Hunk, HunkOp, PrComment, StageHunkResp } from '../../lib/api/types';
-  import { refocusRow } from './diffRowFocus';
+  import { refocusRow } from '../../lib/diff/diffRowFocus';
   import { langFromPath, ensureHljs } from '../../lib/hl';
   import { api, isAbortError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import { gitBridge } from './gitBridge.svelte';
+  import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import CommentThread from './CommentThread.svelte';
   import { prDiffCacheNearCap, prIgnoreWhitespace, setPrIgnoreWhitespace, type DiffFileLoader } from '../../lib/diff/diff-load';
@@ -58,11 +58,11 @@
     prefetchable,
     type ComposerAt,
     type Row,
-  } from './diff-model';
-  import { findScroller, resum, rowAt } from './diff-virtual';
-  import { carryViewState, carryViewed, unchangedPaths } from './diff-viewstate';
+  } from '../../lib/diff/diff-model';
+  import { findScroller, resum, rowAt } from '../../lib/diff/diff-virtual';
+  import { carryViewState, carryViewed, unchangedPaths } from '../../lib/diff/diff-viewstate';
   import { registerFindProvider } from '../../lib/findProviders';
-  import { DeferredHighlighter } from './diff-highlight.svelte';
+  import { DeferredHighlighter } from '../../lib/diff/diff-highlight.svelte';
   import { SvelteSet } from 'svelte/reactivity';
 
   interface Props {

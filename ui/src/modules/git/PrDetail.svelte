@@ -38,7 +38,7 @@
   import { createReviewReconciler, myReview, withMyReview } from './pr-review-state';
   import { prAgentBridge, type PrAgentKind } from './pr-agent-bridge.svelte';
   import { openReviewDoneSlack } from './pr-slack';
-  import { fileStat } from './diff-model';
+  import { fileStat } from '../../lib/diff/diff-model';
   import { notePrHead, onPrWhitespaceChange, prDiffFileLoader, prDiffHead, prDiffSummary, prIgnoreWhitespace, repoDiffFileLoader } from '../../lib/diff/diff-load';
   import PrConversation from './PrConversation.svelte';
   import PrMergeChecks from './PrMergeChecks.svelte';

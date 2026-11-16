@@ -9,7 +9,7 @@ import type { CommitInfo, RefBranch, RefTag, RefsResp, RepoStatusResp, StashInfo
 import { toasts } from '../../../lib/toast.svelte';
 import { git } from '../../../lib/stores/git.svelte';
 import { router } from '../../../lib/router.svelte';
-import { gitBridge } from '../gitBridge.svelte';
+import { gitBridge } from '../../../lib/diff/gitBridge.svelte';
 import { routeGraphRef } from '../deepLink';
 import { prefetchCommitSummary } from '../graph-commit-diff.svelte';
 import type { RefChip } from '../ref-menus';

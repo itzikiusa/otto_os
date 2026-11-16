@@ -5,7 +5,7 @@
   // the reason the flag exists. Clicking a commit selects it in the graph.
   import type { CommitInfo } from '../../lib/api/types';
   import { api } from '../../lib/api/client';
-  import { gitBridge } from './gitBridge.svelte';
+  import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';

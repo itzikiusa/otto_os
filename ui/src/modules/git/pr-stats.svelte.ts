@@ -4,7 +4,7 @@
 // keyed by the PR's head commit and kept in localStorage, so a PR is counted
 // once per push, never again on the next visit. Two requests at a time, and
 // rows scrolled past before their turn are skipped.
-import { fileStat } from './diff-model';
+import { fileStat } from '../../lib/diff/diff-model';
 import { SvelteMap } from 'svelte/reactivity';
 import type { PrSummary } from '../../lib/api/types';
 import { prDiffSummary } from '../../lib/diff/diff-load';

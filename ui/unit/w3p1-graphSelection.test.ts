@@ -93,7 +93,7 @@ function selection(opts: { mobile?: boolean; loaded?: (sha: string) => boolean }
     '../../../lib/toast.svelte': { toasts: { error: (t: string, b: string) => toasts.push(`${t}: ${b}`), info: (t: string) => toasts.push(t) } },
     '../../../lib/stores/git.svelte': { git: { wipRequest: null } },
     '../../../lib/router.svelte': { router: { parts: [] } },
-    '../gitBridge.svelte': { gitBridge: { focus: null } },
+    '../../../lib/diff/gitBridge.svelte': { gitBridge: { focus: null } },
     '../deepLink': { routeGraphRef: () => null },
     '../graph-commit-diff.svelte': { prefetchCommitSummary: (_r: string, sha: string) => { log.push(`prefetch ${sha}`); return () => log.push(`abort ${sha}`); } },
   });

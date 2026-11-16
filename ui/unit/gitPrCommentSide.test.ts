@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { commentsForLine, indexComments, lineAnchor } from '../src/modules/git/diff-model.ts';
+import { commentsForLine, indexComments, lineAnchor } from '../src/lib/diff/diff-model.ts';
 import type { DiffLine, PrComment } from '../src/lib/api/types.ts';
 
 // Inline PR comments key by diff SIDE + line: a deleted row (old 15) and an

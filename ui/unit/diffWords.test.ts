@@ -1,9 +1,9 @@
-// Word-level marks inside changed lines (src/modules/git/diff-words.ts):
+// Word-level marks inside changed lines (src/lib/diff/diff-words.ts):
 // token boundaries, unicode, whitespace-only edits, the size / similarity
 // guards, pairing inside a hunk, and composing with highlighted HTML.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { WORD_MAX_LINE, lineWords, markWords, wordDiff } from '../src/modules/git/diff-words.ts';
+import { WORD_MAX_LINE, lineWords, markWords, wordDiff } from '../src/lib/diff/diff-words.ts';
 
 const at = (text: string, r: [number, number][] | undefined) => (r ?? []).map(([s, e]) => text.slice(s, e));
 

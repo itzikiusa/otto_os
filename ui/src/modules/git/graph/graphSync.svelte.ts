@@ -7,7 +7,7 @@
 import { untrack } from 'svelte';
 import type { RefsResp } from '../../../lib/api/types';
 import { git } from '../../../lib/stores/git.svelte';
-import { gitBridge } from '../gitBridge.svelte';
+import { gitBridge } from '../../../lib/diff/gitBridge.svelte';
 import { withoutRemoteHeads } from '../ref-menus';
 
 export interface GraphSyncHost {
