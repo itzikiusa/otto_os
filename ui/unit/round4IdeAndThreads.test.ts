@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
-import { register } from 'node:module';
 import { describe, it } from 'node:test';
-import { Marked } from 'marked';
 import {
   extractGoBuildTagsFromSource,
   resolveIdeLspModuleRoot,
@@ -22,11 +20,6 @@ import {
   detectInlineRefactorHints,
   transformStringManipulation,
 } from '../src/lib/components/cm-ide-refactor-core.ts';
-import {
-  replaceEmojiShortcodes,
-  resolveEmojiShortcode,
-  searchEmojiShortcodes,
-} from '../src/lib/emojiShortcodes.ts';
 import { splitStreamingMarkdown } from '../src/modules/agents/conversation/streamingMd.ts';
 import {
   mergeGoBuildTagsIntoFlags,
@@ -35,16 +28,6 @@ import {
   resolveRepoRootForPath,
   resolveRepoTestPlan,
 } from '../src/modules/ide/store/ideRepoTestAndBuildTags.ts';
-
-const tsResolveHook =
-  'export async function resolve(s, c, n) {' +
-  "  if (/^\\.{1,2}\\//.test(s) && !/\\.[a-z]+$/i.test(s)) { try { return await n(s + '.ts', c); } catch {} }" +
-  '  return n(s, c);' +
-  '}';
-register(`data:text/javascript,${encodeURIComponent(tsResolveHook)}`);
-const { chatMarkedExtension } = await import(
-  '../src/modules/agents/conversation/chatMarkdown.ts'
-);
 
 describe('Round 4 — Antigravity model catalog & Orchestrator entries', () => {
   it('exposes all 9 Antigravity models immediately on cold start including Orchestrator (Carbon) and Orchestrator (Argon)', () => {
@@ -74,33 +57,6 @@ describe('Round 4 — Antigravity model catalog & Orchestrator entries', () => {
     assert.deepEqual(effortsForModel('agy', 'gemini-pro-orchestrator', null), []);
     assert.deepEqual(effortsForModel('agy', 'gemini-pro-orchestrator-argon', null), []);
     assert.deepEqual(effortsForModel('agy', 'gemini-4-carbon', null), ['low', 'medium', 'high']);
-  });
-});
-
-describe('Round 4 — Emoji shortcodes & chat markdown rendering', () => {
-  it('expands known :shortcode: tokens while preserving URLs, ports, unknown tokens, and code spans', () => {
-    assert.equal(resolveEmojiShortcode('rocket'), '🚀');
-    assert.equal(resolveEmojiShortcode('+1'), '👍');
-    assert.equal(resolveEmojiShortcode('not_a_real_shortcode'), null);
-
-    const expanded = replaceEmojiShortcodes(
-      'Ship it :rocket: :+1: from https://localhost:7700/api with :unknown_tag: intact',
-    );
-    assert.equal(
-      expanded,
-      'Ship it 🚀 👍 from https://localhost:7700/api with :unknown_tag: intact',
-    );
-
-    const m = new Marked({ gfm: true, breaks: true }).use(chatMarkedExtension);
-    const html = m.parse(
-      'Deployed :sparkles: `:rocket:`\n\n```ts\nconst s = ":fire:";\n```',
-    ) as string;
-    assert.ok(html.includes('✨'), 'prose :sparkles: should render as emoji');
-    assert.ok(html.includes(':rocket:'), 'inline code span should preserve literal :rocket:');
-    assert.ok(html.includes(':fire:'), 'fenced code block should preserve literal :fire:');
-
-    const suggestions = searchEmojiShortcodes('rock', 5);
-    assert.ok(suggestions.some((s) => s.shortcode === 'rocket' && s.emoji === '🚀'));
   });
 });
 

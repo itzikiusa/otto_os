@@ -303,7 +303,7 @@ class IdeStore {
     }
     if (!ws.current && !ws.listSettled) return;
     const cur = ws.current ?? ws.workspaces.find((w) => w.id !== SCRATCH_WORKSPACE_ID && w.root_path) ?? ws.workspaces[0];
-    if (cur?.root_path) void this.setLocalTarget(cur.root_path, cur.id);
+    void (cur?.root_path ? this.setLocalTarget(cur.root_path, cur.id) : import('./shell/ideScratches.svelte').then((m) => m.openScratches())); // else the default project
   }
 
   // Zero-wait cold open: ONLY awaits the shallow 1-level `/ide/fs/tree` (<10ms).

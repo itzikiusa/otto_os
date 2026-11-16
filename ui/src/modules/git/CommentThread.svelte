@@ -6,7 +6,7 @@
   import CommentThread from './CommentThread.svelte';
   import type { PrComment } from '../../lib/api/types';
   import { guardUnsaved } from '../../lib/leaveGuard';
-  import { renderMarkdown } from '../../lib/md';
+  import { renderPrMarkdown } from './prMarkdown';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
@@ -147,8 +147,8 @@
     </div>
   {:else}
     <div class="cmt-body md-body">
-      <!-- renderMarkdown escapes HTML before transforming -->
-      {@html renderMarkdown(comment.body)}
+      <!-- renderPrMarkdown (lib/md renderMarkdown) escapes HTML before transforming -->
+      {@html renderPrMarkdown(comment.body)}
     </div>
   {/if}
   {#if showReactions && actions}<div class="cmt-rx"><PrReactions {comment} {actions} /></div>{/if}

@@ -9,7 +9,7 @@
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
-  import { onScratches } from './ideScratches.svelte';
+  import { onScratches, openScratches } from './ideScratches.svelte';
 
   const IdeWorkspacePopoverLazy = lazyComponent(() => import('./IdeWorkspacePopover.svelte'));
 
@@ -110,7 +110,11 @@
               confirmLabel: 'Delete',
               danger: true,
             });
-            if (ok) await ide.deleteNamedProject(proj.id);
+            if (!ok) return;
+            const wasActive = ide.activeProjectId === proj.id;
+            await ide.deleteNamedProject(proj.id);
+            // The open project is gone: land on the default project.
+            if (wasActive && !ide.namedProjects.some((p) => p.id === proj.id)) await openScratches();
           })(),
       },
     ];

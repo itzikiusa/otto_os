@@ -26,6 +26,7 @@
   import { uiControl } from '../../../lib/stores/uiControl.svelte';
   import { toastError } from '../../../lib/toastError';
   import StageSlashPopup from '../StageSlashPopup.svelte';
+  import { EmojiAssistView } from '../../../lib/components/emojiAssistLazy.svelte';
   import { agentTasks } from './agentTasks';
   import { askFromComposer, askTargets } from './askTargets.svelte';
   import { attachmentSupport, capsOf, takesFile } from './attachmentSupport';
@@ -361,8 +362,9 @@
     runtimeThreads.respond(ownerId, requestId, decision).catch((e: unknown) => void toastError('Couldn’t answer the approval', e));
 
   let askEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
+  let emojiEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   function onKeydown(e: KeyboardEvent): void {
-    if (e.isComposing || askEl?.onKey(e)) return;
+    if (e.isComposing || askEl?.onKey(e) || emojiEl?.onKey(e)) return;
     if (handleSlashMenuKey(e, suggestions, cmdIdx, (i) => (cmdIdx = i), () => (cmdDismissed = true), acceptCmd)) return;
     if (enterSends(e)) {
       e.preventDefault();
@@ -485,6 +487,7 @@
       {#if suggestions.length > 0}
         <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
       {/if}
+      {#if EmojiAssistView.component}<EmojiAssistView.component bind:this={emojiEl} textareaEl={composerEl} />{/if}
       <RuntimeContextChips context={draft.context} onremove={(id) => { draft.context = draft.context.filter((c) => c.id !== id); }} onfocus={focusComposer} />
       <RuntimeAskAgent
         bind:this={askEl}
