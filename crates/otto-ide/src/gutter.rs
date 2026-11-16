@@ -5,6 +5,7 @@
 //! rules, returning 1-based [`IdeGutterItem`] entries with ready-to-launch
 //! `IdeQuickRunSpec` configurations for both test runners and DAP debugging.
 
+pub(crate) mod cargo_target;
 mod compiled;
 mod scripting;
 #[cfg(test)]

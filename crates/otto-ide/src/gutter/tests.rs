@@ -405,3 +405,84 @@ fn plugin_registered_language_resolves_gutter_detector_without_hardcoded_match()
     assert_eq!(items[0].language, "elixir");
     assert_eq!(items[0].label, "Mix adds two numbers");
 }
+
+#[test]
+fn rust_gutter_args_select_the_files_cargo_target() {
+    // The crate sits under an ancestor folder named `src`, which used to leak into the filter.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("src/ws/app");
+    for dir in ["src/bin", "src/parser", "examples", "tests"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+    std::fs::write(root.join("src/lib.rs"), "").unwrap();
+    let items =
+        |rel: &str, src: &str| detect_gutter_items(&root.join(rel).to_string_lossy(), src, &[]);
+    let main_src = "fn main() {}\n";
+    let test_src = "#[test]\nfn works() {}\n";
+    let args = |rel: &str, src: &str| items(rel, src)[0].run_spec.args.clone();
+
+    assert_eq!(args("src/main.rs", main_src), ["run", "--bin", "app"]);
+    assert_eq!(args("src/bin/tool.rs", main_src), ["run", "--bin", "tool"]);
+    assert_eq!(
+        args("examples/demo.rs", main_src),
+        ["run", "--example", "demo"]
+    );
+    assert_eq!(
+        args("src/parser/mod.rs", test_src),
+        [
+            "test",
+            "--lib",
+            "parser::works",
+            "--",
+            "--exact",
+            "--nocapture"
+        ]
+    );
+    let it = items("tests/it.rs", test_src);
+    assert_eq!(
+        it[0].run_spec.args,
+        [
+            "test",
+            "--test",
+            "it",
+            "works",
+            "--",
+            "--exact",
+            "--nocapture"
+        ]
+    );
+    assert_eq!(it[0].run_spec.test_filter.as_deref(), Some("works"));
+
+    // `#[ignore]` tests run only with `--include-ignored`.
+    let ignored = items("src/lib.rs", "#[test]\n#[ignore]\nfn slow() {}\n");
+    assert_eq!(
+        ignored[0].run_spec.args,
+        [
+            "test",
+            "--lib",
+            "slow",
+            "--",
+            "--exact",
+            "--nocapture",
+            "--include-ignored"
+        ]
+    );
+}
+
+#[test]
+fn rust_discovery_main_config_names_the_package_bin_beside_src_bin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src/bin")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(root.join("src/bin/tool.rs"), "fn main() {}\n").unwrap();
+    let target = crate::types::IdeTargetSpec::local(root.to_string_lossy().into_owned());
+    let configs = crate::environments::discovery::discover_run_configs(&target, &[]);
+    let main = configs
+        .iter()
+        .find(|c| c.name == "Cargo Run app")
+        .expect("main config");
+    assert_eq!(main.args, ["run", "--bin", "app"]);
+}

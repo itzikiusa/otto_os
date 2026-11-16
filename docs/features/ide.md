@@ -240,6 +240,16 @@ items directly into the editor gutter:
 
 Clicking the gutter play button offers **Run** or **Debug** for that exact item.
 
+How each item runs:
+
+- **Rust:** the file's place under its nearest `Cargo.toml` picks the cargo
+  target: `src/main.rs` → `--bin <package>`, `src/bin/x.rs` → `--bin x`,
+  `examples/x.rs` → `--example x`, `tests/x.rs` → `--test x`, other `src/**`
+  files → `--lib` (or the package binary when there is no `lib.rs`). The test
+  filter is the module path from `<crate>/src/`, and an `#[ignore]` test runs with
+  `--include-ignored`. Debug builds the same target, so it launches that target's
+  executable.
+
 ### 6. Full DAP Debugger & Tabbed/Split Dock
 
 `crates/otto-ide/src/dap/` speaks framing-accurate `Content-Length` JSON-RPC

@@ -412,10 +412,19 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
             .unwrap()
     });
 
-    let file_mods = infer_rust_file_modules(path);
+    let cargo_target = super::cargo_target::cargo_target_for(path);
+    let file_mods = cargo_target
+        .as_ref()
+        .map_or_else(|| infer_rust_file_modules(path), |t| t.modules.clone());
+    let selector = cargo_target.as_ref().map_or(&[][..], |t| &t.selector[..]);
+    let run_selector = cargo_target
+        .as_ref()
+        .and_then(|t| t.run_selector())
+        .unwrap_or(&[]);
     let mut brace_depth: i32 = 0;
     let mut mod_stack: Vec<(String, i32)> = Vec::new();
     let mut pending_kind: Option<IdeGutterKind> = None;
+    let mut pending_ignored = false;
 
     for (idx, line) in content.lines().enumerate() {
         let line_no = (idx + 1) as u32;
@@ -426,6 +435,8 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
 
         if re_test_attr.is_match(line) {
             pending_kind = Some(IdeGutterKind::Test);
+        } else if trimmed.starts_with("#[ignore") {
+            pending_ignored = true;
         } else if re_bench_attr.is_match(line) {
             pending_kind = Some(IdeGutterKind::Bench);
         } else if let Some(cap) = re_fn.captures(line) {
@@ -437,6 +448,13 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                 }
                 full_mods.push(fn_name.to_string());
                 let full_filter = full_mods.join("::");
+                let mut args = vec!["test".to_string()];
+                args.extend(selector.iter().cloned());
+                args.extend([full_filter.clone(), "--".into(), "--exact".into()]);
+                args.push("--nocapture".into());
+                if std::mem::take(&mut pending_ignored) {
+                    args.push("--include-ignored".into());
+                }
                 out.push(IdeGutterItem {
                     line: line_no,
                     kind,
@@ -445,13 +463,7 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::CargoTest,
                         command: Some("cargo".into()),
-                        args: vec![
-                            "test".into(),
-                            full_filter.clone(),
-                            "--".into(),
-                            "--exact".into(),
-                            "--nocapture".into(),
-                        ],
+                        args,
                         cwd: Some(dir.to_string()),
                         target_path: Some(path.to_string()),
                         test_filter: Some(full_filter.clone()),
@@ -468,7 +480,9 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::CargoRun,
                         command: Some("cargo".into()),
-                        args: vec!["run".into()],
+                        args: std::iter::once("run".to_string())
+                            .chain(run_selector.iter().cloned())
+                            .collect(),
                         cwd: Some(dir.to_string()),
                         target_path: Some(path.to_string()),
                         test_filter: None,
@@ -479,6 +493,7 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
             }
         } else if !trimmed.starts_with("#[") && !trimmed.is_empty() {
             pending_kind = None;
+            pending_ignored = false;
         }
 
         if let Some(cap) = re_mod.captures(line) {
@@ -499,6 +514,7 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
     }
 }
 
+/// Fallback when no local `Cargo.toml` owns the file (a remote target).
 fn infer_rust_file_modules(path: &str) -> Vec<String> {
     let Some((_, after_src)) = path.rsplit_once("/src/") else {
         return Vec::new();
