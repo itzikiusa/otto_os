@@ -1659,18 +1659,19 @@ pub fn merge_enabled(
 /// immutable per-token scope has already run before this check. External MCP
 /// tokens retain the existing master-toggle + enabled-tool behavior.
 ///
-/// Agent UI control (`ui_session`: a `ui_*` tool called with a credential bound
-/// to an Otto session) is not an outward integration either: the master
-/// switch does not apply, only the per-tool enable (and, in the bridge, the
-/// per-session human grant).
+/// An Otto-managed session (`managed_session`: a thread or agent session
+/// calling with its own per-session credential) is not an outward integration
+/// either: the master switch is for outside MCP clients and does not apply,
+/// only the per-tool enable (approval, RBAC and agent policy run after this).
 pub fn mcp_tool_enabled_for_token(
     internal: bool,
-    ui_session: bool,
+    managed_session: bool,
     outward_on: bool,
     globally_enabled: &[String],
     short: &str,
 ) -> bool {
-    internal || ((outward_on || ui_session) && globally_enabled.iter().any(|tool| tool == short))
+    internal
+        || ((outward_on || managed_session) && globally_enabled.iter().any(|tool| tool == short))
 }
 
 /// Whether a governed `otto.*` call is subject to the human-approval gate

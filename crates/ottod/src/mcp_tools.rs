@@ -1278,10 +1278,9 @@ async fn gateway_call(ctx: &Ctx, namespaced: &str, args: &Value) -> Result<(Valu
 /// Proxy a control-plane (`otto.*`) tool call through the governed choke point
 /// `POST /mcp/otto-tools/invoke`. `name` is the stdio name (`otto_create_pr`),
 /// already known to map to a governed spec. The tool must be ENABLED in the
-/// control plane right now — the invoke route itself exempts internal session
-/// tokens from the enabled list, but this surface promises to mirror the
-/// operator's checklist, so a disabled tool is refused here with a pointer to
-/// where to enable it. The governed envelope (`decision`, `content`,
+/// control plane right now (the invoke route skips only the outward master
+/// switch for a session token, never the enabled list); refusing it here
+/// adds a pointer to where to enable it. The governed envelope (`decision`, `content`,
 /// `approval_id`…) is returned whole so the agent can see a denial reason or a
 /// pending approval; the route audits the call itself.
 async fn governed_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, bool), String> {

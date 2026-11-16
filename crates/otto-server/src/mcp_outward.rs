@@ -288,19 +288,19 @@ pub(crate) async fn governed_invoke(
     let outward_on = outward_enabled(ctx).await;
     let enabled = enabled_tools(ctx).await;
     let is_ui = crate::ui_commands::is_ui_tool(&short);
-    let ui_session = is_ui && auth.managed_session_id.is_some();
+    // An Otto session skips the outward switch (outside clients'), never the enable list.
+    let managed = auth.managed_session_id.is_some();
     // A session's native irreversible writers reach the governed path even
     // when not ticked in the catalog (see `NATIVE_SESSION_WRITERS`).
-    let native_writer =
-        auth.managed_session_id.is_some() && NATIVE_SESSION_WRITERS.contains(&short.as_str());
+    let native_writer = managed && NATIVE_SESSION_WRITERS.contains(&short.as_str());
     if !mcp_tool_enabled_for_token(
         auth.mcp_internal || native_writer,
-        ui_session,
+        managed,
         outward_on,
         &enabled,
         &short,
     ) {
-        let reason = if outward_on {
+        let reason = if outward_on || managed {
             "this tool is not enabled on the Otto MCP server"
         } else {
             "the Otto MCP server is disabled"

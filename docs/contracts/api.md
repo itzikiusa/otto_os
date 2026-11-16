@@ -4697,9 +4697,10 @@ audit — then through the UI bridge (`crates/otto-server/src/ui_bridge.rs`):
 
 1. **Session-bound.** Only a credential bound to an Otto session
    (`managed_session_id` / an internal MCP `mcp_session_id`) may call them; the
-   session's owner must be the caller. Anything else → `forbidden`. Such a call
-   skips the outward master switch `mcp_otto_server_enabled` (it is not an
-   outward integration) — only the per-tool enable applies. `ui_*` tools are
+   session's owner must be the caller. Anything else → `forbidden`. Like every
+   CP26 call from a session credential, it skips the outward master switch
+   `mcp_otto_server_enabled` (that is for outside MCP clients) — only the
+   per-tool enable applies. `ui_*` tools are
    **default-enabled** (a saved tool list gains UI tools that did not exist when
    it was saved, tracked in `mcp_otto_server_ui_tools_known`; one the operator
    unticked stays off), never `DANGEROUS` (no per-call approval), and
