@@ -519,6 +519,15 @@ fn a_script_config_keeps_its_target_when_program_arguments_are_set() {
         run(IdeRunnerKind::Python, "main.py", &["main.py", "x"]),
         ["main.py", "x"]
     );
+    // A gutter test run already names its file among the tool's arguments.
+    assert_eq!(
+        run(
+            IdeRunnerKind::Node,
+            "/p/calc.test.js",
+            &["--no-install", "jest", "calc.test.js"]
+        ),
+        ["--no-install", "jest", "calc.test.js"]
+    );
     assert_eq!(
         shell_words::join(["hello", "two words", "", "a'b"]),
         r#"hello 'two words' '' 'a'\''b'"#,

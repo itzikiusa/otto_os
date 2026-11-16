@@ -115,11 +115,12 @@ pub(super) fn build_pytest_cmd(
 /// before the script moved out of `args` still start with it: never pass it twice.
 fn script_then_args(cfg: &IdeRunConfig, flags: Vec<String>, args: Vec<String>) -> Vec<String> {
     let mut out = flags;
-    if let Some(tp) = cfg
-        .target_path
-        .as_ref()
-        .filter(|tp| args.first() != Some(*tp))
-    {
+    // Already named (a gutter `npx jest calc.test.js`): not passed twice.
+    let named = |tp: &String| {
+        args.iter()
+            .any(|a| a == tp || std::path::Path::new(tp).ends_with(a))
+    };
+    if let Some(tp) = cfg.target_path.as_ref().filter(|tp| !named(tp)) {
         out.push(tp.clone());
     }
     out.extend(args);
