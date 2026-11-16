@@ -298,3 +298,63 @@ async fn downloader_enforces_companion_sha256_and_removes_corrupt_archive() {
     assert_eq!(tokio::fs::read(&ok_dest).await.unwrap(), payload);
     let _ = server.await;
 }
+
+#[test]
+fn a_symlinked_path_go_resolves_to_its_real_goroot_not_the_brew_prefix() {
+    let tmp = tempfile::tempdir().unwrap();
+    let brew = tmp.path().join("homebrew");
+    let goroot = brew.join("Cellar/go/1.27.2/libexec");
+    std::fs::create_dir_all(goroot.join("bin")).unwrap();
+    std::fs::create_dir_all(goroot.join("src/runtime")).unwrap();
+    std::fs::write(goroot.join("VERSION"), "go1.27.2\n").unwrap();
+    std::fs::write(goroot.join("bin/go"), "#!/bin/sh\n").unwrap();
+    make_executable(&goroot.join("bin/go")).unwrap();
+    std::fs::create_dir_all(brew.join("bin")).unwrap();
+    std::os::unix::fs::symlink(goroot.join("bin/go"), brew.join("bin/go")).unwrap();
+
+    // The PATH scan's prefix: symlinks resolved, then `<prefix>/bin/go`.
+    let prefix = discovery::bin_prefix(&brew.join("bin/go")).unwrap();
+    assert_eq!(prefix, std::fs::canonicalize(&goroot).unwrap());
+    assert!(discovery::is_goroot(&prefix));
+    // The unresolved grandparent has a `bin/go` but no standard library.
+    assert!(
+        !discovery::is_goroot(&brew),
+        "the brew prefix is not a GOROOT"
+    );
+    // Both spellings of the SDK are one row.
+    assert_eq!(
+        discovery::canonical_key(&goroot.to_string_lossy()),
+        discovery::canonical_key(&prefix.to_string_lossy())
+    );
+}
+
+#[test]
+fn path_python_reports_its_real_version_and_a_bare_python_debugs_with_the_bridge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real = tmp.path().join("python3.13");
+    std::fs::write(&real, "#!/bin/sh\nexit 1\n").unwrap();
+    make_executable(&real).unwrap();
+    let link = tmp.path().join("python3");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert_eq!(discovery::python_bin_version(&link), "3.13");
+
+    let st = |path: &std::path::Path| crate::types::IdeToolBinaryStatus {
+        name: "debugpy".into(),
+        available: true,
+        path: Some(path.to_string_lossy().into_owned()),
+    };
+    // `import debugpy` fails (the stub exits 1): the bdb bridge is what debugs.
+    let bare = discovery::label_builtin_dap(EcosystemKind::Python, st(&link));
+    assert_eq!(bare.name, "built-in bdb bridge");
+    assert!(bare.available);
+    let ok = tmp.path().join("python-ok");
+    std::fs::write(&ok, "#!/bin/sh\nexit 0\n").unwrap();
+    make_executable(&ok).unwrap();
+    assert_eq!(
+        discovery::label_builtin_dap(EcosystemKind::Python, st(&ok)).name,
+        "debugpy"
+    );
+    let shell =
+        discovery::label_builtin_dap(EcosystemKind::Shell, st(std::path::Path::new("/bin/zsh")));
+    assert_eq!(shell.name, "built-in otto-sh-dap");
+}

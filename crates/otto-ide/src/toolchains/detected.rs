@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use crate::types::{IdeDetectedSdk, IdeEcosystemKind};
 
 use super::discovery::{
-    dir_name_version, find_executable_in, is_executable_file, python_dir_version,
-    read_go_root_version, read_java_release_version, read_subdirs, resolve_java_home_dir,
-    rust_toolchain_label, system_search_dirs,
+    bin_prefix, dir_name_version, find_executable_in, is_executable_file, is_goroot,
+    node_prefix_version, python_dir_version, read_go_root_version, read_java_release_version,
+    read_subdirs, resolve_java_home_dir, rust_toolchain_label, system_search_dirs,
 };
 
 pub(super) fn scan_detected_sdks(
@@ -222,13 +222,20 @@ pub(super) fn scan_detected_sdks(
             }
         }
     }
-    if let Some(go_bin) = find_executable_in(&search, &["go"]) {
-        if let Some(gr) = go_bin.parent().and_then(|p| p.parent()) {
-            if gr.join("bin/go").is_file() {
-                let v = read_go_root_version(gr).unwrap_or_else(|| "system".into());
-                push_det(&mut out, &mut seen, "go", format!("Go {v}"), &v, gr, "path");
-            }
-        }
+    if let Some(gr) = find_executable_in(&search, &["go"])
+        .and_then(|b| bin_prefix(&b))
+        .filter(|gr| is_goroot(gr))
+    {
+        let v = read_go_root_version(&gr).unwrap_or_else(|| "system".into());
+        push_det(
+            &mut out,
+            &mut seen,
+            "go",
+            format!("Go {v}"),
+            &v,
+            &gr,
+            "path",
+        );
     }
 
     // 4. Node: nvm, fnm, volta, Homebrew, PATH
@@ -282,24 +289,17 @@ pub(super) fn scan_detected_sdks(
             }
         }
     }
-    if let Some(node_bin) = find_executable_in(&search, &["node"]) {
-        if let Some(prefix) = node_bin.parent().and_then(|p| p.parent()) {
-            let v = dir_name_version(prefix);
-            let ver = if v == "homebrew" || v == "local" || v == "usr" {
-                "system".to_string()
-            } else {
-                v
-            };
-            push_det(
-                &mut out,
-                &mut seen,
-                "node",
-                format!("Node ({ver})"),
-                &ver,
-                prefix,
-                "system",
-            );
-        }
+    if let Some(prefix) = find_executable_in(&search, &["node"]).and_then(|b| bin_prefix(&b)) {
+        let ver = node_prefix_version(&prefix);
+        push_det(
+            &mut out,
+            &mut seen,
+            "node",
+            format!("Node ({ver})"),
+            &ver,
+            &prefix,
+            "system",
+        );
     }
 
     scan_python_and_rust_sdks(project_roots, home.as_deref(), &mut out, &mut seen);
