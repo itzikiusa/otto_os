@@ -284,42 +284,36 @@ pub(super) fn base_tool_catalog() -> Value {
             },
             {
                 "name": "workbench_list",
-                "description": "Read-only: list the session owner's Workbench scratch files in this workspace, incl. global ones (id, name, scope, language, pinned, folder, tags, size, rev, updated_at) — pinned first, newest first. `query` filters by a case-insensitive name substring; `trash: true` lists the trash instead. Read one with workbench_get.",
+                "description": "Read-only: list the session owner's scratch files — their Scratches folder, the same in every workspace, which the IDE opens as its Scratches project (path, size, modified_at), newest first. `query` filters by a case-insensitive path substring. Read one with workbench_get.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string", "description": "Optional case-insensitive name substring." },
-                        "trash": { "type": "boolean", "description": "List trashed files instead of live ones." }
+                        "query": { "type": "string", "description": "Optional case-insensitive path substring." }
                     }
                 }
             },
             {
                 "name": "workbench_get",
-                "description": "Read-only: get a Workbench file by doc_id or exact name, with metadata and current content. Set revision to read an older version. history adds newest-first metadata (history_limit: default 100, max 200). Continue with before_seq = next_before_seq; a full page may be followed by an empty page.",
+                "description": "Read-only: get a scratch file's text by `path` (relative to the Scratches folder, as workbench_list returns it). Older versions live in the IDE's Local History.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "doc_id": { "type": "string" },
-                        "name": { "type": "string", "description": "Exact file name (used when doc_id is omitted)." },
-                        "revision": { "type": "integer", "description": "Optional revision seq to read." },
-                        "history": { "type": "boolean", "description": "Include one newest-first revision metadata page." },
-                        "history_limit": { "type": "integer", "default": 100, "minimum": 1, "maximum": 200, "description": "Metadata rows per history page, clamped 1–200." },
-                        "before_seq": { "type": "integer", "description": "Exclusive revision cursor for an older history page." }
-                    }
+                        "path": { "type": "string", "description": "File path relative to the Scratches folder, e.g. `queries/daily.sql`." }
+                    },
+                    "required": ["path"]
                 }
             },
             {
                 "name": "workbench_write",
-                "description": "MUTATING (Agents Edit): write a Workbench scratch file's content — update by `doc_id`, else the live file with exact `name`, else create a new file named `name`. Every write is recorded as its own revision in the file's full history (nothing is overwritten or lost; the user can diff and restore). `language` optionally sets json | md | sql | html | mermaid | d2 | csv | yaml | … (default: auto-detect). `scope` (create only): workspace | global. Only write when the user asked for it.",
+                "description": "MUTATING (Agents Edit): create or replace a scratch file at `path` in the session owner's Scratches folder (folders are created). The previous and the new content both land in the IDE's Local History, so the user can diff and restore. `language` adds an extension when `path` has none: md | json | sql | yaml | html | mermaid | d2 | csv | py | sh | …. Only write when the user asked for it.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "doc_id": { "type": "string" },
-                        "name": { "type": "string", "description": "File name; required when doc_id is omitted." },
+                        "path": { "type": "string", "description": "File path relative to the Scratches folder." },
                         "content": { "type": "string" },
-                        "language": { "type": "string" }, "scope": { "type": "string", "enum": ["workspace", "global"] }
+                        "language": { "type": "string" }
                     },
-                    "required": ["content"]
+                    "required": ["path", "content"]
                 }
             },
             {

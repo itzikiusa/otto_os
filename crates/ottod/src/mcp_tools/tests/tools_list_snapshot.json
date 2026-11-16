@@ -877,70 +877,38 @@
       "properties": {
         "query": {
           "type": "string",
-          "description": "Optional case-insensitive name substring."
-        },
-        "trash": {
-          "type": "boolean",
-          "description": "List trashed files instead of live ones."
+          "description": "Optional case-insensitive path substring."
         }
       }
     },
     "workbench_get": {
       "type": "object",
       "properties": {
-        "doc_id": {
-          "type": "string"
-        },
-        "name": {
+        "path": {
           "type": "string",
-          "description": "Exact file name (used when doc_id is omitted)."
-        },
-        "revision": {
-          "type": "integer",
-          "description": "Optional revision seq to read."
-        },
-        "history": {
-          "type": "boolean",
-          "description": "Include one newest-first revision metadata page."
-        },
-        "history_limit": {
-          "type": "integer",
-          "default": 100,
-          "minimum": 1,
-          "maximum": 200,
-          "description": "Metadata rows per history page, clamped 1–200."
-        },
-        "before_seq": {
-          "type": "integer",
-          "description": "Exclusive revision cursor for an older history page."
+          "description": "File path relative to the Scratches folder, e.g. `queries/daily.sql`."
         }
-      }
+      },
+      "required": [
+        "path"
+      ]
     },
     "workbench_write": {
       "type": "object",
       "properties": {
-        "doc_id": {
-          "type": "string"
-        },
-        "name": {
+        "path": {
           "type": "string",
-          "description": "File name; required when doc_id is omitted."
+          "description": "File path relative to the Scratches folder."
         },
         "content": {
           "type": "string"
         },
         "language": {
           "type": "string"
-        },
-        "scope": {
-          "type": "string",
-          "enum": [
-            "workspace",
-            "global"
-          ]
         }
       },
       "required": [
+        "path",
         "content"
       ]
     },
