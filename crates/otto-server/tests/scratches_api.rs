@@ -34,6 +34,7 @@ fn user(id: &str) -> User {
 }
 
 /// A Workbench doc as the old build stored it (`created` orders the copy).
+#[allow(clippy::too_many_arguments)] // a test fixture: one positional column per field
 async fn seed_doc(
     pool: &DbPool,
     id: &str,
