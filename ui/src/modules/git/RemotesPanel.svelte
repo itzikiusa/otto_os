@@ -8,6 +8,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { toastError } from '../../lib/toastError';
   import { api } from '../../lib/api/client';
+  import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -58,6 +59,7 @@
     try {
       remotes = await api.post<RemoteInfo[]>(`/repos/${repoId}/remotes`, req);
       if (req.name === 'origin') invalidatePr(repoId);
+      git.bumpRefs(repoId); // the toolbar re-reads whether any remote exists
       loadFailed = false;
       toasts.success(label, req.name);
     } catch (e) {

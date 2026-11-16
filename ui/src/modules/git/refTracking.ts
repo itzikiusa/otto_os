@@ -18,6 +18,24 @@ export function splitRemoteRef(ref: string): { remote: string; branch: string } 
   return { remote: ref.slice(0, i), branch: ref.slice(i + 1) };
 }
 
+/** Create-PR target names: the local branches, then remote-only ones with
+ *  their remote stripped (`origin/master` → `master`), so a base that exists
+ *  only on the remote can be picked. */
+export function prTargetNames(local: string[], remote: string[]): string[] {
+  const names = new Set(local);
+  for (const r of remote) {
+    const b = splitRemoteRef(r).branch;
+    if (b !== 'HEAD') names.add(b);
+  }
+  return [...names];
+}
+
+/** The default Create-PR target: a usual base branch, never the source. */
+export function defaultPrTarget(names: string[], source: string): string {
+  const others = names.filter((n) => n !== source);
+  return others.find((n) => n === 'develop' || n === 'main' || n === 'master') ?? others[0] ?? '';
+}
+
 /** Where the commit an Amend would rewrite is already published, or null when
  *  it isn't (S15-28). `headRemotes` is the daemon's `git branch -r --contains
  *  HEAD` answer: it also catches a HEAD pushed under another name and a branch

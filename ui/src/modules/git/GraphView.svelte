@@ -14,6 +14,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { git } from '../../lib/stores/git.svelte';
+  import { canOpenPrs } from '../../lib/api/git';
   import { rel } from '../../lib/stores/now.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -150,6 +151,7 @@
       get worktreeBranches() { return index.worktreeBranches; },
       get refKnowledge() { return index.refKnowledge; },
       get baseBranch() { return index.baseBranch; },
+      get canOpenPr() { return canOpenPrs(git.allRepos.find((r) => r.id === repoId) ?? git.repos.find((r) => r.id === repoId)); },
       openCreatePr,
       chipsFor: (c) => index.chipsFor(c),
       setCleanupBase: (name) => data.setCleanupBase(name),
@@ -696,7 +698,7 @@
     cursor: pointer;
   }
   .graph-select { flex: 1; height: 100%; }
-  .ref-select { flex-shrink: 1; overflow: hidden; }
+  .ref-select { flex-shrink: 1; min-width: auto; } /* floor: the chip's icons + a few letters */
   .graph-row:has(.graph-select:focus-visible) {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
@@ -909,10 +911,7 @@
      overflowed a 156px (or 76px with the detail open) cell and, being
      end-aligned, got clipped at its START — "gin/CS3-15178-goo…" lost both
      ends. The HEAD badge and the +N expander stay rigid. */
-  .branch-cell :global(.ref-chip) {
-    flex-shrink: 1;
-    min-width: 0;
-  }
+  .branch-cell :global(.ref-chip) { flex-shrink: 1; }
 
   /* ── Multi-ref collapse: the "▾ +N" expander + its grouped popover ──────────── */
   .ref-expander {

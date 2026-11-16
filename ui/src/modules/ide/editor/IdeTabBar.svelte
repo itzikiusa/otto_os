@@ -29,6 +29,14 @@
 
   let { onsave }: Props = $props();
 
+  // A tab activated from outside the strip (Find file, ⌘E, a jump) scrolls into view.
+  let stripEl = $state<HTMLDivElement | undefined>(undefined);
+  $effect(() => {
+    if (!ide.activePath || !stripEl) return;
+    void ide.tabs.length;
+    stripEl.querySelector('.ide-tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  });
+
   function openTabMenu(e: MouseEvent, tab: IdeOpenTab): void {
     e.preventDefault();
     const el = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
@@ -71,7 +79,7 @@
     </button>
   </div>
 
-  <div class="ide-tabs-strip" role="toolbar" aria-label="Open files" data-testid="ide-tabs-strip">
+  <div class="ide-tabs-strip" role="toolbar" aria-label="Open files" data-testid="ide-tabs-strip" bind:this={stripEl}>
     {#each ide.tabs as tab (tab.path)}
       {@const isDirty = tab.dirty ?? (tab.content !== tab.savedContent)}
       {@const isActive = tab.path === ide.activePath}

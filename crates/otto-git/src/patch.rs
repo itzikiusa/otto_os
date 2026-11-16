@@ -491,10 +491,24 @@ impl LocalGit {
         let mut cmd = GitCmd::diff("diff")
             .args(["-U3"])
             .args(crate::local::RENAMES);
+        let mut paths = vec![path.to_string()];
         if cached {
             cmd = cmd.args(["--cached"]);
+            // A staged rename only pairs when BOTH names are in the pathspec;
+            // the new name alone reads as a plain add, which slips past the
+            // "stage the whole file" guard and unstages to `D` + `??`.
+            if let Some(orig) = self
+                .tracked_status()
+                .await?
+                .changes
+                .into_iter()
+                .find(|c| c.kind == "renamed" && c.path == path)
+                .and_then(|c| c.orig_path)
+            {
+                paths.push(orig);
+            }
         }
-        self.exec_bytes(&cmd.paths([path])).await
+        self.exec_bytes(&cmd.paths(&paths)).await
     }
 
     /// `git apply [--cached] [--reverse] --recount --whitespace=nowarn -`, with
@@ -1392,6 +1406,30 @@ index 1111111..2222222 100644
         assert!(!worktree.contains("+LINE TWO"), "{worktree}");
         // The response's own diff is the (still dirty) worktree for that path.
         assert_eq!(resp.diff.files.len(), 1);
+    }
+
+    /// A staged rename (with an edit, so it has a hunk) is refused as a hunk
+    /// unstage: reading only the new name made it a plain add, and the reverse
+    /// apply left `D old` + `?? new`.
+    #[tokio::test]
+    async fn unstage_hunk_of_a_staged_rename_is_refused() {
+        let (_tmp, dir, git) = repo();
+        let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        write(&dir, "old.txt", &body);
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "init"]);
+        sh_git(&dir, &["mv", "old.txt", "new.txt"]);
+        write(&dir, "new.txt", &body.replace("line 2\n", "LINE TWO\n"));
+        sh_git(&dir, &["add", "new.txt"]);
+        let e = run_test_hunk_op(&git, &req("new.txt", 0, "@@ -1,5 +1,5 @@", HunkOp::Unstage))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, Error::Invalid(m) if m == "stage the whole file"),
+            "{e:?}"
+        );
+        let st = String::from_utf8(git_bytes(&dir, &["status", "--porcelain"])).unwrap();
+        assert_eq!(st, "R  old.txt -> new.txt\n");
     }
 
     /// A symlink → file type change end to end: both parsed blocks carry the

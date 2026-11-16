@@ -498,8 +498,12 @@ impl LocalGit {
             return Err(Error::Invalid(format!("stash {sha} no longer exists")));
         };
         let base = format!("{sha}^1");
+        // `core.quotePath=false`: non-ASCII paths come back as UTF-8, not
+        // `"\303\274…"` octal escapes.
         let diff = |mode: &'static str| {
             let mut a = vec![
+                "-c",
+                "core.quotePath=false",
                 "diff",
                 "--no-ext-diff",
                 "--no-textconv",
@@ -536,6 +540,8 @@ impl LocalGit {
                 let u = untracked.clone();
                 async move {
                     self.run_read(&[
+                        "-c",
+                        "core.quotePath=false",
                         "show",
                         "--format=",
                         extra,

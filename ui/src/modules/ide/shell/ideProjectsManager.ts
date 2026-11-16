@@ -367,6 +367,7 @@ export async function performMutateFs(
     loadTree(dirPath?: string): Promise<void>;
     openFile(rawPath: string, opts?: { preview?: boolean }): Promise<void>;
     closeSplit(): void;
+    resolvePath(p: string): string;
   },
   flushBuf: (path: string) => void,
   evict: (paths: string[], clearProblems?: boolean) => void,
@@ -375,6 +376,9 @@ export async function performMutateFs(
   path: string,
   destPath?: string,
 ): Promise<boolean> {
+  // A typed destination ("src/x.ts") is project-relative; tabs and the tree key on absolute paths.
+  path = host.resolvePath(path);
+  if (destPath) destPath = host.resolvePath(destPath);
   try {
     const prefs = readIdePreferences();
     const containing = findContainingRoot(path, host.projectRoots);

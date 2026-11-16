@@ -67,6 +67,8 @@ export class IdeTargetEnvState {
   runConfigs = $state<IdeRunConfig[]>([]);
   detectedConfigs = $state<IdeRunConfig[]>([]);
   selectedConfigId = $state<string | null>(null);
+  /** The test / main last launched from the gutter; selected as `GUTTER_TARGET_ID`. */
+  gutterTarget = $state<IdeGutterItem | null>(null);
   envLoading = $state(false);
   envError = $state<string | null>(null);
   activeRun = $state<IdeRunState | null>(null);
@@ -93,6 +95,7 @@ export class IdeTargetEnvState {
     this.runConfigs = [];
     this.detectedConfigs = [];
     this.selectedConfigId = null;
+    this.gutterTarget = null;
     this.envLoading = false;
     this.envError = null;
     this.activeRun = null;
@@ -414,7 +417,16 @@ export async function fetchIdeWorkspaceTree(
         ? rawEntries.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) }))
         : rawEntries;
       host.treeRootEntries = entries;
-      host.childrenByDir = { ...host.childrenByDir, [normalizeRootPath(host.target.root)]: entries };
+      // A root load is a refresh: expanded folders refetch, and collapsed ones drop their
+      // cached listing so the next expand reads the disk instead of a stale snapshot.
+      const rootKey = normalizeRootPath(host.target.root);
+      const kept: typeof host.childrenByDir = { [rootKey]: entries };
+      for (const [dir, children] of Object.entries(host.childrenByDir)) {
+        if (dir === rootKey || !host.expandedDirs[dir]) continue;
+        kept[dir] = children;
+        if (!host.additionalRoots.includes(dir)) void fetchIdeWorkspaceTree(host, dir, onProbeBuildTool);
+      }
+      host.childrenByDir = kept;
       if (host.runConfigs.length === 0) {
         const fast = detectFastRunConfigs(host.target.root, entries);
         host.detectedConfigs = fast;

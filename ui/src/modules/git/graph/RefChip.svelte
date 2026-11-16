@@ -57,8 +57,6 @@
     border-inline-end: 3px solid var(--lane, transparent);
     white-space: nowrap;
     max-width: 160px;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   /* Local branch — subtle, neutral. */
   .ref-chip.kind-local {
@@ -102,11 +100,13 @@
   .ref-chip > :global(svg) {
     flex-shrink: 0;
   }
+  /* Only the LABEL ellipsizes, and never below a few letters: the whole chip
+     used to ellipsize, so the icons ate a narrow column and HEAD read "d…". */
   .chip-label {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    min-width: 0;
+    min-width: 3ch;
   }
   .chip-ab {
     display: inline-flex;

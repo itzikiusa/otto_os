@@ -1037,3 +1037,57 @@ async fn rename_text_fallback_stays_in_the_language_and_lsp_edits_are_applied_as
         "Call add to add.\n"
     );
 }
+
+#[tokio::test]
+async fn idle_change_snapshot_of_just_saved_bytes_is_not_a_second_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    let ws_str = ws.to_string_lossy().into_owned();
+    let (_ctx, app) =
+        build_test_app(tmp.path().join("otto-data"), &tmp.path().join("state.db")).await;
+    let content = "export const a = 1;\n";
+    let target = json!({ "kind": "local", "root": ws_str });
+
+    let (st, _) = send_json(
+        &app,
+        Method::PUT,
+        "/ide/fs/file",
+        Some(json!({ "target": target, "path": "a.ts", "content": content })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    for label in ["Change", "Before rename"] {
+        let (st, body) = send_json(
+            &app,
+            Method::POST,
+            "/ide/history/snapshot",
+            Some(json!({ "target": target, "path": "a.ts", "content": content, "label": label })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{label}: {body}");
+    }
+
+    let (st, body) = send_json(
+        &app,
+        Method::GET,
+        &format!("/ide/history/list?root={}", urlencode(&ws_str)),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let labels: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["rel_path"] == "a.ts")
+        .map(|e| e["label"].as_str().unwrap_or(""))
+        .collect();
+    let mut sorted = labels.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        ["Before rename", "Saved"],
+        "the idle Change duplicates the save; a user label on the same bytes is kept: {labels:?}"
+    );
+}

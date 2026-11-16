@@ -35,7 +35,7 @@ pub(crate) fn unborn_or_err(stderr: &str, stdout: &[u8], code: Option<i32>) -> R
 /// Matched on git's stable porcelain wording; anything unrecognised keeps the
 /// conservative 502 (a genuine network/auth failure looks like nothing here).
 pub(crate) fn local_refusal(msg: &str) -> bool {
-    const MARKERS: [&str; 29] = [
+    const MARKERS: [&str; 34] = [
         "local changes to the following files would be overwritten",
         "would be overwritten by",
         "please commit your changes or stash them",
@@ -77,6 +77,15 @@ pub(crate) fn local_refusal(msg: &str) -> bool {
         "does not have any commits yet",
         // A conflicted path handed to restore/unstage — resolve it first.
         "is unmerged",
+        // Branch create/rename/delete refusals: a bad or taken name, or a
+        // branch another worktree has checked out.
+        "is not a valid branch name",
+        "already exists",
+        "used by worktree",
+        // Publish on a repo with no remote — nothing was dialled.
+        "no configured push destination",
+        // A cherry-pick/revert whose change is already in HEAD.
+        "is now empty",
     ];
     let lc = msg.to_ascii_lowercase();
     MARKERS.iter().any(|m| lc.contains(m))
@@ -210,6 +219,22 @@ mod tests {
                     .contains(broken.trim_start_matches("fatal: ")),
                 "{err}"
             );
+        }
+    }
+
+    /// Branch-dialog and publish refusals are the user's input or local
+    /// setup, never a 502 "provider outage" (git's own wording, 2.46).
+    #[test]
+    fn branch_and_publish_refusals_are_conflicts() {
+        for stderr in [
+            "fatal: 'bad..name' is not a valid branch name\nhint: See `man git check-ref-format`",
+            "fatal: a branch named 'x' already exists",
+            "error: cannot delete branch 'x' used by worktree at '/tmp/w'",
+            "fatal: No configured push destination.\nEither specify the URL",
+            "The previous cherry-pick is now empty, possibly due to conflict resolution.",
+        ] {
+            let err = upstream_err(stderr, "", Some(128));
+            assert!(matches!(err, Error::Conflict(_)), "{stderr}: {err:?}");
         }
     }
 }

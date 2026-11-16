@@ -298,7 +298,7 @@ schemas and full finding-action routes.
 |---|---|
 | Start / latest PR review | `POST` / `GET /repos/{id}/prs/{number}/review` |
 | PR history | `GET /repos/{id}/prs/{number}/reviews` |
-| Start / latest local review | `POST` / `GET /repos/{id}/local-review` |
+| Start / latest local review | `POST` / `GET /repos/{id}/local-review` (`409` while one is running) |
 | Local history | `GET /repos/{id}/local-reviews` |
 | Retry / stop one reviewer | `POST /reviews/{id}/agents/{index}/retry` or `/stop` |
 | Retry final verification | `POST /reviews/{id}/summarizer/retry` |

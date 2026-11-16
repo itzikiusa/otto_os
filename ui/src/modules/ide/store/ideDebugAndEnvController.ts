@@ -14,6 +14,7 @@ import {
   normalizeIncomingDebugSnapshot,
   refreshWatchValues,
   syncSnapshotBreakpointsToStore,
+  syncStopVariables,
 } from './ideDebugSnapshotSync';
 import {
   mergeGoBuildTagsIntoFlags,
@@ -25,9 +26,10 @@ export {
   normalizeIncomingDebugSnapshot,
   refreshWatchValues,
   syncSnapshotBreakpointsToStore,
+  syncStopVariables,
 };
 import {
-  collabGuestPost, defaultRunnerForLanguage, IdeCollabHttpError, ideTargetKey, streamIdeSse, type IdeBottomTab,
+  collabGuestPost, defaultRunnerForLanguage, GUTTER_TARGET_ID, IdeCollabHttpError, ideTargetKey, streamIdeSse, type IdeBottomTab,
   type IdeBreakpoint, type IdeCollabRoom, type IdeDebugSessionSnapshot, type IdeDetectedSdk,
   type IdeEnvVar, type IdeGutterItem, type IdeInstalledSdk, type IdeInstallJob,
   type IdeOpenTab, type IdeProjectEnvironment, type IdeProjectRoot, type IdePythonVenv,
@@ -60,6 +62,7 @@ export interface DebugAndEnvHost {
   runConfigs: IdeRunConfig[];
   detectedConfigs: IdeRunConfig[];
   selectedConfigId: string | null;
+  readonly envState: { gutterTarget: IdeGutterItem | null };
   envLoading: boolean;
   envError: string | null;
   activeRun: IdeRunState | null;
@@ -296,7 +299,9 @@ export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
     const combined = mergeRunConfigs(resp.configs ?? [], host.detectedConfigs);
     host.runConfigs = combined;
     const explicitFirst = combined.find((c) => !c.auto_detected);
-    const hasCurrent = host.selectedConfigId && combined.some((c) => c.id === host.selectedConfigId);
+    const hasCurrent = host.selectedConfigId === GUTTER_TARGET_ID
+      ? Boolean(host.envState.gutterTarget)
+      : Boolean(host.selectedConfigId && combined.some((c) => c.id === host.selectedConfigId));
     if (!hasCurrent || (host.selectedConfigId?.startsWith('auto:') && explicitFirst)) {
       host.selectedConfigId = explicitFirst?.id ?? combined[0]?.id ?? null;
     }
@@ -391,6 +396,8 @@ export async function launchIdeRun(
   prevSseCtl: AbortController | null = null,
 ): Promise<{ poller: Poller | null; sseCtl: AbortController | null }> {
   if (!host.target.root) return { poller: prevPoller, sseCtl: prevSseCtl };
+  const gutterItem = opts.adhoc || opts.configId ? null : selectedGutterTarget(host);
+  if (gutterItem) launchGutterAction(host, gutterItem, 'run', (adhoc) => { opts = { ...opts, adhoc }; }, () => {});
   const keepTc = Boolean(opts.keepTestcontainers || host.keepTestcontainersAlive);
   const wantCoverage = Boolean(opts.coverage || opts.adhoc?.coverage);
   const rawId = opts.configId ?? (opts.adhoc ? undefined : host.selectedConfigId ?? undefined);
@@ -498,6 +505,15 @@ export async function launchIdeRun(
   }
 }
 
+/** The selected toolbar target when it is the last gutter launch ("From the editor"). */
+function selectedGutterTarget(host: DebugAndEnvHost): IdeGutterItem | null {
+  return host.selectedConfigId === GUTTER_TARGET_ID ? host.envState.gutterTarget : null;
+}
+
+const TOOL_ARGV_RUNNERS = new Set([
+  'go_run', 'go_test', 'go_build', 'cargo_run', 'cargo_test', 'pytest', 'npm', 'vitest', 'maven', 'java_junit', 'gradle',
+]);
+
 export function launchGutterAction(
   host: DebugAndEnvHost,
   item: IdeGutterItem,
@@ -513,6 +529,9 @@ export function launchGutterAction(
   const goFlags = lang === 'go'
     ? mergeGoBuildTagsIntoFlags([], resolveRepoGoBuildTags(host.projectEnv, host.target.root, repoInfo.path, openDoc))
     : [];
+  // The toolbar Run / Debug (and ⌃R / ⌃D) now repeat this test / main.
+  host.envState.gutterTarget = item;
+  host.selectedConfigId = GUTTER_TARGET_ID;
   if (mode === 'debug') {
     onDebug({
       language: lang,
@@ -555,6 +574,8 @@ export async function launchDebugSession(
   onSnapshot: (snap: IdeDebugSessionSnapshot) => void,
 ): Promise<AbortController | null> {
   if (!host.target.root) return prevCtl;
+  const gutterItem = opts.launch || opts.configId ? null : selectedGutterTarget(host);
+  if (gutterItem) launchGutterAction(host, gutterItem, 'debug', () => {}, (o) => { opts = { ...opts, ...o }; });
   const rawCfgId = opts.configId ?? host.selectedConfigId ?? undefined;
   const cfg = rawCfgId ? host.runConfigs.find((c) => c.id === rawCfgId) : undefined;
   const fallbackLang = host.activeTab?.language || 'go';
@@ -576,7 +597,9 @@ export async function launchDebugSession(
     const tcEnv: Record<string, string> = host.keepTestcontainersAlive ? { TESTCONTAINERS_RYUK_DISABLED: 'true' } : {};
     const baseLaunch = opts.launch ?? {
       program,
-      args: cfg?.args ?? [],
+      // A tool runner's args are its own command line (`run ./cmd/x`, `test -v ./...`),
+      // not the debuggee's argv; script and custom runners pass theirs through.
+      args: cfg && !TOOL_ARGV_RUNNERS.has(cfg.runner) ? cfg.args : [],
       build_flags: cfg?.build_flags ?? [],
       cwd: cfg?.cwd || repoInfo.path || host.target.root,
       test_name: cfg?.test_filter || undefined,

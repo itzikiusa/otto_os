@@ -436,8 +436,8 @@ async fn merge_abort_with_nothing_in_progress_refuses_and_keeps_work() {
     assert!(st.changes.iter().any(|c| c.path == "e.txt"));
 }
 
-/// In a LINKED worktree `.git` is a file: the merge label must still come
-/// from MERGE_MSG in the real git dir, not fall back to a bare sha.
+/// In a LINKED worktree `.git` is a file: the merge label still names the
+/// merged branch (not the MERGE_MSG line, which overflowed the side buttons).
 #[tokio::test]
 async fn merge_source_reads_merge_msg_in_a_linked_worktree() {
     let (tmp, dir) = fixture_n_commits(1);
@@ -460,7 +460,54 @@ async fn merge_source_reads_merge_msg_in_a_linked_worktree() {
     assert!(!merged.status.success(), "the fixture must conflict");
     let ms = LocalGit::new(&wt).merge_status().await.unwrap();
     assert!(ms.merging);
-    assert_eq!(ms.source.as_deref(), Some("Merge branch 'side' into wtb"));
+    assert_eq!(ms.source.as_deref(), Some("side"));
+    assert_eq!(ms.ours, None);
+}
+
+/// A rebase conflict names both sides: theirs = the branch being replayed,
+/// ours = what it is replayed onto (HEAD is detached, so the branch can't).
+#[tokio::test]
+async fn rebase_conflict_labels_name_the_branch_and_onto() {
+    let (_tmp, dir) = fixture_n_commits(1);
+    sh_git(&dir, &["checkout", "-b", "topic"]);
+    write(&dir, "f.txt", "topic\n");
+    sh_git(&dir, &["commit", "-am", "topic"]);
+    sh_git(&dir, &["checkout", "main"]);
+    write(&dir, "f.txt", "main\n");
+    sh_git(&dir, &["commit", "-am", "main"]);
+    sh_git(&dir, &["checkout", "topic"]);
+    let rebased = std::process::Command::new("git")
+        .current_dir(&dir)
+        .args(["rebase", "main"])
+        .output()
+        .unwrap();
+    assert!(!rebased.status.success(), "the fixture must conflict");
+    let ms = LocalGit::new(&dir).merge_status().await.unwrap();
+    assert_eq!(ms.op.as_deref(), Some("rebase"));
+    assert_eq!(ms.source.as_deref(), Some("topic"));
+    assert_eq!(ms.ours.as_deref(), Some("main"));
+}
+
+/// Cherry-picking a change already in HEAD is skipped and refused with a 409,
+/// not left mid-pick (CHERRY_PICK_HEAD + a "Complete" that could never work).
+#[tokio::test]
+async fn empty_cherry_pick_is_skipped_and_refused() {
+    let (_tmp, dir) = fixture_n_commits(1);
+    let git = LocalGit::new(&dir);
+    sh_git(&dir, &["checkout", "-b", "side"]);
+    write(&dir, "f.txt", "same\n");
+    sh_git(&dir, &["commit", "-am", "side"]);
+    let side_sha = git.rev_parse("side").await.unwrap();
+    sh_git(&dir, &["checkout", "main"]);
+    write(&dir, "f.txt", "same\n");
+    sh_git(&dir, &["commit", "-am", "main, same change"]);
+    match git.cherry_pick(&side_sha).await {
+        Err(Error::Conflict(m)) => assert!(m.contains("already in HEAD"), "{m}"),
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+    let st = git.status().await.unwrap();
+    assert_eq!(st.op_in_progress, None);
+    assert!(!dir.join(".git/CHERRY_PICK_HEAD").exists());
 }
 
 /// A conflicting cherry-pick is a normal outcome: status reports the op +

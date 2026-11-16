@@ -52,7 +52,7 @@ fn references_and_rename_skip_comments_strings_and_substrings() {
 fn code_actions_populate_concrete_edits_and_fallback_formatter_works() {
     let messy_go =
         "package main\nfunc calc(x int) (int, error) {\nres, err := step(x)\nreturn res, err\n}\n";
-    assert!(format_builtin_fallback("go", messy_go).contains("\tres, err := step(x)"));
+    assert_eq!(format_builtin_fallback("go", messy_go), messy_go);
     let actions = generate_code_actions("main.go", "go", messy_go, 3, 2, &[]);
     let err_act = actions
         .iter()
@@ -544,5 +544,22 @@ fn ts_outline_lists_typed_arrows_class_fields_abstract_methods_and_enum_members(
         names(status),
         [("Active", "constant"), ("Closed", "constant")]
             .map(|(a, b)| (a.to_string(), b.to_string()))
+    );
+}
+
+#[test]
+fn builtin_formatter_leaves_code_and_markdown_hard_breaks_alone() {
+    // A template literal's continuation lines are string content, not code to re-indent.
+    let ts = "function f() {\n  const sql = `\n  SELECT *\n    FROM t\n`;\n  return sql;\n}\n";
+    assert_eq!(format_builtin_fallback("typescript", ts), ts);
+    // A two-space indent project is not forced to four.
+    let rs = "fn main() {\n  let s = r#\"a\n   b\"#;\n}\n";
+    assert_eq!(format_builtin_fallback("rust", rs), rs);
+    // Two trailing spaces are a Markdown hard line break.
+    assert_eq!(format_builtin_fallback("markdown", "a  \nb\n"), "a  \nb\n");
+    // Invalid JSON still gets the brace re-indent.
+    assert_eq!(
+        format_builtin_fallback("jsonc", "{\n// c\n\"a\": 1,\n}\n"),
+        "{\n  // c\n  \"a\": 1,\n}\n"
     );
 }

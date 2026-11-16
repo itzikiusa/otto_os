@@ -232,11 +232,17 @@ export async function runFormatActiveFile(
         });
     if (noteFormatSkipped(targetPath, resp)) return; // on purpose, not an error: buffer untouched
     if (resp.changed && typeof resp.formatted === 'string') {
-      if (bufPerf.getBuffer(host, targetPath) !== content || !host.tabs.some((t) => t.path === targetPath)) {
+      if (!host.tabs.some((t) => t.path === targetPath)) return;
+      if (bufPerf.getBuffer(host, targetPath) !== content) {
+        toasts.info('The file changed while formatting. Format it again');
         return;
       }
       await host.applyAgentEdit(targetPath, normalizeEditorLf(resp.formatted));
       toasts.info(opts.organizeImports ? 'Optimized imports' : `Formatted with ${resp.formatter || 'formatter'}`);
+    } else {
+      toasts.info(opts.organizeImports ? 'Imports are already in order'
+        : resp.formatter === 'builtin' ? 'No changes: no formatter is installed for this file type'
+        : `Already formatted (${resp.formatter || 'formatter'})`);
     }
   } catch (e) {
     toastError(opts.organizeImports ? 'Couldn’t optimize imports' : 'Couldn’t format file', e);

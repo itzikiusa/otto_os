@@ -135,7 +135,8 @@ active:
 
 - **Multi-cursor:** `Option + Click` adds/removes cursors; `Option + Drag`
   draws rectangular column selections; `⌥⇧I` splits a multi-line selection into
-  one cursor per line; `⌥⇧↑` / `⌥⇧↓` (`⌘⌥↑` / `⌘⌥↓`) adds cursors above/below;
+  one cursor per line; `⌘⌥↑` / `⌘⌥↓` adds cursors above/below (`⌥⇧↑` / `⌥⇧↓`
+  move the line);
   `⌃G` selects the next occurrence and `⌃⌘G` selects all occurrences.
 - **Add Prefix / Suffix to Lines:** Wraps every selected line (or every cursor
   line) with a chosen prefix and/or suffix in a single undoable CodeMirror
@@ -245,6 +246,11 @@ items directly into the editor gutter:
 - **Shell (Bash / Zsh):** runnable scripts and functions (plus custom `gutter_detectors` contributed by runtime IDE plugins)
 
 Clicking the gutter play button offers **Run** or **Debug** for that exact item.
+That item then becomes the toolbar's selected target (listed under **From the
+editor**), so the toolbar Run / Debug and `⌃R` / `⌃D` repeat it, like an
+IntelliJ temporary configuration. Debugging a JUnit test runs it through a small
+JUnit 5 Launcher / JUnit 4 `JUnitCore` launcher compiled next to the module's
+classes, so it stops inside the test.
 
 How each item runs:
 

@@ -52,7 +52,10 @@ export interface MergeConflictStatus {
   /** Which operation; absent/undefined for conflicts with no state file
    *  (a conflicting stash pop / squash). */
   op?: GitOpInProgress | null;
+  /** Incoming (theirs) side: the branch merged in, or the branch a rebase replays. */
   source: string | null;
+  /** Ours side when it isn't the checked-out branch (what a rebase replays onto). */
+  ours?: string | null;
   conflicted_files: string[];
 }
 

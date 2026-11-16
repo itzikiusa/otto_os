@@ -342,7 +342,7 @@ class IdeStore {
     this.resetTargetState({ kind: 'local', workspace_id: null, root: '', connection_id: null, connection_name: null });
   }
 
-  confirmDiscardUnsaved(): Promise<boolean> { return confirmDiscardOnSwitch(this, this.bufPerf, () => this.flushAutoSave()); }
+  confirmDiscardUnsaved(): Promise<boolean> { return confirmDiscardOnSwitch(this, this.bufPerf, () => this.flushAutoSave(), (p) => this.saveFile(p)); }
   private resetTargetState(next: IdeTargetSpec, overrideAdditionalRoots?: string[]): void {
     this.disposeStreams();
     resetTargetLifecycleState(this, next, () => { this._activePath = null; }, overrideAdditionalRoots);
@@ -390,7 +390,7 @@ class IdeStore {
   async toggleDir(dirPath: string): Promise<void> {
     const clean = normalizeRootPath(dirPath); const next = !this.expandedDirs[clean];
     this.expandedDirs = { ...this.expandedDirs, [clean]: next };
-    if (next && !this.childrenByDir[clean]) await this.loadTree(clean);
+    if (next) await this.loadTree(clean); // every expand rereads the disk (no fs watcher); the cached listing shows meanwhile
   }
   collapseAllDirs(): void {
     const primary = normalizeRootPath(this.target.root);
@@ -473,8 +473,7 @@ class IdeStore {
   async closeTab(path: string): Promise<void> {
     await performCloseTab(this, this.bufPerf, path);
     if (!this.tabs.some((t) => t.path === path)) {
-      this.closedTabPaths = [path, ...this.closedTabPaths.filter((p) => p !== path)].slice(0, 20);
-      this.evictClosedMetadata([path]);
+      this.forgetClosedTabs([path]);
       saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
     }
     this.syncWorkspacePort();
@@ -485,11 +484,12 @@ class IdeStore {
     this.closedTabPaths = this.closedTabPaths.slice(1);
     await this.openFile(next, { preview: false });
   }
-  closeOtherTabs(keepPath: string): void { performCloseTabBatch(this, this.bufPerf, (closing) => this.evictClosedMetadata(closing), keepPath); }
-  closeUnmodifiedTabs(): void { performCloseTabBatch(this, this.bufPerf, (closing) => this.evictClosedMetadata(closing)); }
+  private forgetClosedTabs(paths: string[]): void { this.closedTabPaths = [...paths, ...this.closedTabPaths.filter((p) => !paths.includes(p))].slice(0, 20); this.evictClosedMetadata(paths); } // ⌘⇧T reopens newest first
+  closeOtherTabs(keepPath: string): void { performCloseTabBatch(this, this.bufPerf, (closing) => this.forgetClosedTabs(closing), keepPath); }
+  closeUnmodifiedTabs(): void { performCloseTabBatch(this, this.bufPerf, (closing) => this.forgetClosedTabs(closing)); }
 
   async closeAllTabs(opts?: { force?: boolean }): Promise<void> {
-    await performCloseAllTabs(this, this.bufPerf, (paths) => this.evictClosedMetadata(paths), (p) => this.saveFile(p, false, { silent: true }), opts);
+    await performCloseAllTabs(this, this.bufPerf, (paths) => this.forgetClosedTabs(paths), (p) => this.saveFile(p, false, { silent: true }), opts);
     saveWorkspaceOpenTabs(this.target.root, this.tabs.map((t) => t.path), this._activePath, this.splitPath);
     this.syncWorkspacePort();
   }
@@ -704,7 +704,7 @@ class IdeStore {
       if (!this.debugState.lastDebugLaunch && (sl?.program || sl?.attach_port)) {
         this.debugState.lastDebugLaunch = { configId: snap.config_id ?? undefined, language: snap.language, launch: { program: sl.program, args: sl.args, build_flags: sl.build_flags, cwd: sl.cwd ?? undefined, test_name: sl.test_name ?? undefined, attach_port: sl.attach_port ?? undefined, env: sl.env, env_file: sl.env_file, inherit_shell_env: sl.inherit_shell_env, sdk_path: sl.sdk_path } };
       }
-      m.syncSnapshotBreakpointsToStore(this, snap);
+      m.syncSnapshotBreakpointsToStore(this, snap); m.syncStopVariables(this, cur, snap);
       if (snap.state === 'paused' && paused && snap.paused_line) {
         if (`${paused}:${snap.paused_line}` !== prevPaused) void this.openFile(paused, { line: snap.paused_line, preview: false });
         void this.refreshWatches();

@@ -291,6 +291,7 @@ async fn full_mock_dap_lifecycle_over_duplex() {
     .expect("timed out waiting for paused snapshot");
 
     assert_eq!(paused.stopped_reason.as_deref(), Some("breakpoint"));
+    assert_eq!(paused.stop_seq, 1);
     assert_eq!(paused.paused_line, Some(6));
     assert_eq!(paused.threads.len(), 2);
     assert_eq!(paused.stack_frames.len(), 1);
@@ -384,6 +385,7 @@ async fn full_mock_dap_lifecycle_over_duplex() {
     .await
     .expect("timed out waiting for step_over pause");
     assert_eq!(stepped.stopped_reason.as_deref(), Some("step"));
+    assert_eq!(stepped.stop_seq, 2, "every stop bumps stop_seq");
     assert!(stepped.revision > paused.revision);
     assert!(stepped.revision >= step_ack.revision);
 
@@ -1150,4 +1152,27 @@ async fn shell_dap_logpoints_hit_conditions_and_restart_preserve_live_events() {
         .await
         .unwrap();
     assert_eq!(stopped.state, IdeDebugState::Terminated);
+}
+
+#[test]
+fn breakpoint_relocation_on_one_line_is_skipped_but_a_loop_revisit_is_not() {
+    use super::super::session_inspect::is_same_line_relocation;
+    let key = (1, 3, Some("/w/src/main.rs".to_string()), 8);
+    let first = (key.clone(), 0x950);
+    // `println!` compiled to three locations: the 2nd and 3rd are relocations.
+    assert!(is_same_line_relocation(Some(&first), &key, 0x95c));
+    // A loop coming back to the line restarts at the first address.
+    assert!(!is_same_line_relocation(Some(&first), &key, 0x950));
+    // Another line, another depth (recursion) or no previous stop: a real stop.
+    assert!(!is_same_line_relocation(
+        Some(&first),
+        &(1, 3, key.2.clone(), 9),
+        0x960
+    ));
+    assert!(!is_same_line_relocation(
+        Some(&first),
+        &(1, 4, key.2.clone(), 8),
+        0x960
+    ));
+    assert!(!is_same_line_relocation(None, &key, 0x95c));
 }

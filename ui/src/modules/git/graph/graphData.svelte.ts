@@ -621,8 +621,9 @@ export function createGraphData(h: GraphDataHost) {
   }
 
   /** Run a mutating POST that returns RepoStatusResp, then refresh + toast.
-   *  Errors are surfaced via toast and swallowed (the graph is left untouched). */
-  async function mutate(path: string, body: unknown, okTitle: string, okDetail?: string): Promise<void> {
+   *  Errors are surfaced via toast and swallowed (the graph is left untouched);
+   *  resolves false on an error so a dialog can re-open with what was typed. */
+  async function mutate(path: string, body: unknown, okTitle: string, okDetail?: string): Promise<boolean> {
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${h.repoId}${path}`, body);
       await refreshAfter(s);
@@ -636,6 +637,7 @@ export function createGraphData(h: GraphDataHost) {
       } else {
         toasts.success(okTitle, okDetail);
       }
+      return true;
     } catch (e) {
       toastError('Couldn’t complete the Git action', e);
       // A failed mutation can still have partially landed — most notably a
@@ -645,6 +647,7 @@ export function createGraphData(h: GraphDataHost) {
       // delete it again). Best-effort: the toast above already reported the
       // failure, so a refresh error here must stay silent.
       await refreshAfter().catch(() => {});
+      return false;
     }
   }
 
