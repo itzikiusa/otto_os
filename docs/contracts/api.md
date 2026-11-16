@@ -2346,6 +2346,9 @@ config/mutations = `ws editor` (config write = `ws admin`).
 | POST /improvement/edits/{eid}/approve | ws editor | — | apply a pending edit |
 | POST /improvement/edits/{eid}/reject | ws editor | — | reject a pending edit |
 | POST /improvement/edits/{eid}/rollback | ws editor | — | roll back an applied edit |
+| GET /self-improvement | ws viewer, per workspace | — | `SelfImprovementSummary {workspaces, enabled, pending, pending_workspaces}` over the caller's unarchived workspaces they can view |
+| PUT /self-improvement | ws admin, per workspace | `{enabled: bool}` | `BulkImprovementResp {changed, workspaces, skipped}` — sets `enabled` (which also gates live evolve) in every unarchived workspace the caller administers; `skipped` = visible workspaces without Admin. Person-only (agent credentials are refused) |
+| POST /improvement/edits/reject | ws editor, per workspace | — | `BulkImprovementResp` — rejects every pending edit in the caller's unarchived workspaces where they are Editor+; applied edits are untouched (roll those back one by one). Person-only |
 | POST /sessions/{id}/evolve | ws SelfImprovement:editor | — | trigger a manual per-session live-evolve pass; returns `{ run_id }` |
 
 ## Skill evaluations (eval lab)

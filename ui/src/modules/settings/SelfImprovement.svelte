@@ -24,6 +24,7 @@
     ImprovementRun,
     SelfImprovementConfig,
   } from '../../lib/api/types';
+  import SelfImprovementBulk from './SelfImprovementBulk.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -47,6 +48,8 @@
   let allowlistText = $state('');
   let runs: ImprovementRun[] = $state([]);
   let pending: ImprovementEdit[] = $state([]);
+  // The SAVED on/off state drives the calm “off” page, not the form toggle.
+  let savedEnabled = $state(false);
   let loading = $state(false);
   let loadError = $state('');
   let saving = $state(false);
@@ -159,6 +162,7 @@
     cfgWs = id;
     allowlistText = fresh.skill_allowlist.join(', ');
     savedKey = formKey(fresh, allowlistText);
+    savedEnabled = fresh.enabled;
   }
 
   // Generation guard: a slow load for workspace A landing after a switch to B
@@ -226,6 +230,14 @@
     } finally {
       saving = false;
     }
+  }
+
+  /** The off state's “Turn on”: saves `enabled` with the rest as loaded. */
+  async function turnOn(): Promise<void> {
+    if (!cfg) return;
+    cfg.enabled = true;
+    await save();
+    if (cfg && !savedEnabled) cfg.enabled = false; // the save failed (toasted)
   }
 
   // ---------------------------------------------------------------------------
@@ -379,6 +391,8 @@
         >
           <Icon name="sparkle" size={12} /> {evolving ? 'Evolving…' : 'Evolve now'}
         </button>
+        <SelfImprovementBulk watch={`${wsId}:${pending.length}:${savedEnabled}`} onchanged={() => wsId && void load(wsId)} />
+        {#if savedEnabled}
         <button
           class="btn small primary"
           disabled={saving || !dirty || !!formError}
@@ -387,6 +401,7 @@
         >
           {saving ? 'Saving…' : 'Save'}
         </button>
+        {/if}
       {/if}
     {/snippet}
   </PageHeader>
@@ -473,6 +488,10 @@
       </div>
     {/if}
 
+    {#if !savedEnabled}
+      <EmptyState variant="page" icon="sparkle" headingLevel={2} title="Self-improvement is off" actionLabel={saving ? 'Turning on…' : 'Turn on'} actionIcon="play" onaction={() => void turnOn()}
+        body="Otto isn’t reviewing this workspace’s sessions. Turn it on to improve memory and skills from recent sessions; tune the schedule afterwards." />
+    {:else}
     <h2 class="section-title">Schedule</h2>
     <div class="card form tfirst">
       <SettingToggle
@@ -587,6 +606,7 @@
           </div>
         {/each}
       </div>
+    {/if}
     {/if}
   {/if}
   </PageBody>
