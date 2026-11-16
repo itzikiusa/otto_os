@@ -81,6 +81,8 @@ test('asThreadSession: idle + background work maps to `running`, a turn to `work
   assert.equal(asThreadSession({ ...base, background_tasks: bg }).status, 'running');
   assert.equal(asThreadSession({ ...base, status: 'working', background_tasks: bg }).status, 'working');
   assert.equal(asThreadSession({ ...base, status: 'closed', background_tasks: bg }).status, 'idle');
+  // A turn waiting on an approval is in flight, not Idle (A2).
+  assert.equal(asThreadSession({ ...base, status: 'awaiting_permission' }).status, 'working');
   assert.equal(asThreadSession(base).status, 'idle');
 });
 

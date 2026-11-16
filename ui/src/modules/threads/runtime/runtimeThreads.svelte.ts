@@ -88,7 +88,8 @@ export function asThreadSession(r: RuntimeSession): Session {
     // Background work the agent started keeps the row alive between turns,
     // but calm: `running` ("Background task running"), never the working
     // pulse of a turn — the agent itself is idle.
-    status: r.status === 'working' || r.status === 'starting' ? 'working' : r.status !== 'closed' && (r.background_tasks?.length ?? 0) > 0 ? 'running' : 'idle',
+    // A turn waiting for an approval is still a turn in flight, never "Idle".
+    status: r.status === 'working' || r.status === 'starting' || r.status === 'awaiting_permission' ? 'working' : r.status !== 'closed' && (r.background_tasks?.length ?? 0) > 0 ? 'running' : 'idle',
     cwd: r.cwd,
     provider_session_id: r.native_thread_id ?? null,
     connection_id: null,
