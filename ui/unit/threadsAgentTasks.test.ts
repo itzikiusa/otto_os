@@ -221,3 +221,15 @@ test('structured task_settlement, due_at deadlines, and top-level dynamic_tool s
   );
   assert.equal(t.finished[2].output, 'All 14 smoke checks passed');
 });
+
+test('a swarm row and a swarm subagent card both name their agy member; other rows none', async () => {
+  const { swarmMemberOf, withSwarm } = await import('../src/modules/threads/runtime/agentTasks.ts');
+  const carded = card('t1:swarm:echoer', 'echoer', 'running', '2026-11-13T10:00:00Z', { tool_name: 'swarm' });
+  const plain = card('t1:tool:a', 'alpha', 'running', '2026-11-13T10:00:00Z');
+  const items = [carded, plain];
+  const t = withSwarm(agentTasks(items, []), [{ name: 'echoer', killed: false }, { name: 'dap-lsp', killed: false }], items);
+  const by = (label: string) => t.running.find((r) => r.label === label)!;
+  assert.equal(swarmMemberOf(by('echoer'), items), 'echoer');
+  assert.equal(swarmMemberOf(by('dap-lsp'), items), 'dap-lsp');
+  assert.equal(swarmMemberOf(by('alpha'), items), null);
+});

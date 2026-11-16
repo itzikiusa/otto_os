@@ -547,6 +547,14 @@ export interface SwarmMemberLite {
 /** `swarm:<name>`: a swarm member row with no card of its own. */
 export const SWARM_ROW = 'swarm:';
 
+/** The agy swarm member a row shows (its board and steps come from agy's own
+ *  files): a swarm row's name, or the member a `swarm` subagent card is for. */
+export function swarmMemberOf(t: AgentTask, items: readonly TurnItem[]): string | null {
+  if (t.id.startsWith(SWARM_ROW)) return t.label;
+  const card = t.itemId ? items.find((i) => i.id === t.itemId) : undefined;
+  return card?.type === 'subagent' && card.tool_name === 'swarm' && card.description ? card.description : null;
+}
+
 /** Swarm members not already shown as a card (a thread whose `swarm add`
  *  calls predate the mapping, or whose agent restarted) as rows. */
 export function withSwarm(tasks: AgentTasks, members: readonly SwarmMemberLite[], items: readonly TurnItem[]): AgentTasks {

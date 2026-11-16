@@ -17,7 +17,7 @@
   import type { RuntimeSwarm } from '../../../lib/api/types';
   import {
     agentTasks,
-    SWARM_ROW,
+    swarmMemberOf,
     taskElapsed,
     withSwarm,
     type AgentTask,
@@ -203,6 +203,7 @@
   {@const detailKey = t.itemId ? `${sessionId}:${t.itemId}` : ''}
   {@const detailLoading = Boolean(detailKey && runtimeViews.loadingItem[detailKey])}
   {@const detailError = detailKey ? (runtimeViews.itemError[detailKey] ?? null) : null}
+  {@const swarmMember = swarmMemberOf(t, p?.items ?? [])}
   <li
     class="tat-item"
     class:failed={t.status === 'failed'}
@@ -238,9 +239,9 @@
       {/if}
     </button>
 
-    {#if open && t.id.startsWith(SWARM_ROW)}
+    {#if open && swarmMember && !t.itemId}
       <div class="tat-detail" data-testid="agents-tasks-detail">
-        <RuntimeSwarmWork {sessionId} member={t.label} live={t.status === 'running'} />
+        <RuntimeSwarmWork {sessionId} member={swarmMember} live={t.status === 'running'} />
       </div>
     {:else if open}
       <div class="tat-detail" data-testid="agents-tasks-detail">
@@ -322,9 +323,7 @@
           {:else}
             <pre class="tat-log" dir="ltr">{liveOut}</pre>
           {/if}
-        {:else if t.taskId && runtimeThreads.get(sessionId)?.provider === 'claude'}
-          <RuntimeTaskOutput {sessionId} taskId={t.taskId} live={t.status === 'running'} />
-        {:else if activity.length === 0 && !t.prompt}
+        {:else if activity.length === 0 && !t.prompt && !t.taskId && !swarmMember}
           <p class="tat-empty-note">
             {t.kind === 'timer'
               ? 'Scheduled timer — resumes thread automatically when due.'
@@ -332,6 +331,15 @@
                 ? 'Running in background — waiting for live steps or output…'
                 : 'Completed with no captured output.'}
           </p>
+        {/if}
+
+        <!-- The launch call's output is only "running in background with ID …":
+             the command's own output, and a swarm card's board, come from disk. -->
+        {#if t.taskId && runtimeThreads.get(sessionId)?.provider === 'claude'}
+          <RuntimeTaskOutput {sessionId} taskId={t.taskId} live={t.status === 'running'} />
+        {/if}
+        {#if swarmMember}
+          <RuntimeSwarmWork {sessionId} member={swarmMember} live={t.status === 'running'} />
         {/if}
       </div>
     {/if}
