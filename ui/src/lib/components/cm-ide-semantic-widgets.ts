@@ -1,5 +1,6 @@
 // CodeMirror 6 inline widgets & client quick-fix applier for `cm-ide-semantic.ts`.
 
+import type { Text } from '@codemirror/state';
 import { EditorView, WidgetType } from '@codemirror/view';
 import type { ClientDiagQuickFix } from './cm-ide-semantic-model.ts';
 
@@ -56,15 +57,21 @@ export class CodeVisionWidget extends WidgetType {
   }
 }
 
+/** 1-based edit position → doc offset, matching the `⌥⏎` preview and the daemon: a line past EOF is
+ *  the end of the doc (an EOF insert on a file without a trailing newline), and a column stops at
+ *  its line's newline instead of bleeding onto the next line. */
+export function editOffset(doc: Text, line1: number, col1: number): number {
+  if (line1 > doc.lines) return doc.length;
+  const ln = doc.line(Math.max(1, line1));
+  return Math.min(doc.length, ln.from + Math.min(ln.length + 1, Math.max(0, (col1 || 1) - 1)));
+}
+
 export function applyClientQuickFix(view: EditorView, fix: ClientDiagQuickFix): void {
   const doc = view.state.doc;
   if (fix.edits?.length) {
     const changes = fix.edits.map((ed) => {
-      const s = doc.line(Math.max(1, Math.min(doc.lines, ed.start_line)));
-      const e = doc.line(Math.max(1, Math.min(doc.lines, ed.end_line)));
-      const from = Math.min(doc.length, s.from + Math.max(0, (ed.start_col || 1) - 1));
-      const to = ed.end_line > doc.lines ? doc.length : Math.max(from, Math.min(doc.length, e.from + Math.max(0, (ed.end_col || 1) - 1)));
-      return { from, to, insert: ed.new_text };
+      const from = editOffset(doc, ed.start_line, ed.start_col);
+      return { from, to: Math.max(from, editOffset(doc, ed.end_line, ed.end_col)), insert: ed.new_text };
     });
     view.dispatch({ changes, userEvent: 'input.quickfix' });
     return;

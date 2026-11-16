@@ -29,7 +29,7 @@ function isolateSymbolFromGoGroupBlock(code: string, targetSymbol: string): { si
   const kwMatch = /^(var|const)\s*\(/m.exec(code);
   const kw = kwMatch ? kwMatch[1] : 'var';
   const lines = code.split(/\r?\n/);
-  const symRe = new RegExp(`^\\s*${targetSymbol.replace(/\$/g, '\\$')}\\b`);
+  const symRe = new RegExp(`^\\s*${targetSymbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
   const idx = lines.findIndex((l) => !l.trim().startsWith('//') && symRe.test(l));
   if (idx < 0) return null;
   const docLines: string[] = [];

@@ -186,7 +186,9 @@ describe('Round 5 — Bug U1: Editor Git HEAD diff gutter & persisted baseline a
     const headWithBomAndCrlf = `\uFEFF${baseRows.join('\r\n')}\r\n`;
     const editedRows = [...baseRows];
     editedRows[2499] = 'property.key.2499=updated_value';
-    const editorLf = `${editedRows.join('\n')}\n`;
+    // The live editor doc keeps the BOM (disk read → CodeMirror), so both sides carry it.
+    const editorLf = `\uFEFF${editedRows.join('\n')}\n`;
+    assert.equal(computeIdeDiffHunks(`\uFEFF${baseRows.join('\n')}\n`, headWithBomAndCrlf).length, 0, 'a clean BOM file has no hunks');
 
     const hunks = computeIdeDiffHunks(editorLf, headWithBomAndCrlf);
     assert.equal(hunks.length, 1, 'editing 1 line in a 5,000-line BOM+CRLF file must produce exactly 1 hunk');
@@ -195,7 +197,7 @@ describe('Round 5 — Bug U1: Editor Git HEAD diff gutter & persisted baseline a
     assert.equal(hunks[0].markerEndLine, 2500);
 
     // Trailing-newline-only difference marks only the final line, never all 5,000 rows!
-    const noTrailingNl = baseRows.join('\n');
+    const noTrailingNl = `\uFEFF${baseRows.join('\n')}`;
     const nlHunks = computeIdeDiffHunks(noTrailingNl, headWithBomAndCrlf);
     assert.ok(nlHunks.length <= 1);
     if (nlHunks.length === 1) {
@@ -328,6 +330,9 @@ describe('Round 5 — Bug U4: CRLF line-ending preservation across open, edit, u
     // Plain LF files stay LF on save.
     const lfFile = 'a\nb\nc\n';
     assert.equal(detectTextEol(lfFile), '\n');
+    // A mostly-LF file with one stray CRLF stays LF (majority rule, like the daemon's detect_eol).
+    assert.equal(detectTextEol('a\nb\r\nc\nd\n'), '\n');
+    assert.equal(detectTextEol('a\r\nb\nc\r\n'), '\r\n');
     assert.equal(serializeTabDiskContent({ eol: '\n' }, 'a\nb2\nc\n'), 'a\nb2\nc\n');
   });
 });

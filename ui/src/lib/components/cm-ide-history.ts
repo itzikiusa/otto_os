@@ -10,6 +10,7 @@ import { historyField } from '@codemirror/commands';
 import { EditorState, type Extension, type StateEffect } from '@codemirror/state';
 import { ViewPlugin, type EditorView } from '@codemirror/view';
 import type { MenuItem } from '../contextmenu.svelte.ts';
+import { editOffset } from './cm-ide-semantic-widgets.ts';
 import {
   clearIdeSensitiveWebStorage,
   IDE_CURSOR_POS_KEY,
@@ -442,11 +443,8 @@ export function applyFallbackQuickFixEdits(
 ): void {
   const doc = view.state.doc;
   const specs = edits.map((e) => {
-    const sLn = doc.line(Math.max(1, Math.min(doc.lines, e.start_line)));
-    const eLn = doc.line(Math.max(1, Math.min(doc.lines, e.end_line)));
-    const from = Math.min(doc.length, sLn.from + Math.max(0, e.start_col - 1));
-    const to = Math.max(from, Math.min(doc.length, eLn.from + Math.max(0, e.end_col - 1)));
-    return { from, to, insert: e.new_text };
+    const from = editOffset(doc, e.start_line, e.start_col);
+    return { from, to: Math.max(from, editOffset(doc, e.end_line, e.end_col)), insert: e.new_text };
   });
   view.dispatch({ changes: specs, userEvent: 'input.quickfix' });
 }
