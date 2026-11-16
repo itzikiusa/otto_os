@@ -8,7 +8,11 @@
 //!   * `grok agent stdio` — its ACP server answers the `_x.ai/billing`
 //!     extension request after `initialize`, no session or prompt
 //!     (`config.currentPeriod {type, start, end}`, `config.creditUsagePercent`
-//!     — absent while nothing is used — and `subscription_tier`).
+//!     — absent while nothing is used — and `subscription_tier`);
+//!   * `muse usage --json` — Muse Code's subscription allowance, no model
+//!     turn: the plan `tier`, the rolling `window` and the `weekly` limit,
+//!     each with `usedPercent` and `resetsAtMs` (T3 Code reads the same
+//!     report over Muse's session protocol).
 //!
 //! Machine logins only (root's rows). Answers are cached for [`PROBE_TTL`];
 //! an expired one is served while a background probe refreshes it, and one
@@ -50,10 +54,11 @@ fn cache() -> &'static Mutex<Readings> {
 fn flight(provider: &str) -> &'static tokio::sync::Mutex<()> {
     static AGY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     static GROK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    if provider == "agy" {
-        &AGY
-    } else {
-        &GROK
+    static MUSE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    match provider {
+        "agy" => &AGY,
+        "muse" => &MUSE,
+        _ => &GROK,
     }
 }
 
@@ -65,10 +70,10 @@ pub(crate) fn readings() -> Readings {
 /// Make sure each installed CLI (`Some(program)`) has an answer: a cold probe
 /// waits briefly (`COLD_INLINE_BUDGET`) and otherwise finishes in the
 /// background; an expired one refreshes in the background immediately.
-pub async fn refresh(agy: Option<String>, grok: Option<String>) {
+pub async fn refresh(agy: Option<String>, grok: Option<String>, muse: Option<String>) {
     let now = Utc::now();
     let mut handles = Vec::new();
-    for (provider, program) in [("agy", agy), ("grok", grok)] {
+    for (provider, program) in [("agy", agy), ("grok", grok), ("muse", muse)] {
         let Some(program) = program else { continue };
         let held = readings().get(provider).map(|r| r.taken_at);
         match held {
@@ -106,6 +111,7 @@ async fn probe(provider: &'static str, program: String) {
     }
     let answer = match provider {
         "agy" => query_agy(&program, PROBE_TIMEOUT).await,
+        "muse" => query_muse(&program, PROBE_TIMEOUT).await,
         _ => query_grok(&program, PROBE_TIMEOUT).await,
     };
     cache().lock().unwrap_or_else(|e| e.into_inner()).insert(
@@ -149,6 +155,43 @@ pub(crate) async fn query_agy(program: &str, timeout: Duration) -> Result<Value,
             "agy gave no usage answer: {}",
             short(v["response"].as_str().unwrap_or("unknown error"))
         )),
+    }
+}
+
+/// `muse usage --json` → its report (`allowance`, or the report itself).
+/// Signed out, Muse prints why ("not logged in: run `muse login` first")
+/// instead of JSON.
+pub(crate) async fn query_muse(program: &str, timeout: Duration) -> Result<Value, String> {
+    let mut cmd = super::cli::build_cli_command(program, &["usage", "--json"], true);
+    cmd.current_dir(std::env::temp_dir())
+        .env("MUSE_NO_AUTO_UPDATE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let out = match tokio::time::timeout(timeout, cmd.output()).await {
+        Err(_) => {
+            return Err(format!(
+                "muse didn’t answer within {} s.",
+                timeout.as_secs()
+            ))
+        }
+        Ok(Err(e)) => return Err(format!("Couldn’t start muse ({program}): {e}")),
+        Ok(Ok(out)) => out,
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    match serde_json::from_str::<Value>(stdout.trim()) {
+        Ok(v) if v.is_object() => Ok(v
+            .get("allowance")
+            .filter(|a| a.is_object())
+            .unwrap_or(&v)
+            .clone()),
+        _ => {
+            let why = short(&String::from_utf8_lossy(&out.stderr));
+            let why = if why.is_empty() { short(&stdout) } else { why };
+            let why = why.trim_start_matches("muse usage:").trim();
+            Err(format!("muse gave no usage answer: {why}"))
+        }
     }
 }
 
@@ -296,6 +339,7 @@ fn unknown(provider: &str, label: &str, reason: &str) -> AccountLimits {
 
 pub(crate) const AGY_LABEL: &str = "Default Antigravity login";
 const GROK_LABEL: &str = "Default Grok login";
+const MUSE_LABEL: &str = "Default Muse login";
 
 /// The Antigravity row: one window per quota bucket (`Gemini Models · 5-hour`).
 pub(crate) fn agy_row(r: &Reading, now: DateTime<Utc>) -> AccountLimits {
@@ -375,6 +419,58 @@ pub(crate) fn grok_row(r: &Reading, now: DateTime<Utc>) -> AccountLimits {
     row("grok", GROK_LABEL, r, plan, vec![w], now)
 }
 
+/// The Muse row: the rolling session window and the weekly limit, the tier
+/// as the plan. Field names are read camelCase or snake_case, resets as
+/// epoch milliseconds or RFC 3339.
+pub(crate) fn muse_row(r: &Reading, now: DateTime<Utc>) -> AccountLimits {
+    let data = match &r.answer {
+        Ok(d) => d,
+        Err(why) => return unknown("muse", MUSE_LABEL, why),
+    };
+    let num = |v: &Value, a: &str, b: &str| v.get(a).or_else(|| v.get(b)).and_then(Value::as_f64);
+    let plan = data["tier"]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
+    let mut windows = Vec::new();
+    for (key, name, default_minutes) in [
+        ("window", "Session", None),
+        ("weekly", "Weekly", Some(7 * 24 * 60)),
+    ] {
+        let w = &data[key];
+        let Some(used) = num(w, "usedPercent", "used_percent") else {
+            continue;
+        };
+        let minutes = num(w, "windowDurationMins", "window_duration_mins")
+            .filter(|m| *m > 0.0)
+            .map(|m| m as u64)
+            .or(default_minutes);
+        let resets = num(w, "resetsAtMs", "resets_at_ms")
+            .and_then(|ms| DateTime::from_timestamp_millis(ms as i64))
+            .or_else(|| at(&w["resetsAt"]))
+            .or_else(|| at(&w["resets_at"]));
+        windows.push(window(
+            key.into(),
+            name.into(),
+            minutes,
+            100.0 - used,
+            resets,
+            now,
+        ));
+    }
+    if windows.is_empty() {
+        let mut row = unknown(
+            "muse",
+            MUSE_LABEL,
+            "muse reports no plan usage for this login (an API key, or nothing used this window yet).",
+        );
+        row.plan = plan;
+        return row;
+    }
+    row("muse", MUSE_LABEL, r, plan, windows, now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,6 +527,34 @@ mod tests {
         let used = json!({"config":{"creditUsagePercent":37.5,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_MONTHLY","end":"2026-12-01T00:00:00Z"}}});
         let w = &grok_row(&reading(Ok(used)), t("2026-11-13T13:05:00Z")).windows[0];
         assert_eq!((w.name.as_str(), w.left_percent), ("Monthly", Some(62.5)));
+    }
+
+    #[test]
+    fn muse_allowance_is_a_session_and_a_weekly_window() {
+        // The shape T3 Code decodes (`MuseSubscriptionUsage`).
+        let data = json!({"observedAtMs":1_794_571_200_000_i64,"tier":"Muse Pro","window":{"usedPercent":40.0,"windowDurationMins":300,"resetsAtMs":1_794_582_000_000_i64},"weekly":{"usedPercent":100.0,"resetsAtMs":1_795_000_000_000_i64}});
+        let row = muse_row(&reading(Ok(data)), t("2026-11-13T13:05:00Z"));
+        assert_eq!(row.key, "muse:default");
+        assert_eq!(row.plan.as_deref(), Some("Muse Pro"));
+        let names: Vec<_> = row.windows.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["Session", "Weekly"]);
+        assert_eq!(row.windows[0].left_percent, Some(60.0));
+        assert_eq!(row.windows[0].window_minutes, Some(300));
+        assert_eq!(row.windows[1].window_minutes, Some(10080));
+        assert_eq!(row.limit_reached.as_deref(), Some("Weekly"));
+        // snake_case with an RFC 3339 reset reads the same.
+        let snake = json!({"window":{"used_percent":10,"resets_at":"2026-11-13T18:00:00Z"}});
+        let w = &muse_row(&reading(Ok(snake)), t("2026-11-13T13:05:00Z")).windows[0];
+        assert_eq!(
+            (w.left_percent, w.resets_at),
+            (Some(90.0), Some(t("2026-11-13T18:00:00Z")))
+        );
+        let none = muse_row(
+            &reading(Ok(json!({"tier":"Free"}))),
+            t("2026-11-13T13:05:00Z"),
+        );
+        assert_eq!(none.status, LimitStatus::Unknown);
+        assert_eq!(none.plan.as_deref(), Some("Free"));
     }
 
     #[test]
@@ -493,5 +617,24 @@ done"#,
         );
         let err = query_agy(&refused, PROBE_TIMEOUT).await.unwrap_err();
         assert!(err.contains("not signed in"), "{err}");
+
+        let muse = script(
+            dir.path(),
+            "muse",
+            r#"[ "$1 $2 $MUSE_NO_AUTO_UPDATE" = 'usage --json 1' ] || exit 2
+echo '{"schemaVersion":1,"allowance":{"tier":"Pro","window":{"usedPercent":5}}}'"#,
+        );
+        let data = query_muse(&muse, PROBE_TIMEOUT).await.unwrap();
+        assert_eq!(data["tier"], "Pro");
+        let signed_out = script(
+            dir.path(),
+            "muse-out",
+            "echo 'muse usage: not logged in: run `muse login` first' >&2",
+        );
+        let err = query_muse(&signed_out, PROBE_TIMEOUT).await.unwrap_err();
+        assert_eq!(
+            err,
+            "muse gave no usage answer: not logged in: run `muse login` first"
+        );
     }
 }

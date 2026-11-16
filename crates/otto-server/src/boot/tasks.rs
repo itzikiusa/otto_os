@@ -205,10 +205,11 @@ fn spawn_boot_warmups(ctx: &ServerCtx) {
             .with_claude_config_dirs(claude_dirs);
         let agy = manager.providers().resolved_family_program("agy");
         let grok = manager.providers().resolved_family_program("grok");
+        let muse = manager.providers().resolved_family_program("muse");
         let _ = tokio::join!(
             otto_sessions::tool_probe::probe_tools_cached(specs),
             otto_sessions::provider_models::probe_provider_models_cached(&probe),
-            otto_usage::limits::refresh_cli_limits(agy, grok),
+            otto_usage::limits::refresh_cli_limits(agy, grok, muse),
         );
     });
 }

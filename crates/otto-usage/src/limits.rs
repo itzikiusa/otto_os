@@ -463,7 +463,9 @@ impl ActiveLimitProviders {
                 "claude" if !self.is_default_claude_enabled(&home.join(".claude")) => {
                     return None;
                 }
-                "codex" | "agy" | "grok" | "opencode" | "pi" if !self.is_family_enabled(&lc) => {
+                "codex" | "agy" | "grok" | "opencode" | "pi" | "muse"
+                    if !self.is_family_enabled(&lc) =>
+                {
                     return None;
                 }
                 _ => {}
@@ -626,7 +628,7 @@ pub async fn remaining_limits_filtered(
     })
 }
 
-/// The rows, in display order: Codex, Claude, Antigravity, Grok; within each
+/// The rows, in display order: Codex, Claude, Antigravity, Grok, Muse; within each
 /// the default login, `~/.claude-*` dirs, then profiles by label.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
@@ -708,6 +710,11 @@ fn build_filtered(
         if active.is_none_or(|a| a.is_enabled("grok") && a.is_installed("grok")) {
             if let Some(r) = readings.get("grok") {
                 rows.push(probes::grok_row(r, now));
+            }
+        }
+        if active.is_none_or(|a| a.is_enabled("muse") && a.is_installed("muse")) {
+            if let Some(r) = readings.get("muse") {
+                rows.push(probes::muse_row(r, now));
             }
         }
     }
