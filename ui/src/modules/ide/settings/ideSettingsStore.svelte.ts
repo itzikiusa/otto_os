@@ -71,7 +71,7 @@ export const SETTINGS_TREE: readonly SettingsTreeNode[] = [
     desc: 'Customize editor & chrome color themes, UI density, and tool window defaults.',
     keywords: ['appearance', 'theme', 'dark', 'light', 'density'],
     children: [
-      { id: 'appearance.ui', label: 'Appearance', desc: 'Editor color theme (Islands Dark/Light, Darcula, VS Code, Follow Otto), UI density, and debugger layout.', keywords: ['appearance', 'theme', 'islands', 'darcula', 'vscode', 'density', 'tabbed', 'split'] },
+      { id: 'appearance.ui', label: 'Appearance', desc: 'Editor color theme (Islands Dark/Light, Darcula, VS Code, Follow Otto), UI density, debugger layout, and the Scratches tab.', keywords: ['appearance', 'theme', 'islands', 'darcula', 'vscode', 'density', 'tabbed', 'split', 'scratches'] },
     ],
   },
   {

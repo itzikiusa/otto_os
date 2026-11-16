@@ -6,9 +6,14 @@ are a **project in the IDE**: one real folder per user, the **same in every
 workspace**, opened in the normal IDE with the tree, editor, language servers,
 run configurations, Local History, search and the agent dock.
 
-- Where: IDE → project switcher → **Scratches** (always first, in every
-  workspace). ⌘K: **New scratch file…** from anywhere. `#/workbench` (the old
-  Scratches page) opens the IDE on the Scratches project.
+- Where: IDE → project switcher → **Scratches**, the **default project**: first
+  in the projects list, it can't be renamed or deleted, and the IDE opens it
+  when there is no other project (no workspace folder, or the open project was
+  deleted). ⌘K: **New scratch file…** from anywhere. `#/workbench` (the old
+  Scratches page) opens the IDE on the Scratches project. IDE Settings ›
+  Appearance › **Show Scratches as a tab** adds **Project | Scratches** tabs to
+  the IDE header (wide layouts; off by default): Project returns to the last
+  real project.
 - Folder: `~/Otto/Scratches/<user id>` (`$OTTO_SCRATCHES_HOME` moves the
   parent). It is an ordinary folder, so Finder, a terminal or another editor
   work on it too.

@@ -25,6 +25,7 @@
   import { loadScratchesRoot, newScratchFile, openScratches } from './shell/ideScratches.svelte';
   import IdeHeaderActions from './shell/IdeHeaderActions.svelte';
   import IdeStackSwitcher from './shell/IdeStackSwitcher.svelte';
+  import IdeModeTabs from './shell/IdeModeTabs.svelte';
   import { ideLayout, paneAfterFileOpen, STACK_MAX_H, type IdeStackPane } from './shell/ideLayout.svelte';
   import {
     handleIdeChord,
@@ -397,11 +398,13 @@
   bind:clientHeight={ideLayout.height}
 >
   <!-- One toolbar row (G13). Stacked: the pane switcher takes the tabs slot
-       (below the bar when the page is tall, inline when it is short). -->
+       (below the bar when the page is tall, inline when it is short); wide, the
+       optional Project | Scratches tabs (Settings › Appearance) do. -->
   {#snippet stackTabs()}<IdeStackSwitcher onshow={showPane} />{/snippet}
+  {#snippet modeTabs()}<IdeModeTabs />{/snippet}
   <PageHeader
     title={stack ? 'IDE' : 'IDE (Beta)'}
-    tabs={stack && ide.hasTarget ? stackTabs : undefined}
+    tabs={stack ? (ide.hasTarget ? stackTabs : undefined) : idePreferences.current.scratchesTab ? modeTabs : undefined}
     tabsPlacement={stack && ideLayout.height >= STACK_MAX_H ? 'below' : 'inline'}
   >
     {#snippet badge()}
