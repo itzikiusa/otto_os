@@ -167,7 +167,8 @@ export class IdeBufferPerfController {
     }, DRAFT_PERSIST_IDLE_MS));
   }
   pushHistorySnapshot(host: IdeBufferHost, fullPath: string, content: string, label = 'Change'): void {
-    if (host.collabIsGuest || !host.target.root || !fullPath || fullPath.includes('://')) return;
+    // Local History is a local-disk store: the daemon refuses SSH targets.
+    if (host.collabIsGuest || host.target.kind !== 'local' || !host.target.root || !fullPath || fullPath.includes('://')) return;
     if (label === 'Change') {
       if (!readIdePreferences().localHistoryEnabled) return;
       if (this.lastSnapshotted.get(fullPath) === content) return;

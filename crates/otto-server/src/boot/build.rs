@@ -111,6 +111,11 @@ pub async fn build_ctx(
         )),
         cache_auth_lookups: true,
     });
+    // IDE terminals start with their project's Run env (`.env`, project vars, SDK).
+    ctx.manager
+        .set_terminal_env(Arc::new(crate::modules::ctx_impls::IdeTerminalEnv(
+            ctx.clone(),
+        )));
     Ok(BuiltCtx { ctx, root_user_id })
 }
 

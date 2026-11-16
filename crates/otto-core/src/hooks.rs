@@ -75,3 +75,15 @@ pub struct McpServerSpec {
     pub args: Vec<String>,
     pub env: std::collections::BTreeMap<String, String>,
 }
+
+/// The project environment an IDE terminal starts with: the merged Run env
+/// (login shell → SDK → `.env` → project vars) of the IDE project at `root`,
+/// resolved for `user_id`. Implemented by the server (otto-ide owns the
+/// layers); best-effort — an unauthorized root or a failure yields no vars.
+pub trait TerminalEnvSource: Send + Sync {
+    fn ide_terminal_env<'a>(
+        &'a self,
+        user_id: &'a str,
+        root: &'a str,
+    ) -> crate::auth::BoxFuture<'a, Vec<(String, String)>>;
+}

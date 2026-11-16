@@ -1301,6 +1301,9 @@ pub struct SessionManager {
     providers: ProviderRegistry,
     /// Optional context-provisioning hook, invoked before an agent spawn.
     pre_spawn_hook: Option<Arc<dyn PreSpawnHook>>,
+    /// The project env an IDE terminal (`meta.ide_terminal` + `ide_root`)
+    /// starts with; set once by the server after its context exists.
+    terminal_env: std::sync::OnceLock<Arc<dyn otto_core::hooks::TerminalEnvSource>>,
     /// Optional resolver for the workspace's enabled user-configured MCP servers,
     /// merged into `.mcp.json` on agent spawn (alongside Otto's browser entry).
     mcp_servers: Option<Arc<dyn crate::mcp::McpServerSource>>,
@@ -1430,6 +1433,7 @@ impl SessionManager {
             events,
             providers,
             pre_spawn_hook: None,
+            terminal_env: std::sync::OnceLock::new(),
             mcp_servers: None,
             output_scanner: None,
             ingest_base: std::env::var("OTTO_INGEST_BASE")
@@ -1752,6 +1756,26 @@ impl SessionManager {
     pub fn with_pre_spawn_hook(mut self, hook: Arc<dyn PreSpawnHook>) -> Self {
         self.pre_spawn_hook = Some(hook);
         self
+    }
+
+    /// Wire the IDE terminal env source (see [`Self::ide_terminal_env`]).
+    pub fn set_terminal_env(&self, source: Arc<dyn otto_core::hooks::TerminalEnvSource>) {
+        let _ = self.terminal_env.set(source);
+    }
+
+    /// An IDE terminal's project environment: the IDE project's merged Run env,
+    /// so `.env` vars, project vars and the SDK reach the shell as they reach a
+    /// Run. Empty for every other session.
+    async fn ide_terminal_env(&self, session: &Session) -> Vec<(String, String)> {
+        let root = session.meta.get("ide_root").and_then(|v| v.as_str());
+        let is_ide_terminal = session.provider == "shell"
+            && session.meta.get("ide_terminal").and_then(|v| v.as_bool()) == Some(true);
+        match (self.terminal_env.get(), root) {
+            (Some(source), Some(root)) if is_ide_terminal && !root.is_empty() => {
+                source.ide_terminal_env(&session.created_by, root).await
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// Attach the user-configured MCP-server resolver, merged into `.mcp.json`
@@ -2500,6 +2524,9 @@ impl SessionManager {
             // posts trail/task activity to the per-session ingest endpoint.
             spec.env.extend(self.ingest_env(&session.id));
         }
+        // First, so every Otto-owned var set above still wins.
+        let ide_env = self.ide_terminal_env(&session).await;
+        spec.env.splice(0..0, ide_env);
 
         // Restore the saved grid from `pty_cols` / `pty_rows` in the session's
         // metadata (written by `resize()`). Falls back to 80×24 when absent or
@@ -5162,6 +5189,9 @@ impl SessionManager {
             // the workspace from the initial spawn).
             spec.env.extend(self.ingest_env(&session.id));
         }
+        // First, so every Otto-owned var set above still wins.
+        let ide_env = self.ide_terminal_env(&session).await;
+        spec.env.splice(0..0, ide_env);
         // Restore the saved grid — the client will confirm its own size via a
         // Resize frame on connect, but we want the PTY and emulator to agree
         // with what the user last had so the first snapshot is correctly framed.

@@ -13,6 +13,7 @@
   import { toasts } from '../../../lib/toast.svelte';
   import { ide } from '../ideStore.svelte';
   import IdeShellEnvCard from '../shell/IdeShellEnvCard.svelte';
+  import { absoluteRemoteRoot, confirmProdSshConnect } from '../shell/networkBridgeGuard.svelte';
   import { ideSettings } from './ideSettingsStore.svelte';
 
   interface Props {
@@ -32,7 +33,7 @@
 
   let sshConns = $state<Connection[]>([]);
   let sshLoading = $state(false);
-  let sshRemotePath = $state('~');
+  let sshRemotePath = $state('');
   let plTab = $state<'installed' | 'catalog' | 'source'>('installed');
   let plSource = $state('');
   let plBusy = $state(false);
@@ -49,8 +50,8 @@
     try {
       const scopes = Array.from(
         new Set(
-          [ide.target.workspace_id, ws.currentId, ...ws.workspaces.map((w) => w.id), SCRATCH_WORKSPACE_ID].filter(
-            (id): id is string => Boolean(id),
+          [ide.target.workspace_id, ws.currentId, ...ws.workspaces.map((w) => w.id)].filter(
+            (id): id is string => Boolean(id) && id !== SCRATCH_WORKSPACE_ID,
           ),
         ),
       );
@@ -280,7 +281,7 @@
       </div>
       <div class="bt-field">
         <label class="bt-lbl" for="bt-ssh-path">Remote project directory:</label>
-        <input id="bt-ssh-path" class="input mono" type="text" dir="ltr" bind:value={sshRemotePath} />
+        <input id="bt-ssh-path" class="input mono" type="text" dir="ltr" placeholder="Home directory" bind:value={sshRemotePath} />
       </div>
 
       <LoadState what="saved SSH connections" loading={sshLoading} empty={sshConns.length === 0} variant="compact">
@@ -297,7 +298,9 @@
               type="button"
               class="btn small primary"
               onclick={async () => {
-                if (!(await ide.setSshTarget(conn.id, sshRemotePath || '~', conn.name))) return;
+                const root = absoluteRemoteRoot(conn, sshRemotePath);
+                if (!(await confirmProdSshConnect(conn, root))) return;
+                if (!(await ide.setSshTarget(conn.id, root, conn.name))) return;
                 toasts.success(`Switched IDE target to ${conn.name}`);
                 ide.settingsOpen = false;
               }}

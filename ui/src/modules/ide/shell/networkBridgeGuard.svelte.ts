@@ -7,7 +7,7 @@ import type { Connection, K8sCluster } from '../../../lib/api/types';
 import { confirmer } from '../../../lib/confirm.svelte';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
 import type { IdeNetworkBridgeConfig } from '../store/ideTypes';
-import { describeProdBridgeTarget, type ProdBridgeTargetInfo } from './networkBridgeModel';
+import { describeProdBridgeTarget, isProdEnvironment, type ProdBridgeTargetInfo } from './networkBridgeModel';
 
 class BridgeEnvironmentCache {
   clusters = $state<K8sCluster[]>([]);
@@ -200,5 +200,38 @@ export async function confirmProdSshTarget(
       confirmLabel: 'Run on production',
       danger: true,
     },
+  );
+}
+
+/** `user@host[:port]` for an SSH profile. */
+export function connEndpointText(conn: Connection): string {
+  const p = conn.params ?? {};
+  const host = String(p.host ?? p.hostname ?? 'localhost');
+  const user = String(p.user ?? p.username ?? '').trim();
+  const port = Number(p.port ?? 22);
+  const addr = user ? `${user}@${host}` : host;
+  return port && port !== 22 ? `${addr}:${port}` : addr;
+}
+
+/** The SSH user's home directory, the default remote project root. */
+export function defaultRemoteRoot(conn: Connection): string {
+  const user = String(conn.params?.user ?? conn.params?.username ?? '').trim();
+  return !user || user === 'root' ? '/root' : `/home/${user}`;
+}
+
+/** An absolute remote root: empty / `~` / `~/x` resolve against the user's home
+ *  (SFTP and the language servers take a literal `~` as a missing directory). */
+export function absoluteRemoteRoot(conn: Connection, path: string): string {
+  const p = path.trim();
+  if (!p || p === '~') return defaultRemoteRoot(conn);
+  return p.startsWith('~/') ? `${defaultRemoteRoot(conn)}/${p.slice(2)}` : p;
+}
+
+/** Ask before pointing the IDE at a production SSH host. */
+export async function confirmProdSshConnect(conn: Connection, root: string): Promise<boolean> {
+  if (!isProdEnvironment(conn.environment)) return true;
+  return confirmer.ask(
+    `Connect IDE to production SSH host "${conn.name}" (${connEndpointText(conn)}) at ${root}? File edits, commands, and debuggers will run directly on that host.`,
+    { title: 'Connect to production SSH host?', confirmLabel: 'Connect to production', danger: true },
   );
 }

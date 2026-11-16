@@ -107,6 +107,11 @@
   $effect(() => {
     void reloadSeq;
     if (mode !== 'local-history') return;
+    if (ide.target.kind !== 'local') {
+      // Local History records local files only; an SSH file has none.
+      entries = [];
+      return;
+    }
     const ctl = new AbortController();
     listLoading = true;
     listError = null;

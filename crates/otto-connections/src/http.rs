@@ -103,11 +103,26 @@ impl IntoResponse for ApiErr {
 type ApiResult<T> = std::result::Result<T, ApiErr>;
 
 /// Body of `POST /connections/{id}/open`. `workspace_id` is only needed for
-/// global connections (which have no workspace of their own).
+/// global connections (which have no workspace of their own). `cwd` (SSH only)
+/// is the remote directory the shell starts in — the IDE terminal's project.
 #[derive(Debug, Default, Deserialize)]
 pub struct OpenConnectionReq {
     pub title: Option<String>,
     pub workspace_id: Option<Id>,
+    pub cwd: Option<String>,
+}
+
+/// The command typed into a freshly opened SSH shell: `cd` into `cwd` first,
+/// then the profile's own first command, if any.
+fn first_command_in(cwd: Option<&str>, first: Option<String>) -> Option<String> {
+    let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty()) else {
+        return first;
+    };
+    let cd = format!("cd {}", shell_words::quote(cwd));
+    Some(match first {
+        Some(f) => format!("{cd} && {f}"),
+        None => cd,
+    })
 }
 
 /// Body of `PATCH /connections/{id}/pin`.
@@ -494,7 +509,10 @@ async fn open_connection<S: ConnectionsCtx>(
     body: Option<Json<OpenConnectionReq>>,
 ) -> ApiResult<Json<Session>> {
     let req = body.map(|Json(b)| b).unwrap_or_default();
-    let conn = ctx.connections().get(&id).await?;
+    let mut conn = ctx.connections().get(&id).await?;
+    if conn.kind == ConnectionKind::Ssh {
+        conn.first_command = first_command_in(req.cwd.as_deref(), conn.first_command.take());
+    }
     if owner_private_enabled(&ctx).await && !ctx.connections().is_enforced(&conn.id).await? {
         require_conn_owner_or_root(&user, &conn)?;
     }
@@ -1175,6 +1193,23 @@ async fn move_section<S: ConnectionsCtx>(
 #[allow(clippy::disallowed_methods)] // tests: plain sync fs / secret store is fine
 mod tests {
     use super::*;
+
+    #[test]
+    fn ide_terminal_cwd_is_cd_before_the_profile_first_command() {
+        assert_eq!(
+            first_command_in(None, Some("ls".into())).as_deref(),
+            Some("ls")
+        );
+        assert_eq!(first_command_in(Some("  "), None), None);
+        assert_eq!(
+            first_command_in(Some("/home/dev/my proj"), None).as_deref(),
+            Some("cd '/home/dev/my proj'")
+        );
+        assert_eq!(
+            first_command_in(Some("/srv/app"), Some("tmux a".into())).as_deref(),
+            Some("cd /srv/app && tmux a")
+        );
+    }
 
     fn ssh_conn(params: serde_json::Value) -> Connection {
         Connection {

@@ -462,7 +462,7 @@ export async function runApplyQuickFixEdits(
         const rawPrev = read.content ?? '';
         const eol = detectTextEol(rawPrev);
         const prevLf = normalizeEditorLf(rawPrev);
-        if (prefs.localHistoryEnabled) {
+        if (prefs.localHistoryEnabled && host.target.kind === 'local') {
           void api.post('/ide/history/snapshot', { target: fileTarget, path: filePath, content: rawPrev, label: 'Before Quick Fix' }).catch(() => {});
         }
         const nextLf = applyTextEditsToString(prevLf, fileEdits);
