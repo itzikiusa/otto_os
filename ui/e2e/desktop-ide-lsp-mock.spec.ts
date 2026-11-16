@@ -210,3 +210,28 @@ test('⌥⏎ lists the server’s quick fix first (no refactors) and applies it;
   await expect(usages.getByTestId('ide-usages-text-match')).toHaveCount(0);
   expect(textRefs).toEqual([]);
 });
+
+test('the lint tooltip lists only quick fixes, as themed buttons in light and dark', async ({ page }) => {
+  const lsp = await openIde(page);
+  await openFile(page, lsp, 'lsp-mock-a.ts');
+  await typeLineAfter(page, 'console.log(x)', 'console.log(x)', 'BAD();');
+  const mark = editor(page, 'console.log(x)').locator('.cm-lintRange-error');
+  await expect(mark).toHaveCount(1, { timeout: 10_000 });
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.mouse.move(0, 0);
+    await mark.hover();
+    const action = page.locator('.cm-tooltip-lint .cm-diagnosticAction');
+    await expect(action).toHaveText(['Mock: fix BAD'], { timeout: 10_000 });
+    const [bg, want] = await action.evaluate((el) => {
+      const probe = document.createElement('span');
+      probe.style.backgroundColor = 'var(--accent-soft)';
+      el.parentElement!.appendChild(probe);
+      const out = [getComputedStyle(el).backgroundColor, getComputedStyle(probe).backgroundColor];
+      probe.remove();
+      return out;
+    });
+    expect(bg).toBe(want);
+    if (process.env.OTTO_E2E_LINT_SHOTS) await page.screenshot({ path: `${process.env.OTTO_E2E_LINT_SHOTS}/lint-tooltip-${scheme}.png` });
+  }
+});

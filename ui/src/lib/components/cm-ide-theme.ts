@@ -280,6 +280,21 @@ function makeEditorSurfaceTheme(
         cursor: 'pointer',
       },
       '.cm-search .cm-button:hover': { backgroundColor: 'var(--accent-soft)' },
+      // Lint tooltip fix buttons: CodeMirror's default is a dark block on every theme.
+      '.cm-diagnosticAction': {
+        font: 'inherit',
+        fontSize: 'var(--fs-xs)',
+        padding: '2px 8px',
+        marginInlineStart: '0',
+        marginInlineEnd: '6px',
+        marginTop: '4px',
+        color: 'var(--accent-text)',
+        backgroundColor: 'var(--accent-soft)',
+        border: '1px solid var(--control-border)',
+        borderRadius: 'var(--radius-s)',
+        cursor: 'pointer',
+      },
+      '.cm-diagnosticAction:hover': { backgroundColor: 'var(--surface)' },
       '.cm-search label': { display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--text-dim)' },
       '.cm-search input[type=checkbox]': { accentColor: 'var(--accent-solid)', margin: '0' },
       '.cm-search button[name=close]': {
