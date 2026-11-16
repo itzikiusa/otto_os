@@ -154,6 +154,19 @@ test('auto-limited SELECT shows a pager; Next/Prev page the result', async ({ pa
   await expect(page.locator('.pg-range')).toContainText(P1, { timeout: 10_000 });
 });
 
+test('a full last page offers no Next', async ({ page }) => {
+  test.skip(!connId || !ready, 'mysql connection / fixture unavailable');
+  await openMysql(page);
+  await runStatement(page, `SELECT * FROM ${TABLE} ORDER BY id`);
+  const next = page.locator('.pg-btn', { hasText: 'Next' });
+  // 100 rows in pages of 25: the 4th page is full AND the last one.
+  for (const range of [P2, /rows\s*51[–-]75/, /rows\s*76[–-]100/]) {
+    await next.click();
+    await expect(page.locator('.pg-range')).toContainText(range, { timeout: 10_000 });
+  }
+  await expect(next).toBeDisabled();
+});
+
 test('explicit user LIMIT disables the pager', async ({ page }) => {
   test.skip(!connId || !ready, 'mysql connection / fixture unavailable');
   await openMysql(page);

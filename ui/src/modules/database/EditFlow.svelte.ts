@@ -748,6 +748,7 @@ export class EditFlow {
   private reportPartialReview(failure: BatchFailure, atomic: boolean, ranSql: string): void {
     const stmtRows = this.reviewStmtRows?.sql === ranSql ? this.reviewStmtRows.rows : null;
     const where = failure.statement ? `\nFailed statement: ${failure.statement}` : '';
+    const none = atomic || failure.completed === 0;
     let written: string;
     if (atomic) {
       written = 'Nothing was written — the batch ran in one transaction and was rolled back.';
@@ -762,7 +763,7 @@ export class EditFlow {
         ' The remaining drafts are still pending.';
     }
     this.reviewError = `${failure.message}${where}\n${written}`;
-    toasts.error('The write stopped partway', written);
+    toasts.error(none ? 'Nothing was written' : 'The write stopped partway', written);
   }
   /** Row statements that matched NO row (deleted, key changed) — not "Applied":
    *  keep those drafts and the modal, clear only the rows fully written. */

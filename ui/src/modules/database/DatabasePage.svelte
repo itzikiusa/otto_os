@@ -197,6 +197,14 @@
   // flags are inert on desktop/tablet (the headers only render when isPhone).
   let connOpen = $state(true);
   let schemaOpen = $state(true);
+  // Phone: once a connection tab is active its pane gets the screen; both
+  // accordions stay a tap away.
+  $effect(() => {
+    if (viewport.isPhone && database.selectedConnId) {
+      connOpen = false;
+      schemaOpen = false;
+    }
+  });
 
   // Dock this connection as a pane in the Agents split (beside an agent), with
   // the full DB Explorer. Right-clicked from a connection tab or sidebar row.
@@ -791,7 +799,7 @@
   function connActionsMenu(e: MouseEvent): void {
     ctxMenu.show(e, [
       { label: database.testing ? 'Testing connection…' : 'Test connection', icon: 'plug', disabled: database.testing, action: () => void database.testConnection() },
-      ...(hasSchemaChanges ? [{ label: 'Schema changes', icon: 'branch', title: 'Reviewed schema changes for this connection', action: () => (changesOpen = true) }] : []),
+      ...(hasSchemaChanges ? [{ label: 'Database changes', icon: 'branch', title: 'Reviewed database changes for this connection', action: () => (changesOpen = true) }] : []),
     ]);
   }
   function healthTitle(st: { serverVersion?: string; latencyMs?: number }): string {
@@ -1024,7 +1032,7 @@
         <button class="acc-toggle" onclick={() => (connOpen = !connOpen)} aria-expanded={connOpen}>
           <Icon name={connOpen ? 'chevronDown' : 'chevronRight'} size={14} />
           <span class="conn-head-title">Connections</span>
-          {#if database.connections.length > 0}<span class="acc-count">{database.connections.length}</span>{/if}
+          {#if allConns.length + treeClusters.length > 0}<span class="acc-count">{allConns.length + treeClusters.length}</span>{/if}
         </button>
         <div class="head-btns">
           <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={13} /></button>
@@ -1251,7 +1259,7 @@
         </div>
         <span class="grow"></span>
         <!-- Status is one quiet line (dot + engine; version and latency in its
-             tooltip); Test and Schema changes live in the one ⋯ menu. -->
+             tooltip); Test and Database changes live in the one ⋯ menu. -->
         <div class="conn-status">
           {#if database.isGuarded}
             <!-- The guard as one chip in this row (the full rule in its tooltip

@@ -148,6 +148,19 @@ test('a stopped Next leaves the pager on the page still on screen', async () => 
   pending.reject(new DOMException('stopped', 'AbortError'));
   assert.equal(await paging, null);
   assert.equal(h.t.offset, 0);
+  assert.ok(h.t.result, 'the page still on screen stays');
+});
+
+test('stopping a different statement drops the result it would sit under', async () => {
+  const h = setup();
+  const pending = deferred<unknown>();
+  h.setNext(() => pending.promise);
+  const run = h.db.runQuery('SELECT * FROM customers');
+  await new Promise((r) => setTimeout(r, 0));
+  h.db.abortQuery(h.t.id, { report: false });
+  pending.reject(new DOMException('stopped', 'AbortError'));
+  assert.equal(await run, null);
+  assert.equal(h.t.result, null, 'the orders result must not show under the customers statement');
 });
 
 test('a successful Next keeps the new offset', async () => {

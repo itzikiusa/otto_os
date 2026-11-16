@@ -150,7 +150,10 @@ test.describe('database mobile (phone)', () => {
     await page.locator('.qe-acc-head', { hasText: 'Editor' }).click();
     await expect(page.locator('.qe-edit')).toBeVisible();
 
-    // The connection list collapses too.
+    // The connection list collapsed once the tab opened (its pane gets the
+    // screen); it toggles open and closed.
+    await expect(page.locator('.conn-list')).toBeHidden();
+    await page.locator('.acc-toggle', { hasText: 'Connections' }).click();
     await expect(page.locator('.conn-list')).toBeVisible();
     await page.locator('.acc-toggle', { hasText: 'Connections' }).click();
     await expect(page.locator('.conn-list')).toBeHidden();

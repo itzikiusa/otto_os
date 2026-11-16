@@ -181,10 +181,13 @@ function note(rowIdx: number, why: string): string {
 }
 
 /** The commands that apply ONE edited cell (`colIdx`, new text `after`) of a
- *  row, plus its diff line. `verbs` collects the command names for the title. */
+ *  row, plus its diff line. `verbs` collects the command names for the title.
+ *  `pending` is the rows with this batch's edits applied: a rename re-sets the
+ *  value being saved with it, and a value edit lands on the field's new name. */
 function cellCommands(
   r: { t: RedisTarget; layout: Layout },
   ctx: EditCtx,
+  pending: unknown[][],
   rowIdx: number,
   colIdx: number,
   after: string,
@@ -208,10 +211,10 @@ function cellCommands(
         ? { stmts: [add(`SET ${key} ${redisString(after)} KEEPTTL`)], diff: line('value') }
         : { stmts: [add(`HSET ${key} ${redisQuote(t.field ?? '')} ${redisString(after)}`)], diff: line(t.field ?? 'value') };
     case 'kv': {
-      const field = text(rows[rowIdx]?.[0]);
+      const field = text(pending[rowIdx]?.[0]);
       if (colIdx === 0) {
         // Renaming a field: no HRENAME in Redis — drop the old, set the new.
-        const value = text(rows[rowIdx]?.[1]);
+        const value = text(pending[rowIdx]?.[1]);
         return {
           stmts: [add(`HDEL ${key} ${redisQuote(before)}`), add(`HSET ${key} ${redisQuote(after)} ${redisString(value)}`)],
           diff: line(before, 'rename'),
@@ -227,7 +230,7 @@ function cellCommands(
       const hash = t.cmd === 'HGETALL';
       if (rowIdx % 2 === 1) {
         // A value / score row — its field / member is the row above.
-        const name = text(rows[rowIdx - 1]?.[0]);
+        const name = text(pending[rowIdx - 1]?.[0]);
         if (hash) return { stmts: [add(`HSET ${key} ${redisQuote(name)} ${redisString(after)}`)], diff: line(name) };
         if (!isScore(after)) return { stmts: [note(rowIdx, `"${after}" is not a numeric score`)], diff: line(name) };
         return { stmts: [add(`ZADD ${key} ${after.trim()} ${redisQuote(name)}`)], diff: line(name) };
@@ -235,10 +238,10 @@ function cellCommands(
       // A field / member row — a rename: remove the old name, re-add with the
       // value / score from the row below (absent only when the row cap cut the
       // reply between the two — never write an empty value in that case).
-      if (rows[rowIdx + 1] === undefined) {
+      if (pending[rowIdx + 1] === undefined) {
         return { stmts: [note(rowIdx, 'its value was not loaded (the result is capped)')], diff: line(before, 'rename') };
       }
-      const value = text(rows[rowIdx + 1][0]);
+      const value = text(pending[rowIdx + 1][0]);
       return {
         stmts: hash
           ? [add(`HDEL ${key} ${redisQuote(before)}`), add(`HSET ${key} ${redisQuote(after)} ${redisString(value)}`)]
@@ -292,9 +295,15 @@ export const redisAdapter: EditAdapter = {
     const stmtRows: number[] = [];
     const diff: DiffLine[] = [];
     const verbs = new Set<string>();
+    const pending = [...ctx.liveRows];
+    for (const { rowIdx, patch } of rows) {
+      if (!pending[rowIdx]) continue;
+      pending[rowIdx] = [...pending[rowIdx]];
+      for (const [ci, raw] of patch.cells) pending[rowIdx][ci] = draft(raw);
+    }
     for (const { rowIdx, patch } of rows) {
       for (const [ci, raw] of [...patch.cells.entries()].sort((a, b) => a[0] - b[0])) {
-        const built = cellCommands(r, ctx, rowIdx, ci, draft(raw), verbs);
+        const built = cellCommands(r, ctx, pending, rowIdx, ci, draft(raw), verbs);
         // The typed value is checked up front, but a rename / value-row edit
         // also re-emits the row's OTHER cell (a field name, a value) straight
         // from the data — one line-broken token there and the whole cell is

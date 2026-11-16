@@ -560,7 +560,12 @@ bare SELECT was auto-limited, the footer grows a **pager**
 (`‹ Prev · rows a–b · Next ›`) that re-runs server-side with `OFFSET`/`skip`
 (with an "unordered" hint when the statement has no `ORDER BY`; an explicit
 user `LIMIT` disables it; on MongoDB **Next** walks the collection by `_id`
-instead of `skip` — see §5). **⋯ → Keyboard shortcuts** lists every shortcut
+instead of `skip` — see §5). **Next** is enabled only when the server saw a
+row past the page (`truncated`), so a full last page doesn't offer an empty
+next one; an empty page past the first says "No more rows". **Stop** on a run
+of a different statement clears the old result instead of leaving it under the
+new statement (a stopped page of the same statement keeps the page on
+screen). **⋯ → Keyboard shortcuts** lists every shortcut
 (⌘↵, ⇧⌘↵, ⌘S save, ⇧⌘F format, ⇧⌘V cycle the results view, Esc cancel, ⌥⌘→/←
 switch query tabs, ⌥⌘T new tab, ⌥⌘W close tab, ⇧⌥⌘W reopen). The toolbar's
 first row is **Run** (the one primary action), **Run all** (when the buffer

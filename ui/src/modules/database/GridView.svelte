@@ -895,6 +895,9 @@
           </th>
         {/each}
         {#if colEnd < cols.length}<th class="hpad" colspan={cols.length - colEnd} aria-hidden="true"></th>{/if}
+        <!-- Width-less filler: a narrow result's spare width lands here, not
+             spread over every column (it made # ~265 px wide). -->
+        <th class="fill" aria-hidden="true"></th>
       </tr>
       {#if filterRow && !mini}
         <!-- Per-column filter (client-side, over the loaded rows). `td`, not
@@ -1038,6 +1041,7 @@
     width: var(--rn-w);
   }
   .grid thead th.hpad,
+  .grid thead th.fill,
   .filter-row td.hpad {
     padding: 0;
   }

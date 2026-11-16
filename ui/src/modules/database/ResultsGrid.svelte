@@ -236,7 +236,7 @@
       (result?.rows_affected != null
         ? `${result.rows_affected.toLocaleString()} ${pluralNoun(result.rows_affected, 'row')} affected`
         : result
-          ? 'No rows returned'
+          ? offset > 0 ? 'No more rows' : 'No rows returned'
           : 'Statement OK'),
   );
 
@@ -297,8 +297,9 @@
   const pageRowCount = $derived(result?.rows.length ?? 0);
   const pageFrom = $derived(pageRowCount === 0 ? 0 : offset + 1);
   const pageTo = $derived(offset + pageRowCount);
-  // A full page implies there may be more; a short page is the last one.
-  const hasNextPage = $derived(pageSize > 0 && pageRowCount >= pageSize);
+  // The drivers fetch one row past the page, so `truncated` says whether a
+  // next page exists (a full last page used to offer Next onto nothing).
+  const hasNextPage = $derived(pageSize > 0 && !!result?.truncated);
   const hasOrderBy = $derived(/\border\s+by\b/i.test(statement ?? ''));
 
   // Mini widget grids are previews — cap their rendering. The main grid renders
@@ -1480,7 +1481,7 @@
       {#if !mini && result}
         <span class="ge-meta">{result.stats.duration_ms} ms{#if result.rows_affected != null} · {result.rows_affected} affected{/if}</span>
       {/if}
-      {#if !mini && result?.rows_affected == null}<AddRowButton {flow} variant="empty" />{/if}
+      {#if !mini && result?.rows_affected == null && offset === 0}<AddRowButton {flow} variant="empty" />{/if}
     </div>
   {/if}
 {:else}
@@ -1625,7 +1626,7 @@
       </div>
     {/if}
 
-    {#if !mini && liveRows.length === 0 && !running}<AddRowButton {flow} variant="cta" />{/if}
+    {#if !mini && liveRows.length === 0 && !running && offset === 0}<AddRowButton {flow} variant="cta" />{/if}
     <!-- WP4: filter bar -->
     {#if engine === 'mongodb' && !mini && statement}
       <MongoFilterBar
