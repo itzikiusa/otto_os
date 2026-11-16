@@ -36,7 +36,47 @@ interface Cell {
   needs: string[];
   /** A `node_modules` to link in: there is no offline `npm install`. */
   nodeModules?: string | null;
+  /** Prepares the project after its files are written (a venv, a Gradle wrapper); false skips. */
+  setup?: (root: string) => boolean;
+  /** Also run it from the gutter first; the Run & tests panel must show this. */
+  runPasses?: RegExp;
 }
+
+const sh = (cmd: string, args: string[], cwd: string, env: Record<string, string> = {}): boolean => {
+  try {
+    execFileSync(cmd, args, { cwd, stdio: 'ignore', env: { ...process.env, ...env }, timeout: 240_000 });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** The newest fully downloaded Gradle (`*.zip.ok`) in the wrapper cache, and JDK 17. */
+function cachedGradle(): { gradle: string; jdk: string } | null {
+  const dists = join(homedir(), '.gradle', 'wrapper', 'dists');
+  if (!existsSync(dists)) return null;
+  const dirs = (p: string): string[] => readdirSync(p, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  const homes = dirs(dists).flatMap((d) =>
+    dirs(join(dists, d)).flatMap((h) => {
+      const dir = join(dists, d, h);
+      const ok = readdirSync(dir).find((f) => f.endsWith('-bin.zip.ok'));
+      const home = ok ? join(dir, ok.replace('-bin.zip.ok', '')) : '';
+      return ok && existsSync(join(home, 'bin', 'gradle')) ? [home] : [];
+    }),
+  );
+  const ver = (h: string): number[] => (h.split('gradle-').pop() ?? '').split('.').map(Number);
+  homes.sort((a, b) => {
+    const [x, y] = [ver(a), ver(b)];
+    for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) - (y[i] ?? 0);
+    return 0;
+  });
+  let jdk = '';
+  try {
+    jdk = execFileSync('/usr/libexec/java_home', ['-v', '17'], { encoding: 'utf8' }).trim();
+  } catch { /* none */ }
+  return homes.length && jdk ? { gradle: join(homes[homes.length - 1], 'bin', 'gradle'), jdk } : null;
+}
+const GRADLE = cachedGradle();
 
 /** An already-installed `node_modules` holding `pkg`: the npx cache, or another checkout on this Mac. */
 function installedNodeModules(pkg: string): string | null {
@@ -127,6 +167,36 @@ async function clickBreakpoint(page: Page, line: number): Promise<void> {
 
 CELLS.push(
   {
+    name: 'pytest test in tests/sub',
+    files: {
+      'tests/sub/test_calc.py': 'def add(a, b):\n    return a + b\n\n\ndef test_adds_numbers():\n    left = 20\n    total = add(left, 22)\n    assert total == 42\n    print("PY_TEST_DONE")\n',
+    },
+    open: 'tests/sub/test_calc.py',
+    gutterKind: 'test',
+    menu: /^Debug/,
+    stops: [{ line: 7, text: 'total = add', local: 'left' }, { line: 8, text: 'assert total', local: 'total' }],
+    needs: ['python3'],
+    // The IDE runs the project's .venv; pip serves pytest from its cache when it holds it.
+    setup: (root) => sh('python3', ['-m', 'venv', '.venv'], root) && sh(join(root, '.venv', 'bin', 'pip'), ['install', '-q', '--disable-pip-version-check', 'pytest'], root),
+    runPasses: /1 passed|PASSED|passed/,
+  },
+  {
+    name: 'gradle JUnit test in a deeper package',
+    files: {
+      'settings.gradle': "rootProject.name = 'gj'\ninclude 'lib'\n",
+      'lib/build.gradle': "plugins { id 'java' }\nrepositories { mavenLocal(); mavenCentral() }\ndependencies { testImplementation 'junit:junit:4.13.2' }\ntest { testLogging { events 'passed'; showStandardStreams = true } }\n",
+      'lib/src/main/java/com/acme/gj/Calc.java': 'package com.acme.gj;\n\npublic class Calc {\n    public static int add(int a, int b) {\n        return a + b;\n    }\n}\n',
+      'lib/src/test/java/com/acme/gj/deep/CalcTest.java': 'package com.acme.gj.deep;\n\nimport static org.junit.Assert.assertEquals;\n\nimport com.acme.gj.Calc;\nimport org.junit.Test;\n\npublic class CalcTest {\n    @Test\n    public void addsNumbers() {\n        int left = 20;\n        int sum = Calc.add(left, 22);\n        assertEquals(42, sum);\n        System.out.println("GRADLE_JUNIT_DONE");\n    }\n}\n',
+    },
+    open: 'lib/src/test/java/com/acme/gj/deep/CalcTest.java',
+    gutterKind: 'test',
+    menu: /^Debug/,
+    stops: [{ line: 12, text: 'int sum', local: 'left' }, { line: 13, text: 'assertEquals', local: 'sum' }],
+    needs: ['java'],
+    setup: (root) => GRADLE !== null && sh(GRADLE.gradle, ['wrapper', '--offline', '-q'], root, { JAVA_HOME: GRADLE.jdk }),
+    runPasses: /GRADLE_JUNIT_DONE|PASSED|passed/,
+  },
+  {
     name: 'vitest test in src/deep',
     files: {
       'package.json': '{"name":"m","type":"module","devDependencies":{"vitest":"*"}}\n',
@@ -165,6 +235,7 @@ for (const cell of CELLS) {
       writeFileSync(join(root, rel), src);
     }
     if (cell.nodeModules) symlinkSync(cell.nodeModules, join(root, 'node_modules'));
+    test.skip(cell.setup !== undefined && !cell.setup(root), 'project setup (venv / Gradle wrapper) failed');
     const { ctx, base } = await apiCtx();
     const r = await ctx.post(`${base}/api/v1/workspaces`, { data: { name: cell.name, root_path: root } });
     expect(r.ok(), await r.text()).toBe(true);
@@ -172,7 +243,12 @@ for (const cell of CELLS) {
     const extraPath = [join(homedir(), '.cargo', 'bin'), join(homedir(), '.sdkman', 'candidates', 'maven', 'current', 'bin'), '/opt/homebrew/bin', '/usr/local/bin']
       .filter(existsSync).join(':');
     await ctx.put(`${base}/api/v1/ide/environments`, {
-      data: { target: { kind: 'local', workspace_id: ws, root, connection_id: null }, extra_path: extraPath, env_vars: [] },
+      data: {
+        target: { kind: 'local', workspace_id: ws, root, connection_id: null },
+        extra_path: extraPath,
+        // Gradle 8.3 (the newest fully cached one) does not run on a newer JDK.
+        env_vars: GRADLE && existsSync(join(root, 'gradlew')) ? [{ key: 'JAVA_HOME', value: GRADLE.jdk, secret: false }] : [],
+      },
     });
 
     await page.addInitScript((wsId) => {
@@ -183,6 +259,27 @@ for (const cell of CELLS) {
     await openFromTree(page, cell.open);
     await expect(page.locator('.cm-editor:visible .cm-content').first()).toContainText(cell.stops[0].text);
     for (const s of cell.stops) await clickBreakpoint(page, s.line);
+    const slug = cell.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+
+    if (cell.runPasses) {
+      const runStarted = page.waitForResponse(
+        (res) => res.request().method() === 'POST' && /\/api\/v1\/ide\/runs(\?|$)/.test(res.url()),
+        { timeout: 30_000 },
+      );
+      const gutterRun = page.locator(`.cm-editor:visible .cm-gutters .cm-ide-gutter-run-btn[data-gutter-kind="${cell.gutterKind}"]`).last();
+      await expect(gutterRun).toBeVisible({ timeout: 30_000 });
+      await gutterRun.click();
+      await page.locator('.ctx-menu').getByRole('menuitem', { name: /^Run '/ }).first().click();
+      const runId = ((await (await runStarted).json()) as { run: { id: string } }).run.id;
+      let run: { status: string; output: string[] } = { status: 'running', output: [] };
+      await expect.poll(async () => {
+        run = ((await (await ctx.get(`${base}/api/v1/ide/runs/${runId}`)).json()) as { run: typeof run }).run;
+        return run.status;
+      }, { timeout: 240_000 }).not.toBe('running');
+      expect(run.status, run.output.slice(-20).join('\n')).toBe('passed');
+      expect(run.output.join('\n')).toMatch(cell.runPasses);
+      if (SHOTS) await page.screenshot({ path: join(SHOTS, `${slug}-run.png`) });
+    }
 
     const started = page.waitForResponse(
       (res) => res.request().method() === 'POST' && /\/api\/v1\/ide\/debug\/sessions(\?|$)/.test(res.url()),
@@ -197,7 +294,6 @@ for (const cell of CELLS) {
     const sid = ((await resp.json()) as { session: { id: string } }).session.id;
 
     const panel = page.getByTestId('ide-debugger-panel');
-    const slug = cell.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
     try {
       for (const [i, s] of cell.stops.entries()) {
         await expect(page.locator('.cm-ide-paused-line').first()).toContainText(s.text, { timeout: i === 0 ? 180_000 : 30_000 });
