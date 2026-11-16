@@ -309,6 +309,35 @@ export function buildIdeKeymapSpecs(
     return true;
   };
 
+  const findUsages = (v: EditorView): boolean => {
+    const cb = getCallbacks().onFindUsages;
+    if (!cb) return false;
+    const i = wordAtCursor(v.state);
+    cb({ line: i.line, column: i.column, symbol: i.word || undefined });
+    return true;
+  };
+  const showIntentions = (v: EditorView): boolean => {
+    const cb = getCallbacks().onQuickFix;
+    if (!cb) return applyFirstFix(v);
+    const i = wordAtCursor(v.state);
+    const c = v.coordsAtPos(v.state.selection.main.head);
+    cb({ line: i.line, column: i.column, symbol: i.word || undefined, clientX: c?.left, clientY: c?.bottom });
+    return true;
+  };
+  const renameSymbol = (v: EditorView): boolean => {
+    const cb = getCallbacks().onRenameSymbol;
+    if (!cb) return false;
+    const i = wordAtCursor(v.state);
+    cb({ line: i.line, column: i.column, symbol: i.word });
+    return true;
+  };
+  const reformat = (): boolean => {
+    const cb = getCallbacks().onFormat;
+    if (!cb) return false;
+    cb();
+    return true;
+  };
+
   const runPasteFromHistory = (): boolean => {
     const cb = getCallbacks().onPasteFromHistory;
     if (cb) { cb(); return true; }
@@ -368,16 +397,7 @@ export function buildIdeKeymapSpecs(
     { key: 'F12', run: (v) => runDive(v, 'definition') },
     { key: 'Mod-b', run: (v) => runDive(v, 'definition') },
     { key: 'Mod-Alt-b', run: (v) => runDive(v, 'implementation') },
-    {
-      key: 'Alt-F7',
-      run: (v) => {
-        const cb = getCallbacks().onFindUsages;
-        if (!cb) return false;
-        const i = wordAtCursor(v.state);
-        cb({ line: i.line, column: i.column, symbol: i.word || undefined });
-        return true;
-      },
-    },
+    { key: 'Alt-F7', run: findUsages },
     {
       key: 'Mod-F12',
       run: () => {
@@ -405,37 +425,10 @@ export function buildIdeKeymapSpecs(
         return true;
       },
     },
-    {
-      key: 'Alt-Enter',
-      run: (v) => {
-        const cb = getCallbacks().onQuickFix;
-        if (!cb) return applyFirstFix(v);
-        const i = wordAtCursor(v.state);
-        const c = v.coordsAtPos(v.state.selection.main.head);
-        cb({ line: i.line, column: i.column, symbol: i.word || undefined, clientX: c?.left, clientY: c?.bottom });
-        return true;
-      },
-    },
+    { key: 'Alt-Enter', run: showIntentions },
     { key: 'Alt-Shift-Enter', run: applyFirstFix },
-    {
-      key: 'Shift-F6',
-      run: (v) => {
-        const cb = getCallbacks().onRenameSymbol;
-        if (!cb) return false;
-        const i = wordAtCursor(v.state);
-        cb({ line: i.line, column: i.column, symbol: i.word });
-        return true;
-      },
-    },
-    {
-      key: 'Mod-Alt-l',
-      run: () => {
-        const cb = getCallbacks().onFormat;
-        if (!cb) return false;
-        cb();
-        return true;
-      },
-    },
+    { key: 'Shift-F6', run: renameSymbol },
+    { key: 'Mod-Alt-l', run: reformat },
     {
       key: 'Mod-F8',
       run: (v) => {
@@ -469,9 +462,14 @@ export function buildIdeKeymapSpecs(
           { key: 'Mod-Backspace', run: deleteLine },
         ]
       : [
+          // The Standard column of Settings › Keymap (ideKeymapRows.ts): a unit test holds them in step.
           { key: 'Mod-d', run: selectNextOccurrence },
           { key: 'Shift-Mod-d', run: duplicateLineOrSelection },
           { key: 'Shift-Mod-k', run: deleteLine },
+          { key: 'Shift-F12', run: findUsages },
+          { key: 'F2', run: renameSymbol },
+          { key: 'Mod-.', run: showIntentions },
+          { key: 'Shift-Alt-f', run: reformat },
         ]),
   ];
 }

@@ -259,7 +259,7 @@
       type="button"
       class="icon-btn"
       aria-label="Previous problem"
-      title="Previous problem (⇧F2)"
+      title="Previous problem"
       disabled={filteredProblems.length === 0}
       onclick={() => stepProblem(-1)}
     >
@@ -269,7 +269,7 @@
       type="button"
       class="icon-btn"
       aria-label="Next problem"
-      title="Next problem (F2)"
+      title="Next problem"
       disabled={filteredProblems.length === 0}
       onclick={() => stepProblem(1)}
     >
