@@ -110,10 +110,10 @@ export const lightEditorTheme = EditorView.theme(
 
 export const placeholderEditorTheme = EditorView.theme({
   '.cm-placeholder': { color: 'var(--text-dim)', fontStyle: 'normal' },
-  '.cm-foldGutter, .cm-foldGutter .cm-gutterElement': {
-    inlineSize: '14px',
-    minInlineSize: '14px',
-    maxInlineSize: '14px',
+  // Centre the chevron in its row only: centring the gutter column itself
+  // shifts every margin-top-placed marker down by half the free space.
+  '.cm-foldGutter': { inlineSize: '14px', minInlineSize: '14px', maxInlineSize: '14px' },
+  '.cm-foldGutter .cm-gutterElement': {
     padding: '0',
     display: 'flex',
     alignItems: 'center',
