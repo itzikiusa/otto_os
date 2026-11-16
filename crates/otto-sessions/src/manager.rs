@@ -5759,6 +5759,31 @@ impl SessionManager {
     /// Until it prints something new, its status ticks are corrections, not
     /// activity, so they must not stamp `last_active_at` (A14) — the first
     /// tick turns the adoption's `Running` into `Idle`.
+    /// Learn a Muse terminal session's own id (for usage attribution) from the
+    /// `.session.lock` naming its process, written as Muse starts. Every
+    /// spawn, restart and re-adoption runs it: a restarted Muse is a new
+    /// session (no resume argv), so its id replaces the previous one.
+    fn spawn_muse_id_capture(&self, id: Id, pid: u32) {
+        let repo = self.repo.clone();
+        tokio::spawn(async move {
+            for _ in 0..60 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let found = tokio::task::spawn_blocking(move || {
+                    crate::muse::session_for_pid(&crate::muse::muse_root(), pid)
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some(psid) = found {
+                    if let Err(e) = repo.set_provider_session(&id, &psid).await {
+                        tracing::warn!(session = %id, "muse id capture: persist failed: {e}");
+                    }
+                    return;
+                }
+            }
+        });
+    }
+
     fn start_status_task(
         &self,
         id: Id,
@@ -5767,6 +5792,11 @@ impl SessionManager {
         handle: Arc<PtyHandle>,
         readopted: bool,
     ) {
+        if self.cli_family(&provider) == "muse" {
+            if let Some(pid) = handle.pid() {
+                self.spawn_muse_id_capture(id.clone(), pid);
+            }
+        }
         // Mid-session output scan: subscribe to the PTY broadcast and forward
         // chunks to the scanner. Ends when the PTY closes (broadcast Closed).
         if let Some(scanner) = self.output_scanner.clone() {

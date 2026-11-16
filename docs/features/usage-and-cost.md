@@ -118,6 +118,16 @@ records only the increase from the last committed session total. Input excludes
 `cached_input_tokens`; output uses `output_tokens` (reasoning is already included).
 Cache-read uses `cached_input_tokens`, and cache-write is zero.
 
+**Muse Code** (`otto_transcript::muse_usage`) reads its append-only session logs,
+`~/.local/share/muse/sessions/YYYY/MM/DD/<session-id>/session.jsonl` (a subagent's
+under `<session-id>/subagent/<child>/`, billed to the parent). Each model call is
+one `payload.event.kind = "model_completed"` record with OpenAI-style usage: input
+excludes `cache_read_tokens` (Muse's `input_tokens` includes them), output is
+`output_tokens`. The `goal_usage_attribution` record that repeats the numbers is
+ignored. Muse reports no cost and its model catalog no price, so Muse rows are
+**tokens-only** (`cost_usd` 0, never flagged "est."). New logs backfill from the
+start with the calls' own `recorded_at` times; the cursor counts each line once.
+
 ### 3.3 Attribution (which session a turn belongs to)
 
 The tailer keeps an attribution index built from the SQLite `sessions` table
@@ -135,6 +145,9 @@ simply not Otto's (external) never re-queries. Indexes:
 - **Codex** — by the exact `session_meta` provider session ID.
 - **Grok** — by the exact `params.sessionId` (or session-directory fallback).
 - **Antigravity** — by conversation UUID, then recorded parent/root conversation.
+- **Muse** — by the session directory name. A Threads session's ACP `sessionId`
+  is that name; a terminal session learns it from the `.session.lock` naming its
+  PTY child's pid (`otto-sessions` `muse.rs`, every spawn/restart/re-adoption).
 
 Shared working directories do not establish ownership.
 
