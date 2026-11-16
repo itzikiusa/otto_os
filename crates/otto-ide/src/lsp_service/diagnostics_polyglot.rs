@@ -193,9 +193,19 @@ pub(super) fn analyze_rust_diagnostics(path: &str, content: &str) -> Vec<IdeDiag
 fn find_simple_unused_imports(path: &str, lang: &str, content: &str) -> Vec<IdeDiagnostic> {
     let lines: Vec<&str> = content.lines().collect();
     let mut imports: Vec<(u32, String)> = Vec::new();
+    let mut in_triple = false;
     for (idx, &raw) in lines.iter().enumerate() {
         let ln = (idx + 1) as u32;
         let t = raw.trim();
+        if lang == "python" {
+            // `import x` text inside a docstring or a triple-quoted template is not an import.
+            let quotes = t.matches("\"\"\"").count() + t.matches("'''").count();
+            let was_in = in_triple;
+            in_triple ^= quotes % 2 == 1;
+            if was_in || quotes > 0 {
+                continue;
+            }
+        }
         match lang {
             "rust" => {
                 if let Some(rest) = t.strip_prefix("use ").and_then(|s| s.strip_suffix(';')) {
@@ -213,7 +223,9 @@ fn find_simple_unused_imports(path: &str, lang: &str, content: &str) -> Vec<IdeD
                 }
             }
             "python" => {
-                if let Some(rest) = t.strip_prefix("import ") {
+                // `import yaml  # type: ignore`: the comment is not part of the name.
+                let code = t.split('#').next().unwrap_or("").trim();
+                if let Some(rest) = code.strip_prefix("import ") {
                     if !rest.contains(',') {
                         let sym = rest
                             .split(" as ")
@@ -291,4 +303,17 @@ fn find_simple_unused_imports(path: &str, lang: &str, content: &str) -> Vec<IdeD
         }
     }
     out
+}
+
+#[cfg(test)]
+mod python_unused_import_tests {
+    use super::find_simple_unused_imports;
+
+    #[test]
+    fn noqa_comments_and_imports_inside_triple_quoted_text_are_not_flagged() {
+        let src = "import validate_skill  # noqa: E402\nimport yaml  # type: ignore\nimport os\nTPL = f\"\"\"\nimport {{ RouterOutlet }} from '@angular/router';\n\"\"\"\nvalidate_skill.run(yaml.safe_load(TPL))\n";
+        let diags = find_simple_unused_imports("x.py", "python", src);
+        let lines: Vec<u32> = diags.iter().map(|d| d.line).collect();
+        assert_eq!(lines, vec![3], "only `os` is unused: {diags:?}");
+    }
 }
