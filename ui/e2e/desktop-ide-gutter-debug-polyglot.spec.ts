@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
@@ -34,7 +34,22 @@ interface Cell {
   menu: RegExp;
   stops: Array<{ line: number; text: string; local: string }>;
   needs: string[];
+  /** A `node_modules` to link in: there is no offline `npm install`. */
+  nodeModules?: string | null;
 }
+
+/** An already-installed `node_modules` holding `pkg`: the npx cache, or another checkout on this Mac. */
+function installedNodeModules(pkg: string): string | null {
+  const npx = join(homedir(), '.npm', '_npx');
+  const cands = [
+    ...(existsSync(npx) ? readdirSync(npx).map((d) => join(npx, d, 'node_modules')) : []),
+    ...readdirSync(homedir()).map((d) => join(homedir(), d, 'node_modules')),
+  ];
+  return cands.find((nm) => existsSync(join(nm, pkg, 'package.json')) && existsSync(join(nm, '.bin', pkg))) ?? null;
+}
+
+const TEST_BODY = (imports: string): string =>
+  `${imports}function add(a, b) {\n  return a + b;\n}\n\ntest('adds numbers', () => {\n  const left = 20;\n  const sum = add(left, 22);\n  expect(sum).toBe(42);\n  console.log('JS_TEST_DONE');\n});\n`;
 
 const CELLS: Cell[] = [
   {
@@ -110,15 +125,46 @@ async function clickBreakpoint(page: Page, line: number): Promise<void> {
   await page.mouse.click(g!.x + g!.width / 2, n!.y + n!.height / 2);
 }
 
+CELLS.push(
+  {
+    name: 'vitest test in src/deep',
+    files: {
+      'package.json': '{"name":"m","type":"module","devDependencies":{"vitest":"*"}}\n',
+      'src/deep/calc.test.ts': TEST_BODY("import { expect, test } from 'vitest';\n\n"),
+    },
+    open: 'src/deep/calc.test.ts',
+    gutterKind: 'test',
+    menu: /^Debug/,
+    stops: [{ line: 9, text: 'const sum', local: 'left' }, { line: 10, text: 'expect(sum)', local: 'sum' }],
+    needs: ['node'],
+    nodeModules: installedNodeModules('vitest'),
+  },
+  {
+    name: 'jest test in src/deep',
+    files: {
+      'package.json': '{"name":"m","devDependencies":{"jest":"*"}}\n',
+      'src/deep/calc.test.js': TEST_BODY(''),
+    },
+    open: 'src/deep/calc.test.js',
+    gutterKind: 'test',
+    menu: /^Debug/,
+    stops: [{ line: 7, text: 'const sum', local: 'left' }, { line: 8, text: 'expect(sum)', local: 'sum' }],
+    needs: ['node'],
+    nodeModules: installedNodeModules('jest'),
+  },
+);
+
 for (const cell of CELLS) {
   test(`gutter Debug stops on the breakpoints: ${cell.name}`, async ({ page }) => {
     test.skip(!cell.needs.every(has), `needs ${cell.needs.join(', ')}`);
+    test.skip(cell.nodeModules === null, 'no installed node_modules with the test runner');
     test.setTimeout(240_000);
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'otto-e2e-gutter-polyglot-')));
     for (const [rel, src] of Object.entries(cell.files)) {
       mkdirSync(join(root, rel, '..'), { recursive: true });
       writeFileSync(join(root, rel), src);
     }
+    if (cell.nodeModules) symlinkSync(cell.nodeModules, join(root, 'node_modules'));
     const { ctx, base } = await apiCtx();
     const r = await ctx.post(`${base}/api/v1/workspaces`, { data: { name: cell.name, root_path: root } });
     expect(r.ok(), await r.text()).toBe(true);
@@ -135,6 +181,7 @@ for (const cell of CELLS) {
     }, ws);
     await page.goto('/#/ide');
     await openFromTree(page, cell.open);
+    await expect(page.locator('.cm-editor:visible .cm-content').first()).toContainText(cell.stops[0].text);
     for (const s of cell.stops) await clickBreakpoint(page, s.line);
 
     const started = page.waitForResponse(

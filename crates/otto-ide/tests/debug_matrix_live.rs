@@ -918,15 +918,18 @@ test('adds numbers', () => {
 });
 "#;
 
-/// A `node_modules` holding `pkg` from the npx cache (`~/.npm/_npx/*`): there
-/// is no offline `npm install`, so a fixture links to an already-fetched tree.
+/// A `node_modules` holding `pkg` from the npx cache (`~/.npm/_npx/*`) or
+/// another checkout in `~`: there is no offline `npm install`, so a fixture
+/// links to an already-installed tree.
 fn npx_cached_node_modules(pkg: &str) -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    std::fs::read_dir(Path::new(&home).join(".npm/_npx"))
-        .ok()?
-        .flatten()
-        .map(|e| e.path().join("node_modules"))
-        .find(|nm| nm.join(pkg).join("package.json").is_file())
+    let home = Path::new(&std::env::var("HOME").ok()?).to_path_buf();
+    [home.join(".npm/_npx"), home.clone()]
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flat_map(|rd| rd.flatten().map(|e| e.path().join("node_modules")))
+        .find(|nm| {
+            nm.join(pkg).join("package.json").is_file() && nm.join(".bin").join(pkg).exists()
+        })
 }
 
 async fn node_test_fixture(pkg: &str, file: &str, src: &str) -> Option<Fixture> {
