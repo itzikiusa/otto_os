@@ -44,7 +44,6 @@ pub use otto_automation::goal_loop_workspace;
 pub mod host_guard;
 pub mod improve_channels;
 pub mod k8s_monitor_scheduler;
-pub mod keep_awake;
 pub mod live_events;
 pub mod login_throttle;
 pub mod lsp;

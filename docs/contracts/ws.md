@@ -1836,7 +1836,8 @@ value.
 {"type":"secret_request_updated","user_id":"…","workspace_id":"…","session_id":"…","request_id":"…","pending":true,"prompt":"A GitHub token to push the release","name":"GH_TOKEN"}
 ```
 
-Emitted by `crates/otto-server/src/secret_request.rs`.
+Emitted by `crates/otto-agent-protocol/src/runtime/secret_request.rs`
+(routes: `crates/otto-server/src/secret_request.rs`).
 
 ### `mcp_approval_changed` / `resource_access_changed` / `notifications_changed`
 

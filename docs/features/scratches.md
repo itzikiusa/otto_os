@@ -17,7 +17,8 @@ run configurations, Local History, search and the agent dock.
   inside a workspace whose root contains it.
 - Code: UI `ui/src/modules/ide/shell/ideScratches.svelte.ts` (switcher entry,
   new scratch), file tools `ui/src/modules/ide/filetools/` (format, preview,
-  Send to…), routes `crates/otto-server/src/routes/scratches.rs`, archive
+  Send to…), routes `crates/otto-server/src/routes/scratches.rs` over
+  `crates/otto-ide/src/scratches.rs` (folder, export, path rules), archive
   reader `crates/otto-state/src/workbench.rs` (migration
   `0218_workbench_docs_exported.sql`).
 

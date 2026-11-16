@@ -25,6 +25,7 @@ pub mod lsp_service;
 pub mod netbridge;
 pub mod plugins;
 pub mod projects;
+pub mod scratches;
 pub mod target;
 pub mod text_pos;
 pub mod toolchains;

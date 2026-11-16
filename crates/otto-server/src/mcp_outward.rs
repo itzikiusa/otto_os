@@ -1447,7 +1447,10 @@ pub(crate) async fn execute_otto_tool(
         return ask_human_approval(ctx, user, args).await;
     }
     if tool == "request_secret" {
-        return crate::secret_request::run(ctx, args, session).await;
+        return ctx
+            .agent_runtime
+            .request_secret(&ctx.events, args, session)
+            .await;
     }
     // A short-lived token of the effective user, so the self-call reuses the
     // target endpoint's native RBAC. Reused across calls for a minute and

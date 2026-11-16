@@ -1043,7 +1043,7 @@ secret question forms are refused instead of being collected into history.
 - **Keeping the Mac awake** (T3 Code #34128): while any thread's turn runs
   or starts, or any terminal agent session is `working`, the daemon holds one
   `caffeinate -i -w <ottod pid>` and releases it 60 s after the last one ends
-  (polled every 15 s; `crates/otto-server/src/keep_awake.rs`). `-i` blocks
+  (polled every 15 s; `crates/otto-agent-protocol/src/runtime/keep_awake.rs`). `-i` blocks
   idle sleep only, so closing the lid still sleeps, and `-w` ends the hold
   with the daemon.
 - **Features T3 Code has that Otto does not yet:** restart continuation

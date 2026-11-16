@@ -6476,7 +6476,8 @@ editor, LSP, run configs, Local History, search and agents all apply. These
 routes are the small file API the MCP `workbench_*` tools and the IDE's
 project switcher use. Gated on **Agents** (`GET` = View, `PUT` = Edit); every
 route touches only the caller's own folder. Routes:
-`crates/otto-server/src/routes/scratches.rs`.
+`crates/otto-server/src/routes/scratches.rs` (thin handlers; the folder,
+export and path rules are `crates/otto-ide/src/scratches.rs`).
 
 The IDE root check admits a non-root caller's own folder and refuses anyone
 else's, even inside a workspace root that contains it.

@@ -17,13 +17,16 @@
 mod auto_close;
 mod children;
 pub mod council;
+pub use secret_request::{answer_secret_request, pending_secret_requests};
 mod descendants;
 mod fresh;
 mod held_adopt;
 mod held_proc;
+mod keep_awake;
 mod paging;
 mod peers;
 mod request_ids;
+mod secret_request;
 use request_ids::RequestIds;
 
 use std::collections::HashMap;
