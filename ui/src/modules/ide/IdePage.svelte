@@ -226,7 +226,10 @@
       void (async () => {
         try {
           if (projectParam) await ide.activateProject(projectParam);
-          else if (rootParam) await ide.setLocalTarget(rootParam, null, { skipAutoOpen: Boolean(fileParam) });
+          // A root already attached to the open (multi-folder) project keeps that project and its tabs.
+          else if (rootParam && !(ide.target.kind === 'local' && ide.projectRoots.some((r) => r.path.replace(/\/+$/, '') === rootParam.replace(/\/+$/, '')))) {
+            await ide.setLocalTarget(rootParam, null, { skipAutoOpen: Boolean(fileParam) });
+          }
           else ide.attachDefaultWorkspace();
           if (fileParam) {
             await ide.openFile(fileParam, { line: lineParam, preview: false });
