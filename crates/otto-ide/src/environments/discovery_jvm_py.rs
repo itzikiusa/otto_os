@@ -67,6 +67,16 @@ pub(super) fn discover_python(
     }
 }
 
+/// A pom is a runnable Spring Boot app only when it builds a jar/war (not a
+/// `pom` aggregator) and applies `spring-boot-maven-plugin` itself; the boot
+/// parent or a `<pluginManagement>` entry alone is just a library or a BOM.
+fn pom_is_spring_boot_app(pom: &str) -> bool {
+    use crate::java_workspace::{extract_tag_text, remove_all_tag_blocks, strip_xml_comments};
+    let xml = remove_all_tag_blocks(&strip_xml_comments(pom), "pluginManagement");
+    extract_tag_text(&xml, "packaging").as_deref() != Some("pom")
+        && xml.contains("spring-boot-maven-plugin")
+}
+
 pub(super) fn discover_java(
     root: &Path,
     proj_name: &str,
@@ -85,7 +95,7 @@ pub(super) fn discover_java(
 
     if pom.is_file() {
         let pom_head = read_head(&pom).unwrap_or_default();
-        if pom_head.contains("spring-boot") {
+        if pom_is_spring_boot_app(&pom_head) {
             out.push(make_auto_config(
                 root_badge,
                 IdeRunnerKind::Maven,
@@ -378,5 +388,29 @@ mod tests {
             py_test.cwd.as_deref(),
             Some(svc_py.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn spring_boot_config_only_for_application_poms() {
+        let parent =
+            "<project><parent><artifactId>spring-boot-starter-parent</artifactId></parent>";
+        let lib = format!("{parent}<dependencies><dependency><artifactId>spring-boot-starter</artifactId></dependency></dependencies></project>");
+        let aggregator = format!("{parent}<packaging>pom</packaging><build><plugins><plugin><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>");
+        let managed = format!("{parent}<build><pluginManagement><plugins><plugin><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></pluginManagement></build></project>");
+        let commented = format!("{parent}<!-- <plugin><artifactId>spring-boot-maven-plugin</artifactId></plugin> --></project>");
+        let app = format!("{parent}<build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>");
+        let tmp = tempfile::tempdir().unwrap();
+        let boot_configs = |pom: &str| {
+            std::fs::write(tmp.path().join("pom.xml"), pom).unwrap();
+            let target = IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned());
+            discover_run_configs(&target, &[])
+                .into_iter()
+                .filter(|c| c.name.starts_with("Spring Boot"))
+                .count()
+        };
+        for none in [&lib, &aggregator, &managed, &commented] {
+            assert_eq!(boot_configs(none), 0, "{none}");
+        }
+        assert_eq!(boot_configs(&app), 1);
     }
 }
