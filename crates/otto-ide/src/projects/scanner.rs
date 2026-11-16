@@ -19,7 +19,6 @@ use crate::IdeCtx;
 pub(super) struct StoredProject {
     pub(super) owner_user_id: String,
     pub(super) raw_primary_root: String,
-    pub(super) raw_folders: Vec<String>,
     pub(super) project: IdeNamedProject,
     pub(super) non_root_project: Option<IdeNamedProject>,
 }
@@ -163,18 +162,11 @@ pub(super) fn build_stored_project(
     let raw_primary_root = trim_trailing_slash(&otto_core::paths::expand_tilde(
         raw_proj.primary_root.trim(),
     ));
-    let raw_folders: Vec<String> = raw_proj
-        .folders
-        .iter()
-        .map(|f| trim_trailing_slash(&otto_core::paths::expand_tilde(f.trim())))
-        .filter(|s| !s.is_empty())
-        .collect();
     let root_proj = revalidate_project_paths(raw_proj.clone(), true).unwrap_or(raw_proj.clone());
     let non_root_project = revalidate_project_paths(raw_proj, false);
     StoredProject {
         owner_user_id,
         raw_primary_root,
-        raw_folders,
         project: root_proj,
         non_root_project,
     }
@@ -436,7 +428,6 @@ mod tests {
         let entry = StoredProject {
             owner_user_id: "u1".into(),
             raw_primary_root: "/w/other".into(),
-            raw_folders: vec!["/w/other".into(), "/w/lonely".into()],
             project: IdeNamedProject {
                 id: "p1".into(),
                 name: "X".into(),
