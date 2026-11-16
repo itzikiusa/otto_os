@@ -917,8 +917,9 @@ pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> ApiResult<Ve
     let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).fetch(conn);
     let mut output = Vec::new();
     let mut size = 0;
+    // `updated_at` is INTEGER unix seconds (migration 0205).
     let draft_cutoff = (table == "runtime_composer_drafts")
-        .then(|| (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339());
+        .then(|| (chrono::Utc::now() - chrono::Duration::days(30)).timestamp());
     while let Some(row) = rows.try_next().await.map_err(super::db_error)? {
         let mut values = ArchiveRow::new();
         for column in row.columns() {
@@ -943,10 +944,10 @@ pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> ApiResult<Ve
             };
             values.insert(column.name().into(), value);
         }
-        if let Some(cutoff) = draft_cutoff.as_deref() {
+        if let Some(cutoff) = draft_cutoff {
             if values
                 .get("updated_at")
-                .and_then(Value::as_str)
+                .and_then(Value::as_i64)
                 .is_some_and(|ts| ts < cutoff)
             {
                 continue;
