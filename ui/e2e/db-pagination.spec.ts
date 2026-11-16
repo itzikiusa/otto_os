@@ -167,6 +167,15 @@ test('a full last page offers no Next', async ({ page }) => {
   await expect(next).toBeDisabled();
 });
 
+test('a narrow result keeps the # column narrow', async ({ page }) => {
+  test.skip(!connId || !ready, 'mysql connection / fixture unavailable');
+  await openMysql(page);
+  await runStatement(page, `SELECT id FROM ${TABLE} ORDER BY id`);
+  // The spare width of a 1-column result lands in the filler, not in `#`.
+  const box = await page.locator('.grid thead th.rownum').boundingBox();
+  expect(box?.width ?? 0).toBeLessThan(100);
+});
+
 test('explicit user LIMIT disables the pager', async ({ page }) => {
   test.skip(!connId || !ready, 'mysql connection / fixture unavailable');
   await openMysql(page);
