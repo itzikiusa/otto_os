@@ -291,6 +291,7 @@ async fn full_mock_dap_lifecycle_over_duplex() {
     .expect("timed out waiting for paused snapshot");
 
     assert_eq!(paused.stopped_reason.as_deref(), Some("breakpoint"));
+    assert_eq!(paused.stop_seq, 1);
     assert_eq!(paused.paused_line, Some(6));
     assert_eq!(paused.threads.len(), 2);
     assert_eq!(paused.stack_frames.len(), 1);
@@ -384,6 +385,7 @@ async fn full_mock_dap_lifecycle_over_duplex() {
     .await
     .expect("timed out waiting for step_over pause");
     assert_eq!(stepped.stopped_reason.as_deref(), Some("step"));
+    assert_eq!(stepped.stop_seq, 2, "every stop bumps stop_seq");
     assert!(stepped.revision > paused.revision);
     assert!(stepped.revision >= step_ack.revision);
 
