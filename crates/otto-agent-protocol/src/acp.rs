@@ -1840,25 +1840,42 @@ impl AcpDriver {
                     let stop = serde_json::from_value::<PromptResponse>(r)
                         .map(|p| p.stop_reason)
                         .unwrap_or(StopReason::EndTurn);
-                    let (status, reason) = if was_cancelling {
-                        (TurnTerminalStatus::Interrupted, None)
-                    } else {
-                        match stop {
-                            StopReason::Cancelled => (TurnTerminalStatus::Interrupted, None),
-                            StopReason::MaxTokens => {
-                                (TurnTerminalStatus::Completed, Some("max_tokens"))
-                            }
-                            StopReason::MaxTurnRequests => {
-                                (TurnTerminalStatus::Completed, Some("max_turn_requests"))
-                            }
-                            StopReason::Refusal => (TurnTerminalStatus::Completed, Some("refusal")),
-                            _ => (TurnTerminalStatus::Completed, None),
-                        }
+                    // T3 Code #28797: a refusal or a limit stop is not a
+                    // finished answer, so it fails the turn with a reason.
+                    let stopped = |code: &str, message: &str| DriverEvent::Terminal {
+                        status: TurnTerminalStatus::Failed,
+                        failure: Some(ProviderFailure {
+                            class: "provider_error".into(),
+                            message: message.into(),
+                            code: Some(code.into()),
+                            retryable: None,
+                        }),
+                        reason: Some(code.into()),
                     };
-                    DriverEvent::Terminal {
+                    let done = |status| DriverEvent::Terminal {
                         status,
                         failure: None,
-                        reason: reason.map(str::to_string),
+                        reason: None,
+                    };
+                    if was_cancelling {
+                        done(TurnTerminalStatus::Interrupted)
+                    } else {
+                        match stop {
+                            StopReason::Cancelled => done(TurnTerminalStatus::Interrupted),
+                            StopReason::MaxTokens => stopped(
+                                "max_tokens",
+                                "The agent stopped: the reply hit the model's output token limit.",
+                            ),
+                            StopReason::MaxTurnRequests => stopped(
+                                "max_turn_requests",
+                                "The agent stopped: the turn hit its limit of model requests.",
+                            ),
+                            StopReason::Refusal => stopped(
+                                "refusal",
+                                "The agent refused this request. It won't remember this message.",
+                            ),
+                            _ => done(TurnTerminalStatus::Completed),
+                        }
                     }
                 }
                 (None, None) => DriverEvent::Terminal {
@@ -3091,6 +3108,45 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// T3 Code #28797: a refusal or a limit stop fails the turn with a
+    /// visible reason; `end_turn` still completes.
+    #[test]
+    fn refusal_and_limit_stops_fail_the_turn_with_a_reason() {
+        for (stop, failed) in [
+            ("refusal", true),
+            ("max_tokens", true),
+            ("max_turn_requests", true),
+            ("end_turn", false),
+        ] {
+            let mut d = AcpDriver::gemini("gemini");
+            d.start(&ctx(None));
+            d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+            d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+            d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+            let end = d.on_line(&format!(
+                r#"{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"{stop}"}}}}"#
+            ));
+            let Some(DriverEvent::Terminal {
+                status,
+                failure,
+                reason,
+            }) = end.events.last()
+            else {
+                panic!("{stop}: no terminal")
+            };
+            if failed {
+                assert_eq!(*status, TurnTerminalStatus::Failed, "{stop}");
+                let f = failure.as_ref().expect(stop);
+                assert_eq!(f.code.as_deref(), Some(stop));
+                assert!(!f.message.is_empty());
+                assert_eq!(reason.as_deref(), Some(stop));
+            } else {
+                assert_eq!(*status, TurnTerminalStatus::Completed);
+                assert!(failure.is_none() && reason.is_none());
+            }
+        }
     }
 
     #[test]

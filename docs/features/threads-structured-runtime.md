@@ -283,7 +283,8 @@ plus `adapter.ts`.
    | `stopReason` | Turn status |
    |---|---|
    | `cancelled` | interrupted |
-   | `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` | completed (the last three also as `reason`) |
+   | `end_turn` | completed |
+   | `max_tokens`, `max_turn_requests`, `refusal` | failed, with a `provider_error` failure whose `code` (and the turn's `reason`) is the stop reason and whose message says why; a refusal also says the agent won't remember the message (T3 Code #28797) |
 
    T3 Code: `adapter.ts:8181-8230`.
 5. **Permission round-trip** (`adapter.ts:6353-6527`).
