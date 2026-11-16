@@ -512,3 +512,19 @@ fn builtin_formatter_keeps_template_literals_and_markdown_hard_breaks() {
     );
 }
 
+#[test]
+fn python_organize_imports_leaves_parenthesised_imports_alone() {
+    let src = "import sys\nfrom typing import (\n    Any,\n    Dict,\n)\nimport os\n";
+    let lines: Vec<&str> = src.lines().collect();
+    assert!(code_actions::build_organize_imports_action("python", &lines, src).is_none());
+    let cont = "import sys\nfrom a import b, \\\n    c\nimport os\n";
+    let lines: Vec<&str> = cont.lines().collect();
+    assert!(code_actions::build_organize_imports_action("python", &lines, cont).is_none());
+    // A plain one-line block is still sorted.
+    let plain = "import sys\nimport os\n";
+    let lines: Vec<&str> = plain.lines().collect();
+    let (_, organized) =
+        code_actions::build_organize_imports_action("python", &lines, plain).unwrap();
+    assert_eq!(organized, "import os\nimport sys\n");
+}
+
