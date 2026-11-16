@@ -76,3 +76,24 @@ test('E2: a tree refresh refetches expanded folders and forgets collapsed ones; 
   assert.equal(host.childrenByDir['/repo/src'].length, 2, 'Refresh shows the file created outside Otto');
   assert.equal(host.childrenByDir['/repo/lib'], undefined, 'a collapsed folder drops its stale listing');
 });
+
+test('E3: ⌘⌥L says when nothing changed, and when the buffer moved during the request', async () => {
+  let answer = { formatted: 'x', changed: false, formatter: 'builtin' };
+  const { load, notes } = ideModules({ post: async () => answer });
+  const lsp = load('shell/ideLspAndSearchHelpers.ts');
+  const tab = { path: '/repo/a.ts', name: 'a.ts', language: 'typescript', readOnly: false, truncated: false };
+  let buffer = 'x';
+  const host = { activeTab: tab, tabs: [tab], targetPayload: {}, applyAgentEdit: async () => true };
+  const perf = { flush: () => buffer, getBuffer: () => buffer };
+  await lsp.runFormatActiveFile(host, perf);
+  answer = { formatted: 'x', changed: false, formatter: 'prettier' };
+  await lsp.runFormatActiveFile(host, perf);
+  answer = { formatted: 'y', changed: true, formatter: 'prettier' };
+  const moving = { flush: () => buffer, getBuffer: () => `${buffer}!` };
+  await lsp.runFormatActiveFile(host, moving);
+  assert.deepEqual(notes, [
+    'info:No changes: no formatter is installed for this file type',
+    'info:Already formatted (prettier)',
+    'info:The file changed while formatting. Format it again',
+  ]);
+});
