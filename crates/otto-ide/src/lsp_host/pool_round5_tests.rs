@@ -489,6 +489,10 @@ async fn go_build_tags_overwrite_init_options_rewrite_excluded_diagnostic_and_ev
         assert!(srv_init["params"]["initializationOptions"]
             .get("env")
             .is_none());
+        assert_eq!(
+            srv_init["params"]["initializationOptions"]["semanticTokens"],
+            json!(true)
+        );
     }
 
     // Non-root workspace/executeCommand is rejected by the mux before reaching gopls.
