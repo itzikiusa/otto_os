@@ -6,6 +6,7 @@ import { startCompletion, type Completion, type CompletionContext, type Completi
 import { EditorSelection, EditorState, StateEffect, StateField, type ChangeSpec, type Extension, type Range } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { isSecretIdePath } from './cm-ide-drafts.ts';
+import { fileUriToPath } from '../fileUri.ts';
 
 export const MAX_POOLED_LSP_CLIENTS = 3;
 export const IDLE_CLOSE_MS = 180_000;
@@ -64,6 +65,47 @@ export function lspToPos(doc: EditorState['doc'], p: LspPos): number {
   if (doc.lines === 0) return 0;
   const ln = doc.line(Math.max(1, Math.min(doc.lines, p.line + 1)));
   return Math.max(0, Math.min(doc.length, Math.min(ln.to, ln.from + Math.max(0, p.character))));
+}
+
+/** A file edit from an LSP `WorkspaceEdit`, 1-based (line, UTF-16 column), like the daemon's `IdeTextEdit`. */
+export interface LspFileTextEdit {
+  path: string;
+  start_line: number;
+  start_col: number;
+  end_line: number;
+  end_col: number;
+  new_text: string;
+}
+
+type RawTextEdit = { range?: LspRange; newText?: string };
+
+/**
+ * Flatten a `textDocument/rename` `WorkspaceEdit` (`changes` or `documentChanges`)
+ * into per-file text edits. File create/rename/delete operations are not text
+ * edits and are skipped.
+ */
+export function workspaceEditToTextEdits(raw: unknown): LspFileTextEdit[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const ws = raw as { changes?: Record<string, RawTextEdit[]>; documentChanges?: Array<{ textDocument?: { uri?: string }; edits?: RawTextEdit[] }> };
+  const groups: Array<[string, RawTextEdit[]]> = ws.documentChanges
+    ? ws.documentChanges.filter((d) => d?.textDocument?.uri && Array.isArray(d.edits)).map((d) => [d.textDocument!.uri!, d.edits!])
+    : Object.entries(ws.changes ?? {});
+  const out: LspFileTextEdit[] = [];
+  for (const [uri, edits] of groups) {
+    const path = fileUriToPath(uri);
+    for (const e of edits) {
+      if (!e?.range || typeof e.newText !== 'string') continue;
+      out.push({
+        path,
+        start_line: e.range.start.line + 1,
+        start_col: e.range.start.character + 1,
+        end_line: e.range.end.line + 1,
+        end_col: e.range.end.character + 1,
+        new_text: e.newText,
+      });
+    }
+  }
+  return out;
 }
 
 export function normalizeIdeLspLanguage(langOrExt?: string | null): string | null {

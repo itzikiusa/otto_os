@@ -954,3 +954,86 @@ async fn chained_go_selector_hover_and_in_place_rename_usages_work_end_to_end() 
         .unwrap()
         .contains("return r.aaHeaders"));
 }
+
+#[tokio::test]
+async fn rename_text_fallback_stays_in_the_language_and_lsp_edits_are_applied_as_given() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_ctx, app) =
+        build_test_app(tmp.path().join("otto-data"), &tmp.path().join("state.db")).await;
+    std::fs::create_dir_all(tmp.path().join("ws")).unwrap();
+    let ws = tmp.path().join("ws").canonicalize().unwrap();
+    let lib = ws.join("lib.rs");
+    let other = ws.join("other.rs");
+    std::fs::write(
+        &lib,
+        "pub fn add(a: i32) -> i32 { a }\nfn main() { add(1); }\n",
+    )
+    .unwrap();
+    std::fs::write(&other, "fn f() { crate::add(2); }\n").unwrap();
+    std::fs::write(ws.join("README.md"), "Call add to add.\n").unwrap();
+    std::fs::write(ws.join("tool.py"), "def add(x):\n    return x\n").unwrap();
+    let ws_str = ws.to_string_lossy().into_owned();
+    let rename = |extra: serde_json::Value| {
+        let mut body = json!({
+            "target": { "kind": "local", "root": ws_str },
+            "path": lib.to_string_lossy(),
+            "line": 1, "column": 8, "new_name": "sum",
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        body
+    };
+
+    // Text fallback preview: only the two .rs files, labelled as a text match.
+    let (st, body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/lsp/rename",
+        Some(rename(json!({}))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["source"], "text");
+    let mut paths: Vec<String> = body["edits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            e["path"]
+                .as_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    paths.sort();
+    assert_eq!(paths, ["lib.rs", "other.rs"], "{body}");
+
+    // The language server's edits are applied exactly (only the definition here).
+    let lsp_edit = json!([{ "path": lib.to_string_lossy(), "start_line": 1, "start_col": 8,
+        "end_line": 1, "end_col": 11, "new_text": "sum" }]);
+    let (st, body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/lsp/rename",
+        Some(rename(json!({ "lsp_edits": lsp_edit, "apply": true }))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["source"], "lsp");
+    assert_eq!(
+        body["edits"][0]["preview_lines"][0]["after"],
+        "pub fn sum(a: i32) -> i32 { a }"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lib).unwrap(),
+        "pub fn sum(a: i32) -> i32 { a }\nfn main() { add(1); }\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("README.md")).unwrap(),
+        "Call add to add.\n"
+    );
+}

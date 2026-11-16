@@ -94,6 +94,31 @@ pub fn build_remote_lsp_script(root: &str, launch: &SpawnLaunch) -> String {
     }
 }
 
+/// The newest `lombok-<v>.jar` in the local Maven repository, if any.
+#[allow(clippy::disallowed_methods)] // one small directory listing at server spawn
+fn newest_lombok_jar(env: &BTreeMap<String, String>) -> Option<PathBuf> {
+    let dir = crate::java_workspace::resolve_m2_repo(env)?.join("org/projectlombok/lombok");
+    let key = |v: &str| -> Vec<u64> {
+        v.split(['.', '-'])
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|v| !v.contains("SNAPSHOT"))
+        .map(|v| dir.join(&v).join(format!("lombok-{v}.jar")))
+        .filter(|jar| jar.is_file())
+        .max_by_key(|jar| {
+            key(jar
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or(""))
+        })
+}
+
 pub(crate) fn apply_language_memory_caps(
     command: &mut tokio::process::Command,
     lang: &str,
@@ -120,6 +145,11 @@ pub(crate) fn apply_language_memory_caps(
         "java" => {
             for flag in JDTLS_JVM_FLAGS {
                 command.arg(format!("--jvm-arg={flag}"));
+            }
+            // Without the agent jdtls sees no Lombok-generated members (getters,
+            // builders, `log`) and flags every use as an error.
+            if let Some(jar) = newest_lombok_jar(inherited) {
+                command.arg(format!("--jvm-arg=-javaagent:{}", jar.display()));
             }
             if !existing_args.iter().any(|a| a == "-data") {
                 let data_dir = jdtls_workspace_data_dir(root);

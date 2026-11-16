@@ -53,6 +53,24 @@ pub(crate) fn default_gopls_settings(go_build_tags: &[String]) -> Value {
 /// rust-analyzer for a non-root owner runs no workspace code: no build scripts,
 /// no proc macros, and no `cargo check` on save (which would run `build.rs`
 /// and any `.cargo/config.toml` `rustc-wrapper`).
+/// jdtls settings Otto always applies: keep Eclipse `.project` / `.classpath`
+/// / `.settings` out of the user's repo (they go to the `-data` dir instead).
+fn jdtls_settings() -> Value {
+    json!({ "java": { "import": { "generatesMetadataFilesAtProjectRoot": false } } })
+}
+
+/// Merge `extra` into `base` object-by-object (`extra` wins on leaves).
+fn merge_json(base: &mut Value, extra: Value) {
+    match (base, extra) {
+        (Value::Object(b), Value::Object(e)) => {
+            for (k, v) in e {
+                merge_json(b.entry(k).or_insert(Value::Null), v);
+            }
+        }
+        (b, e) => *b = e,
+    }
+}
+
 fn non_root_rust_settings() -> Value {
     json!({
         "cargo": { "buildScripts": { "enable": false } },
@@ -368,6 +386,14 @@ impl Mux {
             } else {
                 params.remove("initializationOptions");
             }
+        } else if norm_lang == "java" {
+            // Non-root owners never pass their own options through (bundles load code).
+            let mut opts = params
+                .remove("initializationOptions")
+                .filter(|o| self.owner_is_root && o.is_object())
+                .unwrap_or_else(|| json!({}));
+            merge_json(&mut opts, json!({ "settings": jdtls_settings() }));
+            params.insert("initializationOptions".into(), opts);
         } else if !self.owner_is_root && norm_lang == "rust" {
             params.insert("initializationOptions".into(), non_root_rust_settings());
         } else if !self.owner_is_root {
@@ -401,6 +427,16 @@ impl Mux {
                 } else if (section == "python" || section == "python.analysis") && py_path.is_some()
                 {
                     json!({ "pythonPath": py_path })
+                } else if norm_lang == "java" && (section.is_empty() || section.starts_with("java"))
+                {
+                    let settings = jdtls_settings();
+                    let ptr = format!("/{}", section.replace('.', "/"));
+                    let found = if section.is_empty() {
+                        Some(&settings)
+                    } else {
+                        settings.pointer(&ptr)
+                    };
+                    found.cloned().unwrap_or(Value::Null)
                 } else {
                     Value::Null
                 }

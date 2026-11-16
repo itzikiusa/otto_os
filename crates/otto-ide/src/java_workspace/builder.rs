@@ -94,101 +94,136 @@ pub fn prepare_java_execution(
     let mut compiler_logs: Vec<String> = Vec::new();
 
     if let Some(owner) = graph.owning_module(target_file_or_dir) {
+        let maven = maven_module_classpath(&owner.dir, env_map, out_base_dir);
+        // A module whose deps Maven can't resolve (an attached repo that was never
+        // installed) still gets the javac build below; if that fails too, Maven's
+        // error is the one to show.
+        let maven_err = match maven {
+            Some(Err(e)) => Some(e),
+            Some(Ok(cp)) => {
+                let mut srcs = Vec::new();
+                for dir in owner.main_src_dirs.iter().chain(&owner.test_src_dirs) {
+                    if dir.is_dir() {
+                        collect_java_files_rec(dir, &mut srcs);
+                    }
+                }
+                // Every workspace module's sources, so stepping into a sibling module maps.
+                for m in &graph.modules {
+                    source_roots.extend(m.main_src_dirs.iter().chain(&m.test_src_dirs).cloned());
+                }
+                let main_class =
+                    resolve_main_class(explicit_main_class, target_file_or_dir, &srcs)?;
+                return Ok(JavaExecutionPlan {
+                    main_class,
+                    classpath: cp.join(cp_sep),
+                    source_roots,
+                    compiler_output: String::new(),
+                });
+            }
+            None => None,
+        };
         let mut compiled_mods: HashMap<String, PathBuf> = HashMap::new();
         let mut visiting: HashSet<String> = HashSet::new();
-        compile_dep_tree(
-            owner,
-            &graph,
-            m2_repo.as_deref(),
-            javac_bin,
-            env_map,
-            out_base_dir,
-            cp_sep,
-            &mut visiting,
-            &mut compiled_mods,
-            &mut in_project_cp,
-            &mut external_jars,
-            &mut source_roots,
-            &mut compiler_logs,
-        )?;
-
-        let owner_out = out_base_dir.join(sanitize_slug(&owner.key));
-        fs::create_dir_all(&owner_out)
-            .map_err(|e| Error::Internal(format!("create target module classes dir: {e}")))?;
-        let mut owner_srcs = Vec::new();
-        for sdir in &owner.main_src_dirs {
-            if sdir.is_dir() {
-                source_roots.push(sdir.clone());
-                collect_java_files_rec(sdir, &mut owner_srcs);
-            }
-        }
-        let target_is_test = target_file_or_dir
-            .to_string_lossy()
-            .contains("/src/test/java");
-        if include_tests || target_is_test {
-            for tdir in &owner.test_src_dirs {
-                if tdir.is_dir() {
-                    source_roots.push(tdir.clone());
-                    collect_java_files_rec(tdir, &mut owner_srcs);
-                }
-            }
-        }
-        if target_file_or_dir.is_file()
-            && target_file_or_dir.extension().and_then(|s| s.to_str()) == Some("java")
-            && !owner_srcs.iter().any(|p| same_file(p, target_file_or_dir))
-        {
-            owner_srcs.push(target_file_or_dir.to_path_buf());
-        }
-
-        let mut build_cp: Vec<String> = Vec::new();
-        build_cp.extend(in_project_cp.iter().cloned());
-        build_cp.extend(external_jars.iter().cloned());
-        for existing_rel in ["target/classes", "build/classes/java/main"] {
-            let ex = owner.dir.join(existing_rel);
-            if ex.is_dir() {
-                build_cp.push(ex.to_string_lossy().into_owned());
-            }
-        }
-        if !owner_srcs.is_empty() {
-            run_javac(
+        let legacy = (|| -> Result<JavaExecutionPlan> {
+            compile_dep_tree(
+                owner,
+                &graph,
+                m2_repo.as_deref(),
                 javac_bin,
-                &owner_out,
-                &build_cp.join(cp_sep),
-                &owner_srcs,
                 env_map,
+                out_base_dir,
+                cp_sep,
+                &mut visiting,
+                &mut compiled_mods,
+                &mut in_project_cp,
+                &mut external_jars,
+                &mut source_roots,
                 &mut compiler_logs,
             )?;
-        }
 
-        let mut final_cp = vec![owner_out.to_string_lossy().into_owned()];
-        for rdir in &owner.resource_dirs {
-            if rdir.is_dir() {
-                final_cp.push(rdir.to_string_lossy().into_owned());
-            }
-        }
-        final_cp.extend(in_project_cp);
-        final_cp.extend(external_jars);
-        for existing_rel in [
-            "target/classes",
-            "target/test-classes",
-            "build/classes/java/main",
-        ] {
-            let ex = owner.dir.join(existing_rel);
-            if ex.is_dir() {
-                let s = ex.to_string_lossy().into_owned();
-                if !final_cp.contains(&s) {
-                    final_cp.push(s);
+            let owner_out = out_base_dir.join(sanitize_slug(&owner.key));
+            fs::create_dir_all(&owner_out)
+                .map_err(|e| Error::Internal(format!("create target module classes dir: {e}")))?;
+            let mut owner_srcs = Vec::new();
+            for sdir in &owner.main_src_dirs {
+                if sdir.is_dir() {
+                    source_roots.push(sdir.clone());
+                    collect_java_files_rec(sdir, &mut owner_srcs);
                 }
             }
-        }
+            let target_is_test = target_file_or_dir
+                .to_string_lossy()
+                .contains("/src/test/java");
+            if include_tests || target_is_test {
+                for tdir in &owner.test_src_dirs {
+                    if tdir.is_dir() {
+                        source_roots.push(tdir.clone());
+                        collect_java_files_rec(tdir, &mut owner_srcs);
+                    }
+                }
+            }
+            if target_file_or_dir.is_file()
+                && target_file_or_dir.extension().and_then(|s| s.to_str()) == Some("java")
+                && !owner_srcs.iter().any(|p| same_file(p, target_file_or_dir))
+            {
+                owner_srcs.push(target_file_or_dir.to_path_buf());
+            }
 
-        let main_class = resolve_main_class(explicit_main_class, target_file_or_dir, &owner_srcs)?;
-        return Ok(JavaExecutionPlan {
-            main_class,
-            classpath: final_cp.join(cp_sep),
-            source_roots,
-            compiler_output: compiler_logs.join("\n"),
-        });
+            let mut build_cp: Vec<String> = Vec::new();
+            build_cp.extend(in_project_cp.iter().cloned());
+            build_cp.extend(external_jars.iter().cloned());
+            for existing_rel in ["target/classes", "build/classes/java/main"] {
+                let ex = owner.dir.join(existing_rel);
+                if ex.is_dir() {
+                    build_cp.push(ex.to_string_lossy().into_owned());
+                }
+            }
+            if !owner_srcs.is_empty() {
+                run_javac(
+                    javac_bin,
+                    &owner_out,
+                    &build_cp.join(cp_sep),
+                    &owner_srcs,
+                    env_map,
+                    &mut compiler_logs,
+                )?;
+            }
+
+            let mut final_cp = vec![owner_out.to_string_lossy().into_owned()];
+            for rdir in &owner.resource_dirs {
+                if rdir.is_dir() {
+                    final_cp.push(rdir.to_string_lossy().into_owned());
+                }
+            }
+            final_cp.extend(in_project_cp);
+            final_cp.extend(external_jars);
+            for existing_rel in [
+                "target/classes",
+                "target/test-classes",
+                "build/classes/java/main",
+            ] {
+                let ex = owner.dir.join(existing_rel);
+                if ex.is_dir() {
+                    let s = ex.to_string_lossy().into_owned();
+                    if !final_cp.contains(&s) {
+                        final_cp.push(s);
+                    }
+                }
+            }
+
+            let main_class =
+                resolve_main_class(explicit_main_class, target_file_or_dir, &owner_srcs)?;
+            Ok(JavaExecutionPlan {
+                main_class,
+                classpath: final_cp.join(cp_sep),
+                source_roots,
+                compiler_output: compiler_logs.join("\n"),
+            })
+        })();
+        return match (legacy, maven_err) {
+            (Err(_), Some(maven_err)) => Err(maven_err),
+            (legacy, _) => legacy,
+        };
     }
 
     // Standalone `.java` file / directory (no `pom.xml` or `build.gradle`)
@@ -232,6 +267,124 @@ pub fn prepare_java_execution(
         source_roots,
         compiler_output: compiler_logs.join("\n"),
     })
+}
+
+/// How many lines of build-tool output an error carries (the rest is noise).
+const ERROR_LINES: usize = 20;
+
+fn first_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.trim().lines().collect();
+    let mut out = lines[..lines.len().min(ERROR_LINES)].join("\n");
+    if lines.len() > ERROR_LINES {
+        out.push_str(&format!("\n… ({} more lines)", lines.len() - ERROR_LINES));
+    }
+    out
+}
+
+/// Maven's own classpath for a module with a `pom.xml`:
+/// `target/test-classes:target/classes:<dependency:build-classpath>`, after
+/// `test-compile`. Maven resolves parents, BOMs and transitive deps, which a
+/// hand-built javac classpath gets wrong. `None` when the module has no pom or
+/// no `mvnw` / `mvn` is available (the caller falls back to javac).
+fn maven_module_classpath(
+    module_dir: &Path,
+    env_map: &BTreeMap<String, String>,
+    out_base_dir: &Path,
+) -> Option<Result<Vec<String>>> {
+    if !module_dir.join("pom.xml").is_file() {
+        return None;
+    }
+    let mvn = crate::environments::find_build_wrapper(
+        &module_dir.to_string_lossy(),
+        "mvnw",
+        &["pom.xml"],
+    )
+    .map(PathBuf::from)
+    .or_else(|| {
+        let path = env_map.get("PATH")?;
+        crate::toolchains::find_executable_in(
+            &std::env::split_paths(path).collect::<Vec<_>>(),
+            &["mvn"],
+        )
+    })?;
+    let cp_file = out_base_dir.join(format!(
+        "{}.classpath",
+        sanitize_slug(&module_dir.to_string_lossy())
+    ));
+    let _ = fs::remove_file(&cp_file);
+    let mut cmd = Command::new(&mvn);
+    // Build from the reactor root (`-pl <module> -am`) so sibling modules come from
+    // their sources, not from a stale or missing `~/.m2` copy. With `-am` every
+    // upstream module writes the output file first; the target module writes it last.
+    let reactor = crate::lsp_host::servers::climb_to_build_root("java", module_dir, &|_| true);
+    cmd.current_dir(&reactor);
+    if let Ok(rel) = module_dir.strip_prefix(&reactor) {
+        if !rel.as_os_str().is_empty() {
+            cmd.arg("-pl").arg(rel).arg("-am");
+        }
+    }
+    cmd.args([
+        "-q",
+        "-B",
+        "test-compile",
+        "dependency:build-classpath",
+        "-Dmdep.includeScope=test",
+    ]);
+    cmd.arg(format!("-Dmdep.outputFile={}", cp_file.display()));
+    Some((|| {
+        let (status, output) = run_build_tool(cmd, env_map, "mvn")?;
+        if !status.success() {
+            return Err(Error::Invalid(format!(
+                "Maven could not build the module (mvn test-compile dependency:build-classpath):\n{}",
+                first_lines(&output)
+            )));
+        }
+        let deps = fs::read_to_string(&cp_file).unwrap_or_default();
+        let mut cp: Vec<String> = ["target/test-classes", "target/classes"]
+            .iter()
+            .map(|d| module_dir.join(d).to_string_lossy().into_owned())
+            .collect();
+        cp.extend(
+            deps.trim()
+                .split(if cfg!(windows) { ';' } else { ':' })
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        );
+        Ok(cp)
+    })())
+}
+
+/// Run a build tool in its own process group with the run env, cancellable
+/// like `javac`; returns its exit status and combined (tail-capped) output.
+fn run_build_tool(
+    mut cmd: Command,
+    env_map: &BTreeMap<String, String>,
+    label: &str,
+) -> Result<(std::process::ExitStatus, String)> {
+    cmd.env_clear();
+    if !env_map.contains_key("PATH") {
+        cmd.envs(collect_safe_non_root_base_env());
+    }
+    cmd.envs(env_map);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = cmd
+        .spawn()
+        .map_err(|e| Error::Internal(format!("failed to execute '{label}': {e}")))?;
+    let cancel = JAVAC_CANCEL.with(|c| c.borrow().clone());
+    let output = wait_javac(child, BUILD_STEP_TIMEOUT, cancel.as_deref())?;
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok((output.status, combined))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -421,37 +574,14 @@ fn run_javac(
     for s in srcs {
         cmd.arg(s);
     }
-    cmd.env_clear();
-    if !env_map.contains_key("PATH") {
-        cmd.envs(collect_safe_non_root_base_env());
-    }
-    cmd.envs(env_map);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-
-    let child = cmd
-        .spawn()
-        .map_err(|e| Error::Internal(format!("failed to execute '{javac_bin}': {e}")))?;
-    let cancel = JAVAC_CANCEL.with(|c| c.borrow().clone());
-    let output = wait_javac(child, BUILD_STEP_TIMEOUT, cancel.as_deref())?;
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let (status, combined) = run_build_tool(cmd, env_map, javac_bin)?;
     if !combined.trim().is_empty() {
         logs.push(combined.trim().to_string());
     }
-    if !output.status.success() {
+    if !status.success() {
         return Err(Error::Invalid(format!(
             "javac compilation failed:\n{}",
-            combined.trim()
+            first_lines(&combined)
         )));
     }
     let _ = fs::write(&stamp_file, &stamp);
@@ -720,5 +850,136 @@ mod javac_process_tests {
         let out = wait_javac(child, Duration::from_secs(30), None).unwrap();
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).ends_with("err-2999\n"));
+    }
+
+    fn maven_module(tmp: &Path) -> (PathBuf, PathBuf) {
+        // A reactor (`tmp/pom.xml`) with one module, `svc`.
+        fs::write(
+            tmp.join("pom.xml"),
+            "<project><modules><module>svc</module></modules></project>",
+        )
+        .unwrap();
+        let module = tmp.join("svc");
+        let src = module.join("src/main/java/com/acme");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            module.join("pom.xml"),
+            "<project><groupId>com.acme</groupId><artifactId>svc</artifactId><version>1</version></project>",
+        )
+        .unwrap();
+        let app = src.join("App.java");
+        fs::write(
+            &app,
+            "package com.acme;\npublic class App { public static void main(String[] a) {} }\n",
+        )
+        .unwrap();
+        (module, app)
+    }
+
+    fn fake_bin(dir: &Path, name: &str, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(dir).unwrap();
+        let p = dir.join(name);
+        fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    fn path_env(bin: &Path) -> BTreeMap<String, String> {
+        BTreeMap::from([(
+            "PATH".to_string(),
+            format!("{}:/usr/bin:/bin", bin.display()),
+        )])
+    }
+
+    #[test]
+    fn a_maven_module_runs_on_mavens_classpath_and_never_on_otto_javac() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let (module, app) = maven_module(&root);
+        let bin = root.join("bin");
+        let seen = root.join("mvn-call");
+        // The fake mvn writes the classpath to -Dmdep.outputFile=… like the real plugin.
+        fake_bin(
+            &bin,
+            "mvn",
+            &format!(
+                r#"echo "$PWD $*" > {}; for a in "$@"; do case "$a" in -Dmdep.outputFile=*) printf '/m2/a.jar:/m2/b.jar' > "${{a#-Dmdep.outputFile=}}";; esac; done"#,
+                seen.display()
+            ),
+        );
+        let javac_hit = root.join("javac-was-called");
+        let javac = fake_bin(
+            &bin,
+            "javac",
+            &format!("touch {}; exit 1", javac_hit.display()),
+        );
+        let plan = prepare_java_execution(
+            &app,
+            None,
+            false,
+            std::slice::from_ref(&module),
+            &path_env(&bin),
+            &javac,
+            &root.join("out"),
+        )
+        .unwrap();
+        assert_eq!(plan.main_class, "com.acme.App");
+        let t = |d: &str| module.join(d).to_string_lossy().into_owned();
+        assert_eq!(
+            plan.classpath,
+            format!(
+                "{}:{}:/m2/a.jar:/m2/b.jar",
+                t("target/test-classes"),
+                t("target/classes")
+            )
+        );
+        assert!(
+            !javac_hit.exists(),
+            "Otto's own javac must not run for a Maven module"
+        );
+        let call = fs::read_to_string(&seen).unwrap();
+        assert!(
+            call.starts_with(&format!(
+                "{} -pl svc -am -q -B test-compile dependency:build-classpath",
+                root.display()
+            )),
+            "built from the reactor root: {call}"
+        );
+    }
+
+    #[test]
+    fn a_failing_maven_build_falls_back_to_javac_and_reports_a_capped_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let (module, app) = maven_module(&root);
+        let bin = root.join("bin");
+        fake_bin(
+            &bin,
+            "mvn",
+            "i=0; while [ $i -lt 500 ]; do echo \"[ERROR] line-$i\"; i=$((i+1)); done; exit 1",
+        );
+        let prepare = |javac: &str| {
+            prepare_java_execution(
+                &app,
+                None,
+                false,
+                std::slice::from_ref(&module),
+                &path_env(&bin),
+                javac,
+                &root.join("out"),
+            )
+        };
+        // An attached repo Maven can't resolve still builds with javac.
+        let ok_javac = fake_bin(&bin, "javac-ok", "exit 0");
+        assert_eq!(prepare(&ok_javac).unwrap().main_class, "com.acme.App");
+        // When javac fails too, Maven's error is shown, capped.
+        let bad_javac = fake_bin(&bin, "javac-bad", "echo boom >&2; exit 1");
+        let err = prepare(&bad_javac).unwrap_err().to_string();
+        assert!(err.contains("line-0") && err.contains("line-19"), "{err}");
+        assert!(
+            !err.contains("line-20") && err.contains("480 more lines"),
+            "{err}"
+        );
     }
 }

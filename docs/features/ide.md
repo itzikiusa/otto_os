@@ -290,7 +290,15 @@ plus zero-install built-in bridges across every major ecosystem: `dlv dap` (Go),
 `debugpy.adapter` or built-in `otto-py-bdb` (Python stdlib `bdb`), `js-debug`
 or built-in `otto-node-cdp` (`node --inspect-brk=0` CDP), `codelldb` /
 `lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust), and
-`otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter:
+`otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter.
+
+A Java Debug (or `java_main` Run) of a file in a Maven module takes the classpath
+from Maven itself: `mvn -q test-compile dependency:build-classpath` (run from the
+reactor root with `-pl <module> -am`, using `mvnw` when the build has one), then
+`target/test-classes:target/classes:<deps>`. Without a `pom.xml` or Maven, or
+when Maven can't resolve the module (an attached repo that was never installed),
+Otto compiles with its own `javac -g` instead; a failure shows the first 20 lines
+of the build output.
 
 - **1-Click Gutter Breakpoints:** Clicking anywhere beside or on line numbers in
   `.cm-gutters` toggles verified breakpoints in 1 click (persisted across tab
@@ -314,7 +322,10 @@ Combines live LSP multiplexing with zero-roundtrip editor intelligence:
   over SSH when `connection_id` is set.
 - **Structured IDE intelligence (`/api/v1/ide/lsp/*`):** Provides document
   outline symbols, workspace symbol search, go-to-definition, find usages
-  (feeding the **Usages** bottom dock), cross-file symbol rename, formatting,
+  (feeding the **Usages** bottom dock), cross-file symbol rename (`⇧F6`: the
+  editor's language server answers `textDocument/rename` when one is attached;
+  otherwise a whole-word match in files of the same language, labelled
+  **Text match**; Rename applies only a previewed result), formatting,
   Lombok/`src.zip`/Maven/Gradle-aware Java & polyglot diagnostics
   (`POST /ide/lsp/diagnostics`), compact JetBrains-style **Quick-Doc hover**
   (`POST /ide/lsp/hover`, isolated strictly to the hovered declaration with zero
@@ -328,7 +339,10 @@ Combines live LSP multiplexing with zero-roundtrip editor intelligence:
   with Maven & Spring Boot profile activation, and inline **Dependency &
   Vulnerability Intelligence** (`/ide/deps/*`) with `[Text | Dependency Analyzer]`
   tabs on `go.mod`, `pom.xml`, `build.gradle*`, `Cargo.toml`, `package.json`,
-  and `pyproject.toml`.
+  and `pyproject.toml`. For Cargo the inspector reads `[target.*.dependencies]`
+  and `[dependencies.<name>]` tables too, and checks the version resolved in the
+  nearest `Cargo.lock` (not the `Cargo.toml` requirement) against OSV; the
+  suggested fix is the one from the advisory range that covers that version.
 - **Interactive Comparison Tool & Backend Local History (`/ide/history/*`):**
   Side-by-side diff modal (`IdeComparisonModal`) with per-hunk `>>` / `<<`
   apply/revert arrows and an editable right-hand buffer, backed by a content-addressed
@@ -555,7 +569,18 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   toolbar and install the matching language server (for example `rust-analyzer`,
   `gopls`, `pyright`, `jdtls`, or `typescript-language-server`, or install/enable
   a runtime IDE plugin for additional languages such as Kotlin or C/C++). The
-  editor reconnects automatically once the install job finishes.
+  editor reconnects automatically once the install job finishes. A rustup
+  `rust-analyzer` proxy only counts as installed once `rust-analyzer --version`
+  succeeds (`rustup component add rust-analyzer`).
+- **One language server per build:** `jdtls` is rooted at the Maven reactor
+  (the parent `pom.xml` that lists the module in `<modules>`) or the Gradle
+  `settings.gradle*` dir, and `rust-analyzer` at the Cargo `[workspace]`, so
+  the modules of one build share a server. The root never climbs above the
+  project's allowed roots.
+- **jdtls and Lombok / Eclipse files:** jdtls starts with
+  `-javaagent:<newest lombok jar in ~/.m2>` when one is there, so Lombok
+  members resolve, and with `java.import.generatesMetadataFilesAtProjectRoot=false`,
+  so `.project`, `.classpath` and `.settings` go to its `-data` dir, not the repo.
 - **Remote SSH target fails to connect:** Verify the SSH connection succeeds in
   **Connections** first (`BatchMode=yes` key auth is used for non-interactive
   LSP/DAP/command execution) and confirm your role grants `discover` and `shell`

@@ -237,6 +237,55 @@ public class DemoService {
 }
 
 #[test]
+fn java_imports_under_a_build_file_are_trusted_but_standalone_ones_are_checked() {
+    let src = "package com.acme;\n\nimport org.springframework.stereotype.Service;\nimport org.springframework.web.bind.annotation.*;\n\n@Service\n@RestController\npublic class Api {\n    Missing m;\n}\n";
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let file = root.join("svc/src/main/java/com/acme/Api.java");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let diags_of = |src: &str, roots: &[std::path::PathBuf]| {
+        java_diag::analyze_java_diagnostics(
+            &file.to_string_lossy(),
+            src,
+            roots,
+            None,
+            &BTreeMap::new(),
+        )
+    };
+    let diags = |roots: &[std::path::PathBuf]| diags_of(src, roots);
+    let codes = |d: &[crate::types::IdeDiagnostic]| -> Vec<String> {
+        d.iter()
+            .map(|d| format!("{} {}", d.code, d.message))
+            .collect()
+    };
+
+    let standalone = diags(std::slice::from_ref(&root));
+    assert!(
+        standalone.iter().any(|d| d.code == "unresolved_import"),
+        "{:?}",
+        codes(&standalone)
+    );
+
+    // A module pom (parent BOMs and starters bring transitive jars this index can't see).
+    std::fs::write(root.join("svc/pom.xml"), "<project/>").unwrap();
+    let managed = diags(std::slice::from_ref(&root));
+    assert!(
+        !managed.iter().any(|d| d.code.starts_with("unresolved_")),
+        "{:?}",
+        codes(&managed)
+    );
+    // A type with no import at all is still a missing import.
+    let no_wildcard = src.replace("import org.springframework.web.bind.annotation.*;\n", "");
+    let missing = diags_of(&no_wildcard, std::slice::from_ref(&root));
+    let unresolved: Vec<_> = missing
+        .iter()
+        .filter(|d| d.code.starts_with("unresolved_"))
+        .collect();
+    assert_eq!(unresolved.len(), 2, "{:?}", codes(&missing));
+    assert!(unresolved.iter().all(|d| d.code == "unresolved_type"));
+}
+
+#[test]
 fn hover_isolates_single_go_var_doc_without_neighbor_bleed() {
     let decimal_src = r#"package decimal
 

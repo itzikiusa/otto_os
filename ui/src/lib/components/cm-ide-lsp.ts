@@ -35,6 +35,8 @@ import {
   rewriteGoBuildTagDiagnostic,
   shouldAttachIdeLsp,
   toAbsoluteIdeFilePath,
+  workspaceEditToTextEdits,
+  type LspFileTextEdit,
   type LspPos,
   type LspRange,
   type RawLspCompletionItem,
@@ -706,6 +708,26 @@ export async function queryPooledLspHover(view: EditorView, pos: number): Promis
 export async function queryPooledLspHoverMarkdown(view: EditorView, pos: number): Promise<string | null> {
   const res = await queryPooledLspHover(view, pos);
   return res?.markdown || null;
+}
+
+/**
+ * Ask the language server attached to `view` to rename the symbol at 1-based `line`/`column`.
+ * `null` when no ready server with rename support owns the file (the caller then
+ * falls back to the daemon's text match).
+ */
+export async function queryPooledLspRename(view: EditorView, line: number, column: number, newName: string): Promise<LspFileTextEdit[] | null> {
+  const plugin = marimoCache?.getLanguageServerPlugin(view);
+  const doc = view.state.doc;
+  if (!plugin?.client.ready || !plugin.client.hasCapability('textDocument/rename') || line < 1 || line > doc.lines) return null;
+  const rpc = getPooledRpc(plugin.client);
+  if (!rpc) return null;
+  const pos = Math.min(doc.line(line).to, doc.line(line).from + Math.max(0, column - 1));
+  try {
+    const res = await rpc.request('textDocument/rename', { textDocument: { uri: plugin.documentUri }, position: posToLsp(doc, pos), newName });
+    return workspaceEditToTextEdits(res);
+  } catch {
+    return null;
+  }
 }
 
 /** Notify the active LSP plugin on `view` that the buffer was saved (`willSave` / `didSave`). */

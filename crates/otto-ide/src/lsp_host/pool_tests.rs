@@ -496,6 +496,43 @@ fn language_memory_caps_set_go_java_rust_and_node_flags() {
     assert!(java_args.contains(&"-data".to_string()));
 }
 
+#[test]
+fn jdtls_gets_the_newest_lombok_javaagent_from_the_local_m2() {
+    let m2 = tempfile::tempdir().unwrap();
+    let base = m2.path().join("org/projectlombok/lombok");
+    for v in ["1.18.9", "1.18.30", "1.18.32"] {
+        std::fs::create_dir_all(base.join(v)).unwrap();
+        if v != "1.18.32" {
+            // 1.18.32 has only a pom (an incomplete download), so it is skipped.
+            std::fs::write(base.join(v).join(format!("lombok-{v}.jar")), b"jar").unwrap();
+        }
+    }
+    let args_with = |env: &BTreeMap<String, String>| -> Vec<String> {
+        let mut cmd = tokio::process::Command::new("jdtls");
+        apply_language_memory_caps(&mut cmd, "java", "/repo-java", "jdtls", &[], env);
+        cmd.as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
+    };
+    let env = BTreeMap::from([(
+        "MAVEN_REPO_LOCAL".to_string(),
+        m2.path().to_string_lossy().into_owned(),
+    )]);
+    let want = format!(
+        "--jvm-arg=-javaagent:{}",
+        base.join("1.18.30/lombok-1.18.30.jar").display()
+    );
+    assert!(args_with(&env).contains(&want), "{:?}", args_with(&env));
+
+    let empty_m2 = tempfile::tempdir().unwrap();
+    let env = BTreeMap::from([(
+        "MAVEN_REPO_LOCAL".to_string(),
+        empty_m2.path().to_string_lossy().into_owned(),
+    )]);
+    assert!(!args_with(&env).iter().any(|a| a.contains("javaagent")));
+}
+
 /// The periodic RSS sweep never kills a server an editor is attached to: being
 /// over budget is the lesser harm (the count caps still bound the pool).
 #[tokio::test]

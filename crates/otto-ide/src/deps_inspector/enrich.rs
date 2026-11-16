@@ -17,7 +17,9 @@ use crate::types::IdeDepItem;
 
 pub(super) use self::enrich_maven::{enrich_maven_updates, enrich_pypi_updates};
 pub(super) use self::enrich_osv::enrich_osv_vulnerabilities;
-pub(crate) use self::enrich_osv::{apply_best_newer_versions, compare_semver, same_major_minor};
+pub(crate) use self::enrich_osv::{
+    apply_best_newer_versions, compare_semver, parse_semver_tuple, same_major_minor,
+};
 
 pub(super) const MAX_REMOTE_LOOKUPS: usize = 30;
 pub(super) const REGISTRY_CONCURRENCY: usize = 8;
