@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 
 use super::session::{DapStartContext, MAX_DEBUG_OUTPUT, MAX_DEBUG_OUTPUT_BYTES};
+use super::session_inspect::BpStopKey;
 use super::session_transport::evict_terminated_sessions;
 use super::wire::{DapEvent, DapMessage, DapReadItem, DapReader, DapResponse, DapWriter};
 use super::BridgeGuard;
@@ -197,6 +198,9 @@ pub(super) struct SessionEntry {
     pub(super) output_buf: Mutex<VecDeque<IdeDebugOutputEntry>>,
     pub(super) configured_bp_files: Mutex<BTreeSet<String>>,
     pub(super) temp_run_to_cursor: Mutex<Option<(String, u32)>>,
+    /// The last breakpoint stop: where it was and its instruction pointer
+    /// (see `is_same_line_relocation`).
+    pub(super) last_bp_stop: Mutex<Option<(BpStopKey, u64)>>,
     pub(super) break_on_exceptions: Mutex<bool>,
     pub(super) conn: RwLock<Option<Arc<ActiveConnection>>>,
     pub(super) events_tx: broadcast::Sender<IdeDebugSessionSnapshot>,
@@ -239,6 +243,7 @@ impl SessionEntry {
             config_id: req.config_id.clone(),
             launch: Some(req.launch.clone()),
             state: IdeDebugState::Starting,
+            stop_seq: 0,
             stopped_reason: None,
             active_thread_id: None,
             active_frame_id: None,
@@ -262,6 +267,7 @@ impl SessionEntry {
             output_buf: Mutex::new(output_buf),
             configured_bp_files: Mutex::new(BTreeSet::new()),
             temp_run_to_cursor: Mutex::new(None),
+            last_bp_stop: Mutex::new(None),
             break_on_exceptions: Mutex::new(initial_break_exc),
             conn: RwLock::new(None),
             events_tx,

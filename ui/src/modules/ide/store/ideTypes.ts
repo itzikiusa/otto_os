@@ -353,7 +353,7 @@ export interface IdeDebugOutputEntry { category: 'stdout' | 'stderr' | 'console'
 export interface IdeDebugSessionSnapshot {
   id: string; revision?: number; title: string; language: string; adapter: string;
   config_id?: string | null; launch?: IdeDebugLaunch | null;
-  state: 'starting' | 'running' | 'paused' | 'terminated' | 'error'; stopped_reason?: string | null;
+  state: 'starting' | 'running' | 'paused' | 'terminated' | 'error'; stop_seq?: number; stopped_reason?: string | null;
   active_thread_id?: number | null; active_frame_id?: number | null;
   paused_file?: string | null; paused_line?: number | null;
   stopped_file?: string | null; stopped_line?: number | null;
@@ -438,10 +438,14 @@ export function detectIdeLanguage(p: string): string {
   return map[ext] ?? 'txt';
 }
 
+/** `selectedConfigId` of the test / main last launched from the gutter (`gutterTarget`):
+ *  the toolbar Run / Debug repeat it, like an IntelliJ temporary configuration. */
+export const GUTTER_TARGET_ID = 'gutter';
+
 export function defaultRunnerForLanguage(lang: string): string {
   const map: Record<string, string> = {
     go: 'go_run', rust: 'cargo_run', java: 'java_main', python: 'python',
-    javascript: 'node', typescript: 'npm', tsx: 'npm', jsx: 'node', shell: 'shell',
+    javascript: 'node', typescript: 'node', tsx: 'npm', jsx: 'node', shell: 'shell',
   };
   return map[lang] ?? 'custom';
 }

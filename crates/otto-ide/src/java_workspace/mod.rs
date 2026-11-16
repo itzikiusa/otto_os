@@ -10,6 +10,7 @@
 #![allow(clippy::disallowed_methods)] // synchronous workspace/JAR scanner invoked inside spawn_blocking
 
 pub mod builder;
+pub mod test_launcher;
 pub mod zip_jdk;
 
 use std::collections::{BTreeMap, HashMap, HashSet};

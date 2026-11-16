@@ -603,8 +603,8 @@ export function createIdeRefactorExtensions(opts: {
         if (runItem && cbs.onGutterAction) {
           items.push(
             { separator: true },
-            { label: `Run '${runItem.label}'`, icon: 'play', hint: '⌃⇧R', action: () => cbs.onGutterAction?.(runItem, 'run') },
-            { label: `Debug '${runItem.label}'`, icon: 'bug', hint: '⌃⇧D', action: () => cbs.onGutterAction?.(runItem, 'debug') },
+            { label: `Run '${runItem.label}'`, icon: 'play', action: () => cbs.onGutterAction?.(runItem, 'run') },
+            { label: `Debug '${runItem.label}'`, icon: 'bug', action: () => cbs.onGutterAction?.(runItem, 'debug') },
           );
         }
         if (fPath) {

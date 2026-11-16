@@ -626,6 +626,8 @@ export interface IdeDebugSessionSnapshot {
   config_id?: string | null;
   launch?: IdeDebugLaunch | null;
   state: IdeDebugState;
+  /** Bumped on every stop: two stops on the same line differ (DAP variable refs live one stop). */
+  stop_seq?: number;
   stopped_reason?: IdeDebugStoppedReason | null;
   active_thread_id?: number | null;
   active_frame_id?: number | null;

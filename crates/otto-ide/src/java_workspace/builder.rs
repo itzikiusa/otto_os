@@ -544,7 +544,7 @@ fn has_any_class_file(dir: &Path) -> bool {
     false
 }
 
-fn run_javac(
+pub(super) fn run_javac(
     javac_bin: &str,
     out_dir: &Path,
     cp: &str,

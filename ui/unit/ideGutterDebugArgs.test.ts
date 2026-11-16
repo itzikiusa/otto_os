@@ -32,6 +32,7 @@ describe('IDE gutter debug launch', () => {
       activePath: null,
       activeTab: null,
       projectEnv: null,
+      envState: { gutterTarget: null },
     };
     const items = [
       { language: 'rust', kind: 'run', run_spec: { runner: 'cargo', args: ['run'], target_path: '/ws/app/src/main.rs' } },

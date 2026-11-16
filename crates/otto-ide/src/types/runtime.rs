@@ -191,6 +191,10 @@ pub struct IdeDebugSessionSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch: Option<IdeDebugLaunchSpec>,
     pub state: IdeDebugState,
+    /// Bumped on every stop, so a client can tell two stops on the same line
+    /// apart (DAP variable references are valid for one stop only).
+    #[serde(default)]
+    pub stop_seq: u32,
     pub stopped_reason: Option<String>,
     pub active_thread_id: Option<i64>,
     pub active_frame_id: Option<i64>,

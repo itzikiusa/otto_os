@@ -183,6 +183,12 @@ pub(super) fn build_vitest_cmd(
         v.extend(args);
         args = v;
     }
+    // Vitest's default reporter prints no per-test lines (nor console output)
+    // without a TTY, so the run had no results and a filtered run read as "No
+    // tests matched". The verbose reporter lists every test.
+    if !args.iter().any(|a| a.starts_with("--reporter")) {
+        args.push("--reporter=verbose".into());
+    }
     if cfg.coverage
         && !args
             .iter()

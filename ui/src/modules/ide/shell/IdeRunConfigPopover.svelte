@@ -4,7 +4,7 @@
   import { placeAnchored, type AnchorPlacement } from '../../../lib/anchorPlace';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { ide, ideBasename, type IdeRunConfig } from '../ideStore.svelte';
+  import { GUTTER_TARGET_ID, ide, ideBasename, type IdeRunConfig } from '../ideStore.svelte';
 
   interface Props {
     triggerEl: HTMLButtonElement | undefined;
@@ -123,6 +123,15 @@
   {/if}
 
   <div class="run-list">
+    {#if ide.envState.gutterTarget}
+      {@const item = ide.envState.gutterTarget}
+      {@const active = ide.selectedConfigId === GUTTER_TARGET_ID}
+      <div class="run-sec">From the editor</div>
+      <button type="button" class="run-item" class:is-active={active} aria-current={active ? 'true' : undefined} onclick={() => selectTarget(GUTTER_TARGET_ID)} data-testid="ide-run-gutter-target">
+        <span class="run-item-name" dir="ltr">{item.label.replace(/^Run /, '')}</span>
+        <Badge tone="neutral" variant="outline" label={ideBasename(item.run_spec.target_path || item.run_spec.cwd || '')} />
+      </button>
+    {/if}
     {#if savedConfigs.length > 0}
       <div class="run-sec">Saved configurations</div>
       {#each savedConfigs as cfg (cfg.id)}

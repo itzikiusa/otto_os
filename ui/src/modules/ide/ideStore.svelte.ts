@@ -712,7 +712,7 @@ class IdeStore {
       if (!this.debugState.lastDebugLaunch && (sl?.program || sl?.attach_port)) {
         this.debugState.lastDebugLaunch = { configId: snap.config_id ?? undefined, language: snap.language, launch: { program: sl.program, args: sl.args, build_flags: sl.build_flags, cwd: sl.cwd ?? undefined, test_name: sl.test_name ?? undefined, attach_port: sl.attach_port ?? undefined, env: sl.env, env_file: sl.env_file, inherit_shell_env: sl.inherit_shell_env, sdk_path: sl.sdk_path } };
       }
-      m.syncSnapshotBreakpointsToStore(this, snap);
+      m.syncSnapshotBreakpointsToStore(this, snap); m.syncStopVariables(this, cur, snap);
       if (snap.state === 'paused' && paused && snap.paused_line) {
         if (`${paused}:${snap.paused_line}` !== prevPaused) void this.openFile(paused, { line: snap.paused_line, preview: false });
         void this.refreshWatches();
