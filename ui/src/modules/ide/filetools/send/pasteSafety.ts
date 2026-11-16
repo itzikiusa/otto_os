@@ -16,7 +16,7 @@
 //
 // Kept free of runtime imports so the unit tests load it directly.
 
-import type { Session } from '../../../lib/api/types';
+import type { Session } from '../../../../lib/api/types';
 
 /** Sessions the text can be pasted into: this workspace's, not archived, still
  *  alive. Connection sessions stay listed — they take a single line. */

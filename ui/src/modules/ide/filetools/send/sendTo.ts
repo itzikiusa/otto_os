@@ -1,4 +1,4 @@
-// Workbench "Send to…" — hand a scratch file to another Otto surface.
+// IDE "Send to…" — hand the open file to another Otto surface.
 //
 // Every target only PREPARES: nothing is run, sent or executed on the user's
 // behalf. The DB Explorer opens its Run on… sheet on the setup stage; the API
@@ -7,36 +7,25 @@
 // session) after a confirm naming the session; a vault note is written
 // only after a confirm (and a second one before overwriting).
 
-import { router } from '../../../lib/router.svelte';
-import { whenMounted } from '../../../lib/uiCommands';
-import { ws as wsStore } from '../../../lib/stores/workspace.svelte';
-import { confirmer } from '../../../lib/confirm.svelte';
-import { toasts } from '../../../lib/toast.svelte';
-import { copyText } from '../../../lib/clipboard';
-import { ApiError } from '../../../lib/api/client';
-import { listVaults, vaultNote, writeVaultNote } from '../../../lib/api/vault';
-import type { Session, WorkbenchDocFull } from '../../../lib/api/types';
-import { dbHandoff } from '../../database/handoff.svelte';
-import { fillPlaceholders } from '../lib/placeholders';
-import { loadErrorText } from '../../../lib/loadError';
+import { router } from '../../../../lib/router.svelte';
+import { whenMounted } from '../../../../lib/uiCommands';
+import { ws as wsStore } from '../../../../lib/stores/workspace.svelte';
+import { confirmer } from '../../../../lib/confirm.svelte';
+import { toasts } from '../../../../lib/toast.svelte';
+import { copyText } from '../../../../lib/clipboard';
+import { ApiError } from '../../../../lib/api/client';
+import { listVaults, vaultNote, writeVaultNote } from '../../../../lib/api/vault';
+import type { Session } from '../../../../lib/api/types';
+import { dbHandoff } from '../../../database/handoff.svelte';
+import { loadErrorText } from '../../../../lib/loadError';
 import { multiLineRefusal, pasteConfirmText, planPaste } from './pasteSafety';
 
 export interface SendCtx {
-  ws: string;
-  doc: WorkbenchDocFull;
+  /** File name, e.g. `daily.sql`. */
+  name: string;
   content: string;
+  /** Language id or file extension (`sql`, `json`, `md`, …). */
   lang: string;
-  values: Record<string, string>;
-}
-
-/** Content with every placeholder that HAS a value filled in (others kept). */
-export function filled(ctx: SendCtx): string {
-  return fillPlaceholders(ctx.content, ctx.values, ctx.lang);
-}
-
-/** Only the non-empty values (an empty input is "not set"). */
-export function setValues(values: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(Object.entries(values).filter(([, v]) => v.trim() !== ''));
 }
 
 // ── (a) Database — Run on… ─────────────────────────────────────────────────
@@ -52,7 +41,7 @@ export async function sendToDatabase(ctx: SendCtx): Promise<void> {
   }
   // The stores load on demand: they are ~50 KB gzip the Workbench page would
   // otherwise ship to every visit (bundle budget).
-  const { database } = await import('../../../lib/stores/database.svelte');
+  const { database } = await import('../../../../lib/stores/database.svelte');
   // An in-flight load is joined (loadConnections shares it), so a send made
   // while the list is still loading never reads as "no connections".
   if (!database.connections.length) await database.loadConnections();
@@ -86,9 +75,8 @@ export async function sendToDatabase(ctx: SendCtx): Promise<void> {
     if (!picked.value) return;
     connId = picked.value;
   }
-  // Statement as-is: the sheet substitutes the placeholders itself (one run per
-  // value), so the values travel as parameters, not baked into the text.
-  dbHandoff.runOn({ statement: ctx.content, vars: setValues(ctx.values) });
+  // Statement as-is: the sheet finds and fills its placeholders itself.
+  dbHandoff.runOn({ statement: ctx.content, vars: {} });
   router.go('database');
   if (!connId) {
     toasts.info('Open a database connection', 'The Run on… sheet opens with your script as soon as one is connected.');
@@ -125,11 +113,10 @@ function looksLikeJson(text: string): boolean {
 }
 
 export async function sendToApiClient(ctx: SendCtx): Promise<void> {
-  // Only set values are filled: unset `{{name}}` stays for the API client's
-  // own environment variables to resolve.
-  const text = filled(ctx);
+  // `{{name}}` placeholders stay for the API client's environment variables.
+  const text = ctx.content;
   try {
-    const { apiClient } = await import('../../../lib/stores/apiClient.svelte');
+    const { apiClient } = await import('../../../../lib/stores/apiClient.svelte');
     await apiClient.ensureLoaded();
     if (looksLikeCurl(text)) {
       if (!(await apiClient.importCurl(text))) {
@@ -141,7 +128,7 @@ export async function sendToApiClient(ctx: SendCtx): Promise<void> {
       const json = ctx.lang === 'json' || looksLikeJson(text);
       apiClient.draft = {
         ...apiClient.draft,
-        name: ctx.doc.name,
+        name: ctx.name,
         method: 'POST',
         body_mode: json ? 'json' : 'raw',
         body: text,
@@ -161,19 +148,18 @@ export async function sendToApiClient(ctx: SendCtx): Promise<void> {
 // pasteSafety.ts, which the picker and the unit tests load directly.
 
 export async function pasteIntoSession(ctx: SendCtx, session: Session): Promise<boolean> {
-  const text = filled(ctx);
-  const plan = planPaste(text, session);
+  const plan = planPaste(ctx.content, session);
   if (!plan.ok) {
     if (plan.reason === 'empty') {
       toasts.error('Nothing to paste', 'After removing control characters the file has no text left.');
     } else {
       toasts.push('error', 'Not pasted — connection sessions take one line', multiLineRefusal(plan.lines), 12000, {
-        action: { label: 'Copy', run: () => void copyFilled(ctx) },
+        action: { label: 'Copy', run: () => void copyText(ctx.content) },
       });
     }
     return false;
   }
-  const ok = await confirmer.ask(pasteConfirmText(plan, ctx.doc.name, session), {
+  const ok = await confirmer.ask(pasteConfirmText(plan, ctx.name, session), {
     title: plan.multiLine ? 'Paste into session' : 'Type into session',
     confirmLabel: plan.multiLine ? 'Paste' : 'Type it',
   });
@@ -192,7 +178,7 @@ export async function pasteIntoSession(ctx: SendCtx, session: Session): Promise<
 
 // ── (d) Vault — save as note ───────────────────────────────────────────────
 
-/** `workbench/<slug>.md` from the file name. */
+/** `scratches/<slug>.md` from the file name. */
 export function defaultNotePath(name: string): string {
   const base = name.replace(/\.[A-Za-z0-9]+$/, '').trim();
   const slug = base
@@ -200,7 +186,7 @@ export function defaultNotePath(name: string): string {
     .replace(/[^a-z0-9\-_ ]+/g, '')
     .trim()
     .replace(/\s+/g, '-');
-  return `workbench/${slug || 'untitled'}.md`;
+  return `scratches/${slug || 'untitled'}.md`;
 }
 
 /** Markdown stays as-is; anything else becomes a fenced code block. */
@@ -212,9 +198,14 @@ export function noteBody(name: string, content: string, lang: string): string {
 }
 
 export async function sendToVault(ctx: SendCtx): Promise<void> {
+  const wsId = wsStore.currentId;
+  if (!wsId) {
+    toasts.error('No workspace open', 'Vault notes belong to a workspace — open one first.');
+    return;
+  }
   let vaults;
   try {
-    vaults = await listVaults(ctx.ws);
+    vaults = await listVaults(wsId);
   } catch (e) {
     toasts.error('Couldn’t load vaults', loadErrorText(e));
     return;
@@ -238,14 +229,14 @@ export async function sendToVault(ctx: SendCtx): Promise<void> {
   const raw = await confirmer.promptText(`Note path inside “${vaultName}”.`, {
     title: 'Save as note',
     confirmLabel: 'Save note',
-    initial: defaultNotePath(ctx.doc.name),
+    initial: defaultNotePath(ctx.name),
     placeholder: 'folder/note.md',
   });
   if (!raw) return;
   const path = /\.md$/i.test(raw) ? raw : `${raw}.md`;
   let ifHash: string | undefined;
   try {
-    const existing = await vaultNote(ctx.ws, vaultId, path);
+    const existing = await vaultNote(wsId, vaultId, path);
     const ok = await confirmer.ask(`“${path}” already exists in ${vaultName}. Overwrite it? (The vault keeps its previous revision.)`, {
       title: 'Overwrite note?',
       confirmLabel: 'Overwrite',
@@ -259,9 +250,9 @@ export async function sendToVault(ctx: SendCtx): Promise<void> {
     }
   }
   try {
-    await writeVaultNote(ctx.ws, vaultId, {
+    await writeVaultNote(wsId, vaultId, {
       path,
-      content: noteBody(ctx.doc.name, filled(ctx), ctx.lang),
+      content: noteBody(ctx.name, ctx.content, ctx.lang),
       ...(ifHash ? { if_hash: ifHash } : {}),
     });
     toasts.push('success', 'Saved to the vault', `${vaultName} · ${path}`, 6000, {
@@ -269,7 +260,7 @@ export async function sendToVault(ctx: SendCtx): Promise<void> {
         label: 'Open note',
         run: async () => {
           router.go('vault');
-          const { vault } = await import('../../vault/vault.svelte');
+          const { vault } = await import('../../../vault/vault.svelte');
           if (vault.vaults.length === 0 && !vault.loading) await vault.load();
           if (vault.current?.id !== vaultId) await vault.select(vaultId);
           await vault.open(path);
@@ -279,11 +270,4 @@ export async function sendToVault(ctx: SendCtx): Promise<void> {
   } catch (e) {
     toasts.error('Couldn’t save the note', loadErrorText(e));
   }
-}
-
-// ── (e) Copy with placeholders filled ──────────────────────────────────────
-
-export async function copyFilled(ctx: SendCtx): Promise<void> {
-  if (await copyText(filled(ctx))) toasts.success('Copied', 'Placeholders with a value were filled in.');
-  else toasts.error('Couldn’t copy to the clipboard', 'Select the text and copy it manually.');
 }

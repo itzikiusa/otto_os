@@ -15,6 +15,7 @@
   import type { FlatSymbolNode } from './history/IdeTreeSecondaryTabs.svelte';
   import type { FlatTreeNode } from './history/ideTreeNodeMenus';
   import { ide, type IdeFsEntry, type IdeSymbolNode } from './ideStore.svelte';
+  import { newScratchFile, onScratches } from './shell/ideScratches.svelte';
 
   const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
   const IdeTreeSecondaryTabsLazy = lazyComponent(
@@ -145,7 +146,7 @@
       const defaultExpanded = root.isPrimary || !manyRoots || holdsActive;
       const isExpanded = ide.expandedDirs[root.path] ?? defaultExpanded;
       out.push({
-        entry: { name: root.name, path: root.path, kind: 'dir' },
+        entry: { name: root.isPrimary && onScratches() ? 'Scratches' : root.name, path: root.path, kind: 'dir' },
         depth: 0,
         isProjectRoot: true,
         isPrimaryRoot: root.isPrimary,
@@ -254,7 +255,7 @@
     <div class="tree-panel" role="tabpanel" id="ide-explorer-panel-files" aria-labelledby="ide-explorer-tab-files">
       <div class="tree-toolbar">
         <input class="tree-filter" type="search" dir="ltr" aria-label="Filter files" placeholder="Filter…" bind:value={ide.treeFilter} data-testid="ide-tree-filter" />
-        <button type="button" class="tree-act" aria-label="New file…" title="New file…" onclick={() => triggerNewTreeEntry(ide.target.root || selectedDirPath || '', 'create_file')}>
+        <button type="button" class="tree-act" aria-label={onScratches() ? 'New scratch file…' : 'New file…'} title={onScratches() ? 'New scratch file…' : 'New file…'} onclick={() => (onScratches() ? void newScratchFile() : triggerNewTreeEntry(ide.target.root || selectedDirPath || '', 'create_file'))} data-testid="ide-tree-new-file">
           <Icon name="plus" size={12} />
         </button>
         {#if ide.target.kind === 'local'}
@@ -285,11 +286,11 @@
             <EmptyState
               headingLevel={2}
               icon="folder"
-              title={ide.treeFilter.trim() ? 'No matching files' : 'Folder is empty'}
-              body={ide.treeFilter.trim() ? 'Clear the filter or press ⇧⇧ to search across the project.' : 'Create your first source file to start editing.'}
-              actionLabel={ide.treeFilter.trim() ? undefined : 'New file'}
+              title={ide.treeFilter.trim() ? 'No matching files' : onScratches() ? 'No scratches yet' : 'Folder is empty'}
+              body={ide.treeFilter.trim() ? 'Clear the filter or press ⇧⇧ to search across the project.' : onScratches() ? 'Jot down queries, notes, JSON or snippets — every workspace sees the same scratches.' : 'Create your first source file to start editing.'}
+              actionLabel={ide.treeFilter.trim() ? undefined : onScratches() ? 'New scratch file' : 'New file'}
               actionKind="secondary"
-              onaction={ide.treeFilter.trim() ? undefined : () => triggerNewTreeEntry(ide.target.root, 'create_file')}
+              onaction={ide.treeFilter.trim() ? undefined : () => (onScratches() ? void newScratchFile() : triggerNewTreeEntry(ide.target.root, 'create_file'))}
             />
           {/snippet}
 

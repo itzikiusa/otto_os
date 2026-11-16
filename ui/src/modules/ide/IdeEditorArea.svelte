@@ -19,11 +19,12 @@
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { isIdeManifestPath } from '../../lib/components/cm-ide-manifest';
-  import { fileUriToPath, normalizeMacPrivatePath } from '../../lib/fileUri';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ide, type IdeCodeAction, type IdeEditorHandle, type IdeOpenTab, type IdeSymbolNode } from './ideStore.svelte';
   import { ideAgent } from './store/ideAgentController.svelte';
+  import { matchesPausedDebugPath as matchesPausedPath } from './editor/idePausedPath';
+  import { previewLangOf } from './filetools/preview/kinds';
   import { subscribeIdeBufferEvictions, subscribeIdeFileSaved } from './store/ideBufferPerf';
   import IdeBreadcrumbsBar from './editor/IdeBreadcrumbsBar.svelte';
   import IdeTabBar from './editor/IdeTabBar.svelte';
@@ -56,6 +57,7 @@
   IdeEditorSubbarLazy.prefetch();
   const IdeInlinePromptBarLazy = lazyComponent(() => import('./IdeInlinePromptBar.svelte'));
   const IdeCsvViewLazy = lazyComponent(() => import('./editor/IdeCsvView.svelte'));
+  const FilePreviewLazy = lazyComponent(() => import('./filetools/preview/Preview.svelte'));
   const IdeBreakpointPopoverLazy = lazyComponent(() => import('./editor/IdeBreakpointPopover.svelte'));
   const IdeFileStructureModalLazy = lazyComponent(() => import('./editor/IdeFileStructureModal.svelte'));
   const IdeRenameModalLazy = lazyComponent(() => import('./editor/IdeRenameModal.svelte'));
@@ -99,7 +101,7 @@
     manifestDep: CmIdeDepsMod.IdeDepItem | null;
     serverActions: IdeCodeAction[];
   } | null>(null);
-  let tableModeByPath = $state<Record<string, 'table' | 'text'>>({});
+  let tableModeByPath = $state<Record<string, 'table' | 'text' | 'preview'>>({});
   let manifestModeByPath = $state<Record<string, 'text' | 'analyzer'>>({});
   let manifestDepsByPath = $state<Record<string, CmIdeDepsMod.IdeDepItem[]>>({});
   let blameEnabledByPath = $state<Record<string, boolean>>({});
@@ -323,7 +325,8 @@
   const activeIsManifest = $derived(ide.activeTab ? isIdeManifestPath(ide.activeTab.path) : false);
   const effectiveManifestMode = $derived(ide.activeTab ? (manifestModeByPath[ide.activeTab.path] ?? 'text') : 'text');
   const activeFileMeta = $derived(ide.activeTab ? classifyIdeFile(ide.activeTab, ide.target.root, projectFolders.slice(1)) : { external: false, sdkLabel: null });
-  const effectiveViewMode = $derived.by((): 'table' | 'text' => {
+  const previewLang = $derived(ide.activeTab ? previewLangOf(ide.activeTab.path) : null);
+  const effectiveViewMode = $derived.by((): 'table' | 'text' | 'preview' => {
     const t = ide.activeTab;
     return !t ? 'text' : (tableModeByPath[t.path] ?? (activeDocKind === 'csv' ? 'table' : 'text'));
   });
@@ -355,33 +358,8 @@
   const errorCount = $derived(activeDiags.filter((d) => d.severity === 'error').length);
   const warnCount = $derived(activeDiags.filter((d) => d.severity === 'warning').length);
 
-  function canonDebugPath(raw: string): string {
-    const clean = fileUriToPath(raw).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
-    return normalizeMacPrivatePath(clean);
-  }
-
-  function matchesPausedDebugPath(pausedFile: string | null | undefined, tabPath: string): boolean {
-    if (!pausedFile || !tabPath) return false;
-    if (pausedFile === tabPath) return true;
-    const p = canonDebugPath(pausedFile);
-    const t = canonDebugPath(tabPath);
-    if (!p || !t) return false;
-    if (p === t) return true;
-    const roots = [ide.target.root, ...ide.additionalRoots].filter(Boolean).map(canonDebugPath);
-    if (!p.startsWith('/')) {
-      for (const r of roots) {
-        if (`${r}/${p}` === t) return true;
-      }
-      return t.endsWith(`/${p}`);
-    }
-    if (!t.startsWith('/')) {
-      for (const r of roots) {
-        if (`${r}/${t}` === p) return true;
-      }
-      return p.endsWith(`/${t}`);
-    }
-    return false;
-  }
+  const matchesPausedDebugPath = (pausedFile: string | null | undefined, tabPath: string): boolean =>
+    matchesPausedPath(pausedFile, tabPath, [ide.target.root, ...ide.additionalRoots]);
 
   function toEditorHandle(ref: ExtendedEditorRef): IdeEditorHandle {
     const h: IdeEditorHandle & { applyQuickFixEdits?: (edits: CmIdeMod.IdeConcreteTextEdit[]) => boolean } = {
@@ -506,6 +484,7 @@
         sdkLabel={activeFileMeta.sdkLabel}
         {activeDocKind}
         {effectiveViewMode}
+        canPreview={previewLang !== null}
         {hasNonEmptySelection}
         blameActive={Boolean(blameEnabledByPath[activeTab.path])}
         {errorCount}
@@ -549,6 +528,8 @@
               onswitchtext: (ln: number) => { manifestModeByPath = { ...manifestModeByPath, [stagedPrimaryTab!.path]: 'text' }; requestAnimationFrame(() => primaryEditorRef?.goToLine(ln, 1)); },
             }}
           />
+        {:else if effectiveViewMode === 'preview' && stagedPrimaryTab.path === activeTab.path}
+          <LazyMount lazy={FilePreviewLazy} what="preview" variant="panel" props={{ lang: previewLang ?? '', content: stagedPrimaryTab.content, name: stagedPrimaryTab.name }} />
         {:else if effectiveViewMode === 'table' && (activeDocKind === 'csv' || activeDocKind === 'jsonl') && stagedPrimaryTab.path === activeTab.path}
           <LazyMount
             lazy={IdeCsvViewLazy}

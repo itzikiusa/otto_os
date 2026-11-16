@@ -200,7 +200,21 @@ export async function runFormatActiveFile(
   if (!tab || tab.readOnly || tab.truncated) return;
   const targetPath = tab.path;
   const content = bufPerf.flush(host, targetPath);
+  // SQL and XML have no formatter on the daemon: format them here (the old
+  // Workbench formatter — sql-formatter, the markup pretty-printer).
+  const local = !opts.organizeImports && /\.(sql|xml|svg)$/i.test(targetPath)
+    ? targetPath.slice(targetPath.lastIndexOf('.') + 1).toLowerCase()
+    : null;
   try {
+    if (local) {
+      const res = await (await import('../filetools/lib/format')).formatContent(local, content);
+      if (!res.ok) throw new Error(res.line ? `Line ${res.line}: ${res.error}` : res.error);
+      if (res.changed && bufPerf.getBuffer(host, targetPath) === content) {
+        await host.applyAgentEdit(targetPath, normalizeEditorLf(res.text));
+        toasts.info(`Formatted ${local.toUpperCase()}`);
+      }
+      return;
+    }
     const resp = await api.post<{ formatted: string; changed: boolean; formatter: string }>('/ide/lsp/format', {
       target: host.targetPayload,
       path: targetPath,

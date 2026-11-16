@@ -4,8 +4,8 @@
   // It is inserted with its text, so it carries no role: `announceShown`
   // speaks the title once when it appears (politely — it re-renders while the
   // author types, and the line/column would re-announce on every keystroke).
-  import Icon from '../../../lib/components/Icon.svelte';
-  import { announceShown } from '../../../lib/announce.svelte';
+  import Icon from '../../../../lib/components/Icon.svelte';
+  import { announceShown } from '../../../../lib/announce.svelte';
 
   interface Props {
     title: string;

@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canFormat, formatContent, jsonErrorPosition, validateContent } from '../src/modules/workbench/lib/format.ts';
-import { parseCsv, stringifyCsv } from '../src/modules/workbench/lib/csv.ts';
-import { formatMarkup } from '../src/modules/workbench/lib/xml.ts';
+import { canFormat, formatContent, jsonErrorPosition, validateContent } from '../src/modules/ide/filetools/lib/format.ts';
+import { parseCsv, stringifyCsv } from '../src/modules/ide/filetools/lib/csv.ts';
+import { formatMarkup } from '../src/modules/ide/filetools/lib/xml.ts';
 
 async function fmt(lang: string, text: string, opts?: { indent?: number; sqlDialect?: string }): Promise<string> {
   const r = await formatContent(lang, text, opts);

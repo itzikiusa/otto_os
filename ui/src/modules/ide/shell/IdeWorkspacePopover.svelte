@@ -9,6 +9,7 @@
   import { rowMenu } from '../../../lib/rowMenu';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
+  import { onScratches, openScratches } from './ideScratches.svelte';
 
   interface Props {
     triggerEl: HTMLButtonElement | undefined;
@@ -133,6 +134,23 @@
   </div>
 
   <div class="ws-scroll">
+    {#if !query.trim() || 'scratches'.includes(query.trim().toLowerCase())}
+      <!-- Built in and pinned first: the same scratch folder in every workspace. -->
+      <button
+        type="button"
+        class="ws-item"
+        class:is-active={onScratches()}
+        onclick={() => void openScratches().finally(() => closePopover(true))}
+        data-testid="ide-scratches-option"
+      >
+        <span class="ws-item-icon"><Icon name="workbench" size={14} /></span>
+        <span class="ws-item-copy">
+          <span class="ws-item-title">Scratches</span>
+          <span class="ws-item-desc">Your scratch files — the same in every workspace</span>
+        </span>
+        {#if onScratches()}<Badge tone="ok" dot label="Active" />{/if}
+      </button>
+    {/if}
     <div class="ws-sec-head">
       <span class="ws-sec-label">Multi-repo projects ({filteredNamedProjects.length})</span>
       <button
@@ -278,6 +296,7 @@
   .ws-item-copy { flex: 1; min-inline-size: 0; display: flex; flex-direction: column; gap: 2px; }
   .ws-item-title { display: flex; align-items: center; gap: 6px; font-size: var(--fs-s); font-weight: 600; color: var(--text); word-break: break-word; }
   .ws-item-sub { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ws-item-desc { font-size: var(--fs-xs); color: var(--text-dim); }
   .ws-actions-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px; border-block-start: 1px solid var(--border); background: var(--surface-2); flex-shrink: 0; }
   .ws-action-btn {
     display: inline-flex; align-items: center; gap: 6px; padding-block: 6px; padding-inline: 10px;

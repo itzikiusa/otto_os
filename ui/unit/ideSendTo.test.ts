@@ -9,7 +9,7 @@ import {
   pasteTargets,
   planPaste,
   targetNote,
-} from '../src/modules/workbench/send/pasteSafety.ts';
+} from '../src/modules/ide/filetools/send/pasteSafety.ts';
 import { loadSource } from './sourceHarness.ts';
 
 const ESC = '\u001b';
@@ -134,31 +134,30 @@ function sendToModule(answer = true) {
   const sent: unknown[][] = [];
   const asked: string[] = [];
   const toastLog: unknown[][] = [];
-  const safety = loadSource(new URL('../src/modules/workbench/send/pasteSafety.ts', import.meta.url), {});
-  const mod = loadSource(new URL('../src/modules/workbench/send/sendTo.ts', import.meta.url), {
-    '../../../lib/router.svelte': { router: { go() {} } },
-    '../../../lib/uiCommands': { whenMounted: async () => null },
-    '../../../lib/stores/database.svelte': { database: {} },
-    '../../../lib/stores/apiClient.svelte': { apiClient: {} },
-    '../../../lib/stores/workspace.svelte': {
+  const safety = loadSource(new URL('../src/modules/ide/filetools/send/pasteSafety.ts', import.meta.url), {});
+  const mod = loadSource(new URL('../src/modules/ide/filetools/send/sendTo.ts', import.meta.url), {
+    '../../../../lib/router.svelte': { router: { go() {} } },
+    '../../../../lib/uiCommands': { whenMounted: async () => null },
+    '../../../../lib/stores/database.svelte': { database: {} },
+    '../../../../lib/stores/apiClient.svelte': { apiClient: {} },
+    '../../../../lib/stores/workspace.svelte': {
       ws: { sendInput: async (...a: unknown[]) => void sent.push(a), navigateToSession() {} },
     },
-    '../../../lib/confirm.svelte': { confirmer: { ask: async (body: string) => (asked.push(body), answer) } },
-    '../../../lib/toast.svelte': {
+    '../../../../lib/confirm.svelte': { confirmer: { ask: async (body: string) => (asked.push(body), answer) } },
+    '../../../../lib/toast.svelte': {
       toasts: { push: (...a: unknown[]) => void toastLog.push(a), error: (...a: unknown[]) => void toastLog.push(a), success() {}, info() {} },
     },
-    '../../../lib/clipboard': { copyText: async () => true },
-    '../../../lib/api/client': { ApiError: class {} },
-    '../../../lib/api/vault': {},
-    '../../database/handoff.svelte': { dbHandoff: {} },
-    '../lib/placeholders': { fillPlaceholders: (t: string) => t },
-    '../../../lib/loadError': { loadErrorText: String },
+    '../../../../lib/clipboard': { copyText: async () => true },
+    '../../../../lib/api/client': { ApiError: class {} },
+    '../../../../lib/api/vault': {},
+    '../../../database/handoff.svelte': { dbHandoff: {} },
+    '../../../../lib/loadError': { loadErrorText: String },
     './pasteSafety': safety,
   });
   return { mod, sent, asked, toastLog };
 }
 
-const ctxOf = (content: string) => ({ ws: 'w1', doc: { name: 'f.sql' }, content, lang: 'sql', values: {} });
+const ctxOf = (content: string) => ({ name: 'f.sql', content, lang: 'sql' });
 
 test('pasteIntoSession never writes multi-line text to a connection session', async () => {
   const { mod, sent, asked, toastLog } = sendToModule();

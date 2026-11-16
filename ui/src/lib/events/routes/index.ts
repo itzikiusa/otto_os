@@ -48,5 +48,4 @@ export const LIVE_ONLY_EVENTS: readonly EventType[] = [
   'mcp_approval_changed',
   'resource_access_changed',
   'notifications_changed',
-  'workbench_doc_changed',
 ];

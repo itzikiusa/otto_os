@@ -51,6 +51,7 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
         { id: 'core.prev-session', title: 'Previous session', group: 'Session', shortcut: '⌘[', keywords: 'switch tab back cycle', run: () => ws.cycleTab(-1) },
         { id: 'core.split-v', title: 'Split vertically', group: 'Pane', shortcut: '⌘D', run: () => ws.split('col') },
         { id: 'core.split-h', title: 'Split horizontally', group: 'Pane', shortcut: '⌘⇧D', run: () => ws.split('row') },
+        ...(auth.can('agents', 'edit') ? [{ id: 'core.new-scratch', title: 'New scratch file…', group: 'Tools', keywords: 'scratch scratches workbench note snippet query json markdown sql ide', run: () => router.go('ide?scratches=new') }] : []),
         { id: 'core.new-workspace', title: 'New workspace…', group: 'Session', keywords: 'create new project folder directory', run: () => (ui.newWorkspaceOpen = true) },
         { id: 'core.slack-send', title: 'Send a Slack message as me…', group: 'Tools', keywords: 'slack message dm post channel send as me reviewer bot', run: () => slackSend.open() },
         { id: 'core.update-clis', title: 'Update all CLIs', group: 'Tools', shortcut: '⌘U / ⌘⇧U', keywords: 'upgrade claude codex agy cli version', run: () => void deps.updateAllCLIs() },

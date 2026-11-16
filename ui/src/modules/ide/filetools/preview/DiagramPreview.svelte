@@ -4,9 +4,9 @@
   // canvas/d2.ts — the WASM worker). Latest-wins: a render superseded by a
   // newer edit is skipped/discarded by sequence token.
   import { untrack } from 'svelte';
-  import { renderMermaid } from '../../../lib/render/mermaid';
-  import { renderD2 } from '../../canvas/d2';
-  import { ui } from '../../../lib/stores/ui.svelte';
+  import { renderMermaid } from '../../../../lib/render/mermaid';
+  import { renderD2 } from '../../../canvas/d2';
+  import { ui } from '../../../../lib/stores/ui.svelte';
   import PreviewError from './PreviewError.svelte';
 
   interface Props {

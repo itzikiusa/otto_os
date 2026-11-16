@@ -3,7 +3,7 @@
   // (lib/components/JsonTree.svelte, standalone mode — a collapsed container renders
   // one summary line, long arrays chunk) so a multi-MB document stays cheap.
   // Parse errors show inline with line/column.
-  import JsonTree from '../../../lib/components/JsonTree.svelte';
+  import JsonTree from '../../../../lib/components/JsonTree.svelte';
   import { parseJsonWithPos } from './kinds';
   import PreviewError from './PreviewError.svelte';
 

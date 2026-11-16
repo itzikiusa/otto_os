@@ -33,9 +33,6 @@ import type {
   Artifact, Turn,
 } from './transcript';
 import type {
-  WorkbenchDocChangedEvent,
-} from './workbench';
-import type {
   NodeRunState,
 } from './workflows';
 
@@ -635,5 +632,4 @@ export type OttoEvent =
       rows_preview: unknown[][];
       error: string | null;
       ts: string;
-    }
-  | WorkbenchDocChangedEvent;
+    };

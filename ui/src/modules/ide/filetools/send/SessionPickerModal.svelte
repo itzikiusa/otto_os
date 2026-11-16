@@ -3,12 +3,12 @@
   // agent session…). Picking still asks a confirm naming the session; the text
   // goes in cleaned of control bytes, with no Enter. Connection sessions (ssh,
   // DB clients) take one line only — see pasteSafety.ts.
-  import Modal from '../../../lib/components/Modal.svelte';
-  import EmptyState from '../../../lib/components/EmptyState.svelte';
-  import Icon from '../../../lib/components/Icon.svelte';
-  import { ws as wsStore } from '../../../lib/stores/workspace.svelte';
-  import type { Session } from '../../../lib/api/types';
-  import { sessionState } from '../../../lib/status';
+  import Modal from '../../../../lib/components/Modal.svelte';
+  import EmptyState from '../../../../lib/components/EmptyState.svelte';
+  import Icon from '../../../../lib/components/Icon.svelte';
+  import { ws as wsStore } from '../../../../lib/stores/workspace.svelte';
+  import type { Session } from '../../../../lib/api/types';
+  import { sessionState } from '../../../../lib/status';
   import { pasteTargets, targetNote } from './pasteSafety';
 
   interface Props {

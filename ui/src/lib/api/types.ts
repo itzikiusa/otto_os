@@ -46,7 +46,6 @@ export * from './types/transcript';
 export * from './types/ui-control';
 export * from './types/usage-limits';
 export * from './types/vault';
-export * from './types/workbench';
 export * from './types/workflows';
 export * from './types/ws-term';
 

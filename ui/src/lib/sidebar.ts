@@ -104,9 +104,9 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
     keywords: 'cron recurring job report cadence hourly daily personal agents persona soul bot channels chat schedule recap',
   },
   // ── Build ──
-  // IDE unifies multi-repo project editing (`#/ide`) and per-user scratch files
-  // (`#/workbench`) behind one sidebar entry and the `Project | Scratches` switcher.
-  { id: 'ide', icon: 'ide', label: 'IDE (Beta)', group: 'build', feature: 'agents', keywords: 'ide editor code intellij goland debug breakpoints java go rust typescript javascript python lsp ssh refactor workbench scratch scratches scripts snippets format json markdown html mermaid d2 sql notes placeholders' },
+  // IDE: projects and the built-in Scratches project (each user's scratch
+  // folder, the same in every workspace; `#/workbench` forwards to it).
+  { id: 'ide', icon: 'ide', label: 'IDE (Beta)', group: 'build', feature: 'agents', keywords: 'ide editor code intellij goland debug breakpoints java go rust typescript javascript python lsp ssh refactor workbench scratch scratches scripts snippets format json markdown html mermaid d2 sql notes preview send' },
   { id: 'git', icon: 'branch', label: 'Git', group: 'build', feature: 'git', keywords: 'repos prs pull requests diff commit' },
   {
     id: 'product',

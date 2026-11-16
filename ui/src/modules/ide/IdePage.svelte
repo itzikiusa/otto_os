@@ -4,7 +4,6 @@
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import IdeModeTabs from '../../lib/components/IdeModeTabs.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -25,6 +24,7 @@
   import IdeEditorArea from './IdeEditorArea.svelte';
   import { ide } from './ideStore.svelte';
   import IdeWorkspaceSwitcher from './shell/IdeWorkspaceSwitcher.svelte';
+  import { loadScratchesRoot, newScratchFile, openScratches } from './shell/ideScratches.svelte';
   import {
     handleIdeChord,
     handleIdeWindowKeyDown,
@@ -197,6 +197,10 @@
     untrack(() => ide.attachDefaultWorkspace());
   });
 
+  // Know the Scratches folder up front: the switcher names it "Scratches"
+  // (a reload may restore it as the last project).
+  loadScratchesRoot().catch(() => {});
+
   let lastHandledQuery = '';
   $effect(() => {
     void router.parts;
@@ -214,6 +218,7 @@
     const projectParam = params.get('project');
     const rootParam = params.get('root');
     const fileParam = params.get('file');
+    const scratchesParam = params.get('scratches');
     const lineParam = Number(params.get('line') || '0') || undefined;
 
     untrack(() => {
@@ -225,7 +230,9 @@
       }
       void (async () => {
         try {
-          if (projectParam) await ide.activateProject(projectParam);
+          if (scratchesParam === 'new') await newScratchFile();
+          else if (scratchesParam) await openScratches();
+          else if (projectParam) await ide.activateProject(projectParam);
           // A root already attached to the open (multi-folder) project keeps that project and its tabs.
           else if (rootParam && !(ide.target.kind === 'local' && ide.projectRoots.some((r) => r.path.replace(/\/+$/, '') === rootParam.replace(/\/+$/, '')))) {
             if (!(await ide.setLocalTarget(rootParam, null, { skipAutoOpen: Boolean(fileParam) }))) return;
@@ -330,10 +337,6 @@
 
 <div class="ide-page" data-testid="ide-page" data-ide-density={idePreferences.current.uiDensity}>
   <PageHeader title="IDE (Beta)">
-    {#snippet tabs()}
-      <IdeModeTabs active="project" />
-    {/snippet}
-
     {#snippet badge()}
       <IdeWorkspaceSwitcher onpickfolder={(m) => (folderPickerMode = m)} />
     {/snippet}
@@ -537,7 +540,7 @@
           <Icon name="server" size={13} />
           Connect over SSH…
         </button>
-        <button type="button" class="btn ghost" onclick={() => router.go('workbench')} data-testid="ide-open-scratches">
+        <button type="button" class="btn ghost" onclick={() => void openScratches()} data-testid="ide-open-scratches">
           <Icon name="workbench" size={13} />
           Open Scratches
         </button>

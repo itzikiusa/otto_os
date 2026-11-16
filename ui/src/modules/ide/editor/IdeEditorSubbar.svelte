@@ -13,6 +13,7 @@
   import { ideAgent } from '../store/ideAgentController.svelte';
   import { pushIdeNavLocation, revealInIdeProjectTree, toggleFormatOnSave } from './ideEditorStoreBridge.svelte';
   import type { IdeOutlineNode } from './ideLangAnalyzer';
+  import SendToButton from '../filetools/send/SendToButton.svelte';
 
   interface Props {
     activeTab: IdeOpenTab;
@@ -22,12 +23,14 @@
     activeJsonPath: string | null;
     sdkLabel: string | null;
     activeDocKind: string;
-    effectiveViewMode: 'table' | 'text';
+    effectiveViewMode: 'table' | 'text' | 'preview';
+    /** The file has a rendered preview (Markdown, HTML, SVG, Mermaid, D2, JSON). */
+    canPreview: boolean;
     hasNonEmptySelection: boolean;
     blameActive: boolean;
     errorCount: number;
     warnCount: number;
-    onsetviewmode: (mode: 'table' | 'text') => void;
+    onsetviewmode: (mode: 'table' | 'text' | 'preview') => void;
     onapplyjson: (nextText: string) => void;
     onjumpsymbol: (delta: -1 | 1) => void;
     ongotoline: (line: number, col: number) => void;
@@ -40,7 +43,7 @@
 
   let {
     activeTab, pathSegments, enclosingSymbol, effectiveSymbols, activeJsonPath, sdkLabel,
-    activeDocKind, effectiveViewMode, hasNonEmptySelection, blameActive, errorCount, warnCount,
+    activeDocKind, effectiveViewMode, canPreview, hasNonEmptySelection, blameActive, errorCount, warnCount,
     onsetviewmode, onapplyjson, onjumpsymbol, ongotoline, onopenstructure, ontoggleblame,
     onopenquickfix, oncyclediag, onfocusagent,
   }: Props = $props();
@@ -206,6 +209,12 @@
         <button type="button" aria-pressed={effectiveViewMode === 'text'} onclick={() => onsetviewmode('text')}>Text</button>
       </div>
     {/if}
+    {#if canPreview}
+      <div class="segmented" role="group" aria-label="Editor view mode" data-testid="ide-preview-toggle">
+        <button type="button" aria-pressed={effectiveViewMode !== 'preview'} onclick={() => onsetviewmode('text')}>Code</button>
+        <button type="button" aria-pressed={effectiveViewMode === 'preview'} onclick={() => onsetviewmode('preview')}>Preview</button>
+      </div>
+    {/if}
     {#if (activeDocKind === 'json' || activeDocKind === 'jsonl') && !activeTab.readOnly && effectiveViewMode === 'text' && !hasNonEmptySelection}
       <button type="button" class="btn small ghost" onclick={() => applyJsonTransform('pretty')} title="Pretty-print JSON">Pretty</button>
       <button type="button" class="btn small ghost" onclick={() => applyJsonTransform('minify')} title="Minify JSON">Minify</button>
@@ -250,6 +259,7 @@
       {/if}
     </button>
 
+    <SendToButton name={activeTab.name} content={activeTab.content} lang={activeTab.path.split('.').pop()?.toLowerCase() ?? ''} />
     <button type="button" class="icon-btn" aria-label="Color Scheme & Editor Appearance" title="Color Scheme & Editor Appearance" onclick={openSchemePickerMenu} data-testid="ide-scheme-picker-btn">
       <Icon name="palette" size={13} />
     </button>
