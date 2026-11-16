@@ -42,6 +42,7 @@ pub struct ModelProbe {
     pub grok_program: Option<String>,
     pub opencode_program: Option<String>,
     pub pi_program: Option<String>,
+    pub muse_program: Option<String>,
     /// Extra `CLAUDE_CONFIG_DIR` roots configured/inferred for enabled
     /// Claude-family custom providers (e.g. `~/.claude-work`).
     pub claude_config_dirs: Vec<PathBuf>,
@@ -66,6 +67,7 @@ impl ModelProbe {
             grok_program: program_of("grok"),
             opencode_program: program_of("opencode"),
             pi_program: program_of("pi"),
+            muse_program: program_of("muse"),
             families,
             claude_config_dirs: Vec::new(),
         }
@@ -291,6 +293,7 @@ async fn discover_models_with_status(
         let grok_program = probe.grok_program.clone();
         let opencode_program = probe.opencode_program.clone();
         let pi_program = probe.pi_program.clone();
+        let muse_program = probe.muse_program.clone();
         let claude_dirs = probe.claude_config_dirs.clone();
         tasks.push(tokio::spawn(async move {
             let (models, incomplete) = match family.as_str() {
@@ -319,6 +322,18 @@ async fn discover_models_with_status(
                     let out =
                         run_models(prog.as_deref(), &["--offline", "--list-models"], 15).await;
                     let m = parse_pi_models_output(&out);
+                    let inc = prog.is_some() && m.is_empty();
+                    (m, inc)
+                }
+                "muse" => {
+                    let prog = resolve_cli_program(muse_program).await;
+                    let out = match prog.as_deref() {
+                        Some(p) => run_muse_model_list(p, Duration::from_secs(15))
+                            .await
+                            .unwrap_or_default(),
+                        None => String::new(),
+                    };
+                    let m = parse_muse_models_output(&out);
                     let inc = prog.is_some() && m.is_empty();
                     (m, inc)
                 }
@@ -960,6 +975,125 @@ async fn run_models(program: Option<&str>, args: &[&str], secs: u64) -> String {
     text.push('\n');
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     text
+}
+
+/// Muse has no `models` command: its MSP session host (`muse serve`, read
+/// only, nothing logged) answers `model/list` — signed in or not (verified
+/// against 1.4.20). The three requests go in on stdin; the host answers them
+/// before it exits at end of input.
+const MUSE_MODEL_LIST_ARGS: [&str; 4] = [
+    "serve",
+    "--disable-shell",
+    "--disable-write",
+    "--no-session-log",
+];
+const MUSE_MODEL_LIST_INPUT: &str = concat!(
+    r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"otto","version":"1"},"capabilities":{"requestedCapabilities":[]}}}"#,
+    "\n",
+    r#"{"jsonrpc":"2.0","method":"initialized"}"#,
+    "\n",
+    r#"{"jsonrpc":"2.0","id":2,"method":"model/list","params":{}}"#,
+    "\n",
+);
+
+/// The host's stdout for [`MUSE_MODEL_LIST_INPUT`].
+pub(super) async fn run_muse_model_list(prog: &str, budget: Duration) -> Result<String, String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = cli_models_command(prog, &MUSE_MODEL_LIST_ARGS)
+        .env("MUSE_NO_AUTO_UPDATE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("muse serve: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(MUSE_MODEL_LIST_INPUT.as_bytes())
+            .await
+            .map_err(|e| format!("muse serve: {e}"))?;
+    }
+    match timeout(budget, child.wait_with_output()).await {
+        Err(_) => Err("muse serve: timed out".into()),
+        Ok(Err(e)) => Err(format!("muse serve: {e}")),
+        Ok(Ok(o)) => Ok(String::from_utf8_lossy(&o.stdout).into_owned()),
+    }
+}
+
+/// The `model/list` answer in `muse serve`'s output: `modelId`,
+/// `displayLabel` (`muse-spark-1.3` reads "Muse Spark 1.3", as T3 Code
+/// shows it), `variants` (the effort tiers, or `"unknown"` when the host
+/// has no catalog detail) and `defaultReasoningEffort`.
+pub fn parse_muse_models_output(raw: &str) -> Vec<ProviderModelOption> {
+    let Some(models) = raw
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+        .find(|v| v.get("id").and_then(Value::as_u64) == Some(2))
+        .and_then(|v| v.pointer("/result/models").cloned())
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<ProviderModelOption> = Vec::new();
+    for m in models.as_array().into_iter().flatten() {
+        let Some(id) = m
+            .get("modelId")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if out.iter().any(|o| o.id == id) {
+            continue;
+        }
+        let label = m
+            .get("displayLabel")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && *l != id)
+            .map(str::to_string)
+            .unwrap_or_else(|| muse_model_label(id));
+        let supported_efforts: Vec<String> = m
+            .get("variants")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(ProviderModelOption {
+            id: id.to_string(),
+            label,
+            description: m
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            default_effort: m
+                .get("defaultReasoningEffort")
+                .and_then(Value::as_str)
+                .filter(|e| supported_efforts.iter().any(|s| s == e))
+                .map(str::to_string),
+            supported_efforts,
+        });
+    }
+    out
+}
+
+/// `muse-spark-1.3` → `Muse Spark 1.3`.
+fn muse_model_label(id: &str) -> String {
+    if !id.starts_with("muse-") {
+        return id.to_string();
+    }
+    id.split('-')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().chain(c).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `opencode models`: one `provider/model` per line.

@@ -326,3 +326,57 @@ async fn custom_providers_share_their_family_catalog() {
     assert!(!got["claude-work"].is_empty());
     assert_eq!(got["claude-work"], got["claude"]);
 }
+
+/// Trimmed from a real `muse serve` `model/list` answer (Muse 1.4.20, signed
+/// out): ids, readable labels, effort tiers and the model's default tier.
+const MUSE_MODEL_LIST: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"muse","version":"1.4.20"},"schema":{"version":1}}}
+{"jsonrpc":"2.0","id":2,"result":{"providerId":"meta","profileId":"tbh","models":[{"modelId":"muse-wonder-1.0","displayLabel":"muse-wonder-1.0","providerId":"meta","description":null,"isDefault":true,"variants":["minimal","low","medium","high","xhigh","max"],"reasoningEffortVariants":[],"defaultReasoningEffort":"high"},{"modelId":"muse-spark-1.2","displayLabel":"muse-spark-1.2","providerId":"meta","description":null,"isDefault":false,"variants":["minimal","low","medium","high","xhigh"],"defaultReasoningEffort":"high"},{"modelId":"muse-ember-1.0","displayLabel":"muse-ember-1.0","providerId":"meta","isDefault":false,"variants":"unknown"}]}}
+"#;
+
+#[test]
+fn parses_real_muse_model_list() {
+    let m = parse_muse_models_output(MUSE_MODEL_LIST);
+    assert_eq!(
+        m.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["muse-wonder-1.0", "muse-spark-1.2", "muse-ember-1.0"]
+    );
+    assert_eq!(m[0].label, "Muse Wonder 1.0");
+    assert_eq!(m[0].default_effort.as_deref(), Some("high"));
+    assert_eq!(
+        m[1].supported_efforts,
+        ["minimal", "low", "medium", "high", "xhigh"]
+    );
+    // `variants: "unknown"` (no catalog detail): no efforts, no default.
+    assert!(m[2].supported_efforts.is_empty() && m[2].default_effort.is_none());
+    assert!(parse_muse_models_output("muse: not a JSON line\n").is_empty());
+}
+
+/// The host gets the three requests on stdin (and the launcher's update
+/// check is off); a host that never answers times out.
+#[cfg(unix)]
+#[tokio::test]
+async fn muse_model_list_is_asked_of_its_session_host() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("muse");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n[ \"$1 $MUSE_NO_AUTO_UPDATE\" = 'serve 1' ] || exit 2\n\
+             grep -q '\"model/list\"' || exit 3\ncat <<'EOF'\n{MUSE_MODEL_LIST}EOF\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = run_muse_model_list(script.to_str().unwrap(), Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert_eq!(parse_muse_models_output(&out).len(), 3);
+    let silent = dir.path().join("silent");
+    std::fs::write(&silent, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&silent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = run_muse_model_list(silent.to_str().unwrap(), Duration::from_millis(300))
+        .await
+        .unwrap_err();
+    assert!(err.contains("timed out"), "{err}");
+}

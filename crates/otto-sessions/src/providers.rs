@@ -89,9 +89,16 @@ struct ProviderOverride {
     model_family: Option<String>,
 }
 
+/// Muse's launcher has no `update` subcommand: this environment makes it
+/// refresh its own install synchronously, then print the version (T3 Code
+/// runs the same).
+pub const MUSE_UPDATE_COMMAND: &str =
+    "MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1 MUSE_UPDATE_INTERVAL_SECONDS=0 muse --version";
+
 /// Families with a model catalog (`provider_models`) and a `--model` flag.
-pub const MODEL_FAMILIES: [&str; 7] =
-    ["claude", "codex", "agy", "gemini", "grok", "opencode", "pi"];
+pub const MODEL_FAMILIES: [&str; 8] = [
+    "claude", "codex", "agy", "gemini", "grok", "opencode", "pi", "muse",
+];
 
 fn matches_family_token(candidate: &str, fam: &str) -> bool {
     let lower = candidate.trim().to_ascii_lowercase();
@@ -568,6 +575,37 @@ impl ProviderRegistry {
                 shell_fallback: false,
             },
         );
+        // Muse Code (Meta; verified against 1.4.20): the TUI is `muse
+        // [--model <id>] [--yolo]`. Muse mints its own session ids and
+        // `muse resume --last` would cross-wire two sessions sharing a
+        // folder, so terminal Muse starts fresh on every (re)spawn (no
+        // `resume_args`), like opencode; Threads resumes exactly via ACP
+        // `session/load`. `--trust-workspace` loads the folder's skills and
+        // rules as every other CLI's pre-trusted cwd does; `--yolo` is its
+        // skip-permissions (approval and its own sandbox off).
+        // `MUSE_NO_AUTO_UPDATE=1` keeps the launcher from checking for a new
+        // binary on every spawn — Otto's update pass runs the launcher's
+        // synchronous refresh instead.
+        map.insert(
+            "muse".to_string(),
+            ProviderSpec {
+                cmd: "muse".into(),
+                args: {
+                    let mut a = vec!["--trust-workspace".to_string()];
+                    if skip_permissions {
+                        a.push("--yolo".into());
+                    }
+                    a
+                },
+                resume_args: None,
+                env: BTreeMap::from([("MUSE_NO_AUTO_UPDATE".to_string(), "1".to_string())]),
+                update_command: Some(MUSE_UPDATE_COMMAND.into()),
+                model_args: Some(vec!["--model".into(), "{model}".into()]),
+                model_family: Some("muse".into()),
+                captures_session_id: false,
+                shell_fallback: false,
+            },
+        );
         map.insert(
             "shell".to_string(),
             ProviderSpec {
@@ -889,7 +927,7 @@ impl ProviderRegistry {
     }
 
     /// Resolve an ENABLED and installed/aliased program for CLI `family`
-    /// (`"claude"`, `"codex"`, `"agy"`, `"grok"`, `"opencode"`, `"pi"`).
+    /// (`"claude"`, `"codex"`, `"agy"`, `"grok"`, `"opencode"`, `"pi"`, `"muse"`).
     /// Prefers the exact slug `family` when enabled and runnable on `$PATH` /
     /// filesystem / rc alias; falls back to any enabled custom provider of that
     /// family whose command resolves; returns `None` when disabled or missing.

@@ -14,8 +14,9 @@ use serde_json::Value;
 use tokio::time::timeout;
 
 /// Built-in providers covered by the dynamic model catalog and refresher.
-pub const KNOWN_CATALOG_PROVIDERS: [&str; 7] =
-    ["claude", "codex", "agy", "gemini", "grok", "opencode", "pi"];
+pub const KNOWN_CATALOG_PROVIDERS: [&str; 8] = [
+    "claude", "codex", "agy", "gemini", "grok", "opencode", "pi", "muse",
+];
 
 /// A catalog older than this many hours is marked `stale` in `/providers/models`.
 pub const CATALOG_STALE_AFTER_HOURS: i64 = 24;
@@ -254,13 +255,24 @@ pub fn catalog_scrape_target(provider: &str) -> Option<CatalogScrapeTarget> {
     }
 }
 
-/// Source 1 — non-interactive CLI model probe (`agy`, `grok`, `opencode`, `pi`).
-/// Returns `None` when `provider` has no model-listing CLI subcommand.
+/// Source 1 — non-interactive CLI model probe (`agy`, `grok`, `opencode`,
+/// `pi`, `muse`). Returns `None` when `provider` has no model-listing CLI
+/// subcommand.
 pub async fn probe_catalog_cli(
     provider: &str,
     program: &str,
     budget: Duration,
 ) -> Option<Result<Vec<(String, String)>, String>> {
+    if provider == "muse" {
+        let models = super::run_muse_model_list(program, budget)
+            .await
+            .map(|out| super::parse_muse_models_output(&out));
+        return Some(match models {
+            Ok(m) if m.is_empty() => Err("muse model/list: no models".into()),
+            Ok(m) => Ok(m.into_iter().map(|m| (m.id, m.label)).collect()),
+            Err(e) => Err(e),
+        });
+    }
     let args: &[&str] = match provider {
         "agy" | "grok" | "opencode" => &["models"],
         "pi" => &["--offline", "--list-models"],
@@ -322,10 +334,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn known_catalog_providers_covers_all_seven_builtins() {
+    fn known_catalog_providers_covers_all_eight_builtins() {
         assert_eq!(
             KNOWN_CATALOG_PROVIDERS,
-            ["claude", "codex", "agy", "gemini", "grok", "opencode", "pi"]
+            ["claude", "codex", "agy", "gemini", "grok", "opencode", "pi", "muse"]
         );
         for p in ["claude", "codex", "agy", "gemini", "grok"] {
             assert!(catalog_scrape_target(p).is_some(), "missing scrape for {p}");

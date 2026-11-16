@@ -263,12 +263,13 @@ fn fast_tool_statuses(specs: &BTreeMap<String, String>) -> Vec<ToolStatus> {
         .collect()
 }
 /// Tools probed by name on every `/meta`.
-pub const DETECTED_TOOLS: [&str; 7] = [
+pub const DETECTED_TOOLS: [&str; 8] = [
     "claude",
     "codex",
     "agy",
     "opencode",
     "pi",
+    "muse",
     "git",
     "clickhouse",
 ];
@@ -491,6 +492,8 @@ async fn detect_tool(name: &str, program: &str) -> ToolStatus {
             Duration::from_secs(2),
             Command::new(program)
                 .arg("--version")
+                // Muse's launcher would otherwise check for a new binary.
+                .env("MUSE_NO_AUTO_UPDATE", "1")
                 .kill_on_drop(true)
                 .output(),
         )
