@@ -79,10 +79,7 @@ zero-rebuild **runtime IDE plugins**.
     (OTTO_IDE_TRUST_FORMATTER_CONFIG=1)". Root opts a project in with that
     variable in its project environment (non-root callers never). Ruff,
     black, rustfmt, gofmt, shfmt, buf and biome read data-only configs and
-    are unchanged. With no formatter installed, the builtin fallback keeps
-    brace-language code (TS, JS, Java, Go, Rust, C…) exactly as written and
-    says "No changes" with an install hint; it only tidies whitespace in
-    other text (JSON is re-indented; Markdown keeps trailing double spaces). On SSH targets root keeps Prettier's own discovery (it
+    are unchanged. On SSH targets root keeps Prettier's own discovery (it
     runs on the remote host). Pyright only executes a venv interpreter
     (`pyvenv.cfg` present) that resolves under a known interpreter home
     (system, Xcode/CLT, python.org, Homebrew, pyenv/uv/mise/asdf/rye/conda,

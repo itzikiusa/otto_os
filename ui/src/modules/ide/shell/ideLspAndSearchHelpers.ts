@@ -213,7 +213,7 @@ export async function runApplyRename(
 export async function runFormatActiveFile(
   host: IdeLspSearchHost,
   bufPerf: IdeBufferPerfController,
-  opts: { organizeImports?: boolean; onSave?: boolean } = {},
+  opts: { organizeImports?: boolean } = {},
 ): Promise<void> {
   const tab = host.activeTab;
   if (!tab || tab.readOnly || tab.truncated) return;
@@ -232,17 +232,11 @@ export async function runFormatActiveFile(
         });
     if (noteFormatSkipped(targetPath, resp)) return; // on purpose, not an error: buffer untouched
     if (resp.changed && typeof resp.formatted === 'string') {
-      if (!host.tabs.some((t) => t.path === targetPath)) return;
-      if (bufPerf.getBuffer(host, targetPath) !== content) {
-        toasts.info('File changed while formatting', 'Nothing was applied. Format again.');
+      if (bufPerf.getBuffer(host, targetPath) !== content || !host.tabs.some((t) => t.path === targetPath)) {
         return;
       }
       await host.applyAgentEdit(targetPath, normalizeEditorLf(resp.formatted));
       toasts.info(opts.organizeImports ? 'Optimized imports' : `Formatted with ${resp.formatter || 'formatter'}`);
-    } else if (!resp.changed && !opts.onSave) {
-      toasts.info('No changes', resp.formatter === 'builtin'
-        ? 'Only the builtin formatter is available, and it keeps code as written. Install the language’s formatter (Prettier, gofmt, …) to format.'
-        : `${resp.formatter || 'The formatter'} found nothing to change.`);
     }
   } catch (e) {
     toastError(opts.organizeImports ? 'Couldn’t optimize imports' : 'Couldn’t format file', e);

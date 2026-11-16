@@ -518,7 +518,7 @@ class IdeStore {
   }
 
   async saveFile(path?: string, forceOverwrite = false, opts: { silent?: boolean } = {}): Promise<boolean> {
-    if (this.formatOnSave && !opts.silent && (!path || path === this._activePath)) await this.formatActiveFile(true);
+    if (this.formatOnSave && !opts.silent && (!path || path === this._activePath)) await this.formatActiveFile();
     const ok = await performSaveFile(this, this.bufPerf, path, forceOverwrite, opts);
     this.syncWorkspacePort();
     return ok;
@@ -576,7 +576,7 @@ class IdeStore {
   lspRenameEdits(path: string, line: number, column: number, name: string): Promise<IdeTextEdit[] | null> { return this.editorHandleForPath(path)?.lspRenameEdits?.(line, column, name) ?? Promise.resolve(null); }
   previewRename(newName?: string): Promise<void> { return loadLspMod().then((m) => m.runPreviewRename(this, newName, this.bufPerf)); }
   applyRename(): Promise<boolean> { return loadLspMod().then((m) => m.runApplyRename(this, this.bufPerf)); }
-  formatActiveFile(onSave = false): Promise<void> { return loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf, { onSave })); }
+  formatActiveFile(): Promise<void> { return loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf)); }
   organizeImportsActiveFile(): Promise<void> { return loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf, { organizeImports: true })); }
   fetchCodeActions(path: string, line: number, column: number): Promise<IdeCodeAction[]> { return loadLspMod().then((m) => m.runFetchCodeActions(this, this.bufPerf, path, line, column)); }
   applyCodeAction(path: string, action: IdeCodeAction | IdeQuickFix): Promise<boolean> { return loadLspMod().then((m) => m.runApplyCodeAction(this, this.bufPerf, path, action)); }
