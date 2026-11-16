@@ -351,7 +351,7 @@ pub(super) async fn execute_run_task(
 
         append_run_line(
             &handle,
-            format!("$ {} {}", program, args.join(" "))
+            format!("$ {} {}", program, shell_words::join(&args))
                 .trim()
                 .to_string(),
         );

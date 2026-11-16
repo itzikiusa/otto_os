@@ -26,7 +26,7 @@ pub(super) fn discover_python(
             "django-runserver",
             "Django runserver".into(),
             Some("python3"),
-            vec!["manage.py".into(), "runserver".into()],
+            vec!["runserver".into()],
             cwd.clone(),
             Some("manage.py".into()),
         ));
@@ -40,20 +40,23 @@ pub(super) fn discover_python(
                 entry,
                 format!("Python {entry}"),
                 Some("python3"),
-                vec![entry.into()],
+                Vec::new(),
                 cwd.clone(),
                 Some(entry.into()),
             ));
         }
     }
 
-    let has_tests_dir = root.join("tests").is_dir() || root.join("test").is_dir();
+    // A `tests/` folder alone is no Python sign (Go and JS repos have one too).
+    let has_py_tests_dir = ["tests", "test"]
+        .iter()
+        .any(|d| !list_files_with_suffix(&root.join(d), ".py").is_empty());
     let has_root_py_tests = list_files_with_suffix(root, ".py").iter().any(|p| {
         let n = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
         n.starts_with("test_") || n.ends_with("_test.py")
     });
 
-    if has_pytest_ini || has_tests_dir || has_root_py_tests || (has_pyproject && has_reqs) {
+    if has_pytest_ini || has_py_tests_dir || has_root_py_tests || has_pyproject || has_reqs {
         out.push(make_auto_config(
             root_badge,
             IdeRunnerKind::Pytest,
@@ -255,7 +258,7 @@ pub(super) fn discover_shell(
 
     for rel in shell_files {
         let label = format!("Shell {rel}");
-        let args = vec![rel.clone()];
+        let args = Vec::new();
         let target_path = Some(rel.clone());
         out.push(make_auto_config(
             root_badge,

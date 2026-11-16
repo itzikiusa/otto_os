@@ -479,6 +479,78 @@ fn build_runner_command_merges_go_tags_and_coverage_flags() {
     assert_eq!(npm_args, vec!["test", "--", "--coverage"]);
 }
 
+#[test]
+fn a_script_config_keeps_its_target_when_program_arguments_are_set() {
+    let run = |runner, target: &str, args: &[&str]| {
+        let cfg = IdeRunConfig {
+            id: "rc".into(),
+            name: "script".into(),
+            runner,
+            command: Some(
+                if runner == IdeRunnerKind::Python {
+                    "python3"
+                } else {
+                    "node"
+                }
+                .into(),
+            ),
+            target_path: Some(target.into()),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            ..Default::default()
+        };
+        super::runner_cmd::build_runner_command(
+            &cfg,
+            IdeTargetKind::Local,
+            "/tmp",
+            &BTreeMap::new(),
+        )
+        .1
+    };
+    assert_eq!(
+        run(IdeRunnerKind::Python, "main.py", &["hello", "two words"]),
+        ["main.py", "hello", "two words"]
+    );
+    assert_eq!(
+        run(IdeRunnerKind::Node, "index.js", &["--foo"]),
+        ["index.js", "--foo"]
+    );
+    // A config saved with the script in its arguments runs it once.
+    assert_eq!(
+        run(IdeRunnerKind::Python, "main.py", &["main.py", "x"]),
+        ["main.py", "x"]
+    );
+    assert_eq!(
+        shell_words::join(["hello", "two words", "", "a'b"]),
+        r#"hello 'two words' '' 'a'\''b'"#,
+        "the run echo can be copied and re-run"
+    );
+}
+
+#[test]
+fn a_tests_folder_without_python_gets_no_pytest_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+    std::fs::write(tmp.path().join("tests/a_test.go"), "package tests\n").unwrap();
+    let mut out = Vec::new();
+    super::discovery_jvm_py::discover_python(tmp.path(), None, &None, &mut out);
+    assert!(
+        out.iter().all(|c| c.runner != IdeRunnerKind::Pytest),
+        "{out:?}"
+    );
+    std::fs::write(tmp.path().join("tests/test_x.py"), "def test_x(): pass\n").unwrap();
+    std::fs::write(tmp.path().join("main.py"), "print(1)\n").unwrap();
+    super::discovery_jvm_py::discover_python(tmp.path(), None, &None, &mut out);
+    assert!(out.iter().any(|c| c.runner == IdeRunnerKind::Pytest));
+    let main = out
+        .iter()
+        .find(|c| c.target_path.as_deref() == Some("main.py"))
+        .unwrap();
+    assert!(
+        main.args.is_empty(),
+        "the script lives in the target, not the arguments"
+    );
+}
+
 #[cfg(unix)]
 type RunMap = Arc<DashMap<String, Arc<ActiveRunHandle>>>;
 

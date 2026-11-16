@@ -599,7 +599,8 @@ export async function launchDebugSession(
       program,
       // A tool runner's args are its own command line (`run ./cmd/x`, `test -v ./...`),
       // not the debuggee's argv; script and custom runners pass theirs through.
-      args: cfg && !TOOL_ARGV_RUNNERS.has(cfg.runner) ? cfg.args : [],
+      // A config saved with its script as the first argument names it once.
+      args: cfg && !TOOL_ARGV_RUNNERS.has(cfg.runner) ? cfg.args.filter((a, i) => i > 0 || a !== cfg.target_path) : [],
       build_flags: cfg?.build_flags ?? [],
       cwd: cfg?.cwd || repoInfo.path || host.target.root,
       test_name: cfg?.test_filter || undefined,

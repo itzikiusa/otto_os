@@ -111,6 +111,21 @@ pub(super) fn build_pytest_cmd(
     }
 }
 
+/// `flags`, the config's script, then its program arguments. Configs saved
+/// before the script moved out of `args` still start with it: never pass it twice.
+fn script_then_args(cfg: &IdeRunConfig, flags: Vec<String>, args: Vec<String>) -> Vec<String> {
+    let mut out = flags;
+    if let Some(tp) = cfg
+        .target_path
+        .as_ref()
+        .filter(|tp| args.first() != Some(*tp))
+    {
+        out.push(tp.clone());
+    }
+    out.extend(args);
+    out
+}
+
 pub(super) fn build_script_cmd(
     cfg: &IdeRunConfig,
     env_map: &BTreeMap<String, String>,
@@ -127,15 +142,7 @@ pub(super) fn build_script_cmd(
         "node".into()
     };
     let prog = cmd_opt.map(str::to_string).unwrap_or(default_prog);
-    let mut out = build_flags;
-    if args.is_empty() {
-        if let Some(tp) = &cfg.target_path {
-            out.push(tp.clone());
-        }
-    } else {
-        out.extend(args);
-    }
-    (prog, out)
+    (prog, script_then_args(cfg, build_flags, args))
 }
 
 pub(super) fn build_npm_cmd(
@@ -390,15 +397,7 @@ pub(super) fn build_shell_cmd(
     let prog = cmd_opt
         .unwrap_or(if is_bats { "bats" } else { "bash" })
         .to_string();
-    let mut out = build_flags;
-    if args.is_empty() {
-        if let Some(tp) = &cfg.target_path {
-            out.push(tp.clone());
-        }
-    } else {
-        out.extend(args);
-    }
-    (prog, out)
+    (prog, script_then_args(cfg, build_flags, args))
 }
 
 pub(super) fn build_custom_cmd(
