@@ -259,7 +259,7 @@ fn java_imports_under_a_build_file_are_trusted_but_standalone_ones_are_checked()
             .collect()
     };
 
-    let standalone = diags(&[root.clone()]);
+    let standalone = diags(std::slice::from_ref(&root));
     assert!(
         standalone.iter().any(|d| d.code == "unresolved_import"),
         "{:?}",
@@ -268,7 +268,7 @@ fn java_imports_under_a_build_file_are_trusted_but_standalone_ones_are_checked()
 
     // A module pom (parent BOMs and starters bring transitive jars this index can't see).
     std::fs::write(root.join("svc/pom.xml"), "<project/>").unwrap();
-    let managed = diags(&[root.clone()]);
+    let managed = diags(std::slice::from_ref(&root));
     assert!(
         !managed.iter().any(|d| d.code.starts_with("unresolved_")),
         "{:?}",
@@ -276,7 +276,7 @@ fn java_imports_under_a_build_file_are_trusted_but_standalone_ones_are_checked()
     );
     // A type with no import at all is still a missing import.
     let no_wildcard = src.replace("import org.springframework.web.bind.annotation.*;\n", "");
-    let missing = diags_of(&no_wildcard, &[root.clone()]);
+    let missing = diags_of(&no_wildcard, std::slice::from_ref(&root));
     let unresolved: Vec<_> = missing
         .iter()
         .filter(|d| d.code.starts_with("unresolved_"))

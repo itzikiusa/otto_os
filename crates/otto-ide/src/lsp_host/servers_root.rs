@@ -584,7 +584,7 @@ mod tests {
                     lang,
                     &f.to_string_lossy(),
                     Some(&f.to_string_lossy()),
-                    &[top.clone()],
+                    std::slice::from_ref(&top),
                 )
                 .unwrap(),
             )
