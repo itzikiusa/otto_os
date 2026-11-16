@@ -16,6 +16,7 @@ export const KNOWN_AGENT_FAMILIES = [
   'grok',
   'opencode',
   'pi',
+  'muse',
 ] as const;
 
 /** Harnesses with a structured runtime driver (Threads / IDE Agent dock). */
@@ -27,13 +28,14 @@ export const RUNTIME_PROVIDERS: readonly RuntimeProvider[] = [
   'grok',
   'opencode',
   'pi',
+  'muse',
 ];
 
 export type ProviderFamilyMeta = Pick<MetaResp, 'provider_models'> &
   Partial<Pick<MetaResp, 'provider_families' | 'providers' | 'runtime_capabilities'>>;
 
 /** Infer the canonical agent CLI family (`'claude'`, `'codex'`, `'agy'`, `'gemini'`,
- *  `'grok'`, `'opencode'`, `'pi'`, `'shell'`) for any built-in or custom provider slug
+ *  `'grok'`, `'opencode'`, `'pi'`, `'muse'`, `'shell'`) for any built-in or custom provider slug
  *  (e.g. `'claudework'` -> `'claude'`), consulting `/meta.provider_families` first, then
  *  token-boundary matching for short names like `'pi'` (so `'pipeline'` or `'api-agent'`
  *  never false-matches `'pi'`), then `/meta.provider_models` catalog signatures. */
@@ -56,6 +58,7 @@ export function inferProviderFamily(
     p === 'grok' ||
     p === 'opencode' ||
     p === 'pi' ||
+    p === 'muse' ||
     p === 'shell'
   ) {
     return p;
@@ -68,6 +71,7 @@ export function inferProviderFamily(
   if (p.startsWith('gemini') || p.endsWith('-gemini') || p.endsWith('_gemini')) return 'gemini';
   if (p.startsWith('grok') || p.endsWith('-grok') || p.endsWith('_grok')) return 'grok';
   if (p.startsWith('opencode') || p.endsWith('-opencode') || p.endsWith('_opencode')) return 'opencode';
+  if (p.startsWith('muse-') || p.startsWith('muse_') || p.endsWith('-muse') || p.endsWith('_muse')) return 'muse';
   if (
     p === 'pi' ||
     p.startsWith('pi-') ||
@@ -95,13 +99,16 @@ export function inferProviderFamily(
     if (live.some((m) => m.id.startsWith('gemini-'))) {
       return 'gemini';
     }
+    if (live.some((m) => m.id.startsWith('muse-'))) {
+      return 'muse';
+    }
   }
   return p;
 }
 
-/** Whether `provider` can run on Structured Runtime (`AgentRuntime`): true for all 7
+/** Whether `provider` can run on Structured Runtime (`AgentRuntime`): true for all 8
  *  built-in runtime providers AND any custom provider whose CLI family maps to one of
- *  the 7 structured runtime drivers (e.g. `'claudework'` -> `'claude'`). */
+ *  the 8 structured runtime drivers (e.g. `'claudework'` -> `'claude'`). */
 export function isRuntimeProvider(
   provider: string,
   meta?: ProviderFamilyMeta | null,
@@ -186,6 +193,7 @@ const PREFERRED_THREAD_HARNESSES: readonly string[] = [
   'pi',
   'gemini',
   'grok',
+  'muse',
 ];
 
 /** Order enabled agent providers for Threads/stage pickers without ever
@@ -267,6 +275,8 @@ export function harnessLabel(provider: string): string {
       return 'Gemini';
     case 'grok':
       return 'Grok';
+    case 'muse':
+      return 'Muse';
     case 'shell':
       return 'Shell';
     default:
@@ -291,6 +301,8 @@ export function providerSubtitle(provider: string): string {
       return 'Gemini CLI';
     case 'grok':
       return 'Grok CLI';
+    case 'muse':
+      return 'Muse Code CLI';
     case 'shell':
       return 'Plain shell';
     default:

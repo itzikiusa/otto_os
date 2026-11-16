@@ -84,7 +84,7 @@ export const SETTINGS_SECTIONS = [
   // ── Agents ──
   // Settings admins reach Update all CLIs (ws editor) and the model catalog
   // (Agents); the daemon-wide settings on the page stay root-only in the page.
-  { id: 'providers', label: 'Providers', group: 'agents', keywords: 'agent cli claude codex agy opencode pi gemini grok custom model update', gate: ADMIN, scope: 'everyone', settings: ['Default agent', 'Automatic updates', 'Update all CLIs', 'Models catalog', 'PR & commit draft model', 'Permissions', 'Custom provider', 'Command', 'Resume arguments', 'Model flag template'] },
+  { id: 'providers', label: 'Providers', group: 'agents', keywords: 'agent cli claude codex agy opencode pi gemini grok muse custom model update', gate: ADMIN, scope: 'everyone', settings: ['Default agent', 'Automatic updates', 'Update all CLIs', 'Models catalog', 'PR & commit draft model', 'Permissions', 'Custom provider', 'Command', 'Resume arguments', 'Model flag template'] },
   { id: 'context-soul', label: 'Workspace context', group: 'agents', keywords: 'soul goals instructions memory references project', scope: 'workspace', settings: ['Goal', 'Shared instructions', 'Workspace memory', 'References', 'Project context', 'Decisions', 'Artifacts', 'Soul', 'Materialize now'] },
   { id: 'self-improvement', label: 'Self-improvement', group: 'agents', keywords: 'improve review memory skills edits approval', scope: 'workspace', settings: ['Schedule', 'Run every (minutes)', 'Look back (hours)', 'Autonomy', 'What may change', 'Skill allow-list', 'Pending approvals', 'Recent runs'] },
   { id: 'insights', label: 'Insights', group: 'agents', keywords: 'reports daily weekly monthly schedule html', scope: 'everyone', settings: ['Report agent', 'Schedule', 'Provider'] },

@@ -87,7 +87,7 @@ export function barTone(leftPercent: number | null): 'danger' | 'warning' | 'ok'
   return 'ok';
 }
 
-const PROVIDERS: Record<string, string> = { codex: 'Codex', claude: 'Claude', agy: 'Antigravity', grok: 'Grok' };
+const PROVIDERS: Record<string, string> = { codex: 'Codex', claude: 'Claude', agy: 'Antigravity', grok: 'Grok', muse: 'Muse' };
 
 export function providerName(p: string): string {
   return PROVIDERS[p] ?? p;

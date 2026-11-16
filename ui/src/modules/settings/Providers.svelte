@@ -45,6 +45,7 @@
     { name: 'agy',      updateCmd: 'agy update' },
     { name: 'opencode', updateCmd: 'opencode upgrade' },
     { name: 'pi',       updateCmd: 'pi update' },
+    { name: 'muse',     updateCmd: 'MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1 MUSE_UPDATE_INTERVAL_SECONDS=0 muse --version' },
     { name: 'shell',    updateCmd: null },
   ];
 

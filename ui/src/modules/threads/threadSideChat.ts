@@ -4,7 +4,7 @@
 // `meta.side_of = <main id>` — hidden from the thread lists (isThreadSession)
 // until promoted, which just clears the tag. Always plan mode: it reads, it
 // doesn't edit the files the main thread is working on — an agent without a
-// plan mode (grok, opencode, pi) hands the side chat to one that has.
+// plan mode (grok, opencode, pi, muse) hands the side chat to one that has.
 import { api } from '../../lib/api/client';
 import type { Session, Transcript, Turn } from '../../lib/api/types';
 import { resolveSessionThreadConfig, supportsInteractionMode } from '../../lib/providerModels';
@@ -55,7 +55,7 @@ async function mainContext(main: Session): Promise<Parameters<typeof buildSideCh
 
 /** The agent a side chat runs on: the main thread's when it has a plan
  *  (read-only) mode, else the default agent — or the first ready one — that
- *  has. grok, opencode and pi have none, and a side chat must never edit the
+ *  has. grok, opencode, pi and muse have none, and a side chat must never edit the
  *  files the main thread is working on. */
 export function sideChatProvider(main: Pick<Session, 'provider'> & Partial<Session>): string {
   if (!isPlainShellSession(main as Session) && supportsInteractionMode(main.provider)) return main.provider;

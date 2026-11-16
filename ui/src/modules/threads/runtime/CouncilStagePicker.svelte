@@ -35,7 +35,7 @@
     aria-label="Ask several agents"
     disabled={disabled || (!runtime && !council.on)}
     title={!runtime && !council.on
-      ? 'Asking several agents works with Claude Code, Codex, Antigravity, Gemini, Grok, OpenCode and Pi'
+      ? 'Asking several agents works with Claude Code, Codex, Antigravity, Gemini, Grok, OpenCode, Pi and Muse'
       : 'Ask several: send this prompt to 2–4 agents and compare (⌘ or ⇧-click models to add them)'}
     data-testid="new-thread-ask-several"
     onclick={() => council.toggle({ provider, model, effort })}

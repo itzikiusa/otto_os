@@ -38,7 +38,7 @@ export {
 
 /** Built-in fallback used only before `/meta` has loaded (meta is normally
  *  present by the time any picker renders). */
-const FALLBACK: readonly string[] = ['claude', 'codex', 'agy', 'opencode', 'pi', 'shell'];
+const FALLBACK: readonly string[] = ['claude', 'codex', 'agy', 'opencode', 'pi', 'muse', 'shell'];
 
 /** All registered provider names (built-ins + custom), INCLUDING `shell`.
  *  Already sorted by the daemon. Use for surfaces where a shell is valid

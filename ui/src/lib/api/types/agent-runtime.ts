@@ -13,7 +13,7 @@
 import type { Id } from './core';
 import { sessionProviderSlug as resolveSessionProviderSlug } from '../../providerRegistry';
 
-export type RuntimeProvider = 'claude' | 'codex' | 'gemini' | 'grok' | 'agy' | 'opencode' | 'pi';
+export type RuntimeProvider = 'claude' | 'codex' | 'gemini' | 'grok' | 'agy' | 'opencode' | 'pi' | 'muse';
 
 /** Built-in `RuntimeProvider` id or a custom `ProviderRegistry` slug (e.g. `'claudework'`). */
 export type RuntimeProviderOrSlug = RuntimeProvider | (string & {});

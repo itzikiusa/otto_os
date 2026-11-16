@@ -77,6 +77,7 @@
         <option value="grok">Grok</option>
         <option value="opencode">OpenCode</option>
         <option value="pi">Pi</option>
+        <option value="muse">Muse</option>
       </select>
     </div>
   </form>
