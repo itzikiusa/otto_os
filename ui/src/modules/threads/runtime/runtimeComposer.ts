@@ -429,11 +429,17 @@ export function mapChildThreadSummaries(children: readonly RuntimeSession[]): Li
   return out;
 }
 
+/** ⇧⇥ toggles a structured thread's Plan mode (as on the New thread stage). */
+export function isPlanToggleKey(e: KeyboardEvent): boolean {
+  return e.key === 'Tab' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
+}
+
 export function composerPlaceholderText(
   closed: boolean,
   approvals: ReadonlyMap<string, { readonly kind?: string }>,
   running: boolean,
   agentChat?: string,
+  plan = false,
 ): string {
   if (closed) return 'Send a message to reopen this thread';
   if (approvals.size > 0) {
@@ -441,6 +447,7 @@ export function composerPlaceholderText(
       ? 'Answer the question above'
       : 'Waiting for your approval above';
   }
+  if (plan) return 'Plan mode: the agent researches and proposes, and changes nothing. ⇧⇥ leaves Plan';
   if (running) return 'Queue a follow-up for when this turn ends';
   return agentChat ? `Message ${agentChat}…` : 'Ask anything. @ files or agents, / commands';
 }

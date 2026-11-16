@@ -37,7 +37,7 @@
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
   import {
     appendDraftAttachments, buildOptimisticUserMessage, buildRuntimeBanners, collectMessageIds,
-    composerPlaceholderText, deriveActivePlan, deriveSessionError, handleSlashMenuKey, mapChildThreadSummaries,
+    composerPlaceholderText, deriveActivePlan, deriveSessionError, handleSlashMenuKey, isPlanToggleKey, mapChildThreadSummaries,
     pasteDraftAttachments, resolveEffectiveDraftModel, resolvePromptModelOverride, restoreOptimisticDraft,
     runViewSlash, withOptimisticItem, type OptimisticMessageState,
   } from './runtimeComposer';
@@ -52,6 +52,7 @@
   import RuntimeHistoryBar from './RuntimeHistoryBar.svelte';
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimePlan from './RuntimePlan.svelte';
+  import RuntimePlanToggle from './RuntimePlanToggle.svelte';
   import RuntimeQueueBar from './RuntimeQueueBar.svelte';
   import { linkedChildren } from './council';
   import RuntimeSecretCard from './RuntimeSecretCard.svelte';
@@ -186,6 +187,7 @@
   // What the agent takes, as the daemon reports it (live first).
   const caps = $derived(capsOf(p?.session?.capabilities ?? session?.capabilities, runtimeBaselineCaps(provider, auth.meta)));
   const canImages = $derived(attachmentSupport(caps).images);
+  const planOn = $derived(!!caps.plan && !!runtimeThreads.planIds[ownerId]); // every prompt, until turned off
   const canFiles = $derived(attachmentSupport(caps).files);
   const takes = (f: File): boolean => takesFile(caps, f);
   let fileEl = $state<HTMLInputElement | null>(null);
@@ -365,6 +367,7 @@
   let emojiEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   function onKeydown(e: KeyboardEvent): void {
     if (e.isComposing || askEl?.onKey(e) || emojiEl?.onKey(e)) return;
+    if (caps.plan && !suggestions.length && isPlanToggleKey(e)) return void (e.preventDefault(), (runtimeThreads.planIds[ownerId] = !planOn));
     if (handleSlashMenuKey(e, suggestions, cmdIdx, (i) => (cmdIdx = i), () => (cmdDismissed = true), acceptCmd)) return;
     if (enterSends(e)) {
       e.preventDefault();
@@ -483,7 +486,7 @@
 
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
-    <div class="rt-composer" bind:this={composerBoxEl}>
+    <div class="rt-composer" style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
       {#if suggestions.length > 0}
         <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
       {/if}
@@ -515,7 +518,7 @@
         autocapitalize="off"
         autocomplete="off"
         disabled={draft.reopening}
-        placeholder={composerPlaceholderText(closed, approvals, running, agentChat)}
+        placeholder={composerPlaceholderText(closed, approvals, running, agentChat, planOn)}
         aria-label="Message"
         aria-autocomplete="list"
         aria-controls={suggestions.length > 0 ? `${popId}-list` : undefined}
@@ -586,6 +589,7 @@
                 onaccessmodechange?.(m);
               }}
             />
+            {#if caps.plan}<RuntimePlanToggle id={ownerId} on={planOn} disabled={closed || !session} />{/if}
           {/if}
         </span>
         {#if running && !canSendOrQueue}

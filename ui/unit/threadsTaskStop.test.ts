@@ -211,3 +211,21 @@ test('a retry keeps the queued attachments cached; steer releases them', async (
   await runtimeThreads.deliverQueued('A', 'q1', 'steer');
   assert.equal(runtimeThreads.queuedAttachments.has('q1'), false);
 });
+
+test('a thread started in Plan keeps asking for a plan until the person leaves it (A4)', async () => {
+  const posts: { path: string; body: Record<string, unknown> }[] = [];
+  const { runtimeThreads } = loadSource(
+    new URL('../src/modules/threads/runtime/runtimeThreads.svelte.ts', import.meta.url),
+    harness(async () => [], async (path, body) => {
+      posts.push({ path, body: body as Record<string, unknown> });
+      return path.endsWith('/runtime-sessions') ? { id: 'T', status: 'idle', last_sequence: 0 } : { sequence: 1 };
+    }),
+  );
+  await runtimeThreads.start('ws', { provider: 'codex', cwd: null, title: 'T', model: null, plan: true, prompt: 'look around' });
+  await runtimeThreads.prompt('T', { text: 'and now?' });
+  const prompts = posts.filter((p) => p.path.endsWith('/prompt'));
+  assert.deepEqual(prompts.map((p) => p.body.plan), [true, true], 'the second prompt is still a plan');
+  runtimeThreads.planIds.T = false;
+  await runtimeThreads.prompt('T', { text: 'go' });
+  assert.equal(posts.at(-1)!.body.plan, undefined, 'leaving Plan stops asking for one');
+});
