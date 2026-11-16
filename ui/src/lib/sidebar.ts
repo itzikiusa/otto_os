@@ -106,7 +106,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   // ── Build ──
   // IDE unifies multi-repo project editing (`#/ide`) and per-user scratch files
   // (`#/workbench`) behind one sidebar entry and the `Project | Scratches` switcher.
-  { id: 'ide', icon: 'ide', label: 'IDE', group: 'build', feature: 'agents', keywords: 'ide editor code intellij goland debug breakpoints java go rust typescript javascript python lsp ssh refactor workbench scratch scratches scripts snippets format json markdown html mermaid d2 sql notes placeholders' },
+  { id: 'ide', icon: 'ide', label: 'IDE (Beta)', group: 'build', feature: 'agents', keywords: 'ide editor code intellij goland debug breakpoints java go rust typescript javascript python lsp ssh refactor workbench scratch scratches scripts snippets format json markdown html mermaid d2 sql notes placeholders' },
   { id: 'git', icon: 'branch', label: 'Git', group: 'build', feature: 'git', keywords: 'repos prs pull requests diff commit' },
   {
     id: 'product',
@@ -662,7 +662,7 @@ export function moduleLabel(routerModule: string): string {
     design: 'Product',
     canvas: 'Whiteboard',
     'personal-agents': 'Personal Agents',
-    workbench: 'IDE',
+    workbench: 'IDE (Beta)',
     settings: 'Settings',
     walkthroughs: 'Help',
     plugin: 'Plugin',

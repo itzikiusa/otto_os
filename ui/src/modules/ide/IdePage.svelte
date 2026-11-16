@@ -329,7 +329,7 @@
 </script>
 
 <div class="ide-page" data-testid="ide-page" data-ide-density={idePreferences.current.uiDensity}>
-  <PageHeader title="IDE">
+  <PageHeader title="IDE (Beta)">
     {#snippet tabs()}
       <IdeModeTabs active="project" />
     {/snippet}

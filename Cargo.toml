@@ -54,7 +54,7 @@ members = [
 # docs/superpowers/specs/2026-06-21-runtime-plugins-design.md.
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 

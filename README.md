@@ -7,11 +7,31 @@ multi-agent code review, Jira/Confluence product workflows, SSH/database
 connections, an HTTP API client, real token-usage tracking, and Slack/Telegram
 bridges so an agent can work a ticket from a chat thread.
 
-**Version 0.2.2** · macOS (Apple Silicon; Intel from source) · actively developed, so
+**Version 0.3.0** · macOS (Apple Silicon; Intel from source) · actively developed, so
 expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
 🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.2.2/otto-tour-20261113.mp4)**
 (also in the app under **Help → Walkthroughs**).
+
+### What's new in 0.3.0
+
+- **IDE (Beta).** A multi-language IDE inside Otto: local and remote-SSH
+  projects, multi-folder projects, SDK and toolchain manager, run and debug
+  configurations (DAP), language servers, refactorings, a git gutter, local
+  history, dependency and vulnerability views, live shared editing and IDE
+  plugins. Chat with an agent about the open project from the IDE itself.
+- **Threads: every agent, fully.** Claude, Codex, Antigravity, Gemini, Grok,
+  OpenCode, pi and Muse run as structured agents. Each one reports what it
+  can do (images, files, plan mode, effort, steering) and Threads offers
+  exactly that. Agents name their threads, list their own slash commands and
+  report cost and context; tool screenshots show inline; subagents,
+  background tasks and Antigravity swarms open from **Agents & tasks**.
+- **Agents survive a restart.** A deploy or daemon restart no longer kills a
+  running agent: it keeps working in a holder process and the thread picks it
+  up again, mid-turn, approvals and queued messages included.
+- **Safer by default.** Sandboxed sessions can't reach other sessions'
+  agents, shared-editing guests can't write git or agent config, and local
+  language servers run only for the Mac's owner.
 
 ### What's new in 0.2.2
 
