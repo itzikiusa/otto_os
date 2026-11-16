@@ -8,12 +8,14 @@
 //! exit. A cell skips when its toolchain is missing (see `ensure_bins_or_skip`).
 //!
 //! Skips, with the reason:
-//! - pytest: no offline install; its cells run only when `python3` already
-//!   imports pytest.
+//! - pytest: installed into the fixture's `.venv` with pip (from its cache).
 //! - Jest / Vitest: no offline `npm install`; a fixture links the runner's tree
-//!   from the npx cache (`~/.npm/_npx`) and skips when it isn't there.
-//! - Kotlin: its gutter comes from the runtime plugin pack
-//!   (`examples/ide-plugins/kotlin-ide`), not from the daemon.
+//!   from the npx cache (`~/.npm/_npx`) or another checkout in `~`.
+//! - Gradle: the wrapper is generated from a fully cached `~/.gradle/wrapper/dists`
+//!   distribution and runs `--offline`. Kotlin debug needs `kotlin-debug-adapter`
+//!   (the plugin pack's adapter) and skips without it.
+//!
+//! With `OTTO_REQUIRE_TOOLCHAINS=1` every missing runner FAILS its cell.
 //! - Bats (shell tests): only when `bats` is installed; the shell script cells
 //!   cover the bash bridge.
 
@@ -41,8 +43,14 @@ fn var_names<'a>(vars: &[&'a Value]) -> Vec<&'a str> {
 /// A session snapshot without its variables (see [`var_names`]).
 fn brief(sess: &Value) -> String {
     format!(
-        "state={} paused_file={} paused_line={} title={} error={}",
-        sess["state"], sess["paused_file"], sess["paused_line"], sess["title"], sess["error"]
+        "state={} reason={} adapter={} paused_file={} paused_line={} title={} error={}",
+        sess["state"],
+        sess["stopped_reason"],
+        sess["adapter"],
+        sess["paused_file"],
+        sess["paused_line"],
+        sess["title"],
+        sess["error"]
     )
 }
 
@@ -783,32 +791,55 @@ async fn py_fixture() -> Fixture {
     Fixture::new(&[("app.py", PY_MAIN), ("test_app.py", PY_TEST)], &[]).await
 }
 
-/// pytest only when it is already importable (no offline install exists).
-fn pytest_ready() -> bool {
-    ensure_bins_or_skip(&["python3"])
-        && std::process::Command::new("python3")
-            .args(["-c", "import pytest"])
-            .stderr(std::process::Stdio::null())
+/// `OTTO_REQUIRE_TOOLCHAINS=1`: a missing runner fails the cell instead of
+/// skipping it, so a skip can never pass as a green cell.
+fn toolchains_required() -> bool {
+    std::env::var("OTTO_REQUIRE_TOOLCHAINS").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
+}
+
+/// Skips (or, with toolchains required, fails) a cell whose runner is missing.
+fn missing_runner(what: &str) {
+    assert!(!toolchains_required(), "required toolchain missing: {what}");
+    eprintln!("skipping: {what}");
+}
+
+/// The Python fixture with pytest in its own `.venv` (the IDE runs the project
+/// venv): `pip install pytest`, served from pip's cache when it holds it.
+async fn py_venv_fixture() -> Option<Fixture> {
+    if !ensure_bins_or_skip(&["python3"]) {
+        return None;
+    }
+    let f = py_fixture().await;
+    let venv = f.path(".venv");
+    let ok = std::process::Command::new("python3")
+        .args(["-m", "venv", &venv])
+        .status()
+        .is_ok_and(|s| s.success())
+        && std::process::Command::new(format!("{venv}/bin/pip"))
+            .args(["install", "-q", "--disable-pip-version-check", "pytest"])
             .status()
-            .is_ok_and(|s| s.success())
+            .is_ok_and(|s| s.success());
+    if !ok {
+        missing_runner("pytest (pip install into a venv failed)");
+        return None;
+    }
+    Some(f)
 }
 
 #[tokio::test]
 async fn matrix_python_run_pytest() {
-    if !pytest_ready() {
+    let Some(f) = py_venv_fixture().await else {
         return;
-    }
-    let f = py_fixture().await;
+    };
     let item = f.gutter("test_app.py", "test", "test_adds_numbers").await;
     f.run(&item, "passed").await;
 }
 
 #[tokio::test]
 async fn matrix_python_debug_pytest() {
-    if !pytest_ready() {
+    let Some(f) = py_venv_fixture().await else {
         return;
-    }
-    let f = py_fixture().await;
+    };
     let item = f.gutter("test_app.py", "test", "test_adds_numbers").await;
     f.debug(&item, "test_app.py", &[(6, &["left"]), (7, &["total"])])
         .await;
@@ -936,7 +967,10 @@ async fn node_test_fixture(pkg: &str, file: &str, src: &str) -> Option<Fixture> 
     if !ensure_bins_or_skip(&["node"]) {
         return None;
     }
-    let nm = npx_cached_node_modules(pkg)?;
+    let Some(nm) = npx_cached_node_modules(pkg) else {
+        missing_runner(&format!("an installed node_modules with {pkg}"));
+        return None;
+    };
     let manifest = format!(r#"{{"name":"m","type":"module","devDependencies":{{"{pkg}":"*"}}}}"#);
     let f = Fixture::new(&[("package.json", &manifest), (file, src)], &[]).await;
     std::os::unix::fs::symlink(nm, f.path("node_modules")).unwrap();
@@ -1165,4 +1199,184 @@ async fn matrix_ts_run_and_debug_nested_main() {
     f.run(&item, "TS_MAIN_DONE 42").await;
     f.debug(&item, rel, &[(7, &["base"]), (8, &["total"])])
         .await;
+}
+
+// --------------------------------------------------------------- Gradle (Java + Kotlin)
+// Offline: a wrapper generated from a fully downloaded `~/.gradle/wrapper/dists`
+// distribution (`*.zip.ok`; partly downloaded `.part` ones are ignored), JDK 17.
+
+/// The newest fully downloaded Gradle home in the wrapper cache.
+fn cached_gradle_home() -> Option<std::path::PathBuf> {
+    let dists = Path::new(&std::env::var("HOME").ok()?).join(".gradle/wrapper/dists");
+    let mut homes: Vec<(Vec<u32>, std::path::PathBuf)> = std::fs::read_dir(dists)
+        .ok()?
+        .flatten()
+        .flat_map(|d| std::fs::read_dir(d.path()).into_iter().flatten().flatten())
+        .filter_map(|hash| {
+            let dir = hash.path();
+            let ok = std::fs::read_dir(&dir)
+                .ok()?
+                .flatten()
+                .find(|e| e.file_name().to_string_lossy().ends_with(".zip.ok"))?;
+            let name = ok.file_name().to_string_lossy().replace("-bin.zip.ok", "");
+            let version = name
+                .strip_prefix("gradle-")?
+                .split('.')
+                .map(|p| p.parse().unwrap_or(0))
+                .collect();
+            Some((version, dir.join(&name)))
+        })
+        .filter(|(_, home)| home.join("bin/gradle").is_file())
+        .collect();
+    homes.sort();
+    homes.pop().map(|(_, home)| home)
+}
+
+fn java17_home() -> Option<String> {
+    let out = std::process::Command::new("/usr/libexec/java_home")
+        .args(["-v", "17"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// A Gradle project from `files` with a generated `./gradlew` and JDK 17.
+async fn gradle_fixture(files: &[(&str, &str)]) -> Option<Fixture> {
+    let (Some(gradle), Some(jdk)) = (cached_gradle_home(), java17_home()) else {
+        missing_runner("a fully cached Gradle distribution and JDK 17");
+        return None;
+    };
+    let f = Fixture::new(files, &[("JAVA_HOME", &jdk)]).await;
+    let ok = std::process::Command::new(gradle.join("bin/gradle"))
+        .args(["wrapper", "--offline", "-q"])
+        .current_dir(&f.root)
+        .env("JAVA_HOME", &jdk)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        missing_runner("gradle wrapper --offline");
+        return None;
+    }
+    Some(f)
+}
+
+const GRADLE_JAVA_BUILD: &str = r#"plugins { id 'java'; id 'application' }
+repositories { mavenLocal(); mavenCentral() }
+dependencies { testImplementation 'junit:junit:4.13.2' }
+application { mainClass = 'com.acme.gj.Calc' }
+test { testLogging { events 'passed'; showStandardStreams = true } }
+"#;
+const GRADLE_JAVA_TEST_REL: &str = "lib/src/test/java/com/acme/gj/deep/CalcTest.java";
+const GRADLE_JAVA_TEST: &str = r#"package com.acme.gj.deep;
+
+import static org.junit.Assert.assertEquals;
+
+import com.acme.gj.Calc;
+import org.junit.Test;
+
+public class CalcTest {
+    @Test
+    public void addsNumbers() {
+        int left = 20;
+        int sum = Calc.add(left, 22);
+        assertEquals(42, sum);
+        System.out.println("GRADLE_JUNIT_DONE");
+    }
+}
+"#;
+const GRADLE_CALC_REL: &str = "lib/src/main/java/com/acme/gj/Calc.java";
+
+async fn gradle_java_fixture() -> Option<Fixture> {
+    if !ensure_bins_or_skip(&["java", "javac"]) {
+        return None;
+    }
+    let calc = JAVA_CALC.replace("package com.acme.core;", "package com.acme.gj;");
+    gradle_fixture(&[
+        (
+            "settings.gradle",
+            "rootProject.name = 'gj'\ninclude 'lib'\n",
+        ),
+        ("lib/build.gradle", GRADLE_JAVA_BUILD),
+        (GRADLE_CALC_REL, &calc),
+        (GRADLE_JAVA_TEST_REL, GRADLE_JAVA_TEST),
+    ])
+    .await
+}
+
+#[tokio::test]
+async fn matrix_gradle_java_run_and_debug_junit_test() {
+    let Some(f) = gradle_java_fixture().await else {
+        return;
+    };
+    let item = f.gutter(GRADLE_JAVA_TEST_REL, "test", "addsNumbers").await;
+    f.run(&item, "GRADLE_JUNIT_DONE").await;
+    f.debug(
+        &item,
+        GRADLE_JAVA_TEST_REL,
+        &[(12, &["left"]), (13, &["sum"])],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn matrix_gradle_java_run_and_debug_main() {
+    let Some(f) = gradle_java_fixture().await else {
+        return;
+    };
+    let item = f.gutter(GRADLE_CALC_REL, "main", "main").await;
+    f.run(&item, "JAVA_MAIN_DONE 42").await;
+    f.debug(&item, GRADLE_CALC_REL, &[(10, &["base"]), (11, &["total"])])
+        .await;
+}
+
+const KT_BUILD: &str = r#"plugins {
+    kotlin("jvm") version "1.9.0"
+    application
+}
+repositories { mavenLocal(); mavenCentral() }
+dependencies { testImplementation("junit:junit:4.13.2") }
+application { mainClass.set("demo.AppKt") }
+tasks.test { useJUnit(); testLogging { events("passed"); showStandardStreams = true } }
+"#;
+const KT_APP_REL: &str = "app/src/main/kotlin/demo/App.kt";
+const KT_APP: &str = "package demo\n\nfun add(a: Int, b: Int): Int = a + b\n\nfun main() {\n    val base = 40\n    val total = add(base, 2)\n    println(\"KT_MAIN_DONE $total\")\n}\n";
+const KT_TEST_REL: &str = "app/src/test/kotlin/demo/deep/AppTest.kt";
+const KT_TEST: &str = "package demo.deep\n\nimport demo.add\nimport org.junit.Assert.assertEquals\nimport org.junit.Test\n\nclass AppTest {\n    @Test\n    fun testAddsNumbers() {\n        val left = 20\n        val sum = add(left, 22)\n        assertEquals(42, sum)\n        println(\"KT_TEST_DONE\")\n    }\n}\n";
+
+/// Kotlin: its gutter comes from the runtime plugin pack, installed here like
+/// the UI's "Install from path". Debug needs the pack's `kotlin-debug-adapter`.
+async fn kotlin_fixture() -> Option<Fixture> {
+    let f = gradle_fixture(&[
+        (
+            "settings.gradle.kts",
+            "rootProject.name = \"kt\"\ninclude(\"app\")\n",
+        ),
+        ("app/build.gradle.kts", KT_BUILD),
+        (KT_APP_REL, KT_APP),
+        (KT_TEST_REL, KT_TEST),
+    ])
+    .await?;
+    let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/ide-plugins/kotlin-ide");
+    let (st, body) = send_json(
+        &f.app,
+        Method::POST,
+        "/ide/plugins/install",
+        Some(json!({ "source": pack.canonicalize().unwrap().to_string_lossy() })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "kotlin pack install failed: {body}");
+    Some(f)
+}
+
+#[tokio::test]
+async fn matrix_kotlin_run_test_and_main() {
+    let Some(f) = kotlin_fixture().await else {
+        return;
+    };
+    let test = f.gutter(KT_TEST_REL, "test", "testAddsNumbers").await;
+    f.run(&test, "KT_TEST_DONE").await;
+    let main = f.gutter(KT_APP_REL, "main", "main").await;
+    f.run(&main, "KT_MAIN_DONE 42").await;
 }
