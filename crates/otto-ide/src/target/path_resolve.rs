@@ -303,6 +303,10 @@ pub(crate) fn map_io_err(action: &str, path: &Path, err: std::io::Error) -> Erro
         std::io::ErrorKind::NotFound => Error::NotFound(msg),
         std::io::ErrorKind::PermissionDenied => Error::Forbidden(msg),
         std::io::ErrorKind::AlreadyExists => Error::Conflict(msg),
+        // The host's disk, not the request: a 500 that is also logged.
+        std::io::ErrorKind::StorageFull
+        | std::io::ErrorKind::ReadOnlyFilesystem
+        | std::io::ErrorKind::QuotaExceeded => Error::Internal(msg),
         _ => Error::Invalid(msg),
     }
 }
