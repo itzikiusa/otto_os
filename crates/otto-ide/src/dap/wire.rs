@@ -24,6 +24,7 @@ use std::io::{self, ErrorKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader};
+use tokio::sync::mpsc;
 
 pub use crate::jsonrpc_framing::{MAX_HEADER_BYTES, MAX_MESSAGE_BYTES};
 
@@ -204,6 +205,27 @@ impl<R: AsyncRead + Unpin> DapReader<R> {
 
     pub async fn next_message(&mut self) -> io::Result<Option<DapMessage>> {
         read_dap_message(&mut self.inner).await
+    }
+
+    /// Reads messages on their own task, for a `select!` loop to poll. Reading
+    /// in the loop is not cancel-safe: a frame's header and body are separate
+    /// writes, and a read cancelled between them drops the header, desyncing
+    /// the stream so the session hangs. Yields the closing `Ok(None)` or error.
+    pub fn into_channel(mut self) -> mpsc::UnboundedReceiver<io::Result<Option<DapMessage>>>
+    where
+        R: Send + 'static,
+    {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let msg = self.next_message().await;
+                let more = matches!(msg, Ok(Some(_)));
+                if tx.send(msg).is_err() || !more {
+                    break;
+                }
+            }
+        });
+        rx
     }
 
     pub async fn next_raw_frame(&mut self) -> io::Result<Option<String>> {
@@ -510,5 +532,29 @@ mod tests {
                 ErrorKind::UnexpectedEof
             );
         }
+    }
+
+    /// Bridges poll DAP inside `select!`, so a frame whose body arrives after its
+    /// header must survive the poll being cancelled between the two writes.
+    #[tokio::test]
+    async fn into_channel_survives_cancellation_mid_frame() {
+        let (mut tx, rx) = tokio::io::duplex(1024);
+        let mut msgs = DapReader::new(rx).into_channel();
+        let req = DapMessage::Request(DapRequest::new(1, "configurationDone", None));
+        let body = serde_json::to_vec(&req).unwrap();
+        tx.write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
+            .await
+            .unwrap();
+        tokio::select! {
+            got = msgs.recv() => panic!("a header alone must not yield: {got:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+        }
+        tx.write_all(&body).await.unwrap();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), msgs.recv())
+            .await
+            .expect("frame completed after the cancelled poll")
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, Some(req));
     }
 }

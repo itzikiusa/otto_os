@@ -19,6 +19,10 @@ use crate::types::{IdeSshSpec, IdeTargetKind, IdeTargetSpec};
 pub(super) struct InspectorWs {
     reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
     writer: tokio::net::tcp::OwnedWriteHalf,
+    /// Bytes read but not yet framed, and the fragments of the message being
+    /// assembled: kept here so a cancelled [`Self::next_json`] loses nothing.
+    rx: Vec<u8>,
+    message: Vec<u8>,
 }
 
 impl InspectorWs {
@@ -68,7 +72,12 @@ impl InspectorWs {
                 "V8 inspector rejected WebSocket upgrade".into(),
             ));
         }
-        Ok(Self { reader, writer })
+        Ok(Self {
+            reader,
+            writer,
+            rx: Vec::new(),
+            message: Vec::new(),
+        })
     }
 
     pub async fn send_json(&mut self, val: &Value) -> io::Result<()> {
@@ -106,58 +115,76 @@ impl InspectorWs {
         writer.flush().await
     }
 
+    /// Next CDP message, `None` once the inspector closes. Cancel-safe: the bridge
+    /// polls it inside `select!`, and a frame split across TCP reads stays buffered
+    /// when another branch wins (dropping it mid-frame desynced the stream, so the
+    /// bridge never saw `Debugger.paused` and the debuggee hung at its first break).
     pub async fn next_json(&mut self) -> io::Result<Option<Value>> {
-        let mut message_buf = Vec::new();
         loop {
-            let mut hdr = [0u8; 2];
-            if self.reader.read_exact(&mut hdr).await.is_err() {
+            while let Some((fin, opcode, payload)) = self.take_frame()? {
+                match opcode {
+                    0x8 => return Ok(None),
+                    0x9 => Self::write_masked_frame(&mut self.writer, 0x8a, &payload).await?,
+                    0x0 | 0x1 => {
+                        self.message.extend_from_slice(&payload);
+                        if fin {
+                            let msg = std::mem::take(&mut self.message);
+                            return serde_json::from_slice(&msg).map(Some).map_err(|e| {
+                                io::Error::new(ErrorKind::InvalidData, format!("cdp json: {e}"))
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // `read_buf` is cancel-safe: no bytes are consumed unless it returns.
+            if !matches!(self.reader.read_buf(&mut self.rx).await, Ok(n) if n > 0) {
                 return Ok(None);
             }
-            let fin = (hdr[0] & 0x80) != 0;
-            let opcode = hdr[0] & 0x0f;
-            let masked = (hdr[1] & 0x80) != 0;
-            let mut len = (hdr[1] & 0x7f) as usize;
-            if len == 126 {
-                let mut ext = [0u8; 2];
-                self.reader.read_exact(&mut ext).await?;
-                len = u16::from_be_bytes(ext) as usize;
-            } else if len == 127 {
-                let mut ext = [0u8; 8];
-                self.reader.read_exact(&mut ext).await?;
-                len = usize::try_from(u64::from_be_bytes(ext)).unwrap_or(usize::MAX);
+        }
+    }
+
+    /// Pops one complete frame `(fin, opcode, unmasked payload)` off `rx`.
+    fn take_frame(&mut self) -> io::Result<Option<(bool, u8, Vec<u8>)>> {
+        let b = &self.rx;
+        if b.len() < 2 {
+            return Ok(None);
+        }
+        let (mut len, mut at) = ((b[1] & 0x7f) as usize, 2);
+        if len == 126 {
+            if b.len() < 4 {
+                return Ok(None);
             }
-            if len > wire::MAX_MESSAGE_BYTES {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidData,
-                    "V8 inspector frame exceeds 16 MiB",
-                ));
+            (len, at) = (u16::from_be_bytes([b[2], b[3]]) as usize, 4);
+        } else if len == 127 {
+            if b.len() < 10 {
+                return Ok(None);
             }
-            let mut mask = [0u8; 4];
-            if masked {
-                self.reader.read_exact(&mut mask).await?;
-            }
-            let mut chunk = vec![0u8; len];
-            self.reader.read_exact(&mut chunk).await?;
-            if masked {
-                for (i, b) in chunk.iter_mut().enumerate() {
-                    *b ^= mask[i & 3];
-                }
-            }
-            match opcode {
-                0x8 => return Ok(None),
-                0x9 => Self::write_masked_frame(&mut self.writer, 0x8a, &chunk).await?,
-                0x0 | 0x1 => {
-                    message_buf.extend_from_slice(&chunk);
-                    if fin {
-                        let val: Value = serde_json::from_slice(&message_buf).map_err(|e| {
-                            io::Error::new(ErrorKind::InvalidData, format!("cdp json: {e}"))
-                        })?;
-                        return Ok(Some(val));
-                    }
-                }
-                _ => {}
+            let ext = u64::from_be_bytes(b[2..10].try_into().expect("8 bytes"));
+            (len, at) = (usize::try_from(ext).unwrap_or(usize::MAX), 10);
+        }
+        if len > wire::MAX_MESSAGE_BYTES {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "V8 inspector frame exceeds 16 MiB",
+            ));
+        }
+        let mask_at = at;
+        if b[1] & 0x80 != 0 {
+            at += 4;
+        }
+        if b.len() < at + len {
+            return Ok(None);
+        }
+        let mut payload = b[at..at + len].to_vec();
+        if at > mask_at {
+            for (i, byte) in payload.iter_mut().enumerate() {
+                *byte ^= b[mask_at + (i & 3)];
             }
         }
+        let (fin, opcode) = (b[0] & 0x80 != 0, b[0] & 0x0f);
+        self.rx.drain(..at + len);
+        Ok(Some((fin, opcode, payload)))
     }
 }
 
@@ -299,4 +326,51 @@ pub(super) async fn spawn_inspected_node(
 
     guard.push_child(child);
     Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    /// The bridge polls `next_json` inside `select!`, so a frame that arrives in two
+    /// TCP reads must survive the read being cancelled between them.
+    #[tokio::test]
+    async fn next_json_survives_cancellation_mid_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = BufReader::new(&mut sock);
+            let mut line = String::new();
+            while req.read_line(&mut line).await.unwrap() > 0 && line != "\r\n" {
+                line.clear();
+            }
+            sock.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+                .await
+                .unwrap();
+            let payload = br#"{"method":"Debugger.paused","params":{}}"#;
+            let mut frame = vec![0x81, payload.len() as u8];
+            frame.extend_from_slice(payload);
+            sock.write_all(&frame[..10]).await.unwrap();
+            go_rx.await.unwrap();
+            sock.write_all(&frame[10..]).await.unwrap();
+            sock
+        });
+
+        let mut ws = InspectorWs::connect(port, "/x").await.unwrap();
+        tokio::select! {
+            got = ws.next_json() => panic!("half a frame must not parse: {got:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+        go_tx.send(()).unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next_json())
+            .await
+            .expect("frame completed after the cancelled read")
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg["method"], "Debugger.paused");
+        drop(server);
+    }
 }

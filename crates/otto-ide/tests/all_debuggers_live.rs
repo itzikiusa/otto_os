@@ -675,7 +675,7 @@ async fn run_single_node_debug_assertion(
     assert_eq!(st, StatusCode::OK, "{lang} start_debug failed: {start}");
     let sid = start["session"]["id"].as_str().unwrap().to_string();
 
-    let snap = wait_until_paused(app, &sid, Duration::from_secs(15)).await;
+    let snap = wait_until_paused(app, &sid, FIRST_PAUSE).await;
     assert_eq!(
         snap["paused_line"],
         bp_line,
