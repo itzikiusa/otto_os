@@ -1,167 +1,107 @@
-# Workbench
+# Scratches
 
-Scratch files for side scripts, snippets and notes, with strong formatting and
-previews and a **full edit history**. It replaces a separate editor (VS Code,
-a notes app) for the "prepare a script, tidy it, run it somewhere" loop. A file
-can go straight to the DB Explorer's **Run on…** (multi-target / parameter
-sweep), the API client, a terminal or agent session, or the Vault.
+Scratch files for side scripts, queries, snippets and notes — the "prepare a
+script, tidy it, send it somewhere" loop without a separate editor. Scratches
+are a **project in the IDE**: one real folder per user, the **same in every
+workspace**, opened in the normal IDE with the tree, editor, language servers,
+run configurations, Local History, search and the agent dock.
 
-- Route: `#/workbench`. Sidebar entry **Workbench** (Build group). ⌘K: "Go to Workbench".
-- RBAC: rides the **Agents** feature (reads = View, writes = Edit). Files are
-  **per user**. Other members never see your files.
-- **Where a file shows.** Each file is either in **All workspaces** (globe
-  icon) or in **This workspace** only. New files go to all workspaces by
-  default; ⋯ → *New files in this workspace only* changes that default (it is
-  remembered on this device). Flip one file with the toolbar's
-  **All workspaces / This workspace** button or its row menu. Choosing *This
-  workspace* moves the file into the workspace you are in. When both kinds
-  exist the list groups them under **This workspace** and **All workspaces**.
-  Files created before this option existed stay in their workspace until you
-  flip them.
-- Code: UI `ui/src/modules/workbench/`, API client `ui/src/lib/api/workbench.ts`,
-  store `crates/otto-state/src/workbench.rs` (migrations `0165_workbench.sql`,
-  `0184_workbench_doc_scope.sql`),
-  routes `crates/otto-server/src/routes/workbench.rs`.
+- Where: IDE → project switcher → **Scratches** (always first, in every
+  workspace). ⌘K: **New scratch file…** from anywhere. `#/workbench` (the old
+  Scratches page) opens the IDE on the Scratches project.
+- Folder: `~/Otto/Scratches/<user id>` (`$OTTO_SCRATCHES_HOME` moves the
+  parent). It is an ordinary folder, so Finder, a terminal or another editor
+  work on it too.
+- RBAC: rides the **Agents** feature, like the IDE. The folder is **per user**:
+  the IDE opens a non-root user's own folder and refuses anyone else's, even
+  inside a workspace whose root contains it.
+- Code: UI `ui/src/modules/ide/shell/ideScratches.svelte.ts` (switcher entry,
+  new scratch), file tools `ui/src/modules/ide/filetools/` (format, preview,
+  Send to…), routes `crates/otto-server/src/routes/scratches.rs`, archive
+  reader `crates/otto-state/src/workbench.rs` (migration
+  `0218_workbench_docs_exported.sql`).
 
 ## Walkthrough
 
-1. **New file** creates `Untitled N` with language **Auto-detect** and opens it.
-   The language is detected from the extension first (`.json`, `.md`, `.sql`,
-   `.d2`, `.mmd`, `.csv`, …), then from the content (JSON, markup, Mermaid
-   keywords, D2 edges, SQL keywords, `curl`, Markdown, CSV, YAML, shebangs). The
-   language menu overrides it per file.
-2. **Type.** Autosave runs about 0.8 s after you stop typing. It also runs on tab
-   switch, when the page is hidden and before unload. Unsaved buffers are backed
-   up in the browser and restored after a reload. A failed save keeps the buffer
-   dirty and shows **Retry**.
-3. **Format** (⇧⌥F or the toolbar):
-   - JSON (pretty-print, errors show line:col)
-   - YAML (`yaml`)
-   - SQL (`sql-formatter`; `:name`, `{name}`, `{{name}}` placeholders survive)
-   - HTML / XML / SVG (built-in pretty-printer; `<pre>`, `<script>`, `<style>`
-     and `<textarea>` stay verbatim)
-   - CSV / TSV (RFC 4180 normalisation)
-   - TOML, Markdown, JS/TS/CSS, Mermaid, D2 (conservative whitespace clean-up)
-
-   Formatting is idempotent and is a single undo step. JSON, YAML, XML and CSV
-   are validated while you type, and clicking the error's line:col jumps there.
-4. **Preview** (split view):
-   - Markdown: the Vault renderer, sanitised, including Mermaid/D2 fences and
-     `![alt](asset:<id>)` images.
+1. **New scratch file** (⌘K, the tree's **+**, or the empty Scratches tree)
+   asks for a name; its extension picks the language (`.sql`, `.json`, `.md`,
+   `.py`, `.mmd`, `.d2`, `.http`, …). The file is created at the top of the
+   folder and opens. Folders, renames, moves and deletes are the IDE tree's.
+2. **Type.** The IDE saves as usual; every save and delete lands in **Local
+   History** (tree toolbar clock, or the editor's Local History action), where
+   any version can be diffed and restored.
+3. **Format** (⌘⌥L, *Reformat code*): JSON, YAML, Markdown, JS/TS/CSS/HTML
+   through the IDE's formatters; **SQL** (`sql-formatter`, `:name` / `{name}` /
+   `{{name}}` placeholders survive) and **XML / SVG** (built-in pretty-printer)
+   are formatted in the app.
+4. **Preview.** For Markdown, HTML, SVG, Mermaid (`.mmd`), D2 and JSON the
+   editor bar shows **Code | Preview**:
+   - Markdown: the Vault renderer, sanitised, including Mermaid/D2 fences.
    - HTML: an iframe with an empty `sandbox` and a strict CSP, so no scripts run.
    - SVG: rendered as an image, so no scripts run.
    - Mermaid and D2: the Canvas renderers.
    - JSON: a collapsible tree.
-   - CSV/TSV: a table, first 2,000 rows.
-   - Images: pasted or dropped PNG/JPEG/GIF/WebP/SVG files are stored as
-     workbench assets.
-5. **History.** Every save lands in an append-only revision timeline. Select a
-   revision to see it or diff it against the current text or another revision.
-   **Restore this version** adds a new `restore` revision, so nothing is
-   overwritten. Unsaved edits in the tab are saved into the history first; if
-   they cannot be saved, Restore asks before discarding them.
-6. **Placeholders.** The side panel lists the placeholders it detects. In SQL
-   these are `:name`, `{name}` and `{{name}}`, using the DB Explorer's parser.
-   In other languages only `{name}` and `{{name}}` count. Values are remembered
-   per file. A comma-separated value (`1,2,3,4`) becomes a sweep for **Run on…**.
-7. **Send to…**
-   - **Database: Run on…** picks the connection: the selected one, the only
-     one, or a choice. It then opens the DB Explorer with the script in a new
-     query tab and opens the **Run on…** sheet with the placeholder values as
-     parameters. Nothing runs until you start it there.
+   CSV/TSV/JSONL keep the IDE's **Table | Text** view.
+5. **Send to…** (share icon in the editor bar, any file):
+   - **Database: Run on…** picks the connection (the selected one, the only
+     one, or a choice), opens the DB Explorer with the script in a new query
+     tab and the **Run on…** sheet, which fills its own placeholders. Nothing
+     runs until you start it there.
    - **API client: new request.** Text starting with `curl` goes through the
-     curl importer. Anything else becomes an unsaved POST draft with the content
-     as the body.
+     curl importer; anything else becomes an unsaved POST draft with the
+     content as the body.
    - **Terminal / agent session.** Pick a live session and confirm. Control
-     characters are removed from the text first, and the confirm says how many.
-     An agent or shell session gets a bracketed paste with no Enter. A
-     connection session (SSH, a database client, a pod shell) takes a single
-     line only, because such clients can run each line as it arrives; a
+     characters are removed first, and the confirm says how many. An agent or
+     shell session gets a bracketed paste with no Enter. A connection session
+     (SSH, a database client, a pod shell) takes a single line only; a
      multi-line file is refused there and **Copy** is offered instead.
-   - **Vault: save as note.** Choose the vault and path; the default is
-     `workbench/<name>.md`. Overwriting an existing note asks first.
-   - **Copy with placeholders filled.**
-8. **Trash.** **Move to trash** is a soft delete, and the history is kept.
-   **Show trash** lists trashed files with **Restore** and **Delete forever**.
-   Only Delete forever removes the file's history. It asks first, and only a
-   trashed file can be purged.
+   - **Vault: save as note.** Choose the vault and path (default
+     `scratches/<name>.md`). Overwriting an existing note asks first.
 
-Keyboard (only while the Workbench page is active):
+## From the Workbench
 
-| Keys | Action |
-|------|--------|
-| ⌘S | Save now as a checkpoint revision |
-| ⌘W | Close the Workbench tab. This does not close the shell tab. |
-| ⌘P | Quick open |
-| ⇧⌥F | Format |
+Scratch files used to be DB docs on a separate Workbench page. The first time
+you open Scratches (or an agent uses a `workbench_*` tool), Otto copies your
+docs from **every workspace** into the folder, once:
 
-Open tabs and the active tab are remembered per workspace. The page opens on
-the last tab you had open, or else on the most recent file.
+- a doc's folder becomes sub-folders; its name gets an extension from its
+  language (an *Auto-detect* doc is sniffed: SQL, JSON, HTML/XML/SVG, shell,
+  Markdown, else `.txt`); a name that already has an extension keeps it;
+- an image doc becomes its picture file;
+- a name that is taken (including a case-only clash such as `Report` /
+  `report`) gets ` (2)`, ` (3)`… — nothing is overwritten;
+- docs in the Workbench trash are not copied.
 
-## History model
+Each copied doc remembers its new path (`workbench_docs.exported_path`), so the
+copy never repeats — a copy you delete stays deleted. The Workbench tables,
+including every doc's revision history, stay in the database as an archive;
+the revisions are not replayed into Local History.
 
-- **Revisions** (`workbench_revisions`) are keyed `(doc_id, seq)`. `kind` is one of:
-  - `create`: the first content.
-  - `auto`: autosaves within about 60 s of the burst's first save fold into one
-    revision. `saves` counts how many folded in, and the latest content
-    overwrites the burst's revision, so the newest text is never lost.
-  - `checkpoint`: ⌘S. Saving new content appends a revision. Saving unchanged
-    content **seals** the open `auto` burst by turning it into a checkpoint, so
-    the next edit starts a new revision.
-  - `restore`: an older revision restored. `restored_from` holds the source seq.
-- **Content** is stored in content-addressed blobs (`workbench_blobs`, sha256,
-  deduplicated). When a coalesced save replaces a blob that no revision
-  references any more, that blob is collected. Nothing else is ever collected.
-- **Retention:** no retention job touches the workbench tables. A test pins this.
-  History is removed only by `DELETE …?permanent=true` on a trashed file.
-- **Crash safety:** each save is one SQLite transaction (doc row + revision +
-  blob), and concurrent autosaves serialise. A test pins this too.
-- Metadata changes (rename, pin, language, folder, tags) never create revisions.
+## API
 
-## API & events
+REST: `GET /api/v1/scratches` (`root` + files), `GET /api/v1/scratches/file?path=`,
+`PUT /api/v1/scratches/file`. See [api.md → Scratches](../contracts/api.md).
+The IDE itself uses the `/ide/*` routes like any project.
 
-REST under `/api/v1/workspaces/{ws}/workbench/…`. See
-[api.md → Workbench](../contracts/api.md):
+MCP (agents), all on the session owner's folder:
 
-- Docs: list (`?trash=true`), create, get, autosave/patch, trash / `?permanent=true`, restore.
-- Revisions: list, get, restore, and a line `diff?from=&to=`.
-- Assets: upload a raw image body, and fetch it (SVG is served with a sandbox CSP).
-
-WebSocket: `workbench_doc_changed { workspace_id, user_id, doc_id, action, rev,
-updated_at, client_id }` is delivered only to the owner. Other windows refetch,
-and a window ignores its own `client_id`. A tab with local edits shows
-**Reload / Keep mine** instead of being overwritten.
-
-MCP (agents):
-
-- `workbench_list` and `workbench_get` are read-only.
-- `workbench_write` creates a file or updates its content, with the same
-  approval rules as other mutating tools.
+- `workbench_list` (`query` filters paths) and `workbench_get` (`path`) are read-only.
+- `workbench_write` (`path`, `content`, optional `language` for the extension)
+  creates or replaces a file; the old and new content land in Local History.
 
 ## Capabilities & limits
 
-- Content limit is 5 MB per file and 20 MB per image asset. Diffs are capped
-  for very large inputs.
-- Formatting for JS/TS/CSS is whitespace-only, because no heavy formatter is
-  bundled.
-- The DB hand-off needs at least one DB connection in the workspace. With more
-  than six connections it opens the DB page and asks you to pick one.
-- Files are personal: there is no sharing between users yet. A file in
-  **All workspaces** still belongs to you only.
-- Open tabs are remembered per workspace, so a global file open in one
-  workspace isn't automatically open in another (it is listed there).
+- The `/scratches` file API reads and writes UTF-8 text up to 5 MB per file and
+  lists up to 2,000 files; the IDE has its own limits.
+- Markdown images that pointed at Workbench assets (`asset:<id>`) don't render
+  any more; the assets stay in the archive.
+- Files are personal: there is no sharing between users. A workspace rooted
+  above `~/Otto/Scratches` (e.g. your home folder) can browse into the folder
+  through that workspace's own project, like any file under it.
 
 ## Troubleshooting
 
-- **"My files disappeared after switching tabs."** The tab belongs to another
-  workspace and the files are scoped to the workspace they were made in.
-  Go back to that workspace and choose **All workspaces** on each file
-  (toolbar or row menu); they then show everywhere.
-
-- **"Not saved" with Retry.** The daemon refused or was unreachable. The buffer
-  stays dirty and is backed up locally, so press Retry or ⌘S.
-- **"Changed in another window".** Another window saved this file while you had
-  unsaved edits. **Reload** discards your unsaved edits and asks first.
-  **Keep mine** keeps your buffer, and your next save becomes the newest revision.
-- **A revision you expected is missing.** Saves less than about a minute apart
-  fold into one `auto` revision. Press ⌘S to pin an exact state.
+- **"Couldn't open Scratches".** The daemon could not create or read
+  `~/Otto/Scratches/<user id>` (permissions, a full disk) — the toast says why.
+- **A doc from the Workbench is missing.** Trashed docs are not copied; restore
+  it with an older Otto build, then open Scratches again and it is copied.

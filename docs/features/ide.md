@@ -8,8 +8,9 @@ inline **Gutter Run/Debug**, a full **Debug Adapter Protocol (DAP) debugger**,
 Edit (`⌘I`)**, **Share with Friends** live collaborative editing, and
 zero-rebuild **runtime IDE plugins**.
 
-- Route: `#/ide` (**Project** mode) and `#/workbench` (**Scratches** mode,
-  switched in the `IDE` header via `Project | Scratches`). Sidebar entry **IDE**
+- Route: `#/ide`. The project switcher always lists **Scratches** first — the
+  user's own scratch folder, the same in every workspace ([Scratches](./scratches.md));
+  `#/workbench` opens it. Sidebar entry **IDE**
   (Build group). ⌘K: "Go to IDE", "Toggle IDE AI Agent", "IDE: Inline Edit with Agent".
 - RBAC:
   - Protected workspace `/api/v1/ide/*` routes require **Agents: Edit** (`Require(Agents, Edit)`),

@@ -102,7 +102,8 @@ plane), `panels`, `personal-agents` (embedded under unified `Scheduled Tasks`),
 hub), `settings`, `share` (remote/mobile), `skills-eval`, `skills-lab`, `snip`
 (snipping tool), `threads` (experimental inbox-style conversational workspace:
 multi-session splits, file viewer, inspector, session-to-session relay),
-`usage`, `vault` (docs home), `workbench`, `workflows`. Shared code lives in
+`usage`, `vault` (docs home), `workflows`. (Scratches are the IDE's built-in
+Scratches project — `ide/shell/ideScratches.svelte.ts`, `ide/filetools/`.) Shared code lives in
 `ui/src/lib/` (`api/`, `components/`, `stores/`); the app shell is
 `ui/src/shell/` + `ui/src/App.svelte`.
 

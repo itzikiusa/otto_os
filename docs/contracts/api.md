@@ -79,7 +79,7 @@ connection library unusable for every non-root account.)
 | 14 | DELETE /api/v1/workspaces/{id} | ws admin | — | 204 (archives) |
 | 15 | GET /api/v1/workspaces/{id}/members | ws admin | — | `MemberEntry[]` |
 | 16 | PUT /api/v1/workspaces/{id}/members | ws admin | SetMembersReq | `MemberEntry[]` — atomic full replacement; invalid or duplicate users return 400 without changing existing membership |
-| 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…` and `…/runtime-sessions` — structured runtime sessions, owner-scoped the same way — plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above), **plus Workbench** (`…/workbench…`, owner-scoped — every query binds the caller, so the implicit Editor shares nothing; see the Workbench section): every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
+| 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…` and `…/runtime-sessions` — structured runtime sessions, owner-scoped the same way — plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above),: every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
 | 16b | PATCH\|DELETE /api/v1/workspaces/scratch | Agents:View | — | always **409** `the scratch workspace is system-owned` — the scratch workspace cannot be renamed or deleted |
 | 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `foreground=true` = the rows the sidebar lists — every connection session plus the agents `Session::is_foreground_agent` accepts (no string `meta.source` in `BACKGROUND_SESSION_SOURCES`), plus agents whose source is in the comma list `with_sources` (≤ 64; e.g. `channel` for the Slack/Telegram groups); `foreground=false` = background agents only; `ids` = comma list of session ids (≤ 64, more → 400) — fetch-by-id for open tabs; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number` + `held: bool` (the live PTY runs in a PTY holder AND `session_persistence` is on, so a daemon restart leaves it running; `false` otherwise). Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table). The Agents sidebar asks for `?archived=false&foreground=true&with_sources=channel` (+ sources a mounted panel needs, e.g. `swarm`), pages the Archived section with `?archived=true&limit=100&before=…` and probes it with `?archived=true&limit=1` — a workspace's background review agents (~99 % of its rows) are never shipped to it |
 | 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here unless `ids` is given (a fetch-by-id returns the rows whatever their archived state — the UI's `ensureSession` / open-tab path) | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
@@ -6461,59 +6461,45 @@ background poll or a slow call from queueing what the user just clicked:
   `resource_access_changed`, `notifications_changed`, the `/ws/events`
   `subscribe` topic filter and `boot_id` (`ws.md`). No REST shape changed.
 
-## Workbench (per-user scratch files with full history)
+## Scratches (each user's scratch folder)
 
-Notion/VS Code-style scratch files (scripts, JSON, Markdown, Mermaid, D2, …)
-with a FULL, append-only edit history. Owner-scoped: every route answers
-only the caller's own docs (another user's id → `404`). A doc's `scope`
-(`workspace` | `global`, migration 0184) decides which workspaces list it: a
-`workspace` doc only the one it lives in (`workspace_id`), a `global` doc
-every workspace the owner can open (a doc of another workspace → `404`).
-Gated on **Agents** (`GET` = View, everything else = Edit) plus the workspace
-role (`viewer` for reads, `editor` for writes). Also served under the
-`scratch` workspace (owner-scoped, so nothing is shared). Types:
-`ui/src/lib/api/types.ts` "Workbench"; repo: `crates/otto-state/src/workbench.rs`;
-routes: `crates/otto-server/src/routes/workbench.rs` (migrations 0165, 0184).
+Scratch files are real files in one folder per user —
+`<scratches_home>/<user id>`, where `scratches_home` is
+`$OTTO_SCRATCHES_HOME` or `~/Otto/Scratches`. The folder is not tied to a
+workspace: the IDE lists it as the built-in **Scratches** project in every
+workspace and opens it like any local project (`/ide/*` routes), so tree,
+editor, LSP, run configs, Local History, search and agents all apply. These
+routes are the small file API the MCP `workbench_*` tools and the IDE's
+project switcher use. Gated on **Agents** (`GET` = View, `PUT` = Edit); every
+route touches only the caller's own folder. Routes:
+`crates/otto-server/src/routes/scratches.rs`.
 
-History rules: every content change records a revision. Autosaves coalesce —
-a save within 60 s of an `auto` revision's first save overwrites that
-revision (`saves` += 1, so it always holds the newest content); later saves,
-`checkpoint: true` (⌘S) saves, creation (`create`) and revision restores
-(`restore`, with `restored_from`) append a new one. Saving identical content
-records nothing — except a `checkpoint` save of identical content while the
-newest revision is an open `auto` burst: that SEALS it (its kind becomes
-`checkpoint`), so the next autosave starts a new revision (⌘S always sends the
-buffer with `checkpoint: true`); metadata (name, language, pinned, folder, tags, scope) never creates
-a revision. Content is stored content-addressed (sha256 blobs). Revisions are
-removed ONLY by the permanent delete of a trashed doc — no cascade and no
-retention job touches them. Doc content cap 5 MB; asset cap 20 MB.
+The IDE root check admits a non-root caller's own folder and refuses anyone
+else's, even inside a workspace root that contains it.
+
+**Workbench → Scratches.** Scratch files used to be DB docs (the Workbench,
+migrations 0165/0184). Every call to these routes first copies the caller's
+live docs that are not copied yet — from every workspace — into the folder:
+the doc's folder becomes sub-folders, its name gets an extension from its
+language (or, for `auto`, a sniff of the content; a name that already has one
+keeps it), an `image` doc becomes its picture file. A name already taken gets
+` (2)`, ` (3)`… — nothing is overwritten. Each copied doc records its new path
+in `workbench_docs.exported_path` (migration 0218), so the copy runs once per
+doc; trashed docs are not copied. The workbench tables stay as the archive
+(revision history included) and nothing is deleted, so an older build still
+reads them after a rollback.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /workspaces/{ws}/workbench/docs | member (Agents:View) | `?trash=true` lists the trash | `WorkbenchDoc[]` (no content; each row carries `scope` and its home `workspace_id`) — this workspace's docs plus the caller's `global` ones; live: pinned first then newest; trash: most recently trashed first |
-| POST /workspaces/{ws}/workbench/docs | member (Agents:Edit) | `WorkbenchCreateReq {name, language?='auto', content?='', folder?, tags?, pinned?, scope?='workspace'}` (the UI sends its remembered default, `global` unless changed) | `201 WorkbenchDocFull` (rev 1, kind `create`) |
-| GET /workspaces/{ws}/workbench/docs/{id} | member (Agents:View) | — | `WorkbenchDocFull` (`content` = current text; for `language:"image"` the asset id) |
-| PATCH /workspaces/{ws}/workbench/docs/{id} | member (Agents:Edit) | `WorkbenchUpdateReq {content?, name?, language?, pinned?, folder?, tags?, scope?, checkpoint?, client_id?, if_hash?}` — `scope:"workspace"` also moves the doc's `workspace_id` to `{ws}` (scoping a global doc to "this workspace" keeps it here) | `WorkbenchDoc`; `409` while trashed, or when `if_hash` (with `content`) ≠ the doc's current `content_hash` (another window saved — the UI shows its "changed in another window" banner; omit `if_hash` to overwrite); `400` on validation (empty name, bad language, content > 5 MB) |
-| DELETE /workspaces/{ws}/workbench/docs/{id} | member (Agents:Edit) | `?permanent=true` = irreversible purge | soft: `200 WorkbenchDoc` (`deleted_at` set, history kept); permanent: `204` — only for a TRASHED doc (live doc → `409`), removes the doc, every revision and unreferenced blobs |
-| POST /workspaces/{ws}/workbench/docs/{id}/restore | member (Agents:Edit) | `{}` | `WorkbenchDoc` (out of the trash) |
-| GET /workspaces/{ws}/workbench/docs/{id}/revisions | member (Agents:View) | `?limit=100&before_seq=<seq>`; limit clamped 1–200, exclusive cursor | `WorkbenchRevision[]` newest first `{seq, kind, content_hash, size, created_at, updated_at, saves, restored_from}` |
-| GET /workspaces/{ws}/workbench/docs/{id}/revisions/{seq} | member (Agents:View) | — | `WorkbenchRevisionDetail` (revision + `doc_id` + `content`) |
-| POST /workspaces/{ws}/workbench/docs/{id}/revisions/{seq}/restore | member (Agents:Edit) | `{}` | `WorkbenchDocFull` — appends a `restore` revision; nothing is overwritten |
-| GET /workspaces/{ws}/workbench/docs/{id}/diff | member (Agents:View) | `?from=<seq>&to=<seq\|current>` (`to` omitted = current content) | `WorkbenchDiff {doc_id, from, to, added, removed, lines:[{op:eq\|add\|del, text, old_line?, new_line?}]}` — Myers line diff, exact up to 2 000 edits / 20 000 lines per side, else the changed middle as one delete + one add block |
-| POST /workspaces/{ws}/workbench/assets | member (Agents:Edit) | raw image body (PNG/JPEG/GIF/WebP by magic bytes; SVG when sent as `image/svg+xml`), ≤ 20 MB | `201 WorkbenchAsset {id, mime, size, sha256, created_at}` — identical bytes from the same owner in the same workspace return the existing asset |
-| GET /workspaces/{ws}/workbench/assets/{id} | member (Agents:View) | — | the image bytes with its `Content-Type`, `X-Content-Type-Options: nosniff`; SVG adds `Content-Security-Policy: sandbox`. Owner-scoped only (any workspace the caller can open), so a global doc's images render everywhere |
+| GET /scratches | Agents:View | `?query=` filters by a case-insensitive path substring | `{root, files: ScratchFile[]}` — `root` is the folder's canonical path; files newest first (hidden dot files skipped, at most 2 000) |
+| GET /scratches/file | Agents:View | `?path=<relative path>` | `ScratchFile & {content}`; `404` when missing; `400` for a path outside the folder (`..`, absolute, a symlink out), a non-UTF-8 file or one over 5 MB |
+| PUT /scratches/file | Agents:Edit | `{path, content}` (≤ 5 MB) — parent folders are created | `ScratchFile & {created}` — the previous and the new content both land in the IDE's Local History for the folder |
 
-Revision listing returns one metadata page (default 100, maximum 200), never revision bodies. Continue with `before_seq` set to the previous page's last `seq`; stop on a short or empty page. A full final page can require one empty request. Concurrent new revisions do not shift older keyset pages. All history is retained; direct revision detail, diff and restore remain available for any stored seq. The TypeScript response remains `WorkbenchRevision[]`; its API wrapper accepts the same optional limit/cursor parameters.
+`ScratchFile = {path, size, modified_at}` (`path` relative to `root`, `/`-separated; `modified_at` RFC 3339).
 
-Every mutation emits the owner-only WS event `workbench_doc_changed`
-(see ws.md). MCP (`ottod mcp-tools`): `workbench_list`, `workbench_get`
-(read-only) and `workbench_write` (MUTATING, Agents Edit — writes land as
-`checkpoint` revisions). `workbench_get(history:true)` accepts `history_limit`
-(default 100, clamped 1–200) and exclusive `before_seq`; it adds one bounded
-`revisions` array and `next_before_seq` (last seq for a full page, null for a
-short page). A non-null cursor is only a continuation hint; the next page may
-be empty. `revision:<seq>` still fetches that explicit revision independently
-of the metadata page.
+MCP (`ottod mcp-tools`): `workbench_list` and `workbench_get` (read-only) and
+`workbench_write` (MUTATING, Agents Edit; `language` adds an extension when
+`path` has none) call these routes with the session owner's token.
 
 ## Application telemetry and profiling
 

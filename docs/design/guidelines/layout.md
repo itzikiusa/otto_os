@@ -62,8 +62,8 @@ help sentence in the one place that owns the thing, and name that place:
 
 | The user wants to… | It lives in | Not in |
 |---|---|---|
-| Keep durable docs: markdown, wikilinks, an Obsidian vault, OKF bundles | **Vault** | Workbench |
-| Draft a script, snippet or scratch note and run it somewhere | **Workbench** (per user, full edit history; *Save as note* moves a file into the Vault) | Vault |
+| Keep durable docs: markdown, wikilinks, an Obsidian vault, OKF bundles | **Vault** | IDE → Scratches |
+| Draft a script, snippet or scratch note and run it somewhere | **IDE → Scratches** (per-user folder in every workspace, Local History; *Send to… → Vault* moves a file into the Vault) | Vault |
 | Jot workspace notes beside a running session | the **Session panel → Notes** tab (⌘J) | Vault |
 | Annotate a design (frame, site, 3D scene, brand kit) | the artifact's notes in **Design Hall** | Vault |
 | Draw a diagram with an agent (Excalidraw, Mermaid, D2) | **Canvas** (`#/canvas`), which is Design Hall's **Whiteboard** studio — reached from Design Hall (⌘K "Go to Design Hall" matches "canvas") | a separate "whiteboard" module or ⌘K entry |

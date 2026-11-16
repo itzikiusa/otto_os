@@ -47,7 +47,7 @@ reads or a few writes only. **none**: nothing. Snapshot of 2026-11-05.
 | threads | full | none | `thread_*` tools; no UI commands for the inbox |
 | usage | partial | none | usage summary |
 | vault | full | partial | list / read / search / graph / write / rename / delete; UI: list, open, search, write |
-| workbench | full | none | list / get / write (native) |
+| workbench (Scratches folder) | full | none | list / get / write (native) |
 | workflows | partial | partial | list / get / runs / run / cancel; no create or edit of a workflow graph |
 
 Also covered: Jira / Confluence (search, read, create, edit, comment,
