@@ -92,7 +92,9 @@ impl LocalGit {
         Ok(self.push_target_with_url().await?.0)
     }
 
-    async fn push_target_with_url(&self) -> Result<(PushTarget, String)> {
+    /// The target, its single push URL and the local tracking ref the
+    /// destination maps to (if any).
+    async fn push_target_with_url(&self) -> Result<(PushTarget, String, Option<String>)> {
         // A resolved URL handed back to `git push` can be rewritten a second
         // time. Do not offer this force flow when URL rewriting is configured.
         let (rewrites, _, _, code) = self
@@ -206,11 +208,11 @@ impl LocalGit {
                 }
             }
         }
-        let remote_sha = match tracking {
+        let remote_sha = match &tracking {
             Some(r) => {
                 let (ok, out, _, _) = self
                     .run_raw_class(
-                        &["rev-parse", "-q", "--verify", &r],
+                        &["rev-parse", "-q", "--verify", r],
                         &[],
                         SpawnClass::LocalRead,
                     )
@@ -229,14 +231,20 @@ impl LocalGit {
                 remote_sha,
             },
             url,
+            tracking,
         ))
     }
 
     /// Prepare exact argv without sending anything. An explicit lease binds the
     /// remote OID; SHA:ref and a resolved URL bind the source and destination even
-    /// if an external CLI changes refs/config after this method returns.
-    pub(crate) async fn force_push_args(&self, expected: &PushTarget) -> Result<Vec<String>> {
-        let (fresh, url) = self.push_target_with_url().await.map_err(|_| changed())?;
+    /// if an external CLI changes refs/config after this method returns. Also
+    /// returns the tracking ref: pushing to a URL leaves it stale, so the
+    /// caller moves it once the push lands.
+    pub(crate) async fn force_push_args(
+        &self,
+        expected: &PushTarget,
+    ) -> Result<(Vec<String>, String)> {
+        let (fresh, url, tracking) = self.push_target_with_url().await.map_err(|_| changed())?;
         if &fresh != expected {
             return Err(changed());
         }
@@ -269,7 +277,9 @@ impl LocalGit {
         if !self.run_read(&args).await?.trim().is_empty() {
             return Err(Error::Conflict("force push refused: the fetched remote commits were never integrated into this branch — review and integrate them first".into()));
         }
-        Ok(vec![
+        // A remote sha implies the tracking ref it was read from.
+        let tracking = tracking.ok_or_else(changed)?;
+        let args = vec![
             "push".into(),
             "--no-follow-tags".into(),
             "--no-mirror".into(),
@@ -281,7 +291,8 @@ impl LocalGit {
             "--".into(),
             url,
             format!("{}:{}", fresh.source_sha, fresh.destination_ref),
-        ])
+        ];
+        Ok((args, tracking))
     }
 
     pub async fn push_confirmed(
@@ -289,16 +300,25 @@ impl LocalGit {
         token: Option<TransportCredential>,
         expected: &PushTarget,
     ) -> Result<()> {
-        let args = self.force_push_args(expected).await?;
+        let (args, tracking) = self.force_push_args(expected).await?;
         let askpass = token.as_ref().map(AskPass::new).transpose()?;
         let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
         let args: Vec<_> = args.iter().map(String::as_str).collect();
         let (ok, out, err, code) = self.run_raw_class(&args, &envs, SpawnClass::Remote).await?;
-        if ok {
-            Ok(())
-        } else {
-            Err(push_err(&err, &out, code))
+        if !ok {
+            return Err(push_err(&err, &out, code));
         }
+        // The push went to a URL, so git left the tracking ref on the old sha
+        // (↑1 ↓1 until a fetch). Move it, leased on the sha we pushed over.
+        let old = expected.remote_sha.as_deref().unwrap_or_default();
+        let _ = self
+            .run_raw_class(
+                &["update-ref", &tracking, &expected.source_sha, old],
+                &[],
+                SpawnClass::LocalWrite,
+            )
+            .await;
+        Ok(())
     }
 }
 

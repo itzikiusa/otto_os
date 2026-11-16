@@ -54,7 +54,8 @@ async fn bound_push_preserves_upstream_and_pins_source_after_preflight() {
     let target = local.push_target().await.unwrap();
     assert_eq!(target.remote, "upstream");
     assert_eq!(target.destination_ref, "refs/heads/review");
-    let args = local.force_push_args(&target).await.unwrap();
+    let (args, tracking) = local.force_push_args(&target).await.unwrap();
+    assert_eq!(tracking, "refs/remotes/upstream/review");
     // The command is captured, not executed: no force push, even to a fixture.
     git(dir.path(), &["checkout", "-qb", "other"]);
     git(
@@ -220,4 +221,33 @@ async fn publication_push_pins_proved_revision_and_never_forces_newer_remote() {
         local.push_revision(None, "HEAD", "main").await,
         Err(Error::Invalid(_))
     ));
+}
+
+/// A confirmed force push (to a LOCAL bare remote) moves the tracking ref too:
+/// pushing to the resolved URL used to leave it on the old sha, so the branch
+/// still read ↑1 ↓1 and Push re-offered the rejected push.
+#[tokio::test]
+async fn confirmed_force_push_moves_the_tracking_ref() {
+    let root = tempfile::tempdir().unwrap();
+    let bare = root.path().join("remote.git");
+    let work = root.path().join("work");
+    git(root.path(), &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()]);
+    git(root.path(), &["init", "-q", "-b", "main", work.to_str().unwrap()]);
+    for kv in [
+        ["user.name", "Fixture"],
+        ["user.email", "fixture@example.test"],
+        ["commit.gpgsign", "false"],
+    ] {
+        git(&work, &["config", kv[0], kv[1]]);
+    }
+    git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    git(&work, &["commit", "--allow-empty", "-qm", "published"]);
+    git(&work, &["push", "-q", "-u", "origin", "main"]);
+    git(&work, &["commit", "--amend", "--allow-empty", "-qm", "rewritten"]);
+    let local = LocalGit::new(&work);
+    let target = local.push_target().await.unwrap();
+    local.push_confirmed(None, &target).await.unwrap();
+    let head = git(&work, &["rev-parse", "HEAD"]);
+    assert_eq!(git(&bare, &["rev-parse", "main"]), head);
+    assert_eq!(git(&work, &["rev-parse", "refs/remotes/origin/main"]), head);
 }

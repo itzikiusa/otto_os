@@ -547,6 +547,9 @@ markers is no longer one careless checkbox away.
    file's hunks (`ConflictFilePane` / `ConflictHunk`). Its title and buttons name
    the actual operation (merge / rebase / cherry-pick / revert; stash-pop
    conflicts have nothing to abort or commit — resolutions are staged as you go).
+   The sides are named by branch: a merge or pull shows the merged tip
+   (`feature`, `origin/develop`); a rebase shows the branch being replayed and
+   the branch it is replayed onto.
    - `GET /repos/{id}/conflict?path=…` returns one file's conflict content;
    - `POST /repos/{id}/conflict/resolve` writes your chosen resolution for a path
      and re-stages it — or takes a whole side with `side: "ours" | "theirs"`.
@@ -825,7 +828,7 @@ distinction from the **"Draft message with agent"** button, which drafts the
 > check-your-token hint, 404 → 404, "not mergeable"-style 405/409/422 → 409.
 
 | `POST /repos/{id}/checkout` | ws editor | `CheckoutReq` (`create`) |
-| `POST /repos/{id}/cherry-pick` · `/revert` | ws editor | `{sha}`; a conflicting pick/revert is a normal 200 — status carries `op_in_progress` + conflicted paths, resolved/aborted via the merge lifecycle routes |
+| `POST /repos/{id}/cherry-pick` · `/revert` | ws editor | `{sha}`; a conflicting pick/revert is a normal 200 — status carries `op_in_progress` + conflicted paths, resolved/aborted via the merge lifecycle routes. A pick/revert whose change is already in HEAD is skipped (`--skip`) and refused with 409, so the repo is never left mid-pick |
 | `POST /repos/{id}/branch` · `/branch/rename` · `/branch/delete` | ws editor | Create / rename / delete branch |
 | `POST /repos/{id}/branch/update-to-upstream` | ws editor | `{branch, ahead}` → `{status, backup, also_kept?}` — move the checked-out branch to its upstream after a force-push, old tip kept on `otto-backup/…` |
 | `POST /repos/{id}/tag` · `/tag/push` · `/tag/delete` | ws editor | Create / push / delete tags |

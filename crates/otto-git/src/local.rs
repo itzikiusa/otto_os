@@ -1620,7 +1620,7 @@ impl LocalGit {
     /// "is the tracked tree dirty"). Enumerating every untracked file costs a
     /// full directory walk, and these ran on every unstage / merge commit /
     /// pull, two or three times each.
-    async fn tracked_status(&self) -> Result<RepoStatusResp> {
+    pub(crate) async fn tracked_status(&self) -> Result<RepoStatusResp> {
         let out = self
             .exec_text(&GitCmd::read(&[
                 "status",
@@ -3734,6 +3734,16 @@ impl LocalGit {
             return Ok(());
         }
         let combined = format!("{stdout}\n{stderr}");
+        // The change is already in HEAD: git stops mid-sequence with nothing
+        // to commit, and `--continue` refuses forever. Skip it so the repo
+        // isn't left stuck, and say why.
+        if combined.contains("is now empty") {
+            self.run_raw(&[args[0], "--skip"], &[]).await?;
+            return Err(Error::Conflict(format!(
+                "nothing to {}: the change is already in HEAD",
+                args[0]
+            )));
+        }
         let conflicted = combined.contains("CONFLICT")
             || combined.contains("could not apply")
             || combined.contains("could not revert")
@@ -4545,9 +4555,14 @@ impl LocalGit {
                 merging: false,
                 op: None,
                 source: None,
+                ours: None,
                 conflicted_files: Vec::new(),
             });
         }
+        let (rebase_theirs, ours) = match op.as_deref() {
+            Some("rebase") => self.rebase_labels().await,
+            _ => (None, None),
+        };
         let source = match op.as_deref() {
             Some("merge") => self.merge_source().await,
             Some("cherry_pick") => self
@@ -4560,30 +4575,66 @@ impl LocalGit {
                 .await
                 .ok()
                 .map(|s| format!("revert {}", s.trim())),
-            Some("rebase") => Some("rebase".to_string()),
+            Some("rebase") => rebase_theirs.or_else(|| Some("rebase".to_string())),
             _ => None,
         };
         Ok(MergeConflictStatus {
             merging: true,
             op,
             source,
+            ours,
             conflicted_files,
         })
     }
 
-    /// Best-effort source ref for an in-progress merge: first line of
-    /// `.git/MERGE_MSG` (e.g. "Merge branch 'feature'"), else the MERGE_HEAD sha.
+    /// Best-effort source label for an in-progress merge: the branch/tag
+    /// MERGE_HEAD is the tip of (`origin/develop` for a pull), else its sha.
+    /// MERGE_MSG's first line ("Merge branch 'x' of <url> into y") overflowed
+    /// the resolver's side buttons.
     async fn merge_source(&self) -> Option<String> {
-        // The real git dir: in a linked worktree `.git` is a FILE, so
-        // `<tree>/.git/MERGE_MSG` never existed and the label fell back to a sha.
-        if let Some(git_dir) = self.git_dir().await {
-            if let Ok(text) = tokio::fs::read_to_string(git_dir.join("MERGE_MSG")).await {
-                if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
-                    return Some(line.trim().to_string());
-                }
-            }
+        self.ref_label("MERGE_HEAD").await
+    }
+
+    /// A rebase's (theirs, ours) labels: the branch being replayed
+    /// (`head-name`) and what it is replayed onto. During a rebase HEAD is
+    /// detached, so the checked-out branch can't name the ours side.
+    async fn rebase_labels(&self) -> (Option<String>, Option<String>) {
+        let Some(git_dir) = self.git_dir().await else {
+            return (None, None);
+        };
+        for d in ["rebase-merge", "rebase-apply"] {
+            let read = |f: &str| tokio::fs::read_to_string(git_dir.join(d).join(f));
+            let Ok(onto) = read("onto").await else {
+                continue;
+            };
+            let head = read("head-name").await.ok().map(|h| {
+                let h = h.trim();
+                h.strip_prefix("refs/heads/").unwrap_or(h).to_string()
+            });
+            return (head, self.ref_label(onto.trim()).await);
         }
-        self.run(&["rev-parse", "MERGE_HEAD"])
+        (None, None)
+    }
+
+    /// A short branch/tag name whose tip is `rev` (local branches first, no
+    /// symrefs), else the short sha.
+    async fn ref_label(&self, rev: &str) -> Option<String> {
+        let names = self
+            .run(&[
+                "for-each-ref",
+                "--points-at",
+                rev,
+                "--format=%(symref)\t%(refname:short)",
+                "refs/heads",
+                "refs/remotes",
+                "refs/tags",
+            ])
+            .await
+            .unwrap_or_default();
+        if let Some(name) = names.lines().find_map(|l| l.strip_prefix('\t')) {
+            return Some(name.to_string());
+        }
+        self.run(&["rev-parse", "--short", rev])
             .await
             .ok()
             .map(|s| s.trim().to_string())
