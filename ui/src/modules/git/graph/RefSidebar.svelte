@@ -730,8 +730,7 @@
   .refs-panel :global(.wt-open-hint) {
     flex: 0 100 auto;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow: hidden; text-overflow: ellipsis;
     font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: .06em;
