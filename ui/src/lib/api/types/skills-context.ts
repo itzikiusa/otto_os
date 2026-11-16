@@ -46,6 +46,30 @@ export interface UpdateSelfImprovementReq {
   live_evolve: boolean;
 }
 
+/** `GET /self-improvement` — across every unarchived workspace the caller can see. */
+export interface SelfImprovementSummary {
+  workspaces: number;
+  /** Workspaces with self-improvement on. */
+  enabled: number;
+  pending: number;
+  pending_workspaces: number;
+}
+
+/** `PUT /self-improvement` — on/off in every workspace the caller administers. */
+export interface SetSelfImprovementEnabledReq {
+  enabled: boolean;
+}
+
+/** Result of `PUT /self-improvement` and `POST /improvement/edits/reject`. */
+export interface BulkImprovementResp {
+  /** Workspaces switched, or suggestions rejected. */
+  changed: number;
+  /** Workspaces those changes touched. */
+  workspaces: number;
+  /** Workspaces the caller can see but lacks the role to change. */
+  skipped: number;
+}
+
 export interface ImprovementRun {
   id: string;
   workspace_id: string;

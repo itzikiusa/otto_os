@@ -3,10 +3,12 @@
 
 import { api } from './client';
 import type {
+  BulkImprovementResp,
   ImprovementEdit,
   ImprovementRun,
   RunNowResp,
   SelfImprovementConfig,
+  SelfImprovementSummary,
   UpdateSelfImprovementReq,
 } from './types';
 
@@ -33,4 +35,9 @@ export const improveApi = {
     api.post<ImprovementEdit>(`/improvement/edits/${eid}/reject`),
   rollback: (eid: string) =>
     api.post<ImprovementEdit>(`/improvement/edits/${eid}/rollback`),
+  // Across every workspace the caller can see / change.
+  summary: () => api.get<SelfImprovementSummary>('/self-improvement'),
+  setEnabledAll: (enabled: boolean) =>
+    api.put<BulkImprovementResp>('/self-improvement', { enabled }),
+  rejectAll: () => api.post<BulkImprovementResp>('/improvement/edits/reject'),
 };

@@ -239,6 +239,13 @@ Queued and applied edits live in a per-workspace **version log**
   conflict check); **Reject** marks it rejected and changes nothing on disk.
 - **Recent runs** — a log of the last 50 runs with status, trigger, sessions
   reviewed, applied/pending counts, summary, and any error.
+- **Off state** — a workspace with self-improvement off shows one calm
+  "Self-improvement is off" panel with **Turn on** instead of the settings form.
+- **Every workspace at once** (header, folds into ⋯): **Reject all suggestions
+  (N)** rejects every pending edit in all your workspaces where you are Editor+
+  (one confirm with the counts; applied edits stay applied — roll those back one
+  by one), and **Turn off everywhere** sets `enabled: false` in every workspace
+  you administer (scheduled and live runs stop). Turn it back on per workspace.
 
 Edit lifecycle (`ImprovementEditStatus`):
 
@@ -396,6 +403,9 @@ mutations require workspace **Editor**. (Plus per-feature RBAC: the
 | `POST /improvement/edits/{eid}/approve` | ws editor | — | applied `ImprovementEdit` (or `conflict`) |
 | `POST /improvement/edits/{eid}/reject` | ws editor | — | rejected `ImprovementEdit` |
 | `POST /improvement/edits/{eid}/rollback` | ws editor | — | rolled-back `ImprovementEdit` (or `conflict`) |
+| `GET /self-improvement` | ws viewer, each | — | `SelfImprovementSummary` (counts over your viewable workspaces) |
+| `PUT /self-improvement` | ws admin, each | `{ enabled }` | `BulkImprovementResp { changed, workspaces, skipped }` |
+| `POST /improvement/edits/reject` | ws editor, each | — | `BulkImprovementResp` (pending edits only) |
 | `POST /sessions/{id}/evolve` | ws editor (`SelfImprovement:Edit`) | — | `{ run_id }` |
 
 Notes:
