@@ -520,6 +520,10 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   `settings.gradle*` dir, and `rust-analyzer` at the Cargo `[workspace]`, so
   the modules of one build share a server. The root never climbs above the
   project's allowed roots.
+- **jdtls and Lombok / Eclipse files:** jdtls starts with
+  `-javaagent:<newest lombok jar in ~/.m2>` when one is there, so Lombok
+  members resolve, and with `java.import.generatesMetadataFilesAtProjectRoot=false`,
+  so `.project`, `.classpath` and `.settings` go to its `-data` dir, not the repo.
 - **Remote SSH target fails to connect:** Verify the SSH connection succeeds in
   **Connections** first (`BatchMode=yes` key auth is used for non-interactive
   LSP/DAP/command execution) and confirm your role grants `discover` and `shell`

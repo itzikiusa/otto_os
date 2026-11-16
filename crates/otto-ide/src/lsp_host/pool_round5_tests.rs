@@ -742,3 +742,51 @@ async fn non_root_mux_handles_multibyte_utf8_and_blocks_rfc8089_secret_uris_and_
     assert_eq!(ok_msg["id"], json!(4));
     assert_eq!(ok_msg["result"]["contents"], json!("confined-hover-ok"));
 }
+
+#[tokio::test]
+async fn jdtls_initialize_never_writes_eclipse_metadata_into_the_repo() {
+    let (pool, rec) = recording_pool();
+    pool.record_owner_privilege("root_j", true);
+    pool.record_owner_privilege("viewer_j", false);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    for owner in ["root_j", "viewer_j"] {
+        let key = PoolKey {
+            owner: owner.into(),
+            lang: "java".into(),
+            root: root.clone(),
+            ssh: None,
+            go_build_tags: Vec::new(),
+        };
+        let mut a = pool.attach(key, "jdtls", &[]).unwrap();
+        let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri": "file:///elsewhere",
+            "initializationOptions": {"bundles": ["/x/debug.jar"], "settings": {"java": {"home": "/jdk"}}}
+        }});
+        assert!(a.send(init.to_string()).await);
+        assert_eq!(recv_msg(&mut a).await["id"], json!(1));
+    }
+    let inits = rec.init_params.lock().unwrap().clone();
+    assert_eq!(inits.len(), 2);
+    for p in &inits {
+        assert_eq!(
+            p["initializationOptions"]["settings"]["java"]["import"]
+                ["generatesMetadataFilesAtProjectRoot"],
+            json!(false),
+            "{p}"
+        );
+    }
+    // The root owner's own options survive the merge; a non-root owner's are dropped.
+    assert_eq!(
+        inits[0]["initializationOptions"]["bundles"],
+        json!(["/x/debug.jar"])
+    );
+    assert_eq!(
+        inits[0]["initializationOptions"]["settings"]["java"]["home"],
+        json!("/jdk")
+    );
+    assert!(inits[1]["initializationOptions"].get("bundles").is_none());
+}
