@@ -132,8 +132,9 @@ class IdeGitController {
       const repo = candidates[i];
       if (!repo || seen.has(repo.id)) continue;
       seen.add(repo.id);
-      const rev = git.liveRev[repo.id];
-      if (rev === undefined) continue;
+      // A repo whose status was read without a live bump has no rev yet: record 0 so its FIRST
+      // external change (rev 1) is not swallowed as the baseline.
+      const rev = git.liveRev[repo.id] ?? 0;
       const prev = this.lastHandledLiveRev[repo.id];
       this.lastHandledLiveRev[repo.id] = rev;
       if (prev === undefined || rev <= prev) continue;
@@ -326,18 +327,24 @@ class IdeGitController {
       git.ensureStatus(known.id);
       return known;
     }
+    // Never hand back a repo that does not contain `clean` (a plain folder must not act on another repo).
+    const owns = (r: Repo | null): r is Repo => !!r && this.repoRelativePath(r, clean) !== null;
     const root = this.rootContainingPath(clean) ?? this.activeRoot;
     if (root) {
       const fromRoot = await this.ensureRootDetected(root.path);
-      if (fromRoot) return fromRoot;
+      if (owns(fromRoot)) return fromRoot;
     }
+    // A directory target (e.g. an unprobed child repo under an umbrella root) probes itself; a file probes its folder.
     const slash = clean.lastIndexOf('/');
-    const parentDir = slash > 0 ? clean.slice(0, slash) : '';
-    if (parentDir && (!root || parentDir.length > normSlash(root.path).length)) {
-      const fromParent = await this.ensureRootDetected(parentDir);
-      if (fromParent) return fromParent;
+    const isDir =
+      ide.childrenByDir[clean] !== undefined ||
+      (ide.childrenByDir[clean.slice(0, slash)] ?? ide.treeRootEntries).some((e) => normSlash(e.path) === clean && e.kind === 'dir');
+    const dir = isDir ? clean : slash > 0 ? clean.slice(0, slash) : '';
+    if (dir && (!root || dir.length > normSlash(root.path).length)) {
+      const fromDir = await this.ensureRootDetected(dir);
+      if (owns(fromDir)) return fromDir;
     }
-    return this.findKnownRepoForPath(clean) ?? this.activeRepo;
+    return this.findKnownRepoForPath(clean);
   }
 
   /** Sync active/expanded roots without flooding 35+ requests on cold multi-repo project open. */
@@ -395,7 +402,8 @@ class IdeGitController {
       ide.openBottomTab('git' as IdeBottomTab);
       return;
     }
-    const relPath = this.repoRelativePath(repo, cleanAbs) || ideBasename(cleanAbs);
+    const relPath = this.repoRelativePath(repo, cleanAbs);
+    if (!relPath) return;
     const key = `hist:${cleanAbs}`;
     this.histModeSeq += 1;
     const entry: IdeGitHistoryTab = {
