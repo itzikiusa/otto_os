@@ -12,8 +12,8 @@ import type {
 import { toasts } from '../toast.svelte';
 import { toastError } from '../toastError';
 
-export type SkillsBrowserSource = 'all' | 'library' | 'bundled' | 'claude' | 'codex' | 'agy' | (string & {});
-export type SkillsBrowserVariantSource = 'library' | 'bundled' | 'claude' | 'codex' | 'agy' | (string & {});
+export type SkillsBrowserSource = 'all' | 'library' | 'bundled' | 'claude' | 'codex' | 'agy' | 'muse' | (string & {});
+export type SkillsBrowserVariantSource = 'library' | 'bundled' | 'claude' | 'codex' | 'agy' | 'muse' | (string & {});
 export type SkillsBrowserDetailTab = 'overview' | 'edit' | 'evals' | 'usage';
 export type SkillsEvalMode = 'form' | 'detail';
 

@@ -146,6 +146,8 @@
         return '~/.codex/skills/' + group.name;
       case 'agy':
         return '~/.gemini/skills/' + group.name;
+      case 'muse':
+        return '~/.config/muse/skills/' + group.name;
       default:
         return `~/.${source}/skills/${group.name}`;
     }

@@ -2326,7 +2326,8 @@ async fn list_sources(
 }
 
 /// Per-provider on-disk skills — the same dirs the Skills Lab lists
-/// (~/.claude/skills, $CODEX_HOME/skills, ~/.gemini/skills for agy).
+/// (~/.claude/skills, $CODEX_HOME/skills, ~/.gemini/skills for agy,
+/// ~/.config/muse/skills for Muse).
 #[allow(clippy::disallowed_methods)] // sync helper: list_sources runs it via offload::blocking
 fn provider_skill_sources() -> Vec<SkillSourceInfo> {
     let mut out = Vec::new();
