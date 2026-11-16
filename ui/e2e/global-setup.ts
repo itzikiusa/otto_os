@@ -111,6 +111,12 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       // Never the real `~/Otto/Scratches` — and outside the data dir, which the
       // IDE treats as protected.
       OTTO_SCRATCHES_HOME: `${dataDir}-scratches`,
+      // Agent context bundles and IDE build output (Go/Java/Rust debug
+      // builds, jdtls -data) stay in the temp dir, not the real
+      // ~/.otto/context and ~/Library/Caches/Otto. HOME stays real: rustup,
+      // cargo and sdkman find their toolchains through it.
+      OTTO_CONTEXT_ROOT: join(dataDir, 'context'),
+      OTTO_IDE_BUILD_CACHE_DIR: join(dataDir, 'ide-builds'),
       // Never write test secrets into the user's macOS Keychain — file-backed
       // secrets live in the temp data dir and vanish with it.
       OTTO_SECRETS: process.env.OTTO_SECRETS ?? 'file',
