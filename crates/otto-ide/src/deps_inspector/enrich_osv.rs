@@ -74,14 +74,13 @@ async fn resolve_osv_vuln_detail(v: &Value) -> Option<(String, Value)> {
     Some((vid.to_string(), detail))
 }
 
-pub(in crate::deps_inspector) async fn enrich_osv_vulnerabilities(
-    osv_ecosystem: &str,
-    items: &mut [IdeDepItem],
-) {
+/// The OSV batch queries for `items` and the item index of each query.
+fn osv_queries(osv_ecosystem: &str, items: &[IdeDepItem]) -> (Vec<Value>, Vec<usize>) {
     let mut queries = Vec::new();
     let mut mapped_indices = Vec::new();
     for (idx, item) in items.iter().enumerate() {
-        if item.current_version.is_empty() || item.current_version.starts_with("${") {
+        // A range's floor (`>=1.0`) is not what is installed: no advisory is known to apply.
+        if item.range || item.current_version.is_empty() || item.current_version.starts_with("${") {
             continue;
         }
         let ver = if osv_ecosystem == "Go" {
@@ -95,6 +94,14 @@ pub(in crate::deps_inspector) async fn enrich_osv_vulnerabilities(
         }));
         mapped_indices.push(idx);
     }
+    (queries, mapped_indices)
+}
+
+pub(in crate::deps_inspector) async fn enrich_osv_vulnerabilities(
+    osv_ecosystem: &str,
+    items: &mut [IdeDepItem],
+) {
+    let (queries, mapped_indices) = osv_queries(osv_ecosystem, items);
     if queries.is_empty() {
         return;
     }
@@ -191,7 +198,8 @@ fn extract_osv_fixed_version(detail: &Value, current: &str, prefix_v: bool) -> O
             .and_then(Value::as_array)
             .into_iter()
             .flatten();
-        for r in ranges {
+        // A `GIT` range's `fixed` is a commit SHA, never a version to upgrade to.
+        for r in ranges.filter(|r| r.get("type").and_then(Value::as_str) != Some("GIT")) {
             let events = r
                 .get("events")
                 .and_then(Value::as_array)
@@ -342,6 +350,27 @@ mod tests {
         assert_eq!(
             extract_osv_fixed_version(&one, "1.5.3", true).as_deref(),
             Some("v1.6.1")
+        );
+    }
+
+    #[test]
+    fn a_range_floor_is_not_looked_up_and_a_git_fix_is_never_offered() {
+        let mut items = crate::deps_inspector::parsers::parse_python_deps(
+            "requirements.txt",
+            "requests==2.19.0\nflask>=1.0\n",
+        );
+        let (queries, idx) = osv_queries("PyPI", &items);
+        assert_eq!(idx, vec![0], "only the pinned requests is queried");
+        assert_eq!(queries[0]["version"], "2.19.0");
+        items.truncate(1);
+        // PYSEC-2023-62: a GIT range (SHA) before the ECOSYSTEM one.
+        let detail = json!({"affected": [{"ranges": [
+            {"type": "GIT", "events": [{"introduced": "0"}, {"fixed": "70f906c51ce49c485f1d355703e9cc3386b1cc2b"}]},
+            {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.2.5"}]}
+        ]}]});
+        assert_eq!(
+            extract_osv_fixed_version(&detail, "1.0", false).as_deref(),
+            Some("2.2.5")
         );
     }
 }

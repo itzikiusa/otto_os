@@ -175,6 +175,7 @@ fn parse_go_require_spec(raw_line: &str, line_no: u32, strip_kw: bool) -> Option
         property_name: None,
         managed_in: None,
         vulnerabilities: Vec::new(),
+        range: false,
     })
 }
 

@@ -103,3 +103,13 @@ test('V1: connecting to an SSH host leaves the named project, so its tabs are no
   assert.match(body, /saveLastSshTarget\(\{/, 'and a reload reopens the SSH host');
   assert.ok(body.indexOf('snapshotProjectTabs') < body.indexOf('this.activeProjectId = null'), 'the project keeps its own local tabs');
 });
+
+test('V6: after a dependency action the daemon wrote, the manifest tab reloads from disk', async () => {
+  const fs = await import('node:fs');
+  const read = (rel: string) => fs.readFileSync(ideUrl(rel), 'utf8');
+  for (const rel of ['editor/IdeDependencyAnalyzer.svelte', 'editor/IdeIntentionPopover.svelte']) {
+    assert.doesNotMatch(read(rel), /onapplycontent\(res\.updated_content\)/, `${rel}: no edit over the old sha`);
+    assert.match(read(rel), /onfilewritten\(\)/);
+  }
+  assert.match(read('IdeEditorArea.svelte'), /reloadIdeTabIfOpen\(path\)/);
+});

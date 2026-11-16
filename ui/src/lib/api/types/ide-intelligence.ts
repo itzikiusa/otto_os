@@ -357,6 +357,8 @@ export interface IdeDepItem {
   property_name?: string | null;
   managed_in?: IdeDepManagedIn | null;
   vulnerabilities: IdeDepVulnerability[];
+  /** `current_version` is a range floor (`^1.0.0`, `>=1.0`): no vulnerability lookup. */
+  range?: boolean;
 }
 
 export interface IdeDepsInspectReq {

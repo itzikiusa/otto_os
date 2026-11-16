@@ -277,6 +277,7 @@ pub fn parse_pom_dependencies_scoped(
                     property_name: prop_name,
                     managed_in,
                     vulnerabilities: Vec::new(),
+                    range: false,
                 });
             }
             i = end_idx + 1;
@@ -406,6 +407,7 @@ pub fn parse_gradle_dependencies(content: &str) -> Vec<IdeDepItem> {
                 property_name: None,
                 managed_in: None,
                 vulnerabilities: Vec::new(),
+                range: false,
             });
         }
     }

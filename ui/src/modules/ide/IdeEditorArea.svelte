@@ -130,6 +130,12 @@
       .catch(() => { /* ignore aborted or non-git paths */ });
   }
 
+  /** A dependency action wrote the manifest itself: take the file from disk (an
+   *  edit on top of the old sha would end in a save conflict and a dirty tab). */
+  function reloadTabFromDisk(path: string): void {
+    void import('./git/ideGitController.svelte').then((m) => m.ideGit.reloadIdeTabIfOpen(path));
+  }
+
   $effect(() => {
     const cur = ide.activeTab;
     if (!cur) { stagedPrimaryTab = null; return; }
@@ -503,7 +509,7 @@
               connectionId: ide.target.kind === 'ssh' ? ide.target.connection_id : null, projectFolders,
               readOnly: stagedPrimaryTab.readOnly || !ide.canEditCollab,
               initialDeps: manifestDepsByPath[stagedPrimaryTab.path] ?? [],
-              onapplycontent: (nextContent: string) => { if (!primaryEditorRef?.applyAgentEdit?.(nextContent)) ide.updateBuffer(stagedPrimaryTab!.path, nextContent); },
+              onfilewritten: () => reloadTabFromDisk(stagedPrimaryTab!.path),
               onjumplocation: (loc: { path: string; line: number; column: number }) => { void performIdeDive('definition', stagedPrimaryTab!.path, loc, stagedPrimaryTab!.content); },
               onswitchtext: (ln: number) => { manifestModeByPath = { ...manifestModeByPath, [stagedPrimaryTab!.path]: 'text' }; requestAnimationFrame(() => primaryEditorRef?.goToLine(ln, 1)); },
             }}
@@ -678,7 +684,7 @@
       allManifestDeps: manifestDepsByPath[intentionState.path] ?? [],
       onapplyclientfix: (fix: CmIdeMod.ClientDiagQuickFix) => { iRef?.applyClientDiagFix?.(fix); },
       onapplyedits: (edits: CmIdeMod.IdeConcreteTextEdit[]) => { iRef?.applyQuickFixEdits?.(edits); },
-      onapplycontent: (nextContent: string) => { if (!iRef?.applyAgentEdit?.(nextContent) && intentionState) ide.updateBuffer(intentionState.path, nextContent); },
+      onfilewritten: () => { if (intentionState) reloadTabFromDisk(intentionState.path); },
       onapplyserveraction: (act: IdeCodeAction) => { if (intentionState) ide.applyCodeAction(intentionState.path, act); },
       onrename: () => { if (intentionState) void ide.openRenameModal(intentionState.path, intentionState.line, intentionState.col, intentionState.symbol); },
       onfindusages: () => { if (intentionState) void ide.findReferences(intentionState.path, intentionState.line, intentionState.col, intentionState.symbol); },

@@ -57,6 +57,10 @@ pub struct IdeDepItem {
     pub managed_in: Option<IdeDepManagedIn>,
     #[serde(default)]
     pub vulnerabilities: Vec<IdeDepVulnerability>,
+    /// `current_version` is the floor of a range (`^1.0.0`, `>=1.0`), not an
+    /// installed version: no vulnerability lookup is made for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub range: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

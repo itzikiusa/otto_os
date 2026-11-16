@@ -30,7 +30,8 @@
     allManifestDeps?: IdeDepItem[];
     onapplyclientfix: (fix: ClientDiagQuickFix) => void;
     onapplyedits: (edits: IdeConcreteTextEdit[]) => void;
-    onapplycontent: (nextContent: string) => void;
+    /** A dependency action rewrote the manifest on disk: reload the tab from it. */
+    onfilewritten: () => void;
     onapplyserveraction: (act: IdeCodeAction) => void;
     onrename: () => void;
     onfindusages: () => void;
@@ -42,7 +43,7 @@
   let {
     filePath, root, connectionId = null, projectFolders = [], docText, line, anchorX, anchorY, readOnly,
     clientFixes, deterministicFixes, serverActions, manifestDep = null, allManifestDeps = [],
-    onapplyclientfix, onapplyedits, onapplycontent, onapplyserveraction,
+    onapplyclientfix, onapplyedits, onfilewritten, onapplyserveraction,
     onrename, onfindusages, onformat, onaskagent, onclose,
   }: Props = $props();
 
@@ -97,7 +98,7 @@
   function runDepAction(action: string, dep?: IdeDepItem | null, version?: string | null): void {
     onclose();
     void executeIdeDepAction({ root, connectionId, projectFolders, path: filePath, content: docText, action, dep, version, deps: allManifestDeps }).then((res) => {
-      if (res.updated_content && res.updated_content !== docText) onapplycontent(res.updated_content);
+      if (res.updated_content && res.updated_content !== docText) onfilewritten();
     });
   }
 
