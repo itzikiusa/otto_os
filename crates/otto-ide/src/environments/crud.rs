@@ -26,6 +26,12 @@ use crate::types::{
     IdeUpdateEnvironmentReq,
 };
 
+/// Whether a non-root `PUT /ide/environments` on a Local target touches a
+/// root-only field. Only a real CHANGE counts: the UI echoes the whole loaded
+/// env back with a one-field patch (e.g. Go build tags), so a field merely
+/// present with its stored value must not need root. `network_bridge` is
+/// root-only on Local because only root may Run/Debug there, so a non-root
+/// edit would only ever reroute root's processes.
 pub(crate) fn local_env_mutation_requires_root(
     raw_obj: Option<&serde_json::Map<String, serde_json::Value>>,
     req: &IdeUpdateEnvironmentReq,
@@ -36,25 +42,28 @@ pub(crate) fn local_env_mutation_requires_root(
         opt.as_deref().map(str::trim).filter(|s| !s.is_empty())
     }
 
-    if has_key(&["env_vars", "vars", "env"])
-        && (!req.env_vars.is_empty() || req.env_vars != prev.env_vars)
-    {
+    if has_key(&["env_vars", "vars", "env"]) && req.env_vars != prev.env_vars {
         return true;
     }
     if has_key(&["dotenv_path", "env_file"])
-        && (trimmed_opt(&req.dotenv_path).is_some()
-            || trimmed_opt(&req.dotenv_path) != prev.dotenv_path.as_deref())
+        && trimmed_opt(&req.dotenv_path) != prev.dotenv_path.as_deref()
     {
         return true;
     }
     if has_key(&["inherit_shell_env"])
         && req
             .inherit_shell_env
-            .is_some_and(|v| v != prev.inherit_shell_env || !v)
+            .is_some_and(|v| v != prev.inherit_shell_env)
     {
         return true;
     }
     if has_key(&["sdk_path", "sdkPath"]) {
+        return true;
+    }
+    if has_key(&["network_bridge", "networkBridge"])
+        && sanitize_network_bridge(req.network_bridge.clone())
+            .map_or(true, |nb| nb != prev.network_bridge)
+    {
         return true;
     }
     for (key, req_v, prev_v) in [
@@ -89,7 +98,7 @@ pub(crate) fn local_env_mutation_requires_root(
             prev.extra_path.as_deref(),
         ),
     ] {
-        if has_key(&[key]) && (req_v.is_some() || req_v != prev_v) {
+        if has_key(&[key]) && req_v != prev_v {
             return true;
         }
     }
@@ -97,7 +106,7 @@ pub(crate) fn local_env_mutation_requires_root(
         && req
             .module_sdks
             .as_ref()
-            .is_some_and(|m| !m.is_empty() || *m != prev.module_sdks)
+            .is_some_and(|m| sanitize_module_sdks(m) != prev.module_sdks)
 }
 
 fn validate_environment_update_permissions(
@@ -385,8 +394,9 @@ impl EnvironmentManager {
         }
 
         let inherit_shell_env = req.inherit_shell_env.unwrap_or(prev_proj.inherit_shell_env);
+        let roots_writable = caller_is_root || req.target.kind != IdeTargetKind::Local;
         let next_roots = match &req.additional_roots {
-            Some(explicit_roots) => {
+            Some(explicit_roots) if roots_writable => {
                 let mut validated = Vec::new();
                 for r in explicit_roots {
                     if r.trim().is_empty() || r.trim() == req.target.root {
@@ -399,7 +409,10 @@ impl EnvironmentManager {
                 }
                 validated
             }
-            None => prev_proj.additional_roots,
+            // Non-root Local callers only ever see their RBAC-filtered roots, so
+            // echoing them back must not drop the stored ones; folders change
+            // through `/ide/projects/folders` instead.
+            _ => prev_proj.additional_roots,
         };
 
         let next_module_sdks = if caller_is_root {
@@ -546,5 +559,45 @@ impl EnvironmentManager {
         .map_err(|e| Error::Internal(format!("upsert ide_project_environments: {e}")))?;
 
         self.get_project_env(pool, &req.target).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::IdeEnvVarEntry;
+
+    fn guard(body: serde_json::Value, prev: &IdeProjectEnvironment) -> bool {
+        let req: IdeUpdateEnvironmentReq = serde_json::from_value(body.clone()).unwrap();
+        local_env_mutation_requires_root(body.as_object(), &req, prev)
+    }
+
+    #[test]
+    fn echoing_the_stored_env_with_a_build_tag_patch_needs_no_root() {
+        let prev = IdeProjectEnvironment {
+            java_home: Some("/opt/jdk".into()),
+            inherit_shell_env: false,
+            env_vars: vec![IdeEnvVarEntry {
+                key: "TOKEN".into(),
+                value: None,
+                secret: true,
+                has_secret: true,
+            }],
+            ..Default::default()
+        };
+        let mut body = serde_json::to_value(&prev).unwrap();
+        body["target"] = serde_json::json!({ "kind": "local", "root": "/w" });
+        body["go_build_tags"] = serde_json::json!(["integration"]);
+        assert!(!guard(body.clone(), &prev));
+
+        body["java_home"] = serde_json::json!("/evil/jdk");
+        assert!(guard(body.clone(), &prev), "a changed SDK home is root-only");
+
+        body["java_home"] = serde_json::json!("/opt/jdk");
+        body["network_bridge"] = serde_json::json!({
+            "enabled": true,
+            "host_mappings": [{ "from_host": "localhost", "from_port": 5432, "to_host": "x.example", "to_port": 5432 }],
+        });
+        assert!(guard(body, &prev), "a Local network bridge edit is root-only");
     }
 }

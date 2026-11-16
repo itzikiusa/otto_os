@@ -61,7 +61,7 @@ async fn non_root_netbridge_cross_tenant_ssh_k8s_and_namespace_rbac() {
     let alice_root = ws_alice.to_string_lossy().into_owned();
     let kubectl = write_mock_kubectl(tmp.path());
 
-    let (ctx, _) = build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
+    let (ctx, app_root) = build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
     ctx.k8s_clusters.lock().unwrap().insert(
         "k8s_alice".into(),
         TestK8sEntry {
@@ -208,11 +208,11 @@ async fn non_root_netbridge_cross_tenant_ssh_k8s_and_namespace_rbac() {
     assert_eq!(ok_probe["ok"], true);
     assert_eq!(ok_probe["services"][0]["name"], "confsrv");
 
-    // 4. Stale disabled bridge tolerance: if Alice disables her bridge and later
-    // loses access to `k8s_alice`, saving unrelated `env_vars` must NOT 403,
-    // whereas re-enabling the stale bridge MUST 403.
+    // 4. Stale disabled bridge tolerance: once a disabled bridge is stored (a Local
+    // bridge is root-only, so root saves it) and Alice later loses access to
+    // `k8s_alice`, her unrelated saves must NOT 403, whereas re-enabling MUST 403.
     let (st_save_dis, _) = send_json(
-        &app_alice,
+        &app_root,
         Method::PUT,
         "/ide/environments",
         Some(json!({
@@ -343,8 +343,8 @@ async fn per_user_netbridge_pool_isolation_evict_user_and_drop_idle_ttl() {
     assert_eq!(ctx.ide.netbridge.pooled_count_for_user("u_alice"), 0);
     assert_eq!(ctx.ide.netbridge.pooled_count_for_user("u_bob"), 1);
 
-    // Re-populate Alice's warm bridge, save enabled config, then disable via HTTP
-    // `PUT /ide/environments` and verify HTTP eviction clears Alice's slot only.
+    // On a Local target only root may Run/Debug, so a non-root bridge edit would
+    // only ever reroute root's processes: `PUT /ide/environments` refuses it.
     let (st_en, _) = send_json(
         &app_alice,
         Method::PUT,
@@ -363,44 +363,7 @@ async fn per_user_netbridge_pool_isolation_evict_user_and_drop_idle_ttl() {
         })),
     )
     .await;
-    assert_eq!(st_en, StatusCode::OK);
-
-    let lease_alice_2 = ctx
-        .ide
-        .netbridge
-        .acquire_for_launch(
-            &ctx,
-            &alice,
-            &IdeTargetSpec::local(alice_root.clone()),
-            &bridge_cfg,
-        )
-        .await
-        .unwrap()
-        .expect("alice lease 2");
-    drop(lease_alice_2);
-    assert_eq!(ctx.ide.netbridge.pooled_count_for_user("u_alice"), 1);
-
-    let (st_dis, _) = send_json(
-        &app_alice,
-        Method::PUT,
-        "/ide/environments",
-        Some(json!({
-            "target": { "kind": "local", "root": alice_root },
-            "network_bridge": {
-                "enabled": false,
-                "host_mappings": [{
-                    "from_host": "confsrv.stg.local",
-                    "from_port": 8080,
-                    "to_host": "example.com",
-                    "to_port": 80,
-                }],
-            },
-        })),
-    )
-    .await;
-    assert_eq!(st_dis, StatusCode::OK);
-    assert_eq!(ctx.ide.netbridge.pooled_count_for_user("u_alice"), 0);
-    assert_eq!(ctx.ide.netbridge.pooled_count_for_user("u_bob"), 1);
+    assert_eq!(st_en, StatusCode::FORBIDDEN);
 
     // Delayed `NetBridgeLease::drop` eviction: dropping the last active lease
     // evicts the idle bridge after `idle_ttl` even if `acquire_for_launch` is never called again.
