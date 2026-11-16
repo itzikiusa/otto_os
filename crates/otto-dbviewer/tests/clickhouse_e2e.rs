@@ -1041,3 +1041,19 @@ async fn clickhouse_parity_parquet_and_csv_round_trip_through_insert_format() {
         .await
         .expect("cleanup");
 }
+
+/// NaN / ±inf come back as text over HTTP (JSONCompact has no literal for
+/// them), not as NULL.
+#[tokio::test]
+#[ignore]
+async fn clickhouse_non_finite_floats_are_not_null() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = ClickhouseDriver::default();
+    let res = d
+        .run(&cfg(), &query("SELECT nan AS a, -inf AS b, 1.5 AS c"))
+        .await
+        .expect("run");
+    assert_eq!(res.rows[0], vec![json!("nan"), json!("-inf"), json!(1.5)]);
+}

@@ -1210,6 +1210,8 @@ impl Conn {
         req = req.query(&[
             ("output_format_json_quote_64bit_integers", "1"),
             ("output_format_json_quote_decimals", "1"),
+            // NaN / ±inf as strings, not null (JSON has no literal for them).
+            ("output_format_json_quote_denormals", "1"),
         ]);
         if readonly {
             req = req.query(&[("readonly", "2")]);
@@ -1455,6 +1457,8 @@ impl Conn {
         req = req.query(&[
             ("output_format_json_quote_64bit_integers", "1"),
             ("output_format_json_quote_decimals", "1"),
+            // NaN / ±inf as strings, not null (JSON has no literal for them).
+            ("output_format_json_quote_denormals", "1"),
             (
                 "output_format_json_array_of_rows",
                 if json_array { "1" } else { "0" },

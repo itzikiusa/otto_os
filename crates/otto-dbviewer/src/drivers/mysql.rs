@@ -975,11 +975,7 @@ impl Driver for MysqlDriver {
             };
             if !header_written {
                 decoders = column_decoders(&row);
-                let columns: Vec<Column> = row
-                    .columns()
-                    .iter()
-                    .map(|c| Column::typed(c.name(), c.type_info().name()))
-                    .collect();
+                let columns: Vec<Column> = row.columns().iter().map(result_column).collect();
                 sink.write_header(&columns)
                     .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
                 header_written = true;
@@ -2301,7 +2297,7 @@ async fn exec_read_conn(
         };
         if columns.is_empty() {
             for col in row.columns() {
-                columns.push(Column::typed(col.name(), col.type_info().name()));
+                columns.push(result_column(col));
             }
             decoders = column_decoders(&row).into();
         }
@@ -2386,10 +2382,7 @@ async fn finish_read_rows(
 
 /// Metadata is available both on rows and on the result completion packet.
 fn mysql_columns(columns: &[sqlx::mysql::MySqlColumn]) -> Vec<Column> {
-    columns
-        .iter()
-        .map(|column| Column::typed(column.name(), column.type_info().name()))
-        .collect()
+    columns.iter().map(result_column).collect()
 }
 
 /// Decode fetched rows with their per-column decoders (capping oversized cells
@@ -2454,11 +2447,7 @@ async fn exec_write_conn(
         match stream.try_next().await {
             Ok(Some(sqlx::Either::Right(row))) => {
                 if current.columns.is_empty() {
-                    current.columns = row
-                        .columns()
-                        .iter()
-                        .map(|col| Column::typed(col.name(), col.type_info().name()))
-                        .collect();
+                    current.columns = row.columns().iter().map(result_column).collect();
                     decoders = column_decoders(&row);
                 }
                 if current.rows.len() >= max_rows {
@@ -2521,7 +2510,8 @@ enum CellDecoder {
     Time,
     /// CHAR/VARCHAR/TEXT/ENUM (non-binary collation) → the string AS IS.
     Text,
-    /// BINARY/VARBINARY/BLOB → base64.
+    /// BINARY/VARBINARY/BLOB → the text when the collation is a text one,
+    /// else base64.
     Bytes,
     /// GEOMETRY → its internal-format bytes (SRID + WKB) as base64, always.
     Geometry,
@@ -2549,6 +2539,15 @@ fn cell_decoder(type_name: &str) -> CellDecoder {
         "GEOMETRY" => Geometry,
         _ => Fallback,
     }
+}
+
+/// A result column. A BINARY/VARBINARY/BLOB with a text collation (SHOW
+/// output, information_schema, `->>`) decodes as text (see
+/// [`CellDecoder::Bytes`]), so it isn't marked `binary`.
+fn result_column(c: &sqlx::mysql::MySqlColumn) -> Column {
+    let mut col = Column::typed(c.name(), c.type_info().name());
+    col.binary &= !<String as sqlx::Type<sqlx::MySql>>::compatible(c.type_info());
+    col
 }
 
 /// One decoder per column of `row` (every row of a result shares the columns).
@@ -2601,11 +2600,17 @@ fn mysql_cell(row: &MySqlRow, idx: usize, dec: CellDecoder) -> Value {
             .try_get::<Option<String>, _>(idx)
             .map(string_to_json)
             .ok(),
+        // MySQL reports SHOW / information_schema / `->>` text as VARBINARY
+        // with a text collation; sqlx's String decode refuses only the real
+        // `binary` collation (63), so it is the exact "is this text" test.
         CellDecoder::Bytes => row
-            .try_get::<Option<Vec<u8>>, _>(idx)
-            .map(|v| {
-                v.map(|b| Value::String(B64.encode(b)))
-                    .unwrap_or(Value::Null)
+            .try_get::<Option<String>, _>(idx)
+            .map(string_to_json)
+            .or_else(|_| {
+                row.try_get::<Option<Vec<u8>>, _>(idx).map(|v| {
+                    v.map(|b| Value::String(B64.encode(b)))
+                        .unwrap_or(Value::Null)
+                })
             })
             .ok(),
         CellDecoder::Geometry => Some(geometry_to_json(row.try_get_raw(idx))),
@@ -3258,7 +3263,7 @@ mod tests {
         // Floats (and non-finite -> Null).
         assert_eq!(float_to_json(Some(1.5)), serde_json::json!(1.5));
         assert_eq!(float_to_json(None), Value::Null);
-        assert_eq!(float_to_json(Some(f64::NAN)), Value::Null);
+        assert_eq!(float_to_json(Some(f64::NAN)), serde_json::json!("NaN"));
     }
 
     #[test]

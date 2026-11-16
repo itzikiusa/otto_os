@@ -1272,7 +1272,13 @@ connections refuse every write (§13) on top of these.
   `decode('…', 'base64')` — in Duplicate row, Copy as INSERT and the key
   predicate of an UPDATE / DELETE, so a `BINARY(16)` primary key matches its
   row. Filter / Exclude / Query by value on a binary cell are disabled (the
-  database would compare the base64 text).
+  database would compare the base64 text). MySQL reports `SHOW` output,
+  `information_schema` and `->>` results as `VARBINARY` with a text
+  collation; those are text, not bytes (only the `binary` collation is).
+- **Numbers read as the database prints them.** Postgres `NUMERIC` keeps its
+  scale (`1.10`, never `1.1000` or `1.0E-7`) and `NaN`; `BIT` / `VARBIT` read
+  as `0101…`; a float `NaN` / `Infinity` / `-Infinity` is that text, not NULL
+  (ClickHouse spells them `nan` / `inf`).
 - **"Applied" means a row matched.** After **Review & apply**, every UPDATE /
   DELETE (Mongo `updateOne` / `deleteMany` …) that reports **0** matched rows
   — the row was deleted or its key changed since the result loaded — keeps its
