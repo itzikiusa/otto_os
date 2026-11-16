@@ -2760,7 +2760,12 @@ fn emit(inner: &Inner, live: &Live, st: &mut State, body: RuntimeEventBody) -> u
     if let Some(row) = st.proj.apply(&body, seq) {
         let _ = live.persist.send(PersistOp::Upsert(vec![row]));
     }
-    st.last_activity = Instant::now();
+    // A provider retry is not progress (`RETRY_NOTICE_SUFFIX`).
+    let retry = matches!(&body, RuntimeEventBody::TurnItemUpdated { turn_item }
+        if turn_item.id.ends_with(crate::driver::RETRY_NOTICE_SUFFIX));
+    if !retry {
+        st.last_activity = Instant::now();
+    }
     // Prompt admission and request responses need not produce child stdout.
     // Broadcast: a superseded process pump must not consume the new one's wake.
     live.deadline_changed.notify_waiters();

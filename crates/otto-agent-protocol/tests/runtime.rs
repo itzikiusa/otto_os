@@ -4845,3 +4845,46 @@ async fn idle_agent_processes_are_released_and_the_next_prompt_resumes() {
     rt.close(&s.id).await.unwrap();
     rt.close(&child.id).await.unwrap();
 }
+
+/// T3 Code #29208: provider retries show as one row but are not progress,
+/// so a turn stuck retrying is still stopped as stalled.
+#[tokio::test]
+async fn provider_retries_do_not_reset_the_stall_watchdog() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(
+        &pool,
+        &host,
+        RuntimeConfig {
+            stall_after: Duration::from_millis(1200),
+            stall_tool_after: Duration::from_millis(1200),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = create_as(&rt, cwd, RuntimeProvider::Claude).await;
+    host.wait(is_ready).await;
+    let started = std::time::Instant::now();
+    rt.prompt(&s.id, "retrying 6").await.unwrap();
+    let t = host.wait(is_terminal).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "stopped while the retries still came ({:?})",
+        started.elapsed()
+    );
+    assert!(
+        matches!(&t.body, RuntimeEventBody::TurnTerminal { reason: Some(r), .. } if r == "stalled")
+    );
+    let retry_rows: Vec<TurnItem> = host
+        .items()
+        .into_iter()
+        .filter(|i| i.id.ends_with(":provider-retry"))
+        .collect();
+    assert!(!retry_rows.is_empty(), "the retries were shown");
+    assert!(
+        retry_rows.iter().all(|i| i.id == retry_rows[0].id),
+        "as one row"
+    );
+    rt.close(&s.id).await.unwrap();
+}

@@ -626,6 +626,23 @@ streaming upsert of an item to one per `RuntimeConfig::stream_coalesce`
   event;
 - text only grows.
 
+### Provider retries and compactions
+
+Every driver reports a provider retry and a context compaction the same way
+(T3 Code #33151, #29208, #24334): as `system_notice` work rows, so the
+person sees why a turn is waiting instead of a bare "Working".
+
+| Provider | Retry (one row per turn, `<turn>:provider-retry`, updated in place) | Compaction (one row, `<turn>:compaction`) |
+|---|---|---|
+| Claude | `system` `api_retry` → "Provider retry 2 of 10 · overloaded" | `system` `status: compacting` → "Compacting context…" (running), `compact_boundary` → "Context compacted" |
+| Codex | `error` with `willRetry: true` → "Provider retry · <message>" (a final `error` still fails the turn) | the `contextCompaction` item → "Context compacted" |
+| pi | `auto_retry_start` → "Provider retry 1 of 3 · <errorMessage>" | `auto_compaction_start` / `_end` |
+| ACP (Gemini, Grok, agy, opencode, Muse) | none reported by the protocol | none reported |
+
+A retry row is not progress: its updates do not reset the 15-minute stall
+watchdog, so a provider stuck retrying is still stopped as stalled
+(`RETRY_NOTICE_SUFFIX`, `runtime.rs` `emit`).
+
 ### Typed provider questions
 
 `runtime_request.updated` with `kind: "question"` carries the full form:

@@ -927,6 +927,23 @@ impl PiDriver {
                 }
             }
             Some("extension_ui_request") => self.on_dialog(step, v),
+            // T3 Code #33151: pi's own retries and compactions, one row each.
+            Some("auto_retry_start") if self.turn_id.is_some() => {
+                let n = |k: &str| v.get(k).and_then(Value::as_u64);
+                let why = v.get("errorMessage").and_then(Value::as_str);
+                let row =
+                    crate::driver::retry_notice(self.turn(), n("attempt"), n("maxAttempts"), why);
+                step.push(DriverEvent::TurnItem(row));
+            }
+            Some(t @ ("auto_compaction_start" | "auto_compaction_end"))
+                if self.turn_id.is_some() =>
+            {
+                let done = t == "auto_compaction_end";
+                step.push(DriverEvent::TurnItem(crate::driver::compaction_notice(
+                    self.turn(),
+                    done,
+                )));
+            }
             _ => {}
         }
     }

@@ -1333,6 +1333,15 @@ impl StructuredDriver for CodexDriver {
                             if let Some(e) = params.get("error") {
                                 self.failure = Some(rpc_failure("provider_error", e));
                             }
+                        } else if self.turn_id.is_some() {
+                            // T3 Code #29208: a retry shows as the turn's retry row.
+                            let why = params.pointer("/error/message").and_then(Value::as_str);
+                            step.push(DriverEvent::TurnItem(crate::driver::retry_notice(
+                                &self.turn(),
+                                None,
+                                None,
+                                why,
+                            )));
                         }
                     }
                     "serverRequest/resolved" => {
@@ -1557,6 +1566,28 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// T3 Code #29208: `error{willRetry}` is the turn's retry row, not a
+    /// silent drop; a final error still fails the turn.
+    #[test]
+    fn a_retrying_error_is_the_turns_retry_row() {
+        let mut d = CodexDriver::with_program("codex");
+        ready(&mut d, false);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let s = feed(
+            &mut d,
+            json!({"method":"error","params":{"error":{"message":"Reconnecting... 2/5"},"willRetry":true,"threadId":"th","turnId":"u1"}}),
+        );
+        let DriverEvent::TurnItem(row) = &s.events[0] else {
+            panic!("{:?}", s.events)
+        };
+        assert!(row.id.ends_with(crate::driver::RETRY_NOTICE_SUFFIX));
+        assert!(
+            matches!(&row.kind, TurnItemKind::SystemNotice { message, .. }
+            if message == "Provider retry · Reconnecting... 2/5")
+        );
+        assert!(d.failure.is_none());
     }
 
     #[test]
