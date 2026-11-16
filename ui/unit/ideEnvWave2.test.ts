@@ -182,3 +182,23 @@ test('V8: a host prepend and a guest append both survive; overlapping edits keep
   assert.deepEqual(sent.map((s) => s[1]), [`HOSTHOST${base}guestguest`], 'the merge goes back to the room');
   assert.equal(store.sharedBuffers['/r/shared.txt'].version, 4);
 });
+
+test('V-TC: "Delve is too old" becomes an Update Delve action', () => {
+  const mod = loadSource(ideUrl('store/ideDebugAndEnvController.ts'), {
+    '../../../lib/api/client': { api: {}, ApiError: class extends Error {} },
+    '../../../lib/idePreferences.svelte': { idePreferences: { current: {} } },
+    '../../../lib/stores/auth.svelte': { auth: {} },
+    '../../../lib/toast.svelte': { toasts: {} },
+    '../../../lib/toastError': { toastError() {} },
+    '../../../lib/confirm.svelte': { confirmer: {} },
+    '../../../lib/ideWorkspacePort.svelte': { ideWorkspacePort: {} },
+    '../../../lib/storage': { lsGet: () => null, lsSet() {} },
+    '../../../lib/components/cm-ide-prefs': { readIdePreferences: () => ({}) },
+    '../../../lib/components/cm-ide-drafts': {},
+    svelte: { tick: async () => {} },
+  }, {}, { relative: true });
+  const n = mod.toolOutdatedNotice(new Error('invalid: tool_outdated:go:dap — Delve is too old for Go 1.25. Update Delve.'));
+  assert.equal(n.action, 'Update Delve');
+  assert.equal(n.body, 'Delve is too old for Go 1.25. Update Delve.');
+  assert.equal(mod.toolOutdatedNotice(new Error('exec: dlv not found')), null);
+});

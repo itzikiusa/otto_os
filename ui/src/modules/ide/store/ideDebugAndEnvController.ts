@@ -572,6 +572,7 @@ export async function launchDebugSession(
   },
   prevCtl: AbortController | null,
   onSnapshot: (snap: IdeDebugSessionSnapshot) => void,
+  onUpdateTool?: () => Promise<void>,
 ): Promise<AbortController | null> {
   if (!host.target.root) return prevCtl;
   const gutterItem = opts.launch || opts.configId ? null : selectedGutterTarget(host);
@@ -637,11 +638,26 @@ export async function launchDebugSession(
     onSnapshot(resp.session);
     return attachDebugSessionStream(host, resp.session.id, prevCtl, onSnapshot);
   } catch (e) {
-    toastError('Couldn’t start debugger', e);
+    const outdated = toolOutdatedNotice(e);
+    if (outdated && onUpdateTool) {
+      toasts.push('warn', outdated.title, outdated.body, 20_000, { action: { label: outdated.action, run: onUpdateTool } });
+    } else {
+      toastError('Couldn’t start debugger', e);
+    }
     return prevCtl;
   } finally {
     host.debugLoading = false;
   }
+}
+
+/** The daemon's `tool_outdated:go:dap — …` launch error (Delve built for an older Go)
+ *  as a notice with an "Update Delve" action; null for any other error. */
+export function toolOutdatedNotice(e: unknown): { title: string; body: string; action: string } | null {
+  const msg = e instanceof Error ? e.message : String(e ?? '');
+  const at = msg.indexOf('tool_outdated:go:dap');
+  if (at < 0) return null;
+  const body = msg.slice(at).replace(/^tool_outdated:go:dap\s*[—-]\s*/, '');
+  return { title: 'Delve is too old for this Go', body, action: 'Update Delve' };
 }
 
 export async function sendDebugAction(
@@ -688,8 +704,12 @@ export async function installToolchainJob(
   ensurePoller: () => void,
 ): Promise<IdeInstallJob | null> {
   try {
+    // gopls / Delve are built with the project's own Go, so they match it.
+    const goRoot = ecosystem === 'go' && component !== 'sdk'
+      ? host.toolchains.find((e) => e.ecosystem === 'go')?.installed.find((s) => s.active)?.path ?? null
+      : null;
     const resp = await api.post<{ job: IdeInstallJob }>('/ide/toolchains/install', {
-      target: host.targetPayload, ecosystem, component, version,
+      target: host.targetPayload, ecosystem, component, version, ...(goRoot ? { go_root: goRoot } : {}),
     });
     host.installJobs = [resp.job, ...host.installJobs.filter((j) => j.id !== resp.job.id)].slice(0, 12);
     ensurePoller();

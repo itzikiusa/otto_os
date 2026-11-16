@@ -374,8 +374,11 @@
                       <h3 id="tc-lsp-heading" class="tc-sec-title">Language server (LSP)</h3>
                       <span class="tc-tool-name" dir="ltr">{currentEco.lsp_status.name}</span>
                     </div>
-                    <StatusBadge tone={currentEco.lsp_status.available ? 'success' : 'warning'} label={currentEco.lsp_status.available ? 'Installed' : 'Missing'} />
+                    <StatusBadge tone={currentEco.lsp_status.available && !currentEco.lsp_status.outdated ? 'success' : 'warning'} label={currentEco.lsp_status.outdated ? 'Outdated' : currentEco.lsp_status.available ? 'Installed' : 'Missing'} />
                   </div>
+                  {#if currentEco.lsp_status.outdated}
+                    <p class="tc-tool-hint tc-outdated" data-testid="ide-tc-lsp-outdated">{currentEco.lsp_status.name} {currentEco.lsp_status.outdated}: update it to match.</p>
+                  {/if}
                   {#if currentEco.lsp_status.path}
                     <code class="tc-mono-path" dir="ltr">{currentEco.lsp_status.path}</code>
                   {:else}
@@ -385,12 +388,12 @@
                     <button
                       type="button"
                       class="btn small"
-                      class:ghost={currentEco.lsp_status.available}
+                      class:ghost={currentEco.lsp_status.available && !currentEco.lsp_status.outdated}
                       disabled={busyKey === `install:${currentEco.ecosystem}:lsp`}
                       onclick={() => triggerInstall(currentEco.ecosystem, 'lsp')}
                     >
                       <Icon name="download" size={12} />
-                      {busyKey === `install:${currentEco.ecosystem}:lsp` ? 'Installing…' : currentEco.lsp_status.available ? 'Reinstall LSP' : 'Install LSP'}
+                      {busyKey === `install:${currentEco.ecosystem}:lsp` ? 'Installing…' : currentEco.lsp_status.outdated ? 'Update LSP' : currentEco.lsp_status.available ? 'Reinstall LSP' : 'Install LSP'}
                     </button>
                   </div>
                 </section>
@@ -401,8 +404,11 @@
                       <h3 id="tc-dap-heading" class="tc-sec-title">Debug adapter (DAP)</h3>
                       <span class="tc-tool-name" dir="ltr">{currentEco.dap_status.name}</span>
                     </div>
-                    <StatusBadge tone={currentEco.dap_status.available ? 'success' : 'warning'} label={currentEco.dap_status.available ? 'Installed' : 'Missing'} />
+                    <StatusBadge tone={currentEco.dap_status.available && !currentEco.dap_status.outdated ? 'success' : 'warning'} label={currentEco.dap_status.outdated ? 'Outdated' : currentEco.dap_status.available ? 'Installed' : 'Missing'} />
                   </div>
+                  {#if currentEco.dap_status.outdated}
+                    <p class="tc-tool-hint tc-outdated" data-testid="ide-tc-dap-outdated">{currentEco.dap_status.name} {currentEco.dap_status.outdated}: update it to match.</p>
+                  {/if}
                   {#if currentEco.dap_status.path}
                     <code class="tc-mono-path" dir="ltr">{currentEco.dap_status.path}</code>
                   {:else}
@@ -412,12 +418,12 @@
                     <button
                       type="button"
                       class="btn small"
-                      class:ghost={currentEco.dap_status.available}
+                      class:ghost={currentEco.dap_status.available && !currentEco.dap_status.outdated}
                       disabled={busyKey === `install:${currentEco.ecosystem}:dap`}
                       onclick={() => triggerInstall(currentEco.ecosystem, 'dap')}
                     >
                       <Icon name="bug" size={12} />
-                      {busyKey === `install:${currentEco.ecosystem}:dap` ? 'Installing…' : currentEco.dap_status.available ? 'Reinstall debugger' : 'Install debugger'}
+                      {busyKey === `install:${currentEco.ecosystem}:dap` ? 'Installing…' : currentEco.dap_status.outdated ? 'Update debugger' : currentEco.dap_status.available ? 'Reinstall debugger' : 'Install debugger'}
                     </button>
                   </div>
                 </section>
@@ -612,6 +618,7 @@
   .tc-tools-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .tc-tool-name { display: block; font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); margin-block-start: 2px; }
   .tc-tool-hint { margin: 0; font-size: var(--fs-xs); color: var(--text-dim); }
+  .tc-tool-hint.tc-outdated { color: var(--warning); }
   .tc-tool-actions { display: flex; align-items: center; gap: 6px; margin-block-start: auto; padding-block-start: 4px; }
 
   .tc-dl-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

@@ -342,6 +342,8 @@ fn path_python_reports_its_real_version_and_a_bare_python_debugs_with_the_bridge
         name: "debugpy".into(),
         available: true,
         path: Some(path.to_string_lossy().into_owned()),
+        version: None,
+        outdated: None,
     };
     // `import debugpy` fails (the stub exits 1): the bdb bridge is what debugs.
     let bare = discovery::label_builtin_dap(EcosystemKind::Python, st(&link));
@@ -357,4 +359,43 @@ fn path_python_reports_its_real_version_and_a_bare_python_debugs_with_the_bridge
     let shell =
         discovery::label_builtin_dap(EcosystemKind::Shell, st(std::path::Path::new("/bin/zsh")));
     assert_eq!(shell.name, "built-in otto-sh-dap");
+}
+
+#[test]
+fn a_delve_built_with_an_older_go_than_the_project_is_outdated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let goroot = tmp.path().join("go1.25");
+    std::fs::create_dir_all(goroot.join("bin")).unwrap();
+    std::fs::write(goroot.join("VERSION"), "go1.25.1\n").unwrap();
+    // `go version <bin>` prints `<bin>: go1.22.3` (what the fake dlv was built with).
+    std::fs::write(goroot.join("bin/go"), "#!/bin/sh\necho \"$2: go1.22.3\"\n").unwrap();
+    make_executable(&goroot.join("bin/go")).unwrap();
+    let dlv = tmp.path().join("dlv");
+    std::fs::write(&dlv, "#!/bin/sh\n").unwrap();
+    let status = || crate::types::IdeToolBinaryStatus {
+        name: "dlv".into(),
+        available: true,
+        path: Some(dlv.to_string_lossy().into_owned()),
+        version: None,
+        outdated: None,
+    };
+    let mut st = status();
+    discovery::mark_go_tool_outdated(&mut st, Some(&goroot));
+    assert_eq!(st.version.as_deref(), Some("go1.22.3"));
+    assert_eq!(
+        st.outdated.as_deref(),
+        Some("built with go1.22, project uses go1.25")
+    );
+
+    std::fs::write(goroot.join("VERSION"), "go1.22.9\n").unwrap();
+    let mut same = status();
+    discovery::mark_go_tool_outdated(&mut same, Some(&goroot));
+    assert_eq!(same.outdated, None, "same major.minor is fine");
+    let mut no_go = status();
+    discovery::mark_go_tool_outdated(&mut no_go, None);
+    assert_eq!(
+        (no_go.version, no_go.outdated),
+        (None, None),
+        "no project Go: nothing to compare"
+    );
 }

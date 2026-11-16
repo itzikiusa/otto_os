@@ -250,7 +250,7 @@ export interface IdeDetectedSdk {
   name: string; label?: string; version: string; path: string; home_path?: string;
   bin_path?: string | null; source: string; arch?: string | null; valid?: boolean; broken?: boolean;
 }
-export interface IdeToolStatus { name: string; available: boolean; installed?: boolean; path?: string | null }
+export interface IdeToolStatus { name: string; available: boolean; installed?: boolean; path?: string | null; version?: string | null; outdated?: string | null }
 export interface IdeDownloadableSdk { version: string; label: string; lts: boolean; os: string; arch: string; url: string; size_hint?: string | null; sha256?: string | null }
 
 export interface IdeToolchainEcosystem {

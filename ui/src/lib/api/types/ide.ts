@@ -224,6 +224,10 @@ export interface IdeToolStatus {
   name: string;
   available: boolean;
   path?: string | null;
+  /** What the binary reports (Go tools: the Go it was built with, `go1.22.3`). */
+  version?: string | null;
+  /** Why it no longer fits the project's toolchain; reinstalling updates it. */
+  outdated?: string | null;
 }
 
 export interface IdeDownloadableSdk {

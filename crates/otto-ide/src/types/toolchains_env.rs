@@ -92,6 +92,13 @@ pub struct IdeToolBinaryStatus {
     pub available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// What the binary reports about itself (for Go tools: the Go it was built with, `go1.22.3`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Why it no longer fits the project's toolchain ("built with go1.22, project uses go1.25");
+    /// reinstalling the component (`POST /ide/toolchains/install`) updates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outdated: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +169,10 @@ pub struct IdeInstallToolchainReq {
     pub component: IdeInstallComponent,
     #[serde(default)]
     pub version: Option<String>,
+    /// Go LSP / DAP only: build gopls / Delve with this GOROOT (the project's
+    /// Go), so the tool matches it; otherwise the newest Go found is used.
+    #[serde(default)]
+    pub go_root: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

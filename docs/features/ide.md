@@ -179,6 +179,14 @@ global system directories:
 | **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
 | **JSON & CSV / TSV** | `vscode-json-language-server`, live JSONPath breadcrumb (JSONC files — `.jsonc`, `tsconfig*.json`, `jsconfig*.json`, `.vscode/*.json`, `devcontainer.json`, `.eslintrc.json` — allow comments and trailing commas in the built-in syntax check), Pretty / Minify / Sort Keys, `$ref` navigation, virtualized `IdeCsvView` (`Table ↔ Text` toggle, rainbow columns, sort/filter, inline cell edit + undo, column stats) |
 
+**Tools that follow the SDK.** When the project's Go moves ahead of the Go that
+gopls or Delve were built with, the Toolchains window marks them **Outdated**
+("built with go1.22, project uses go1.25") and offers **Update**, which rebuilds
+them with the project's own Go (`POST /ide/toolchains/install` with `go_root`).
+A debug launch Delve refuses ("too old for Go 1.25") shows an **Update Delve**
+action that rebuilds it and starts the same session again. A Python debugger
+without the `debugpy` module is listed as the built-in bdb bridge.
+
 Installed `<data_dir>/toolchains/**/bin` directories and custom registered local
 SDKs (`POST /ide/toolchains/local`) are automatically prepended to `PATH` (setting
 `GOROOT` / `JAVA_HOME` / `NODE_HOME` as appropriate) across IDE runs, debug

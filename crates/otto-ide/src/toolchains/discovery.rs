@@ -11,6 +11,8 @@ pub(super) fn empty_tool(name: &str) -> IdeToolBinaryStatus {
         name: name.to_string(),
         available: false,
         path: None,
+        version: None,
+        outdated: None,
     }
 }
 
@@ -361,6 +363,8 @@ pub(super) fn discover_local_lsp_with_shell(
                 name,
                 available: true,
                 path: Some(cand.to_string_lossy().into_owned()),
+                version: None,
+                outdated: None,
             };
         }
     }
@@ -378,6 +382,8 @@ pub(super) fn discover_local_lsp_with_shell(
             name,
             available: true,
             path: Some(sys.to_string_lossy().into_owned()),
+            version: None,
+            outdated: None,
         };
     }
     empty_tool(&name)
@@ -425,6 +431,8 @@ pub(super) fn discover_local_dap_with_shell(
                     name,
                     available: true,
                     path: Some(cand.to_string_lossy().into_owned()),
+                    version: None,
+                    outdated: None,
                 };
             }
         }
@@ -443,6 +451,8 @@ pub(super) fn discover_local_dap_with_shell(
             name,
             available: true,
             path: Some(sys.to_string_lossy().into_owned()),
+            version: None,
+            outdated: None,
         };
     }
     empty_tool(&name)
@@ -474,6 +484,48 @@ pub(super) fn label_builtin_dap(
         _ => {}
     }
     st
+}
+
+/// `major.minor` of a Go version (`go1.25.3`, `1.25`) for comparison.
+fn go_major_minor(v: &str) -> Option<(u32, u32)> {
+    let mut parts = v.trim().trim_start_matches("go").split(['.', '-', ' ']);
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// The Go a binary was built with: `go version <bin>` prints `<bin>: go1.22.3`.
+#[allow(clippy::disallowed_methods)] // called from the toolchain listing's blocking task
+fn go_built_with(goroot: &Path, bin: &str) -> Option<String> {
+    let out = std::process::Command::new(goroot.join("bin/go"))
+        .args(["version", bin])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v = text.rsplit(": ").next()?.split_whitespace().next()?;
+    v.starts_with("go").then(|| v.to_string())
+}
+
+/// gopls / Delve built with an older Go than the project's (`goroot`) can't
+/// load or debug its code ("Version of Delve is too old"): record the build
+/// version and why it is outdated. One `go version` exec per tool, only when
+/// the toolchain status is listed.
+pub(super) fn mark_go_tool_outdated(st: &mut IdeToolBinaryStatus, goroot: Option<&Path>) {
+    let (Some(goroot), Some(path)) = (goroot, st.path.as_deref()) else {
+        return;
+    };
+    let Some(project) = read_go_root_version(goroot) else {
+        return;
+    };
+    st.version = go_built_with(goroot, path);
+    let built = st.version.as_deref().and_then(go_major_minor);
+    if let (Some(b), Some(p)) = (built, go_major_minor(&project)) {
+        if b < p {
+            st.outdated = Some(format!(
+                "built with go{}.{}, project uses go{}.{}",
+                b.0, b.1, p.0, p.1
+            ));
+        }
+    }
 }
 
 #[allow(clippy::disallowed_methods)] // called from the toolchain listing's blocking task

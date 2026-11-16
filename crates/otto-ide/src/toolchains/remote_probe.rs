@@ -227,6 +227,8 @@ pub(crate) fn parse_ssh_probe_output(
                     name: eco.lsp_name().to_string(),
                     available: true,
                     path: Some(path.to_string()),
+                    version: None,
+                    outdated: None,
                 });
             }
         } else if let Some((eco_s, path)) =
@@ -237,6 +239,8 @@ pub(crate) fn parse_ssh_probe_output(
                     name: eco.dap_name().to_string(),
                     available: true,
                     path: Some(path.to_string()),
+                    version: None,
+                    outdated: None,
                 });
             }
         }

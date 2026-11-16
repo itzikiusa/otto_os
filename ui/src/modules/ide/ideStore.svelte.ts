@@ -699,7 +699,22 @@ class IdeStore {
     const gate = await (await loadRepoActionsMod()).confirmIdeTargetProdLaunch(this.target, this.projectEnv, opts.skipProdConfirm);
     if (!gate.allowed) return;
     if (idePreferences.current.autoSave) await this.flushAutoSave();
-    this.debugSseCtl = await (await loadDebugEnvMod()).launchDebugSession(this, { ...opts, confirmProdTargets: gate.confirmProdTargets }, this.debugSseCtl, (s) => this.applyDebugSnapshot(s));
+    this.debugSseCtl = await (await loadDebugEnvMod()).launchDebugSession(
+      this, { ...opts, confirmProdTargets: gate.confirmProdTargets }, this.debugSseCtl, (s) => this.applyDebugSnapshot(s),
+      () => this.updateDelveAndRetry(opts),
+    );
+  }
+  /** "Update Delve": rebuild it with the project's Go, then start the same debug session again. */
+  private async updateDelveAndRetry(opts: Parameters<IdeStore['startDebug']>[0]): Promise<void> {
+    if (this.toolchains.length === 0) await this.loadToolchains();
+    const job = await this.installToolchain('go', 'dap');
+    if (!job) return;
+    for (let i = 0; i < 300; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const cur = (await api.get<{ job: IdeInstallJob }>(`/ide/toolchains/jobs/${encodeURIComponent(job.id)}`)).job;
+      if (cur.status === 'error') throw new Error(cur.error || 'Delve install failed');
+      if (cur.status === 'done') return this.startDebug(opts);
+    }
   }
   applyDebugSnapshot(raw: IdeDebugSessionSnapshot): void {
     const apply = (m: typeof DebugEnvMod): void => {
