@@ -41,7 +41,9 @@ export class CodeVisionWidget extends WidgetType {
     if (el instanceof HTMLButtonElement) el.type = 'button';
     el.className = 'cm-ide-codevision';
     el.dataset.testid = 'ide-codevision-usages';
-    el.textContent = `${this.count} ${this.count === 1 ? 'usage' : 'usages'}`;
+    // A same-file word count, so it never claims project-wide usages.
+    el.textContent = `${this.count} in file`;
+    el.title = `Uses of ${this.symbol} in this file${this.onUsages ? ' (click to find usages in the project)' : ''}`;
     if (this.onUsages) {
       el.addEventListener('mousedown', (e) => {
         e.preventDefault();

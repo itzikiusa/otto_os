@@ -221,6 +221,15 @@ fn compute_replacement(
     if count == 0 {
         return None;
     }
+    // `$1_v2` is the named group `1_v2` to the regex crate (empty), not
+    // group 1 then `_v2` as in every editor: brace numbered groups first.
+    let braced;
+    let replacement = if is_regex {
+        braced = brace_numbered_groups(replacement);
+        braced.as_str()
+    } else {
+        replacement
+    };
     let mut sample_before = String::new();
     let mut sample_after = String::new();
     for line in text.lines() {
@@ -243,6 +252,28 @@ fn compute_replacement(
             .into_owned()
     };
     Some((full, count, sample_before, sample_after))
+}
+
+/// `$12` → `${12}`; `$$` (a literal `$`) and `${…}`/`$name` stay as they are.
+fn brace_numbered_groups(replacement: &str) -> String {
+    let mut out = String::with_capacity(replacement.len() + 4);
+    let mut chars = replacement.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c != '$' {
+            continue;
+        }
+        if chars.peek() == Some(&'$') {
+            out.push(chars.next().unwrap_or('$'));
+        } else if chars.peek().is_some_and(char::is_ascii_digit) {
+            out.push('{');
+            while let Some(d) = chars.next_if(char::is_ascii_digit) {
+                out.push(d);
+            }
+            out.push('}');
+        }
+    }
+    out
 }
 
 fn display_remote_rel_path(path: &str, root: &str, additional_roots: &[String]) -> String {
@@ -409,4 +440,23 @@ fn parse_rg_or_grep_line(root: &str, raw: &str) -> Option<IdeSearchItem> {
         symbol_kind: None,
         container: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_numbered_group_followed_by_word_chars_keeps_its_capture() {
+        let re = Regex::new(r"def (withdraw)\(").unwrap();
+        let text = "    def withdraw(self, amount):\n";
+        let (full, n, _, after) = compute_replacement(text, &re, "def $1_v2(", true).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(full, "    def withdraw_v2(self, amount):\n");
+        assert_eq!(after, "def withdraw_v2(self, amount):");
+        let (full, ..) = compute_replacement(text, &re, "def $$1${1}x(", true).unwrap();
+        assert_eq!(full, "    def $1withdrawx(self, amount):\n");
+        let (full, ..) = compute_replacement(text, &re, "$1_v2", false).unwrap();
+        assert_eq!(full, "    $1_v2self, amount):\n", "plain text is literal");
+    }
 }

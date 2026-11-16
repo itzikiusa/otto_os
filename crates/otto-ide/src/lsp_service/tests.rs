@@ -273,6 +273,21 @@ var PowPrecisionNegativeExponent = 16
     );
 }
 
+#[test]
+fn rust_hover_names_the_crate_from_the_nearest_cargo_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("app/src")).unwrap();
+    std::fs::write(
+        dir.path().join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let file = dir.path().join("app/src/lib.rs");
+    let src = "/// Adds.\npub fn add(a: i32, b: i32) -> i32 { a + b }\n";
+    let hov = hover::extract_hover_from_definition("add", file.to_str().unwrap(), 2, "rust", src);
+    assert_eq!(hov.package_name.as_deref(), Some("app"));
+}
+
 #[tokio::test]
 async fn multibyte_utf8_literals_and_identifiers_never_panic_or_skew_columns() {
     // Non-ASCII UTF-8 inside preceding string/comment spans on the same line as an unimported Go package.

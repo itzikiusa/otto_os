@@ -65,6 +65,18 @@ fn extract_package_or_module_name(path: &str, lang: &str, lines: &[&str]) -> Opt
             _ => {}
         }
     }
+    if lang == "rust" {
+        // The crate a file belongs to: the nearest Cargo.toml's package.
+        let toml = Path::new(path)
+            .ancestors()
+            .skip(1)
+            .find_map(|d| std::fs::read_to_string(d.join("Cargo.toml")).ok());
+        if let Some(name) =
+            toml.and_then(|t| crate::environments::discovery::parse_cargo_package_name(&t))
+        {
+            return Some(name);
+        }
+    }
     Path::new(path)
         .parent()
         .and_then(|p| p.file_name())

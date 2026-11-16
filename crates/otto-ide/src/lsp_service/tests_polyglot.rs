@@ -179,3 +179,42 @@ fn go_sibling_package_var_resolves_first_and_ignores_unrelated_short_var_decls()
         "function-local `:=` in unrelated package must never match cross-file Go definitions: {cross_pkg_hits:?}"
     );
 }
+
+#[test]
+fn ts_import_type_and_type_prefixed_names_are_not_misread_as_unused() {
+    let src = "import type { CityInput } from './types';\n\
+               import typeorm from 'typeorm';\n\
+               import { gone } from './gone';\n\
+               export const f = (c: CityInput) => typeorm(c);\n";
+    let diags = diagnostics_polyglot::analyze_js_ts_diagnostics("a.ts", src, &[]);
+    let unused: Vec<_> = diags.iter().filter(|d| d.code == "unused_import").collect();
+    assert_eq!(unused.len(), 1, "{diags:?}");
+    assert_eq!(unused[0].message, "Unused import 'gone'");
+    assert!(
+        !unused[0].quick_fixes[0].is_preferred,
+        "a heuristic fix is not the default"
+    );
+}
+
+#[test]
+fn jsonc_files_allow_comments_and_trailing_commas() {
+    let src = "{\n  // Compiler options\n  \"compilerOptions\": {\n    \"strict\": true, /* on */\n    \"paths\": {\"@/*\": [\"src/*\"]},\n  },\n  \"include\": [\"src\", \"a//b\",],\n}\n";
+    for path in [
+        "tsconfig.json",
+        "app/tsconfig.base.json",
+        ".vscode/settings.json",
+        "x.jsonc",
+    ] {
+        let diags = diagnostics::analyze_json_diagnostics(path, "json", src);
+        assert!(diags.is_empty(), "{path}: {diags:?}");
+    }
+    // Plain JSON stays strict, and a real JSONC error keeps its line.
+    assert_eq!(
+        diagnostics::analyze_json_diagnostics("data.json", "json", src).len(),
+        1
+    );
+    let broken = "{\n  // c\n  \"a\": 1\n  \"b\": 2\n}\n";
+    let diags = diagnostics::analyze_json_diagnostics("tsconfig.json", "json", broken);
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].line, 4);
+}

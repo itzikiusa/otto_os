@@ -113,7 +113,7 @@ test('Go: chevrons sit on the opening lines, also after folding the import', asy
   const ed = await openScratch(page, 'fold-e2e.go', 'package main');
   const before = await markerLines(ed);
   if (SHOT_DIR) await page.screenshot({ path: join(SHOT_DIR, 'go.png') });
-  // Line text includes inline widgets ("…" placeholder, "1 usage" lens): match prefixes.
+  // Line text includes inline widgets ("…" placeholder, "1 in file" lens): match prefixes.
   const opener = /^(import \(|type Item struct \{|func main\(\) \{|for _, it := range items \{)/;
   expect(before.some((t) => t?.startsWith('import ('))).toBe(true);
   expect(before.some((t) => t?.startsWith('func main() {'))).toBe(true);

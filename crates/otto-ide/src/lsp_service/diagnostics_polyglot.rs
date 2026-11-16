@@ -86,7 +86,16 @@ pub(super) async fn analyze_shell_diagnostics(
             .lines()
             .next()
             .is_some_and(|l| l.starts_with("#!") && l.contains("zsh"));
-    let bin = if is_zsh { "/bin/zsh" } else { "/bin/bash" };
+    // The bash the runner and debugger prefer (Homebrew 5), so bash-4+
+    // syntax (`|&`, `;;&`) is not a false error under macOS's 3.2.
+    let bin = if is_zsh {
+        "/bin/zsh"
+    } else {
+        ["/opt/homebrew/bin/bash", "/usr/local/bin/bash"]
+            .into_iter()
+            .find(|b| Path::new(b).is_file())
+            .unwrap_or("/bin/bash")
+    };
     let mut cmd = Command::new(bin);
     cmd.arg("-n")
         .env_clear()
@@ -225,9 +234,10 @@ fn find_simple_unused_imports(path: &str, lang: &str, content: &str) -> Vec<IdeD
                     && !t.contains('*') =>
             {
                 let head = t.split(" from ").next().unwrap_or("");
+                let head = head.trim_start_matches("import").trim_start();
+                // `import type { X }`, not `import typeorm`.
+                let head = head.strip_prefix("type ").unwrap_or(head);
                 let sym = head
-                    .trim_start_matches("import")
-                    .trim_start_matches("type")
                     .trim_matches(|c: char| matches!(c, '{' | '}' | ' '))
                     .split(" as ")
                     .last()
@@ -273,7 +283,8 @@ fn find_simple_unused_imports(path: &str, lang: &str, content: &str) -> Vec<IdeD
                     end_line: ln,
                     replacement: String::new(),
                     delete_line: true,
-                    is_preferred: true,
+                    // A text heuristic: never the one-key default fix.
+                    is_preferred: false,
                     edits: vec![del_edit],
                 }],
             });
