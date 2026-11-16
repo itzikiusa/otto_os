@@ -106,10 +106,10 @@ impl SessionManager {
                     Vec::new()
                 })
             });
-            // Terminal Muse / opencode get no file of their own here: they see
-            // Otto's tools only if their CLI reads the workspace `.mcp.json`
-            // above (not verified for either). Their Threads sessions get the
-            // full set through ACP `mcpServers` (otto-agent-protocol).
+            // Terminal Muse reads the workspace `.mcp.json` above (its `otto`
+            // entry forwards the bridge env by name, which Muse requires);
+            // opencode is unverified. Their Threads sessions get the full set
+            // through ACP `mcpServers` (otto-agent-protocol).
             let grok = match (&*provider, &cfg.user_servers) {
                 ("grok", Some(users)) => Some(crate::mcp::reconcile_user_servers_grok(&cwd, users)),
                 _ => None,
