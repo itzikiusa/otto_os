@@ -7,6 +7,7 @@ import type { GitAccount, GitProviderKind, PrSummary, Repo } from '../../lib/api
 import { forgeLabel } from './threadsHelpers';
 
 const ACCOUNTS_TTL_MS = 60_000;
+const FAILED_RETRY_MS = 30_000;
 
 class ThreadPrs {
   private byKey = $state<Record<string, PrSummary | null>>({});
@@ -14,12 +15,15 @@ class ThreadPrs {
   private accountProviders: Set<GitProviderKind> | null = null;
   private accountsFetchedAt = 0;
   private accountsInflight: Promise<Set<GitProviderKind>> | null = null;
+  private failedAt = new Map<string, number>();
 
   /** The open PR from `branch`, null when none (or unknown yet — see `checked`). */
   prFor(repo: Repo | null, branch: string | null): PrSummary | null {
     if (!repo || !branch || !repo.provider || !forgeLabel(repo)) return null;
     const key = `${repo.id}:${branch}`;
     if (key in this.byKey) return this.byKey[key];
+    // A failed lookup is retried after a short backoff instead of being memoized as "no PR".
+    if (Date.now() - (this.failedAt.get(key) ?? -Infinity) < FAILED_RETRY_MS) return null;
     queueMicrotask(() => void this.load(repo, branch, key));
     return null;
   }
@@ -57,12 +61,6 @@ class ThreadPrs {
         this.accountsFetchedAt = Date.now();
         return set;
       })
-      .catch(() => {
-        const empty = new Set<GitProviderKind>();
-        this.accountProviders = empty;
-        this.accountsFetchedAt = Date.now();
-        return empty;
-      })
       .finally(() => {
         this.accountsInflight = null;
       });
@@ -88,10 +86,12 @@ class ThreadPrs {
         pr = r.items.find((p) => p.source_branch === branch) ?? null;
       }
     } catch {
-      pr = null;
+      this.failedAt.set(key, Date.now());
+      return;
     } finally {
       this.inflight.delete(key);
     }
+    this.failedAt.delete(key);
     this.byKey = { ...this.byKey, [key]: pr };
   }
 }
