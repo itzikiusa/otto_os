@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
+use otto_core::agent_runtime::MUSE_NO_AUTO_UPDATE;
 use otto_core::{Error, Result};
 use otto_pty::CommandSpec;
 use serde::Deserialize;
@@ -642,7 +643,10 @@ impl ProviderRegistry {
                     a
                 },
                 resume_args: None,
-                env: BTreeMap::from([("MUSE_NO_AUTO_UPDATE".to_string(), "1".to_string())]),
+                env: BTreeMap::from([(
+                    MUSE_NO_AUTO_UPDATE.0.to_string(),
+                    MUSE_NO_AUTO_UPDATE.1.to_string(),
+                )]),
                 update_command: Some(MUSE_UPDATE_COMMAND.into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 model_family: Some("muse".into()),
@@ -789,23 +793,28 @@ impl ProviderRegistry {
     }
 
     /// All `(provider_name, update_command)` pairs for enabled providers that
-    /// have an update command set (non-empty). A provider the admin excluded is
-    /// never updated: they may not want that CLI at all. Sorted by name.
+    /// have an update command set (non-empty) and whose CLI is installed. A
+    /// provider the admin excluded is never updated, and a missing CLI is never
+    /// installed by an update pass: they may not want that CLI at all. Sorted
+    /// by name.
     pub fn update_commands(&self) -> Vec<(String, String)> {
-        let map = self.map.read().expect("provider registry lock");
-        let disabled = self.disabled.read().expect("provider disabled lock");
-        let mut pairs: Vec<(String, String)> = map
-            .iter()
-            .filter(|(name, _)| !disabled.contains(name.as_str()))
+        self.update_commands_where(crate::tool_probe::command_resolves_fast)
+    }
+
+    /// [`Self::update_commands`] with `installed(cmd)` deciding which CLIs exist.
+    pub(crate) fn update_commands_where(
+        &self,
+        installed: impl Fn(&str) -> bool,
+    ) -> Vec<(String, String)> {
+        self.enabled_specs()
+            .into_iter()
+            .filter(|(_, spec)| installed(&spec.cmd))
             .filter_map(|(name, spec)| {
                 spec.update_command
-                    .as_deref()
                     .filter(|s| !s.is_empty())
-                    .map(|cmd| (name.clone(), cmd.to_string()))
+                    .map(|cmd| (name, cmd))
             })
-            .collect();
-        pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        pairs
+            .collect()
     }
 
     /// The provider's model-flag TEMPLATE (each element gets `{model}`

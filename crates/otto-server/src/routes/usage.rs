@@ -442,9 +442,7 @@ pub async fn limits(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<otto_usage::limits::LimitsResp>> {
     if user.is_root {
-        let program = |p| enabled_provider_program(&ctx.manager, p);
-        otto_usage::limits::refresh_cli_limits(program("agy"), program("grok"), program("muse"))
-            .await;
+        otto_usage::limits::refresh_cli_limits(|p| enabled_provider_program(&ctx.manager, p)).await;
     }
     let active = active_limit_providers(&ctx.manager);
     let l = otto_usage::limits::remaining_limits_filtered(

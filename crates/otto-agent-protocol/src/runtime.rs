@@ -1102,7 +1102,16 @@ impl AgentRuntime {
                     .holder_launcher
                     .clone()
                     .or_else(crate::holder::HolderLauncher::auto_detect);
-                if let Some(launcher) = launcher {
+                // A socket dir that can't be made private (another account
+                // took the shared /tmp fallback) costs only restart survival.
+                let socket = launcher.as_ref().and_then(|_| {
+                    crate::holder::socket_path_for(holders_dir, &session.id)
+                        .inspect_err(|e| {
+                            tracing::warn!(session = %session.id, "runtime holder socket unavailable, spawning directly: {e}")
+                        })
+                        .ok()
+                });
+                if let (Some(launcher), Some(socket)) = (launcher, socket) {
                     return held_proc::spawn_via_holder(
                         &self.inner,
                         live,
@@ -1111,7 +1120,7 @@ impl AgentRuntime {
                         &ctx,
                         cmd,
                         claude_login,
-                        holders_dir,
+                        socket,
                         &launcher,
                     )
                     .await;

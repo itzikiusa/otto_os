@@ -51,14 +51,35 @@ fn cache() -> &'static Mutex<Readings> {
     CACHE.get_or_init(Default::default)
 }
 
-fn flight(provider: &str) -> &'static tokio::sync::Mutex<()> {
-    static AGY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    static GROK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    static MUSE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    match provider {
-        "agy" => &AGY,
-        "muse" => &MUSE,
-        _ => &GROK,
+/// The CLIs whose limits come from asking the CLI itself.
+#[derive(Debug, Clone, Copy)]
+enum ProbedCli {
+    Agy,
+    Grok,
+    Muse,
+}
+
+impl ProbedCli {
+    const ALL: [Self; 3] = [Self::Agy, Self::Grok, Self::Muse];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Agy => "agy",
+            Self::Grok => "grok",
+            Self::Muse => "muse",
+        }
+    }
+
+    /// One probe at a time per CLI.
+    fn flight(self) -> &'static tokio::sync::Mutex<()> {
+        static AGY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        static GROK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        static MUSE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        match self {
+            Self::Agy => &AGY,
+            Self::Grok => &GROK,
+            Self::Muse => &MUSE,
+        }
     }
 }
 
@@ -67,26 +88,28 @@ pub(crate) fn readings() -> Readings {
     cache().lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// Make sure each installed CLI (`Some(program)`) has an answer: a cold probe
-/// waits briefly (`COLD_INLINE_BUDGET`) and otherwise finishes in the
-/// background; an expired one refreshes in the background immediately.
-pub async fn refresh(agy: Option<String>, grok: Option<String>, muse: Option<String>) {
+/// Make sure each installed CLI (`program(name)` is `Some`) has an answer: a
+/// cold probe waits briefly (`COLD_INLINE_BUDGET`) and otherwise finishes in
+/// the background; an expired one refreshes in the background immediately.
+pub async fn refresh(program: impl Fn(&str) -> Option<String>) {
     let now = Utc::now();
     let mut handles = Vec::new();
-    for (provider, program) in [("agy", agy), ("grok", grok), ("muse", muse)] {
-        let Some(program) = program else { continue };
-        let held = readings().get(provider).map(|r| r.taken_at);
+    for cli in ProbedCli::ALL {
+        let Some(program) = program(cli.name()) else {
+            continue;
+        };
+        let held = readings().get(cli.name()).map(|r| r.taken_at);
         match held {
             Some(at) if (now - at).to_std().is_ok_and(|age| age < PROBE_TTL) => {}
             Some(_) => {
-                if flight(provider).try_lock().is_ok() {
-                    tokio::spawn(probe(provider, program));
+                if cli.flight().try_lock().is_ok() {
+                    tokio::spawn(probe(cli, program));
                 }
             }
             None => {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 tokio::spawn(async move {
-                    probe(provider, program).await;
+                    probe(cli, program).await;
                     let _ = tx.send(());
                 });
                 handles.push(rx);
@@ -99,9 +122,9 @@ pub async fn refresh(agy: Option<String>, grok: Option<String>, muse: Option<Str
     }
 }
 
-async fn probe(provider: &'static str, program: String) {
-    let _held = flight(provider).lock().await;
-    let fresh = readings().get(provider).is_some_and(|r| {
+async fn probe(cli: ProbedCli, program: String) {
+    let _held = cli.flight().lock().await;
+    let fresh = readings().get(cli.name()).is_some_and(|r| {
         (Utc::now() - r.taken_at)
             .to_std()
             .is_ok_and(|a| a < PROBE_TTL)
@@ -109,13 +132,13 @@ async fn probe(provider: &'static str, program: String) {
     if fresh {
         return;
     }
-    let answer = match provider {
-        "agy" => query_agy(&program, PROBE_TIMEOUT).await,
-        "muse" => query_muse(&program, PROBE_TIMEOUT).await,
-        _ => query_grok(&program, PROBE_TIMEOUT).await,
+    let answer = match cli {
+        ProbedCli::Agy => query_agy(&program, PROBE_TIMEOUT).await,
+        ProbedCli::Grok => query_grok(&program, PROBE_TIMEOUT).await,
+        ProbedCli::Muse => query_muse(&program, PROBE_TIMEOUT).await,
     };
     cache().lock().unwrap_or_else(|e| e.into_inner()).insert(
-        provider,
+        cli.name(),
         Reading {
             taken_at: Utc::now(),
             answer,
@@ -164,7 +187,7 @@ pub(crate) async fn query_agy(program: &str, timeout: Duration) -> Result<Value,
 pub(crate) async fn query_muse(program: &str, timeout: Duration) -> Result<Value, String> {
     let mut cmd = super::cli::build_cli_command(program, &["usage", "--json"], true);
     cmd.current_dir(std::env::temp_dir())
-        .env("MUSE_NO_AUTO_UPDATE", "1")
+        .envs([otto_core::agent_runtime::MUSE_NO_AUTO_UPDATE])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

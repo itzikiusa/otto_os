@@ -47,21 +47,7 @@ export interface IdeDepsInspectResponse {
   actions?: string[];
 }
 
-const MANIFEST_NAMES = new Set([
-  'go.mod',
-  'pom.xml',
-  'package.json',
-  'cargo.toml',
-  'requirements.txt',
-  'pyproject.toml',
-  'build.gradle',
-  'build.gradle.kts',
-]);
-
-export function isIdeManifestPath(filePath: string): boolean {
-  const base = filePath.split('?')[0].split('/').pop()?.toLowerCase() ?? '';
-  return MANIFEST_NAMES.has(base) || /^requirements(?:[-_.][\w-]+)?\.txt$/.test(base);
-}
+export { isIdeManifestPath } from './cm-ide-manifest.ts';
 
 export function detectManifestEcosystem(filePath: string): ManifestEcosystem | null {
   const base = filePath.split('?')[0].split('/').pop()?.toLowerCase() ?? '';
@@ -507,7 +493,7 @@ export async function executeIdeDepAction(opts: {
   version?: string | null;
   deps?: IdeDepItem[];
 }): Promise<{ ok: boolean; updated_content?: string; output?: string; items?: IdeDepItem[] }> {
-  const [{ api }, { toasts }] = await Promise.all([
+  const [{ api, ApiError }, { toasts }] = await Promise.all([
     import('../api/client.ts'),
     import('../toast.svelte.ts'),
   ]);
@@ -561,18 +547,21 @@ export async function executeIdeDepAction(opts: {
     }
     return { ok, updated_content: updatedContent, output: out };
   } catch (e) {
-    if (normAction === 'update_one' && opts.dep && opts.version) {
+    // Edit the manifest text only when the daemon has no runner for this
+    // action (400); any other failure means the tool itself did not run.
+    const unsupported = e instanceof ApiError && e.status === 400;
+    if (unsupported && normAction === 'update_one' && opts.dep && opts.version) {
       const updated = applyFallbackManifestVersionUpdate(opts.content, opts.dep, opts.version);
       if (updated !== opts.content) {
         toasts.success(`Updated ${opts.dep.name}`, `${opts.dep.current_version} → ${opts.version}`);
         return { ok: true, updated_content: updated };
       }
-    } else if (
+    } else if (unsupported && (
       normAction === 'update_all_latest' ||
       normAction === 'update_all_patch' ||
       normAction === 'update_direct_latest' ||
       normAction === 'update_direct_patch'
-    ) {
+    )) {
       const sourceDeps = opts.deps?.length
         ? opts.deps
         : parseManifestDependencies(opts.path, opts.content);

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortenHomePath } from '../../../lib/homePath';
   // macOS-style Named Multi-Repo Project & Workspace Switcher for the IDE header.
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
@@ -23,14 +24,6 @@
   let menuOpen = $state(false);
   let triggerEl = $state<HTMLButtonElement | undefined>(undefined);
 
-  function shortenHomePath(p: string): string {
-    if (!p) return '';
-    const m = p.match(/^\/Users\/[^/]+(\/.*)?$/);
-    if (m) return `~${m[1] || ''}`;
-    const mLinux = p.match(/^\/home\/[^/]+(\/.*)?$/);
-    if (mLinux) return `~${mLinux[1] || ''}`;
-    return p;
-  }
 
   const primaryLabel = $derived.by((): string => {
     if (!ide.hasTarget) return 'Select project';

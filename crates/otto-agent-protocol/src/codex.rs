@@ -23,8 +23,8 @@ use otto_core::agent_runtime::{
 use serde_json::{json, Value};
 
 use crate::driver::{
-    item, rpc_failure, rpc_key, tool_error, with_file_paths, DriverError, DriverEvent, DriverStep,
-    LaunchContext, LaunchSpec, StructuredDriver,
+    item, restore_keeping_program, rpc_failure, rpc_key, tool_error, with_file_paths, DriverError,
+    DriverEvent, DriverStep, LaunchContext, LaunchSpec, StructuredDriver,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1373,13 +1373,7 @@ impl StructuredDriver for CodexDriver {
     }
 
     fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
-        if !state.is_null() {
-            let mut restored: Self =
-                serde_json::from_value(state.clone()).map_err(|e| DriverError(e.to_string()))?;
-            restored.program = std::mem::take(&mut self.program);
-            *self = restored;
-        }
-        Ok(())
+        restore_keeping_program(self, state, |d| &mut d.program)
     }
 }
 
@@ -1739,7 +1733,7 @@ mod tests {
         let s = feed(
             &mut d,
             json!({"id": 3, "result": {"data": [{"cwd": "/w", "errors": [], "skills": [
-                {"name": "review", "description": "Review a diff thoroughly", "enabled": true, "path": "/s/review/SKILL.md", "scope": "user"},
+                {"name": "review", "description": "Review a diff thoroughly", "interface": {"shortDescription": "Review a diff"}, "enabled": true, "path": "/s/review/SKILL.md", "scope": "user"},
                 {"name": "off", "description": "x", "enabled": false, "path": "/s/off/SKILL.md", "scope": "user"}
             ]}]}}),
         );
@@ -1748,6 +1742,10 @@ mod tests {
         };
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].name, "review");
+        assert_eq!(
+            c[0].description, "Review a diff",
+            "the short description wins"
+        );
         let s = d
             .prompt("t1", &RuntimePromptReq::of("/review the last commit"))
             .unwrap();

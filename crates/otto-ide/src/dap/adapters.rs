@@ -209,7 +209,7 @@ pub(super) async fn locate_binary(
                 } else {
                     format!(
                         "command -v {} 2>/dev/null | head -n 1",
-                        super::shell_quote(cand)
+                        crate::target::ssh_exec::posix_quote(cand)
                     )
                 };
                 let probe_args = vec!["-lc".to_string(), probe_cmd];

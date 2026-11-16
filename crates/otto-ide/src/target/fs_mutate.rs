@@ -11,7 +11,8 @@ use crate::lsp_host::pool::LspPool;
 use crate::types::{IdeFsMutateOp, IdeFsMutateResp};
 
 use super::fs_ops::{
-    is_remote_sftp_not_found, resolve_local_existing_in_roots, write_local_atomic,
+    is_remote_sftp_not_found, resolve_local_entry_in_roots, resolve_local_existing_in_roots,
+    write_local_atomic,
 };
 use super::{
     map_io_err, remote_parent, resolve_local_prospective_in_roots, resolve_remote_in_roots,
@@ -121,7 +122,7 @@ pub(super) async fn mutate_local_fs_in_roots(
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| Error::Invalid("dest_path is required for rename".into()))?;
             let (src, _) =
-                resolve_local_existing_in_roots(root, additional_roots, is_root_user, path)?;
+                resolve_local_entry_in_roots(root, additional_roots, is_root_user, path)?;
             if is_protected_root(&src, root, additional_roots) {
                 return Err(Error::Forbidden("cannot rename workspace root".into()));
             }
@@ -133,6 +134,20 @@ pub(super) async fn mutate_local_fs_in_roots(
                 true,
             )
             .await?;
+            // `rename` silently replaces an existing destination. The same
+            // inode is a case-only rename on a case-insensitive volume.
+            if let Ok(existing) = tokio::fs::symlink_metadata(&dst).await {
+                use std::os::unix::fs::MetadataExt;
+                let same = tokio::fs::symlink_metadata(&src)
+                    .await
+                    .is_ok_and(|m| (m.dev(), m.ino()) == (existing.dev(), existing.ino()));
+                if !same {
+                    return Err(Error::Conflict(format!(
+                        "'{}' already exists",
+                        dst.display()
+                    )));
+                }
+            }
             tokio::fs::rename(&src, &dst)
                 .await
                 .map_err(|e| map_io_err("rename path", &src, e))?;
@@ -164,7 +179,7 @@ pub(super) async fn mutate_local_fs_in_roots(
         }
         IdeFsMutateOp::Delete => {
             let (target_path, matched_root) =
-                resolve_local_existing_in_roots(root, additional_roots, is_root_user, path)?;
+                resolve_local_entry_in_roots(root, additional_roots, is_root_user, path)?;
             if is_protected_root(&target_path, root, additional_roots) {
                 return Err(Error::Forbidden("cannot delete workspace root".into()));
             }

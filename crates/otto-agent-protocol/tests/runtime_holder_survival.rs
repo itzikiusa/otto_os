@@ -174,6 +174,47 @@ fn pid_is_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
+/// A holder socket dir Otto can't make private (another account squatting the
+/// shared `/tmp` fallback) costs only restart survival: the thread still
+/// starts, spawned directly.
+#[tokio::test]
+async fn an_unusable_holder_socket_dir_falls_back_to_a_direct_spawn() {
+    let dir = tempfile::tempdir().unwrap();
+    // Short enough that the socket goes in `holders_dir` itself, which can't
+    // be created under a regular file.
+    let blocker = tempfile::NamedTempFile::new_in("/tmp").unwrap();
+    let holders_dir = blocker.path().join("h");
+    let pool = open_db(&dir.path().join("state.db")).await;
+    let host = TestHost::new(dir.path());
+    let rt = build_held_runtime(&pool, &host, &holders_dir);
+
+    rt.create(
+        &"u1".into(),
+        &"w1".into(),
+        CreateRuntimeSessionReq {
+            title_auto: false,
+            provider: Some(RuntimeProvider::Claude),
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+            title: Some("Direct".into()),
+            model: None,
+            access_mode: None,
+            meta: None,
+        },
+    )
+    .await
+    .unwrap();
+    host.wait(|e| {
+        matches!(
+            &e.body,
+            RuntimeEventBody::ProviderSessionUpdated { provider_session }
+                if provider_session.status == ProviderSessionStatus::Ready
+        )
+    })
+    .await;
+    assert!(list_holder_sockets(&holders_dir).is_empty());
+    rt.shutdown().await;
+}
+
 #[tokio::test]
 async fn runtime_holder_survives_daemon_restart_streams_gap_output_and_runs_next_turn() {
     let dir = tempfile::tempdir().unwrap();

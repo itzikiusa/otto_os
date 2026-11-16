@@ -120,6 +120,48 @@ async fn local_tree_read_write_conflict_and_mutate_roundtrip() {
 }
 
 #[tokio::test]
+async fn rename_refuses_an_existing_destination_and_symlinks_act_on_the_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join("a.txt"), "a").unwrap();
+    std::fs::write(root.join("b.txt"), "b").unwrap();
+    std::fs::create_dir_all(root.join("shared/docs")).unwrap();
+    std::fs::write(root.join("shared/docs/keep.md"), "keep").unwrap();
+    std::os::unix::fs::symlink(root.join("shared/docs"), root.join("docs")).unwrap();
+    std::os::unix::fs::symlink(root.join("a.txt"), root.join("a-link")).unwrap();
+
+    let mgr = TargetManager::new();
+    let spec = IdeTargetSpec::local(root.to_string_lossy().into_owned());
+    let target = mgr.resolve_local(&spec, true).unwrap();
+
+    let err = mgr
+        .mutate_fs(&target, IdeFsMutateOp::Rename, "a.txt", Some("b.txt"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Conflict(_)), "got {err:?}");
+    assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "b");
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "a");
+
+    mgr.mutate_fs(&target, IdeFsMutateOp::Rename, "a-link", Some("c-link"))
+        .await
+        .unwrap();
+    assert!(std::fs::symlink_metadata(root.join("c-link"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "a");
+
+    mgr.mutate_fs(&target, IdeFsMutateOp::Delete, "docs", None)
+        .await
+        .unwrap();
+    assert!(std::fs::symlink_metadata(root.join("docs")).is_err());
+    assert_eq!(
+        std::fs::read_to_string(root.join("shared/docs/keep.md")).unwrap(),
+        "keep"
+    );
+}
+
+#[tokio::test]
 async fn non_root_secret_files_and_path_traversal_are_refused() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join(".env"), "SECRET=1\n").unwrap();

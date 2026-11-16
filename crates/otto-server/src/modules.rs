@@ -563,7 +563,7 @@ async fn update_providers(
             Some(pair) => vec![pair],
             None => {
                 return Err(ApiError(Error::Invalid(format!(
-                    "provider '{name}' has no update command"
+                    "provider '{name}' has no update command, is turned off or is not installed"
                 ))));
             }
         }

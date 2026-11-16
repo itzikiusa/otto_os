@@ -30,7 +30,7 @@ use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, PlanStepStatus, ProviderCommand,
     ProviderFailure, RequestKind, RuntimeAccessMode, RuntimeCapabilities, RuntimePromptReq,
     RuntimeProvider, ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus,
-    TurnTokenUsage,
+    TurnTokenUsage, EFFORT_RANK,
 };
 use serde_json::{json, Value};
 
@@ -598,7 +598,10 @@ impl AcpDriver {
                         RuntimeAccessMode::FullAccess => "allowAll",
                     })
                 }),
-                access_env: Some(|_| vec![("MUSE_NO_AUTO_UPDATE".into(), "1".into())]),
+                access_env: Some(|_| {
+                    let (k, v) = otto_core::agent_runtime::MUSE_NO_AUTO_UPDATE;
+                    vec![(k.into(), v.into())]
+                }),
                 effort_config_id: Some("thought_level"),
                 own_sandbox_off: Some("--disable-sandbox"),
                 no_authenticate: true,
@@ -1875,16 +1878,12 @@ impl AcpDriver {
     }
 }
 
-/// Effort names low → high (agents list theirs in either order: grok
-/// advertises `xhigh, high, medium, low`).
-const EFFORT_RANK: [&str; 8] = [
-    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-];
-
-/// The agent's levels low → high (what the effort picker lists).
+/// The agent's levels low → high (what the effort picker lists); a tier Otto
+/// doesn't know sorts as `medium`.
 fn effort_levels(levels: &[String]) -> Vec<String> {
+    let rank = |l: &str| EFFORT_RANK.iter().position(|r| *r == l);
     let mut out = levels.to_vec();
-    out.sort_by_key(|l| EFFORT_RANK.iter().position(|r| r == l).unwrap_or(3));
+    out.sort_by_key(|l| rank(l).or(rank("medium")));
     out
 }
 
@@ -2656,11 +2655,14 @@ mod tests {
             caps.efforts,
             ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
         );
-        for m in [
-            RuntimeAccessMode::AutoAcceptEdits,
-            RuntimeAccessMode::FullAccess,
+        for (m, id) in [
+            (RuntimeAccessMode::AutoAcceptEdits, "onRequest"),
+            (RuntimeAccessMode::FullAccess, "allowAll"),
         ] {
             assert!(d.switches_access_live(m), "{m:?}");
+            let mut step = DriverStep::default();
+            d.write_mode(&mut step, "01a1e323", m);
+            assert_eq!(sent(&step, 0)["params"]["modeId"], id, "{m:?}");
         }
         let mut req = RuntimePromptReq::of("go");
         req.effort = Some("ultra".into());

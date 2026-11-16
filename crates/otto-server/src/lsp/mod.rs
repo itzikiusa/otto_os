@@ -137,28 +137,7 @@ async fn lsp_ws(
     }
 
     let user = auth.effective_user.clone();
-    // A local language server runs unsandboxed as the daemon's user: root
-    // only. Remote SSH targets run on the remote host as before.
-    let local = q
-        .connection_id
-        .as_deref()
-        .is_none_or(|c| c.trim().is_empty());
-    if local && !user.is_root {
-        return ws_problem(
-            StatusCode::FORBIDDEN,
-            "lsp_requires_root",
-            "only a root account can open a local language server",
-        );
-    }
-    let ctx_for_check = st.ctx.clone();
-    let user_for_check = user.clone();
-    let prepared = match prepare_lsp_ws_session(&st.ctx, &user, q, move |root_buf| {
-        let ctx_cl = ctx_for_check.clone();
-        let user_cl = user_for_check.clone();
-        async move { ide_local_root_authorized(&ctx_cl, &user_cl, &root_buf, false).await }
-    })
-    .await
-    {
+    let prepared = match prepare_lsp_ws_session(&st.ctx, &user, q).await {
         Ok(s) => s,
         Err(err) => return ws_problem(err.status, err.code, &err.message),
     };

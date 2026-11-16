@@ -393,6 +393,13 @@ async fn the_main_agent_lists_creates_and_delegates_as_its_session() {
         .send("POST", &d.alice, "/personal-agents/team", create)
         .await;
     assert_eq!(st, 409, "names stay unique");
+    // A Threads provider that can't load a persona would never run.
+    let muse =
+        json!({"session_id": "thr-lead", "name": "Muser", "instructions": "x", "provider": "muse"});
+    let (st, body) = d
+        .send("POST", &d.alice, "/personal-agents/team", muse)
+        .await;
+    assert_eq!(st, 400, "{body}");
 
     let (_, team) = d.send("GET", &d.alice, team_path, json!(null)).await;
     let agents = team["agents"].as_array().unwrap();

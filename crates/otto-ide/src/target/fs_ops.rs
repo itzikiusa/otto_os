@@ -44,8 +44,40 @@ pub(crate) fn resolve_local_existing_in_roots(
     is_root_user: bool,
     raw: &str,
 ) -> Result<(PathBuf, PathBuf)> {
+    canonical_in_roots(
+        &local_candidate(root, raw)?,
+        root,
+        additional_roots,
+        is_root_user,
+    )
+}
+
+/// [`resolve_local_existing_in_roots`] for an entry Delete/Rename acts on: a
+/// symlink stays the link itself (only its parent is resolved and confined),
+/// so the operation never reaches what the link points to.
+pub(crate) fn resolve_local_entry_in_roots(
+    root: &Path,
+    additional_roots: &[PathBuf],
+    is_root_user: bool,
+    raw: &str,
+) -> Result<(PathBuf, PathBuf)> {
+    let candidate = local_candidate(root, raw)?;
+    let is_link = std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.file_type().is_symlink());
+    let (true, Some(parent), Some(name)) = (is_link, candidate.parent(), candidate.file_name())
+    else {
+        return canonical_in_roots(&candidate, root, additional_roots, is_root_user);
+    };
+    let (parent, matched_root) = canonical_in_roots(parent, root, additional_roots, is_root_user)?;
+    let entry = parent.join(name);
+    if !is_root_user {
+        enforce_non_root_path(&entry)?;
+    }
+    Ok((entry, matched_root))
+}
+
+fn local_candidate(root: &Path, raw: &str) -> Result<PathBuf> {
     let decoded = strip_file_uri(raw);
-    let candidate = if decoded.is_empty() || decoded == "." {
+    Ok(if decoded.is_empty() || decoded == "." {
         root.to_path_buf()
     } else if decoded.starts_with('~') {
         otto_core::paths::expand_home_strict(&decoded).map_err(Error::Invalid)?
@@ -56,10 +88,18 @@ pub(crate) fn resolve_local_existing_in_roots(
         } else {
             root.join(p)
         }
-    };
+    })
+}
+
+fn canonical_in_roots(
+    candidate: &Path,
+    root: &Path,
+    additional_roots: &[PathBuf],
+    is_root_user: bool,
+) -> Result<(PathBuf, PathBuf)> {
     let canonical = candidate
         .canonicalize()
-        .map_err(|e| map_io_err("resolve path", &candidate, e))?;
+        .map_err(|e| map_io_err("resolve path", candidate, e))?;
 
     let matched_root = std::iter::once(root)
         .chain(additional_roots.iter().map(PathBuf::as_path))
@@ -280,27 +320,6 @@ pub(super) async fn read_bounded_bytes(path: &Path, max_bytes: u64) -> Result<(V
     }
 }
 
-/// Trim an incomplete UTF-8 multi-byte sequence split at a truncation boundary
-/// so `truncated == true` never injects `U+FFFD` replacement characters.
-pub(crate) fn trim_incomplete_utf8_tail(bytes: &[u8]) -> &[u8] {
-    if bytes.is_empty() {
-        return bytes;
-    }
-    let mut i = bytes.len() - 1;
-    let min_i = bytes.len().saturating_sub(4);
-    while i > min_i && (bytes[i] & 0xC0) == 0x80 {
-        i -= 1;
-    }
-    if (bytes[i] & 0xC0) == 0x80 {
-        return bytes;
-    }
-    match std::str::from_utf8(&bytes[i..]) {
-        Ok(_) => bytes,
-        Err(e) if e.error_len().is_none() => &bytes[..i + e.valid_up_to()],
-        Err(_) => bytes,
-    }
-}
-
 pub(crate) fn build_file_read_resp(
     path: String,
     bytes: &[u8],
@@ -325,7 +344,7 @@ pub(crate) fn build_file_read_resp(
         });
     }
     let effective_bytes = if truncated {
-        trim_incomplete_utf8_tail(bytes)
+        otto_core::text::trim_incomplete_utf8_tail(bytes)
     } else {
         bytes
     };

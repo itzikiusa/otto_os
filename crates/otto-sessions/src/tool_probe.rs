@@ -492,8 +492,7 @@ async fn detect_tool(name: &str, program: &str) -> ToolStatus {
             Duration::from_secs(2),
             Command::new(program)
                 .arg("--version")
-                // Muse's launcher would otherwise check for a new binary.
-                .env("MUSE_NO_AUTO_UPDATE", "1")
+                .envs([otto_core::agent_runtime::MUSE_NO_AUTO_UPDATE])
                 .kill_on_drop(true)
                 .output(),
         )

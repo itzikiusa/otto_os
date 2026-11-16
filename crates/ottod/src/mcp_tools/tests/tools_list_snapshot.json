@@ -2411,7 +2411,7 @@
         },
         "provider": {
           "type": "string",
-          "description": "claude|codex|gemini|grok|opencode|pi|muse (default: yours)"
+          "description": "claude|codex|gemini|grok|opencode|pi (default: yours)"
         },
         "model": {
           "type": "string"

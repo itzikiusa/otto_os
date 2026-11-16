@@ -1000,7 +1000,7 @@ const MUSE_MODEL_LIST_INPUT: &str = concat!(
 pub(super) async fn run_muse_model_list(prog: &str, budget: Duration) -> Result<String, String> {
     use tokio::io::AsyncWriteExt;
     let mut child = cli_models_command(prog, &MUSE_MODEL_LIST_ARGS)
-        .env("MUSE_NO_AUTO_UPDATE", "1")
+        .envs([otto_core::agent_runtime::MUSE_NO_AUTO_UPDATE])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

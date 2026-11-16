@@ -69,11 +69,11 @@ export interface NamedProjectsHost extends ProjectHelperHost {
   activeProjectId: string | null;
   activePath: string | null;
   hasClosedAllTabs: boolean;
-  flushAutoSave?(path?: string): Promise<void>;
+  confirmDiscardUnsaved(): Promise<boolean>;
   setLocalTarget(
     root: string,
     workspaceId?: string | null,
-    opts?: { additionalRoots?: string[]; projectId?: string | null; skipAutoOpen?: boolean },
+    opts?: { additionalRoots?: string[]; projectId?: string | null; skipAutoOpen?: boolean; discardConfirmed?: boolean },
   ): Promise<void>;
 }
 
@@ -216,9 +216,7 @@ export async function activateNamedProject(host: NamedProjectsHost, projectId: s
   ) {
     return;
   }
-  if (readIdePreferences().autoSave && host.flushAutoSave) {
-    await host.flushAutoSave();
-  }
+  if (!(await host.confirmDiscardUnsaved())) return;
   if (host.activeProjectId) {
     snapshotProjectTabs(host.activeProjectId, host.tabs, host.activePath);
   }
@@ -234,6 +232,7 @@ export async function activateNamedProject(host: NamedProjectsHost, projectId: s
     additionalRoots: extraRoots,
     projectId: proj.id,
     skipAutoOpen: hasSavedTabs,
+    discardConfirmed: true,
   });
   if (hasSavedTabs) {
     const activeFirst = savedTabs?.activePath && boundedPaths.includes(savedTabs.activePath)

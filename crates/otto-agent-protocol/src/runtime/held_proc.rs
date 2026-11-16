@@ -1,7 +1,7 @@
 //! Detached `runtime-holder` spawn, live event pump, and checkpoint sync for [`super::AgentRuntime`].
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,7 +10,7 @@ use otto_core::agent_runtime::{
     CancelReason, ProviderFailure, ProviderSessionStatus, RuntimeSession, TurnItem, TurnItemStatus,
     TurnTerminalStatus,
 };
-use otto_core::{Error, Id, Result};
+use otto_core::{Id, Result};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
@@ -21,8 +21,8 @@ use super::{
 };
 use crate::driver::{LaunchContext, StructuredDriver};
 use crate::holder::{
-    socket_path_for, spawn_held, HolderCheckpoint, HolderChildCommand, HolderEvent, HolderLauncher,
-    HolderSpawnSpec, HolderTurnSnapshot, LineStream,
+    spawn_held, HolderCheckpoint, HolderChildCommand, HolderEvent, HolderLauncher, HolderSpawnSpec,
+    HolderTurnSnapshot, LineStream,
 };
 use crate::process::ChildCommand;
 
@@ -199,15 +199,9 @@ pub(super) async fn spawn_via_holder(
     ctx: &LaunchContext,
     cmd: ChildCommand,
     claude_login: Option<Option<PathBuf>>,
-    holders_dir: &Path,
+    socket_path: PathBuf,
     launcher: &HolderLauncher,
 ) -> Result<()> {
-    let socket_path = socket_path_for(holders_dir, &session.id).map_err(|e| {
-        Error::Internal(format!(
-            "cannot prepare runtime holder socket for {}: {e}",
-            session.id
-        ))
-    })?;
     let request_ids = RequestIds::new();
     let fresh_starting = live.lock().fresh_starting;
     let start_step = driver.start(ctx);

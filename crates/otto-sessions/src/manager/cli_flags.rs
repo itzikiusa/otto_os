@@ -205,6 +205,17 @@ pub(super) fn interaction_mode_apply(
     }
 }
 
+/// Muse's own shell sandbox cannot nest inside Otto's Seatbelt (macOS refuses
+/// the nested `sandbox_apply`), so a confined Muse turns it off, as its thread
+/// launch does.
+pub(super) fn nested_sandbox_args(provider: &str, external_sandbox: bool) -> Vec<String> {
+    if external_sandbox && effective_cli_family(provider) == "muse" {
+        vec!["--disable-sandbox".to_string()]
+    } else {
+        vec![]
+    }
+}
+
 /// Extra argv for a **lean turn** (`meta.lean_turn = true`, Claude-only).
 pub(super) fn lean_turn_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
     let fam = effective_cli_family(provider);
@@ -278,6 +289,13 @@ mod tests {
         let ro = read_only_args("claudework", &ro_meta);
         assert!(ro.contains(&"--disallowed-tools".to_string()));
         assert!(ro.contains(&"--strict-mcp-config".to_string()));
+    }
+
+    #[test]
+    fn confined_muse_turns_its_own_sandbox_off() {
+        assert_eq!(nested_sandbox_args("muse", true), ["--disable-sandbox"]);
+        assert!(nested_sandbox_args("muse", false).is_empty());
+        assert!(nested_sandbox_args("claude", true).is_empty());
     }
 
     #[test]

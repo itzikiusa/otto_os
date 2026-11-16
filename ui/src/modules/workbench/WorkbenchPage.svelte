@@ -482,7 +482,7 @@
 </script>
 
 <div class="wb-page">
-  <PageHeader title="IDE">
+  <PageHeader title="IDE (Beta)">
     {#snippet tabs()}
       <IdeModeTabs active="scratches" />
     {/snippet}

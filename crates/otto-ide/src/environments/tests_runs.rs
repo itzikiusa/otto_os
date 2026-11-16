@@ -95,7 +95,7 @@ fn finished_runs_evict_cleanly_past_max_finished_runs_preserving_running() {
 fn streaming_10k_lines_ssh_runner_commands_and_maven_flags_work() {
     let (stop_tx, _stop_rx) = watch::channel(false);
     let (events_tx, _) = broadcast::channel(16);
-    let handle = ActiveRunHandle {
+    let handle = Arc::new(ActiveRunHandle {
         seq: 1,
         owner_user_id: String::new(),
         state: Mutex::new(RunStateInner::new(
@@ -106,7 +106,7 @@ fn streaming_10k_lines_ssh_runner_commands_and_maven_flags_work() {
         )),
         stop_tx,
         events_tx,
-    };
+    });
 
     let started = Instant::now();
     for i in 0..10_000 {
@@ -343,8 +343,8 @@ async fn saved_run_config_round_trips_and_blocks_cross_workspace_id_collision() 
     assert_eq!(still_intact.name, "Spring Dev");
 }
 
-#[test]
-fn subscribe_run_for_user_streams_live_events_and_enforces_owner_rbac() {
+#[tokio::test]
+async fn subscribe_run_for_user_streams_live_events_and_enforces_owner_rbac() {
     let mgr = EnvironmentManager::new(PathBuf::from("/tmp/otto-ide-sse-test"));
     let (stop_tx, _) = watch::channel(false);
     let (events_tx, _) = broadcast::channel(32);
@@ -371,12 +371,13 @@ fn subscribe_run_for_user_streams_live_events_and_enforces_owner_rbac() {
 
     let (initial, mut rx) = mgr.subscribe_run_for_user(&alice, "run_sse_1").unwrap();
     assert_eq!(initial.status, IdeRunStatus::Running);
+    // A burst of lines reaches watchers as one snapshot.
+    append_run_line(&handle, "first line".into());
     append_run_line(&handle, "hello from sse".into());
-    let ev1 = rx.try_recv().unwrap();
-    assert_eq!(
-        ev1.output.last().map(String::as_str),
-        Some("hello from sse")
-    );
+    assert!(rx.try_recv().is_err(), "lines gather before a snapshot");
+    let ev1 = rx.recv().await.unwrap();
+    assert_eq!(ev1.output, ["first line", "hello from sse"]);
+    assert!(rx.try_recv().is_err(), "one snapshot per burst");
 
     finish_run(
         &handle,

@@ -230,6 +230,7 @@ pub async fn create_member<C: AssistantCtx>(
             THREAD_PROVIDERS.join(", ")
         )));
     }
+    pa_engine::persona_provider(&provider)?;
     let repo = pa_engine::repo(ctx);
     let taken = repo
         .list_by_workspace(&lead.workspace_id)

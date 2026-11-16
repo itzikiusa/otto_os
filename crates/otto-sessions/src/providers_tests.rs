@@ -292,23 +292,54 @@ fn reload_preserves_skip_mode() {
 }
 
 /// "Update CLIs" (and the auto-update pass) never runs a disabled provider's
-/// update command: the user may not want that CLI installed at all.
+/// update command, nor one whose CLI is not installed: the user may not want
+/// that CLI installed at all.
 #[test]
-fn update_commands_skip_disabled_providers() {
+fn update_commands_skip_disabled_and_missing_providers() {
     let reg = ProviderRegistry::new(None);
-    let names = |r: &ProviderRegistry| {
-        r.update_commands()
+    let names = |r: &ProviderRegistry, installed: &dyn Fn(&str) -> bool| {
+        r.update_commands_where(installed)
             .into_iter()
             .map(|(n, _)| n)
             .collect::<Vec<_>>()
     };
-    assert!(names(&reg).contains(&"pi".to_string()));
+    let all = names(&reg, &|_| true);
+    assert!(all.contains(&"pi".to_string()));
+    assert!(all.contains(&"gemini".to_string()));
+
+    let only_claude = names(&reg, &|cmd| cmd == "claude");
+    assert_eq!(only_claude, ["claude"]);
 
     reg.set_disabled(&["pi", "opencode"]);
-    let left = names(&reg);
+    let left = names(&reg, &|_| true);
     assert!(!left.contains(&"pi".to_string()));
     assert!(!left.contains(&"opencode".to_string()));
     assert!(left.contains(&"claude".to_string()));
+}
+
+/// Gemini CLI and Grok Build start a session with Otto's id and reopen it by
+/// that id; each approves every tool only while permission prompts are
+/// skipped.
+#[test]
+fn gemini_and_grok_start_and_resume_by_otto_id() {
+    let reg = ProviderRegistry::new(None);
+    for (provider, skip) in [("gemini", "--yolo"), ("grok", "--always-approve")] {
+        assert_eq!(
+            args_for(&reg, provider, false),
+            [skip, "--session-id", "SID"],
+            "{provider}"
+        );
+        assert_eq!(
+            args_for(&reg, provider, true),
+            [skip, "--resume", "SID"],
+            "{provider}"
+        );
+    }
+    reg.set_skip_permissions(false, None);
+    for provider in ["gemini", "grok"] {
+        assert_eq!(args_for(&reg, provider, false), ["--session-id", "SID"]);
+        assert_eq!(args_for(&reg, provider, true), ["--resume", "SID"]);
+    }
 }
 
 /// Muse Code is built in: `--trust-workspace` always, `--yolo` only while
@@ -333,7 +364,7 @@ fn muse_is_a_builtin_terminal_and_runtime_provider() {
         Some(vec!["--model".to_string(), "{model}".to_string()])
     );
     assert!(reg
-        .update_commands()
+        .update_commands_where(|_| true)
         .contains(&("muse".to_string(), MUSE_UPDATE_COMMAND.to_string())));
     assert_eq!(
         reg.runtime_provider_for("muse"),

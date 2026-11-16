@@ -108,6 +108,9 @@ export interface IdeBufferHost {
 export class IdeBufferPerfController {
   readonly liveBuffers = new Map<string, string>();
   readonly conflictedPaths = new Set<string>();
+  /** The save in flight per path: a second save waits for it, so it sends the
+   *  sha256 the first one got back instead of a stale one (a false 409). */
+  readonly savesInFlight = new Map<string, Promise<boolean>>();
   private syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private autoSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private draftTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -519,12 +522,28 @@ export async function performOpenFile(
   }
 }
 
-export async function performSaveFile(
+export function performSaveFile(
   host: IdeBufferHost,
   perf: IdeBufferPerfController,
   path?: string,
   forceOverwrite = false,
   opts: { silent?: boolean } = {},
+): Promise<boolean> {
+  const key = (path ? host.resolvePath(path) : host.activePath) ?? '';
+  const prior = perf.savesInFlight.get(key) ?? Promise.resolve(false);
+  const run = prior.catch(() => false).then(() => saveFileNow(host, perf, path, forceOverwrite, opts));
+  perf.savesInFlight.set(key, run);
+  const done = (): void => { if (perf.savesInFlight.get(key) === run) perf.savesInFlight.delete(key); };
+  run.then(done, done);
+  return run;
+}
+
+async function saveFileNow(
+  host: IdeBufferHost,
+  perf: IdeBufferPerfController,
+  path: string | undefined,
+  forceOverwrite: boolean,
+  opts: { silent?: boolean },
 ): Promise<boolean> {
   const targetPath = path ? host.resolvePath(path) : host.activePath;
   const rawFlushed = perf.flush(host, targetPath);
@@ -574,7 +593,8 @@ export async function performSaveFile(
       const choice = await confirmer.choose(`“${tab.name}” changed on disk since you opened it.`, {
         title: 'File conflict on disk', options: [{ label: 'Overwrite disk', value: 'overwrite', kind: 'danger' }, { label: 'Reload from disk', value: 'reload', kind: 'normal' }],
       });
-      if (choice.value === 'overwrite') return host.saveFile(targetPath, true);
+      // Inside this path's queued save, so not via host.saveFile (it would wait on itself).
+      if (choice.value === 'overwrite') return saveFileNow(host, perf, targetPath, true, {});
       if (choice.value === 'reload') { await host.openFile(targetPath, { reload: true }); }
       return false;
     }

@@ -1,7 +1,7 @@
 // Single source of truth for the agent-provider list across the whole UI.
 //
-// The daemon's provider registry (built-ins claude/codex/agy/shell + any CUSTOM
-// providers the user configures in Settings → Providers, e.g. `grok`) is
+// The daemon's provider registry (built-ins claude/codex/agy/gemini/grok/… + any CUSTOM
+// providers the user configures in Settings → Providers, e.g. `kilo`) is
 // surfaced on `GET /meta`.providers and cached on the auth store. EVERY surface
 // that lets the user pick which agent CLI to launch/use — PR review, ⌘K
 // orchestrator, swarm, workflows, scheduled tasks, self-improve, evals, … —
@@ -38,7 +38,7 @@ export {
 
 /** Built-in fallback used only before `/meta` has loaded (meta is normally
  *  present by the time any picker renders). */
-const FALLBACK: readonly string[] = ['claude', 'codex', 'agy', 'opencode', 'pi', 'muse', 'shell'];
+const FALLBACK: readonly string[] = ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi', 'muse', 'shell'];
 
 /** All registered provider names (built-ins + custom), INCLUDING `shell`.
  *  Already sorted by the daemon. Use for surfaces where a shell is valid

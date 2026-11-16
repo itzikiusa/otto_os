@@ -18,6 +18,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { isIdeManifestPath } from '../../lib/components/cm-ide-manifest';
   import { fileUriToPath, normalizeMacPrivatePath } from '../../lib/fileUri';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -25,7 +26,6 @@
   import { ideAgent } from './store/ideAgentController.svelte';
   import { subscribeIdeBufferEvictions, subscribeIdeFileSaved } from './store/ideBufferPerf';
   import IdeBreadcrumbsBar from './editor/IdeBreadcrumbsBar.svelte';
-  import IdeEditorSubbar from './editor/IdeEditorSubbar.svelte';
   import IdeTabBar from './editor/IdeTabBar.svelte';
   import {
     areIdeBreakpointsMuted, classifyIdeFile, evictPersistedIdeGitBase, fetchIdeGitBlame,
@@ -49,6 +49,11 @@
     return langAnalyzerMod ? langAnalyzerMod.detectIdeDocKind(filePath, language) : 'other';
   }
 
+  // The subbar only renders with an open tab, whose editor already waits on the
+  // histReady chunks above; warm it now so it lands in the same window. Until
+  // then a 30px placeholder holds its slot (no layout shift).
+  const IdeEditorSubbarLazy = lazyComponent(() => import('./editor/IdeEditorSubbar.svelte'));
+  IdeEditorSubbarLazy.prefetch();
   const IdeInlinePromptBarLazy = lazyComponent(() => import('./IdeInlinePromptBar.svelte'));
   const IdeCsvViewLazy = lazyComponent(() => import('./editor/IdeCsvView.svelte'));
   const IdeBreakpointPopoverLazy = lazyComponent(() => import('./editor/IdeBreakpointPopover.svelte'));
@@ -64,10 +69,6 @@
       const v = Number(typeof localStorage !== 'undefined' ? localStorage.getItem(SPLIT_RATIO_KEY) : '');
       return Number.isFinite(v) && v >= 0.2 && v <= 0.8 ? v : 0.5;
     } catch { return 0.5; }
-  }
-  function isManifestPath(p: string): boolean {
-    const b = (p.split('?')[0].split('/').pop() ?? '').toLowerCase();
-    return b === 'go.mod' || b === 'pom.xml' || b === 'package.json' || b === 'cargo.toml' || b === 'pyproject.toml' || b === 'build.gradle' || b === 'build.gradle.kts' || /^requirements(?:[-_.][\w-]+)?\.txt$/.test(b);
   }
 
   type ExtendedEditorRef = IdeEditorHandle & {
@@ -319,7 +320,7 @@
   const projectFolders = $derived(getIdeProjectFolders());
   const hasNonEmptySelection = $derived(ide.cursorInfo.selections.some((s) => s.anchor !== s.head));
   const activeDocKind = $derived(ide.activeTab ? fastDocKind(ide.activeTab.path, ide.activeTab.language) : 'other');
-  const activeIsManifest = $derived(ide.activeTab ? isManifestPath(ide.activeTab.path) : false);
+  const activeIsManifest = $derived(ide.activeTab ? isIdeManifestPath(ide.activeTab.path) : false);
   const effectiveManifestMode = $derived(ide.activeTab ? (manifestModeByPath[ide.activeTab.path] ?? 'text') : 'text');
   const activeFileMeta = $derived(ide.activeTab ? classifyIdeFile(ide.activeTab, ide.target.root, projectFolders.slice(1)) : { external: false, sdkLabel: null });
   const effectiveViewMode = $derived.by((): 'table' | 'text' => {
@@ -495,29 +496,33 @@
 
   {#if ide.activeTab}
     {@const activeTab = ide.activeTab}
-    <IdeEditorSubbar
-      {activeTab}
-      {pathSegments}
-      {enclosingSymbol}
-      {effectiveSymbols}
-      {activeJsonPath}
-      sdkLabel={activeFileMeta.sdkLabel}
-      {activeDocKind}
-      {effectiveViewMode}
-      {hasNonEmptySelection}
-      blameActive={Boolean(blameEnabledByPath[activeTab.path])}
-      {errorCount}
-      {warnCount}
-      onsetviewmode={(m) => (tableModeByPath = { ...tableModeByPath, [activeTab.path]: m })}
-      onapplyjson={(txt) => { if (!primaryEditorRef?.applyAgentEdit?.(txt)) ide.updateBuffer(activeTab.path, txt); }}
-      onjumpsymbol={jumpAdjacentSymbol}
-      ongotoline={(ln, col) => primaryEditorRef?.goToLine(ln, col)}
-      onopenstructure={() => (structureOpen = true)}
-      ontoggleblame={() => toggleBlameFor(activeTab.path)}
-      onopenquickfix={(e) => openIntentionPopoverAt(activeTab.path, ide.cursorInfo.line, ide.cursorInfo.col, { x: e.clientX - 200, y: e.clientY + 10 })}
-      oncyclediag={cycleNextDiagnostic}
-      onfocusagent={focusAgentComposer}
-    />
+    {#if IdeEditorSubbarLazy.component}
+      <IdeEditorSubbarLazy.component
+        {activeTab}
+        {pathSegments}
+        {enclosingSymbol}
+        {effectiveSymbols}
+        {activeJsonPath}
+        sdkLabel={activeFileMeta.sdkLabel}
+        {activeDocKind}
+        {effectiveViewMode}
+        {hasNonEmptySelection}
+        blameActive={Boolean(blameEnabledByPath[activeTab.path])}
+        {errorCount}
+        {warnCount}
+        onsetviewmode={(m) => (tableModeByPath = { ...tableModeByPath, [activeTab.path]: m })}
+        onapplyjson={(txt) => { if (!primaryEditorRef?.applyAgentEdit?.(txt)) ide.updateBuffer(activeTab.path, txt); }}
+        onjumpsymbol={jumpAdjacentSymbol}
+        ongotoline={(ln, col) => primaryEditorRef?.goToLine(ln, col)}
+        onopenstructure={() => (structureOpen = true)}
+        ontoggleblame={() => toggleBlameFor(activeTab.path)}
+        onopenquickfix={(e) => openIntentionPopoverAt(activeTab.path, ide.cursorInfo.line, ide.cursorInfo.col, { x: e.clientX - 200, y: e.clientY + 10 })}
+        oncyclediag={cycleNextDiagnostic}
+        onfocusagent={focusAgentComposer}
+      />
+    {:else}
+      <div class="ide-subbar-slot" aria-hidden="true"></div>
+    {/if}
 
     {#if ideAgent.inlinePrompt?.open}
       <LazyMount lazy={IdeInlinePromptBarLazy} what="inline prompt" variant="compact" />
@@ -760,6 +765,7 @@
 
 <style>
   .ide-editor-area { display: flex; flex-direction: column; flex: 1; min-inline-size: 0; min-block-size: 0; background: var(--bg); }
+  .ide-subbar-slot { block-size: 30px; flex-shrink: 0; background: var(--surface); border-block-end: 1px solid var(--border); }
   .ide-panes { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; }
   .ide-panes.split-down { flex-direction: column; }
   .ide-pane { flex: 1; min-inline-size: 0; min-block-size: 0; display: flex; flex-direction: column; }

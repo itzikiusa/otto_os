@@ -50,15 +50,7 @@ import {
   type IdeInlineRefactorHint,
 } from './cm-ide-refactor.ts';
 import { readIdeEditorPreferences } from './cm-ide-theme.ts';
-
-function isIdeManifestPath(p: string): boolean {
-  const b = (p.split('?')[0].split('/').pop() ?? '').toLowerCase();
-  return (
-    b === 'go.mod' || b === 'pom.xml' || b === 'package.json' || b === 'cargo.toml' ||
-    b === 'pyproject.toml' || b === 'build.gradle' || b === 'build.gradle.kts' ||
-    /^requirements(?:[-_.][\w-]+)?\.txt$/.test(b)
-  );
-}
+import { isIdeManifestPath } from './cm-ide-manifest.ts';
 
 export {
   addCursorAbove, addCursorBelow, applyClientQuickFix, applyConcreteEditsToView,

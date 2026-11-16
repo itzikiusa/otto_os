@@ -14,7 +14,7 @@ import { toastError } from '../../lib/toastError';
 import {
   attachProjectFolder, canonicalizeLocalProjectPath, createTemplatedFile, detachProjectFolder,
   detectBuildToolFromState, formatRelativeToRoots, loadActiveProjectIdLocal, loadNamedProjectsLocal,
-  mutatePathBreakpoints, normalizeRootPath, performCloseAllTabs, pushNavigationHistory,
+  confirmDiscardOnSwitch, mutatePathBreakpoints, normalizeRootPath, performCloseAllTabs, pushNavigationHistory,
   restoreWorkspaceTabsOrInitial, revealPathInTree, saveActiveProjectIdLocal, saveBuildToolPrefsLocal, saveLastIdeRoot,
 } from './shell/ideProjectHelpers';
 import {
@@ -310,12 +310,12 @@ class IdeStore {
   async setLocalTarget(
     root: string,
     workspaceId: string | null = null,
-    opts: { additionalRoots?: string[]; projectId?: string | null; skipAutoOpen?: boolean } = {},
+    opts: { additionalRoots?: string[]; projectId?: string | null; skipAutoOpen?: boolean; discardConfirmed?: boolean } = {},
   ): Promise<void> {
     const clean = normalizeRootPath(root);
     if (!clean) return;
     if (opts.projectId === undefined && this.target.kind === 'local' && normalizeRootPath(this.target.root) === clean && !opts.additionalRoots) return;
-    if (this.target.root && idePreferences.current.autoSave) await this.flushAutoSave();
+    if (!opts.discardConfirmed && !(await this.confirmDiscardUnsaved())) return;
     const matchedProj = opts.projectId !== undefined ? opts.projectId : (this.namedProjects.find((p) => p.primary_root === clean)?.id ?? null);
     this.activeProjectId = matchedProj;
     saveLastIdeRoot(clean);
@@ -331,7 +331,7 @@ class IdeStore {
   }
 
   async setSshTarget(connectionId: string, root: string, connectionName: string | null = null): Promise<void> {
-    if (this.target.root && idePreferences.current.autoSave) await this.flushAutoSave();
+    if (!(await this.confirmDiscardUnsaved())) return;
     const clean = normalizeRootPath(root) || '~';
     this.resetTargetState({ kind: 'ssh', workspace_id: null, root: clean, connection_id: connectionId, connection_name: connectionName });
     await this.loadTree();
@@ -342,6 +342,7 @@ class IdeStore {
     this.resetTargetState({ kind: 'local', workspace_id: null, root: '', connection_id: null, connection_name: null });
   }
 
+  confirmDiscardUnsaved(): Promise<boolean> { return confirmDiscardOnSwitch(this, this.bufPerf, () => this.flushAutoSave()); }
   private resetTargetState(next: IdeTargetSpec, overrideAdditionalRoots?: string[]): void {
     this.disposeStreams();
     resetTargetLifecycleState(this, next, () => { this._activePath = null; }, overrideAdditionalRoots);

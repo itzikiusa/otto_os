@@ -443,7 +443,7 @@ pub(crate) fn format_remote_env_exports(env: &BTreeMap<String, String>) -> Strin
         ) {
             quote_remote_home_expr(v)
         } else {
-            format!("'{}'", v.replace('\'', "'\\''"))
+            posix_quote(v)
         };
         out.push_str(&format!("export {k}={quoted_val}\n"));
     }

@@ -482,9 +482,9 @@ How Otto launches it: `muse acp --trust-workspace [--model <id>]
   comes from `muse serve`'s `model/list` (below). **Effort** is the
   `thought_level` option, sent by the tier name Muse lists (`minimal` …
   `max`, `ultra` behind its experiment); the picker orders them low to high.
-- **Sandbox:** Muse's own OS sandbox is turned off only when Otto's Seatbelt
-  confines the process (macOS refuses a nested sandbox); otherwise it stays
-  on. `--trust-workspace` loads the folder's skills and rules, as every other
+- **Sandbox:** Muse's own OS sandbox is turned off (`--disable-sandbox`, in a
+  thread and a terminal session alike) only when Otto's Seatbelt confines the
+  process (macOS refuses a nested sandbox); otherwise it stays on. `--trust-workspace` loads the folder's skills and rules, as every other
   CLI's pre-trusted cwd does.
 - **Seatbelt home rules** (`otto-sandbox`, terminal and thread alike): Muse
   may write its session logs, index and runtime sockets
@@ -761,8 +761,10 @@ and still remembered the image.
   - **No session reaches a holder.** Seatbelt-confined sessions are denied
     `connect()` to the socket directory and its `/tmp/otto-rth-*` fallback,
     and to the PTY holders' sockets.
-- **Without holders** (the setting off, a child with a network profile, or
-  an unadoptable child) a structured
+- **Without holders** (the setting off, a child with a network profile, a
+  socket directory Otto can't keep private — another account owning the
+  `/tmp/otto-rth-*` fallback, logged as a warning — or an unadoptable child)
+  a structured
   child dies with the daemon. At boot (`AgentRuntime::recover`, from
   `recover_before_serve`):
   - every in-flight turn ends **`interrupted`**, and so do its open items;

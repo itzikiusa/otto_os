@@ -61,6 +61,8 @@ pub(super) struct RunStateInner {
     output: VecDeque<String>,
     parser: IncrementalTestTracker,
     pub(super) active_local_pid: Option<u32>,
+    /// A coalesced output snapshot is scheduled for the run's watchers.
+    flush_pending: bool,
 }
 
 impl RunStateInner {
@@ -83,6 +85,7 @@ impl RunStateInner {
             output: VecDeque::new(),
             parser: IncrementalTestTracker::default(),
             active_local_pid: None,
+            flush_pending: false,
         }
     }
 
@@ -461,14 +464,33 @@ fn multi_step_label(cfg: &IdeRunConfig) -> &'static str {
     }
 }
 
-pub(super) fn append_run_line(handle: &ActiveRunHandle, line: String) {
-    let snap_opt = {
+/// How long output lines gather before watchers get one snapshot of them: a
+/// snapshot carries the 250-line tail and every test result, so one per line
+/// would cost O(tail + tests) per line.
+const RUN_OUTPUT_COALESCE: Duration = Duration::from_millis(100);
+
+pub(super) fn append_run_line(handle: &Arc<ActiveRunHandle>, line: String) {
+    let schedule = {
         let mut guard = handle.state.lock().unwrap_or_else(|e| e.into_inner());
         guard.push_line(line);
-        (handle.events_tx.receiver_count() > 0).then(|| guard.to_snapshot(Some(250)))
+        let due = handle.events_tx.receiver_count() > 0 && !guard.flush_pending;
+        guard.flush_pending |= due;
+        due
     };
-    if let Some(snap) = snap_opt {
-        let _ = handle.events_tx.send(snap);
+    if schedule {
+        let h = Arc::clone(handle);
+        tokio::spawn(async move {
+            tokio::time::sleep(RUN_OUTPUT_COALESCE).await;
+            let snap = {
+                let mut guard = h.state.lock().unwrap_or_else(|e| e.into_inner());
+                guard.flush_pending = false;
+                // A finished or stopped run already sent its final snapshot.
+                (guard.status == IdeRunStatus::Running).then(|| guard.to_snapshot(Some(250)))
+            };
+            if let Some(snap) = snap {
+                let _ = h.events_tx.send(snap);
+            }
+        });
     }
 }
 

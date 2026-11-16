@@ -1455,7 +1455,7 @@ fn team_tool_specs() -> [Value; 3] {
             "description":"Main agent only: create a personal agent (name + instructions = its persona). Shown in Personal Agents, attributed to you. Returns it.",
             "inputSchema":{"type":"object","required":["name","instructions"],"properties":{
                 "name":{"type":"string"},"instructions":{"type":"string"},
-                "provider":{"type":"string","description":"claude|codex|gemini|grok|opencode|pi|muse (default: yours)"},
+                "provider":{"type":"string","description":"claude|codex|gemini|grok|opencode|pi (default: yours)"},
                 "model":{"type":"string"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
         json!({"name":"otto.personal_agent_delegate","mutating":false,"category":"Sessions",
             "description":"Main agent only, from its Threads chat: hand `task` to one of your agents (name or id). Opens it beside you as a linked thread; its report arrives back here as a message when it finishes. Returns the thread.",

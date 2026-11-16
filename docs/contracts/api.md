@@ -3418,7 +3418,7 @@ artifacts. The final manifest is published by atomic rename as the last action.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /workspaces/{id}/providers/update | ws editor | UpdateProvidersReq | update agent CLI providers for the workspace |
+| POST /workspaces/{id}/providers/update | ws editor | UpdateProvidersReq | update agent CLI providers for the workspace: only enabled providers whose CLI is installed (a missing CLI is never installed); 400 when the named provider has no update command, is turned off or is not installed |
 
 ## Filesystem & logs (operator tools)
 
@@ -6814,7 +6814,7 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | GET /ide/fs/file?kind=&root=&workspace_id=&connection_id=&path= | Agents: Edit | query `IdeFileQuery` | `IdeFileReadResp` (`content`, `sha256`, `language`, `line_count`, `read_only` for external SDK/module files) |
 | GET /ide/fs/git-base?kind=&root=&workspace_id=&connection_id=&path= | Agents: Edit | query `IdeGitBaseQuery` | `IdeGitBaseResp` (`in_repo`, `repo_root?`, `rel_path?`, `head_exists`, `content?`, `binary`, `truncated` — `HEAD:<rel_path>` baseline following staged `R` renames for editor Git diff gutter markers across reopen/reload; returns `in_repo: false` for broad system/`$HOME` git roots) |
 | PUT /ide/fs/file | Agents: Edit | `IdeFileWriteReq` (`expected_sha256?` → 409 on mismatch; records Local History snapshot when `local_history_enabled`) | `IdeFileWriteResp` |
-| POST /ide/fs/mutate | Agents: Edit | `IdeFsMutateReq` (`mkdir` \| `create_file` \| `rename` \| `delete` \| `duplicate`; snapshots deleted files into Local History before unlink) | `IdeFsMutateResp` |
+| POST /ide/fs/mutate | Agents: Edit | `IdeFsMutateReq` (`mkdir` \| `create_file` \| `rename` \| `delete` \| `duplicate`; snapshots deleted files into Local History before unlink; `create_file`, `rename` and `duplicate` onto an existing path → 409 (a case-only rename is allowed); `rename`/`delete` of a symlink act on the link, never its target) | `IdeFsMutateResp` |
 | POST /ide/fs/complete | Agents: Edit | `IdeFsCompleteReq` (`query` [alias `prefix`] incl. `@~/...`, `@../...`, `/abs/...`, or workspace-relative; `cwd?`, `roots`, `target?`, `aliases`, `limit?`) | `IdeFsCompleteResp` (`items`, `base_dir`, `elapsed_ms` in `<15ms` for `@` composer menus) |
 | POST /ide/search | Agents: Edit | `IdeSearchReq` (`files` \| `text` \| `symbols` \| `all` across primary + attached roots) | `IdeSearchResp` |
 | POST /ide/replace | Agents: Edit | `IdeReplaceReq` (`dry_run?` preview or atomic apply across primary + attached roots) | `IdeReplaceResp` |

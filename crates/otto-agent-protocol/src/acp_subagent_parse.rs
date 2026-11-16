@@ -310,45 +310,12 @@ pub(crate) fn parse_grok_bg_launch(output: &str) -> Option<(String, bool)> {
 
 pub(crate) fn file_uri_to_path(raw: &str) -> Option<PathBuf> {
     let s = raw.trim().trim_matches(['"', '\'', ')', '>', ',']);
-    let p = if let Some(rest) = s.strip_prefix("file://") {
-        let path_part = rest.strip_prefix("localhost").unwrap_or(rest);
-        if path_part.is_empty() {
-            return None;
-        }
-        PathBuf::from(percent_decode(path_part))
-    } else if s.starts_with('/') {
+    let p = if s.starts_with('/') {
         PathBuf::from(s)
     } else {
-        return None;
+        otto_core::paths::file_uri_to_path(s)?
     };
     is_clean_absolute_path(&p).then_some(p)
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push((hi << 4) | lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 pub(crate) fn parse_embedded_json(s: &str) -> Option<Value> {

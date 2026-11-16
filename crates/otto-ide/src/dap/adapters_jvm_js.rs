@@ -325,11 +325,11 @@ pub(super) async fn resolve_java_adapter(
         }
         let compile_cmd = format!(
             "mkdir -p {} && {} -g -d {} -sourcepath {} {}",
-            super::shell_quote(&out_dir),
-            super::shell_quote(&javac_bin),
-            super::shell_quote(&out_dir),
-            super::shell_quote(&src_root),
-            super::shell_quote(&program),
+            crate::target::ssh_exec::posix_quote(&out_dir),
+            crate::target::ssh_exec::posix_quote(&javac_bin),
+            crate::target::ssh_exec::posix_quote(&out_dir),
+            crate::target::ssh_exec::posix_quote(&src_root),
+            crate::target::ssh_exec::posix_quote(&program),
         );
         let out = run_target_command(
             &req.target,

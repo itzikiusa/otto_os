@@ -53,8 +53,8 @@ use otto_core::agent_runtime::{
 use serde_json::{json, Value};
 
 use crate::driver::{
-    item, rpc_key, tool_error, with_file_paths, DriverError, DriverEvent, DriverStep,
-    LaunchContext, LaunchSpec, StructuredDriver,
+    item, restore_keeping_program, rpc_key, tool_error, with_file_paths, DriverError, DriverEvent,
+    DriverStep, LaunchContext, LaunchSpec, StructuredDriver,
 };
 
 /// A multi-edit `edit` call as one patch: a hunk per `(oldText, newText)`.
@@ -1630,13 +1630,7 @@ impl StructuredDriver for PiDriver {
     }
 
     fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
-        if !state.is_null() {
-            let mut restored: Self =
-                serde_json::from_value(state.clone()).map_err(|e| DriverError(e.to_string()))?;
-            restored.program = std::mem::take(&mut self.program);
-            *self = restored;
-        }
-        Ok(())
+        restore_keeping_program(self, state, |d| &mut d.program)
     }
 }
 

@@ -20,7 +20,7 @@ use tokio::io::AsyncReadExt;
 use crate::lsp_host::pool_spawn::kill_process_group_sync;
 use crate::types::IdeGitBaseResp;
 
-use super::fs_ops::{enforce_non_root_path, trim_incomplete_utf8_tail};
+use super::fs_ops::enforce_non_root_path;
 use super::path_resolve::{remote_parent, resolve_remote_in_roots_or_sdk};
 use super::sdk_paths::{is_virtual_archive_uri, resolve_local_readable};
 use super::ssh_exec::write_ssh_env_preamble;
@@ -225,7 +225,7 @@ fn decode_head_blob_bytes(mut out_buf: Vec<u8>, cap: usize) -> HeadBlobData {
         };
     }
     let slice = if truncated {
-        trim_incomplete_utf8_tail(&out_buf)
+        otto_core::text::trim_incomplete_utf8_tail(&out_buf)
     } else {
         out_buf.as_slice()
     };

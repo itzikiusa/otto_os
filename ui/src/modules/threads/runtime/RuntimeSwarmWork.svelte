@@ -5,10 +5,10 @@
   // reads it from agy's files (GET /runtime-sessions/{id}/swarm?member=),
   // polled while the member runs. T3 Code's NativeChildWorkDialog
   // (MIT, Copyright (c) 2026 T3 Tools Inc.) shows the same per-child steps.
-  import { onDestroy } from 'svelte';
   import { api } from '../../../lib/api/client';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../../lib/loadError';
+  import { pollWhileVisible, type Poller } from '../../../lib/poll';
   import type { RuntimeSwarmMember, RuntimeSwarm } from '../../../lib/api/types';
 
   interface Props {
@@ -23,38 +23,43 @@
   let data = $state<RuntimeSwarmMember | null>(null);
   let error = $state<string | null>(null);
   let loading = $state(true);
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let gone = false;
+  let poller: Poller | null = null;
 
-  async function load(): Promise<void> {
+  async function load(): Promise<boolean> {
     try {
       const s = await api.get<RuntimeSwarm>(`/runtime-sessions/${encodeURIComponent(sessionId)}/swarm?member=${encodeURIComponent(member)}`);
       data = s.members.find((m) => m.name === member) ?? null;
       error = null;
+      return true;
     } catch (e) {
       error = loadErrorText(e);
+      return false;
     } finally {
       loading = false;
     }
-    if (!gone && live) timer = setTimeout(() => void load(), POLL_MS);
   }
   $effect(() => {
     void sessionId;
     void member;
     loading = true;
-    void load();
+    if (!live) {
+      void load();
+      return;
+    }
+    const p = pollWhileVisible(load, { ms: POLL_MS });
+    poller = p;
     return () => {
-      if (timer) clearTimeout(timer);
+      p.stop();
+      poller = null;
     };
   });
-  onDestroy(() => (gone = true));
 
   const STEP: Record<string, string> = { PLANNER_RESPONSE: 'Thought / tools', GENERIC: 'Result', USER_INPUT: 'Message' };
   const phaseText = $derived(data ? (data.killed ? 'Killed' : data.phase ? data.phase.charAt(0) + data.phase.slice(1).toLowerCase() : null) : null);
 </script>
 
 <div class="sw" data-testid="runtime-swarm-work">
-  <LoadState what="its work" loading={loading && !data} error={data ? null : error} empty={!data} variant="compact" rows={2} onretry={() => void load()}>
+  <LoadState what="its work" loading={loading && !data} error={data ? null : error} empty={!data} variant="compact" rows={2} onretry={() => (poller ? poller.now() : void load())}>
     {#snippet emptyView()}<p class="sw-meta">Antigravity has no record of this member yet.</p>{/snippet}
     {#if data}
       <p class="sw-meta">

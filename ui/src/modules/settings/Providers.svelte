@@ -43,6 +43,8 @@
     { name: 'claude',   updateCmd: 'claude update' },
     { name: 'codex',    updateCmd: 'codex update' },
     { name: 'agy',      updateCmd: 'agy update' },
+    { name: 'gemini',   updateCmd: 'npm install -g @google/gemini-cli@latest' },
+    { name: 'grok',     updateCmd: 'grok update' },
     { name: 'opencode', updateCmd: 'opencode upgrade' },
     { name: 'pi',       updateCmd: 'pi update' },
     { name: 'muse',     updateCmd: 'MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1 MUSE_UPDATE_INTERVAL_SECONDS=0 muse --version' },
@@ -415,9 +417,12 @@
   }
 
   async function remove(n: string): Promise<void> {
+    const builtin = BUILTINS.some((b) => b.name === n);
     if (
       !(await confirmer.ask(
-        `Remove the custom provider “${n}”? It disappears from every picker; sessions already running on it keep working. You’d have to re-enter its command to add it back.`,
+        builtin
+          ? `Remove your override of “${n}”? It goes back to the built-in command; sessions already running on it keep working.`
+          : `Remove the custom provider “${n}”? It disappears from every picker; sessions already running on it keep working. You’d have to re-enter its command to add it back.`,
         { title: 'Remove provider?', danger: true, confirmLabel: 'Remove' },
       ))
     )
@@ -585,14 +590,14 @@
     <section class="section">
       <h2 class="section-title">Built-in</h2>
       <div class="list">
-        {#each BUILTINS as b (b)}
+        <!-- An overridden built-in is listed once, under Custom. -->
+        {#each BUILTINS.filter((b) => !custom[b.name]) as b (b.name)}
           <div class="item" class:off={disabled.has(b.name)}>
             <span class="mono name">{b.name}</span>
             {#if b.updateCmd}
               <span class="dim sm mono meta" title="Update command">{b.updateCmd}</span>
             {/if}
             <span class="grow"></span>
-            {#if custom[b.name]}<span class="chip">Overridden below</span>{/if}
             {#if b.name !== 'shell'}
               {@render enableToggle(b.name)}
             {:else}
@@ -619,6 +624,7 @@
             <span class="mono name">{n}</span>
             <span class="dim sm mono meta" title={`${p.cmd} ${joinArgs(p.args)}`}>{p.cmd} {joinArgs(p.args)}</span>
             <span class="grow"></span>
+            {#if BUILTINS.some((b) => b.name === n)}<span class="chip" title="Replaces the built-in {n} provider">Overrides built-in</span>{/if}
             {#if p.model_family}<span class="chip" title={`CLI family: ${p.model_family}`}>{p.model_family}</span>{/if}
             {#if p.resume_args?.length}<span class="chip" title="Resume arguments set">resume</span>{/if}
             {#if p.update_command}<span class="chip" title={`Update command: ${p.update_command}`}>update</span>{/if}

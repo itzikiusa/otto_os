@@ -125,6 +125,26 @@ export async function performCloseAllTabs(
   host.closeSplit();
 }
 
+/** A target switch drops every tab: autosave what it can, then ask before
+ *  discarding what is still unsaved (autosave off, a conflict, a failed save). */
+export async function confirmDiscardOnSwitch(
+  host: { target: IdeTargetSpec; tabs: IdeOpenTab[] },
+  bufPerf: { flushAll(h: { tabs: IdeOpenTab[] }): void; isTabDirty(t: IdeOpenTab): boolean },
+  flushAutoSave: () => Promise<void>,
+): Promise<boolean> {
+  if (!host.target.root) return true;
+  if (readIdePreferences().autoSave) await flushAutoSave();
+  bufPerf.flushAll(host);
+  const dirty = host.tabs.filter((t) => !t.readOnly && bufPerf.isTabDirty(t));
+  if (dirty.length === 0) return true;
+  return confirmer.ask(
+    dirty.length === 1
+      ? `“${dirty[0].name}” has unsaved changes. Discard them and switch?`
+      : `${dirty.length} tabs have unsaved changes. Discard them and switch?`,
+    { title: 'Discard unsaved changes?', confirmLabel: 'Discard & switch', danger: true },
+  );
+}
+
 export function projectStorageKey(target: IdeTargetSpec): string {
   if (!target.root) return '';
   return target.kind === 'ssh'

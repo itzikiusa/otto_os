@@ -40,11 +40,12 @@
     applyLinePrefixSuffixSync, buildEditorFindProviderSpec,
     buildReadOnlyExtension, clampSelectionToDoc, computeCursorChangeInfo, computeMinimalTextUpdate,
     createCompletionExtension, createCopyRecorder, createEditorStateCache, createIdeColdGutterPlaceholders, createPlainLineWatch,
-    foldMarkerGutter, hasLongLine, isManifestFilePath, langExtOf,
+    foldMarkerGutter, hasLongLine, langExtOf,
     lightEditorTheme, parkEditorHistory, placeholderEditorTheme,
     restoreOrCreateEditorState, revealEditorLine,
     splitSelectionIntoLinesSync, type CursorChangeInfo,
   } from './cm-editor-helpers';
+  import { isIdeManifestPath } from './cm-ide-manifest';
   import { ui } from '../stores/ui.svelte';
   import { keyContext } from '../keys';
   import { registerFindProvider } from '../findProviders';
@@ -465,7 +466,7 @@
       ...(minimal ? [] : [lineNumbers(), ideBpCompartment.of(buildIdeBpExtIfLoaded(filePath)), foldMarkerGutter()]),
       indentOnInput(), indentCompartment.of(indentExt(filePath)), bracketMatching(), lintGutter(),
       ideCompartment.of(buildIdeExtIfLoaded(filePath)),
-      ideDepsCompartment.of(ideMode && isManifestFilePath(filePath) ? coldGutters.deps : []),
+      ideDepsCompartment.of(ideMode && isIdeManifestPath(filePath) ? coldGutters.deps : []),
       drawSelection(),
       readOnlyCompartment.of(readOnlyExt(readOnly, hk)), completionCompartment.of(completionExt()),
       placeholderCompartment.of(placeholderExt((appliedPlaceholder = placeholder))),
@@ -594,7 +595,7 @@
     stateCache.saveLightMeta(fromPath, prevScrollTop, prevSel.anchor, prevSel.head);
     coreSmartMod?.saveIdeViewPosition(root, fromPath, { anchor: prevSel.anchor, head: prevSel.head, scrollTop: prevScrollTop }, { immediate: true });
     attachedLspRoot = ''; attachedLspPath = ''; appliedManifestDepsPath = ''; ++lspAttachSeq;
-    const nextColdDeps = ideMode && isManifestFilePath(toPath) ? coldGutters.deps : [];
+    const nextColdDeps = ideMode && isIdeManifestPath(toPath) ? coldGutters.deps : [];
     view.dispatch({ effects: [lspCompartment.reconfigure([]), ideDepsCompartment.reconfigure(nextColdDeps)] });
 
     parkHistory(fromPath, view.state, prevScrollTop, outgoingSaved);

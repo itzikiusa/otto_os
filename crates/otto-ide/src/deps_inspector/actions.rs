@@ -379,10 +379,12 @@ async fn exec_cmd(
             }
         }
     }
-    let out = tokio::time::timeout(Duration::from_secs(30), cmd.output())
-        .await
-        .map_err(|_| Error::Internal(format!("'{bin}' timed out after 30s")))?
-        .map_err(|e| Error::Internal(format!("failed to run '{bin}': {e}")))?;
+    // A missing or slow tool is the command failing, like a non-zero exit.
+    let out = match tokio::time::timeout(Duration::from_secs(30), cmd.output()).await {
+        Err(_) => return Ok((false, format!("'{bin}' timed out after 30s"))),
+        Ok(Err(e)) => return Ok((false, format!("failed to run '{bin}': {e}"))),
+        Ok(Ok(out)) => out,
+    };
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),

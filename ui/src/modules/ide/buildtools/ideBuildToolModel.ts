@@ -1,4 +1,5 @@
 // Maven & Gradle multi-module model loader, fallback manifest parser, and goal runner.
+import { shortenHomePath as formatHomeShortPath } from '../../../lib/homePath';
 
 import { api, ApiError } from '../../../lib/api/client';
 import { normalizeRootPath } from '../shell/ideProjectHelpers';
@@ -395,9 +396,6 @@ export async function loadBuildToolWorkspaceModel(): Promise<LoadedBuildToolWork
   };
 }
 
-export function formatHomeShortPath(path: string): string {
-  return path.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~');
-}
 
 export function executeBuildToolGoal(mod: IdeBuildToolModule, rawGoal: string, mode: 'run' | 'debug'): void {
   const goals = rawGoal.trim().split(/\s+/).filter(Boolean);
@@ -437,3 +435,5 @@ export function executeBuildToolGoal(mod: IdeBuildToolModule, rawGoal: string, m
     },
   });
 }
+
+export { formatHomeShortPath };

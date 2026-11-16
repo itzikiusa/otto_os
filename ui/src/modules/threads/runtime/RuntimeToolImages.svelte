@@ -15,25 +15,27 @@
   // A string, so the effect doesn't re-run (and re-download) on every update
   // of the session row the getter reads.
   const sid = $derived(target?.().sessionId);
-  let fileUrls = $state<string[]>([]);
+  // null keeps the slot of a file the daemon could not serve, so it shows an
+  // error line instead of vanishing and renumbering the rest.
+  let fileUrls = $state<(string | null)[]>([]);
   $effect(() => {
     const n = files.length;
     if (!sid || !itemId || n === 0) return;
     const id = sid;
     let alive = true;
-    let got: string[] = [];
+    let got: (string | null)[] = [];
     void Promise.all(
       Array.from({ length: n }, (_, i) =>
         authedBlobUrl(`/runtime-sessions/${encodeURIComponent(id)}/items/${encodeURIComponent(itemId)}/images/${i}`).catch(() => null),
       ),
     ).then((urls) => {
-      got = urls.filter((u): u is string => !!u);
+      got = urls;
       if (alive) fileUrls = got;
-      else for (const u of got) URL.revokeObjectURL(u);
+      else for (const u of got) if (u) URL.revokeObjectURL(u);
     });
     return () => {
       alive = false;
-      for (const u of got) URL.revokeObjectURL(u);
+      for (const u of got) if (u) URL.revokeObjectURL(u);
       fileUrls = [];
     };
   });
@@ -45,7 +47,7 @@
 {#if sources.length}
   <div class="tool-images" data-testid="runtime-tool-images">
     {#each sources as src, i}
-      {#if failed.includes(src)}
+      {#if !src || failed.includes(src)}
         <p class="image-error">Image {i + 1} could not be displayed.</p>
       {:else}
         <button type="button" class="thumbnail" aria-label="Enlarge tool image {i + 1}" title="Enlarge tool image {i + 1}" onclick={() => (selected = src)}>

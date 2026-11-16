@@ -14,7 +14,7 @@ import { toasts } from '../toast.svelte';
 import { extOf, langExtOf } from './cm-editor-helpers';
 import type * as CmIdeDepsMod from './cm-ide-deps';
 import type * as CmIdeMod from './cm-ide-extensions';
-import { isManifestPath } from './cm-ide-history';
+import { isIdeManifestPath } from './cm-ide-manifest';
 import { lspLanguageIdFor, normalizeIdeLspServerLang } from './cm-ide-keymap';
 import {
   resolveIdeLspModuleRoot,
@@ -153,7 +153,7 @@ export function mountIdeManifestDeps(opts: {
   onToggleBlame?: (() => void) | null;
   onDepsUpdated: (items: CmIdeDepsMod.IdeDepItem[]) => void;
 }): void {
-  if (!opts.ideMode || !isManifestPath(opts.forPath)) {
+  if (!opts.ideMode || !isIdeManifestPath(opts.forPath)) {
     if (opts.appliedPath) {
       opts.setAppliedPath('');
       opts.target.dispatch({ effects: opts.ideDepsCompartment.reconfigure([]) });

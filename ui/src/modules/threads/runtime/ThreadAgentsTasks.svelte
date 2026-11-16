@@ -14,6 +14,7 @@
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { threads } from '../threadsStore.svelte';
   import { api } from '../../../lib/api/client';
+  import { pollWhileVisible } from '../../../lib/poll';
   import type { RuntimeSwarm } from '../../../lib/api/types';
   import {
     agentTasks,
@@ -84,21 +85,18 @@
   $effect(() => {
     if (!agy) return;
     const id = sessionId;
-    let stop = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const load = async (): Promise<void> => {
+    const poller = pollWhileVisible(async (signal) => {
       try {
-        const s = await api.bg.get<RuntimeSwarm>(`/runtime-sessions/${encodeURIComponent(id)}/swarm`);
-        if (!stop) swarm = s.members;
+        const s = await api.bg.get<RuntimeSwarm>(`/runtime-sessions/${encodeURIComponent(id)}/swarm`, signal);
+        if (!signal.aborted) swarm = s.members;
+        return true;
       } catch {
-        if (!stop) swarm = [];
+        if (!signal.aborted) swarm = [];
+        return false;
       }
-      if (!stop) timer = setTimeout(() => void load(), 15_000);
-    };
-    void load();
+    }, { ms: 15_000 });
     return () => {
-      stop = true;
-      if (timer) clearTimeout(timer);
+      poller.stop();
       swarm = [];
     };
   });

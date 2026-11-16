@@ -171,26 +171,6 @@ fn normalize_rev(rev: Option<&str>) -> Result<String> {
     Ok(r.to_string())
 }
 
-/// Trim an incomplete UTF-8 multi-byte codepoint split right at the truncation cap.
-fn trim_incomplete_utf8_tail(bytes: &[u8]) -> &[u8] {
-    if bytes.is_empty() {
-        return bytes;
-    }
-    let mut i = bytes.len() - 1;
-    let min_i = bytes.len().saturating_sub(4);
-    while i > min_i && (bytes[i] & 0xC0) == 0x80 {
-        i -= 1;
-    }
-    if (bytes[i] & 0xC0) == 0x80 {
-        return bytes;
-    }
-    match std::str::from_utf8(&bytes[i..]) {
-        Ok(_) => bytes,
-        Err(e) if e.error_len().is_none() => &bytes[..i + e.valid_up_to()],
-        Err(_) => bytes,
-    }
-}
-
 fn is_missing_blob_stderr(stderr: &str) -> bool {
     let low = stderr.to_ascii_lowercase();
     const MARKERS: &[&str] = &[
@@ -352,7 +332,7 @@ async fn read_blob_once(
         }));
     }
     let slice = if truncated {
-        trim_incomplete_utf8_tail(&out_buf)
+        otto_core::text::trim_incomplete_utf8_tail(&out_buf)
     } else {
         out_buf.as_slice()
     };

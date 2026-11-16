@@ -2320,6 +2320,8 @@ impl SessionManager {
                     .has_process_sandbox(SessionKind::Agent, &provider)
                     .await;
                 interaction_mode_apply(&cli_prov, &meta_val, external_sandbox, &mut spec.args);
+                spec.args
+                    .extend(nested_sandbox_args(&cli_prov, external_sandbox));
                 spec.args.extend(lean_turn_args(&cli_prov, &meta_val));
                 read_only_strip(&cli_prov, &meta_val, &mut spec.args);
                 spec.args.extend(read_only_args(&cli_prov, &meta_val));
@@ -5062,6 +5064,8 @@ impl SessionManager {
                     .has_process_sandbox(SessionKind::Agent, &session.provider)
                     .await;
                 interaction_mode_apply(&cli_prov, &session.meta, external_sandbox, &mut spec.args);
+                spec.args
+                    .extend(nested_sandbox_args(&cli_prov, external_sandbox));
                 spec.args.extend(lean_turn_args(&cli_prov, &session.meta));
                 // A fresh restart (e.g. a legacy row or an override-created
                 // session) must use and retain the same UUID contract as create.
@@ -6152,8 +6156,8 @@ mod trail;
 #[path = "manager/transcript_roots.rs"]
 mod transcript_roots;
 use cli_flags::{
-    add_dir_args, effort_args, interaction_mode_apply, lean_turn_args, model_args, read_only_args,
-    read_only_strip,
+    add_dir_args, effort_args, interaction_mode_apply, lean_turn_args, model_args,
+    nested_sandbox_args, read_only_args, read_only_strip,
 };
 use otto_tools_env::{
     codex_creds_path, codex_server_env_path, otto_tools_env, pi_mcp_extension_path,

@@ -14,11 +14,7 @@ use super::pool::{PoolKey, ServerIo, SpawnLaunch, Spawner};
 use super::servers;
 use crate::environments::shell_env::collect_safe_non_root_base_env;
 use crate::environments::EnvironmentManager;
-
-/// POSIX single-quote escaping (`'abc'` -> `'abc'`, `a'b` -> `'a'\''b'`).
-pub fn posix_quote(s: &str) -> String {
-    crate::target::ssh_exec::posix_quote(s)
-}
+use crate::target::ssh_exec::posix_quote;
 
 /// Canonical `jdtls` JVM flags balancing burst headroom (768 MiB so Maven/Gradle
 /// indexing never throws `OutOfMemoryError`) with periodic G1 heap uncommit so

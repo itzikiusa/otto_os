@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortenHomePath } from '../../../lib/homePath';
   // Lazy-loaded Workspace & Named Multi-Repo Project switcher popover.
   import { tick } from 'svelte';
   import { placeAnchored, type AnchorPlacement } from '../../../lib/anchorPlace';
@@ -24,14 +25,6 @@
   let width = $state(500);
   let pos = $state<AnchorPlacement>({ left: 12, top: 48, maxH: 460 });
 
-  function shortenHomePath(p: string): string {
-    if (!p) return '';
-    const m = p.match(/^\/Users\/[^/]+(\/.*)?$/);
-    if (m) return `~${m[1] || ''}`;
-    const mLinux = p.match(/^\/home\/[^/]+(\/.*)?$/);
-    if (mLinux) return `~${mLinux[1] || ''}`;
-    return p;
-  }
 
   const filteredNamedProjects = $derived.by(() => {
     const q = query.trim().toLowerCase();

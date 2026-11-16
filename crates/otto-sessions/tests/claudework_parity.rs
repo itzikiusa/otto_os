@@ -271,6 +271,96 @@ async fn prepare_runtime_spawn_rewrites_claudework_respects_access_mode_and_wrap
     assert!(alias_spec.args.iter().any(|a| a == "claude-work-shell-fn"));
 }
 
+/// A runtime thread with `meta.account_id` signs in as that account (its home
+/// as `CLAUDE_CONFIG_DIR`); an account another person owns is refused.
+#[tokio::test]
+async fn prepare_runtime_spawn_uses_the_creators_named_account_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_dir = dir.path().join("project");
+    std::fs::create_dir_all(&ws_dir).unwrap();
+    let ws_str = ws_dir.to_string_lossy().into_owned();
+    let pool = otto_state::open(&dir.path().join("state.db"))
+        .await
+        .unwrap();
+    for user in ["u1", "u2"] {
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) \
+             VALUES (?, ?, 'x', 'U', 0, ?)",
+        )
+        .bind(user)
+        .bind(user)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let accounts = otto_state::provider_accounts::ProviderAccountsRepo::new(pool.clone());
+    let mine = accounts
+        .create(&"u1".into(), "claude", "Work")
+        .await
+        .unwrap();
+    let theirs = accounts
+        .create(&"u2".into(), "claude", "Other")
+        .await
+        .unwrap();
+    let profiles = dir.path().join("profiles");
+    let (events, _rx) = broadcast::channel(16);
+    let mgr = SessionManager::new(SessionsRepo::new(pool), events, ProviderRegistry::new(None))
+        .with_data_dir(dir.path().join("data"))
+        .with_provider_accounts(accounts, profiles.clone());
+    let ws = make_workspace(&ws_str);
+    let spec = || CommandSpec {
+        program: "claude".into(),
+        args: vec!["--output-format".into(), "stream-json".into()],
+        cwd: Some(ws_str.clone()),
+        env: Vec::new(),
+    };
+
+    let sess = make_session(
+        "rt-acct-1",
+        "claude",
+        &ws_str,
+        json!({"runtime": "structured", "account_id": mine.id}),
+    );
+    let mut own = spec();
+    mgr.prepare_runtime_spawn(
+        &ws,
+        &sess,
+        &mut own,
+        Vec::new(),
+        RuntimeMcpDelivery::Protocol,
+    )
+    .await
+    .unwrap();
+    let home = otto_sessions::accounts::account_home(&profiles, &mine.id).unwrap();
+    assert!(
+        own.env.contains(&(
+            "CLAUDE_CONFIG_DIR".into(),
+            home.to_string_lossy().into_owned()
+        )),
+        "{:?}",
+        own.env
+    );
+
+    let foreign = make_session(
+        "rt-acct-2",
+        "claude",
+        &ws_str,
+        json!({"runtime": "structured", "account_id": theirs.id}),
+    );
+    let mut other = spec();
+    assert!(mgr
+        .prepare_runtime_spawn(
+            &ws,
+            &foreign,
+            &mut other,
+            Vec::new(),
+            RuntimeMcpDelivery::Protocol
+        )
+        .await
+        .is_err());
+}
+
 #[tokio::test]
 async fn custom_command_probe_strips_templates_and_checks_login_shell() {
     assert_eq!(

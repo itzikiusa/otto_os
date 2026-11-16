@@ -124,6 +124,19 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
     })
 }
 
+/// The rows a list can show. One a build can't read (a provider added by a
+/// newer build, after a rollback) is skipped and logged, never failing the
+/// whole list.
+fn listable(rows: &[sqlx::sqlite::SqliteRow]) -> Vec<RuntimeSessionRecord> {
+    rows.iter()
+        .filter_map(|r| {
+            row_to_session(r)
+                .inspect_err(|e| tracing::warn!("skipping runtime session row: {e}"))
+                .ok()
+        })
+        .collect()
+}
+
 impl AgentRuntimeRepo {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
@@ -186,7 +199,7 @@ impl AgentRuntimeRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list runtime sessions"))?;
-        rows.iter().map(row_to_session).collect()
+        Ok(listable(&rows))
     }
 
     /// Sessions of every workspace, newest activity first; `owner` narrows to
@@ -204,7 +217,7 @@ impl AgentRuntimeRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list runtime sessions"))?;
-        rows.iter().map(row_to_session).collect()
+        Ok(listable(&rows))
     }
 
     /// [`Self::list`] narrowed to the threads whose `meta.source` and/or
@@ -258,7 +271,7 @@ impl AgentRuntimeRepo {
             }
         }
         .map_err(dberr("list runtime sessions"))?;
-        rows.iter().map(row_to_session).collect()
+        Ok(listable(&rows))
     }
 
     /// Up to `limit` OPEN sessions whose `meta.source` is one of `sources`
@@ -727,6 +740,29 @@ mod tests {
                 .len(),
             6
         );
+    }
+
+    /// A row from a newer build (a provider this build can't parse) is left
+    /// out of every list instead of failing it.
+    #[tokio::test]
+    async fn lists_skip_a_row_with_an_unknown_provider() {
+        let pool = mem_pool().await;
+        seed(&pool).await;
+        let repo = AgentRuntimeRepo::new(pool.clone());
+        new_session(&repo, "a", "u1", json!({"source": "pr-agent"})).await;
+        new_session(&repo, "b", "u1", json!({"source": "pr-agent"})).await;
+        sqlx::query("UPDATE agent_runtime_sessions SET provider = 'future' WHERE id = 'b'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let w = "w1".to_string();
+        assert_eq!(ids(&repo.list(&w, None).await.unwrap()), ["a"]);
+        assert_eq!(ids(&repo.list_all(None).await.unwrap()), ["a"]);
+        let got = repo
+            .list_filtered(&w, None, Some("pr-agent"), None)
+            .await
+            .unwrap();
+        assert_eq!(ids(&got), ["a"]);
     }
 
     /// The auto-close sweep's candidates: open, a listed source, idle before

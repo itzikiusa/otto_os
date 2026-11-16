@@ -104,7 +104,7 @@ fn validate(draft: &RuntimeDraftContent) -> otto_core::Result<()> {
     if draft
         .effort
         .as_ref()
-        .is_some_and(|v| !["low", "medium", "high", "xhigh", "max", "ultra"].contains(&v.as_str()))
+        .is_some_and(|v| !otto_core::agent_runtime::EFFORT_RANK.contains(&v.as_str()))
     {
         return Err(Error::Invalid("Invalid model or effort selection.".into()));
     }
@@ -152,6 +152,22 @@ mod tests {
         assert!(validate(&draft).is_ok());
         draft.images[0].mime = "image/svg+xml".into();
         assert!(matches!(validate(&draft), Err(Error::UnsupportedMedia(_))));
+    }
+
+    #[test]
+    fn drafts_accept_every_effort_a_driver_offers() {
+        for effort in ["none", "minimal", "low", "ultra"] {
+            let draft = RuntimeDraftContent {
+                effort: Some(effort.into()),
+                ..Default::default()
+            };
+            assert!(validate(&draft).is_ok(), "{effort}");
+        }
+        let draft = RuntimeDraftContent {
+            effort: Some("turbo".into()),
+            ..Default::default()
+        };
+        assert!(matches!(validate(&draft), Err(Error::Invalid(_))));
     }
 
     #[test]

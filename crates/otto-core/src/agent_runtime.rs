@@ -30,6 +30,10 @@ use serde_json::Value;
 
 use crate::Id;
 
+/// The env pair that keeps Muse's launcher from checking for a new binary on
+/// every spawn: set on every `muse` Otto runs except its update command.
+pub const MUSE_NO_AUTO_UPDATE: (&str, &str) = ("MUSE_NO_AUTO_UPDATE", "1");
+
 /// The agent CLIs the structured runtime can drive (distinct from the PTY
 /// provider registry): `claude` over the Agent SDK's stream-json control
 /// protocol, `codex` over `codex app-server`, `gemini` (`gemini --acp`) and
@@ -911,6 +915,12 @@ impl ProviderCommand {
         }
     }
 }
+
+/// Every effort name a driver may offer, low → high (agents list theirs in
+/// either order: grok advertises `xhigh, high, medium, low`).
+pub const EFFORT_RANK: [&str; 8] = [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
 
 impl RuntimeCapabilities {
     /// What each driver takes before it reports more (or less) itself.

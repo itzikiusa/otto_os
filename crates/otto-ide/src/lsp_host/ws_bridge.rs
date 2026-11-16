@@ -6,7 +6,6 @@
 //! wiring, and attachment framing inside `otto-ide`.
 
 use std::collections::HashSet;
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -193,17 +192,11 @@ pub async fn plan_lsp_install_compound(
 
 /// Validate query parameters, authorize SSH or local workspace roots, sync
 /// effective Go build tags for `go`, and prepare the [`PoolKey`] + [`SpawnLaunch`].
-pub async fn prepare_lsp_ws_session<C, F, Fut>(
+pub async fn prepare_lsp_ws_session<C: IdeCtx>(
     ctx: &C,
     user: &User,
     q: LspWsQuery,
-    local_root_ok: F,
-) -> std::result::Result<PreparedLspSession, LspWsError>
-where
-    C: IdeCtx,
-    F: Fn(PathBuf) -> Fut,
-    Fut: Future<Output = otto_core::Result<bool>>,
-{
+) -> std::result::Result<PreparedLspSession, LspWsError> {
     let has_root_auth = otto_core::auth::root_authority(user);
     let ide = ctx.ide();
     ide.lsp_pool.record_owner_privilege(&user.id, has_root_auth);
@@ -290,6 +283,15 @@ where
         });
     }
 
+    // A local language server runs unsandboxed as the daemon's user: root
+    // only. Remote SSH targets (above) run on the remote host.
+    if !has_root_auth {
+        return Err(LspWsError {
+            status: StatusCode::FORBIDDEN,
+            code: "lsp_requires_root",
+            message: "only a root account can open a local language server".into(),
+        });
+    }
     let expanded_root_buf =
         otto_core::paths::expand_home_strict(&root).map_err(LspWsError::bad_request)?;
     let expanded_root = expanded_root_buf.to_string_lossy().into_owned();
@@ -300,44 +302,6 @@ where
         }
         None => None,
     };
-
-    // Enforce live RBAC (and secret-path denial via `local_root_ok`, preserving
-    // read-only personal-agent persona-dir access) BEFORE probing filesystem
-    // existence or walking parent directories for module roots.
-    if !has_root_auth {
-        match local_root_ok(expanded_root_buf.clone()).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(LspWsError::forbidden(
-                    "root is not inside a workspace you can access",
-                ));
-            }
-            Err(e) => {
-                tracing::warn!("lsp: workspace lookup failed: {e}");
-                return Err(LspWsError::internal("workspace lookup failed"));
-            }
-        }
-
-        if let Some(ref fh) = file_hint {
-            let fh_path = Path::new(fh);
-            if otto_core::secret_paths::is_denied_file(fh_path) {
-                return Err(LspWsError::forbidden("access to secret file denied"));
-            }
-            let fh_dir = fh_path.parent().unwrap_or(fh_path).to_path_buf();
-            match local_root_ok(fh_dir).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Err(LspWsError::forbidden(
-                        "file is not inside a workspace you can access",
-                    ));
-                }
-                Err(e) => {
-                    tracing::warn!("lsp: file workspace lookup failed: {e}");
-                    return Err(LspWsError::internal("workspace lookup failed"));
-                }
-            }
-        }
-    }
 
     let resolved_root = {
         let lang_cl = lang.clone();
@@ -350,28 +314,6 @@ where
         .await
         .map_err(|_| LspWsError::internal("local module root resolution failed"))??
     };
-
-    if !has_root_auth && Path::new(&resolved_root) != expanded_root_buf.as_path() {
-        match local_root_ok(PathBuf::from(&resolved_root)).await {
-            Ok(true) => {}
-            Ok(false) => {
-                let root_cl = PathBuf::from(&resolved_root);
-                let secret_why = tokio::task::spawn_blocking(move || {
-                    secret_root_denial(&canonical_or_ancestor(&root_cl))
-                })
-                .await
-                .ok()
-                .flatten();
-                let msg = secret_why
-                    .unwrap_or_else(|| "root is not inside a workspace you can access".to_string());
-                return Err(LspWsError::forbidden(msg));
-            }
-            Err(e) => {
-                tracing::warn!("lsp: workspace lookup failed: {e}");
-                return Err(LspWsError::internal("workspace lookup failed"));
-            }
-        }
-    }
 
     let resolved = {
         let lang_cl = lang.clone();

@@ -386,6 +386,23 @@ impl std::fmt::Display for DriverError {
     }
 }
 
+/// [`StructuredDriver::restore_state`] for a driver that snapshots itself
+/// whole: a non-null `state` replaces `driver`, which keeps its own `program`
+/// (the field `program` picks), never part of a snapshot.
+pub(crate) fn restore_keeping_program<T: serde::de::DeserializeOwned>(
+    driver: &mut T,
+    state: &serde_json::Value,
+    program: fn(&mut T) -> &mut String,
+) -> Result<(), DriverError> {
+    if !state.is_null() {
+        let mut restored: T =
+            serde_json::from_value(state.clone()).map_err(|e| DriverError(e.to_string()))?;
+        std::mem::swap(program(&mut restored), program(driver));
+        *driver = restored;
+    }
+    Ok(())
+}
+
 /// One provider's protocol translator.
 pub trait StructuredDriver: Send + 'static {
     fn provider(&self) -> RuntimeProvider;

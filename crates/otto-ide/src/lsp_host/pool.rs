@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 
 use super::pool_mux::run_actor;
 use super::pool_spawn::build_process_spawner;
-pub use super::pool_spawn::{build_remote_lsp_script, posix_quote};
+pub use super::pool_spawn::build_remote_lsp_script;
 use super::servers;
 use crate::environments::module_sdks::effective_go_build_tags_for_paths_in_project;
 use crate::environments::EnvironmentManager;

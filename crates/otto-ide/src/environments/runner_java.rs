@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::super::runner::{append_run_line, ActiveRunHandle};
 use super::{csv_list, resolve_program_in_env};
@@ -53,7 +54,7 @@ pub(in crate::environments) async fn compile_java_main_step(
     target: &IdeTargetSpec,
     cwd: &str,
     env_map: &BTreeMap<String, String>,
-    handle: &ActiveRunHandle,
+    handle: &Arc<ActiveRunHandle>,
 ) -> std::result::Result<(String, Vec<String>), String> {
     let mut roots = vec![PathBuf::from(&target.root)];
     for extra in target.merged_extra_roots() {

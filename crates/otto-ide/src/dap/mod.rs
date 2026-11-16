@@ -145,11 +145,6 @@ pub(crate) fn ssh_tunnel_config(ssh: &IdeSshSpec) -> Result<SshTunnelConfig> {
     ssh.to_ssh_tunnel_config()
 }
 
-/// Safe POSIX single-quote shell escaping for remote SSH command strings.
-pub(crate) fn shell_quote(raw: &str) -> String {
-    crate::target::ssh_exec::posix_quote(raw)
-}
-
 fn build_ssh_remote_command(
     ssh: &IdeSshSpec,
     command: &str,
@@ -181,7 +176,10 @@ fn build_ssh_remote_command(
     };
     ssh_args.push("--".into());
     ssh_args.push(dest);
-    ssh_args.push(format!("sh -lc {}", shell_quote(&remote_body)));
+    ssh_args.push(format!(
+        "sh -lc {}",
+        crate::target::ssh_exec::posix_quote(&remote_body)
+    ));
     let mut cmd = Command::new("ssh");
     cmd.args(&ssh_args).kill_on_drop(true);
     #[cfg(unix)]
