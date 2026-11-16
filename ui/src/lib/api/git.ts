@@ -24,6 +24,7 @@ import type {
   PushTarget,
   RefsResp,
   RepoFileAtRevResp,
+  Repo,
   RepoStatusResp,
 } from './types';
 
@@ -66,13 +67,25 @@ export function statusEq(a: RepoStatusResp, b: RepoStatusResp): boolean {
   return true;
 }
 
+/** "1 file needs resolution" / "3 files need resolution". */
+export function needResolution(n: number): string {
+  return `${plural(n, 'file')} ${n === 1 ? 'needs' : 'need'} resolution`;
+}
+
+/** Whether Otto can open pull requests for this repo: its remote is a
+ *  supported forge. No remote, or an unrecognized host, can't. */
+export function canOpenPrs(repo: Pick<Repo, 'forge' | 'remote_url'> | null | undefined): boolean {
+  if (!repo || repo.forge === 'unrecognized') return false;
+  return !!repo.forge || !!repo.remote_url;
+}
+
 /** What a finished pull says (one wording for the toolbar, the graph menus and
  *  the agent command). A pull whose merge conflicted comes back 200 with
  *  unmerged paths — not a failure: it needs the resolver. */
 export function pullReport(r: PullResp): { tone: 'warn' | 'success'; title: string; body?: string } {
   const conflicts = r.status.changes.filter((c) => c.kind === 'conflicted').length;
   if (conflicts > 0) {
-    return { tone: 'warn', title: 'Pulled with conflicts', body: r.note ?? `${plural(conflicts, 'file')} need resolution — open "Resolve conflicts"` };
+    return { tone: 'warn', title: 'Pulled with conflicts', body: r.note ?? `${needResolution(conflicts)} — open "Resolve conflicts"` };
   }
   return { tone: 'success', title: 'Pulled', body: r.note ?? undefined };
 }

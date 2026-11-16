@@ -1,12 +1,13 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import { needResolution } from '../../lib/api/git';
   import { toastError } from '../../lib/toastError';
   // Toolbar row: Fetch / Pull / Push / Branch / Stash / Pop + current branch chip.
   // In the page header Fetch folds into the Pull split menu (≤5 header
   // controls) and the verbs are also ⌘K commands (group "Git").
   import { git } from '../../lib/stores/git.svelte';
   import { api } from '../../lib/api/client';
-  import type { PullMode, PullModeResp, RepoStatusResp } from '../../lib/api/types';
+  import type { PullMode, PullModeResp, RemoteInfo, RepoStatusResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -31,8 +32,12 @@
     /** Rendered as direct children of the PageHeader's actions row (so they
      *  overflow into its ⋯ by `data-overflow`) instead of in a `.toolbar` wrapper. */
     inHeader?: boolean;
+    /** Opens the stash browser OUTSIDE the toolbar. In the header a dialog
+     *  mounted here lands in PageHeader's actions row, whose overflow
+     *  measurer hides it (and Pull with it). */
+    onbrowsestashes?: () => void;
   }
-  let { repoId, status, onstatus, onrefresh, inHeader = false }: Props = $props();
+  let { repoId, status, onstatus, onrefresh, inHeader = false, onbrowsestashes }: Props = $props();
 
   let busy = $state('');
 
@@ -43,6 +48,21 @@
   // no branch to push or pull, so both would only fail with git's
   // "You are not currently on a branch".
   const detached = $derived(status.branch === '(detached)');
+  // A repo with no remote can't pull or publish (git's "No configured push
+  // destination" / "no tracking information"). Re-read when refs move (a
+  // remote added in Remotes… bumps them). Unknown (null) keeps both enabled.
+  let remoteCount = $state<number | null>(null);
+  $effect(() => {
+    void git.refsRev[repoId];
+    const ctl = new AbortController();
+    api
+      .get<RemoteInfo[]>(`/repos/${repoId}/remotes`, ctl.signal)
+      .then((r) => (remoteCount = r.length))
+      .catch(() => {});
+    return () => ctl.abort();
+  });
+  const noRemote = $derived(remoteCount === 0);
+  const NO_REMOTE = 'Add a remote first (⋯ → Remotes…)';
   // Push is the header's primary action only while there is something to push.
   const pushPrimary = $derived(status.upstream != null && status.ahead > 0 && !detached);
   // Known-empty stash list → Pop can only fail, so say so up front. Unknown
@@ -51,6 +71,10 @@
   const nothingToPop = $derived(stashCount === 0);
   /** The stash browser is open (files + patch, Apply / Pop / Drop). */
   let stashesOpen = $state(false);
+  function browseStashes(): void {
+    if (onbrowsestashes) onbrowsestashes();
+    else stashesOpen = true;
+  }
 
   async function doFetch(): Promise<void> {
     busy = 'fetch';
@@ -208,7 +232,7 @@
         icon: 'eye',
         disabled: nothingToPop,
         title: 'See what each stash holds, then apply, pop or drop it',
-        action: () => (stashesOpen = true),
+        action: browseStashes,
       },
     ]);
   }
@@ -240,7 +264,7 @@
       if (conflicts > 0) {
         toasts.warn(
           'Stash popped with conflicts',
-          `${plural(conflicts, 'file')} need resolution — open "Resolve conflicts". The stash entry was kept.`,
+          `${needResolution(conflicts)} — open "Resolve conflicts". The stash entry was kept.`,
         );
       } else {
         toasts.success('Stash popped');
@@ -283,10 +307,12 @@
     class="btn small ghost tbtn"
     data-icon="arrowDown"
     data-label={pullLabel}
-    disabled={busy !== '' || detached}
+    disabled={busy !== '' || detached || noRemote}
     onclick={() => void doPull()}
     title={detached
       ? 'HEAD is detached — check out a branch to pull'
+      : noRemote
+      ? NO_REMOTE
       : "Pull from upstream using the repo’s configured mode"}
   >
     <Icon name="arrowDown" size={12} />
@@ -312,10 +338,12 @@
   data-overflow="4"
   data-icon="arrowUp"
   data-label={status.upstream ? 'Push' : 'Publish'}
-  disabled={busy !== '' || nothingToPush || detached}
+  disabled={busy !== '' || nothingToPush || detached || noRemote}
   onclick={() => void doPush()}
   title={detached
     ? 'HEAD is detached — check out a branch to push'
+    : noRemote
+    ? NO_REMOTE
     : status.upstream
     ? status.ahead > 0
       ? `Push ${plural(status.ahead, 'commit')} to ${status.upstream}`
@@ -373,7 +401,7 @@
   data-icon="archive"
   data-label="Stashes"
   disabled={busy !== '' || nothingToPop}
-  onclick={() => (stashesOpen = true)}
+  onclick={browseStashes}
   title={nothingToPop ? 'There are no stashes' : 'See what each stash holds, then apply, pop or drop it'}
 >
   <Icon name="archive" size={12} />

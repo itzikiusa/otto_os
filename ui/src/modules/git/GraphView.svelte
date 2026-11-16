@@ -14,6 +14,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { git } from '../../lib/stores/git.svelte';
+  import { canOpenPrs } from '../../lib/api/git';
   import { rel } from '../../lib/stores/now.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -150,6 +151,9 @@
       get worktreeBranches() { return index.worktreeBranches; },
       get refKnowledge() { return index.refKnowledge; },
       get baseBranch() { return index.baseBranch; },
+      get canOpenPr() {
+        return canOpenPrs(git.allRepos.find((r) => r.id === repoId) ?? git.repos.find((r) => r.id === repoId));
+      },
       openCreatePr,
       chipsFor: (c) => index.chipsFor(c),
       setCleanupBase: (name) => data.setCleanupBase(name),

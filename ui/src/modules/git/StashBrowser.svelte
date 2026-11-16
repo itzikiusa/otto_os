@@ -16,6 +16,7 @@
   import { toastError } from '../../lib/toastError';
   import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
+  import { needResolution } from '../../lib/api/git';
   import { relativeAge, splitPatch, stashTitle } from './gitopsPlan';
 
   interface Props {
@@ -109,7 +110,7 @@
       if (conflicts > 0 && op !== 'drop') {
         toasts.warn(
           op === 'pop' ? 'Popped with conflicts' : 'Applied with conflicts',
-          `${plural(conflicts, 'file')} need resolution. The stash entry was kept.`,
+          `${needResolution(conflicts)}. The stash entry was kept.`,
         );
       } else {
         toasts.success(op === 'apply' ? 'Stash applied' : op === 'pop' ? 'Stash popped' : 'Stash dropped', label);

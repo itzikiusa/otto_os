@@ -201,6 +201,14 @@
     return 'working';
   });
 
+  /** The per-file diff URL. A staged rename sends its origin too, or the new
+   *  name alone reads as a whole-file add (+N −0). */
+  function diffUrl(path: string, target: typeof selTarget): string {
+    const orig = untrack(() => status.changes.find((c) => c.path === path)?.orig_path);
+    const old = target === 'staged' && orig ? `&old_path=${encodeURIComponent(orig)}` : '';
+    return `/repos/${repoId}/diff?target=${target}&path=${encodeURIComponent(path)}${old}`;
+  }
+
   $effect(() => {
     const path = selectedPath;
     const target = selTarget;
@@ -222,7 +230,7 @@
     const ctl = new AbortController();
     const stale = () => ctl.signal.aborted;
     void api
-      .get<DiffResp>(`/repos/${repoId}/diff?target=${target}&path=${encodeURIComponent(path)}`, ctl.signal)
+      .get<DiffResp>(diffUrl(path, target), ctl.signal)
       .then((d) => {
         if (!stale()) diff = d;
       })
@@ -249,7 +257,7 @@
   function refetchOpenDiff(path: string, target: typeof selTarget): () => void {
     const ctl = new AbortController();
     void api
-      .get<DiffResp>(`/repos/${repoId}/diff?target=${target}&path=${encodeURIComponent(path)}`, ctl.signal)
+      .get<DiffResp>(diffUrl(path, target), ctl.signal)
       .then((d) => {
         if (!ctl.signal.aborted && selectedPath === path && selTarget === target) {
           diff = d;

@@ -8,7 +8,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { router } from '../../lib/router.svelte';
   import { git } from '../../lib/stores/git.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import GitToolbar from './GitToolbar.svelte';
   import GraphView from './GraphView.svelte';
   import GraphSearchBar from './GraphSearchBar.svelte';
@@ -212,8 +212,10 @@
 
   /** ⋯ in the toolbar row: the repo-level tools that don't earn a permanent
    *  button (remotes are a setting; recovery is rare and deliberate). */
-  export function openMoreMenu(e: MouseEvent): void {
-    ctxMenu.show(e, [
+  /** The repo's own overflow rows (Remotes, Recovery, Copy path). In the Git
+   *  page header they ride PageHeader's single ⋯ (`more`). */
+  export function moreMenuItems(): MenuItem[] {
+    return [
       { label: 'Remotes…', icon: 'globe', action: () => (remotesOpen = true) },
       { label: 'Recovery tools…', icon: 'undo', action: () => gitBridge.openRecovery(repo.id) },
       { separator: true },
@@ -225,7 +227,10 @@
             .then(() => toasts.success('Copied', repo.path))
             .catch(() => toasts.error('Couldn’t copy', 'The clipboard isn’t available here. Select the text and copy it manually.')),
       },
-    ]);
+    ];
+  }
+  function openMoreMenu(e: MouseEvent): void {
+    ctxMenu.show(e, moreMenuItems());
   }
 
   // History / blame open as a right-side drawer over the graph. The request

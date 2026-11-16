@@ -11,7 +11,8 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { GitAccount, GitProviderKind, Repo, RemoteRepoSummary } from '../../lib/api/types';
+  import type { GitAccount, GitProviderKind, Repo, RemoteRepoSummary, RepoStatusResp } from '../../lib/api/types';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { git } from '../../lib/stores/git.svelte';
@@ -43,7 +44,11 @@
   // The active repo is driven by the tab store, not the route.
   const activeRepo = $derived(git.allRepos.find((r) => r.id === git.activeRepoId) ?? null);
   const activeStatus = $derived(activeRepo ? (git.statusById[activeRepo.id] ?? null) : null);
-  let repoView = $state<{ openMoreMenu: (e: MouseEvent) => void } | undefined>();
+  let repoView = $state<{ moreMenuItems: () => MenuItem[] } | undefined>();
+  // The header toolbar's stash browser, mounted here: inside PageHeader's
+  // actions row the overflow measurer hid the dialog (and Pull with it).
+  const StashBrowser = lazyComponent(() => import('./StashBrowser.svelte'));
+  let stashesRepo = $state<string | null>(null);
 
   // Focus (my PRs + my Jira work across every repo) is a PAGE-level view, not
   // a repo sub-tab, and it lives in the URL (gitRoute.ts): the Focus entry
@@ -338,6 +343,7 @@
       title={focusView ? 'Focus' : 'Git'}
       crumbs={focusView ? [{ label: 'Git', onclick: () => setFocus(false) }] : []}
       class="git-header"
+      more={activeRepo && !focusView ? () => repoView?.moreMenuItems() ?? [] : undefined}
     >
       {#snippet tabs()}
         <GitTabs embedded focus={focusView} ontogglefocus={() => setFocus(!focusView)} onopen={openRepo} onadd={(mode) => { addMode = mode; addOpen = true; }} />
@@ -354,21 +360,30 @@
               status={activeStatus}
               onstatus={(s) => git.setStatus(repoId, s)}
               onrefresh={() => gitBridge.refreshGraph(repoId)}
+              onbrowsestashes={() => (stashesRepo = repoId)}
             />
           {/if}
-          <button
-            class="icon-btn"
-            data-keep
-            data-icon="more"
-            data-label="More repository actions"
-            title="More repository actions"
-            aria-label="More repository actions"
-            aria-haspopup="menu"
-            onclick={(e) => repoView?.openMoreMenu(e)}
-          ><Icon name="more" size={16} /></button>
         {/if}
       {/snippet}
     </PageHeader>
+
+    {#if stashesRepo}
+      {@const sid = stashesRepo}
+      <LazyMount
+        lazy={StashBrowser}
+        what="the stash browser"
+        quiet
+        onerror={() => (stashesRepo = null)}
+        props={{
+          repoId: sid,
+          onclose: () => (stashesRepo = null),
+          onchanged: (st: RepoStatusResp) => {
+            git.setStatus(sid, st);
+            gitBridge.refreshGraph(sid);
+          },
+        }}
+      />
+    {/if}
 
     {#if focusView}
       <PageBody fill padded={false}>
