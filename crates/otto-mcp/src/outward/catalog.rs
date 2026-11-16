@@ -13,6 +13,9 @@ use super::ui_commands;
 pub const DEFAULT_ENABLED: &[&str] = &[
     "get_context_packet",
     "ask_human_approval",
+    // Asks the thread's owner for a secret in a private card: the value goes
+    // only to the calling agent's tool result (never the DB or the timeline).
+    "request_secret",
     // Scheduled-tasks reads are safe to expose by default so an agent can inspect
     // existing jobs; the write tools below stay off until an admin enables them.
     "list_scheduled_tasks",
@@ -659,6 +662,11 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["title"],"properties":{
                 "workspace_id":{"type":"string"},"title":{"type":"string"},
                 "detail":{"type":"string"},"wait_seconds":{"type":"integer"}}}}),
+        json!({"name":"otto.request_secret","mutating":false,"category":"Approvals",
+            "description":"Ask the person for a secret (token, password) in a private Otto card, never the chat. Waits ≤3 min: `{status: provided, value}` (only here; don't echo it), `declined` or `no_answer`.",
+            "inputSchema":{"type":"object","required":["prompt"],"properties":{
+                "prompt":{"type":"string","description":"What it is for."},
+                "name":{"type":"string"}}}}),
         // ================= Workflows =================
         json!({"name":"otto.list_workflows","mutating":false,"category":"Workflows",
             "description":"List workflows (visual node-graph automations) across EVERY workspace you can read — `{items, current_workspace_id, workspace_count}`, each item id, name, description, version, workspace_id + workspace_name (graph omitted: use otto.get_workflow). Pass a workflow's id OR its name as `workflow_id` to the other workflow tools. Read-only.",

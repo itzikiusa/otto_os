@@ -168,6 +168,7 @@ pub const GROUPS: &[ToolGroup] = &[
             "get_usage_summary",
             "list_bundled_skills",
             "ask_human_approval",
+            "request_secret",
         ],
     },
     ToolGroup {

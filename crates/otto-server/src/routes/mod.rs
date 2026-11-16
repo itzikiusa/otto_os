@@ -324,6 +324,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/sessions/{id}/ui-control",
             post(ui_commands::set_ui_control),
         )
+        .route("/secret-requests", get(crate::secret_request::list))
+        .route("/secret-requests/{id}", post(crate::secret_request::answer))
         .route(
             "/mcp/otto-server",
             get(crate::mcp_outward::otto_server_status)

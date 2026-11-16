@@ -53,6 +53,8 @@
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimePlan from './RuntimePlan.svelte';
   import RuntimeQueueBar from './RuntimeQueueBar.svelte';
+  import RuntimeSecretCard from './RuntimeSecretCard.svelte';
+  import { secretRequests } from '../../../lib/stores/secretRequests.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import RuntimeTimelineRows from './RuntimeTimelineRows.svelte';
   import RuntimeTurnStatus from './RuntimeTurnStatus.svelte';
@@ -137,10 +139,16 @@
   const sessionError = $derived(deriveSessionError(draft.startError, p));
   const plan = $derived(deriveActivePlan(p, turn));
   const uiAsk = $derived(!!session && !closed && !auth.isImpersonating && session.created_by === auth.me?.id && !!uiControl.promptFor(sessionId));
+  // The owner's own sign-in answers a private secret request.
+  const secretAsk = $derived(
+    session && !auth.isImpersonating && session.created_by === auth.me?.id ? (secretRequests.bySession[sessionId] ?? null) : null,
+  );
+  $effect(() => void secretRequests.load());
   const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || needsRevive);
   const banners = $derived(buildRuntimeBanners({
     sessionError,
     uiAsk,
+    secretAsk: !!secretAsk,
     hasQuestions: Boolean(p?.requests.some((r) => r.kind === 'question')),
     hasPlan: Boolean(plan),
     queueShown,
@@ -459,6 +467,8 @@
           <p class="rt-banner" dir="auto" use:announceShown={{ text: sessionError, assertive: true }}><Icon name="warning" size={13} />{sessionError}</p>
         {:else if key === 'ui'}
           <RuntimeUiControl {sessionId} />
+        {:else if key === 'secret' && secretAsk}
+          <RuntimeSecretCard request={secretAsk} />
         {:else if key === 'questions' && p}
           <LazyMount lazy={RuntimeQuestions} what="the questions" variant="compact" props={{ requests: p.requests, sessionId, agent: agentName, onanswered: focusComposer }} />
         {:else if key === 'plan' && plan}

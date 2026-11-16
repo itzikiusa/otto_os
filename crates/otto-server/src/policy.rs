@@ -676,6 +676,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p.starts_with("/sessions/") && p.contains("/canvas-refs") {
         return Require(Canvas, if get { View } else { Edit });
     }
+    if p == "/secret-requests" || p == "/secret-requests/{id}" {
+        // A thread's private secret request: the handlers answer only the
+        // owner's own sign-in, for the owner's own threads.
+        return Require(Agents, if get { View } else { Edit });
+    }
     if p == "/sessions/{id}/ui-control" {
         // Agent UI control grant / revoke: a session-control write (the
         // handler adds human-credential + owner / owner-or-admin checks).
@@ -2484,6 +2489,15 @@ mod tests {
         // The grant is a session-control write.
         assert_eq!(
             pol(Method::POST, "/api/v1/sessions/{id}/ui-control"),
+            Require(Agents, Edit)
+        );
+        // A private secret request is answered like a session-control write.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/secret-requests"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/secret-requests/{id}"),
             Require(Agents, Edit)
         );
         // Per-user email sender (Gmail App Password → Keychain): self-owned.

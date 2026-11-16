@@ -4219,7 +4219,8 @@ mod tests {
     /// hidden from narrow sessions).
     const TOOLS_LIST_BYTE_BUDGET: usize = 96_500;
     /// A review-type session (R2 per-source scoping): 52_595 after slim-app cleanup.
-    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 56_800; // +otto_thread_*, +otto_personal_agent_*
+    /// 56_895 with otto_request_secret (a thread's private secret card).
+    const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 57_000; // +otto_thread_*, +otto_personal_agent_*, +otto_request_secret
 
     /// A Ctx pointing at an unreachable base; used by the no-upstream tests above
     /// (which never actually call out). Audit disabled.

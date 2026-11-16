@@ -1385,3 +1385,146 @@ async fn runtime_threads_list_across_workspaces() {
     );
     assert_eq!(ids(d.bob.clone()).await, ["t-bob-own"]);
 }
+
+/// T3 Code #15907: a thread's agent asks its owner for a secret in a private
+/// card. Only the owner's own sign-in answers; the value goes only to the
+/// agent's tool result and the pending request is in memory only.
+#[tokio::test]
+async fn a_thread_asks_its_owner_for_a_secret_privately() {
+    let d = boot().await;
+    let pool = file_pool(d._tmp.path()).await;
+    otto_state::AgentRuntimeRepo::new(pool.clone())
+        .create(otto_state::NewRuntimeSession {
+            id: "thr-secret".into(),
+            workspace_id: "ws1".into(),
+            provider: otto_core::agent_runtime::RuntimeProvider::Claude,
+            title: "Deploy".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            access_mode: Default::default(),
+            created_by: "alice".into(),
+            parent_id: None,
+            meta: None,
+        })
+        .await
+        .unwrap();
+    let (agent, _) = AuthRepo::new(pool.clone())
+        .issue_session_api_token(&"alice".to_string(), &"thr-secret".to_string())
+        .await
+        .unwrap();
+    let ask = |token: String, prompt: &'static str| {
+        let http = d.http.clone();
+        let url = format!("{}/api/v1/mcp/otto-tools/invoke", d.base);
+        tokio::spawn(async move {
+            http.post(url)
+                .bearer_auth(token)
+                .json(&json!({"tool": "otto.request_secret", "arguments": {"prompt": prompt, "name": "GH_TOKEN"}}))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        })
+    };
+    let pending = |token: String| {
+        let http = d.http.clone();
+        let url = format!("{}/api/v1/secret-requests", d.base);
+        async move {
+            for _ in 0..100 {
+                let v: Value = http
+                    .get(&url)
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if let Some(first) = v["items"].as_array().and_then(|a| a.first()) {
+                    return first.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!("no pending secret request")
+        }
+    };
+
+    // The thread's API token is an outward MCP caller here: switch the
+    // server on (its default tool list has `request_secret`).
+    let st = d
+        .http
+        .patch(format!("{}/api/v1/mcp/otto-server", d.base))
+        .bearer_auth(&d.human)
+        .json(&json!({"enabled": true}))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(st.is_success(), "{st}");
+    let call = ask(agent.clone(), "A GitHub token to push the release");
+    let req = pending(d.human.clone()).await;
+    assert_eq!(req["session_id"], "thr-secret");
+    assert_eq!(req["prompt"], "A GitHub token to push the release");
+    let id = req["request_id"].as_str().unwrap().to_string();
+    // The agent cannot answer its own request; another user cannot either.
+    let (st, _) = d
+        .post(
+            &agent,
+            &format!("/secret-requests/{id}"),
+            json!({"value": "x"}),
+            None,
+        )
+        .await;
+    assert_eq!(st, 403);
+    let (st, _) = d
+        .post(
+            &d.bob,
+            &format!("/secret-requests/{id}"),
+            json!({"value": "x"}),
+            None,
+        )
+        .await;
+    assert!(matches!(st, 403 | 404), "{st}");
+    let (st, _) = d
+        .post(
+            &d.human,
+            &format!("/secret-requests/{id}"),
+            json!({"value": "ghp_s3cr3tvalue"}),
+            None,
+        )
+        .await;
+    assert_eq!(st, 204);
+    let out = call.await.unwrap();
+    assert_eq!(out["content"]["status"], "provided", "{out}");
+    assert_eq!(out["content"]["value"], "ghp_s3cr3tvalue");
+    let (st, _) = d
+        .post(
+            &d.human,
+            &format!("/secret-requests/{id}"),
+            json!({"value": "again"}),
+            None,
+        )
+        .await;
+    assert_eq!(st, 404, "settled");
+
+    let call = ask(agent.clone(), "The sudo password");
+    let id = pending(d.human.clone()).await["request_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (st, _) = d
+        .post(
+            &d.human,
+            &format!("/secret-requests/{id}"),
+            json!({"decline": true}),
+            None,
+        )
+        .await;
+    assert_eq!(st, 204);
+    assert_eq!(call.await.unwrap()["content"]["status"], "declined");
+
+    // A person's own credential is not a thread's agent.
+    let out = ask(d.human.clone(), "x").await.unwrap();
+    assert_eq!(out["is_error"], json!(true), "{out}");
+}

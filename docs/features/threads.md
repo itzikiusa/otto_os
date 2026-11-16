@@ -209,6 +209,19 @@ you already typed, caret on a free line under it (T3 Code #33124, #34181).
 It is UI-only, so every provider has it. The button is
 `lib/components/SelectionQuote.svelte`, the text `lib/quote/quote.ts`.
 
+## Give an agent a secret privately
+
+An agent that needs a token or a password calls `otto.request_secret`
+(`otto_request_secret` in a session; on by default). A card appears above
+the thread's composer, for the thread's owner only: **The agent asks for a
+secret: …**, a password field, **Send** and **Decline**. The value goes only
+into that tool call's result. It is never put in the composer, a draft, the
+timeline or Otto's database: the request lives in the daemon's memory for up
+to about 3 minutes, and the thread masks the value as `••••••` in everything
+it shows or stores afterwards (values shorter than 4 characters are not
+masked). The agent CLI's own transcript on disk still records the tool
+result, as it does for any tool. Threads only (T3 Code #15907, #30257).
+
 ## Find in a thread
 
 ⌘F opens the app's find bar (next / previous, match count, highlight) over

@@ -320,6 +320,8 @@ export function deriveActivePlan(p: RuntimeProjection | null, turn: ProviderTurn
 export function buildRuntimeBanners(opts: {
   sessionError: string | null;
   uiAsk: boolean;
+  /** A private secret request waits on the owner. */
+  secretAsk?: boolean;
   hasQuestions: boolean;
   hasPlan: boolean;
   queueShown: boolean;
@@ -329,6 +331,7 @@ export function buildRuntimeBanners(opts: {
   return [
     ...(opts.sessionError ? [{ key: 'error', label: 'error', urgent: true }] : []),
     ...(opts.uiAsk ? [{ key: 'ui', label: 'UI control request', urgent: true }] : []),
+    ...(opts.secretAsk ? [{ key: 'secret', label: 'secret request', urgent: true }] : []),
     ...(opts.hasQuestions ? [{ key: 'questions', label: 'questions', urgent: true }] : []),
     ...(opts.hasPlan ? [{ key: 'plan', label: 'plan' }] : []),
     ...(opts.queueShown ? [{ key: 'queue', label: opts.needsRevive ? 'revive' : 'queue' }] : []),

@@ -4888,3 +4888,37 @@ async fn provider_retries_do_not_reset_the_stall_watchdog() {
     );
     rt.close(&s.id).await.unwrap();
 }
+
+/// T3 Code #15907: a secret the person gave privately never reaches the
+/// timeline, the event stream or the persisted projection.
+#[tokio::test]
+async fn a_privately_given_secret_is_masked_everywhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    host.wait(is_ready).await;
+    rt.redact_value(&s.id, "hunter2-token").await.unwrap();
+    rt.redact_value(&s.id, "abc").await.unwrap(); // too short to mask
+    rt.prompt(&s.id, "use hunter2-token abc").await.unwrap();
+    host.wait(is_terminal).await;
+    rt.flush(&s.id).await;
+    let published =
+        serde_json::to_string(&host.all().iter().map(|e| &e.body).collect::<Vec<_>>()).unwrap();
+    assert!(!published.contains("hunter2-token"), "published events");
+    assert!(published.contains("use •••••• abc"));
+    let replay = serde_json::to_string(&rt.replay(&s.id, 0).await.unwrap()).unwrap();
+    assert!(!replay.contains("hunter2-token"), "replay / snapshot");
+    let rows: Vec<String> = sqlx::query_scalar("SELECT payload_json FROM agent_runtime_entities")
+        .fetch_all(pool.writer())
+        .await
+        .unwrap();
+    assert!(
+        rows.iter().all(|r| !r.contains("hunter2-token")),
+        "persisted rows"
+    );
+    assert!(rows.iter().any(|r| r.contains("••••••")));
+    rt.close(&s.id).await.unwrap();
+}

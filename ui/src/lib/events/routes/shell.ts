@@ -7,6 +7,7 @@ import { activity } from '../../stores/activity.svelte';
 import { transcript } from '../../stores/transcript.svelte';
 import { git } from '../../stores/git.svelte';
 import { uiControl } from '../../stores/uiControl.svelte';
+import { secretRequests } from '../../stores/secretRequests.svelte';
 import type { EventOf, EventRoutes } from './types';
 
 /** The workspace store's own events (`ws.applyEvent` switches on them). */
@@ -69,6 +70,8 @@ export const shellRoutes: EventRoutes = {
   artifact_added: toTranscript,
   // An agent asked to drive the UI: the session's pane shows the prompt.
   ui_control_requested: (ev) => uiControl.applyEvent(ev),
+  // A thread's agent asks its owner for a secret: the private card.
+  secret_request_updated: (ev) => secretRequests.applyEvent(ev),
   // A watched repo changed on disk: the Git page re-reads its status.
   repo_status_changed: (ev) => git.applyRepoChanged(ev.repo_id, ev.paths),
 };

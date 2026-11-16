@@ -591,6 +591,20 @@ export type OttoEvent =
       command: string;
     }
   | {
+      /** A thread's agent asked its owner for a secret (`otto.request_secret`).
+       *  Owner scope. `pending: true` shows the private card in the thread
+       *  (stores/secretRequests.svelte.ts), `false` removes it. Never carries
+       *  the value. */
+      type: 'secret_request_updated';
+      user_id: Id;
+      workspace_id: Id;
+      session_id: Id;
+      request_id: Id;
+      pending: boolean;
+      prompt?: string;
+      name?: string | null;
+    }
+  | {
       /** An MCP approval was created (`pending`), decided, `consumed` or
        *  `expired` — an invalidation cue only (no title/tool/args): refetch
        *  `GET /mcp/approvals`. `approval_id` is absent for a bulk expiry;
