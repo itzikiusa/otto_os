@@ -1,6 +1,6 @@
 # Otto product tour film
 
-One music-led film (2:36, 1920×1080, 30 fps, H.264 + AAC) that walks through
+One music-led film (2:52, 1920×1080, 30 fps, H.264 + AAC) that walks through
 every main area of the app, chaptered by sidebar section. The Help →
 Walkthroughs page plays it from `ui/src/lib/walkthroughs/film.json`.
 
@@ -22,7 +22,8 @@ scripts/capture.mjs       isolated daemon + demo DBs + seed + Playwright → pub
 scripts/capture-rooms.mjs genuine two-person Rooms footage → public/capture/rooms/
 scripts/reuse-rooms.mjs   the same genuine Rooms clips, cut from the published (hash-checked) capture
 scripts/lib/demo-codex.mjs scripted `codex app-server` for Threads / Personal Agents on the structured runtime
-scripts/lib/demo-claude.mjs scripted stream-json `claude` for Council seats, the judge and child threads
+scripts/lib/demo-claude.mjs scripted stream-json `claude` for Council seats, the judge, child threads and the IDE agent dock
+scripts/lib/demo-ledger.mjs the fictional multi-language project (Python, Go, TypeScript) the IDE chapter opens
 scripts/lib/stack.mjs     the isolated stack, incl. the fictional tailnet for Phone access
 scripts/lib/shots.mjs     the shot list (routes, clicks, stills, flow clips)
 scripts/render.mjs        Remotion render → loudnorm → poster → out/film.candidate.json
@@ -42,7 +43,7 @@ and is arranged from the edit's music sections in `chapters.json`:
 | Intro build | Meet Otto | The filter opens on a supersaw pad, the pluck arp comes in, then the kick from bar 3, a snare roll, a riser and half a beat of silence |
 | Drop / chorus | Home → Council | Four-on-the-floor kick, clap with a short room, swung 16th hats with open off-beats, pumping 8th bass, side-chained pad, arp and the lead hook. The last 4 bars are a post-chorus. |
 | Verse | Goal Loops, Workflows, Personal Agents | Lighter hats, a syncopated bass, a darker pad and a prominent arp, with the hook's figure answered on the pluck |
-| Chorus | Git → Vault and Skills Lab | Riser and impact in, then the hook again |
+| Chorus | IDE (Beta) → Vault and Skills Lab | Riser and impact in, then the hook again. The last 4 bars are a post-chorus. |
 | Verse | Database Explorer, Connections and cloud | As the first verse |
 | Breakdown | Insights | Drums out, a resonant pad sweep, the hook on the pluck, then a 2-bar riser and snare roll |
 | Final chorus | Rooms, Phone access | Full energy, with the hook harmonised a third below |
@@ -110,6 +111,8 @@ ffmpeg -hide_banner -nostats -i public/audio/music.wav -af ebur128=peak=true -f 
   starts a throwaway ClickHouse server on its own temp dir and 127.0.0.1:18911,
   loads the fictional storefront and stops it at the end
   (`OTTO_TOUR_NO_CLICKHOUSE=1` skips it).
+- For the IDE chapter: `python3` and `pytest`, plus `pyright` and
+  `typescript-language-server` for the hover and the diagnostic, on `PATH`.
 - Docker (optional) for the other demo databases. The capture uses local images
   `mariadb:11.8.4`, `mongo:8.2` and `redpandadata/redpanda:v24.2.7`. It skips
   any image that isn't present, and the chapters that need it look emptier.
@@ -215,8 +218,16 @@ basename.
   Claude Agent SDK's stream-json protocol. They stream scripted turns (plan,
   commands, a file change, a test run, an inline approval, an
   `otto.slack_digest` tool call, a Council seat's answer, the judge's
-  synthesis, a child thread's review) and report fictional plan windows for
-  Usage → Remaining. No account or network is used.
+  synthesis, a child thread's review, the IDE agent dock's proposal) and
+  report fictional plan windows for Usage → Remaining. No account or network
+  is used. OpenCode, pi and Muse are listed in the agent picker through
+  `--version`-only stand-ins.
+- **IDE (Beta)** opens `~/Code/acme-ledger` in the capture's temp HOME
+  (`scripts/lib/demo-ledger.mjs`): one commit plus an uncommitted change for
+  the git gutter. The language servers (pyright, typescript-language-server),
+  pytest and the Python debugger are the real ones found on `PATH`; the
+  project root's temp path is hidden in the tree. The IDE shot runs last,
+  because its agent chat is a thread the Threads shots would otherwise show.
 - **Phone access** pairs through the daemon's real pairing routes and its real
   tailnet-only peer check. The tailnet is fictional: `OTTO_TAILSCALE_CLI`
   points the daemon at a scripted CLI (`acme-mbp.tail0demo.ts.net`, 100.101.10.x),

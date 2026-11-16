@@ -33,6 +33,8 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   agents, shared-editing guests can't write git or agent config, and local
   language servers run only for the Mac's owner.
 
+![The IDE (Beta) paused at a breakpoint in a Python project, with the git gutter, frames, variables and an evaluated expression](docs/screenshots/ide.jpg)
+
 ### What's new in 0.2.2
 
 - **Threads: several agents, one conversation.** Ask another agent from inside
@@ -214,6 +216,11 @@ including behaviour changes to know before upgrading.
   screen share, draw annotations directly on the shared screen (with permission),
   hand over and reclaim terminal control at any moment, and generate a local
   structured recap (decisions, actions, open questions) once participants consent.
+- **IDE (Beta)** — a multi-language IDE (`#/ide`) on your local or SSH
+  projects: language servers (hover, diagnostics, rename), a git gutter, run
+  configurations with live output and test trees, a DAP debugger with
+  breakpoints, and an agent dock that proposes diffs you apply or undo. See
+  `docs/features/ide.md`.
 - **Git & Pull Requests** — a GitKraken-style **commit graph** with a WIP row +
   staging panel, per-file diffs, folder-level stage/discard, an interactive
   **conflict resolver** (A/B line picking with live output) that covers merge,

@@ -291,6 +291,9 @@ export const SHOTS = {
     await wait(700);
     await glide(page, stage.getByTestId('picker-agent'));
     await wait(700);
+    // Every structured agent in the picker's rail (stand-ins: lib/stack.mjs).
+    await page.getByTestId('model-picker').getByTestId('model-picker-provider-muse').waitFor({ timeout: 10_000 }).catch(() => console.log('  (no muse in the picker)'));
+    await still(page, c, 'threads-picker');
     await glide(page, page.getByTestId('model-picker').getByTestId('model-picker-provider-codex'));
     await wait(500);
     await page.keyboard.press('Escape');
@@ -821,7 +824,142 @@ export const SHOTS = {
     }
     await context.close();
   },
+  // IDE (Beta) on the fictional acme-ledger project (lib/demo-ledger.mjs),
+  // shot LAST: its agent chat is a thread that would show in the Threads shots.
+  // the tree and the git gutter, a hover, a TypeScript diagnostic, a pytest
+  // run in the dock, a breakpoint hit in the Python debugger, then the agent
+  // dock proposing a change to the selected function (lib/demo-claude.mjs).
+  ide: async (c) => {
+    const root = c.meta.ids.ledgerDir;
+    if (!root) return console.log('  (no ledger project)');
+    const { context, page } = await open(c, 'ide', {
+      settle: 5000,
+      extra: [
+        { name: 'otto_rail_expanded', value: '0' },
+        { name: 'otto.ide.agent.provider', value: 'claude' },
+        { name: 'otto.ide.namedProjects.v1', value: JSON.stringify([{ id: 'proj-ledger', name: 'acme-ledger', primaryRoot: root, folders: [root], updatedAt: Date.now() }]) },
+        { name: 'otto.ide.activeProjectId.v1', value: 'proj-ledger' },
+      ],
+    });
+    // The project root's subtitle is the capture's temp path: keep it off camera.
+    await page.addStyleTag({ content: '.tree-root-sub{display:none!important}' });
+    const editor = page.locator('.ide-editor-area .cm-editor .cm-content').first();
+    const lineNo = (n) => page.locator('.ide-editor-area .cm-lineNumbers .cm-gutterElement').filter({ hasText: new RegExp(`^\\s*${n}\\s*$`) }).first();
+    await page.getByTestId('ide-project-tree').waitFor({ timeout: 30_000 });
+    const rec = await record(page);
+    await wait(600);
+    await ideFile(page, 'pyapp', 'settlement.py');
+    await editor.getByText('MIN_FEE_CENTS = 30').waitFor({ timeout: 15_000 });
+    await wait(2500);
+    await still(page, c, 'ide-file');
+    // Hover: the quick-doc of platform_fee, from its call site.
+    const call = editor.locator('.cm-line').filter({ hasText: 'fee = max(' }).first();
+    const callBox = await call.boundingBox();
+    if (callBox) {
+      await page.mouse.move(callBox.x + 190, callBox.y + callBox.height / 2, { steps: 20 });
+      await wait(2600);
+      await page.screenshot({ path: join(c.out, 'ide-hover.jpg'), type: 'jpeg', quality: 90 });
+      console.log('  still ide-hover.jpg');
+    }
+    // A TypeScript diagnostic in the web client.
+    await ideFile(page, 'web', 'src', 'totals.ts');
+    await wait(6000);
+    const bad = editor.locator('.cm-lintRange-error, .cm-ide-diag-error, [class*="lintRange"]').first();
+    if (await bad.isVisible().catch(() => false)) {
+      const b = await bad.boundingBox();
+      await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 16 });
+      await wait(1800);
+    } else console.log('  (no diagnostic underline)');
+    await page.screenshot({ path: join(c.out, 'ide-diagnostic.jpg'), type: 'jpeg', quality: 90 });
+    console.log('  still ide-diagnostic.jpg');
+    // Run the pytest configuration: output and the test tree in the dock.
+    await page.locator('.ide-tab').filter({ hasText: 'settlement.py' }).first().click();
+    await wait(800);
+    await glide(page, page.getByTestId('ide-run-config-select'));
+    await wait(700);
+    await glide(page, page.getByTestId('ide-run-config-popover').locator('.run-item').filter({ hasText: 'pytest · settlement' }).first());
+    await wait(500);
+    await glide(page, page.getByTestId('ide-run-btn'));
+    await page.getByTestId('ide-run-panel').getByText(/4 passed/).first().waitFor({ timeout: 40_000 }).catch(() => console.log('  (no "4 passed")'));
+    await wait(1800);
+    await still(page, c, 'ide-run');
+    // Debug: a breakpoint in settle(), the Settle payouts configuration, paused.
+    await lineNo(24).waitFor({ timeout: 10_000 });
+    await lineNo(24).evaluate((el) => el.scrollIntoView({ block: 'center' }));
+    await wait(500);
+    const ln = await lineNo(24).boundingBox();
+    await page.mouse.move(ln.x + ln.width / 2, ln.y + ln.height / 2, { steps: 18 });
+    await wait(300);
+    await page.mouse.click(ln.x + ln.width / 2, ln.y + ln.height / 2);
+    await wait(700);
+    await glide(page, page.getByTestId('ide-run-config-select'));
+    await wait(600);
+    await glide(page, page.getByTestId('ide-run-config-popover').locator('.run-item').filter({ hasText: 'Settle payouts' }).first());
+    await wait(500);
+    await glide(page, page.getByTestId('ide-debug-btn'));
+    const dbg = page.getByTestId('ide-debugger-panel');
+    await dbg.getByText(/Paused/i).first().waitFor({ timeout: 40_000 }).catch(() => console.log('  (debugger never paused)'));
+    await dbg.getByText('net', { exact: false }).first().waitFor({ timeout: 15_000 }).catch(() => {});
+    await wait(1500);
+    const evalBox = dbg.getByLabel('Evaluate expression');
+    if (await evalBox.isVisible().catch(() => false)) {
+      await evalBox.click();
+      await typeSlow(page, 'platform_fee(net)', 60);
+      await dbg.getByRole('button', { name: 'Evaluate' }).click();
+      await wait(1500);
+    }
+    await still(page, c, 'ide-debug');
+    // Stop the debug session before the agent part.
+    await page.getByTestId('ide-stop-btn').click({ timeout: 4000 }).catch(() => {});
+    await wait(1200);
+    // Agent: select platform_fee, add it to the agent, ask for a change.
+    await page.getByRole('button', { name: 'Collapse bottom dock' }).click({ timeout: 4000 }).catch(() => console.log('  (skip: collapse dock)'));
+    await wait(800);
+    await lineNo(17).evaluate((el) => el.scrollIntoView({ block: 'center' }));
+    await editor.locator('.cm-line').filter({ hasText: 'def platform_fee' }).first().click({ timeout: 8000 });
+    await page.keyboard.press('Meta+ArrowLeft');
+    await page.keyboard.press('Meta+ArrowLeft');
+    for (let i = 0; i < 2; i++) await page.keyboard.press('Shift+ArrowDown');
+    await page.keyboard.press('Shift+Meta+ArrowRight');
+    await wait(900);
+    const add = page.getByTestId('ide-selection-add-agent');
+    if (await add.isVisible().catch(() => false)) await glide(page, add);
+    else await page.keyboard.press('Meta+Shift+l');
+    const composer = page.getByTestId('ide-agent-composer');
+    await composer.waitFor({ timeout: 20_000 });
+    await wait(900);
+    await composer.click();
+    await typeSlow(page, 'Round the platform fee to the nearest cent instead of down', 40);
+    await wait(500);
+    await still(page, c, 'ide-agent-ask');
+    await glide(page, page.getByTestId('ide-agent-send'));
+    const card = page.getByTestId('ide-agent-proposal').first();
+    await card.waitFor({ timeout: 40_000 }).catch(() => console.log('  (no proposal card)'));
+    await wait(1800);
+    await still(page, c, 'ide-agent');
+    const apply = card.getByTestId('ide-agent-apply-proposal');
+    if (await apply.isVisible().catch(() => false)) {
+      await glide(page, apply);
+      await wait(2200);
+      await still(page, c, 'ide-agent-applied');
+    }
+    await rec.stop(join(c.out, 'ide.mp4'));
+    await context.close();
+  },
 };
+
+/** Open a file in the IDE's project tree by its path segments. */
+async function ideFile(page, ...segments) {
+  const tree = page.getByTestId('ide-project-tree');
+  for (let i = 0; i < segments.length; i++) {
+    const rel = segments.slice(0, i + 1).join('/');
+    const item = tree.locator(`button.tree-item[title="${rel}"], button.tree-item[title$="/${rel}"]`).first();
+    await item.waitFor({ timeout: 15_000 });
+    if (i === segments.length - 1) await glide(page, item, { click: false }).then(() => item.dblclick());
+    else if ((await item.getAttribute('aria-expanded')) !== 'true') await glide(page, item);
+    await wait(350);
+  }
+}
 
 /** The film's runtime thread (made by threads-runtime). */
 async function runtimeThread(c) {
