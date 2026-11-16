@@ -12,6 +12,9 @@ const helpers = loadSource(new URL('../src/modules/threads/threadsHelpers.ts', i
   '../../lib/stores/sessionBuckets': sessionBuckets,
   // threadsHelpers re-exports harnessLabel from here; membership never calls it.
   '../../lib/providers': { harnessLabel: (p: string) => p },
+  // The file viewer's preview helpers, re-exported from lib/; unused here.
+  '../../lib/components/filePreviewKind': {},
+  '../../lib/render/previewText': {},
 });
 
 const s = (id: string, meta: Record<string, unknown> = {}) => ({ id, kind: 'agent', meta });

@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use super::sse_framing::build_collab_sse_response;
 use super::ApiResult;
+use crate::target::ResolvedTarget;
 use crate::types::{
     IdeCollabCursorReq, IdeCollabDebugActionReq, IdeCollabEditReq, IdeCollabEditResp,
     IdeCollabJoinReq, IdeCollabJoinResp, IdeCollabRoleReq, IdeCollabRoomResp, IdeCollabRoomsResp,
@@ -142,15 +143,13 @@ pub(super) async fn uninstall_plugin<S: IdeCtx>(
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct CollabGuestQuery {
     #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
     peer_id: Option<String>,
 }
 
-pub(super) fn extract_collab_token(
-    headers: &HeaderMap,
-    query_token: Option<&str>,
-) -> Result<String> {
+/// The invite token, from `X-Ide-Collab-Token` (what the UI sends) or a
+/// `Bearer` header — never the query string: a write-capable capability in a
+/// URI ends up in access logs and proxy histories.
+pub(super) fn extract_collab_token(headers: &HeaderMap) -> Result<String> {
     if let Some(hv) = headers
         .get("x-ide-collab-token")
         .and_then(|v| v.to_str().ok())
@@ -159,11 +158,6 @@ pub(super) fn extract_collab_token(
         if !trimmed.is_empty() {
             return Ok(trimmed.to_string());
         }
-    }
-    // Check `?token=` BEFORE `Authorization: Bearer` so an authenticated browser
-    // session sending its daemon auth header never shadows the room's invite token.
-    if let Some(tok) = query_token.map(str::trim).filter(|s| !s.is_empty()) {
-        return Ok(tok.to_string());
     }
     if let Some(auth) = headers
         .get(header::AUTHORIZATION)
@@ -203,8 +197,9 @@ pub(super) async fn collab_guest_join<S: IdeCtx>(
     Json(mut req): Json<IdeCollabJoinReq>,
 ) -> ApiResult<Json<IdeCollabJoinResp>> {
     if req.token.trim().is_empty() {
-        req.token = extract_collab_token(&headers, None)?;
+        req.token = extract_collab_token(&headers)?;
     }
+    ensure_host_active(&ctx, &room_id).await?;
     let resp = ctx.ide().collab.join_room(&room_id, req)?;
     Ok(Json(resp))
 }
@@ -213,16 +208,16 @@ pub(super) async fn collab_guest_state<S: IdeCtx>(
     State(ctx): State<S>,
     Path(room_id): Path<String>,
     headers: HeaderMap,
-    Query(q): Query<CollabGuestQuery>,
 ) -> ApiResult<Json<IdeCollabStateResp>> {
-    let token = extract_collab_token(&headers, q.token.as_deref())?;
+    let token = extract_collab_token(&headers)?;
     let mut state = ctx.ide().collab.get_state(&room_id, &token)?;
+    let host_id = ctx.ide().collab.host_user_id(&room_id).unwrap_or_default();
     if let Some(debug_id) = state.room.active_debug_id.as_deref() {
         let belongs_to_host = ctx
             .ide()
             .dap
             .session_owner_and_target(debug_id)
-            .is_some_and(|(owner, _)| owner == state.room.host_user_id);
+            .is_some_and(|(owner, _)| owner == host_id);
         if belongs_to_host {
             if let Ok(fresh) = ctx.ide().dap.get_session(debug_id) {
                 state.active_debug = Some(crate::collab::redact_guest_debug_snapshot(&fresh));
@@ -241,10 +236,21 @@ pub(super) async fn collab_guest_events<S: IdeCtx>(
     headers: HeaderMap,
     Query(q): Query<CollabGuestQuery>,
 ) -> ApiResult<Response> {
-    let _ = &q.peer_id;
-    let token = extract_collab_token(&headers, q.token.as_deref())?;
-    let (room, rx) = ctx.ide().collab.subscribe(&room_id, &token)?;
-    Ok(build_collab_sse_response(room, rx))
+    let token = extract_collab_token(&headers)?;
+    ensure_host_active(&ctx, &room_id).await?;
+    let peer_id = q.peer_id.filter(|p| !p.trim().is_empty());
+    let (room, rx) = ctx
+        .ide()
+        .collab
+        .subscribe_peer(&room_id, &token, peer_id.as_deref())?;
+    // When the stream ends (tab closed, network gone) the peer starts its
+    // grace period; a peer with no stream left is freed after it.
+    let on_close = peer_id.map(|peer_id| {
+        let engine = ctx.ide().clone();
+        Box::new(move || engine.collab.peer_stream_closed(&room_id, &peer_id))
+            as Box<dyn FnOnce() + Send>
+    });
+    Ok(build_collab_sse_response(room, rx, on_close))
 }
 
 pub(super) async fn collab_guest_cursor<S: IdeCtx>(
@@ -265,7 +271,7 @@ pub(super) async fn collab_guest_edit<S: IdeCtx>(
     Json(mut req): Json<IdeCollabEditReq>,
 ) -> ApiResult<Json<IdeCollabEditResp>> {
     fill_peer_secret_from_headers(&headers, &mut req.peer_secret);
-    let (target, host_user) = ctx.ide().collab.validate_edit_precheck(&room_id, &req)?;
+    let (target, frozen_host) = ctx.ide().collab.validate_edit_precheck(&room_id, &req)?;
     if req.save && is_agent_or_git_control_path(&req.path) {
         return Err(
             Error::Forbidden("guests cannot save git or agent configuration files".into()).into(),
@@ -276,22 +282,61 @@ pub(super) async fn collab_guest_edit<S: IdeCtx>(
         .validate_subpath(&target, &req.path, false)
         .await?;
     let resolved_for_save = if req.save {
+        let host_user = current_host(&ctx, &room_id, frozen_host).await?;
         let host_resolved = ctx
             .ide()
             .targets
             .resolve_write(&ctx, &host_user, &target)
             .await?;
         Some(match target.kind {
-            IdeTargetKind::Local => host_resolved,
+            // A guest writes with non-root path rules even in a root host's
+            // room, and the guest list is checked on the RESOLVED path (a
+            // committed `tools -> .git` symlink must not carry a save into
+            // `.git/hooks`).
+            IdeTargetKind::Local => {
+                let guest_target = host_resolved.restricted_for_guest();
+                let resolved_path = ctx
+                    .ide()
+                    .targets
+                    .resolve_path(&guest_target, &req.path, false)
+                    .await?;
+                refuse_guest_control_path(std::path::Path::new(&resolved_path))?;
+                guest_target
+            }
             IdeTargetKind::Ssh => {
-                ctx.ide()
-                    .collab
-                    .room_resolved_target(&room_id)
-                    .ok_or_else(|| {
-                        Error::Upstream(
-                            "remote SSH target is unavailable for collaborative save".into(),
-                        )
-                    })?
+                let room_target =
+                    ctx.ide()
+                        .collab
+                        .room_resolved_target(&room_id)
+                        .ok_or_else(|| {
+                            Error::Upstream(
+                                "remote SSH target is unavailable for collaborative save".into(),
+                            )
+                        })?;
+                if let ResolvedTarget::Ssh {
+                    root,
+                    additional_roots,
+                    ..
+                } = &room_target
+                {
+                    let (remote, matched) = crate::target::ssh_exec::resolve_remote_in_roots(
+                        root,
+                        additional_roots,
+                        &req.path,
+                    )?;
+                    let real = ctx
+                        .ide()
+                        .targets
+                        .confine_remote_write(&room_target, &matched, &remote)
+                        .await?;
+                    if let Some(why) = crate::target::guest_control_path_denial_at(
+                        std::path::Path::new(&real),
+                        false,
+                    ) {
+                        return Err(Error::Forbidden(why).into());
+                    }
+                }
+                room_target
             }
         })
     } else {
@@ -322,7 +367,8 @@ pub(super) async fn collab_guest_debug_action<S: IdeCtx>(
     Json(mut req): Json<IdeCollabDebugActionReq>,
 ) -> ApiResult<Json<IdeDebugSessionResp>> {
     fill_peer_secret_from_headers(&headers, &mut req.peer_secret);
-    let (target, host_user) = ctx.ide().collab.authorize_debug_action(&room_id, &req)?;
+    let (target, frozen_host) = ctx.ide().collab.authorize_debug_action(&room_id, &req)?;
+    let host_user = current_host(&ctx, &room_id, frozen_host).await?;
     let owns_session = ctx
         .ide()
         .dap
@@ -409,16 +455,60 @@ pub(super) async fn collab_guest_debug_action<S: IdeCtx>(
 
 /// Git config/hooks and agent CLI config run code on the HOST's next git or
 /// agent command (invisible in a diff), so an invited guest never saves them.
-/// Checked on the decoded path (a `file://` URI is percent-decoded before the
-/// write) and without case (APFS is case-insensitive).
+/// This first pass runs on the decoded REQUEST path (a `file://` URI is
+/// percent-decoded before the write; also the only pass an SSH room gets
+/// before its remote realpath check); local saves are checked again on the
+/// resolved path by [`refuse_guest_control_path`].
 fn is_agent_or_git_control_path(path: &str) -> bool {
     let path = crate::target::sdk_paths::strip_file_uri(path);
-    std::path::Path::new(&path).components().any(|c| {
-        let name = c.as_os_str().to_string_lossy();
-        [".git", ".claude", ".codex", ".gemini", ".mcp.json"]
-            .iter()
-            .any(|n| name.eq_ignore_ascii_case(n))
-    })
+    // Lexical only: the request path may name a file on an SSH host.
+    crate::target::guest_control_path_denial_at(std::path::Path::new(&path), false).is_some()
+}
+
+fn refuse_guest_control_path(resolved: &std::path::Path) -> Result<()> {
+    match crate::target::guest_control_path_denial(resolved) {
+        Some(why) => Err(Error::Forbidden(why)),
+        None => Ok(()),
+    }
+}
+
+/// The room's host as of NOW, not as of room creation: a disabled host's
+/// rooms close, and a demoted host's guests write with the demoted rights.
+/// (Otto disables users rather than deleting them; a missing row keeps the
+/// room's copy.)
+async fn current_host<S: IdeCtx>(
+    ctx: &S,
+    room_id: &str,
+    frozen: otto_core::domain::User,
+) -> Result<otto_core::domain::User> {
+    match otto_state::UsersRepo::new(ctx.pool()).get(&frozen.id).await {
+        Ok(user) if user.disabled => {
+            ctx.ide().collab.revoke_room(room_id);
+            Err(Error::Forbidden(
+                "the host of this shared session no longer has access".into(),
+            ))
+        }
+        Ok(user) => Ok(user),
+        Err(Error::NotFound(_)) => Ok(frozen),
+        Err(e) => Err(e),
+    }
+}
+
+/// [`current_host`] for routes that only need the room to still be valid.
+async fn ensure_host_active<S: IdeCtx>(ctx: &S, room_id: &str) -> Result<()> {
+    let Some(host_id) = ctx.ide().collab.host_user_id(room_id) else {
+        return Ok(()); // unknown room: the hub answers 404 itself
+    };
+    match otto_state::UsersRepo::new(ctx.pool()).get(&host_id).await {
+        Ok(user) if user.disabled => {
+            ctx.ide().collab.revoke_room(room_id);
+            Err(Error::Forbidden(
+                "the host of this shared session no longer has access".into(),
+            ))
+        }
+        Ok(_) | Err(Error::NotFound(_)) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]

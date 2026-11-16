@@ -500,7 +500,7 @@ pub(crate) async fn run_review_core(
         } else {
             compose_orchestrator_prompt(
                 &run.lenses,
-                &run.provider,
+                &manager.cli_family(&run.provider),
                 |slug| otto_review::session::lens_findings_path(&review_id_s, i, slug),
                 &otto_review::session::findings_path(&review_id_s, i),
             )

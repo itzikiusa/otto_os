@@ -23,19 +23,33 @@
 //     "Open in Threads" instead (`openInThreads`).
 //   - `onstatus(status)`: called on mount with the thread's state and on every
 //     change — 'idle' | 'working' | 'needs-you' (an approval or question is
-//     waiting) | 'closed' — so a folded host header can show a dot without
-//     reading the Threads stores.
+//     waiting) | 'background' (idle, background work still running: calm, not
+//     "working"; a host that doesn't know it treats it as idle) | 'closed' —
+//     so a folded host header can show a dot without reading the Threads stores.
 //   - `hostCommands`: the view-level slash commands the host can carry out.
 //     A command with no handler is hidden from the slash popup, and typing it
 //     sends it to the agent like any other `/command` (never a silent no-op).
 //     `/clear` (fresh context) and `/review` (a prompt) belong to the thread
 //     and always work. Threads is just another host (runtime/threadsHost.ts).
+//   - `draft` (with `sessionId: null`): no thread yet — the embed renders the
+//     Threads start composer (provider · model · effort, access, attach, `@`,
+//     `/`) under the host's lead line and suggestion chips, starts the thread
+//     through the Threads store and hands it back (`draft.onstarted`).
+//   - `onhandle(handle)`: the embed's send for host-initiated asks (a menu, a
+//     file, a line pick): before a thread it starts one with the composer's
+//     picks, after it reopens a closed thread and queues behind a running
+//     turn — always through the Threads store, so the access chip, the closed
+//     state and the working dot stay true.
+//   - `contextOnFresh()`: text put before the first message after `/clear`,
+//     so the agent knows again what it is looking at.
 import type { Component, Snippet } from 'svelte';
 import type {
   ApprovalDecision,
   AskChildReq,
   AskChildTarget,
   DiffResp,
+  EmbeddedOrigin,
+  EmbeddedThreadSource,
   MetaResp,
   PlanArtifact,
   PromptImage,
@@ -111,11 +125,53 @@ export interface RuntimeHostCommands {
 }
 
 /** An embedded thread's state as its host sees it (`onstatus`). */
-export type RuntimeEmbedStatus = 'idle' | 'working' | 'needs-you' | 'closed';
+export type RuntimeEmbedStatus = 'idle' | 'working' | 'needs-you' | 'background' | 'closed';
+
+/** A suggestion chip above an embed's start composer: `prompt()` is the
+ *  whole first message (the host's context included — no `transformFirstPrompt`). */
+export interface RuntimeEmbedSuggestion {
+  label: string;
+  prompt: () => string | Promise<string>;
+}
+
+/** An embed with no thread yet (`sessionId: null`): what its start composer
+ *  starts and how. */
+export interface RuntimeEmbedDraft {
+  workspaceId: string;
+  /** Fixed: an embed has no folder picker (null: the workspace's root). */
+  cwd: string | null;
+  /** The thread's title (titleAuto stays off: the host's name is the point). */
+  title: string;
+  source?: EmbeddedThreadSource;
+  origin?: EmbeddedOrigin;
+  /** The access chip's first value (PR question / diagnosis: approval-required). */
+  defaultAccess: RuntimeAccessMode;
+  /** Asked when the person picks a mode other than `defaultAccess`; false keeps the old one. */
+  confirmAccess?: (mode: RuntimeAccessMode) => Promise<boolean>;
+  suggestions?: readonly RuntimeEmbedSuggestion[];
+  placeholder?: string;
+  /** One line (or more) above the composer: what the agent will do, and where. */
+  lead?: Snippet;
+  /** Wraps a TYPED first message (PR: its context block). */
+  transformFirstPrompt?: (text: string) => string | Promise<string>;
+  /** The thread exists (its first message is sent): the host keeps its id. */
+  onstarted: (session: RuntimeSession) => void;
+}
+
+/** What `onhandle` gives the host: one send for its own asks. */
+export interface RuntimeEmbedHandle {
+  /** `text` is the whole message. `accessMode` applies from this turn on (the
+   *  chip follows). Resolves once sent or queued; rejects with the reason. */
+  send(text: string, opts?: { accessMode?: RuntimeAccessMode }): Promise<void>;
+}
 
 export type RuntimeThreadViewProps = {
-  sessionId: string;
+  /** Null with `draft`: no thread yet (the start composer). */
+  sessionId: string | null;
   workspaceId: string;
+  draft?: RuntimeEmbedDraft;
+  onhandle?: (handle: RuntimeEmbedHandle | null) => void;
+  contextOnFresh?: () => string | null;
   agentName?: string;
   focusOnMount?: boolean;
   compact?: boolean;
@@ -130,7 +186,8 @@ export type RuntimeThreadViewProps = {
   hideEmbedBarWhenUnlinked?: boolean;
   fallbackCwd?: string | null;
   hasExternalContext?: boolean;
-  transformOutgoingText?: (text: string) => string;
+  /** `fresh`: the message starts a fresh context (`/clear`). */
+  transformOutgoingText?: (text: string, fresh?: boolean) => string;
   transformRestoredQueuedText?: (text: string) => string;
   onExternalContextConsumed?: () => void;
   onopenpath?: (path: string, line?: number) => void;
@@ -264,17 +321,31 @@ export interface RuntimeSessionPort {
         title: string;
         model: string | null;
         effort?: string;
+        titleAuto?: boolean;
+        plan?: boolean;
         prompt: string;
         attachments?: readonly { name: string; mime: string; data_base64: string }[];
+        accessMode?: RuntimeAccessMode;
+        source?: EmbeddedThreadSource;
+        origin?: EmbeddedOrigin;
       },
     ): Promise<RuntimeSession>;
+    /** The embedded thread for an origin: open before closed, then newest. */
+    findByOrigin(
+      workspaceId: string,
+      source: string,
+      originId: string,
+      rememberedId?: string | null,
+    ): Promise<RuntimeSession | null>;
     reopen(id: string): Promise<RuntimeSession>;
+    close(id: string): Promise<void>;
     prompt: (
       id: string,
       req: RuntimePromptReq,
       localAttachments?: readonly ComposerFile[],
     ) => Promise<RuntimePromptResp>;
-    interrupt(id: string): Promise<void>;
+    /** Stop the turn (the store may answer with what it stopped; hosts only await it). */
+    interrupt(id: string): Promise<unknown>;
     respond(id: string, requestId: string, decision: ApprovalDecision): Promise<void>;
     askChildren(parentId: string, req: AskChildReq): Promise<RuntimeSession[]>;
   };

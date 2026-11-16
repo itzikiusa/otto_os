@@ -38,19 +38,13 @@ pub(crate) fn transcript_roots(data_dir: &Path) -> TranscriptRoots {
     TranscriptRoots::discover(&home_dir(), data_dir)
 }
 
-/// The provider whose transcript this session has: its own (or its CLI family)
-/// for agent sessions, the captured nested one for a plain terminal the user
-/// ran `claude`/`codex` in.
+/// The provider whose transcript this session has, without the registry: its
+/// own for agent sessions, the captured nested one for a plain terminal the
+/// user ran `claude`/`codex` in. A custom slug is never guessed from its name
+/// — [`effective_provider_in`] resolves it through the registry.
 pub(crate) fn effective_provider(session: &Session) -> String {
-    if matches!(session.provider.as_str(), "claude" | "codex" | "agy") {
-        return session.provider.clone();
-    }
     if session.provider != "shell" {
-        if let Some(family) =
-            otto_sessions::providers::infer_model_family(None, "", &session.provider)
-        {
-            return family;
-        }
+        return session.provider.clone();
     }
     session
         .meta

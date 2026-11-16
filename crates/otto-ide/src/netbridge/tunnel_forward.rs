@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use otto_core::{Error, Result};
 use otto_ssh::SshTunnel;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpStream, UnixListener};
 use tokio::process::{Child, Command};
 
@@ -19,6 +18,7 @@ use super::k8s_discover::{resolve_destination, BridgeDestination};
 use super::socks5::{connect_via_socks5, SocksUpstreamResolver};
 use super::tunnel::NetBridgeInstance;
 use super::IdeK8sSpec;
+use crate::line_reader::{LossyLines, MAX_OUTPUT_LINE_BYTES};
 
 const PORT_FORWARD_READY_TIMEOUT: Duration = Duration::from_secs(12);
 
@@ -482,8 +482,8 @@ async fn spawn_kubectl_port_forward(
 
     let tx_out = Arc::clone(&ready_tx);
     let out_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut lines = LossyLines::new(stdout, MAX_OUTPUT_LINE_BYTES);
+        while let Some(line) = lines.next_line().await {
             if let Some(port_num) = parse_forwarding_port(&line) {
                 if let Ok(mut g) = tx_out.lock() {
                     if let Some(tx) = g.take() {
@@ -496,9 +496,9 @@ async fn spawn_kubectl_port_forward(
 
     let tx_err = Arc::clone(&ready_tx);
     let err_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
+        let mut lines = LossyLines::new(stderr, MAX_OUTPUT_LINE_BYTES);
         let mut first_err = String::new();
-        while let Ok(Some(line)) = lines.next_line().await {
+        while let Some(line) = lines.next_line().await {
             if let Some(port_num) = parse_forwarding_port(&line) {
                 if let Ok(mut g) = tx_err.lock() {
                     if let Some(tx) = g.take() {

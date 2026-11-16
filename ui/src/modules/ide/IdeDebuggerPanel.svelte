@@ -26,6 +26,7 @@
   import IdeConsoleView, { type ConsoleLineInput } from './debug/IdeConsoleView.svelte';
   import IdeDebuggerInspector from './debug/IdeDebuggerInspector.svelte';
   import { ideDockPrefs } from './debug/ideDockPrefs.svelte';
+  import { ideCollabNotices } from './store/ideCollabNotices.svelte';
 
   let activeSubTab = $state<'debugger' | 'console'>('debugger');
   let replInput = $state('');
@@ -186,7 +187,9 @@
         onclick={() => toggleIdeBreakpointsMuted()}
         data-testid="ide-debug-mute-bps"
       ><Icon name={areIdeBreakpointsMuted() ? 'shieldOff' : 'shield'} size={13} /></button>
-      <button type="button" class="icon-btn" aria-label="Restart debug session" title="Restart debug session" disabled={(!isLive && !ide.canRestartDebug) || ide.debugLoading} onclick={() => void ide.restartDebug()} data-testid="ide-debug-restart"><Icon name="refresh" size={13} /></button>
+      <!-- A guest can't restart the host's session (it relaunches the host's program, as the host). -->
+      <button type="button" class="icon-btn" aria-label="Restart debug session" title={ide.collabIsGuest ? 'Only the host can restart the debug session' : 'Restart debug session'} disabled={ide.collabIsGuest || (!isLive && !ide.canRestartDebug) || ide.debugLoading} onclick={() => void ide.restartDebug()} data-testid="ide-debug-restart"><Icon name="refresh" size={13} /></button>
+      <span class="dbg-host-only" role="status" data-testid="ide-debug-host-only">{ide.collabIsGuest ? (ideCollabNotices.debug ?? '') : ''}</span>
       <button type="button" class="icon-btn" aria-label="Stop debug session (⌘F2)" title="Stop debug session (⌘F2)" aria-keyshortcuts="Meta+F2" disabled={!isLive} onclick={() => void ide.stopDebug()}><Icon name="stop" size={13} /></button>
     </div>
 
@@ -353,6 +356,7 @@
 {/if}
 
 <style>
+  .dbg-host-only { font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-inline-size: 0; }
   .dbg-root { container-type: inline-size; display: flex; flex-direction: column; block-size: 100%; min-block-size: 0; min-inline-size: 0; background: var(--surface); }
   .dbg-bar {
     display: flex; align-items: center; gap: 6px;

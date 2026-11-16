@@ -444,3 +444,215 @@ fn build_runner_command_merges_go_tags_and_coverage_flags() {
     assert_eq!(npm_prog, "npm");
     assert_eq!(npm_args, vec!["test", "--", "--coverage"]);
 }
+
+#[cfg(unix)]
+type RunMap = Arc<DashMap<String, Arc<ActiveRunHandle>>>;
+
+#[cfg(unix)]
+fn local_run_handle(id: &str) -> (RunMap, Arc<ActiveRunHandle>, watch::Receiver<bool>) {
+    let runs: RunMap = Arc::new(DashMap::new());
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (events_tx, _) = broadcast::channel(32);
+    let handle = Arc::new(ActiveRunHandle {
+        seq: 1,
+        owner_user_id: "u_test".into(),
+        state: Mutex::new(RunStateInner::new(
+            id.into(),
+            id.into(),
+            IdeRunnerKind::Custom,
+            "2026-01-01T00:00:00Z".into(),
+        )),
+        stop_tx,
+        events_tx,
+    });
+    runs.insert(id.into(), Arc::clone(&handle));
+    (runs, handle, stop_rx)
+}
+
+#[cfg(unix)]
+fn sh_run_config(script: &str, before_launch: Option<String>) -> IdeRunConfig {
+    IdeRunConfig {
+        id: "rc_sh".into(),
+        name: "sh".into(),
+        runner: IdeRunnerKind::Custom,
+        command: Some("/bin/sh".into()),
+        args: vec!["-c".into(), script.into()],
+        before_launch,
+        ..Default::default()
+    }
+}
+
+#[cfg(unix)]
+async fn pid_alive(pid: u32) -> bool {
+    Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|s| s.success())
+}
+
+/// A program that prints a non-UTF-8 byte and an endless line keeps running:
+/// tokio's `lines()` stopped at the bad byte, closed the pipe, and the next
+/// write killed the program with SIGPIPE.
+#[tokio::test]
+#[cfg(unix)]
+async fn run_output_with_invalid_utf8_and_an_endless_line_keeps_streaming() {
+    use crate::line_reader::TRUNCATED_MARKER;
+    let tmp = tempfile::tempdir().unwrap();
+    let (runs, handle, stop_rx) = local_run_handle("run_utf8");
+    let script = "printf 'bad \\377 byte\\n'; head -c 200000 /dev/zero | tr '\\0' x; echo; \
+                  i=0; while [ $i -lt 300 ]; do echo after-$i; i=$((i+1)); done";
+    execute_run_task(
+        runs,
+        Arc::clone(&handle),
+        TargetManager::new(),
+        IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned()),
+        None,
+        vec![(sh_run_config(script, None), BTreeMap::new())],
+        None,
+        stop_rx,
+    )
+    .await;
+    let snap = handle.snapshot();
+    assert_eq!(
+        snap.status,
+        IdeRunStatus::Passed,
+        "output: {:?}",
+        snap.output
+    );
+    assert_eq!(snap.exit_code, Some(0));
+    assert!(snap.output.iter().any(|l| l == "bad \u{fffd} byte"));
+    assert!(snap
+        .output
+        .iter()
+        .any(|l| l.starts_with("xxxx") && l.ends_with(TRUNCATED_MARKER) && l.len() < 20_000));
+    assert_eq!(snap.output.last().map(String::as_str), Some("after-299"));
+}
+
+/// Stop while `before_launch` is still running kills the hook's whole process
+/// group at once and never starts the program.
+#[tokio::test]
+#[cfg(unix)]
+async fn stop_during_before_launch_kills_the_hook_group_and_skips_the_program() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pid_file = tmp.path().join("hook.pid");
+    let started = tmp.path().join("started");
+    let (runs, handle, stop_rx) = local_run_handle("run_hook_stop");
+    let hook = format!("sleep 60 & echo $! > '{}'; wait", pid_file.display());
+    let cfg = sh_run_config(&format!("touch '{}'", started.display()), Some(hook));
+    let target = IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned());
+    let handle_c = Arc::clone(&handle);
+    let task = tokio::spawn(async move {
+        execute_run_task(
+            runs,
+            handle_c,
+            TargetManager::new(),
+            target,
+            None,
+            vec![(cfg, BTreeMap::new())],
+            None,
+            stop_rx,
+        )
+        .await;
+    });
+    let mut hook_pid = None;
+    for _ in 0..80 {
+        if let Some(pid) = std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+        {
+            hook_pid = Some(pid);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let hook_pid = hook_pid.expect("before_launch never started");
+
+    handle.stop();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("run task kept waiting on the hook after Stop")
+        .unwrap();
+    let mut gone = false;
+    for _ in 0..50 {
+        if !pid_alive(hook_pid).await {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(gone, "hook child {hook_pid} survived Stop");
+    assert!(!started.exists(), "the program ran after Stop");
+    assert_eq!(handle.snapshot().status, IdeRunStatus::Stopped);
+}
+
+/// A failing hook's stdout and stderr reach the console as they are written.
+#[tokio::test]
+#[cfg(unix)]
+async fn failing_before_launch_streams_its_output_and_fails_the_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (runs, handle, stop_rx) = local_run_handle("run_hook_fail");
+    let cfg = sh_run_config(
+        "echo program-ran",
+        Some("echo hook-out; echo hook-err >&2; exit 3".into()),
+    );
+    execute_run_task(
+        runs,
+        Arc::clone(&handle),
+        TargetManager::new(),
+        IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned()),
+        None,
+        vec![(cfg, BTreeMap::new())],
+        None,
+        stop_rx,
+    )
+    .await;
+    let snap = handle.snapshot();
+    assert_eq!(snap.status, IdeRunStatus::Failed);
+    assert!(snap.output.iter().any(|l| l == "hook-out"));
+    assert!(snap.output.iter().any(|l| l == "hook-err"));
+    assert!(snap
+        .output
+        .iter()
+        .any(|l| l == "ERROR: before_launch failed (exit 3)"));
+    assert!(!snap.output.iter().any(|l| l == "program-ran"));
+}
+
+/// A hook that never exits is bounded by its timeout and its group is killed.
+#[tokio::test]
+#[cfg(unix)]
+async fn before_launch_timeout_fails_the_step_and_kills_the_group() {
+    use super::runner_steps::{run_local_before_launch, StepOutcome};
+    let tmp = tempfile::tempdir().unwrap();
+    let pid_file = tmp.path().join("hook.pid");
+    let (_runs, handle, mut stop_rx) = local_run_handle("run_hook_timeout");
+    let hook = format!("sleep 60 & echo $! > '{}'; wait", pid_file.display());
+    let outcome = run_local_before_launch(
+        &handle,
+        &hook,
+        &tmp.path().to_string_lossy(),
+        &BTreeMap::new(),
+        &mut stop_rx,
+        Duration::from_millis(400),
+    )
+    .await;
+    match outcome {
+        StepOutcome::Failed(msg) => assert!(msg.contains("timed out"), "{msg}"),
+        _ => panic!("expected a timeout failure"),
+    }
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut gone = false;
+    for _ in 0..50 {
+        if !pid_alive(pid).await {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(gone, "hook child {pid} survived the timeout");
+}

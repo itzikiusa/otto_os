@@ -4,14 +4,14 @@
 mod common;
 mod rbac_netbridge;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use axum::http::{Method, StatusCode};
 use axum::Router;
 use common::{
-    build_test_app, non_root_user, public_router_for, router_as, router_as_with_write_roots,
-    send_json, send_raw, urlencode, TestIdeCtx,
+    build_test_app, guest_get_json, non_root_user, public_router_for, router_as,
+    router_as_with_write_roots, send_json, send_raw, urlencode, TestIdeCtx,
 };
 use otto_core::Error;
 use otto_ide::dap::DapStartContext;
@@ -458,7 +458,8 @@ async fn collab_room_debug_owner_binding_and_guest_co_debug_guards() {
     )
     .await;
 
-    let (_, state_body) = send_json(
+    // The invite token is a header, never a query parameter (E12).
+    let (st_query, _) = send_json(
         &pub_app,
         Method::GET,
         &format!(
@@ -468,7 +469,17 @@ async fn collab_room_debug_owner_binding_and_guest_co_debug_guards() {
         None,
     )
     .await;
+    assert_eq!(st_query, StatusCode::UNAUTHORIZED);
+    let (_, state_body) = guest_get_json(
+        &pub_app,
+        &format!("/ide/collab/guest/{room_id}/state"),
+        &token,
+    )
+    .await;
     assert_eq!(state_body["room"]["active_debug_id"], sid_alice);
+    // Guests don't learn the host's user id or connection details (E11).
+    assert_eq!(state_body["room"]["host_user_id"], "");
+    assert!(state_body["room"]["target"].get("connection_id").is_none());
 
     let (_, join_body) = send_json(
         &pub_app,
@@ -556,5 +567,122 @@ async fn collab_room_debug_owner_binding_and_guest_co_debug_guards() {
             Some(json!({ "action": "stop" })),
         )
         .await;
+    }
+}
+
+/// E1 + E2: a non-root editor never writes git's own files, git wiring or
+/// agent config through the IDE — Otto's next fetch / status, the owner's
+/// next commit or next agent session would run them unsandboxed — by save,
+/// create, rename (into or away) or replace, also through a committed
+/// `tools -> .git` symlink; and `$HOME` is never its IDE root. Root keeps
+/// ordinary repo work such as editing `.gitattributes`.
+#[tokio::test]
+async fn non_root_ide_writes_refuse_git_and_agent_control_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("repo");
+    std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
+    std::fs::write(ws.join(".git/config"), "[core]\n").unwrap();
+    std::fs::write(ws.join("main.go"), "package main\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(ws.join(".git"), ws.join("tools")).unwrap();
+
+    let (ctx, root_app) =
+        build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
+    let app = router_as_with_write_roots(
+        &ctx,
+        non_root_user("u_nr"),
+        vec![ws.clone()],
+        vec![ws.clone()],
+    );
+    let target = json!({ "kind": "local", "root": ws.to_string_lossy() });
+
+    for path in [
+        ".git/config",
+        ".git/hooks/pre-commit",
+        "tools/hooks/post-checkout",
+        ".gitattributes",
+        "sub/.gitmodules",
+        ".claude/settings.json",
+        "CLAUDE.md",
+        ".codex/config.toml",
+    ] {
+        let (st, body) = send_json(
+            &app,
+            Method::PUT,
+            "/ide/fs/file",
+            Some(json!({ "target": target, "path": path, "content": "x\n", "create_dirs": true })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "save {path}: {body}");
+    }
+    for (op, path, dest) in [
+        ("create_file", ".git/hooks/pre-push", None),
+        ("mkdir", "nested/.git", None),
+        ("rename", "main.go", Some(".git/hooks/pre-commit")),
+        ("rename", ".git", Some("dotgit")),
+        ("duplicate", "main.go", Some(".gitattributes")),
+    ] {
+        let (st, body) = send_json(
+            &app,
+            Method::POST,
+            "/ide/fs/mutate",
+            Some(json!({ "target": target, "op": op, "path": path, "dest_path": dest })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{op} {path}: {body}");
+    }
+    let (st, body) = send_json(
+        &app,
+        Method::POST,
+        "/ide/replace",
+        Some(json!({
+            "target": target,
+            "query": "core",
+            "replacement": "core]\nsshCommand = sh -c evil #",
+            "paths": [ws.join(".git/config").to_string_lossy()],
+            "dry_run": false,
+        })),
+    )
+    .await;
+    assert!(
+        st == StatusCode::OK || st == StatusCode::FORBIDDEN,
+        "{st}: {body}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join(".git/config")).unwrap(),
+        "[core]\n"
+    );
+    assert!(!ws.join(".git/hooks/pre-commit").exists());
+    assert!(!ws.join(".gitattributes").exists());
+
+    // Ordinary files still save, and root keeps editing git wiring.
+    let (st, body) = send_json(
+        &app,
+        Method::PUT,
+        "/ide/fs/file",
+        Some(json!({ "target": target, "path": "main.go", "content": "package main\n\n" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let (st, body) = send_json(
+        &root_app,
+        Method::PUT,
+        "/ide/fs/file",
+        Some(json!({ "target": target, "path": ".gitattributes", "content": "*.go text\n" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "root edits .gitattributes: {body}");
+
+    // E1: even when a workspace covers it, `$HOME` is not a non-root IDE root.
+    if let Ok(home) = std::env::var("HOME") {
+        let home_app = router_as(&ctx, non_root_user("u_home"), vec![PathBuf::from(&home)]);
+        let (st, _) = send_json(
+            &home_app,
+            Method::GET,
+            &format!("/ide/fs/tree?root={}", urlencode(&home)),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "non-root IDE root at $HOME");
     }
 }

@@ -39,6 +39,9 @@ test('requestArchive confirms a working agent before archiving', () => {
 test('SessionView "Save & restart" runs the restart working-guard first', () => {
   const src = read('src/modules/agents/SessionView.svelte');
   const fn = src.slice(src.indexOf('  async function saveDirs('));
-  assert.match(fn, /if \(alsoRestart && !\(await ws\.confirmRestart\(sessionId\)\)\) return;/);
+  // The working-guard runs first inside saveAndRestartChoice (lib/freshRestart),
+  // then the can't-resume ask; a cancel leaves before anything is saved.
+  assert.match(fn, /saveAndRestartChoice\(session, \(\) => ws\.confirmRestart\(sessionId\), confirmer\)/);
+  assert.match(fn, /if \(restart === null\) return;/);
   assert.ok(fn.indexOf('confirmRestart') < fn.indexOf('ws.restartSession'), 'guard before the restart');
 });

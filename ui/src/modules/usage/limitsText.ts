@@ -1,11 +1,12 @@
 // Wording for the Usage page's "Remaining" section (GET /usage/limits): one
-// row per provider login, one bar per window. Pure (type-only import), so
+// row per provider login, one bar per window. Pure (no Svelte imports), so
 // `node --test` can load it.
 //
 // The rule this file keeps: a percent is only ever shown next to its age.
 // A fresh snapshot reads "87% left"; a stale one "87% left 3 h ago"; a window
 // that reset after the snapshot shows no percent at all.
 import type { AccountLimits, ClaudeCheck, WindowLimit } from '../../lib/api/types/usage-limits';
+import { usageProviderLabel } from './providerCoverage.ts';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -89,8 +90,9 @@ export function barTone(leftPercent: number | null): 'danger' | 'warning' | 'ok'
 
 const PROVIDERS: Record<string, string> = { codex: 'Codex', claude: 'Claude', agy: 'Antigravity', grok: 'Grok', muse: 'Muse' };
 
+/** A login's short name; any other provider gets the shared registry's. */
 export function providerName(p: string): string {
-  return PROVIDERS[p] ?? p;
+  return PROVIDERS[p] ?? usageProviderLabel(p);
 }
 
 /** "Pro", "Plus", "Max 20x" — the CLI's plan id, capitalised. */

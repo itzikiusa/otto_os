@@ -336,6 +336,23 @@ export function applyEvents(
   return foldEventBatch(p, events, true);
 }
 
+/** A snapshot carries no live command output (it is never persisted): keep
+ *  what was streamed so far for commands the snapshot says still run without
+ *  a settled `output`, so a reconnect mid-command does not blank its output. */
+function keepLiveOutput(prev: Record<string, string>, items: readonly TurnItem[]): Record<string, string> {
+  const ids = Object.keys(prev);
+  if (ids.length === 0) return {};
+  const kept: Record<string, string> = {};
+  const running = new Map<string, TurnItem>();
+  for (const it of items) if (it.status === 'running') running.set(it.id, it);
+  for (const id of ids) {
+    const it = running.get(id);
+    const settled = it && 'output' in it && it.output !== undefined && it.output !== null;
+    if (it && !settled) kept[id] = prev[id];
+  }
+  return kept;
+}
+
 /** Apply a `GET …/events?after_sequence=` answer. Replayed events are
  *  authoritative for their range, so they may skip ahead (a daemon restart
  *  resumes sequences above a reserved floor). */
@@ -345,7 +362,11 @@ export function applyReplay(p: RuntimeProjection, replay: RuntimeReplay): Runtim
     const rawFresh = fromSnapshot(replay.snapshot, replay.snapshot_sequence);
     const fresh =
       p.items.length > 0
-        ? { ...rawFresh, items: preserveHydratedItems(p.items, rawFresh.items) }
+        ? {
+            ...rawFresh,
+            items: preserveHydratedItems(p.items, rawFresh.items),
+            output: keepLiveOutput(p.output, rawFresh.items),
+          }
         : rawFresh;
     if (
       fresh.hasOlder &&

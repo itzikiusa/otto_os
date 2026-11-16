@@ -171,6 +171,9 @@
     line: 'M3 13 13 3',
     marker: 'M2.5 13.5h11M5 11l5.5-7.5 2.3 1.7L7.3 12.7H5Z',
     text: 'M3.5 3.5h9M8 3.5v9M6 12.5h4',
+    // Editor | Split | Preview (IDE preview control): source lines; lines beside a pane
+    editorLines: 'M2.5 3.5h11M2.5 6.5h11M2.5 9.5h11M2.5 12.5h7',
+    editorSplit: 'M1.5 3.5h5M1.5 6.5h5M1.5 9.5h5M1.5 12.5h3.5M9.5 2.5h4a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z',
     step: 'M8 2.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11ZM7 6.3 8.4 5.3v5.4',
   } satisfies Record<string, string>;
 

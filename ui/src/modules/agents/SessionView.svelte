@@ -24,7 +24,7 @@
   import Handover from './Handover.svelte';
   import HandoverDeliveryPanel from './HandoverDeliveryPanel.svelte';
   import { ws, isForeground } from '../../lib/stores/workspace.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmer } from '../../lib/confirm.svelte'; import { saveAndRestartChoice } from '../../lib/freshRestart';
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyText } from '../../lib/clipboard';
@@ -346,8 +346,8 @@
 
   async function saveDirs(alsoRestart: boolean): Promise<void> {
     if (dirsBusy) return;
-    // Same working-guard as every other restart path (ws.requestRestart).
-    if (alsoRestart && !(await ws.confirmRestart(sessionId))) return;
+    // Working-guard (ws.requestRestart's) + the can't-resume ask; null = cancelled.
+    const restart = alsoRestart ? await saveAndRestartChoice(session, () => ws.confirmRestart(sessionId), confirmer) : false; if (restart === null) return;
     dirsBusy = true;
     try {
       try {
@@ -360,7 +360,7 @@
       // The directories ARE saved from here on: close the dialog (a second
       // Save would only repeat it), and report a failed restart as exactly that.
       dirsOpen = false;
-      if (!alsoRestart) {
+      if (!restart) {
         toasts.success('Directories saved', 'Applies the next time this session restarts.');
         return;
       }

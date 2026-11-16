@@ -622,7 +622,8 @@ pub async fn run_agent_session(
     // that loads `.claude/skills` from an added dir. Wiring it for codex (which
     // would scavenge the bundle and run the wrong skill) or agy (which loads
     // `.agents/skills`) is the propagation bug; they get the lens method inline.
-    if let Some(dirs) = review_skills_extra_dirs(provider, skills_add_dir) {
+    // A custom slug (`claudework`) rides its CLI family.
+    if let Some(dirs) = review_skills_extra_dirs(&manager.cli_family(provider), skills_add_dir) {
         meta["extra_dirs"] = dirs;
     }
     if !model.trim().is_empty() {

@@ -360,6 +360,24 @@ pub async fn send_json(
     (status, parsed)
 }
 
+/// GET `uri` as a collab guest: the invite token travels in the
+/// `X-Ide-Collab-Token` header (the query form is refused).
+pub async fn guest_get_json(app: &Router, uri: &str, token: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("x-ide-collab-token", token)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
 pub fn urlencode(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len() * 2);
     for b in raw.bytes() {

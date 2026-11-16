@@ -6,6 +6,8 @@
   // smart IDE context pills (`IdeContextBar`) and 1-click `IdeProposalCard`
   // Diff Preview + Apply/Undo.
   import { onMount, setContext, untrack } from 'svelte';
+  // Touch devices have no keyboard: no "(⌘…)" hints there.
+  const touchOnly = typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)').matches);
   import { announceShown } from '../../lib/announce.svelte';
   import type { TurnItem } from '../../lib/api/types';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -194,7 +196,7 @@
       type="button"
       class="icon-btn"
       aria-label="Close agent panel"
-      title="Close agent (⌘L)"
+      title={touchOnly ? 'Close agent' : 'Close agent (⇧⌘L)'}
       onclick={closeAgentPanel}
       data-testid="ide-agent-close"
     >
@@ -373,7 +375,7 @@
               disabled={!ide.activeTab}
               onclick={() => ideAgent.markSelectionFromEditor({ openPanel: true })}
             >
-              <Icon name="cursor" size={12} /> Mark selection (⌘L)
+              <Icon name="cursor" size={12} /> Mark selection{touchOnly ? '' : ' (⌘L)'}
             </button>
             <button
               type="button"

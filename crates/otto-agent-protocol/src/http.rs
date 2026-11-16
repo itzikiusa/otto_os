@@ -25,6 +25,7 @@ use crate::runtime::council::{CouncilFollowUpReq, CouncilRoundsResp};
 use crate::RuntimeCtx;
 
 pub(crate) mod drafts;
+mod tasks;
 
 pub(crate) struct ApiErr(pub Error);
 
@@ -127,6 +128,15 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
         .route(
             "/runtime-sessions/{id}/tasks/{task_id}/output",
             get(task_output::<S>),
+        )
+        // A person stops background work (the turn's Stop does not).
+        .route(
+            "/runtime-sessions/{id}/tasks/stop",
+            post(tasks::stop_all::<S>),
+        )
+        .route(
+            "/runtime-sessions/{id}/tasks/{task_id}/stop",
+            post(tasks::stop_one::<S>),
         )
         .route("/runtime-sessions/{id}/swarm", get(swarm::<S>))
         .route(
@@ -370,8 +380,18 @@ async fn create<S: RuntimeCtx>(
     require_human(&ctx, &auth)?;
     ctx.roles().check(&user, &ws, WorkspaceRole::Editor).await?;
     let rt = ctx.agent_runtime();
+    let effort = body.effort.clone();
+    let effort = effort.as_deref().map(str::trim).filter(|e| !e.is_empty());
     let req = body.into_req_with_resolver(|slug| rt.resolve_runtime_provider(slug))?;
-    let s = rt.create(&user.id, &ws, req).await?;
+    // Checked before the thread exists: a bad effort creates nothing.
+    if let (Some(e), Some(p)) = (effort, req.provider) {
+        let caps = otto_core::agent_runtime::RuntimeCapabilities::for_provider(p);
+        crate::runtime::check_effort(&caps, p.as_str(), e)?;
+    }
+    let mut s = rt.create(&user.id, &ws, req).await?;
+    if effort.is_some() {
+        s = rt.set_effort(&s.id, effort).await?;
+    }
     Ok((StatusCode::CREATED, Json(s)))
 }
 
@@ -464,6 +484,9 @@ async fn prompt<S: RuntimeCtx>(
 #[derive(serde::Serialize)]
 struct InterruptResp {
     interrupted: bool,
+    /// Background work still running: the turn's Stop leaves it alone
+    /// (`POST …/tasks/stop` stops it).
+    background_tasks: usize,
 }
 
 async fn interrupt<S: RuntimeCtx>(
@@ -475,7 +498,11 @@ async fn interrupt<S: RuntimeCtx>(
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
     let interrupted = ctx.agent_runtime().interrupt(&id).await?;
-    Ok(Json(InterruptResp { interrupted }))
+    let background_tasks = ctx.agent_runtime().background_count(&id).await?;
+    Ok(Json(InterruptResp {
+        interrupted,
+        background_tasks,
+    }))
 }
 
 async fn answer<S: RuntimeCtx>(

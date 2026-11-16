@@ -192,3 +192,10 @@ export function buildAskMessage(
   }
   return { text: body, access: accessModeFor(ask.kind), title: prThreadTitle(pr) };
 }
+
+/** A message the person typed in the start composer: their words and the
+ *  PR's context. No read-only rule here — the access chip they picked says
+ *  what the agent may do, and the footer says it in words. */
+export function typedAskMessage(text: string, pr: PrDetail, repo: PrRepoCtx): string {
+  return `${prAgentPrompt('ask', pr, repo.slug, text)}\n\n${prContextBlock(pr, repo)}`;
+}

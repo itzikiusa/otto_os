@@ -909,6 +909,21 @@ impl UsageTailer {
                 .insert((sref.provider.clone(), psid.clone()), sref.clone());
             attr.by_provider_session.insert(psid, sref);
         }
+        // Threads (structured runtime): the CLI still writes its transcript
+        // under its own id, the thread's `native_thread_id`. Without this its
+        // turns landed as "external". A terminal session holding the same id
+        // (a thread continued in a terminal) keeps it.
+        for (id, workspace_id, provider, native) in runtime_thread_identities(&self.pool).await {
+            let sref = SessionRef {
+                otto_session_id: id,
+                workspace_id,
+                provider,
+            };
+            attr.by_provider_identity
+                .entry((sref.provider.clone(), native.clone()))
+                .or_insert_with(|| sref.clone());
+            attr.by_provider_session.entry(native).or_insert(sref);
+        }
         attr
     }
 
@@ -1392,6 +1407,22 @@ fn list_claude_files_under(root: &Path) -> Vec<(PathBuf, u64)> {
 
 /// The claude session a transcript bills to: the file stem for a top-level
 /// `<sid>.jsonl`, the parent `<sid>` for `<sid>/subagents/<agent>.jsonl`.
+/// `(thread id, workspace, provider, native id)` of every structured-runtime
+/// thread whose CLI id is known (closed ones too: a transcript outlives its
+/// thread's last turn). A failed read only costs attribution, as above.
+async fn runtime_thread_identities(pool: &DbPool) -> Vec<(String, String, String, String)> {
+    sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT id, workspace_id, provider, native_thread_id FROM agent_runtime_sessions \
+         WHERE native_thread_id IS NOT NULL AND native_thread_id <> ''",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!("usage tailer: thread attribution query failed: {e}");
+        Vec::new()
+    })
+}
+
 fn claude_session_stem(file: &Path) -> String {
     let parent = file.parent();
     if parent.and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("subagents") {
@@ -2652,6 +2683,38 @@ mod accounting_tests {
             .await
             .unwrap();
         restarted.scan_once().await.unwrap();
+        assert_eq!(outbox(&root).await.len(), 1);
+        usage.shutdown().await;
+        pool.close().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    /// A Codex thread (structured runtime) writes its usual rollout under its
+    /// native thread id: billed to the thread and its workspace, never as
+    /// external (and only once — the runtime itself records nothing for codex).
+    #[tokio::test]
+    async fn a_runtime_thread_rollout_bills_to_the_thread_not_external() {
+        let (root, pool, usage, mut tailer) = owner_fixture("thread").await;
+        sqlx::query("INSERT INTO agent_runtime_sessions(id,workspace_id,provider,title,cwd,native_thread_id,created_by,created_at,last_active_at) VALUES('thread-1','w','codex','t','/repo','psid-thread','u','2026-11-13T00:00:00Z','2026-11-13T00:00:00Z')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let file = write_rollout(&root, "psid-thread");
+        tailer
+            .scan_paths(HashSet::from([file.clone()]))
+            .await
+            .unwrap();
+        let rows = outbox(&root).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            (
+                rows[0].workspace_id.as_str(),
+                rows[0].session_id.as_str(),
+                rows[0].provider.as_str()
+            ),
+            ("w", "thread-1", "codex")
+        );
+        tailer.scan_once().await.unwrap();
         assert_eq!(outbox(&root).await.len(), 1);
         usage.shutdown().await;
         pool.close().await;

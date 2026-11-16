@@ -1712,6 +1712,8 @@ pub fn compose_orchestrator_prompt(
         // unresolvable method is still reachable there BY NAME; codex/agy have
         // only what the prompt carries.
         let method = if l.skill_text.trim().is_empty() {
+            // `provider` is the CLI family (the caller resolves a custom slug
+            // through the registry: `claudework` → `claude`).
             if provider == "claude" {
                 format!("use the `{}` skill (registered via --add-dir)", l.slug)
             } else {
@@ -1945,6 +1947,31 @@ mod orchestrator_tests {
         assert!(out.contains("ALPHA METHOD BODY"));
         assert!(!out.contains("registered via --add-dir"));
         assert!(out.contains("alpha instructions"));
+    }
+
+    /// I-09: the method names the skill only for the claude family (the
+    /// caller passes the registry-resolved family, never a raw slug).
+    #[test]
+    fn orchestrator_method_follows_the_cli_family_not_the_raw_slug() {
+        let lenses = vec![OrchestratorLens {
+            name: "Alpha lens".into(),
+            slug: "alpha-lens".into(),
+            skill_text: String::new(),
+            instructions: "alpha instructions".into(),
+            read_only: true,
+        }];
+        let dir = std::path::PathBuf::from("/tmp");
+        let prompt = |provider: &str| {
+            compose_orchestrator_prompt(
+                &lenses,
+                provider,
+                |slug| crate::session::lens_findings_path_in(&dir, "R1", 0, slug),
+                &crate::session::findings_path_in(&dir, "R1", 0),
+            )
+        };
+        assert!(prompt("claude").contains("registered via --add-dir"));
+        assert!(!prompt("codex").contains("registered via --add-dir"));
+        assert!(!prompt("muse").contains("registered via --add-dir"));
     }
 
     #[test]

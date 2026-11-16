@@ -7,11 +7,13 @@
 //! SSH hosts.
 
 pub mod complete;
+mod control_paths;
 mod fs_mutate;
 mod fs_ops;
 mod git_base;
 mod manager_ops;
 mod path_resolve;
+mod remote_realpath;
 pub(crate) mod sdk_archives;
 pub(crate) mod sdk_paths;
 mod search;
@@ -31,6 +33,11 @@ use crate::local_history::LocalHistoryStore;
 use crate::types::{IdePlatformInfo, IdeSshSpec, IdeTargetKind, IdeTargetSpec};
 use crate::IdeCtx;
 
+pub(crate) use self::control_paths::enforce_control_path;
+pub use self::control_paths::{
+    control_path_denial, control_path_denial_at, guest_control_path_denial,
+    guest_control_path_denial_at,
+};
 pub use self::fs_ops::{enforce_non_root_path, HistoryWriteOpts};
 pub(crate) use self::path_resolve::normalize_posix_clean_root;
 use self::sdk_paths::{
@@ -123,6 +130,16 @@ impl ResolvedTarget {
             }
             Self::Ssh { .. } => Vec::new(),
         }
+    }
+
+    /// The same target with non-root path rules: what an invited collab guest
+    /// writes with, even in a root host's room (secrets and git/agent
+    /// control paths stay refused). SSH targets are unchanged.
+    pub fn restricted_for_guest(mut self) -> Self {
+        if let Self::Local { is_root_user, .. } = &mut self {
+            *is_root_user = false;
+        }
+        self
     }
 
     pub fn local_readonly_roots(&self) -> &[PathBuf] {

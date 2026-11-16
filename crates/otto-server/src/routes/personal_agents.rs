@@ -305,6 +305,8 @@ async fn create(
 ) -> ApiResult<Json<Value>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
     check_creator(otto_core::auth::request_is_person(), &req)?;
+    let providers = ctx.manager.providers();
+    personal_agents_engine::check_agent_provider(providers, req.provider.as_deref().unwrap_or(""))?;
     let made = otto_assistant::personal_agent_admin::create(&ctx, &ws_id, &user.id, req).await?;
     if let Some(id) = made["id"].as_str() {
         changed(&ctx, &ws_id, id, "agent");
@@ -339,6 +341,7 @@ async fn update(
     require_agent_owner(&ctx, &auth, &agent, &owner_only_changes(&agent, &req)).await?;
     if let Some(p) = req.provider.as_deref() {
         check_provider(p)?;
+        personal_agents_engine::check_agent_provider(ctx.manager.providers(), p)?;
     }
     if let Some(d) = &req.delivery {
         check_delivery(d)?;

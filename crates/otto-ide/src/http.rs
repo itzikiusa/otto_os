@@ -20,7 +20,7 @@ mod sse_framing;
 #[path = "http/toolchains_env.rs"]
 mod toolchains_env;
 
-use axum::extract::{Query, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -62,6 +62,16 @@ use crate::types::{
     IdeSearchResp,
 };
 use crate::IdeCtx;
+
+/// Body cap for the routes that carry a whole editor buffer as JSON: the
+/// 4 MiB file the editor opens writable or the 8 MiB a shared collab buffer
+/// may reach, plus JSON-escaping headroom. Every other route keeps axum's
+/// 2 MB default.
+pub const IDE_BUFFER_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+fn buffer_body() -> DefaultBodyLimit {
+    DefaultBodyLimit::max(IDE_BUFFER_BODY_LIMIT)
+}
 
 pub(super) fn require_root_user(user: &otto_core::domain::User) -> Result<()> {
     if otto_core::auth::root_authority(user) {
@@ -108,7 +118,10 @@ pub(crate) type ApiResult<T> = std::result::Result<T, ApiErr>;
 
 /// Protected `/ide/*` REST & SSE routes (nested under `/api/v1`).
 pub fn api_router<S: IdeCtx>() -> Router<S> {
-    Router::new()
+    // A + A2 carry whole editor buffers (`content` on save, replace, gutter,
+    // format, diagnostics, hover, definition, completion, code actions,
+    // history snapshot): one bounded limit for the group.
+    let buffer_routes = Router::new()
         // A. Target Filesystem, Search, Gutter, Completion & Extended LSP
         .route("/ide/fs/tree", get(fs_tree::<S>))
         .route(
@@ -136,103 +149,107 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
         .route("/ide/history/entry", get(history_entry::<S>))
         .route("/ide/history/restore", post(history_restore::<S>))
         .route("/ide/history/snapshot", post(history_snapshot::<S>))
-        // B. OS/Arch Toolchains, Detected SDKs, Custom Local SDKs & SDK Downloader
-        .route("/ide/toolchains", get(list_toolchains::<S>))
-        .route("/ide/toolchains/install", post(install_toolchain::<S>))
-        .route(
-            "/ide/toolchains/local",
-            post(register_local_sdk::<S>).delete(delete_local_sdk::<S>),
-        )
-        .route("/ide/toolchains/jobs/{job_id}", get(get_toolchain_job::<S>))
-        .route(
-            "/ide/toolchains/python-venv",
-            post(toolchain_python_venv::<S>),
-        )
-        // C. Shell Env, Named Projects, Dependencies, Build Tools & Run Configs
-        .route("/ide/shell-env", get(get_shell_env::<S>))
-        .route("/ide/shell-env/reload", post(reload_shell_env::<S>))
-        .route(
-            "/ide/projects",
-            get(list_projects::<S>).post(upsert_project::<S>),
-        )
-        .route("/ide/projects/{id}", delete(delete_project::<S>))
-        .route("/ide/projects/scan-repos", post(scan_repos::<S>))
-        .route(
-            "/ide/projects/folders",
-            post(add_project_folder::<S>).delete(remove_project_folder::<S>),
-        )
-        .route(
-            "/ide/projects/folders/bulk",
-            post(add_project_folders_bulk::<S>),
-        )
-        .route("/ide/deps/inspect", post(deps_inspect::<S>))
-        .route("/ide/deps/action", post(deps_action::<S>))
-        .route("/ide/build-tools/model", post(build_tools_model::<S>))
-        .route(
-            "/ide/environments",
-            get(get_environments::<S>).put(put_environments::<S>),
-        )
-        .route(
-            "/ide/environments/python-venv",
-            post(create_python_venv::<S>),
-        )
-        .route(
-            "/ide/environments/bridge-test",
-            post(test_network_bridge::<S>),
-        )
-        .route(
-            "/ide/run-configs",
-            get(list_run_configs::<S>).post(upsert_run_config::<S>),
-        )
-        .route("/ide/run-configs/{id}", delete(delete_run_config::<S>))
-        .route("/ide/runs", post(start_run::<S>))
-        .route("/ide/runs/{run_id}", get(get_run::<S>))
-        .route("/ide/runs/{run_id}/events", get(stream_run_events::<S>))
-        .route("/ide/runs/{run_id}/stop", post(stop_run::<S>))
-        // D. Full DAP Debugger Engine
-        .route(
-            "/ide/debug/sessions",
-            get(list_debug_sessions::<S>).post(start_debug_session::<S>),
-        )
-        .route("/ide/debug/sessions/{id}", get(get_debug_session::<S>))
-        .route(
-            "/ide/debug/sessions/{id}/events",
-            get(stream_debug_events::<S>),
-        )
-        .route(
-            "/ide/debug/sessions/{id}/breakpoints",
-            put(set_debug_breakpoints::<S>),
-        )
-        .route("/ide/debug/sessions/{id}/command", post(debug_command::<S>))
-        .route(
-            "/ide/debug/sessions/{id}/variables",
-            post(debug_variables::<S>),
-        )
-        .route(
-            "/ide/debug/sessions/{id}/evaluate",
-            post(debug_evaluate::<S>),
-        )
-        // E. "Share with Friends" Host Routes
-        .route(
-            "/ide/collab/rooms",
-            get(list_collab_rooms::<S>).post(create_collab_room::<S>),
-        )
-        .route(
-            "/ide/collab/rooms/{room_id}/role",
-            post(set_collab_role::<S>),
-        )
-        .route(
-            "/ide/collab/rooms/{room_id}",
-            delete(close_collab_room::<S>),
-        )
-        // F. Runtime IDE Plugins
-        .route("/ide/plugins", get(list_plugins::<S>))
-        .route("/ide/plugins/install", post(install_plugin::<S>))
-        .route("/ide/plugins/{slug}/toggle", post(toggle_plugin::<S>))
-        .route("/ide/plugins/{slug}", delete(uninstall_plugin::<S>))
-        // G. Live Database Watch & Component-Test Watcher
-        .route("/ide/db-watch/detect", post(db_watch_detect::<S>))
-        .route("/ide/db-watch/snapshot", post(db_watch_snapshot::<S>))
+        .layer(buffer_body());
+    buffer_routes.merge(
+        Router::new()
+            // B. OS/Arch Toolchains, Detected SDKs, Custom Local SDKs & SDK Downloader
+            .route("/ide/toolchains", get(list_toolchains::<S>))
+            .route("/ide/toolchains/install", post(install_toolchain::<S>))
+            .route(
+                "/ide/toolchains/local",
+                post(register_local_sdk::<S>).delete(delete_local_sdk::<S>),
+            )
+            .route("/ide/toolchains/jobs/{job_id}", get(get_toolchain_job::<S>))
+            .route(
+                "/ide/toolchains/python-venv",
+                post(toolchain_python_venv::<S>),
+            )
+            // C. Shell Env, Named Projects, Dependencies, Build Tools & Run Configs
+            .route("/ide/shell-env", get(get_shell_env::<S>))
+            .route("/ide/shell-env/reload", post(reload_shell_env::<S>))
+            .route(
+                "/ide/projects",
+                get(list_projects::<S>).post(upsert_project::<S>),
+            )
+            .route("/ide/projects/{id}", delete(delete_project::<S>))
+            .route("/ide/projects/scan-repos", post(scan_repos::<S>))
+            .route(
+                "/ide/projects/folders",
+                post(add_project_folder::<S>).delete(remove_project_folder::<S>),
+            )
+            .route(
+                "/ide/projects/folders/bulk",
+                post(add_project_folders_bulk::<S>),
+            )
+            .route("/ide/deps/inspect", post(deps_inspect::<S>))
+            .route("/ide/deps/action", post(deps_action::<S>))
+            .route("/ide/build-tools/model", post(build_tools_model::<S>))
+            .route(
+                "/ide/environments",
+                get(get_environments::<S>).put(put_environments::<S>),
+            )
+            .route(
+                "/ide/environments/python-venv",
+                post(create_python_venv::<S>),
+            )
+            .route(
+                "/ide/environments/bridge-test",
+                post(test_network_bridge::<S>),
+            )
+            .route(
+                "/ide/run-configs",
+                get(list_run_configs::<S>).post(upsert_run_config::<S>),
+            )
+            .route("/ide/run-configs/{id}", delete(delete_run_config::<S>))
+            .route("/ide/runs", post(start_run::<S>))
+            .route("/ide/runs/{run_id}", get(get_run::<S>))
+            .route("/ide/runs/{run_id}/events", get(stream_run_events::<S>))
+            .route("/ide/runs/{run_id}/stop", post(stop_run::<S>))
+            // D. Full DAP Debugger Engine
+            .route(
+                "/ide/debug/sessions",
+                get(list_debug_sessions::<S>).post(start_debug_session::<S>),
+            )
+            .route("/ide/debug/sessions/{id}", get(get_debug_session::<S>))
+            .route(
+                "/ide/debug/sessions/{id}/events",
+                get(stream_debug_events::<S>),
+            )
+            .route(
+                "/ide/debug/sessions/{id}/breakpoints",
+                put(set_debug_breakpoints::<S>),
+            )
+            .route("/ide/debug/sessions/{id}/command", post(debug_command::<S>))
+            .route(
+                "/ide/debug/sessions/{id}/variables",
+                post(debug_variables::<S>),
+            )
+            .route(
+                "/ide/debug/sessions/{id}/evaluate",
+                post(debug_evaluate::<S>),
+            )
+            // E. "Share with Friends" Host Routes
+            .route(
+                "/ide/collab/rooms",
+                get(list_collab_rooms::<S>).post(create_collab_room::<S>),
+            )
+            .route(
+                "/ide/collab/rooms/{room_id}/role",
+                post(set_collab_role::<S>),
+            )
+            .route(
+                "/ide/collab/rooms/{room_id}",
+                delete(close_collab_room::<S>),
+            )
+            // F. Runtime IDE Plugins
+            .route("/ide/plugins", get(list_plugins::<S>))
+            .route("/ide/plugins/install", post(install_plugin::<S>))
+            .route("/ide/plugins/{slug}/toggle", post(toggle_plugin::<S>))
+            .route("/ide/plugins/{slug}", delete(uninstall_plugin::<S>))
+            // G. Live Database Watch & Component-Test Watcher
+            .route("/ide/db-watch/detect", post(db_watch_detect::<S>))
+            .route("/ide/db-watch/snapshot", post(db_watch_snapshot::<S>)),
+    )
 }
 
 /// Public capability-token `/ide/collab/guest/*` routes (nested under `/api/v1`).
@@ -256,7 +273,7 @@ pub fn public_router<S: IdeCtx>() -> Router<S> {
         )
         .route(
             "/ide/collab/guest/{room_id}/edit",
-            post(collab_guest_edit::<S>),
+            post(collab_guest_edit::<S>).layer(buffer_body()),
         )
         .route(
             "/ide/collab/guest/{room_id}/debug-action",
@@ -326,6 +343,11 @@ async fn fs_write_file<S: IdeCtx>(
         .targets
         .resolve_write(&ctx, &user, &req.target)
         .await?;
+    let is_root = otto_core::auth::root_authority(&user);
+    ctx.ide()
+        .targets
+        .refuse_remote_control_path(&resolved, &req.path, is_root)
+        .await?;
     let resp = ctx
         .ide()
         .targets
@@ -355,6 +377,13 @@ async fn fs_mutate<S: IdeCtx>(
         .targets
         .resolve_write(&ctx, &user, &req.target)
         .await?;
+    let is_root = otto_core::auth::root_authority(&user);
+    for p in std::iter::once(req.path.as_str()).chain(req.dest_path.as_deref()) {
+        ctx.ide()
+            .targets
+            .refuse_remote_control_path(&resolved, p, is_root)
+            .await?;
+    }
     let resp = ctx
         .ide()
         .targets
@@ -434,23 +463,22 @@ mod tests {
     use serde_json::Value;
 
     #[test]
-    fn collab_token_extraction_checks_query_header_and_bearer() {
+    fn collab_token_extraction_reads_headers_only() {
         let mut headers = HeaderMap::new();
         assert!(matches!(
-            extract_collab_token(&headers, None),
+            extract_collab_token(&headers),
             Err(Error::Unauthorized)
         ));
-        assert_eq!(
-            extract_collab_token(&headers, Some("  tok_q  ")).unwrap(),
-            "tok_q"
-        );
 
         headers.insert("x-ide-collab-token", HeaderValue::from_static("tok_hdr"));
-        assert_eq!(extract_collab_token(&headers, None).unwrap(), "tok_hdr");
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer tok_daemon"),
+        );
         assert_eq!(
-            extract_collab_token(&headers, Some("tok_q")).unwrap(),
+            extract_collab_token(&headers).unwrap(),
             "tok_hdr",
-            "explicit x-ide-collab-token header takes highest precedence"
+            "x-ide-collab-token wins over a daemon Authorization header"
         );
 
         let mut bearer_headers = HeaderMap::new();
@@ -458,15 +486,7 @@ mod tests {
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer tok_bearer"),
         );
-        assert_eq!(
-            extract_collab_token(&bearer_headers, None).unwrap(),
-            "tok_bearer"
-        );
-        assert_eq!(
-            extract_collab_token(&bearer_headers, Some("tok_invite_q")).unwrap(),
-            "tok_invite_q",
-            "?token= query parameter must win over daemon Authorization: Bearer header"
-        );
+        assert_eq!(extract_collab_token(&bearer_headers).unwrap(), "tok_bearer");
     }
 
     #[test]

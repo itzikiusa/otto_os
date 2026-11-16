@@ -11,6 +11,7 @@ import {
   setAltLoopbackBase,
 } from '../api/client';
 import { lsRemove, ssGet, ssSet, ssRemove } from '../storage';
+import { registerMetaSource } from '../freshRestart';
 import type { CapabilitiesResp, LoginResp, MeResp, MetaResp, User } from '../api/types';
 import type { Capability, Feature } from '../api/types';
 
@@ -597,6 +598,8 @@ class AuthStore {
 }
 
 export const auth = new AuthStore();
+// The restart guard reads `/meta.provider_resumable` without importing this store.
+registerMetaSource(() => auth.meta);
 
 if (typeof window !== 'undefined') {
   window.addEventListener(UNAUTHORIZED_EVENT, (e) => {

@@ -11,6 +11,9 @@ const FAILED_RETRY_MS = 30_000;
 
 class ThreadPrs {
   private byKey = $state<Record<string, PrSummary | null>>({});
+  /** Keys whose repo has no account and the person none for its forge:
+   *  "no PR" there means "can't look", which the surface says. */
+  private unlinked = $state<Record<string, boolean>>({});
   private inflight = new Set<string>();
   private accountProviders: Set<GitProviderKind> | null = null;
   private accountsFetchedAt = 0;
@@ -32,6 +35,12 @@ class ThreadPrs {
     return !repo || !branch || !repo.provider || !forgeLabel(repo) || `${repo.id}:${branch}` in this.byKey;
   }
 
+  /** Whether `repo`'s PRs can't be read because no git account covers its
+   *  forge (known once `checked`). */
+  needsAccount(repo: Repo | null, branch: string | null): boolean {
+    return !!repo && !!branch && !!this.unlinked[`${repo.id}:${branch}`];
+  }
+
   forget(repo: Repo | null, branch: string | null): void {
     this.accountProviders = null;
     this.accountsFetchedAt = 0;
@@ -40,6 +49,10 @@ class ThreadPrs {
     const next = { ...this.byKey };
     delete next[`${repo.id}:${branch}`];
     this.byKey = next;
+    if (this.unlinked[`${repo.id}:${branch}`]) {
+      const { [`${repo.id}:${branch}`]: _gone, ...rest } = this.unlinked;
+      this.unlinked = rest;
+    }
   }
 
   private async ensureAccountProviders(): Promise<Set<GitProviderKind>> {
@@ -72,6 +85,7 @@ class ThreadPrs {
     if (key in this.byKey || this.inflight.has(key)) return;
     this.inflight.add(key);
     let pr: PrSummary | null = null;
+    let unlinked = false;
     try {
       if (!repo.provider) {
         pr = null;
@@ -80,6 +94,8 @@ class ThreadPrs {
         if (providers.has(repo.provider)) {
           const r = await gitApi.prs.list(repo.id, 'open', 1, 50);
           pr = r.items.find((p) => p.source_branch === branch) ?? null;
+        } else {
+          unlinked = true;
         }
       } else {
         const r = await gitApi.prs.list(repo.id, 'open', 1, 50);
@@ -92,6 +108,7 @@ class ThreadPrs {
       this.inflight.delete(key);
     }
     this.failedAt.delete(key);
+    if (unlinked) this.unlinked = { ...this.unlinked, [key]: true };
     this.byKey = { ...this.byKey, [key]: pr };
   }
 }

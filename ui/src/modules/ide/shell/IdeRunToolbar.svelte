@@ -1,15 +1,18 @@
 <script lang="ts">
   // GoLand-style Run / Debug configuration selector & execution cluster:
-  // `[Config Selector ▾] [▶ Run] [🐞 Debug] [⏹ Stop] [⚙]`
+  // `[Config Selector ▾] [▶ Run] [🐞 Debug] [⏹ Stop] [⚙]`. Coverage lives in
+  // the IDE ⋯ menu. `compact` (the stacked phone layout) keeps only Run/Stop:
+  // Debug, Coverage and the configs move to ⋯ so the header stays one row.
   import Icon from '../../../lib/components/Icon.svelte';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
-  import { viewport } from '../../../lib/stores/viewport.svelte';
   import { ide, type IdeRunConfig } from '../ideStore.svelte';
   import { bridgeEnvCache } from './networkBridgeGuard.svelte';
   import { formatBridgeToolbarLabel } from './networkBridgeModel';
 
   const IdeRunConfigPopoverLazy = lazyComponent(() => import('./IdeRunConfigPopover.svelte'));
+
+  let { compact = false }: { compact?: boolean } = $props();
 
   let menuOpen = $state(false);
   let triggerEl = $state<HTMLButtonElement | undefined>(undefined);
@@ -38,7 +41,7 @@
   });
 </script>
 
-{#if !viewport.isPhone}
+{#if !compact}
   <div class="run-cluster" data-keep role="group" aria-label="Launch controls">
     {#if bridgeLabel}
       <button
@@ -90,17 +93,6 @@
     <button
       type="button"
       class="icon-btn"
-      aria-label="Run with coverage"
-      title="Run with coverage"
-      onclick={() => void ide.startRun({ coverage: true })}
-      data-testid="ide-run-coverage-btn"
-    >
-      <Icon name="shield" size={14} />
-    </button>
-
-    <button
-      type="button"
-      class="icon-btn"
       aria-label="Debug selected target (⌃D)"
       title="Debug selected target (⌃D)"
       onclick={() => void ide.startDebug()}
@@ -138,6 +130,7 @@
     <button
       type="button"
       class="run-bridge-btn is-prod is-compact"
+      data-keep
       title="Active PRODUCTION cluster / SSH network bridge — click to configure"
       onclick={() => ide.openEnvironmentsModal('env')}
       data-testid="ide-netbridge-toolbar-pill"
@@ -149,6 +142,7 @@
     <button
       type="button"
       class="btn small primary"
+      data-keep
       onclick={() => void ide.stopActiveExecution()}
       title="Stop active session"
       data-testid="ide-stop-btn"
@@ -160,6 +154,7 @@
     <button
       type="button"
       class="btn small primary"
+      data-keep
       onclick={() => void ide.startRun()}
       title="Run selected target"
       data-testid="ide-run-btn"
@@ -168,30 +163,6 @@
       Run
     </button>
   {/if}
-  <button
-    type="button"
-    class="icon-btn"
-    data-overflow="3"
-    data-icon="shield"
-    aria-label="Run with coverage"
-    title="Run with coverage"
-    onclick={() => void ide.startRun({ coverage: true })}
-    data-testid="ide-run-coverage-btn"
-  >
-    <Icon name="shield" size={14} />
-  </button>
-  <button
-    type="button"
-    class="icon-btn"
-    data-overflow="4"
-    data-icon="bug"
-    aria-label="Debug"
-    title="Debug"
-    onclick={() => void ide.startDebug()}
-    data-testid="ide-debug-btn"
-  >
-    <Icon name="bug" size={14} />
-  </button>
 {/if}
 
 {#if menuOpen}

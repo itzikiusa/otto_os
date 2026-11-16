@@ -198,6 +198,30 @@ export function bucketSessions(sessions: readonly Session[], byId?: ReadonlyMap<
   return b;
 }
 
+/** The "Agents N" badge: of the row groups the Agents section renders (the
+ *  current workspace's agents, "No workspace" and, with the all-workspaces
+ *  toggle, every other workspace's group), the rows whose dot is the green
+ *  "working" one — live status `working` (events-fed, else the row's own)
+ *  and not flagged needs-you, whose dot wins (`sessionState`). Counting any
+ *  other set (connection terminals, the current workspace only) made the
+ *  badge say 1 next to three green rows. */
+export function visibleWorkingCount(
+  groups: readonly (readonly Session[])[],
+  statusMap: Readonly<Record<string, string>>,
+  needsYou: Readonly<Record<string, boolean>>,
+): number {
+  const seen = new Set<string>();
+  let n = 0;
+  for (const rows of groups) {
+    for (const s of rows) {
+      if (seen.has(s.id)) continue;
+      seen.add(s.id);
+      if ((statusMap[s.id] ?? s.status) === 'working' && needsYou[s.id] !== true) n++;
+    }
+  }
+  return n;
+}
+
 /** A persisted open-tab list (`otto_tabs_<key>`): its string ids, or none
  *  when the payload is corrupt — a bad entry must never block selecting the
  *  workspace (restoreLayout ran an unguarded JSON.parse). */

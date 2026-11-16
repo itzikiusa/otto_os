@@ -10,7 +10,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use super::{CollabHub, SharedBufferRecord, MAX_SELECTIONS_PER_PEER, MAX_SHARED_BUFFER_BYTES};
+use super::{
+    CollabHub, SharedBufferRecord, MAX_ROOM_EVENT_BYTES, MAX_SELECTIONS_PER_PEER,
+    MAX_SHARED_BUFFER_BYTES, MAX_SUBSCRIBERS_PER_ROOM,
+};
 use crate::target::ResolvedTarget;
 use crate::types::{
     IdeCollabCursorReq, IdeCollabDebugActionReq, IdeCollabEditReq, IdeCollabEvent, IdeCollabRole,
@@ -25,15 +28,73 @@ impl CollabHub {
         room_id: &str,
         token: &str,
     ) -> Result<(IdeCollabRoom, broadcast::Receiver<IdeCollabEvent>)> {
-        let guard = self
+        self.subscribe_peer(room_id, token, None)
+    }
+
+    /// [`Self::subscribe`] for the stream of `peer_id`: while it is open the
+    /// peer keeps its seat (see [`Self::peer_stream_closed`]). At most
+    /// [`MAX_SUBSCRIBERS_PER_ROOM`] streams are open per room.
+    pub fn subscribe_peer(
+        &self,
+        room_id: &str,
+        token: &str,
+        peer_id: Option<&str>,
+    ) -> Result<(IdeCollabRoom, broadcast::Receiver<IdeCollabEvent>)> {
+        let mut guard = self
             .rooms
-            .read()
+            .write()
             .map_err(|_| Error::Internal("collab lock poisoned".into()))?;
         let room = guard
-            .get(room_id)
+            .get_mut(room_id)
             .ok_or_else(|| Error::NotFound(format!("collab room '{room_id}' not found")))?;
         room.verify_invite_token(token)?;
-        Ok((room.snapshot(), room.events_tx.subscribe()))
+        let now = Instant::now();
+        room.evict_stale_peers(now);
+        if room.events_tx.receiver_count() >= MAX_SUBSCRIBERS_PER_ROOM {
+            return Err(Error::Conflict(format!(
+                "room already has {MAX_SUBSCRIBERS_PER_ROOM} open event streams"
+            )));
+        }
+        if let Some(rec) =
+            peer_id.and_then(|id| room.peers.iter_mut().find(|p| p.peer.peer_id == id))
+        {
+            rec.streams += 1;
+            rec.last_seen = now;
+        }
+        Ok((room.guest_snapshot(), room.events_tx.subscribe()))
+    }
+
+    /// The `/events` stream of `peer_id` ended. With no stream left the peer
+    /// has [`super::PEER_STALE_AFTER`] to reconnect before its seat is freed.
+    pub fn peer_stream_closed(&self, room_id: &str, peer_id: &str) {
+        let Ok(mut guard) = self.rooms.write() else {
+            return;
+        };
+        let Some(room) = guard.get_mut(room_id) else {
+            return;
+        };
+        if let Some(rec) = room.peers.iter_mut().find(|p| p.peer.peer_id == peer_id) {
+            rec.streams = rec.streams.saturating_sub(1);
+            rec.last_seen = Instant::now();
+        }
+    }
+
+    /// The room's host user id (for server-side checks; guests never see it).
+    pub fn host_user_id(&self, room_id: &str) -> Option<String> {
+        let guard = self.rooms.read().ok()?;
+        Some(guard.get(room_id)?.host_user_id.clone())
+    }
+
+    /// Close a room without a host request — its host lost access (disabled).
+    pub fn revoke_room(&self, room_id: &str) {
+        let Ok(mut guard) = self.rooms.write() else {
+            return;
+        };
+        if let Some(removed) = guard.remove(room_id) {
+            let _ = removed.events_tx.send(IdeCollabEvent::RoomClosed {
+                room_id: room_id.to_string(),
+            });
+        }
     }
 
     /// Return the host-authorized [`ResolvedTarget`] bound to `room_id`, if available.
@@ -137,7 +198,7 @@ impl CollabHub {
         }
         rec.clean = true;
         let content = rec.buf.content.clone();
-        let _ = room.events_tx.send(IdeCollabEvent::BufferUpdated {
+        room.send_event(IdeCollabEvent::BufferUpdated {
             peer_id: peer_id.to_string(),
             path: path.to_string(),
             sha256: Some(hex::encode(Sha256::digest(content.as_bytes()))),
@@ -213,6 +274,12 @@ impl CollabHub {
 
         let next_version =
             Self::check_base_version(room.shared_buffers.get(&req.path), req.base_version)?;
+        if room.pinned_event_bytes() + req.content.len() > MAX_ROOM_EVENT_BYTES {
+            return Err(Error::Conflict(
+                "a collaborator's connection is not keeping up with edits; try again shortly"
+                    .into(),
+            ));
+        }
 
         room.buffer_seq = room.buffer_seq.saturating_add(1);
         let touched_seq = room.buffer_seq;
@@ -230,7 +297,7 @@ impl CollabHub {
         room.enforce_buffer_caps(&req.path);
 
         let sha256 = saved_to_target.then(|| hex::encode(Sha256::digest(req.content.as_bytes())));
-        let _ = room.events_tx.send(IdeCollabEvent::BufferUpdated {
+        room.send_event(IdeCollabEvent::BufferUpdated {
             peer_id: req.peer_id.clone(),
             path: req.path.clone(),
             content: req.content.clone(),
@@ -243,8 +310,8 @@ impl CollabHub {
     }
 
     /// Authorize a co-debugger guest action (`IdeCollabDebugActionReq`), verifying `Editor` role
-    /// and that `req.debug_id` matches the room's active debug session (or `last_debug_id` when
-    /// restarting a terminated session).
+    /// and that `req.debug_id` matches the room's active debug session. `Restart` is never a
+    /// guest's: it relaunches the host's program, as the host, with whatever a guest just saved.
     pub fn authorize_debug_action(
         &self,
         room_id: &str,
@@ -262,10 +329,13 @@ impl CollabHub {
         let matches_room_debug = room
             .active_debug
             .as_ref()
-            .is_some_and(|d| d.id == req.debug_id)
-            || (req.action == crate::types::IdeDebugAction::Restart
-                && room.last_debug_id.as_deref() == Some(req.debug_id.as_str()));
+            .is_some_and(|d| d.id == req.debug_id);
         let rec = room.find_authenticated_peer_mut(&req.peer_id, &req.peer_secret)?;
+        if req.action == crate::types::IdeDebugAction::Restart {
+            return Err(Error::Forbidden(
+                "only the host can restart the debug session".into(),
+            ));
+        }
         if rec.peer.role != IdeCollabRole::Editor {
             return Err(Error::Forbidden(
                 "viewer peers do not have permission to edit or control debugging".into(),
@@ -334,7 +404,7 @@ impl CollabHub {
             .map(|(k, v)| (k.clone(), v.buf.clone()))
             .collect();
         Ok(IdeCollabStateResp {
-            room: room.snapshot(),
+            room: room.guest_snapshot(),
             shared_buffers,
             active_debug: room.active_debug.clone(),
         })

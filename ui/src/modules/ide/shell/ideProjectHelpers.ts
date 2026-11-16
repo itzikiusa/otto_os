@@ -12,11 +12,14 @@ import {
 import { ideWorkspacePort } from '../../../lib/ideWorkspacePort.svelte';
 import { lsGet, lsSet } from '../../../lib/storage';
 import { toasts } from '../../../lib/toast.svelte';
+import { loadErrorText } from '../../../lib/loadError';
 import { toastError } from '../../../lib/toastError';
+import { ideTreeDirErrors } from '../store/ideTreeDirErrors.svelte';
 import {
   autoOpenInitialEntry,
   buildNewFileTemplate,
   ideBasename,
+  ideTargetKey,
   type IdeBreakpoint,
   type IdeFsEntry,
   type IdeFsTreeResp,
@@ -308,18 +311,22 @@ export function findContainingRoot(fullPath: string, roots: IdeProjectRoot[]): I
 export async function loadAttachedRootEntries(host: ProjectHelperHost, rootPath: string): Promise<void> {
   const clean = normalizeRootPath(rootPath);
   if (!clean) return;
+  const key = ideTargetKey(host.target);
   try {
     const query = host.target.kind === 'local'
       ? new URLSearchParams({ kind: 'local', root: clean, show_hidden: String(host.showHidden) }).toString()
       : host.targetQuery({ path: clean, show_hidden: host.showHidden });
     const resp = await api.get<IdeFsTreeResp>(`/ide/fs/tree?${query}`);
+    if (ideTargetKey(host.target) !== key) return;
     const rawEntries = resp.entries ?? [];
     const entries = host.target.kind === 'local'
       ? rawEntries.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) }))
       : rawEntries;
     host.childrenByDir = { ...host.childrenByDir, [clean]: entries };
+    ideTreeDirErrors.clear(clean);
   } catch (e) {
-    toastError(`Couldn’t open folder ${ideBasename(clean)}`, e);
+    // Shown inline under the folder with Retry (IdeProjectTree), not as a toast.
+    if (ideTargetKey(host.target) === key) ideTreeDirErrors.set(clean, loadErrorText(e));
   }
 }
 
@@ -648,8 +655,14 @@ export async function restoreWorkspaceTabsOrInitial(host: {
   if (host.collabIsGuest || host.tabs.length > 0 || host.hasClosedAllTabs) return;
   if (typeof window !== 'undefined' && /[?&](file|collab)=/.test(window.location.hash)) return;
   const saved = loadWorkspaceOpenTabs(host.target.root);
+  // Stop as soon as the project switches: the rest of the list belongs to the old one.
+  const key = ideTargetKey(host.target);
   if (saved && saved.paths.length > 0) {
-    for (let i = 0; i < saved.paths.length; i++) await host.openFile(saved.paths[i], { preview: false });
+    for (let i = 0; i < saved.paths.length; i++) {
+      if (ideTargetKey(host.target) !== key) return;
+      await host.openFile(saved.paths[i], { preview: false });
+    }
+    if (ideTargetKey(host.target) !== key) return;
     const validTabs = host.tabs.filter((t) => !t.error);
     if (validTabs.length > 0) {
       if (saved.splitPath && validTabs.some((t) => t.path === saved.splitPath)) host.openInSplit(saved.splitPath, 'right');

@@ -144,6 +144,8 @@ describe('Round 5 — Bug U1: Editor Git HEAD diff gutter & persisted baseline a
         'modules/ide/ideStore.svelte': ideStub,
         '../store/ideAgentController.svelte': { ideAgent: {} },
         '../../../lib/idePreferences.svelte': { idePreferences: { current: { formatOnSave: false }, update() {} } },
+        // The stacked-layout editor switch needs CodeMirror; not under test here.
+        'lib/components/cm-ide-compact': { setIdeCompactLayout() {}, isIdeCompactLayout: () => false, ideCompactExtension: () => [] },
       },
       {},
       { relative: true },

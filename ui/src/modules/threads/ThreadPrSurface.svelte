@@ -55,6 +55,16 @@
 <div class="tps" data-testid="threads-pr-surface">
   {#if !checked}
     <div class="tps-pad"><Skeleton rows={4} height={22} label="the pull request" /></div>
+  {:else if threadPrs.needsAccount(repo, branch)}
+    <EmptyState
+      variant="panel"
+      icon="pr"
+      title="No {forge} account linked"
+      body="Otto reads pull requests with your {forge} account. Add one in Settings › Git accounts, then link it to this repo (Git → repo card → Account)."
+      actionLabel="Open Git accounts"
+      actionIcon="gear"
+      onaction={() => router.go('settings/git-accounts')}
+    />
   {:else if !pr || !repo}
     <EmptyState
       variant="panel"

@@ -37,6 +37,7 @@
   import UsageHealthBanner from './UsageHealthBanner.svelte';
   import RemainingLimits from './RemainingLimits.svelte';
   import ModelBreakdown from './ModelBreakdown.svelte';
+  import { unmeasuredTerminalNote, usageProviderLabel } from './providerCoverage';
   import { usageUi, type UsageSubView } from './usageUiState.svelte';
   let reportLoad = $state(0);
 
@@ -815,7 +816,7 @@
                 <div class="bars">
                   {#each usage.summary.providers as p (p.provider)}
                     <div class="bar-row">
-                      <span class="bar-name" title={p.provider}>{p.provider}</span>
+                      <span class="bar-name" title={p.provider}>{usageProviderLabel(p.provider)}</span>
                       <div class="bar-track">
                         <div class="bar-fill stacked" style="width: {(p.total_tokens / pmax) * 100}%" title={breakdownTitle(p)}>
                           {#each tokenSegs(p) as s (s.label)}
@@ -831,6 +832,7 @@
               {:else}
                 <p class="dim small">No usage in this window. Providers appear here as agents run.</p>
               {/if}
+              {#if unmeasuredTerminalNote(providerChoices)}<p class="dim small" data-testid="usage-unmeasured-note">{unmeasuredTerminalNote(providerChoices)}</p>{/if}
             </section>
 
             <!-- Daily tokens (SVG chart with y-axis labels, gridlines, x-axis ticks,

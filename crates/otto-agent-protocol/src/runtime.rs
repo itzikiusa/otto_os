@@ -14,6 +14,7 @@
 //! the persistence op all happen under it, so they agree on order; DB writes
 //! run on a per-session persister task fed in that order.
 
+mod admission;
 mod auto_close;
 mod children;
 pub mod council;
@@ -24,7 +25,13 @@ mod held_proc;
 mod paging;
 mod peers;
 mod request_ids;
+mod selection;
+mod task_stop;
+mod usage_hook;
+pub use admission::{HANDSHAKE_TIMEOUT, MAX_QUEUED_BYTES, MAX_QUEUED_PROMPTS};
 use request_ids::RequestIds;
+pub use selection::check_effort;
+pub use task_stop::{TaskStopAllResp, TaskStopEntry, TaskStopOutcome, TaskStopResp};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -98,6 +105,9 @@ pub struct RuntimeConfig {
     /// Explicit launcher binary for `runtime-holder` (tests pass `otto-runtime-holder`;
     /// `None` auto-detects `ottod runtime-holder` or `OTTO_RUNTIME_HOLDER_BIN`).
     pub holder_launcher: Option<crate::holder::HolderLauncher>,
+    /// A spawned CLI that has not answered its handshake after this long
+    /// is stopped with a clear error ([`HANDSHAKE_TIMEOUT`]). Zero disables.
+    pub handshake_timeout: Duration,
 }
 
 impl Default for RuntimeConfig {
@@ -115,6 +125,7 @@ impl Default for RuntimeConfig {
             stall_tool_after: Duration::from_secs(45 * 60),
             holders_dir: None,
             holder_launcher: None,
+            handshake_timeout: HANDSHAKE_TIMEOUT,
         }
     }
 }
@@ -134,10 +145,15 @@ const K_COMMANDS: &str = "commands";
 struct QueuedRecord {
     id: Id,
     created_at: chrono::DateTime<Utc>,
-    req: RuntimePromptReq,
+    #[serde(with = "admission::shared_req")]
+    req: Arc<RuntimePromptReq>,
     /// A child thread's answer waiting for this (parent) thread's agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wake: Option<children::WakeKey>,
+    /// Its last delivery failed: kept (never lost), skipped by the drain
+    /// until a person retries, edits or removes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 impl QueuedRecord {
@@ -148,6 +164,7 @@ impl QueuedRecord {
             attachments: (self.req.images.len() + self.req.files.len()).min(u32::MAX as usize)
                 as u32,
             created_at: self.created_at,
+            error: self.error.clone(),
         }
     }
 }
@@ -159,6 +176,12 @@ enum PersistOp {
     /// The agent's own name for the conversation (the title stays auto).
     Title(String),
     ClearNativeThreadId,
+    /// The thread's model / effort / access, in the order they took effect.
+    Model(Option<String>),
+    Effort(Option<String>),
+    Access(otto_core::agent_runtime::RuntimeAccessMode),
+    /// The whole queue row, serialized by the persister (off the session lock).
+    Queue(u64, Vec<QueuedRecord>),
     Closed,
     Opened,
     Flush(oneshot::Sender<()>),
@@ -433,6 +456,12 @@ pub(super) struct State {
     /// once it runs (T3 Code #34912) instead of finding nothing to stop.
     starting: u32,
     stop_requested: bool,
+    /// `session.model` is what the agent reported, not a pin (a "Default
+    /// model" thread): it is shown, never re-launched as `--model`.
+    pub(super) model_from_provider: bool,
+    /// The model before a live switch the agent has not refused (yet): a
+    /// refusal rolls back to it (`selection::on_error`).
+    pub(super) switch_from: Option<Option<String>>,
 }
 
 impl State {
@@ -478,6 +507,8 @@ pub(super) struct Inner {
     config: RuntimeConfig,
     live: DashMap<Id, Arc<Live>>,
     loading: otto_core::keyed_lock::KeyedLocks<Id>,
+    /// Where settled turns' token usage goes (`usage_hook`); unset = nowhere.
+    usage: std::sync::OnceLock<Arc<otto_usage::UsageEngine>>,
 }
 
 /// Cheap to clone.
@@ -502,6 +533,7 @@ impl AgentRuntime {
                 config,
                 live: DashMap::new(),
                 loading: otto_core::keyed_lock::KeyedLocks::new(),
+                usage: std::sync::OnceLock::new(),
             }),
         }
     }
@@ -984,6 +1016,8 @@ impl AgentRuntime {
                     last_activity: Instant::now(),
                     starting: 0,
                     stop_requested: false,
+                    model_from_provider: false,
+                    switch_from: None,
                 }),
                 persist: tx,
                 detaching_for_restart: std::sync::atomic::AtomicBool::new(false),
@@ -1015,7 +1049,9 @@ impl AgentRuntime {
             "threads.spawn_driver",
             self.spawn_driver_inner(live, session),
         )
-        .await
+        .await?;
+        admission::watch_handshake(&self.inner, live);
+        Ok(())
     }
 
     async fn spawn_driver_inner(&self, live: &Arc<Live>, session: RuntimeSession) -> Result<()> {
@@ -1186,23 +1222,14 @@ impl AgentRuntime {
         live: &Arc<Live>,
         raw_req: &RuntimePromptReq,
     ) -> Result<RuntimePromptResp> {
+        // `""` stays: it clears the thread's pin (`selection::Pick::Clear`).
         let normalized_req = RuntimePromptReq {
-            model: raw_req
-                .model
-                .as_deref()
-                .map(str::trim)
-                .filter(|m| !m.is_empty())
-                .map(str::to_string),
-            effort: raw_req
-                .effort
-                .as_deref()
-                .map(str::trim)
-                .filter(|e| !e.is_empty())
-                .map(str::to_string),
+            model: raw_req.model.as_deref().map(|m| m.trim().to_string()),
+            effort: raw_req.effort.as_deref().map(|e| e.trim().to_string()),
             ..raw_req.clone()
         };
         let req = &normalized_req;
-        if let Some(m) = req.model.as_deref() {
+        if let Some(m) = req.model.as_deref().filter(|m| !m.is_empty()) {
             crate::http::drafts::validate_model_name(m)?;
         }
         if req.text.trim().is_empty() && req.images.is_empty() && req.files.is_empty() {
@@ -1283,44 +1310,7 @@ impl AgentRuntime {
     ) -> Result<RuntimePromptResp> {
         let live = Arc::clone(live);
         let _starting = Starting::new(&live);
-        let model = req.model.clone().filter(|m| !m.trim().is_empty());
-        if model.is_some() || req.access_mode.is_some() {
-            let _spawning = live.spawn_lock.lock().await;
-            let (stale, model, mode) = {
-                let mut st = live.lock();
-                check_can_prompt(&st)?;
-                let model = model.filter(|m| st.session.model.as_ref() != Some(m));
-                let mode = req.access_mode.filter(|m| *m != st.session.access_mode);
-                // A driver that cannot switch live restarts in the new
-                // selection and resumes its thread.
-                let live_switch = st.proc.as_ref().is_some_and(|p| {
-                    (model.is_none() || p.driver.switches_model_live())
-                        && mode.is_none_or(|m| p.driver.switches_access_live(m))
-                });
-                if let Some(m) = &model {
-                    st.session.model = Some(m.clone());
-                }
-                if let Some(m) = mode {
-                    st.session.access_mode = m;
-                }
-                let changed = model.is_some() || mode.is_some();
-                (
-                    (changed && !live_switch).then(|| st.proc.take()).flatten(),
-                    model,
-                    mode,
-                )
-            };
-            if let Some(p) = stale {
-                live.proc_ended.notify_waiters();
-                stop_child(p, self.inner.config.interrupt_grace);
-            }
-            if let Some(m) = &model {
-                self.inner.repo.set_model(id, m).await?;
-            }
-            if let Some(m) = mode {
-                self.inner.repo.set_access_mode(id, m).await?;
-            }
-        }
+        let req = &self.apply_selection(&live, req).await?;
         self.spawn_resuming(id, &live).await?;
         if req.fresh_context && !self.fresh_process_ready(&live).await {
             return Err(Error::Invalid(
@@ -1374,6 +1364,7 @@ impl AgentRuntime {
         if req.fresh_context {
             self.commit_fresh(live, &mut st, &turn_id);
         }
+        selection::accept_effort(&self.inner, live, &mut st, req);
         let now = Utc::now();
         st.proj.next_turn_ordinal += 1;
         let turn = ProviderTurn {
@@ -1384,6 +1375,8 @@ impl AgentRuntime {
             completed_at: None,
             turn_token_usage: None,
             origin: TurnOrigin::User,
+            model: st.session.model.clone(),
+            effort: req.effort.clone(),
         };
         st.turn = Some(ActiveTurn {
             id: turn_id.clone(),
@@ -1444,18 +1437,12 @@ impl AgentRuntime {
         req: &RuntimePromptReq,
         delivery: PromptDelivery,
     ) -> Result<RuntimePromptResp> {
-        if delivery == PromptDelivery::Steer {
+        // Dropping a pin needs a restart: such a message waits its turn.
+        let clears = selection::clear_needs_restart(&live.lock(), req);
+        if delivery == PromptDelivery::Steer && !clears {
             let attachments = self.store_attachments(id, req).await?;
-            let stored = self.with_paths(id, req, &attachments);
-            if let Some((resp, steered_model, steered_mode)) =
-                steer_turn(&self.inner, live, &stored, attachments.clone())
-            {
-                if let Some(m) = &steered_model {
-                    let _ = self.inner.repo.set_model(id, m).await;
-                }
-                if let Some(m) = steered_mode {
-                    let _ = self.inner.repo.set_access_mode(id, m).await;
-                }
+            let stored = self.with_paths(id, &selection::for_driver(req), &attachments);
+            if let Some(resp) = steer_turn(&self.inner, live, &stored, attachments.clone()) {
                 return Ok(resp);
             }
             for a in &attachments {
@@ -1468,14 +1455,16 @@ impl AgentRuntime {
             if st.session.status == RuntimeSessionStatus::Closed {
                 return Err(Error::Conflict("the session is closed".into()));
             }
+            admission::check_queue_room(&st.proj.queue, req)?;
             let rec = QueuedRecord {
                 id: new_id(),
                 created_at: Utc::now(),
-                req: RuntimePromptReq {
+                req: Arc::new(RuntimePromptReq {
                     delivery: None,
                     ..req.clone()
-                },
+                }),
                 wake: None,
+                error: None,
             };
             let qid = rec.id.clone();
             if front {
@@ -1506,13 +1495,16 @@ impl AgentRuntime {
         queued_id: &str,
     ) -> Result<Option<RuntimePromptReq>> {
         let live = self.live(id).await?;
+        // Serialized with delivery: a message the drain is sending right now
+        // is not also handed back for Edit (a second send) or "removed".
+        let _prompt = live.prompt_lock.lock().await;
         let mut st = live.lock();
         let Some(idx) = st.proj.queue.iter().position(|q| q.id == queued_id) else {
             return Ok(None);
         };
         let rec = st.proj.queue.remove(idx);
         emit_queue(&self.inner, &live, &mut st);
-        Ok(Some(rec.req))
+        Ok(Some(Arc::unwrap_or_clone(rec.req)))
     }
 
     /// Drop a queued message (`false` when it is not queued any more).
@@ -1536,6 +1528,19 @@ impl AgentRuntime {
             let Some(n) = st.proj.queue.iter().position(|q| q.id == queued_id) else {
                 return Err(Error::NotFound("that message is no longer queued".into()));
             };
+            if delivery == PromptDelivery::Queue && st.proj.queue[n].error.is_some() {
+                // Retry a failed one in its place in line.
+                st.proj.queue[n].error = None;
+                let sequence = emit_queue(&self.inner, &live, &mut st);
+                drop(st);
+                self.kick_queue(id);
+                return Ok(RuntimePromptResp {
+                    turn_id: String::new(),
+                    sequence,
+                    queued_id: Some(queued_id.to_string()),
+                    steered: false,
+                });
+            }
             if delivery == PromptDelivery::Queue {
                 return Ok(RuntimePromptResp {
                     turn_id: String::new(),
@@ -1550,14 +1555,20 @@ impl AgentRuntime {
         };
         let req = RuntimePromptReq {
             delivery: Some(delivery),
-            ..rec.req.clone()
+            ..(*rec.req).clone()
         };
         let res = self.prompt_locked(id, &live, &req).await;
-        if res.is_err() {
+        if let Err(e) = &res {
             // Back where it was, so nothing is lost.
             let mut st = live.lock();
             if !st.proj.queue.iter().any(|q| q.id == rec.id) {
-                st.proj.queue.insert(0, rec);
+                st.proj.queue.insert(
+                    0,
+                    QueuedRecord {
+                        error: Some(e.to_string()),
+                        ..rec
+                    },
+                );
                 emit_queue(&self.inner, &live, &mut st);
             }
         }
@@ -1584,27 +1595,38 @@ impl AgentRuntime {
             // A child thread's reply never respawns a stopped agent: it waits
             // for the person (their next message, or Revive). A queue with a
             // person's message in it goes out in order.
-            if st.proc.is_none() && st.proj.queue.iter().all(|q| q.wake.is_some()) {
+            // A message whose delivery failed waits for a person's retry.
+            let mut ready = st.proj.queue.iter().filter(|q| q.error.is_none());
+            if st.proc.is_none() && ready.clone().all(|q| q.wake.is_some()) {
                 return;
             }
-            st.proj.queue.first().cloned()
+            ready.next().cloned()
         };
         let Some(rec) = next else {
             return;
         };
         let res = self.prompt_now(id, &live, &rec.req).await;
         let mut st = live.lock();
+        let failed = res
+            .as_ref()
+            .is_err_and(|e| !matches!(e, Error::Conflict(m) if m == TURN_RUNNING));
         match res {
             // A turn started first: this one waits for its end.
             Err(Error::Conflict(m)) if m == TURN_RUNNING => return,
-            Ok(_) => {}
+            Ok(_) => st.proj.queue.retain(|q| q.id != rec.id),
             Err(e) => {
+                // Never lost: it stays queued, marked, for Retry / Edit.
+                if let Some(q) = st.proj.queue.iter_mut().find(|q| q.id == rec.id) {
+                    q.error = Some(e.to_string());
+                }
                 let mut n = item(
                     new_id(),
                     TurnItemStatus::Failed,
                     None,
                     TurnItemKind::SystemNotice {
-                        message: format!("A queued message could not be sent: {e}"),
+                        message: format!(
+                            "A queued message could not be sent: {e}. It is still queued — retry, edit or remove it."
+                        ),
                         task_settlement: None,
                     },
                 );
@@ -1612,8 +1634,12 @@ impl AgentRuntime {
                 upsert_item(&self.inner, &live, &mut st, n);
             }
         }
-        st.proj.queue.retain(|q| q.id != rec.id);
         emit_queue(&self.inner, &live, &mut st);
+        drop(st);
+        if failed {
+            // The ones behind it still go out (each failure is marked once).
+            self.kick_queue(id);
+        }
     }
 
     /// The session's attachment folder.
@@ -2155,24 +2181,19 @@ impl AgentRuntime {
                         last_sequence,
                     }))
                 } else {
-                    Err(last_sequence)
+                    // Under the same lock as `last_sequence`: an event emitted
+                    // in between would sit in the snapshot AND be replayed
+                    // after it (a doubled `command_output.delta`).
+                    Err((last_sequence, Box::new(st.proj.snapshot())))
                 }
             };
             match fast {
                 Ok(Some(r)) => r,
                 Ok(None) => unreachable!(),
-                Err(last_sequence) => {
-                    let snapshot =
-                        otto_telemetry::context::measure("threads.snapshot_slice", async {
-                            let st = live.lock();
-                            Box::new(st.proj.snapshot())
-                        })
-                        .await;
-                    RuntimeReplay::Snapshot {
-                        snapshot_sequence: last_sequence,
-                        snapshot,
-                    }
-                }
+                Err((last_sequence, snapshot)) => RuntimeReplay::Snapshot {
+                    snapshot_sequence: last_sequence,
+                    snapshot,
+                },
             }
         };
         try_evict_dead(&self.inner, id);
@@ -2342,11 +2363,7 @@ fn steer_turn(
     live: &Live,
     req: &RuntimePromptReq,
     attachments: Vec<Attachment>,
-) -> Option<(
-    RuntimePromptResp,
-    Option<String>,
-    Option<otto_core::agent_runtime::RuntimeAccessMode>,
-)> {
+) -> Option<RuntimePromptResp> {
     let mut st = live.lock();
     let turn_id = st.turn.as_ref()?.id.clone();
     let model_change = req
@@ -2367,12 +2384,13 @@ fn steer_turn(
         }
     }
     let step = st.proc.as_mut()?.driver.steer(req).ok()?;
-    if let Some(m) = &model_change {
-        st.session.model = Some(m.clone());
+    if let Some(m) = model_change {
+        selection::set_model(inner, live, &mut st, Some(m), true);
     }
     if let Some(m) = mode_change {
-        st.session.access_mode = m;
+        selection::set_access(inner, live, &mut st, m);
     }
+    selection::accept_effort(inner, live, &mut st, req);
     let mut user = item(
         format!("{turn_id}:steer:{}", new_id()),
         TurnItemStatus::Completed,
@@ -2387,16 +2405,12 @@ fn steer_turn(
     let sequence = st.session.last_sequence;
     st.session.last_active_at = Utc::now();
     apply_step_opts(inner, live, &mut st, step, true, true);
-    Some((
-        RuntimePromptResp {
-            turn_id,
-            sequence,
-            queued_id: None,
-            steered: true,
-        },
-        model_change,
-        mode_change,
-    ))
+    Some(RuntimePromptResp {
+        turn_id,
+        sequence,
+        queued_id: None,
+        steered: true,
+    })
 }
 
 /// Spawn a drain of `id`'s queue (no-op when the runtime is gone).
@@ -2504,12 +2518,10 @@ fn emit_queue(inner: &Inner, live: &Live, st: &mut State) -> u64 {
         st,
         RuntimeEventBody::QueueUpdated { queued_prompts },
     );
-    let _ = live.persist.send(PersistOp::Upsert(vec![RuntimeEntityRow {
-        kind: K_QUEUE.into(),
-        entity_id: "queue".into(),
-        sequence: seq,
-        payload: serde_json::to_value(&st.proj.queue).unwrap_or(serde_json::Value::Null),
-    }]));
+    // Records share their prompts (`Arc`): the persister serializes the row.
+    let _ = live
+        .persist
+        .send(PersistOp::Queue(seq, st.proj.queue.clone()));
     seq
 }
 
@@ -2611,6 +2623,8 @@ fn open_agent_turn(inner: &Inner, live: &Live, st: &mut State, turn_id: String) 
         completed_at: None,
         turn_token_usage: None,
         origin: TurnOrigin::Agent,
+        model: st.session.model.clone(),
+        effort: st.session.effort.clone(),
     };
     st.turn = Some(ActiveTurn {
         id: turn_id,
@@ -3139,6 +3153,7 @@ fn finish_turn(
     if let Some(mut turn) = st.proj.turns.get(&active.id).cloned() {
         turn.status = status.turn_status();
         turn.completed_at = Some(now);
+        usage_hook::record_settled_turn(inner, st, &turn);
         emit(
             inner,
             live,
@@ -3253,8 +3268,9 @@ pub(super) fn apply_step_opts(
                         }
                     }
                 }
-                if model.is_some() && st.session.model.is_none() {
+                if model.is_some() && (st.session.model.is_none() || st.model_from_provider) {
                     st.session.model = model;
+                    st.model_from_provider = true;
                 }
                 // What the agent reported it takes in its handshake.
                 if let Some(p) = st.proc.as_ref() {
@@ -3497,11 +3513,15 @@ pub(super) fn apply_step_opts(
             }
             DriverEvent::TurnStarted { turn_id } => open_agent_turn(inner, live, st, turn_id),
             DriverEvent::BackgroundTasks(tasks) => {
+                let tasks = task_stop::carry_marks(&st.session.background_tasks, tasks);
                 if st.session.background_tasks != tasks {
                     st.session.background_tasks = tasks;
                     let (status, last_error) = current_status(st);
                     set_session_status(inner, live, st, status, last_error);
                 }
+            }
+            DriverEvent::TaskStopAnswered { task_id, error } => {
+                task_stop::on_answer(inner, live, st, task_id, error);
             }
             DriverEvent::Terminal {
                 status,
@@ -3520,6 +3540,7 @@ pub(super) fn apply_step_opts(
                     status
                 };
                 finish_turn(inner, live, st, status, failure, reason);
+                st.switch_from = None; // not refused before the turn ended
                 if st.session.title_auto {
                     if let Some(path) = st.proc.as_ref().and_then(|p| p.driver.title_transcript()) {
                         probe_title(inner, &st.session.id, path);
@@ -3537,9 +3558,10 @@ pub(super) fn apply_step_opts(
                         None,
                     );
                 }
-                if let Some(p) = st.proc.take() {
-                    live.proc_ended.notify_waiters();
-                    stop_child(p, inner.config.close_grace);
+                if selection::drop_proc(inner, live, st, inner.config.close_grace) {
+                    if let Some(me) = inner.me.upgrade() {
+                        retire(&me, &st.session);
+                    }
                 }
                 set_session_status(
                     inner,
@@ -3549,16 +3571,7 @@ pub(super) fn apply_step_opts(
                     Some(failure.message),
                 );
             }
-            DriverEvent::Error(failure) => {
-                let mut e = item(
-                    new_id(),
-                    TurnItemStatus::Failed,
-                    None,
-                    TurnItemKind::Error { failure },
-                );
-                e.turn_id = st.turn.as_ref().map(|t| t.id.clone());
-                upsert_item(inner, live, st, e);
-            }
+            DriverEvent::Error(failure) => selection::on_error(inner, live, st, failure),
         }
     }
     if let Some(p) = st.proc.as_ref() {
@@ -3829,6 +3842,19 @@ async fn persister(repo: AgentRuntimeRepo, id: Id, mut rx: mpsc::UnboundedReceiv
             PersistOp::NativeThreadId(n) => repo.set_native_thread_id(&id, &n).await,
             PersistOp::Title(t) => repo.set_title(&id, &t, true).await,
             PersistOp::ClearNativeThreadId => repo.clear_native_thread_id(&id).await,
+            PersistOp::Model(Some(m)) => repo.set_model(&id, &m).await,
+            PersistOp::Model(None) => repo.clear_model(&id).await,
+            PersistOp::Effort(e) => repo.set_effort(&id, e.as_deref()).await,
+            PersistOp::Access(m) => repo.set_access_mode(&id, m).await,
+            PersistOp::Queue(seq, queue) => {
+                let row = RuntimeEntityRow {
+                    kind: K_QUEUE.into(),
+                    entity_id: "queue".into(),
+                    sequence: seq,
+                    payload: serde_json::to_value(&queue).unwrap_or(serde_json::Value::Null),
+                };
+                repo.upsert_entities(&id, &[row]).await
+            }
             PersistOp::Closed => repo.set_closed(&id).await,
             PersistOp::Opened => repo.set_open(&id).await,
             PersistOp::Flush(done) => {

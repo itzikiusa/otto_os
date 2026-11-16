@@ -365,7 +365,7 @@ fn muse_is_a_builtin_terminal_and_runtime_provider() {
     );
     assert!(reg
         .update_commands_where(|_| true)
-        .contains(&("muse".to_string(), MUSE_UPDATE_COMMAND.to_string())));
+        .contains(&("muse".to_string(), muse_update_command("muse"))));
     assert_eq!(
         reg.runtime_provider_for("muse"),
         Some(RuntimeProvider::Muse)
@@ -379,4 +379,148 @@ fn muse_is_a_builtin_terminal_and_runtime_provider() {
         infer_model_family(None, "/opt/muse/bin/muse", "metamuse"),
         Some("muse".into())
     );
+}
+
+fn session_on(provider: &str, psid: Option<&str>) -> otto_core::domain::Session {
+    otto_core::domain::Session {
+        id: otto_core::new_id(),
+        workspace_id: otto_core::new_id(),
+        kind: otto_core::domain::SessionKind::Agent,
+        provider: provider.into(),
+        title: "t".into(),
+        status: otto_core::domain::SessionStatus::Idle,
+        cwd: "/tmp".into(),
+        provider_session_id: psid.map(str::to_string),
+        connection_id: None,
+        created_by: otto_core::new_id(),
+        created_at: chrono::Utc::now(),
+        last_active_at: chrono::Utc::now(),
+        archived: false,
+        meta: serde_json::json!({}),
+    }
+}
+
+/// I-02: the one "would a restart keep the conversation?" predicate that
+/// gates every restart Otto makes on the person's behalf (the nightly CLI
+/// update's reload) and picks the argv in `restart_locked`. Muse and opencode
+/// have no resume, a custom CLI without `resume_args` neither, and a codex
+/// session whose id was never captured would start over too.
+#[test]
+fn resumes_session_only_when_the_conversation_survives_a_restart() {
+    let reg = ProviderRegistry::new(Some(&serde_json::json!({
+        "aider": {"cmd": "/opt/bin/aider"}
+    })));
+    assert!(reg.resumes_session(&session_on("claude", Some("u-1"))));
+    assert!(reg.resumes_session(&session_on("codex", Some("019f"))));
+    assert!(reg.resumes_session(&session_on("pi", Some("u-2"))));
+    assert!(!reg.resumes_session(&session_on("muse", Some("m-1"))));
+    assert!(!reg.resumes_session(&session_on("opencode", Some("o-1"))));
+    assert!(!reg.resumes_session(&session_on("aider", Some("a-1"))));
+    assert!(!reg.resumes_session(&session_on("codex", None)));
+    assert!(!reg.resumes_session(&session_on("claude", Some(""))));
+    let mut conn = session_on("claude", Some("u-1"));
+    conn.kind = otto_core::domain::SessionKind::Connection;
+    assert!(!reg.resumes_session(&conn));
+}
+
+/// A Muse-family custom provider refreshes ITS OWN binary the Muse way (the
+/// launcher has no `update` subcommand), never a hard-coded `muse`.
+#[test]
+fn muse_family_custom_provider_updates_its_own_binary() {
+    let reg = ProviderRegistry::new(Some(&serde_json::json!({
+        "musework": {"cmd": "/opt/muse-beta/bin/muse"}
+    })));
+    let cmds: HashMap<_, _> = reg.update_commands_where(|_| true).into_iter().collect();
+    assert_eq!(
+        cmds["musework"],
+        "MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1 MUSE_UPDATE_INTERVAL_SECONDS=0 \
+         '/opt/muse-beta/bin/muse' --version"
+    );
+    assert!(cmds["muse"].ends_with(" muse --version"));
+}
+
+/// I-04/I-05: every provider family Otto launches has an entry in the ONE
+/// sandbox path table (its state dirs, home config denies and read-only
+/// project denies). Adding a family to `MODEL_FAMILIES` without one fails here.
+#[test]
+fn every_model_family_has_a_sandbox_entry() {
+    for fam in MODEL_FAMILIES {
+        assert!(
+            otto_sandbox::providers::covers(fam),
+            "provider family {fam} has no entry in otto_sandbox::providers::PROVIDERS"
+        );
+    }
+    for p in RuntimeProvider::ALL {
+        assert!(
+            otto_sandbox::providers::covers(p.as_str()),
+            "runtime provider {} has no sandbox entry",
+            p.as_str()
+        );
+    }
+}
+
+/// I-07: a provider turned off in Settings › Providers can't start a NEW
+/// session (every new-session path builds through `build_new_spec`), while an
+/// existing session on it still resumes through `build_spec`.
+#[test]
+fn disabled_provider_refuses_new_sessions_but_still_resumes() {
+    let reg = ProviderRegistry::new(None);
+    assert!(reg.build_new_spec("muse", "SID", "/tmp/cwd").is_ok());
+    reg.set_disabled(&["muse", "claude"]);
+    let err = reg
+        .build_new_spec("muse", "SID", "/tmp/cwd")
+        .expect_err("disabled");
+    assert!(
+        err.to_string()
+            .contains("muse is turned off in Settings › Providers"),
+        "{err}"
+    );
+    assert!(reg.ensure_enabled("claude").is_err());
+    assert!(reg.ensure_enabled("codex").is_ok());
+    assert!(reg.build_spec("claude", "SID", "/tmp/cwd", true).is_ok());
+}
+
+/// I-09: family inference never guesses from a bare prefix (`museum-cli` is
+/// not Muse), while the `<family>work` and `<family>-…` spellings still ride
+/// their family; `cli_family` resolves registered slugs through the registry
+/// (an explicit `model_family` wins over the name) and leaves unknown CLIs as
+/// themselves.
+#[test]
+fn family_resolution_is_registry_first_and_never_prefix_guessed() {
+    assert_eq!(infer_model_family(None, "", "museum-cli"), None);
+    assert_eq!(infer_model_family(None, "", "codexify"), None);
+    assert_eq!(
+        infer_model_family(None, "", "claudework"),
+        Some("claude".into())
+    );
+    assert_eq!(
+        infer_model_family(None, "", "muse-beta"),
+        Some("muse".into())
+    );
+    assert_eq!(
+        infer_model_family(None, "", "claude2"),
+        Some("claude".into())
+    );
+    let reg = ProviderRegistry::new(Some(&serde_json::json!({
+        "work": {"cmd": "/opt/wrap", "model_family": "claude"},
+        "museum-cli": {"cmd": "/opt/museum"}
+    })));
+    assert_eq!(reg.cli_family("work"), "claude");
+    assert_eq!(reg.cli_family("museum-cli"), "museum-cli");
+    assert_eq!(reg.cli_family("muse"), "muse");
+    assert_eq!(reg.cli_family("unknown-cli"), "unknown-cli");
+}
+
+/// `/meta.provider_resumable`: Muse and opencode can't reopen a terminal
+/// conversation; a disabled provider is not listed.
+#[test]
+fn resume_flags_list_enabled_providers() {
+    let reg = ProviderRegistry::new(None);
+    reg.set_disabled(&["gemini"]);
+    let f = reg.resume_flags();
+    assert_eq!(f.get("claude"), Some(&true));
+    assert_eq!(f.get("pi"), Some(&true));
+    assert_eq!(f.get("muse"), Some(&false));
+    assert_eq!(f.get("opencode"), Some(&false));
+    assert!(!f.contains_key("gemini"));
 }

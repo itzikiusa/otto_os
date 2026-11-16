@@ -62,3 +62,26 @@ export function followAfterScroll(following: boolean, gap: number, byReader: boo
   if (gap < END_BAND) return true;
   return byReader ? false : following;
 }
+
+/** A timeline row's identity: RuntimeTimelineRows' `{#each}` key. */
+export function timelineRowKey(r: { kind: string; id?: string; item?: { id: string } }): string {
+  return r.kind === 'message' && r.item ? r.item.id : (r.id ?? '');
+}
+
+/** The rows the timeline renders: the newest `cap`. While the reader is
+ *  scrolled up, `holdFrom` (the first row they had rendered when they left
+ *  the end, RuntimeFollow) keeps the window from starting after it, so a new
+ *  row at the end never drops a row off the top and slides the text they are
+ *  reading (`.rt-scroll` has `overflow-anchor: none`). */
+export function renderWindow<R>(rows: R[], cap: number, holdFrom: string | null, key: (r: R) => string): R[] {
+  let start = Math.max(0, rows.length - cap);
+  if (start > 0 && holdFrom) {
+    for (let i = 0; i < start; i++) {
+      if (key(rows[i]) === holdFrom) {
+        start = i;
+        break;
+      }
+    }
+  }
+  return start > 0 ? rows.slice(start) : rows;
+}

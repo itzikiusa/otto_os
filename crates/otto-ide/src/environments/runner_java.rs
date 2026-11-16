@@ -117,8 +117,11 @@ pub(in crate::environments) async fn compile_java_main_step(
     let env_clone = env_map.clone();
     let out_clone = out_dir.clone();
 
+    // Stop drops this step and with it the guard, which kills javac's group.
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _cancel_on_drop = crate::proc_group::CancelOnDrop(Arc::clone(&cancel));
     let plan = tokio::task::spawn_blocking(move || {
-        crate::java_workspace::prepare_java_execution(
+        crate::java_workspace::prepare_java_execution_cancellable(
             &target_file_or_dir,
             explicit_main.as_deref(),
             true,
@@ -126,6 +129,7 @@ pub(in crate::environments) async fn compile_java_main_step(
             &env_clone,
             &javac_bin,
             &out_clone,
+            cancel,
         )
     })
     .await

@@ -700,8 +700,8 @@ async fn test_manager() -> (Arc<SessionManager>, SessionsRepo, Workspace, Id) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("test.db");
     let pool = otto_state::open(&db).await.unwrap();
-    // Keep the tempdir alive for the whole process (leak is fine in tests).
-    std::mem::forget(dir);
+    // Kept for the whole process, removed when it exits.
+    crate::test_tmp::keep_until_exit(dir);
 
     let user = new_id();
     let ws_id = new_id();
@@ -2490,13 +2490,8 @@ async fn suspend_survives_late_exit_of_slow_dying_child() {
     let id = seed_session(&repo, &ws, &user, Some("sid-late")).await;
     let handle = Arc::new(PtyHandle::spawn(&slow_hup_spec()).expect("spawn"));
     mgr.live.insert(id.clone(), Arc::clone(&handle));
-    mgr.start_status_task(
-        id.clone(),
-        ws.id.clone(),
-        "claude".into(),
-        Arc::clone(&handle),
-        false,
-    );
+    let row = repo.get(&id).await.unwrap();
+    mgr.start_status_task(&row, Arc::clone(&handle), false);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     mgr.suspend(&id).await.unwrap();
@@ -2522,13 +2517,8 @@ async fn superseded_exit_does_not_mark_new_process_exited() {
     let id = seed_session(&repo, &ws, &user, Some("sid-respawn")).await;
     let old = Arc::new(PtyHandle::spawn(&slow_hup_spec()).expect("spawn old"));
     mgr.live.insert(id.clone(), Arc::clone(&old));
-    mgr.start_status_task(
-        id.clone(),
-        ws.id.clone(),
-        "claude".into(),
-        Arc::clone(&old),
-        false,
-    );
+    let row = repo.get(&id).await.unwrap();
+    mgr.start_status_task(&row, Arc::clone(&old), false);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // What `restart_locked` does: untrack + kill the old, track the new,
@@ -2563,13 +2553,8 @@ async fn natural_exit_of_current_process_marks_exited() {
     };
     let handle = Arc::new(PtyHandle::spawn(&spec).expect("spawn"));
     mgr.live.insert(id.clone(), Arc::clone(&handle));
-    mgr.start_status_task(
-        id.clone(),
-        ws.id.clone(),
-        "claude".into(),
-        Arc::clone(&handle),
-        false,
-    );
+    let row = repo.get(&id).await.unwrap();
+    mgr.start_status_task(&row, Arc::clone(&handle), false);
 
     wait_child_exit_and_settle(&handle).await;
     assert_eq!(repo.get(&id).await.unwrap().status, SessionStatus::Exited);

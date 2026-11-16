@@ -259,10 +259,44 @@ pub(super) fn read_only_args(provider: &str, meta: &serde_json::Value) -> Vec<St
     }
 }
 
+/// Whether a TERMINAL session of CLI `family` can carry `meta.effort`: its
+/// CLI has an effort flag ([`effort_args`] emits one). Muse, opencode, grok
+/// and gemini have none, so a respawn would silently ignore the choice.
+pub(super) fn terminal_takes_effort(family: &str) -> bool {
+    !effort_args(family, &serde_json::json!({"effort": "high"})).is_empty()
+}
+
+impl super::SessionManager {
+    /// `/meta.provider_terminal_effort`: per enabled provider, whether its
+    /// terminal session takes an effort (pickers hide the control when not).
+    pub fn provider_terminal_effort(&self) -> std::collections::HashMap<String, bool> {
+        self.providers()
+            .names()
+            .into_iter()
+            .map(|p| {
+                let takes = terminal_takes_effort(&self.cli_family(&p));
+                (p, takes)
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// I-01: only families whose CLI has an effort flag offer effort on a
+    /// terminal session.
+    #[test]
+    fn terminal_effort_follows_the_cli_flag() {
+        for fam in ["claude", "codex", "agy", "pi"] {
+            assert!(terminal_takes_effort(fam), "{fam}");
+        }
+        for fam in ["muse", "opencode", "grok", "gemini", "shell"] {
+            assert!(!terminal_takes_effort(fam), "{fam}");
+        }
+    }
 
     #[test]
     fn claudework_expands_effort_interaction_lean_and_read_only_flags() {

@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 
 use crate::driver::{
     item, restore_keeping_program, tool_error, DriverError, DriverEvent, DriverStep, LaunchContext,
-    LaunchSpec, StructuredDriver,
+    LaunchSpec, StructuredDriver, TaskStop,
 };
 
 /// Claude Code's switch for connecting MCP servers before the first request.
@@ -49,6 +49,30 @@ enum ToolType {
     FileChange,
     WebSearch,
     Dynamic,
+}
+
+/// The command an unsuggested Bash session rule is scoped to.
+fn session_rule_command<'a>(tool: &str, input: &'a Value) -> Option<&'a str> {
+    (classify(tool).0 == ToolType::Command)
+        .then(|| input.get("command").and_then(Value::as_str))
+        .flatten()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+}
+
+/// What "Allow for this session" actually allows: the CLI's own
+/// suggestions, else this one Bash command, else every call of the tool.
+fn session_allow_label(tool: &str, input: &Value, suggestions: &[Value]) -> String {
+    let only_mode = suggestions
+        .iter()
+        .all(|s| s.get("type").and_then(Value::as_str) == Some("setMode"));
+    if !only_mode {
+        "Allow for this session".into()
+    } else if session_rule_command(tool, input).is_some() {
+        "Allow this command for this session".into()
+    } else {
+        format!("Allow all {tool} calls for this session")
+    }
 }
 
 /// `classifyClaudeNativeTool` (`ClaudeAdapterV2.ts:2815-2860`).
@@ -115,7 +139,10 @@ fn blocks_compat<'de, D: serde::Deserializer<'de>>(d: D) -> Result<HashMap<u64, 
     .map_err(serde::de::Error::custom)
 }
 
+/// Every field may be missing from a snapshot an older build wrote (a
+/// deploy must never kill a live thread over a new field).
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ClaudeDriver {
     /// The factory's binary: kept across a restore, never snapshotted.
     #[serde(skip)]
@@ -151,6 +178,10 @@ pub struct ClaudeDriver {
     /// Ids of in-flight `set_model` / `apply_flag_settings` /
     /// `set_permission_mode` requests.
     switches: Vec<String>,
+    /// The in-flight `set_model` among `switches`: its refusal is reported
+    /// as `MODEL_SWITCH_REFUSED` (the runtime rolls the thread back).
+    #[serde(default)]
+    model_switch: Option<String>,
     /// CLI tasks by task id (see `claude_tasks.rs`).
     tasks: HashMap<String, tasks::Task>,
     /// Subagent cards by their `Agent` / `Task` tool_use id.
@@ -175,6 +206,9 @@ pub struct ClaudeDriver {
     transcript: Option<std::path::PathBuf>,
     #[serde(default)]
     cwd: String,
+    /// In-flight `stop_task` control requests: (request id, task id).
+    #[serde(default)]
+    task_stops: Vec<(String, String)>,
 }
 
 impl Default for ClaudeDriver {
@@ -204,6 +238,7 @@ impl ClaudeDriver {
             access: RuntimeAccessMode::default(),
             bypass_allowed: false,
             switches: Vec::new(),
+            model_switch: None,
             tasks: HashMap::new(),
             agents: HashMap::new(),
             sub_tools: HashMap::new(),
@@ -214,6 +249,7 @@ impl ClaudeDriver {
             plan: false,
             transcript: None,
             cwd: String::new(),
+            task_stops: Vec::new(),
         }
     }
 
@@ -272,6 +308,7 @@ impl ClaudeDriver {
             self.model = req.model.clone();
             let (id, line) =
                 self.control_request(json!({"subtype": "set_model", "model": req.model}));
+            self.model_switch = Some(id.clone());
             self.switches.push(id);
             step.write(line);
         }
@@ -636,6 +673,11 @@ impl ClaudeDriver {
             .get("decision_reason")
             .and_then(Value::as_str)
             .map(str::to_string);
+        let suggestions: Vec<Value> = req
+            .get("permission_suggestions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         let options = vec![
             ApprovalOption {
                 decision: ApprovalDecision::Accept,
@@ -643,7 +685,7 @@ impl ClaudeDriver {
             },
             ApprovalOption {
                 decision: ApprovalDecision::AcceptForSession,
-                label: "Allow for this session".into(),
+                label: session_allow_label(&tool_name, &input, &suggestions),
             },
             ApprovalOption {
                 decision: ApprovalDecision::Decline,
@@ -679,11 +721,7 @@ impl ClaudeDriver {
                 tool_name,
                 input,
                 tool_use_id,
-                suggestions: req
-                    .get("permission_suggestions")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default(),
+                suggestions,
             },
         );
         if let Some(questions) = questions {
@@ -726,9 +764,16 @@ impl ClaudeDriver {
                     })
                     .collect();
                 if updates.is_empty() {
+                    // No CLI suggestion: a Bash rule is scoped to this exact
+                    // command (`Bash(<command>)`); any other tool's rule is
+                    // the whole tool, which the option's label says.
+                    let rule = match session_rule_command(&p.tool_name, &p.input) {
+                        Some(cmd) => json!({"toolName": p.tool_name, "ruleContent": cmd}),
+                        None => json!({"toolName": p.tool_name}),
+                    };
                     updates.push(json!({
                         "type": "addRules",
-                        "rules": [{"toolName": p.tool_name}],
+                        "rules": [rule],
                         "behavior": "allow",
                         "destination": "session",
                     }));
@@ -847,7 +892,16 @@ impl ClaudeDriver {
         let error = resp.get("subtype").and_then(Value::as_str) == Some("error");
         if let Some(n) = self.switches.iter().position(|s| Some(s.as_str()) == id) {
             self.switches.remove(n);
+            let was_model = id.is_some() && self.model_switch.as_deref() == id;
+            if was_model {
+                self.model_switch = None;
+            }
             if error {
+                // Not applied: the process still runs what it ran; the next
+                // pick is sent again rather than assumed.
+                if was_model {
+                    self.model = None;
+                }
                 step.push(DriverEvent::Error(ProviderFailure {
                     class: "provider_error".into(),
                     message: resp
@@ -855,10 +909,28 @@ impl ClaudeDriver {
                         .and_then(Value::as_str)
                         .unwrap_or("the switch was refused")
                         .to_string(),
-                    code: None,
+                    code: was_model
+                        .then(|| otto_core::agent_runtime::MODEL_SWITCH_REFUSED.to_string()),
                     retryable: None,
                 }));
             }
+            return;
+        }
+        if let Some(n) = self
+            .task_stops
+            .iter()
+            .position(|(r, _)| Some(r.as_str()) == id)
+        {
+            let (_, task_id) = self.task_stops.remove(n);
+            // "callback not registered" / an unknown subtype land here too:
+            // the runtime falls back to asking the agent.
+            let error = error.then(|| {
+                resp.get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Claude Code refused to stop the task")
+                    .to_string()
+            });
+            step.push(DriverEvent::TaskStopAnswered { task_id, error });
             return;
         }
         if id.is_none() || id != self.init_req.as_deref() {
@@ -1160,6 +1232,20 @@ impl StructuredDriver for ClaudeDriver {
         step
     }
 
+    /// The control protocol's `stop_task {task_id}` (the SDK's `stopTask`),
+    /// for a task this process reported; the CLI then settles it as
+    /// `killed` / `stopped` through its own task frames.
+    fn stop_task(&mut self, task_id: &str) -> TaskStop {
+        if !self.reported_background.iter().any(|t| t.id == task_id) {
+            return TaskStop::Unsupported;
+        }
+        let (id, line) = self.control_request(json!({"subtype": "stop_task", "task_id": task_id}));
+        self.task_stops.push((id, task_id.to_string()));
+        let mut step = DriverStep::default();
+        step.write(line);
+        TaskStop::Native(step)
+    }
+
     fn respond(
         &mut self,
         request_id: &str,
@@ -1433,13 +1519,31 @@ mod tests {
             &mut d,
             json!({"type":"control_response","response":{"subtype":"error","request_id":rid,"error":"no such model"}}),
         );
-        assert!(matches!(&e.events[0], DriverEvent::Error(f) if f.message == "no such model"));
-        // The same selection next turn sends nothing extra.
+        assert!(
+            matches!(&e.events[0], DriverEvent::Error(f) if f.message == "no such model"
+            && f.code.as_deref() == Some(otto_core::agent_runtime::MODEL_SWITCH_REFUSED))
+        );
+        // The refused model never ran: picking it again asks again (the
+        // accepted effort is not re-sent).
         feed(
             &mut d,
             json!({"type":"result","subtype":"success","is_error":false}),
         );
         let s = d.prompt("t2", &req).unwrap();
+        assert_eq!(s.writes.len(), 2);
+        let again: Value = serde_json::from_str(&s.writes[0]).unwrap();
+        assert_eq!(again["request"]["subtype"], "set_model");
+        // An accepted switch is remembered: the same pick sends nothing extra.
+        let rid = again["request_id"].as_str().unwrap().to_string();
+        feed(
+            &mut d,
+            json!({"type":"control_response","response":{"subtype":"success","request_id":rid}}),
+        );
+        feed(
+            &mut d,
+            json!({"type":"result","subtype":"success","is_error":false}),
+        );
+        let s = d.prompt("t3", &req).unwrap();
         assert_eq!(s.writes.len(), 1);
         assert!(d.switches_model_live());
     }
@@ -1901,6 +2005,102 @@ mod tests {
                 task_settlement: Some(ts),
             } if message.starts_with("Background command stopped") && ts.status == "stopped"
         )));
+    }
+
+    /// A person's Stop on a background task: the control protocol's
+    /// `stop_task`; its answer (accepted, or "callback not registered")
+    /// goes back to the runtime, and the CLI's own `killed` frame ends it.
+    #[test]
+    fn stop_task_sends_the_control_request_and_relays_its_answer() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"tu1","description":"npm run dev","task_type":"local_bash","is_backgrounded":true}),
+        );
+        assert_eq!(d.background_list().len(), 1);
+        assert!(matches!(d.stop_task("nope"), TaskStop::Unsupported));
+        let TaskStop::Native(step) = d.stop_task("b1") else {
+            panic!("a listed task stops natively");
+        };
+        let req: Value = serde_json::from_str(&step.writes[0]).unwrap();
+        assert_eq!(
+            req["request"],
+            json!({"subtype": "stop_task", "task_id": "b1"})
+        );
+        let rid = req["request_id"].as_str().unwrap().to_string();
+        let s = feed(
+            &mut d,
+            json!({"type":"control_response","response":{"subtype":"success","request_id":rid,"response":{}}}),
+        );
+        assert_eq!(
+            s.events,
+            vec![DriverEvent::TaskStopAnswered {
+                task_id: "b1".into(),
+                error: None
+            }]
+        );
+        // A CLI without the callback refuses: the refusal is relayed.
+        let TaskStop::Native(step) = d.stop_task("b1") else {
+            panic!("still listed");
+        };
+        let req: Value = serde_json::from_str(&step.writes[0]).unwrap();
+        let rid = req["request_id"].as_str().unwrap().to_string();
+        let s = feed(
+            &mut d,
+            json!({"type":"control_response","response":{"subtype":"error","request_id":rid,"error":"stop_task is not supported in this context (callback not registered)"}}),
+        );
+        assert!(matches!(
+            &s.events[..],
+            [DriverEvent::TaskStopAnswered { task_id, error: Some(e) }]
+                if task_id == "b1" && e.contains("callback not registered")
+        ));
+        let s = feed(
+            &mut d,
+            json!({"type":"system","subtype":"task_notification","task_id":"b1","status":"killed"}),
+        );
+        assert!(bg_lists(&s).last().is_some_and(Vec::is_empty));
+    }
+
+    /// "Allow for this session" says what it allows: a Bash command with no
+    /// CLI suggestion is scoped to that command, any other tool to all calls.
+    #[test]
+    fn allow_for_session_without_suggestions_is_scoped_and_labelled_truthfully() {
+        let mut d = ClaudeDriver::new();
+        ready(&mut d);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let label = |s: &DriverStep| match &s.events.last() {
+            Some(DriverEvent::Request { options, .. }) => options
+                .iter()
+                .find(|o| o.decision == ApprovalDecision::AcceptForSession)
+                .map(|o| o.label.clone())
+                .unwrap(),
+            other => panic!("not a request: {other:?}"),
+        };
+        let s = feed(
+            &mut d,
+            json!({"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf build"},"tool_use_id":"tu1"}}),
+        );
+        assert_eq!(label(&s), "Allow this command for this session");
+        let w = d
+            .respond("claude-r1", ApprovalDecision::AcceptForSession)
+            .unwrap();
+        let r: Value = serde_json::from_str(&w.writes[0]).unwrap();
+        assert_eq!(
+            r["response"]["response"]["updatedPermissions"][0]["rules"][0],
+            json!({"toolName": "Bash", "ruleContent": "rm -rf build"})
+        );
+        let s = feed(
+            &mut d,
+            json!({"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"WebFetch","input":{"url":"https://x"},"tool_use_id":"tu2"}}),
+        );
+        assert_eq!(label(&s), "Allow all WebFetch calls for this session");
+        let s = feed(
+            &mut d,
+            json!({"type":"control_request","request_id":"r3","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"ls:*"}],"behavior":"allow","destination":"localSettings"}],"tool_use_id":"tu3"}}),
+        );
+        assert_eq!(label(&s), "Allow for this session");
     }
 
     #[test]

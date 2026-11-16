@@ -1,165 +1,154 @@
 // "Diagnose with an agent" — the stateful half (rules: diagnose-prompt.ts).
 //
 // Flow: an entry point (the ended-SSH panel, the DB connect-error banner, the
-// connection form's failed Test) calls `request` → the consent dialog
-// (DiagnoseAside) → `confirm` finds this connection's earlier diagnosis
-// thread or creates one (source `connection-diagnose`, origin = the
-// connection; an older daemon that rejects those fields gets a plain thread)
-// in APPROVAL-REQUIRED mode — every command the agent runs waits for the
-// user's OK in the embed — and sends the opening prompt. The thread then
-// shows in the Connections page's side split; Close hides it and keeps the
-// thread, the next Diagnose on the same connection shows it again.
-//
-// "Finished" is read from the thread's own row (GET /runtime-sessions/{id},
-// polled while the panel shows a running diagnosis): idle again after the
-// prompt's first event. This module never imports the Threads feature — the
-// embed comes through lib/runtimeThreadPort.
+// connection form's failed Test) calls `request` → the side panel
+// (DiagnoseAside) opens and this connection's earlier diagnosis thread is
+// looked up through the Threads store (source `connection-diagnose`, origin
+// = the connection; an open thread before a closed one).
+//   - None yet: the panel is the Threads start composer (the embed's draft
+//     state) under the consent text — the person picks the agent, model,
+//     effort and access (approval-required unless they choose otherwise:
+//     every command the agent runs waits for their OK) and starts it.
+//   - One exists: it shows, and the consent dialog offers to run the checks
+//     again in it — reopened when the daemon closed it, queued behind a turn
+//     still running.
+// Close hides the panel and keeps the thread; the next Diagnose on the same
+// connection shows it again. "Finished" is the embed's own status
+// (`onstatus`): idle again after it was seen working. Every send goes
+// through lib/runtimeThreadPort (never the runtime routes), so the embed's
+// chip and status stay true; this module never imports the Threads feature.
 
-import { api, ApiError } from '../../lib/api/client';
 import { loadErrorText } from '../../lib/loadError';
-import { pollWhileVisible, type Poller } from '../../lib/poll';
-import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+import { loadIdeRuntimeSessionPort, type RuntimeEmbedStatus } from '../../lib/runtimeThreadPort';
 import { ws } from '../../lib/stores/workspace.svelte';
-import type { Connection, CreateRuntimeSessionReq, RuntimePromptResp, RuntimeSession } from '../../lib/api/types';
-import { DIAGNOSE_SOURCE, diagnosePrompt, originLabel, pickDiagnoseThread, type DiagnoseProbe, type DiagnoseThreadRow } from './diagnose-prompt';
+import type { Connection, RuntimeSession } from '../../lib/api/types';
+import { DIAGNOSE_SOURCE, diagnosePrompt, type DiagnoseProbe } from './diagnose-prompt';
 
-export type DiagnosePhase = 'starting' | 'running' | 'finished' | 'failed';
-
-/** Providers the structured runtime runs (RuntimeProvider). */
-const RUNTIME_PROVIDERS = new Set(['claude', 'codex', 'gemini', 'grok', 'agy', 'opencode', 'pi', 'muse']);
-const POLL_MS = 3000;
+/** looking: the earlier thread is being looked up · ready: nothing running
+ *  (the start composer, or an idle thread) · running / finished: a diagnosis
+ *  this panel started · failed: the lookup or a send failed. */
+export type DiagnosePhase = 'looking' | 'ready' | 'running' | 'finished' | 'failed';
 
 interface Active {
   conn: Connection;
   probe: DiagnoseProbe | null;
   workspaceId: string;
+  /** Null: no thread yet (the draft composer). */
   sessionId: string | null;
   phase: DiagnosePhase;
   error: string | null;
-  /** `sequence` of the prompt's first event — idle past it = finished. */
-  startSeq: number;
 }
 
 class ConnDiagnose {
-  /** The consent dialog, when one is up. */
+  /** "Run the checks again" in an existing thread, when asked. */
   consent = $state<{ conn: Connection; probe: DiagnoseProbe | null } | null>(null);
   active = $state<Active | null>(null);
   /** The side panel is open (Close hides it; the thread stays). */
   shown = $state(false);
   maximized = $state(false);
-  private poller: Poller | null = null;
+  /** The embed was seen working since the diagnosis started. */
+  private sawWork = false;
 
   /** An entry point's "Diagnose with an agent…". The same connection's
-   *  diagnosis that is already under way just shows again — no new consent. */
+   *  diagnosis that is already shown just shows again. */
   request(conn: Connection, probe: DiagnoseProbe | null): void {
     if (this.active?.conn.id === conn.id && this.active.phase !== 'failed') {
       this.shown = true;
-      this.watch();
       return;
     }
-    this.consent = { conn, probe };
+    void this.open(conn, probe);
   }
 
   cancel(): void {
     this.consent = null;
   }
 
-  /** Consent given: start (or reuse) the thread and send the prompt. */
+  /** Consent given: run the checks again in the existing thread. */
   async confirm(): Promise<void> {
     const c = this.consent;
     this.consent = null;
-    if (c) await this.start(c.conn, c.probe);
+    const a = this.active;
+    if (c && a?.conn.id === c.conn.id && a.sessionId) await this.sendAgain(a.sessionId, c.conn, c.probe);
   }
 
-  /** Retry after a failed start. */
+  /** Retry after a failure: the lookup again (or the send, with a thread). */
   async retry(): Promise<void> {
     const a = this.active;
-    if (a) await this.start(a.conn, a.probe);
+    if (!a) return;
+    if (a.sessionId) await this.sendAgain(a.sessionId, a.conn, a.probe);
+    else await this.open(a.conn, a.probe);
   }
 
   close(): void {
     this.shown = false;
     this.maximized = false;
-    this.unwatch();
   }
 
-  private async start(conn: Connection, probe: DiagnoseProbe | null): Promise<void> {
+  /** The draft composer started the thread (its first message is sent). */
+  started(session: RuntimeSession): void {
+    const a = this.active;
+    if (!a) return;
+    this.sawWork = false;
+    this.active = { ...a, sessionId: session.id, phase: 'running', error: null };
+  }
+
+  /** New thread (/new): close this one (it stays in Threads › History) and
+   *  go back to the start composer, where another agent can be picked. */
+  async newThread(id: string): Promise<void> {
+    const a = this.active;
+    if (!a || a.sessionId !== id) return;
+    try {
+      const port = await loadIdeRuntimeSessionPort();
+      if (port.runtimeThreads.get(id)?.status !== 'closed') await port.runtimeThreads.close(id);
+      if (this.active?.sessionId === id) this.active = { ...this.active, sessionId: null, phase: 'ready', error: null };
+    } catch (e) {
+      if (this.active?.sessionId === id) this.active = { ...this.active, phase: 'failed', error: loadErrorText(e) };
+    }
+  }
+
+  /** The embed's status (`onstatus`): working → idle is a finished diagnosis. */
+  status(st: RuntimeEmbedStatus): void {
+    const a = this.active;
+    if (!a?.sessionId) return;
+    if (st === 'working' || st === 'needs-you') {
+      this.sawWork = true;
+      if (a.phase !== 'running') this.active = { ...a, phase: 'running' };
+    } else if (a.phase === 'running' && this.sawWork) {
+      this.active = { ...a, phase: 'finished' };
+    }
+  }
+
+  private async open(conn: Connection, probe: DiagnoseProbe | null): Promise<void> {
     const workspaceId = ws.currentId ?? conn.workspace_id ?? '';
-    this.active = { conn, probe, workspaceId, sessionId: null, phase: 'starting', error: null, startSeq: 0 };
+    this.active = { conn, probe, workspaceId, sessionId: null, phase: 'looking', error: null };
     this.shown = true;
+    this.sawWork = false;
     try {
       if (!workspaceId) throw new Error('Pick a workspace first — the diagnosis thread belongs to one.');
-      const session = (await this.existing(workspaceId, conn.id)) ?? (await this.create(workspaceId, conn));
+      const port = await loadIdeRuntimeSessionPort();
+      // The lookup is a convenience: when it fails, a new thread works too.
+      const found = await port.runtimeThreads.findByOrigin(workspaceId, DIAGNOSE_SOURCE, conn.id).catch(() => null);
       if (this.active?.conn.id !== conn.id) return;
-      this.active = { ...this.active, sessionId: session.id };
-      const resp = await api.post<RuntimePromptResp>(`/runtime-sessions/${session.id}/prompt`, {
-        text: diagnosePrompt(conn, probe),
-        access_mode: 'approval-required',
-      });
-      if (this.active?.conn.id !== conn.id) return;
-      this.active = { ...this.active, phase: 'running', startSeq: resp.sequence ?? 0 };
-      this.watch();
+      this.active = { ...this.active, sessionId: found?.id ?? null, phase: 'ready' };
+      if (found) this.consent = { conn, probe };
     } catch (e) {
       if (this.active?.conn.id === conn.id) this.active = { ...this.active, phase: 'failed', error: loadErrorText(e) };
     }
   }
 
-  /** This connection's earlier diagnosis thread, if the daemon lists one. */
-  private async existing(workspaceId: string, connId: string): Promise<DiagnoseThreadRow | null> {
-    try {
-      const q = `source=${encodeURIComponent(DIAGNOSE_SOURCE)}&origin_id=${encodeURIComponent(connId)}`;
-      const rows = await api.get<DiagnoseThreadRow[]>(`/workspaces/${workspaceId}/runtime-sessions?${q}`);
-      return pickDiagnoseThread(Array.isArray(rows) ? rows : [], connId);
-    } catch {
-      return null; // the lookup is a convenience: a new thread works too
-    }
-  }
-
-  private async create(workspaceId: string, conn: Connection): Promise<RuntimeSession> {
-    const def = defaultAgentProvider();
-    const fallback = agentProviders().find((p) => RUNTIME_PROVIDERS.has(p)) ?? 'claude';
-    const base: CreateRuntimeSessionReq = {
-      provider: (RUNTIME_PROVIDERS.has(def) ? def : fallback) as CreateRuntimeSessionReq['provider'],
-      title: `Diagnose ${conn.name}`,
-      // The most restrictive mode: every command waits for the user's OK.
-      access_mode: 'approval-required',
-    };
-    const path = `/workspaces/${workspaceId}/runtime-sessions`;
-    try {
-      return await api.post<RuntimeSession>(path, {
-        ...base,
-        source: 'connection-diagnose',
-        origin: { kind: 'connection', id: conn.id, label: originLabel(conn.name) },
-      });
-    } catch (e) {
-      // An older daemon may refuse the unknown fields: a plain thread still works.
-      if (e instanceof ApiError && (e.status === 400 || e.status === 422)) return api.post<RuntimeSession>(path, base);
-      throw e;
-    }
-  }
-
-  private watch(): void {
-    if (this.poller || this.active?.phase !== 'running') return;
-    this.poller = pollWhileVisible(() => this.poll(), { ms: POLL_MS, immediate: false });
-  }
-
-  private unwatch(): void {
-    this.poller?.stop();
-    this.poller = null;
-  }
-
-  private async poll(): Promise<void> {
+  /** The checks again in `id`: reopened when closed, queued behind a running turn. */
+  private async sendAgain(id: string, conn: Connection, probe: DiagnoseProbe | null): Promise<void> {
     const a = this.active;
-    if (!a?.sessionId || a.phase !== 'running' || !this.shown) return this.unwatch();
+    if (!a) return;
+    this.active = { ...a, phase: 'running', error: null };
+    this.sawWork = false;
     try {
-      const row = await api.bg.get<RuntimeSession>(`/runtime-sessions/${a.sessionId}`);
-      const done = row.status === 'closed' || (row.status === 'idle' && row.last_sequence > a.startSeq);
-      if (done && this.active?.sessionId === a.sessionId) {
-        this.active = { ...this.active, phase: 'finished' };
-        this.unwatch();
-      }
-    } catch {
-      /* the next tick retries; the embed shows its own errors */
+      const port = await loadIdeRuntimeSessionPort();
+      const row = port.runtimeThreads.get(id) ?? (await port.runtimeThreads.loadOne(id));
+      if (row.status === 'closed') await port.runtimeThreads.reopen(id);
+      await port.runtimeThreads.prompt(id, { text: diagnosePrompt(conn, probe), access_mode: 'approval-required', delivery: 'queue' });
+    } catch (e) {
+      if (this.active?.sessionId === id) this.active = { ...this.active, phase: 'failed', error: loadErrorText(e) };
     }
   }
 }

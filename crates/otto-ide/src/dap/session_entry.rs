@@ -9,15 +9,19 @@ use dashmap::DashMap;
 use otto_core::{Error, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{broadcast, mpsc, oneshot, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 
 use super::session::{DapStartContext, MAX_DEBUG_OUTPUT, MAX_DEBUG_OUTPUT_BYTES};
 use super::session_transport::evict_terminated_sessions;
-use super::wire::{DapEvent, DapMessage, DapReader, DapResponse, DapWriter};
+use super::wire::{DapEvent, DapMessage, DapReadItem, DapReader, DapResponse, DapWriter};
 use super::BridgeGuard;
 use crate::types::{IdeDebugOutputEntry, IdeDebugSessionSnapshot, IdeDebugState, IdeStartDebugReq};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long debuggee output gathers before watchers get one snapshot of it: a
+/// snapshot carries the whole output ring (up to 256 KiB), so one per line
+/// cost a full clone + JSON encode per line per watcher.
+pub(super) const OUTPUT_COALESCE: Duration = Duration::from_millis(100);
 
 pub(super) type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
 pub(super) type BoxWrite = Box<dyn AsyncWrite + Send + Unpin>;
@@ -43,7 +47,41 @@ impl DapWireClient {
         let client_ref = client.clone();
         tokio::spawn(async move {
             let mut reader = DapReader::new(reader_io);
-            while let Ok(Some(msg)) = reader.next_message().await {
+            loop {
+                let msg = match reader.next_item().await {
+                    Ok(Some(DapReadItem::Message(msg))) => msg,
+                    // One unreadable or oversized reply (a huge `variables`
+                    // body) fails the request it answered, not the session.
+                    Ok(Some(DapReadItem::Skipped {
+                        len,
+                        request_seq,
+                        reason,
+                    })) => {
+                        tracing::warn!(len, reason = %reason, "DAP: skipped an adapter message");
+                        let tx = request_seq.and_then(|seq| {
+                            client_ref
+                                .pending
+                                .lock()
+                                .ok()
+                                .and_then(|mut map| map.remove(&seq))
+                                .map(|tx| (seq, tx))
+                        });
+                        if let Some((seq, tx)) = tx {
+                            let _ = tx.send(DapResponse {
+                                seq: 0,
+                                request_seq: seq,
+                                success: false,
+                                command: String::new(),
+                                message: Some(format!(
+                                    "the debug adapter's reply could not be used ({reason})"
+                                )),
+                                body: None,
+                            });
+                        }
+                        continue;
+                    }
+                    Ok(None) | Err(_) => break,
+                };
                 match msg {
                     DapMessage::Response(resp) => {
                         let tx = client_ref
@@ -167,7 +205,12 @@ pub(super) struct SessionEntry {
     pub(super) suppress_transient_pause: AtomicBool,
     pub(super) restarting: AtomicBool,
     pub(super) boot_generation: AtomicU64,
+    /// Mirrors `boot_generation` so an in-flight boot (build, adapter start,
+    /// handshake) can be cancelled the moment Stop or Restart supersedes it.
+    boot_gen_tx: watch::Sender<u64>,
     pub(super) lifecycle_lock: tokio::sync::Mutex<()>,
+    /// A coalesced output snapshot is scheduled for watchers.
+    output_flush_pending: AtomicBool,
 }
 
 impl SessionEntry {
@@ -227,7 +270,9 @@ impl SessionEntry {
             suppress_transient_pause: AtomicBool::new(false),
             restarting: AtomicBool::new(false),
             boot_generation: AtomicU64::new(1),
+            boot_gen_tx: watch::channel(1).0,
             lifecycle_lock: tokio::sync::Mutex::new(()),
+            output_flush_pending: AtomicBool::new(false),
         })
     }
 
@@ -238,6 +283,38 @@ impl SessionEntry {
             .iter()
             .cloned()
             .collect()
+    }
+
+    /// Supersede any boot in flight (Stop, Restart) and return the new generation.
+    pub(super) fn bump_generation(&self) -> u64 {
+        let gen = self.boot_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.boot_gen_tx.send_replace(gen);
+        gen
+    }
+
+    /// Resolves once Stop or Restart has moved the session past `my_gen`.
+    pub(super) async fn superseded(&self, my_gen: u64) {
+        let mut rx = self.boot_gen_tx.subscribe();
+        if rx.wait_for(|g| *g != my_gen).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Run a boot step unless the boot is superseded first; the step future is
+    /// then dropped, which kills its build's process group and releases the
+    /// lifecycle lock instead of making Stop wait out a 15 s adapter timeout.
+    pub(super) async fn unless_superseded<T>(
+        &self,
+        my_gen: u64,
+        step: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        if self.boot_generation.load(Ordering::SeqCst) != my_gen {
+            return None;
+        }
+        tokio::select! {
+            v = step => Some(v),
+            _ = self.superseded(my_gen) => None,
+        }
     }
 
     pub(super) fn is_terminal(&self) -> bool {
@@ -339,7 +416,7 @@ impl SessionEntry {
         updated
     }
 
-    pub(super) fn append_output(&self, category: &str, text: String) {
+    pub(super) fn append_output(self: &Arc<Self>, category: &str, text: String) {
         if text.is_empty() {
             return;
         }
@@ -368,7 +445,33 @@ impl SessionEntry {
                 }
             }
         }
-        self.mutate_and_broadcast(|_| {});
+        {
+            let mut snap = self.snapshot.write().unwrap_or_else(|e| e.into_inner());
+            snap.revision = snap.revision.saturating_add(1);
+        }
+        self.schedule_output_flush();
+    }
+
+    /// Broadcast at most one snapshot per [`OUTPUT_COALESCE`] for a burst of
+    /// output lines, and nothing at all while no one is watching.
+    fn schedule_output_flush(self: &Arc<Self>) {
+        if self.events_tx.receiver_count() == 0
+            || self.output_flush_pending.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            self.output_flush_pending.store(false, Ordering::Release);
+            let _ = self.events_tx.send(self.read_snapshot());
+            return;
+        };
+        let me = Arc::clone(self);
+        rt.spawn(async move {
+            tokio::time::sleep(OUTPUT_COALESCE).await;
+            // Clear first: a line appended after this schedules the next flush.
+            me.output_flush_pending.store(false, Ordering::Release);
+            let _ = me.events_tx.send(me.read_snapshot());
+        });
     }
 
     pub(super) fn active_conn(&self) -> Result<Arc<ActiveConnection>> {

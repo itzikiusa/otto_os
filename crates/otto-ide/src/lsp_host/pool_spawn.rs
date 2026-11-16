@@ -328,13 +328,13 @@ pub(crate) fn build_process_spawner(
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         let lang = key.lang.clone();
-        tokio::spawn(async move {
-            use tokio::io::AsyncBufReadExt;
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(lang = lang.as_str(), "lsp stderr: {line}");
-            }
-        });
+        // Drained to EOF whatever the bytes: a server that logs a non-UTF-8 path
+        // must not lose its stderr (and die of SIGPIPE) under every socket.
+        crate::line_reader::spawn_line_drain(
+            stderr,
+            crate::line_reader::MAX_OUTPUT_LINE_BYTES,
+            move |line| tracing::debug!(lang = lang.as_str(), "lsp stderr: {line}"),
+        );
         Ok(ServerIo {
             reader: Box::new(BufReader::new(stdout)),
             writer: Box::new(stdin),

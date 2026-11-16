@@ -4,6 +4,8 @@
   // applies on the next restart — said here, and offered as "Save & restart".
   import Modal from '../../lib/components/Modal.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { saveAndRestartChoice } from '../../lib/freshRestart';
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
   import { loadErrorText } from '../../lib/loadError';
@@ -36,7 +38,11 @@
 
   async function save(alsoRestart: boolean): Promise<void> {
     if (busy) return;
-    if (alsoRestart && !(await ws.confirmRestart(sessionId))) return;
+    // Working-guard + the can't-resume ask (lib/freshRestart); null = cancelled.
+    const restart = alsoRestart
+      ? await saveAndRestartChoice(ws.getSession(sessionId), () => ws.confirmRestart(sessionId), confirmer)
+      : false;
+    if (restart === null) return;
     busy = true;
     try {
       try {
@@ -47,7 +53,7 @@
       }
       onclose();
       const label = mcpProfiles.labelFor(ids);
-      if (!alsoRestart) {
+      if (!restart) {
         toasts.success(`MCP tools: ${label}`, 'Applies the next time the agent restarts.');
         return;
       }

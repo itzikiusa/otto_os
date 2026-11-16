@@ -3,11 +3,16 @@
 
 import { api } from '../../../lib/api/client';
 import { readIdePreferences } from '../../../lib/components/cm-ide-prefs';
+import { confirmer } from '../../../lib/confirm.svelte';
+import { latestOnly } from '../../../lib/latest';
 import { loadErrorText } from '../../../lib/loadError';
 import { plural } from '../../../lib/plural';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { findContainingRoot } from './ideProjectHelpers';
+import { namesOf, noteFormatSkipped, stillDirtyTabsIn, toastKeptTabs, type IdeFormatAnswer } from './ideWorkspaceOpGuards';
+import { ideCollabNotices } from '../store/ideCollabNotices.svelte';
+import { collabStatus, isNotKeepingUp, recoverRefusedEdit } from '../store/ideCollabSync';
 import {
   type IdeBufferHost,
   type IdeBufferPerfController,
@@ -16,6 +21,7 @@ import {
 import {
   collabGuestPost,
   detectTextEol,
+  diskEolsOf,
   normalizeEditorLf,
   serializeTabDiskContent,
   type IdeCodeAction,
@@ -164,6 +170,13 @@ export async function runApplyRename(
   try {
     const prefs = readIdePreferences();
     await flushDirtyOpenTabsForWorkspaceOp(host, bufPerf, true);
+    // A rename cannot skip a file and stay consistent: stop while a touched tab still
+    // holds edits its save could not write (a conflict or a failed save).
+    const blocked = stillDirtyTabsIn(host, bufPerf, [host.renameState.path, ...host.renameState.edits.map((e) => e.path)]);
+    if (blocked.length > 0) {
+      host.renameState.error = `${namesOf(blocked)} ${blocked.length === 1 ? 'has' : 'have'} unsaved changes that couldn’t be saved. Save or reload ${blocked.length === 1 ? 'it' : 'them'} first, then rename.`;
+      return false;
+    }
     const content = bufPerf.flush(host, host.renameState.path);
     const resp = await api.post<{ applied: boolean; edits: IdeRenameEdit[] }>('/ide/lsp/rename', {
       target: host.targetPayload,
@@ -179,7 +192,7 @@ export async function runApplyRename(
       local_history_retention_days: prefs.localHistoryRetentionDays,
     });
     const touched = new Set((resp.edits ?? []).map((e) => e.path));
-    await reloadTabsFromDisk(host, bufPerf, touched);
+    toastKeptTabs(await reloadTabsFromDisk(host, bufPerf, touched));
     host.renameState.open = false;
     toasts.success(`Renamed to “${next}”`, `${plural(touched.size, 'file')} updated`);
     return true;
@@ -201,13 +214,14 @@ export async function runFormatActiveFile(
   const targetPath = tab.path;
   const content = bufPerf.flush(host, targetPath);
   try {
-    const resp = await api.post<{ formatted: string; changed: boolean; formatter: string }>('/ide/lsp/format', {
+    const resp = await api.post<IdeFormatAnswer & { formatted: string; changed: boolean; formatter: string }>('/ide/lsp/format', {
       target: host.targetPayload,
       path: targetPath,
       content,
       language: tab.language,
       organize_imports: Boolean(opts.organizeImports),
     });
+    if (noteFormatSkipped(targetPath, resp)) return; // on purpose, not an error: buffer untouched
     if (resp.changed && typeof resp.formatted === 'string') {
       if (bufPerf.getBuffer(host, targetPath) !== content || !host.tabs.some((t) => t.path === targetPath)) {
         return;
@@ -452,7 +466,7 @@ export async function runApplyQuickFixEdits(
           void api.post('/ide/history/snapshot', { target: fileTarget, path: filePath, content: rawPrev, label: 'Before Quick Fix' }).catch(() => {});
         }
         const nextLf = applyTextEditsToString(prevLf, fileEdits);
-        const nextDisk = serializeTabDiskContent({ eol }, nextLf);
+        const nextDisk = serializeTabDiskContent({ eol, diskEols: diskEolsOf(rawPrev), savedContent: prevLf }, nextLf);
         await api.put('/ide/fs/file', {
           target: fileTarget,
           path: filePath,
@@ -507,9 +521,13 @@ export async function runSearchWorkspace(
   } = {},
 ): Promise<void> {
   const effectiveQuery = mode === 'text' ? query : query.trim();
+  // Each search supersedes (and aborts) the one before it, so a slow broad query that
+  // answers last can never paint its hits under a newer query.
+  const ticket = workspaceSearch.begin();
   if (!host.target.root || effectiveQuery.length === 0) {
     host.searchResults = [];
     host.searchTruncated = false;
+    host.searchLoading = false;
     return;
   }
   host.searchLoading = true;
@@ -525,14 +543,22 @@ export async function runSearchWorkspace(
       file_glob: opts.fileGlob || undefined,
       scope_path: opts.scopePath ?? host.searchScopePath ?? undefined,
       limit: opts.limit ?? 80,
-    });
+    }, ticket.signal);
+    if (!ticket.current) return;
     host.searchResults = resp.items ?? [];
     host.searchTruncated = Boolean(resp.truncated);
   } catch (e) {
-    host.searchError = loadErrorText(e);
+    if (ticket.current) host.searchError = loadErrorText(e);
   } finally {
-    host.searchLoading = false;
+    if (ticket.current) host.searchLoading = false;
   }
+}
+
+const workspaceSearch = latestOnly();
+
+/** Drop any in-flight workspace search (the search sheet closed, or the project changed). */
+export function cancelWorkspaceSearch(): void {
+  workspaceSearch.cancel();
 }
 
 export async function runReplaceInWorkspace(
@@ -554,6 +580,24 @@ export async function runReplaceInWorkspace(
   host.replaceLoading = true;
   try {
     await flushDirtyOpenTabsForWorkspaceOp(host, bufPerf, !dryRun);
+    let paths = opts.paths;
+    if (!dryRun) {
+      const candidates = opts.paths ?? host.replacePreview?.previews.map((p) => p.path) ?? null;
+      const blocked = stillDirtyTabsIn(host, bufPerf, candidates);
+      if (blocked.length > 0) {
+        const what = `${namesOf(blocked)} ${blocked.length === 1 ? 'has' : 'have'} unsaved changes that couldn’t be saved`;
+        const rest = candidates ? candidates.filter((p) => !blocked.some((t) => t.path === host.resolvePath(p))) : [];
+        if (rest.length === 0) {
+          toasts.error('Nothing replaced', `${what}. Save or reload ${blocked.length === 1 ? 'it' : 'them'} first.`);
+          return null;
+        }
+        const skip = await confirmer.ask(`${what}. Replace in the other files and leave ${blocked.length === 1 ? 'it' : 'them'} unchanged?`, {
+          title: 'Unsaved changes', confirmLabel: 'Skip and replace',
+        });
+        if (!skip) return null;
+        paths = rest;
+      }
+    }
     const resp = await api.long.post<IdeReplaceResp>('/ide/replace', {
       target: host.targetPayload,
       query,
@@ -563,12 +607,12 @@ export async function runReplaceInWorkspace(
       regex: opts.regex ?? false,
       file_glob: opts.fileGlob || undefined,
       scope_path: opts.scopePath ?? host.searchScopePath ?? undefined,
-      paths: opts.paths,
+      paths,
       dry_run: dryRun,
     });
     host.replacePreview = resp;
     if (!dryRun) {
-      await reloadTabsFromDisk(host, bufPerf, new Set(resp.previews.map((p) => p.path)));
+      toastKeptTabs(await reloadTabsFromDisk(host, bufPerf, new Set(resp.previews.map((p) => p.path))));
       toasts.success(
         `Replaced ${plural(resp.replacements, 'occurrence')}`,
         `${plural(resp.files_changed, 'file')} updated`,
@@ -658,7 +702,8 @@ export async function runSendCollabEdit(
 ): Promise<boolean> {
   bufPerf.flush(host, path);
   if (!host.collabRoom || !host.collabPeerId || !host.collabPeerSecret || !host.canEditCollab) return false;
-  try {
+  const send = async (text: string): Promise<void> => {
+    if (!host.collabRoom || !host.collabPeerId || !host.collabPeerSecret) throw new Error('left the room');
     const res = await collabGuestPost<{ version: number }>(
       `/ide/collab/guest/${encodeURIComponent(host.collabRoom.id)}/edit`,
       host.collabGuestToken,
@@ -666,18 +711,43 @@ export async function runSendCollabEdit(
         peer_id: host.collabPeerId,
         peer_secret: host.collabPeerSecret,
         path,
-        content,
+        content: text,
         base_version: host.sharedBuffers[path]?.version,
         save,
       },
     );
-    host.sharedBuffers = { ...host.sharedBuffers, [path]: { content, version: res.version } };
+    host.sharedBuffers = { ...host.sharedBuffers, [path]: { content: text, version: res.version } };
+  };
+  try {
+    await send(content);
+    if (save) ideCollabNotices.clearSave(path);
     return true;
   } catch (e) {
+    if (isNotKeepingUp(e)) {
+      // One recovery per file at a time; a typing burst meanwhile rides on its resend.
+      if (collabRecovering.has(path)) return false;
+      collabRecovering.add(path);
+      try {
+        // A save resends what was saved; a live edit resends the CURRENT buffer.
+        const ok = await recoverRefusedEdit(host, () => send(save ? content : host.getBuffer(path)));
+        if (ok && save) ideCollabNotices.clearSave(path);
+        return ok;
+      } finally {
+        collabRecovering.delete(path);
+      }
+    }
+    if (save && collabStatus(e) === 403) {
+      // The host refused this file (git/agent config, instructions, launch configs, …):
+      // its reason shows on the file, not in a toast.
+      ideCollabNotices.refuseSave(path, (e as Error).message);
+      return false;
+    }
     if (save) toastError('Couldn’t sync edit to room', e);
     return false;
   }
 }
+
+const collabRecovering = new Set<string>();
 
 export async function runSetCollabPeerRole(
   host: IdeLspSearchHost,

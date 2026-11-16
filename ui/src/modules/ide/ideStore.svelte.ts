@@ -327,7 +327,7 @@ class IdeStore {
       this.loadEnvironments(),
     ]);
     if (opts.skipAutoOpen) this.hasClosedAllTabs = false;
-    else void restoreWorkspaceTabsOrInitial(this);
+    else if (this.target.kind === 'local' && this.target.root === clean) void restoreWorkspaceTabsOrInitial(this); // not if switched meanwhile
     return true;
   }
 
@@ -786,7 +786,7 @@ class IdeStore {
     this.bufPerf.flushAndSnapshotAll(this);
   }
   disposeStreams(): void {
-    this.bufPerf.resetAll(this);
+    this.bufPerf.resetAll(this, { discardDirty: true }); // only after the discard prompt (or a storage wipe)
     if (this.cursorSendTimer) clearTimeout(this.cursorSendTimer);
     if (this.collabEditTimer) clearTimeout(this.collabEditTimer);
     this.cursorSendTimer = null; this.collabEditTimer = null;

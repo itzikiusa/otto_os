@@ -21,7 +21,8 @@
 //!   `.fake-claude/escaped.pid`, then answers like `echo`.
 //! * anything else — `echo: <text>` as stream events + `assistant`.
 //!
-//! An `interrupt` control request ends the running turn as interrupted.
+//! An `interrupt` control request ends the running turn as interrupted; a
+//! `stop_task` one kills that background task (`task_notification` killed).
 //! `--resume <id>` works only for a session this binary started in the same
 //! cwd (`.fake-claude/<id>` exists); otherwise it exits 1 like the CLI
 //! ("No conversation found"). A `.fake-claude/<id>.flaky` marker fails the
@@ -269,6 +270,17 @@ fn main() {
                 }
                 if sub == Some("interrupt") && waiting.take().is_some() {
                     result_interrupted();
+                }
+                // `stop_task`: the background task is killed at once.
+                if sub == Some("stop_task") {
+                    let task = msg.pointer("/request/task_id").and_then(Value::as_str);
+                    if let Some(i) = dues.iter().position(|d| Some(d.task_id.as_str()) == task) {
+                        let d = dues.remove(i);
+                        out(
+                            json!({"type":"system","subtype":"task_notification","task_id":d.task_id,
+                            "tool_use_id":d.tool_use_id,"status":"killed","output_file":"","summary":"stopped"}),
+                        );
+                    }
                 }
             }
             Some("user") => {

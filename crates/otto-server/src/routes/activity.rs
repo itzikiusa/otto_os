@@ -235,6 +235,8 @@ pub async fn claude_ingest(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // Turn boundaries feed the sidebar's working / idle (status_classify).
+    ctx.manager.note_claude_hook(&sid, &event_name);
 
     let norm = normalize_claude(&payload);
     let activity = ctx.activity();
@@ -358,6 +360,8 @@ pub async fn codex_ingest(
     let Some(session) = ingest_session(&ctx, &headers).await else {
         return StatusCode::NO_CONTENT;
     };
+    let kind = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    ctx.manager.note_codex_notify(&session.id, kind);
     if let Some(d) = normalize_codex(&payload) {
         let _ = ctx
             .activity()

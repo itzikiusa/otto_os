@@ -34,6 +34,8 @@
   let mine = $state(false);
   let handles = $state<Set<string>>(new Set());
   let accountProviders = $state<Set<GitProviderKind> | null>(null);
+  /** No account on the repo and none for its forge: the daemon can't list PRs. */
+  let noAccount = $state(false);
   let sortEl = $state<HTMLButtonElement | null>(null);
   let filterEl = $state<HTMLButtonElement | null>(null);
 
@@ -66,6 +68,9 @@
   });
 
   async function load(reset: boolean): Promise<void> {
+    // Refresh after "No account linked" re-reads the accounts: one may have just been added.
+    if (reset && noAccount) accountProviders = null;
+    noAccount = false;
     if (!repo || !repo.provider || !forge) {
       if (reset) items = [];
       return;
@@ -83,6 +88,7 @@
         if (reset) items = [];
         hasMore = false;
         error = null;
+        noAccount = true;
         return;
       }
     }
@@ -188,6 +194,16 @@
       <EmptyState variant="panel" icon="pr" title="No repository here" body="Open a thread in a git repository to see its pull requests." />
     {:else if !forge}
       <EmptyState variant="panel" icon="pr" title="No supported remote" body="{repo.name} has no GitHub, Bitbucket or GitLab remote." />
+    {:else if noAccount}
+      <EmptyState
+        variant="panel"
+        icon="pr"
+        title="No {forge} account linked"
+        body="Otto lists {repo.name}'s pull requests with your {forge} account. Add one in Settings › Git accounts, then link it to this repo (Git → repo card → Account)."
+        actionLabel="Open Git accounts"
+        actionIcon="gear"
+        onaction={() => router.go('settings/git-accounts')}
+      />
     {:else}
       <LoadState
         what="pull requests"

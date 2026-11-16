@@ -214,6 +214,7 @@ impl AgentRuntime {
                 Some(root),
             )
             .await?;
+        let effort = req.effort.filter(|e| !e.trim().is_empty());
         if let Some(p) = req.prompt.filter(|p| !p.trim().is_empty()) {
             let text = if framed {
                 format!("{}\n\n{p}", Self::peer_header(&c, "Opened by"))
@@ -221,8 +222,12 @@ impl AgentRuntime {
                 p
             };
             let mut prompt = RuntimePromptReq::of(&text);
-            prompt.effort = req.effort.filter(|e| !e.trim().is_empty());
+            // Stored on the thread once its agent takes the prompt.
+            prompt.effort = effort;
             self.prompt_with(&created.id, &prompt).await?;
+        } else if let Some(e) = effort.as_deref() {
+            // No opening prompt: the thread keeps the pick for its first turn.
+            self.set_effort(&created.id, Some(e)).await?;
         }
         self.get(&created.id).await
     }

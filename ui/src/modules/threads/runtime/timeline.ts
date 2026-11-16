@@ -18,6 +18,7 @@ import type {
   TurnItem,
 } from '../../../lib/api/types';
 import type { RuntimeProjection } from './projection';
+import { settingsChangeOf, type SettingsChange } from './settingsChange.ts';
 
 export interface PendingApproval {
   requestId: string;
@@ -81,7 +82,9 @@ export type TimelineRow =
   | { kind: 'day'; id: string; label: string }
   | { kind: 'session'; id: string }
   /** Subtle divider before an autonomous/reactive agent wakeup turn (`origin === 'agent'`). */
-  | { kind: 'agent_turn'; id: string; label: string };
+  | { kind: 'agent_turn'; id: string; label: string }
+  /** A quiet line where a model / effort / access switch took effect or was refused (settingsChange.ts). */
+  | { kind: 'setting'; id: string; change: SettingsChange };
 
 const TOOL_TYPES: ReadonlySet<TurnItem['type']> = new Set(['command_execution', 'dynamic_tool', 'web_search', 'file_change']);
 const isTool = (i: TurnItem): boolean => TOOL_TYPES.has(i.type);
@@ -350,6 +353,9 @@ export function timelineRows(items: readonly TurnItem[], turns: readonly Provide
         messageRowCache.set(item, mRow);
       }
       rows.push(mRow);
+    } else if (settingsChangeOf(item)) {
+      flush();
+      rows.push({ kind: 'setting', id: item.id, change: settingsChangeOf(item)! });
     } else if (!foldedIds?.has(item.id)) {
       if (!work.length) workId = item.id;
       const approval = folded?.get(item.id);

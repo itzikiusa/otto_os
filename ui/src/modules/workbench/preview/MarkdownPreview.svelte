@@ -5,7 +5,7 @@
   // uses; `![alt](asset:<id>)` images resolve to workbench assets.
   import { onDestroy, untrack } from 'svelte';
   import { renderNote } from '../../../lib/render/markdown';
-  import { renderMermaid } from '../../../lib/render/mermaid';
+  import { hydrateDiagramBlocks } from '../../../lib/render/diagramBlocks';
   import { renderD2 } from '../../canvas/d2';
   import { workbenchAssetUrl } from '../../../lib/api/workbench';
   import { ui } from '../../../lib/stores/ui.svelte';
@@ -29,7 +29,6 @@
   }
   onDestroy(revokeAll);
 
-  let seq = 0;
   $effect(() => {
     void html;
     const el = host;
@@ -51,27 +50,7 @@
           () => img.setAttribute('alt', `${img.alt || 'image'} (couldn’t load)`),
         );
       }
-      for (const block of Array.from(el.querySelectorAll('div.diagram-block:not([data-rendered])'))) {
-        block.setAttribute('data-rendered', '1');
-        const kind = block.getAttribute('data-diagram');
-        const src = block.querySelector('pre.diagram-src')?.textContent ?? '';
-        const id = `wb-md-diag-${++seq}`;
-        const isStale = () => !block.isConnected;
-        const run =
-          kind === 'd2' ? renderD2(id, src, { dark, isStale }) : renderMermaid(id, src, { dark, isStale });
-        void run.then(({ svg, error }) => {
-          if (!block.isConnected) return;
-          if (svg) {
-            block.innerHTML = svg;
-            block.classList.add('diagram-ok');
-          } else if (error) {
-            const err = document.createElement('div');
-            err.className = 'diagram-error';
-            err.textContent = `Diagram error: ${error}`;
-            block.prepend(err);
-          }
-        });
-      }
+      hydrateDiagramBlocks(el, { dark, idPrefix: 'wb-md-diag', renderD2 });
     });
   });
 </script>

@@ -23,6 +23,8 @@ pub mod share_throttle;
 pub mod slash_commands;
 pub mod submit;
 pub mod tail_scan;
+#[cfg(test)]
+pub(crate) mod test_tmp;
 mod titles;
 pub mod tool_probe;
 pub mod trust;

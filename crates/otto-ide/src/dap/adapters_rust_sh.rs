@@ -416,7 +416,7 @@ async fn compile_rust_debug_artifact(
         &cargo_args,
         &cargo_cwd,
         &cargo_env,
-        Duration::from_secs(120),
+        crate::proc_group::BUILD_STEP_TIMEOUT,
     )
     .await?;
     let stderr_txt = String::from_utf8_lossy(&out.stderr).to_string();

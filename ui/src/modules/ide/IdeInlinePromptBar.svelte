@@ -178,11 +178,11 @@
         <button
           type="button"
           class="btn small ghost"
-          title="Move selection and prompt to side-by-side Agent chat (⌘L)"
+          title="Move selection and prompt to the side-by-side Agent chat"
           onclick={handoffToChat}
           data-testid="ide-inline-handoff"
         >
-          In Chat ⌘L
+          In Chat
         </button>
 
         <button
