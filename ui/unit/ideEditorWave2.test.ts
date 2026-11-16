@@ -119,3 +119,72 @@ test('E4: an opened tab carries the read flags, so a truncated or binary file is
   assert.deepEqual([big?.truncated, big?.binary], [true, false]);
   assert.deepEqual([blob?.truncated, blob?.binary], [true, true]);
 });
+
+function shell(over: Record<string, unknown> = {}) {
+  const calls: string[] = [];
+  let promptOpts: { validate?: (v: string) => string | null } = {};
+  const ide = {
+    activePath: '/repo/a.ts', activeTab: { path: '/repo/a.ts', pinned: false } as { path: string; pinned: boolean } | null,
+    cursorInfo: { line: 1, col: 1 }, searchEverywhereOpen: false, activeDebug: null, goToLineOpen: false,
+    jumpTo: () => {}, openSettings: () => {}, saveFile: async () => true,
+    closeTab: async (p: string) => { calls.push(`close:${p}`); },
+    openSearchEverywhere: (t: string) => { calls.push(`search:${t}`); },
+    ...over,
+  };
+  const page = { tagName: 'DIV', isContentEditable: false, matches: () => false, closest: () => null, querySelector: () => null };
+  const mod = loadSource(new URL('../src/modules/ide/shell/ideShellCommands.ts', import.meta.url), {
+    '../../../lib/confirm.svelte': { confirmer: { promptText: async (_m: string, o: typeof promptOpts) => { promptOpts = o; return null; } } },
+    '../../../lib/contextmenu.svelte': { ctxMenu: { showAt: () => {} } },
+    '../../../lib/idePreferences.svelte': { readIdePreferences: () => ({}), writeIdePreferences: () => {} },
+    '../ideStore.svelte': { ide, ideBasename: (p: string) => p },
+    '../store/ideAgentController.svelte': { ideAgent: { markSelectionFromEditor: () => null, openInlineEdit: () => {} } },
+  }, { Element: class {}, window: { location: { reload() {} }, dispatchEvent() {} }, CustomEvent: class {} });
+  const key = (k: string, code: string, mods: { meta?: boolean; shift?: boolean } = {}) => ({
+    target: page, key: k, code, ctrlKey: false, metaKey: Boolean(mods.meta), shiftKey: Boolean(mods.shift), altKey: false,
+    defaultPrevented: false, preventDefault() { this.defaultPrevented = true; },
+  });
+  return { mod, calls, ide, key, prompt: () => promptOpts };
+}
+
+test('E6: ⌘F12 is left to the editor (File Structure); ⌘O still opens Symbols', () => {
+  const { mod, calls, key } = shell();
+  assert.equal(mod.handleIdeChord(key('F12', 'F12', { meta: true }), false, () => {}), false);
+  assert.equal(mod.handleIdeChord(key('o', 'KeyO', { meta: true }), false, () => {}), true);
+  assert.deepEqual(calls, ['search:symbols']);
+});
+
+test('E6: ⌘W on a pinned tab keeps it open (and still keeps the window)', () => {
+  const pinned = shell({ activeTab: { path: '/repo/a.ts', pinned: true } });
+  const w = pinned.key('w', 'KeyW', { meta: true });
+  assert.equal(pinned.mod.handleIdeChord(w, false, () => {}), true);
+  assert.equal(w.defaultPrevented, true);
+  assert.deepEqual(pinned.calls, []);
+  const plain = shell();
+  plain.mod.handleIdeChord(plain.key('w', 'KeyW', { meta: true }), false, () => {});
+  assert.deepEqual(plain.calls, ['close:/repo/a.ts']);
+});
+
+test('E6: Go to Line rejects anything but line or line:column', async () => {
+  const { mod, prompt } = shell();
+  await mod.promptIdeGoToLine();
+  const validate = prompt().validate!;
+  for (const ok of ['42', '42:8']) assert.equal(validate(ok), null, ok);
+  for (const bad of ['abc', '12x', '4:', ':3', '1:2:3']) assert.ok(validate(bad), bad);
+});
+
+test('E6: ⌘⇧T reopens tabs closed by Close others / Close unmodified / Close all', async () => {
+  const { load } = ideModules({});
+  const slices = load('store/ideStateSlices.svelte.ts');
+  const recorded: string[][] = [];
+  const tabs = ['/repo/a.ts', '/repo/b.ts', '/repo/c.ts'].map((path) => ({ path, name: path, content: '', savedContent: '' }));
+  const host = { target, tabs, activePath: '/repo/a.ts', splitPath: null, closeSplit: () => {}, hasClosedAllTabs: false, syncWorkspacePort: () => {} };
+  const perf = { flushAll: () => {}, isTabDirty: () => false };
+  slices.performCloseTabBatch(host, perf, (closing: string[]) => recorded.push(closing), '/repo/a.ts');
+  assert.deepEqual(recorded, [['/repo/b.ts', '/repo/c.ts']], 'the batch hands its closed paths to the store');
+  // The store's callback is forgetClosedTabs, which feeds closedTabPaths (ideStore.svelte.ts).
+  const store = await import('node:fs').then((fs) => fs.readFileSync(new URL('../src/modules/ide/ideStore.svelte.ts', import.meta.url), 'utf8'));
+  for (const call of ['closeOtherTabs', 'closeUnmodifiedTabs', 'closeAllTabs']) {
+    const body = store.slice(store.indexOf(`${call}(`), store.indexOf('\n  }', store.indexOf(`${call}(`)) + 4);
+    assert.match(body, /forgetClosedTabs/, `${call} records what it closed for ⌘⇧T`);
+  }
+});

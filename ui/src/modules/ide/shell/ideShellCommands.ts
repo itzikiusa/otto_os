@@ -60,6 +60,7 @@ export async function promptIdeGoToLine(): Promise<void> {
       title: 'Go to Line / Column',
       placeholder: `${ide.cursorInfo.line}:${ide.cursorInfo.col}`,
       confirmLabel: 'Go',
+      validate: (v) => (/^\d+(:\d+)?$/.test(v) ? null : 'Enter a line number, or line:column (for example 42 or 42:8).'),
     });
     if (!raw?.trim() || !ide.activePath) return;
     const [lStr, cStr] = raw.trim().split(':');
@@ -178,7 +179,7 @@ export function handleIdeChord(
   if (pureMod && !e.shiftKey && !e.altKey && (e.code === 'Comma' || e.key === ',')) { e.preventDefault(); ide.openSettings(); return true; }
   if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyS', 's')) { e.preventDefault(); void ide.saveFile(); return true; }
   if (mod && !e.shiftKey && e.altKey && matchesKey(e, 'KeyS', 's')) { e.preventDefault(); void ide.saveAll(); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyW', 'w') && ide.activePath) { e.preventDefault(); void ide.closeTab(ide.activePath); return true; }
+  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyW', 'w') && ide.activePath) { e.preventDefault(); if (!ide.activeTab?.pinned) void ide.closeTab(ide.activePath); return true; }
   if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyT', 't')) { e.preventDefault(); void ide.reopenClosedTab(); return true; }
   if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyE', 'e')) { e.preventDefault(); openIdeRecentFilesMenu(); return true; }
   if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyG', 'g') && !inEditorWithFindPanel(e.target)) { e.preventDefault(); void promptIdeGoToLine(); return true; }
@@ -194,7 +195,7 @@ export function handleIdeChord(
   if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyO', 'o')) {
     e.preventDefault(); ide.openSearchEverywhere('files'); return true;
   }
-  if (pureMod && !e.shiftKey && !e.altKey && (matchesKey(e, 'KeyO', 'o') || e.key === 'F12')) {
+  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyO', 'o')) {
     e.preventDefault(); ide.openSearchEverywhere('symbols'); return true;
   }
   if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyI', 'i') && !(e.ctrlKey && !e.metaKey && inXterm(e.target))) {
