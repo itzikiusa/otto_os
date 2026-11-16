@@ -92,6 +92,11 @@ export function defaultAgentProvider(): string {
   return list[0] ?? 'claude';
 }
 
+/** `provider`'s CLI family, honouring the daemon's `/meta.provider_families` (a custom slug's explicit family). */
+export function providerFamily(provider: string): string {
+  return inferProviderFamily(provider, auth.meta);
+}
+
 /** Whether `provider` accepts a model flag — its daemon spec carries a
  *  `model_args` template (`/meta.model_flags`). Surfaces hide their model
  *  control when false, so a picked model is never silently dropped. Falls back
