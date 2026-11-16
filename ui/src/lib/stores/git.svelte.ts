@@ -224,6 +224,14 @@ class GitStore {
     this.repoUsedAt[repoId] = Date.now();
     this.persistOpenTabs();
     this.fetchOnArrival();
+    this.followTab(repoId);
+  }
+
+  /** The status bar's "Current branch" follows the repo tab the user opens —
+   *  it kept showing the session repo's branch while you worked in another. */
+  private followTab(repoId: string): void {
+    const repo = this.allRepos.find((r) => r.id === repoId);
+    if (repo && this.primary?.id !== repoId) void this.selectPrimary(repo);
   }
 
   /** Close a repo tab; pick a sensible neighbour as the new active tab. */
@@ -248,6 +256,7 @@ class GitStore {
     this.repoUsedAt[repoId] = Date.now();
     this.persistOpenTabs();
     this.fetchOnArrival();
+    this.followTab(repoId);
   }
 
   /** Move `repoId` to the position currently held by `targetIdx` (drag-reorder). */
