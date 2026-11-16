@@ -1,6 +1,6 @@
 // Data loaders and live disk/editor sync helpers for `IdeComparisonModal.svelte`.
 
-import { api } from '../../../lib/api/client';
+import { api, ApiError } from '../../../lib/api/client';
 import { gitApi } from '../../../lib/api/git';
 import type { Repo } from '../../../lib/api/types';
 import type {
@@ -43,8 +43,11 @@ async function readDiskFile(
       signal,
     );
     return { content: res.content, exists: true };
-  } catch {
-    return { content: '', exists: false };
+  } catch (e) {
+    // Only a missing file is "absent": a read failure must not become an empty file (a 0-byte
+    // Local History label, or a comparison showing the file as deleted).
+    if (e instanceof ApiError && e.status === 404) return { content: '', exists: false };
+    throw e;
   }
 }
 

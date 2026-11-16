@@ -50,11 +50,27 @@ pub(crate) fn default_gopls_settings(go_build_tags: &[String]) -> Value {
     })
 }
 
+/// rust-analyzer for a non-root owner runs no workspace code: no build scripts,
+/// no proc macros, and no `cargo check` on save (which would run `build.rs`
+/// and any `.cargo/config.toml` `rustc-wrapper`).
+fn non_root_rust_settings() -> Value {
+    json!({
+        "cargo": { "buildScripts": { "enable": false } },
+        "procMacro": { "enable": false },
+        "checkOnSave": false
+    })
+}
+
+/// The repo's venv interpreter for pyright (which EXECUTES it to read
+/// `sys.path`). A real venv's `bin/python` links to an interpreter outside the
+/// repo; one that resolves inside it is a committed file, never run.
+#[allow(clippy::disallowed_methods)]
 fn detect_local_python_path(root: &str) -> Option<String> {
     let r = Path::new(root);
+    let canon_root = std::fs::canonicalize(r).ok()?;
     for rel in [".venv/bin/python", "venv/bin/python", ".env/bin/python"] {
         let p = r.join(rel);
-        if p.is_file() {
+        if std::fs::canonicalize(&p).is_ok_and(|c| c.is_file() && !c.starts_with(&canon_root)) {
             return Some(p.to_string_lossy().into_owned());
         }
     }
@@ -168,6 +184,11 @@ impl Mux {
         let Some(ref canon_root) = self.canon_root else {
             return false;
         };
+        // An unescaped `?`/`#` is a query/fragment the server's URI parser drops,
+        // so the path checked here would not be the file it opens.
+        if uri.contains(['?', '#']) {
+            return false;
+        }
         let Some(path) = otto_core::paths::file_uri_to_path(uri) else {
             return false;
         };
@@ -289,13 +310,7 @@ impl Mux {
                 params.remove("initializationOptions");
             }
         } else if !self.owner_is_root && norm_lang == "rust" {
-            params.insert(
-                "initializationOptions".into(),
-                json!({
-                    "cargo": { "buildScripts": { "enable": false } },
-                    "procMacro": { "enable": false }
-                }),
-            );
+            params.insert("initializationOptions".into(), non_root_rust_settings());
         } else if !self.owner_is_root {
             params.remove("initializationOptions");
         }
@@ -323,10 +338,7 @@ impl Mux {
                     && norm_lang == "rust"
                     && (section.is_empty() || section == "rust-analyzer")
                 {
-                    json!({
-                        "cargo": { "buildScripts": { "enable": false } },
-                        "procMacro": { "enable": false }
-                    })
+                    non_root_rust_settings()
                 } else if (section == "python" || section == "python.analysis") && py_path.is_some()
                 {
                     json!({ "pythonPath": py_path })
@@ -670,5 +682,25 @@ impl Mux {
             (None, None) => {}
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod python_path_tests {
+    #[test]
+    fn a_committed_venv_python_is_never_handed_to_pyright() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let bin = ws.path().join(".venv/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("python"), "#!/bin/sh\ntouch /tmp/pwned\n").unwrap();
+        let root = ws.path().to_str().unwrap();
+        assert_eq!(super::detect_local_python_path(root), None);
+
+        let interp = outside.path().join("python3");
+        std::fs::write(&interp, "").unwrap();
+        std::fs::remove_file(bin.join("python")).unwrap();
+        std::os::unix::fs::symlink(&interp, bin.join("python")).unwrap();
+        assert!(super::detect_local_python_path(root).is_some());
     }
 }

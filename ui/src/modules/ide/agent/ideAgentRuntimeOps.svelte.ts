@@ -3,7 +3,7 @@
 
 import type { PromptImage, RuntimeAccessMode, RuntimePromptResp } from '../../../lib/api/types';
 import type { EffortLevel } from '../../../lib/providerModels';
-import type { RuntimeProjectionView } from '../../../lib/runtimeThreadPort';
+import type { RuntimeProjectionView, RuntimeSessionPort } from '../../../lib/runtimeThreadPort';
 import type { ComposerFile } from '../../../lib/stores/runtimeDrafts.svelte';
 import {
   ide,
@@ -40,7 +40,7 @@ const MAX_UNDO_SNAPSHOTS = 16;
 export function readIdeFileBuffer(fullPath: string): string {
   const viaStore = ide.getBuffer?.(fullPath);
   return (
-    (typeof viaStore === 'string' && viaStore.length > 0
+    (typeof viaStore === 'string' // an emptied live buffer is "", not "missing"
       ? viaStore
       : ide.tabs.find((t) => t.path === fullPath)?.content) ?? ''
   );
@@ -131,13 +131,8 @@ export async function dispatchPromptToRuntimeSession(
 ): Promise<RuntimePromptResp> {
   const bridge = ideAgentState.runtimeBridge ?? (await ideAgentState.ensureBridge());
   if (!bridge) throw new Error('Couldn’t load runtime threads in this window.');
-  const { runtimeThreads, runtimeViews } = bridge;
-  const row = runtimeThreads.get(sid);
-  const proj = runtimeViews.projections[sid];
-  const turnBusy =
-    row?.status === 'working' ||
-    row?.status === 'starting' ||
-    proj?.turns.some((t) => t.status === 'running' || t.status === 'pending');
+  const { runtimeThreads } = bridge;
+  const turnBusy = isRuntimeTurnBusy(bridge, sid);
   const attached = opts.files ?? [];
   const pics: PromptImage[] = attached
     .filter((f) => f.mime.startsWith('image/'))
@@ -156,6 +151,16 @@ export async function dispatchPromptToRuntimeSession(
       ...(turnBusy && !opts.freshContext ? { delivery: 'queue' as const } : {}),
     },
     attached,
+  );
+}
+
+/** Whether `sid` is mid-turn (a new prompt would be queued behind it). */
+export function isRuntimeTurnBusy(bridge: RuntimeSessionPort, sid: string): boolean {
+  const row = bridge.runtimeThreads.get(sid);
+  return (
+    row?.status === 'working' ||
+    row?.status === 'starting' ||
+    Boolean(bridge.runtimeViews.projections[sid]?.turns.some((t) => t.status === 'running' || t.status === 'pending'))
   );
 }
 

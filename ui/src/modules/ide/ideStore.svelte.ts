@@ -699,7 +699,7 @@ class IdeStore {
       const { snap, paused } = m.normalizeIncomingDebugSnapshot(this, raw);
       this.activeDebug = snap;
       const sl = snap.launch;
-      if (!this.debugState.lastDebugLaunch && sl?.program) {
+      if (!this.debugState.lastDebugLaunch && (sl?.program || sl?.attach_port)) {
         this.debugState.lastDebugLaunch = { configId: snap.config_id ?? undefined, language: snap.language, launch: { program: sl.program, args: sl.args, build_flags: sl.build_flags, cwd: sl.cwd ?? undefined, test_name: sl.test_name ?? undefined, attach_port: sl.attach_port ?? undefined, env: sl.env, env_file: sl.env_file, inherit_shell_env: sl.inherit_shell_env, sdk_path: sl.sdk_path } };
       }
       m.syncSnapshotBreakpointsToStore(this, snap);
@@ -726,8 +726,14 @@ class IdeStore {
   resumeDebug = () => this.debugCommand('continue');
   pauseDebug = () => this.debugCommand('pause');
   restartDebug = async (): Promise<void> => {
-    if (this.collabIsGuest) { await this.debugCommand('restart'); return; }
-    if (this.activeDebug && this.activeDebug.state !== 'terminated' && this.activeDebug.state !== 'error') await this.stopDebug();
+    // A live session restarts server-side with its own (unredacted) launch spec; the memo only
+    // relaunches a finished session.
+    const live = this.activeDebug && this.activeDebug.state !== 'terminated' && this.activeDebug.state !== 'error';
+    if (this.collabIsGuest || live) {
+      if (live && idePreferences.current.autoSave) await this.flushAutoSave();
+      await this.debugCommand('restart');
+      return;
+    }
     await this.startDebug(this.debugState.lastDebugLaunch ?? {});
   };
   stopDebug = () => this.debugCommand('stop');

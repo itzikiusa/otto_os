@@ -121,8 +121,8 @@ const MARKERS_BY_SOURCE: Record<IdeDiffBaselineSource, { add: DiffGutterMarker; 
 export function parseSavedLines(savedContent: string | null | undefined): string[] | null {
   if (savedContent == null) return null;
   if (savedContent === '') return [];
-  const clean = savedContent.charCodeAt(0) === 0xfeff ? savedContent.slice(1) : savedContent;
-  const lines = clean.replace(/\r\n?/g, '\n').split('\n');
+  // Keep a UTF-8 BOM: the live editor doc keeps it too, so stripping one side marks line 1 modified.
+  const lines = savedContent.replace(/\r\n?/g, '\n').split('\n');
   return lines.length <= MAX_DIFF_GUTTER_LINES ? lines : null;
 }
 
@@ -133,8 +133,7 @@ export function computeIdeDiffHunks(
 ): IdeDiffHunk[] {
   const savedLines = parseSavedLines(savedContent);
   if (!savedLines) return [];
-  const normDoc = docText.charCodeAt(0) === 0xfeff ? docText.slice(1) : docText;
-  const st = EditorState.create({ doc: normDoc });
+  const st = EditorState.create({ doc: docText });
   return buildDiffState(st.doc, savedLines, baselineSource).hunks;
 }
 
@@ -378,6 +377,8 @@ export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions
   const setComputedDiffEffect = StateEffect.define<{ markers: RangeSet<GutterMarker>; hunks: IdeDiffHunk[] }>();
 
   const diffField = StateField.define<{
+    /** Raw baseline text last applied: an identical re-send (every auto-save re-sends the git base) is a no-op. */
+    raw: string | null | undefined;
     savedLines: string[] | null;
     baselineSource: IdeDiffBaselineSource;
     markers: RangeSet<GutterMarker>;
@@ -386,28 +387,28 @@ export function createIdeGitAndAgentExtensions(opts: CreateIdeGitAndAgentOptions
     create(st) {
       const savedLines = parseSavedLines(opts.savedContent);
       const baselineSource = opts.baselineSource ?? 'git';
-      return { savedLines, baselineSource, ...buildDiffState(st.doc, savedLines, baselineSource) };
+      return { raw: opts.savedContent, savedLines, baselineSource, ...buildDiffState(st.doc, savedLines, baselineSource) };
     },
     update(cur, tr) {
-      let savedLines = cur.savedLines;
-      let baselineSource = cur.baselineSource;
+      let { raw, savedLines, baselineSource } = cur;
       let baselineChanged = false;
       for (const ef of tr.effects) {
-        if (ef.is(setSavedContentEffect)) {
+        if (ef.is(setSavedContentEffect) && ef.value !== raw) {
+          raw = ef.value;
           savedLines = parseSavedLines(ef.value);
           baselineChanged = true;
         } else if (ef.is(setBaselineSourceEffect) && ef.value !== baselineSource) {
           baselineSource = ef.value;
           baselineChanged = true;
         } else if (ef.is(setComputedDiffEffect)) {
-          return { savedLines, baselineSource, markers: ef.value.markers, hunks: ef.value.hunks };
+          return { raw, savedLines, baselineSource, markers: ef.value.markers, hunks: ef.value.hunks };
         }
       }
       if (baselineChanged) {
-        return { savedLines, baselineSource, ...buildDiffState(tr.state.doc, savedLines, baselineSource) };
+        return { raw, savedLines, baselineSource, ...buildDiffState(tr.state.doc, savedLines, baselineSource) };
       }
       if (!tr.docChanged) return cur;
-      return { savedLines, baselineSource, markers: cur.markers.map(tr.changes), hunks: cur.hunks };
+      return { raw, savedLines, baselineSource, markers: cur.markers.map(tr.changes), hunks: cur.hunks };
     },
   });
 

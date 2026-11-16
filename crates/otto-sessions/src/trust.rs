@@ -23,7 +23,6 @@
 //!   never silently reverted ([`atomic_replace`]).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
@@ -55,19 +54,31 @@ fn fingerprint(path: &Path) -> Fingerprint {
 /// taken before the caller read it. `Ok(false)` = the file changed meanwhile
 /// (a CLI saved it); nothing was written and the caller should re-read.
 fn atomic_replace(path: &Path, contents: &[u8], read_fp: Fingerprint) -> Result<bool, String> {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
+    use std::io::Write;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // A random name opened `O_EXCL`: a sandboxed agent that can write this dir
+    // can't pre-plant a symlink for us to write through.
     let tmp = path.with_file_name(format!(
-        ".{name}.otto-tmp.{}.{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
+        ".{name}.otto-tmp.{}",
+        uuid::Uuid::new_v4().simple()
     ));
-    std::fs::write(&tmp, contents).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    if let Ok(meta) = std::fs::metadata(path) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut f| {
+            f.write_all(contents)?;
+            if let Ok(meta) = std::fs::metadata(path) {
+                let _ = f.set_permissions(meta.permissions());
+            }
+            Ok(())
+        });
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("write {}: {e}", tmp.display()));
     }
     if fingerprint(path) != read_fp {
         let _ = std::fs::remove_file(&tmp);

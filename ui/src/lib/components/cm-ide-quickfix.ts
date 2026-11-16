@@ -5,6 +5,7 @@ import { EditorSelection, type ChangeSpec, type Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import { getCachedSemanticDoc } from './cm-ide-semantic-model.ts';
 import { analyzeGoImports, detectSemanticLang, inferGoImportPkgNames } from './cm-ide-semantic.ts';
+import { editOffset } from './cm-ide-semantic-widgets.ts';
 
 export interface IdeConcreteTextEdit {
   path?: string;
@@ -61,16 +62,8 @@ export function applyConcreteEditsToView(view: EditorView, edits: IdeConcreteTex
   const changes: ChangeSpec[] = [];
   let firstPos: number | null = null;
   for (const ed of localEdits) {
-    const sLine = doc.line(Math.max(1, Math.min(doc.lines, ed.start_line)));
-    const eLine = doc.line(Math.max(1, Math.min(doc.lines, ed.end_line)));
-    const from = Math.min(doc.length, sLine.from + Math.max(0, (ed.start_col || 1) - 1));
-    let to: number;
-    if (ed.end_line > doc.lines || (ed.new_text === '' && ed.end_line > ed.start_line && ed.end_col === 1)) {
-      const prevLn = doc.line(Math.max(1, Math.min(doc.lines, ed.end_line - 1)));
-      to = Math.max(from, Math.min(doc.length, prevLn.to + 1));
-    } else {
-      to = Math.max(from, Math.min(doc.length, eLine.from + Math.max(0, (ed.end_col || 1) - 1)));
-    }
+    const from = editOffset(doc, ed.start_line, ed.start_col);
+    const to = Math.max(from, editOffset(doc, ed.end_line, ed.end_col));
     changes.push({ from, to, insert: ed.new_text });
     if (firstPos === null) firstPos = from;
   }

@@ -304,12 +304,12 @@ export async function persistEnvironment(
   patch: Partial<IdeProjectEnvironment> & { env_vars?: IdeEnvVar[]; confirm_prod_targets?: boolean },
 ): Promise<boolean> {
   try {
+    // PUT replaces the whole environment: never merge a one-field patch onto an unloaded env
+    // (that would send `env_vars: []` and wipe the stored vars, secrets and SDK homes).
+    if (!host.projectEnv) await fetchEnvironments(host);
+    if (!host.projectEnv) throw new Error(host.envError ?? 'Project environment isn’t loaded yet.');
     const { confirm_prod_targets, ...envPatch } = patch;
-    const merged: IdeProjectEnvironment = {
-      inherit_shell_env: true,
-      ...(host.projectEnv ?? { env_vars: [] }),
-      ...envPatch,
-    };
+    const merged: IdeProjectEnvironment = { inherit_shell_env: true, ...host.projectEnv, ...envPatch };
     const resp = await api.put<{ env: IdeProjectEnvironment }>('/ide/environments', {
       target: host.targetPayload,
       ...merged,

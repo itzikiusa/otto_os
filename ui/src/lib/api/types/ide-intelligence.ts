@@ -164,13 +164,22 @@ export interface IdeHoverResp {
   defined_in?: IdeHoverDefinedIn | null;
 }
 
-export interface IdeLspActiveServer {
-  key: string;
+export interface IdeLspServerStat {
   language: string;
   root: string;
+  owner: string;
   pid?: number | null;
-  rss_bytes?: number | null;
-  uptime_secs: number;
+  rss_bytes: number;
+  active_clients: number;
+  open_documents: number;
+  remote_ssh: boolean;
+}
+
+export interface IdeLspAvailableServer {
+  language: string;
+  available: boolean;
+  command: string;
+  install_command?: string | null;
 }
 
 export interface IdeLspStatusResp {
@@ -179,8 +188,8 @@ export interface IdeLspStatusResp {
   max_global_servers: number;
   total_rss_bytes: number;
   rss_budget_bytes: number;
-  servers: IdeLspActiveServer[];
-  available_servers?: Record<string, boolean>;
+  servers: IdeLspServerStat[];
+  available_servers: IdeLspAvailableServer[];
 }
 
 // ── Local History & Deleted-File Recovery (`/ide/history/*`) ─────────────────

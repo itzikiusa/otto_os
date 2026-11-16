@@ -6,7 +6,7 @@ import { loadSource } from './sourceHarness.ts';
 const label = (p: string) => ({ claude: 'Claude Code', codex: 'Codex', agy: 'Antigravity' } as Record<string, string>)[p]
   ?? p.charAt(0).toUpperCase() + p.slice(1);
 const m = loadSource(new URL('../src/modules/personal-agents/personaProviders.ts', import.meta.url), {
-  '../../lib/providers': { harnessLabel: label, inferProviderFamily },
+  '../../lib/providers': { harnessLabel: label, providerFamily: (p: string) => inferProviderFamily(p) },
 });
 
 test('a personal agent is offered only the CLIs that can load its persona', () => {
@@ -22,6 +22,8 @@ test('a personal agent is offered only the CLIs that can load its persona', () =
 test('a new agent never starts on a provider the daemon would refuse', () => {
   assert.equal(m.personaDefault('codex'), 'codex');
   assert.equal(m.personaDefault('gemini'), 'claude');
+  // Only a custom Claude-family slug is enabled: start on it, not on the disabled built-in.
+  assert.equal(m.personaDefault('gemini', ['claudework', 'gemini']), 'claudework');
 });
 
 test('the refusal names the provider and what to pick instead', () => {

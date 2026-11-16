@@ -23,6 +23,7 @@ import {
   parseManifestDependencies,
 } from '../src/lib/components/cm-ide-deps.ts';
 import { sanitizeAndSplitHoverDoc } from '../src/lib/components/cm-ide-hover.ts';
+import { editOffset } from '../src/lib/components/cm-ide-semantic-widgets.ts';
 import { analyzeJavaDiagnostics } from '../src/lib/components/cm-ide-semantic.ts';
 import {
   IDE_PREFS_STORAGE_KEY,
@@ -391,4 +392,16 @@ test('restoreIdeStateFromJournal clamps out-of-bounds persisted selection offset
   assert.equal(restored.state.doc.toString(), shortDisk);
   assert.equal(restored.state.selection.main.head, shortDisk.length);
   assert.equal(restored.scrollTop, 240);
+});
+
+test('editOffset: an EOF insert on a file without a trailing newline appends instead of replacing line 1', () => {
+  const doc = EditorState.create({ doc: 'package main' }).doc;
+  // diagnostics_go emits the missing-import fix at line 2 col 1 of a 1-line file.
+  assert.equal(editOffset(doc, 2, 1), doc.length);
+  const multi = EditorState.create({ doc: 'ab\ncd' }).doc;
+  assert.equal(editOffset(multi, 1, 1), 0);
+  assert.equal(editOffset(multi, 1, 99), 3, 'a column stops at its own newline');
+  assert.equal(editOffset(multi, 2, 2), 4);
+  const edits = [{ start_line: 2, start_col: 1, end_line: 2, end_col: 1, new_text: '\nimport "fmt"\n' }];
+  assert.equal(previewConcreteEdits('package main', edits).nextText, 'package main\nimport "fmt"\n');
 });

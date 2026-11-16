@@ -82,6 +82,11 @@ export function normalizeIdeLspLanguage(langOrExt?: string | null): string | nul
   return null;
 }
 
+/** `?query` only exists on URIs (`jdt:`, `jar:`, `file:`); a plain path may contain a literal `?`. */
+function stripUriQuery(p: string): string {
+  return /^[a-z][a-z0-9+.-]+:/i.test(p) ? p.split('?')[0] : p;
+}
+
 export function shouldAttachIdeLsp(
   filePath?: string | null,
   languageId?: string | null,
@@ -89,7 +94,7 @@ export function shouldAttachIdeLsp(
 ): boolean {
   if (rootPath !== undefined && (!rootPath || !rootPath.trim())) return false;
   if (!filePath || !filePath.trim()) return false;
-  const clean = filePath.split('?')[0].replace(/^file:\/\//, '').trim();
+  const clean = stripUriQuery(filePath).replace(/^file:\/\//, '').trim();
   if (!clean || clean.startsWith('untitled:') || clean.startsWith('jdt://')) return false;
   if (isSecretIdePath(clean)) return false;
 
@@ -106,7 +111,7 @@ export function shouldAttachIdeLsp(
 }
 
 export function toAbsoluteIdeFilePath(rootPath: string, filePath: string): string {
-  const cleanFile = filePath.split('?')[0].replace(/^file:\/\//, '').replace(/\\/g, '/').trim();
+  const cleanFile = stripUriQuery(filePath).replace(/^file:\/\//, '').replace(/\\/g, '/').trim();
   if (!cleanFile) return '';
   if (cleanFile.startsWith('/') || /^[A-Za-z]:\//.test(cleanFile)) return cleanFile;
   const normRoot = rootPath.replace(/\\/g, '/').replace(/\/+$/, '');

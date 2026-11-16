@@ -242,7 +242,8 @@ function lineStartsOf(src: string): number[] {
 export function textEditToOffsets(src: string, edit: IdeTextEdit): { from: number; to: number } {
   const starts = lineStartsOf(src);
   const toOff = (ln: number, col: number): number => {
-    const idx = Math.max(0, Math.min(starts.length - 1, Math.floor(ln) - 1));
+    if (Math.floor(ln) > starts.length) return src.length; // past EOF: append (no trailing newline case)
+    const idx = Math.max(0, Math.floor(ln) - 1);
     const lineStart = starts[idx];
     const limit = idx + 1 < starts.length ? starts[idx + 1] : src.length;
     return Math.min(limit, Math.max(lineStart, lineStart + Math.max(0, Math.floor(col) - 1)));

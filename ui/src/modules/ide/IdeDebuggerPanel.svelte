@@ -66,11 +66,9 @@
       .then((list) => {
         if (ide.activeDebug) return;
         const sessions = list.sessions ?? [];
-        const live =
-          sessions.find((s) => s.state !== 'terminated' && s.state !== 'error') ??
-          sessions.find((s) => s.state !== 'terminated') ??
-          sessions[0] ??
-          null;
+        // Only re-attach a session that is still running: a finished one (possibly another
+        // project's) would seed Debug Rerun with the wrong launch.
+        const live = sessions.find((s) => s.state !== 'terminated' && s.state !== 'error') ?? null;
         if (live) ide.applyDebugSnapshot(live);
       })
       .catch(() => {});

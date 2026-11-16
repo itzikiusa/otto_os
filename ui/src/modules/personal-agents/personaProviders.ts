@@ -4,7 +4,7 @@
 // custom CLI) have no such mechanism, so the daemon refuses them (`otto_context::materialize::delivers_context`,
 // `personal_agents_engine::persona_provider`). Keep the list in step.
 
-import { harnessLabel, inferProviderFamily } from '../../lib/providers';
+import { harnessLabel, providerFamily } from '../../lib/providers';
 
 export const PERSONA_PROVIDERS: readonly string[] = ['claude', 'codex', 'agy', 'grok', 'opencode', 'pi'];
 
@@ -12,7 +12,7 @@ export const PERSONA_PROVIDERS: readonly string[] = ['claude', 'codex', 'agy', '
 export function canCarryPersona(provider: string | null | undefined): boolean {
   const raw = (provider ?? '').trim();
   if (!raw) return true;
-  return PERSONA_PROVIDERS.includes(inferProviderFamily(raw));
+  return PERSONA_PROVIDERS.includes(providerFamily(raw));
 }
 
 /** The registered providers a personal agent may pick. */
@@ -24,8 +24,8 @@ export function personaProviders(registered: string[]): string[] {
  *  carry a persona (and is enabled in `registered` when supplied), else the
  *  first enabled persona provider (preferring Claude). */
 export function personaDefault(preferred: string, registered?: readonly string[]): string {
-  const allowed =
-    registered && registered.length > 0 ? PERSONA_PROVIDERS.filter((p) => registered.includes(p)) : PERSONA_PROVIDERS;
+  // Enabled custom slugs of a persona family (e.g. `claudework`) count too.
+  const allowed = registered && registered.length > 0 ? registered.filter(canCarryPersona) : PERSONA_PROVIDERS;
   if (allowed.includes(preferred)) return preferred;
   if (allowed.includes('claude')) return 'claude';
   return allowed[0] ?? (canCarryPersona(preferred) ? preferred : 'claude');

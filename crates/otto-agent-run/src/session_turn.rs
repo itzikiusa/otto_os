@@ -257,12 +257,17 @@ pub async fn run_session_turn_cancellable(
     // With permission prompts on, writing the reply file outside the cwd asks
     // for approval and the turn would sit until the idle backstop; claude and
     // codex end their turns natively, so they answer in chat alone instead.
-    let (complete_prompt, mut opts) =
-        if reply::wants_file(provider, manager.providers().skip_permissions()) {
-            (reply.prompt(prompt), reply_turn_options(&reply.path()))
-        } else {
-            (prompt.to_string(), reply::chat_options())
-        };
+    let (complete_prompt, mut opts) = if reply::wants_file(
+        &manager
+            .providers()
+            .model_family_for(provider)
+            .unwrap_or_else(|| provider.to_string()),
+        manager.providers().skip_permissions(),
+    ) {
+        (reply.prompt(prompt), reply_turn_options(&reply.path()))
+    } else {
+        (prompt.to_string(), reply::chat_options())
+    };
     opts.cancel = cancel;
     let (text, sid) = run_session_turn_with(
         manager,
@@ -479,7 +484,12 @@ async fn run_session_turn_inner(
     }
     on_ready(&sid);
     let session_info = manager.get(&sid).await?;
-    let provider = session_info.provider.as_str();
+    // A custom slug (`claudework`) behaves as its CLI family from here on.
+    let family = manager
+        .providers()
+        .model_family_for(&session_info.provider)
+        .unwrap_or_else(|| session_info.provider.clone());
+    let provider = family.as_str();
 
     // 4. Submit the prompt AND confirm it actually landed on the CLI's input box.
     //    A startup/promo/onboarding banner is quiescent output, so wait_for_tui /
@@ -1167,11 +1177,15 @@ async fn session_transcript_path(
 ) -> otto_core::Result<Option<std::path::PathBuf>> {
     let session = manager.get(sid).await?;
     let home = manager.provider_home(&session);
+    let family = manager
+        .providers()
+        .model_family_for(&session.provider)
+        .unwrap_or_else(|| session.provider.clone());
     let (cwd, psid) = (cwd.to_string(), psid.map(str::to_string));
     Ok(crate::offload::blocking(move || {
         transcript_path(
             &otto_transcript::roots::RootsEnv::from_process(),
-            &session.provider,
+            &family,
             &cwd,
             psid.as_deref(),
             &session.meta,

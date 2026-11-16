@@ -485,7 +485,7 @@ test('providers, askAgents, and personaProviders support opencode & pi and stric
   assert.equal(mentions.some((m: { provider: string }) => m.provider === 'opencode'), true);
 
   const persona = loadSource(new URL('../src/modules/personal-agents/personaProviders.ts', import.meta.url), {
-    '../../lib/providers': { harnessLabel: providers.harnessLabel },
+    '../../lib/providers': { harnessLabel: providers.harnessLabel, providerFamily: providers.providerFamily },
   });
   // pi carries a persona (for one launch), so it stays the pick; a `preferred`
   // that is not enabled falls to the first enabled persona CLI (`codex`).

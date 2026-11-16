@@ -266,6 +266,11 @@ pub(super) async fn collab_guest_edit<S: IdeCtx>(
 ) -> ApiResult<Json<IdeCollabEditResp>> {
     fill_peer_secret_from_headers(&headers, &mut req.peer_secret);
     let (target, host_user) = ctx.ide().collab.validate_edit_precheck(&room_id, &req)?;
+    if req.save && is_agent_or_git_control_path(&req.path) {
+        return Err(
+            Error::Forbidden("guests cannot save git or agent configuration files".into()).into(),
+        );
+    }
     ctx.ide()
         .targets
         .validate_subpath(&target, &req.path, false)
@@ -294,24 +299,18 @@ pub(super) async fn collab_guest_edit<S: IdeCtx>(
     };
 
     // Commit buffer version under the room lock BEFORE writing to disk so a racing
-    // `base_version` conflict never overwrites target files.
-    let version = ctx
-        .ide()
-        .collab
-        .apply_edit(&room_id, &req, resolved_for_save.is_some())?;
+    // `base_version` conflict never overwrites target files. Peers hear "saved"
+    // only after the write succeeds.
+    let version = ctx.ide().collab.apply_edit(&room_id, &req, false)?;
 
     if let Some(resolved) = resolved_for_save {
-        if let Err(err) = ctx
-            .ide()
+        ctx.ide()
             .targets
             .write_file(&resolved, &req.path, &req.content, None, false)
-            .await
-        {
-            ctx.ide()
-                .collab
-                .mark_buffer_dirty(&room_id, &req.path, version);
-            return Err(err.into());
-        }
+            .await?;
+        ctx.ide()
+            .collab
+            .mark_buffer_saved(&room_id, &req.peer_id, &req.path, version);
     }
     Ok(Json(IdeCollabEditResp { version }))
 }
@@ -406,4 +405,34 @@ pub(super) async fn collab_guest_debug_action<S: IdeCtx>(
     Ok(Json(IdeDebugSessionResp {
         session: crate::collab::redact_guest_debug_snapshot(&session),
     }))
+}
+
+/// Git config/hooks and agent CLI config run code on the HOST's next git or
+/// agent command (invisible in a diff), so an invited guest never saves them.
+fn is_agent_or_git_control_path(path: &str) -> bool {
+    std::path::Path::new(path).components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some(".git" | ".claude" | ".codex" | ".gemini" | ".mcp.json")
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn guest_save_refuses_git_and_agent_config() {
+        for p in [
+            "/w/.git/hooks/pre-commit",
+            "/w/.git/config",
+            "/w/.claude/settings.json",
+            "/w/sub/.mcp.json",
+            ".codex/config.toml",
+        ] {
+            assert!(super::is_agent_or_git_control_path(p), "{p}");
+        }
+        for p in ["/w/src/main.go", "/w/.github/workflows/ci.yml", "/w/git.md"] {
+            assert!(!super::is_agent_or_git_control_path(p), "{p}");
+        }
+    }
 }

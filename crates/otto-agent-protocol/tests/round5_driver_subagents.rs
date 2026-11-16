@@ -213,7 +213,7 @@ fn claude_codex_and_pi_emit_subagent_child_parent_ids_completed_at_and_settlemen
 
 #[test]
 fn agy_gemini_opencode_and_grok_emit_subagent_children_timers_and_prehandshake_checks() {
-    // 4. AcpDriver::gemini pre-handshake image check + codebase_investigator subagent
+    // 4. AcpDriver::gemini pre-handshake image prompt + codebase_investigator subagent
     let mut gemini = AcpDriver::gemini("gemini");
     gemini.start(&launch_ctx("/w"));
     let mut img_req = RuntimePromptReq::of("look");
@@ -222,12 +222,9 @@ fn agy_gemini_opencode_and_grok_emit_subagent_children_timers_and_prehandshake_c
         data_base64: VALID_PNG_B64.into(),
         name: Some("shot.png".into()),
     });
-    let pre_err = gemini.prompt("t0", &img_req).unwrap_err();
-    assert!(
-        pre_err.0.contains("does not accept images"),
-        "{}",
-        pre_err.0
-    );
+    // Capabilities are unknown until `initialize` answers (a slow handshake
+    // outlives `start_wait`), so the image prompt queues instead of failing.
+    assert!(gemini.prompt("t0", &img_req).is_ok());
 
     let mut gemini = AcpDriver::gemini("gemini");
     acp_handshake_and_prompt(&mut gemini, "/w", "gem-12345678");

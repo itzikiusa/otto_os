@@ -1,6 +1,6 @@
 // Maven & Gradle multi-module model loader, fallback manifest parser, and goal runner.
 
-import { api } from '../../../lib/api/client';
+import { api, ApiError } from '../../../lib/api/client';
 import { normalizeRootPath } from '../shell/ideProjectHelpers';
 import {
   ide,
@@ -76,6 +76,11 @@ function parsePomPlugins(xml: string): { name: string; goals: string[] }[] {
   return defaults;
 }
 
+/** Only a missing file/route is "nothing there"; transport/auth/server errors reach the window's Retry state. */
+function isNotFound(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 404;
+}
+
 async function readLocalOrTargetFile(rootDir: string, fullPath: string): Promise<string | null> {
   try {
     const q = ide.target.kind === 'local'
@@ -83,8 +88,9 @@ async function readLocalOrTargetFile(rootDir: string, fullPath: string): Promise
       : ide.targetQuery({ path: fullPath });
     const res = await api.get<IdeFileReadResp>(`/ide/fs/file?${q}`);
     return res.content ?? '';
-  } catch {
-    return null;
+  } catch (e) {
+    if (isNotFound(e)) return null;
+    throw e;
   }
 }
 
@@ -101,8 +107,9 @@ async function discoverSpringProfiles(rootDir: string): Promise<string[]> {
       if (m?.[1] && !out.includes(m[1])) out.push(m[1]);
     }
     return out;
-  } catch {
-    return [];
+  } catch (e) {
+    if (isNotFound(e)) return [];
+    throw e;
   }
 }
 
@@ -365,7 +372,9 @@ export async function loadBuildToolWorkspaceModel(): Promise<LoadedBuildToolWork
         return { tool, profiles: buildProfiles, springProfiles: [...springSet], modules };
       }
     }
-  } catch { /* fallback to manifest parser */ }
+  } catch (e) {
+    if (!isNotFound(e)) throw e; // a daemon without the model route falls back to the manifest parser
+  }
 
   const profilesMap = new Map<string, IdeBuildToolProfile>();
   const springSet = new Set<string>();

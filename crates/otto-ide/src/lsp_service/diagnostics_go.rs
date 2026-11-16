@@ -175,7 +175,7 @@ fn analyze_go_diagnostics_sync(
         for cap in exported_qual_re.captures_iter(&code_ln) {
             let q = cap[1].to_string();
             if let Some(m) = cap.get(1) {
-                let col = code_ln[..m.start()].chars().count() as u32 + 1;
+                let col = code_ln[..m.start()].encode_utf16().count() as u32 + 1;
                 body_qual_sites.push((ln, col, q));
             }
         }
@@ -204,7 +204,7 @@ fn analyze_go_diagnostics_sync(
                 line: imp_ln,
                 col: 1,
                 end_line: imp_ln,
-                end_col: (lines[(imp_ln - 1) as usize].chars().count() as u32).max(1),
+                end_col: (lines[(imp_ln - 1) as usize].encode_utf16().count() as u32).max(1),
                 severity: "warning".into(),
                 code: "unused_import".into(),
                 source: "otto-go".into(),
@@ -242,7 +242,7 @@ fn analyze_go_diagnostics_sync(
                 line: ln,
                 col,
                 end_line: ln,
-                end_col: col + qual.chars().count() as u32,
+                end_col: col + qual.encode_utf16().count() as u32,
                 severity: "error".into(),
                 code: "undeclared_name".into(),
                 source: "otto-go".into(),

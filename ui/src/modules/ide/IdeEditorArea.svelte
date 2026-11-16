@@ -694,7 +694,10 @@
 </section>
 
 {#if intentionState}
-  {@const qfBundle = primaryEditorRef?.getAvailableQuickFixes?.(intentionState.line, intentionState.symbol) ?? { clientFixes: [], deterministicFixes: [], docText: ide.activeTab?.content ?? '' }}
+  <!-- Actions apply to the pane the popover was opened from (a split-pane ⌥⏎ must not edit the primary file). -->
+  {@const iRef = intentionState.path !== stagedPrimaryTab?.path && intentionState.path === stagedSplitTab?.path ? splitEditorRef : primaryEditorRef}
+  {@const iTab = ide.tabs.find((t) => t.path === intentionState?.path)}
+  {@const qfBundle = iRef?.getAvailableQuickFixes?.(intentionState.line, intentionState.symbol) ?? { clientFixes: [], deterministicFixes: [], docText: iTab?.content ?? '' }}
   <LazyMount
     lazy={IdeIntentionPopoverLazy} what="context actions" quiet onerror={() => (intentionState = null)}
     props={{
@@ -702,13 +705,13 @@
       connectionId: ide.target.kind === 'ssh' ? ide.target.connection_id : null, projectFolders,
       docText: qfBundle.docText, line: intentionState.line, col: intentionState.col,
       anchorX: intentionState.x, anchorY: intentionState.y,
-      readOnly: Boolean(ide.activeTab?.readOnly || !ide.canEditCollab),
+      readOnly: Boolean(iTab?.readOnly || !ide.canEditCollab),
       clientFixes: qfBundle.clientFixes, deterministicFixes: qfBundle.deterministicFixes,
       serverActions: intentionState.serverActions, manifestDep: intentionState.manifestDep,
       allManifestDeps: manifestDepsByPath[intentionState.path] ?? [],
-      onapplyclientfix: (fix: CmIdeMod.ClientDiagQuickFix) => { primaryEditorRef?.applyClientDiagFix?.(fix); },
-      onapplyedits: (edits: CmIdeMod.IdeConcreteTextEdit[]) => { primaryEditorRef?.applyQuickFixEdits?.(edits); },
-      onapplycontent: (nextContent: string) => { if (!primaryEditorRef?.applyAgentEdit?.(nextContent) && intentionState) ide.updateBuffer(intentionState.path, nextContent); },
+      onapplyclientfix: (fix: CmIdeMod.ClientDiagQuickFix) => { iRef?.applyClientDiagFix?.(fix); },
+      onapplyedits: (edits: CmIdeMod.IdeConcreteTextEdit[]) => { iRef?.applyQuickFixEdits?.(edits); },
+      onapplycontent: (nextContent: string) => { if (!iRef?.applyAgentEdit?.(nextContent) && intentionState) ide.updateBuffer(intentionState.path, nextContent); },
       onapplyserveraction: (act: IdeCodeAction) => { if (intentionState) ide.applyCodeAction(intentionState.path, act); },
       onrename: () => { if (intentionState) void ide.openRenameModal(intentionState.path, intentionState.line, intentionState.col, intentionState.symbol); },
       onfindusages: () => { if (intentionState) void ide.findReferences(intentionState.path, intentionState.line, intentionState.col, intentionState.symbol); },

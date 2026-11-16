@@ -422,7 +422,11 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
     ctx: &C,
     agent: &PersonalAgent,
 ) -> Result<String> {
-    let provider = persona_provider(&agent.provider)?.to_string();
+    // A custom slug (`claudework`) carries its CLI family's persona bundle —
+    // the one the session manager reads for it.
+    let slug = agent.provider.trim();
+    let family = ctx.manager().providers().model_family_for(slug);
+    let provider = persona_provider(family.as_deref().unwrap_or(slug))?.to_string();
     let dir = agent_directory(ctx, agent)?;
     crate::personal_agent_documents::seed_memory(&dir, &seed_notes(&agent.name)).await?;
     let cwd = dir.to_string_lossy().to_string();

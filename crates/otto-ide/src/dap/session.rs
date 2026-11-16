@@ -161,28 +161,28 @@ impl DapManager {
         }
     }
 
-    /// List snapshots of all debug sessions (newest first by ID).
+    /// List snapshots of all debug sessions, newest first.
     pub fn list_sessions(&self) -> Vec<IdeDebugSessionSnapshot> {
-        let mut out: Vec<IdeDebugSessionSnapshot> = self
+        self.newest_first(|_| true)
+    }
+
+    /// Snapshots of the sessions `keep` accepts, newest first (by start order:
+    /// ids are random UUIDs and say nothing about age).
+    fn newest_first(&self, keep: impl Fn(&str) -> bool) -> Vec<IdeDebugSessionSnapshot> {
+        let mut out: Vec<(u64, IdeDebugSessionSnapshot)> = self
             .sessions
             .iter()
-            .map(|item| item.value().read_snapshot())
+            .filter(|item| keep(item.value().owner_user_id.as_str()))
+            .map(|item| (item.value().created_seq, item.value().read_snapshot()))
             .collect();
-        out.sort_by(|a, b| b.id.cmp(&a.id));
-        out
+        out.sort_by_key(|(seq, _)| std::cmp::Reverse(*seq));
+        out.into_iter().map(|(_, snap)| snap).collect()
     }
 
     /// List snapshots visible to `user` (all for root, owner-only otherwise).
     pub fn list_sessions_for_user(&self, user: &User) -> Vec<IdeDebugSessionSnapshot> {
         let has_root_auth = otto_core::auth::root_authority(user);
-        let mut out: Vec<IdeDebugSessionSnapshot> = self
-            .sessions
-            .iter()
-            .filter(|item| has_root_auth || item.value().owner_user_id == user.id.as_str())
-            .map(|item| item.value().read_snapshot())
-            .collect();
-        out.sort_by(|a, b| b.id.cmp(&a.id));
-        out
+        self.newest_first(|owner| has_root_auth || owner == user.id.as_str())
     }
 
     /// Filter an arbitrary snapshot slice down to sessions owned by `user`.

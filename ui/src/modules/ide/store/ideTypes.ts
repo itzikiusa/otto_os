@@ -107,8 +107,11 @@ export interface IdeOpenTab {
   lastAccessedAt?: number;
 }
 
+/** Dominant line ending (mirrors Rust `text_pos::detect_eol`): one stray CRLF must not turn an LF file CRLF on save. */
 export function detectTextEol(text: string): '\r\n' | '\n' {
-  return text.includes('\r\n') ? '\r\n' : '\n';
+  const crlf = text.split('\r\n').length - 1;
+  const lf = text.split('\n').length - 1;
+  return crlf > 0 && crlf >= lf - crlf ? '\r\n' : '\n';
 }
 
 export function normalizeEditorLf(text: string): string {
@@ -351,7 +354,7 @@ export function ideBasename(p: string): string {
 
 export function detectIdeLanguage(p: string): string {
   if (/^jdt:/i.test(p)) return 'java';
-  const base = ideBasename(p.split('?')[0]);
+  const base = ideBasename(p);
   const lower = base.toLowerCase();
   if (lower === 'bashrc' || lower === '.bashrc' || lower === '.zshrc' || lower === '.zshenv') return 'shell';
   const ext = lower.includes('.') ? (lower.split('.').pop() ?? '') : '';

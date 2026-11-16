@@ -135,19 +135,7 @@ impl TargetManager {
 
     /// Build a `tokio::process::Command` with piped `stdin`/`stdout`/`stderr`
     /// and `kill_on_drop(true)` targeting either local OS or multiplexed SSH.
-    pub fn build_piped_command(
-        &self,
-        target: &ResolvedTarget,
-        program: &str,
-        args: &[String],
-        cwd: Option<&str>,
-        env: &BTreeMap<String, String>,
-    ) -> Result<Command> {
-        Ok(self
-            .build_piped_command_with_preamble(target, program, args, cwd, env)?
-            .0)
-    }
-
+    /// The returned preamble MUST be written with `write_ssh_env_preamble`.
     pub(crate) fn build_piped_command_with_preamble(
         &self,
         target: &ResolvedTarget,
@@ -225,20 +213,6 @@ impl TargetManager {
     /// Build a multiplexed SSH `Command` for long-lived run tasks whose stdin is
     /// unused: keeps local stdin piped so killing the local `ssh` client delivers
     /// immediate EOF to a remote watcher that sends `SIGTERM` to the remote process.
-    pub fn build_ssh_run_command(
-        &self,
-        spec: &IdeSshSpec,
-        actor_id: &str,
-        cwd: &str,
-        program: &str,
-        args: &[String],
-        env: &BTreeMap<String, String>,
-    ) -> Result<Command> {
-        Ok(self
-            .build_ssh_run_command_with_preamble(spec, actor_id, cwd, program, args, env)?
-            .0)
-    }
-
     pub(crate) fn build_ssh_run_command_with_preamble(
         &self,
         spec: &IdeSshSpec,
@@ -596,7 +570,7 @@ pub(crate) fn wrap_remote_stdio_with_eof_kill_and_env(
     format!(
         "{prefix}exec 4<&0; \
          fifo=\"/tmp/.otto-ide-$$-$(date +%s 2>/dev/null || echo 0)\"; \
-         mkfifo \"$fifo\" || exit 1; \
+         mkfifo -m 600 \"$fifo\" || exit 1; \
          ( exec 4<&-; {exec_line} ) <\"$fifo\" & pid=$!; \
          exec 3>\"$fifo\"; rm -f \"$fifo\"; \
          ( cat <&4 >&3; exec 3>&-; sleep 1; kill -TERM \"$pid\" ) >/dev/null 2>&1 & watcher=$!; \

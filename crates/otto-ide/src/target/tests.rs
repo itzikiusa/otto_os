@@ -390,8 +390,8 @@ fn ssh_validation_and_piped_command_builder_reject_unsafe_inputs() {
     let resolved = mgr.resolve_with_ssh(&spec, "u1", good_ssh).unwrap();
     let mut env = BTreeMap::new();
     env.insert("GOFLAGS".into(), "-mod=readonly".into());
-    let cmd = mgr
-        .build_piped_command(
+    let (cmd, preamble) = mgr
+        .build_piped_command_with_preamble(
             &resolved,
             "dlv",
             &["dap".into(), "--listen=127.0.0.1:0".into()],
@@ -399,13 +399,17 @@ fn ssh_validation_and_piped_command_builder_reject_unsafe_inputs() {
             &env,
         )
         .unwrap();
+    assert!(
+        preamble.is_some(),
+        "non-PATH env travels on stdin, not argv"
+    );
     assert_eq!(cmd.as_std().get_program(), "ssh");
 
     // Bad env variable key must be rejected:
     let mut bad_env = BTreeMap::new();
     bad_env.insert("BAD;KEY".into(), "1".into());
     assert!(mgr
-        .build_piped_command(&resolved, "dlv", &[], None, &bad_env)
+        .build_piped_command_with_preamble(&resolved, "dlv", &[], None, &bad_env)
         .is_err());
 }
 
