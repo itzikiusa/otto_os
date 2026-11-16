@@ -846,6 +846,18 @@ pub(crate) async fn start_local_review(
         .await
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
+    // One local review per repo at a time: a second start used to run beside
+    // the first, hidden from the panel, which could only stop the newest.
+    let runs = ctx
+        .reviews_store
+        .list_for_pr(&repo_id, LOCAL_REVIEW_PR_NUMBER as i64)
+        .await
+        .map_err(crate::error::ApiError)?;
+    if runs.iter().any(|r| r.status == ReviewStatus::Running) {
+        return Err(crate::error::ApiError(Error::Conflict(
+            "a local review of this repo is already running".into(),
+        )));
+    }
     review_budget_gate(&ctx, &repo.workspace_id)
         .await
         .map_err(crate::error::ApiError)?;
