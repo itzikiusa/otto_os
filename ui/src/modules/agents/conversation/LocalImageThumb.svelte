@@ -8,7 +8,7 @@
   import { toasts } from '../../../lib/toast.svelte';
   import { toastError } from '../../../lib/toastError';
   import Icon from '../../../lib/components/Icon.svelte';
-  import Lightbox from './Lightbox.svelte';
+  import Lightbox from '../../../lib/components/Lightbox.svelte';
   import { resolvePath } from './format';
   import { CONV_CTX, type ConvContext } from './context';
 

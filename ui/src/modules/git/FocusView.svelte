@@ -39,16 +39,13 @@
     prErrors = 0;
     try {
       if (!git.allReposLoaded) await git.loadAllRepos();
-      // Forge usernames — powers the "Mine" filter (best-effort).
-      void api
-        .get<GitAccount[]>('/git/accounts')
-        .then((accs) => {
-          myHandles = new Set(accs.map((a) => a.username.toLowerCase()).filter(Boolean));
-        })
-        .catch(() => {});
-      const candidates = git.allRepos.filter(
-        (r) => r.forge && r.forge !== 'unrecognized',
-      );
+      const accs = await api.get<GitAccount[]>('/git/accounts').catch(() => null);
+      if (accs) myHandles = new Set(accs.map((a) => a.username.toLowerCase()).filter(Boolean));
+      const configuredProviders = accs ? new Set(accs.map((a) => a.provider)) : null;
+      const candidates = git.allRepos.filter((r) => {
+        const forge = r.provider ?? (r.forge && r.forge !== 'unrecognized' ? r.forge : null);
+        return Boolean(forge && (r.git_account_id || (configuredProviders ? configuredProviders.has(forge) : r.provider)));
+      });
       // One provider API call per repo (0.5–3 s each) across every workspace:
       // at most 2 at a time, on the background lane (r3-04-05). The old
       // unbounded fan-out filled the alias host's six sockets for ~(R/6) ×

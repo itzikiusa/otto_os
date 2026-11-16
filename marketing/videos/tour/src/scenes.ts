@@ -132,9 +132,10 @@ export const SCENES: Record<string, ChapterSpec> = {
     ],
   },
 
-  // 6 bars = 24 beats — Threads on the structured runtime (a Codex thread
-  // driven by the capture's scripted app-server, scripts/lib/demo-codex.mjs;
-  // the Claude it asks is scripts/lib/demo-claude.mjs)
+  // 6 bars = 24 beats — Threads on the structured runtime: the picker lists
+  // every structured agent (stand-ins in scripts/lib/stack.mjs), a Codex
+  // thread driven by the capture's scripted app-server (scripts/lib/demo-codex.mjs),
+  // and the Claude it asks (scripts/lib/demo-claude.mjs)
   threads: {
     id: 'threads',
     group: 'Work',
@@ -143,16 +144,28 @@ export const SCENES: Record<string, ChapterSpec> = {
     shots: [
       {
         kind: 'screen',
+        src: cap('threads-picker.jpg'),
+        beats: 4,
+        label: 'Every structured agent, one picker',
+        cam: [
+          { b: 0, x: 0.55, y: 0.45, z: 1.2 },
+          { b: 1, x: 0.56, y: 0.42, z: 1.75 },
+        ],
+        callouts: [{ b: 1.5, x: 0.44, y: 0.42, label: 'Claude, Codex, Antigravity, OpenCode, pi, Gemini, Grok, Muse', side: 'left' }],
+      },
+      {
+        kind: 'screen',
         src: cap('threads-runtime.mp4'),
-        from: 9,
+        from: 9.5,
         rate: 1.8,
-        beats: 8,
+        beats: 6,
+        transition: 'push',
         label: 'Start a Codex thread and watch it work',
         cam: [
           { b: 0, x: 0.5, y: 0.45, z: 1.5 },
-          { b: 2.5, x: 0.55, y: 0.3, z: 1.5 },
+          { b: 2, x: 0.55, y: 0.3, z: 1.5 },
         ],
-        callouts: [{ b: 3.5, until: 7.5, x: 0.31, y: 0.17, label: 'Plan · commands · edits, streamed', side: 'right' }],
+        callouts: [{ b: 2.5, until: 5.5, x: 0.31, y: 0.17, label: 'Plan · commands · edits, streamed', side: 'right' }],
       },
       {
         kind: 'screen',
@@ -181,17 +194,17 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('threads-ask.jpg'),
-        beats: 8,
+        beats: 6,
         transition: 'push',
         label: 'Its answer arrives as a live card, and nests under the thread',
         cam: [
           { b: 0, x: 0.55, y: 0.5, z: 1.1 },
           { b: 1, x: 0.5, y: 0.5, z: 1.5 },
-          { b: 4.5, x: 0.22, y: 0.2, z: 1.7 },
+          { b: 3.5, x: 0.22, y: 0.2, z: 1.7 },
         ],
         callouts: [
-          { b: 1.5, until: 4.5, x: 0.45, y: 0.566, label: 'A child thread on Claude', side: 'top' },
-          { b: 5, x: 0.19, y: 0.187, label: 'Nested in the sidebar', side: 'right' },
+          { b: 1.5, until: 3.5, x: 0.45, y: 0.566, label: 'A child thread on Claude', side: 'top' },
+          { b: 4, x: 0.19, y: 0.187, label: 'Nested in the sidebar', side: 'right' },
         ],
       },
     ],
@@ -344,7 +357,101 @@ export const SCENES: Record<string, ChapterSpec> = {
     ],
   },
 
-  // 4 bars = 16 beats — chorus 2
+  // 8 bars = 32 beats — chorus 2: IDE (Beta) on the fictional acme-ledger
+  // project (scripts/lib/demo-ledger.mjs): gutter, hover, a TypeScript
+  // diagnostic, a pytest run, a breakpoint hit, the agent dock.
+  ide: {
+    id: 'ide',
+    group: 'Build',
+    title: 'IDE (Beta)',
+    kicker: 'Edit, run, debug and ask an agent, in one project',
+    shots: [
+      {
+        kind: 'screen',
+        src: cap('ide-file.jpg'),
+        beats: 6,
+        label: 'A multi-language project: Python, Go and TypeScript',
+        cam: [
+          { b: 0, x: 0.5, y: 0.5, z: 1 },
+          { b: 2, x: 0.38, y: 0.42, z: 1.35 },
+        ],
+        callouts: [
+          { b: 0.75, until: 2.5, x: 0.11, y: 0.3, label: 'The project tree', side: 'right' },
+          { b: 3, x: 0.255, y: 0.438, label: 'Git gutter: your changes', side: 'right' },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: cap('ide-hover.jpg'),
+        beats: 4,
+        transition: 'push',
+        label: 'Docs on hover, from the language server',
+        cam: [
+          { b: 0, x: 0.45, y: 0.55, z: 1.2 },
+          { b: 1, x: 0.44, y: 0.58, z: 1.75 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: cap('ide-diagnostic.jpg'),
+        beats: 4,
+        transition: 'whip',
+        label: 'Type errors as you read',
+        cam: [
+          { b: 0, x: 0.45, y: 0.45, z: 1.2 },
+          { b: 1, x: 0.48, y: 0.43, z: 1.7 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: cap('ide-run.jpg'),
+        beats: 6,
+        transition: 'push',
+        label: 'Run configurations: live output and a test tree',
+        cam: [
+          { b: 0, x: 0.55, y: 0.45, z: 1.05 },
+          { b: 1.5, x: 0.45, y: 0.78, z: 1.45 },
+        ],
+        callouts: [{ b: 2.5, x: 0.3, y: 0.735, label: '4 tests passed', side: 'right' }],
+      },
+      {
+        kind: 'screen',
+        src: cap('ide-debug.jpg'),
+        beats: 6,
+        transition: 'whip',
+        label: 'A breakpoint hit: frames, variables, evaluate',
+        cam: [
+          { b: 0, x: 0.5, y: 0.45, z: 1.1 },
+          { b: 1.5, x: 0.48, y: 0.72, z: 1.4 },
+        ],
+        callouts: [{ b: 2, x: 0.462, y: 0.694, label: 'Paused at the breakpoint', side: 'top' }],
+      },
+      {
+        kind: 'screen',
+        src: cap('ide-agent.jpg'),
+        beats: 3,
+        transition: 'push',
+        label: 'Ask the agent about the selected code',
+        cam: [
+          { b: 0, x: 0.7, y: 0.4, z: 1.2 },
+          { b: 1, x: 0.86, y: 0.36, z: 1.75 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: cap('ide-agent-applied.jpg'),
+        beats: 3,
+        transition: 'whip',
+        label: 'Apply its diff, or undo it',
+        cam: [
+          { b: 0, x: 0.55, y: 0.45, z: 1.2 },
+          { b: 1, x: 0.5, y: 0.5, z: 1.45 },
+        ],
+      },
+    ],
+  },
+
+  // 4 bars = 16 beats
   git: {
     id: 'git',
     group: 'Build',

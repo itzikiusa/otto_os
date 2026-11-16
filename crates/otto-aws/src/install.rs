@@ -25,6 +25,8 @@ pub const TOOL: &str = "aws";
 /// Env override honoured by [`locate`] — absolute path to an `aws` binary.
 pub const BIN_ENV: &str = "OTTO_AWS_BIN";
 const PKG_URL: &str = "https://awscli.amazonaws.com/AWSCLIV2.pkg";
+/// Expected Apple Developer Team ID on Amazon's official AWS CLI v2 `.pkg`.
+const AMAZON_PKG_TEAM_ID: &str = "94KV3E626L";
 /// Keep the last N bytes of installer output for `/status`.
 const LOG_TAIL_CAP: usize = 4096;
 const STEP_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -156,13 +158,50 @@ pub fn parse_version(text: &str) -> Option<String> {
 /// status on every visit; an upgrade / reinstall changes the mtime (or the
 /// path) and so re-probes.
 type VersionKey = (PathBuf, Option<std::time::SystemTime>);
+type LocateKey = (PathBuf, Option<String>);
+static LOCATE_CACHE: Mutex<Option<(std::time::Instant, LocateKey, Option<VersionKey>)>> =
+    Mutex::new(None);
 static VERSION_CACHE: Mutex<Option<(VersionKey, String)>> = Mutex::new(None);
+const LOCATE_TTL: Duration = Duration::from_secs(30);
+const COLD_VERSION_INLINE_BUDGET: Duration = Duration::from_millis(150);
 
-async fn cached_version(bin: &Path) -> Option<String> {
-    let key: VersionKey = (
-        bin.to_path_buf(),
-        std::fs::metadata(bin).and_then(|m| m.modified()).ok(),
-    );
+fn invalidate_locate_cache() {
+    if let Ok(mut g) = LOCATE_CACHE.lock() {
+        *g = None;
+    }
+}
+
+async fn cached_locate(data_dir: &Path) -> Option<VersionKey> {
+    let key: LocateKey = (data_dir.to_path_buf(), std::env::var(BIN_ENV).ok());
+    if let Ok(g) = LOCATE_CACHE.lock() {
+        if let Some((at, k, found)) = g.as_ref() {
+            if *k == key && at.elapsed() < LOCATE_TTL {
+                return found.clone();
+            }
+        }
+    }
+    let dir = data_dir.to_path_buf();
+    let found = tokio::task::spawn_blocking(move || {
+        locate(&dir).map(|p| {
+            let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+            (p, mtime)
+        })
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Ok(mut g) = LOCATE_CACHE.lock() {
+        *g = Some((std::time::Instant::now(), key, found.clone()));
+    }
+    found
+}
+
+fn version_flight() -> &'static tokio::sync::Mutex<()> {
+    static FLIGHT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &FLIGHT
+}
+
+async fn cached_version(key: VersionKey) -> Option<String> {
     if let Ok(g) = VERSION_CACHE.lock() {
         if let Some((k, v)) = g.as_ref() {
             if *k == key && key.1.is_some() {
@@ -170,18 +209,42 @@ async fn cached_version(bin: &Path) -> Option<String> {
             }
         }
     }
-    let v = version(bin).await?;
-    if let Ok(mut g) = VERSION_CACHE.lock() {
-        *g = Some((key, v.clone()));
+    let bin_owned = key.0.clone();
+    let key_owned = key;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _guard = version_flight().lock().await;
+        if let Ok(g) = VERSION_CACHE.lock() {
+            if let Some((k, v)) = g.as_ref() {
+                if *k == key_owned && key_owned.1.is_some() {
+                    let _ = tx.send(Some(v.clone()));
+                    return;
+                }
+            }
+        }
+        let v = version(&bin_owned).await;
+        if let Some(ref ver) = v {
+            if let Ok(mut g) = VERSION_CACHE.lock() {
+                *g = Some((key_owned, ver.clone()));
+            }
+        }
+        let _ = tx.send(v);
+    });
+    match tokio::time::timeout(COLD_VERSION_INLINE_BUDGET, rx).await {
+        Ok(Ok(v)) => v,
+        _ => VERSION_CACHE
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|(_, v)| v.clone())),
     }
-    Some(v)
 }
 
 /// Presence + version + install-job snapshot.
 pub async fn status(data_dir: &Path) -> AwsStatus {
-    let path = locate(data_dir);
-    let version = match &path {
-        Some(p) => cached_version(p).await,
+    let located = cached_locate(data_dir).await;
+    let path = located.as_ref().map(|(p, _)| p.clone());
+    let version = match located {
+        Some(vk) => cached_version(vk).await,
         None => None,
     };
     AwsStatus {
@@ -251,6 +314,7 @@ impl Installer {
                 InstallState::Idle => {}
             }
         }
+        invalidate_locate_cache();
         let _ = events.send(Event::AwsInstallUpdated {
             tool: TOOL.into(),
             state: state.as_str().into(),
@@ -327,18 +391,32 @@ impl Installer {
             None,
         )
         .await?;
+        if let Err(e) = self.verify_pkg_signature(&pkg).await {
+            let _ = std::fs::remove_file(&pkg);
+            return Err(e);
+        }
+        let installer_bin = if Path::new("/usr/sbin/installer").is_file() {
+            Path::new("/usr/sbin/installer")
+        } else {
+            Path::new("installer")
+        };
         self.append_log("$ installer -pkg AWSCLIV2.pkg -target CurrentUserHomeDirectory");
-        self.step(
-            Path::new("installer"),
-            &[
-                "-pkg",
-                &pkg.to_string_lossy(),
-                "-target",
-                "CurrentUserHomeDirectory",
-            ],
-            None,
-        )
-        .await?;
+        if let Err(e) = self
+            .step(
+                installer_bin,
+                &[
+                    "-pkg",
+                    &pkg.to_string_lossy(),
+                    "-target",
+                    "CurrentUserHomeDirectory",
+                ],
+                None,
+            )
+            .await
+        {
+            let _ = std::fs::remove_file(&pkg);
+            return Err(e);
+        }
         let _ = std::fs::remove_file(&pkg);
         let bin_dir = data_dir.join("bin");
         std::fs::create_dir_all(&bin_dir)
@@ -400,6 +478,67 @@ impl Installer {
             ))
         }
     }
+
+    async fn verify_pkg_signature(&'static self, pkg: &Path) -> std::result::Result<(), String> {
+        let pkgutil = if Path::new("/usr/sbin/pkgutil").is_file() {
+            Path::new("/usr/sbin/pkgutil")
+        } else {
+            Path::new("pkgutil")
+        };
+        self.append_log("$ pkgutil --check-signature AWSCLIV2.pkg");
+        let out = tokio::time::timeout(
+            Duration::from_secs(60),
+            Command::new(pkgutil)
+                .args(["--check-signature", &pkg.to_string_lossy()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| "pkgutil --check-signature timed out".to_string())?
+        .map_err(|e| format!("run {}: {e}", pkgutil.display()))?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if !text.trim().is_empty() {
+            self.append_log(text.trim_end());
+        }
+        verify_pkg_signature_output(out.status.success(), &text)
+    }
+}
+
+fn verify_pkg_signature_output(success: bool, output: &str) -> std::result::Result<(), String> {
+    if !success {
+        return Err("AWSCLIV2.pkg failed pkgutil --check-signature verification".into());
+    }
+    let Some(status_line) = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Status:"))
+        .map(str::trim)
+    else {
+        return Err("AWSCLIV2.pkg signature check produced no Status line".into());
+    };
+    let status_lower = status_line.to_ascii_lowercase();
+    if !status_lower.starts_with("signed by")
+        || status_lower.contains("no signature")
+        || status_lower.contains("untrusted")
+        || status_lower.contains("invalid")
+        || status_lower.contains("revoked")
+        || status_lower.contains("expired")
+    {
+        return Err("AWSCLIV2.pkg does not carry a trusted Apple installer signature".into());
+    }
+    let expected_team = format!("({AMAZON_PKG_TEAM_ID})");
+    if !output.contains("Developer ID Installer:") || !output.contains(&expected_team) {
+        return Err(format!(
+            "AWSCLIV2.pkg signer does not match Amazon Developer ID Team ID {AMAZON_PKG_TEAM_ID}"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -439,5 +578,77 @@ mod tests {
             inst.append_log(&"x".repeat(100));
         }
         assert!(inst.snapshot().log_tail.len() <= LOG_TAIL_CAP);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cached_version_bounds_cold_probe_then_populates_in_background() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("slow-aws");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nsleep 0.35\nprintf 'aws-cli/2.99.1 Python/3.12.0\\n'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let vk: VersionKey = (
+            script.clone(),
+            std::fs::metadata(&script).and_then(|m| m.modified()).ok(),
+        );
+        let t0 = std::time::Instant::now();
+        let first = cached_version(vk.clone()).await;
+        assert!(
+            t0.elapsed() < Duration::from_millis(320),
+            "cold version probe exceeded inline budget"
+        );
+        assert!(first.is_none());
+
+        for _ in 0..40 {
+            if VERSION_CACHE
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(k, _)| *k == vk)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(cached_version(vk).await.as_deref(), Some("2.99.1"));
+    }
+
+    #[test]
+    fn pkg_signature_verifier_accepts_amazon_team_id_and_rejects_tampered_pkgs() {
+        let valid = r#"Package "AWSCLIV2.pkg":
+   Status: signed by a developer certificate issued by Apple for distribution
+   Notarization: trusted by the Apple notary service
+   Certificate Chain:
+    1. Developer ID Installer: AMZN Mobile LLC (94KV3E626L)
+       Expires: Thu, 01 Feb 2029 00:00:00 +0000
+"#;
+        assert!(verify_pkg_signature_output(true, valid).is_ok());
+        assert!(verify_pkg_signature_output(false, valid).is_err());
+
+        let unsigned = "Package \"AWSCLIV2.pkg\":\n   Status: no signature\n";
+        assert!(verify_pkg_signature_output(true, unsigned).is_err());
+
+        let expired = r#"Package "AWSCLIV2.pkg":
+   Status: signed by a certificate that has since expired
+   Certificate Chain:
+    1. Developer ID Installer: AMZN Mobile LLC (94KV3E626L)
+"#;
+        assert!(verify_pkg_signature_output(true, expired).is_err());
+
+        let wrong_team = r#"Package "AWSCLIV2.pkg":
+   Status: signed by a developer certificate issued by Apple for distribution
+   Certificate Chain:
+    1. Developer ID Installer: Evil Corp (DEADBEEF00)
+"#;
+        assert!(verify_pkg_signature_output(true, wrong_team).is_err());
     }
 }

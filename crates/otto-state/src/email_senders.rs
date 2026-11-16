@@ -58,7 +58,7 @@ impl EmailSendersRepo {
     ///
     /// An upsert on the `user_id` PK. **Re-configuring resets verification** —
     /// `verified_at` is cleared, because the new address / app password has not
-    /// yet been proven via SMTP. The caller sets it again via [`set_verified`]
+    /// yet been proven via SMTP. The caller sets it again via `set_verified`
     /// after a successful login.
     pub async fn upsert(&self, user_id: &str, gmail_address: &str, secret_ref: &str) -> Result<()> {
         sqlx::query(

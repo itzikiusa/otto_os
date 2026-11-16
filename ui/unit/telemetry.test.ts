@@ -78,6 +78,10 @@ test('navigation and request spans share W3C context, and arbitrary fields never
   assert.ok(!JSON.stringify(spans).includes('secret'));
   assert.ok(!JSON.stringify(spans).includes('private'));
   assert.equal(t.apiComponent('/workspaces/private-project/vault/vaults/secret'), 'vault');
+  assert.equal(t.apiComponent('/runtime-sessions/private-thread/events'), 'threads');
+  assert.equal(t.apiComponent('/workspaces/private-project/runtime-sessions'), 'threads');
+  assert.equal(t.apiComponent('/ide/projects'), 'ide');
+  assert.equal(t.apiComponent('/api-client/requests'), 'api');
   assert.equal(t.apiComponent('/private-name'), 'other');
   t.configureTelemetry(false);
 });
@@ -250,14 +254,18 @@ test('actual HTTP producer conforms to the shared ingest contract without export
   let current = contract.requests[0];
   const done = t.beginNavigation('git');
   for (current of contract.requests) {
-    if (current.method === 'POST') await api.post('/repos/private-project/fetch');
-    else await api.get('/repos/private-project');
+    const path = current.route.replace(/^\/api\/v1/, '').replace('{id}', 'private-project');
+    if (current.method === 'POST') await api.post(path);
+    else await api.get(path);
   }
   t.startMeasurement('ui.render', 'git').finish();
+  t.startMeasurement('ui.thread.open', 'threads').finish();
+  t.startMeasurement('ui.thread.send', 'threads').finish();
   done();
   await t.flushTelemetry();
   const clients = spans.filter((span) => span.kind === 'client');
   assert.deepEqual(Array.from(clients, (span) => span.name), contract.requests.map((request: any) => request.name));
+  assert.deepEqual(Array.from(clients, (span) => span.component), contract.requests.map((request: any) => request.component));
   const navigation = spans.find((span) => span.name === 'ui.navigation');
   assert.ok(navigation);
   assert.ok(clients.every((span) => span.parent_span_id === navigation.span_id));

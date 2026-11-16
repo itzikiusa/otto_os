@@ -13,7 +13,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { runPull } from './pullFlow';
   import { runPush } from './pushFlow';
-  import { gitBridge } from './gitBridge.svelte';
+  import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import { registry } from '../../lib/commands.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';

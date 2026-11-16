@@ -3,7 +3,7 @@
 //! machine-checked acceptance criteria, on an isolated git branch, until the
 //! goal is met or a hard limit (iterations / active time) is hit.
 //!
-//! Reuse is plumbing-only: executors run as live, openable [`SessionManager`]
+//! Reuse is plumbing-only: executors run as live, openable `SessionManager`
 //! sessions (review-style spawn/inject/watch via the shared agent-run runner
 //! behind [`crate::AutomationCtx`]); the planner/evaluator/digester/definer are
 //! managed provider-aware turns with absolute deadlines. The

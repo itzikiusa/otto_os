@@ -21,7 +21,7 @@ import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { loadErrorText } from '../../../lib/loadError';
 import { git } from '../../../lib/stores/git.svelte';
-import { gitBridge } from '../gitBridge.svelte';
+import { gitBridge } from '../../../lib/diff/gitBridge.svelte';
 import { graphCache, type GraphSnapshot } from '../graph-cache';
 import { spliceHistory } from '../graph-splice';
 import { headShaOf, withoutRemoteHeads } from '../ref-menus';

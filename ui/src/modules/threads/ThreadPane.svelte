@@ -13,9 +13,8 @@
   import { transcript } from '../../lib/stores/transcript.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
-  import ConversationView from '../agents/conversation/ConversationView.svelte'; // ui-guards: allow — experimental threads embeds shared ConversationView
   import { buildThreadMenu, relatedThreadsItem } from './threadMenu';
-  import ThreadTerminalDrawer from './ThreadTerminalDrawer.svelte';
+  import { TerminalDrawerView } from './threadLazy.svelte';
   import { harnessLabel, isPlainShellSession, sessionBranch } from './threadsHelpers';
   import { threadRepos } from './threadRepos.svelte';
   import { threads } from './threadsStore.svelte';
@@ -27,6 +26,7 @@
   import { asThreadSession, runtimeThreads } from './runtime/runtimeThreads.svelte';
   // The structured-runtime conversation loads with the first runtime thread.
   const RuntimeThread = lazyComponent(() => import('./runtime/RuntimeThread.svelte'));
+  const LegacyConversation = lazyComponent(() => import('../agents/conversation/ConversationView.svelte')); // ui-guards: allow — experimental threads embeds shared ConversationView
 
   interface Props {
     paneId: string;
@@ -54,7 +54,7 @@
   });
   const branch = $derived(detectedBranch ?? sessionBranch(session, git.repos, git.statusById));
 
-  let convRef = $state<ReturnType<typeof ConversationView> | null>(null);
+  let convRef = $state<{ triggerSearch(): void } | null>(null);
   let renaming = $state(false);
   let draftTitle = $state('');
   // The terminal drawer lives in the store so the page's top bar can drive
@@ -280,8 +280,8 @@
       <div class="tp-shell-wrap otto-force-dark">
         <LazyTerminal sessionId={paneId} forceDark autoFocus={focused} resumeOnOpen={focused} />
       </div>
-    {:else}
-      <ConversationView
+    {:else if LegacyConversation.component}
+      <LegacyConversation.component
         bind:this={convRef}
         sessionId={paneId}
         workspaceId={session.workspace_id}
@@ -293,13 +293,15 @@
         onsidechat={(q) => threads.openSideChat(paneId, q)}
         branchHint={branch}
       />
+    {:else}
+      <LazyMount lazy={LegacyConversation} what="conversation" variant="panel" />
     {/if}
   </div>
 
-  {#if showTerminal && runtime}
-    {#if runtimeShell}<ThreadTerminalDrawer sessionId={runtimeShell.id} title={runtime.title} onclose={toggleTerminal} />{/if}
-  {:else if showTerminal && session && !isPlainShellSession(session)}
-    <ThreadTerminalDrawer
+  {#if showTerminal && runtime && TerminalDrawerView.component}
+    {#if runtimeShell}<TerminalDrawerView.component sessionId={runtimeShell.id} title={runtime.title} onclose={toggleTerminal} />{/if}
+  {:else if showTerminal && session && !isPlainShellSession(session) && TerminalDrawerView.component}
+    <TerminalDrawerView.component
       sessionId={paneId}
       title={session.title}
       onclose={toggleTerminal}

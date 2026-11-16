@@ -66,6 +66,8 @@ test.beforeEach(async ({ page }, info) => {
 
 test('a Codex runtime thread streams, asks inline, queues a follow-up and stops', async ({ page }, info) => {
   await page.goto('/#/threads');
+  // Other specs' threads (any workspace) may open first; start a new one.
+  await page.getByTestId('threads-new-btn').click();
   const stage = page.getByTestId('new-thread-stage');
   await expect(stage).toBeVisible({ timeout: 30_000 });
 
@@ -111,7 +113,7 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await composer.fill('hang');
   await composer.press('Enter');
   await expect(thread.getByTestId('runtime-stop')).toBeVisible({ timeout: 15_000 });
-  await expect(thread.getByText(/Working for \d+s/)).toBeVisible();
+  await expect(thread.getByTestId('runtime-working')).toContainText(/Working · .+ · \d+s/);
   await composer.fill('after the stop');
   await composer.press('Enter');
   await expect(thread.getByTestId('runtime-queued')).toContainText('after the stop');
@@ -120,14 +122,13 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect(thread.getByTestId('runtime-queued')).toHaveCount(0);
 
   // Slash commands: the popup lists the view's commands; /btw opens a side
-  // chat about this thread without interrupting it.
+  // chat about this thread without interrupting it ("Ask about <title> … Starting…"
+  // while spawning, then "About <title>" once the side session is live).
   await composer.fill('/');
   await expect(thread.locator('[data-slash-pop]')).toContainText('/btw');
   await composer.fill('/btw what changed so far?');
   await composer.press('Enter');
-  // (The side chat itself is a PTY thread — its agent never starts against
-  // the e2e stand-in CLI, so this checks that it is asked about this thread.)
-  await expect(page.getByTestId('threads-side-chat')).toContainText('Ask about hello runtime', { timeout: 15_000 });
+  await expect(page.getByTestId('threads-side-chat')).toContainText(/about hello runtime/i, { timeout: 15_000 });
   await expect(composer).toHaveValue('');
 
   await expectNoHorizontalOverflow(page);
@@ -153,7 +154,7 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect(thread.getByTestId('runtime-model')).toContainText(pickedLabel);
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
   await thread.locator('input[type=file]').setInputFiles({ name: 'dot.png', mimeType: 'image/png', buffer: png });
-  await expect(thread.getByTestId('runtime-images')).toContainText('dot.png');
+  await expect(thread.getByTestId('runtime-images').getByRole('img', { name: 'dot.png' })).toBeVisible();
   await page.screenshot({ path: info.outputPath('runtime-composer-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.screenshot({ path: info.outputPath('runtime-composer-dark.png'), animations: 'disabled' });
@@ -219,6 +220,27 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
 // own activity; a closed thread reopens when you send to it; Delete honours
 // Settings › "Closing a session tab" = Always delete.
 // ─────────────────────────────────────────────────────────────────────────────
+test('a new runtime thread sends the stage’s image with its first message', async ({ page }) => {
+  await page.goto('/#/threads');
+  await page.getByTestId('threads-new-btn').click();
+  const stage = page.getByTestId('new-thread-stage');
+  await expect(stage).toBeVisible({ timeout: 30_000 });
+  await stage.getByTestId('picker-agent').click();
+  await page.getByTestId('model-picker').getByTestId('model-picker-provider-codex').click();
+  await page.keyboard.press('Escape');
+
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+  await stage.locator('input[type=file]').setInputFiles({ name: 'first.png', mimeType: 'image/png', buffer: png });
+  await expect(stage.getByRole('img', { name: 'first.png' })).toBeVisible();
+  const sent = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/prompt'));
+  await stage.getByTestId('new-thread-input').fill('first with a picture');
+  await stage.getByTestId('new-thread-send-btn').click();
+  const body = (await sent).postDataJSON() as { text?: string; images?: { mime: string; name?: string }[] };
+  expect(body.text).toBe('first with a picture');
+  expect(body.images?.map((i) => [i.name, i.mime])).toEqual([['first.png', 'image/png']]);
+  await expect(page.locator('[data-testid^="runtime-thread-"]').getByText('echo: first with a picture')).toBeVisible({ timeout: 15_000 });
+});
+
 test('a Claude thread: background work, its own turn, a subagent card, reopen and delete', async ({ page }, info) => {
   const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, {
     data: { provider: 'claude', cwd: fixtureDir, title: 'Claude background' },
@@ -568,7 +590,7 @@ test('composer drafts recover after reload and page reopen without sending; fail
   }).toEqual(['Unsent browser recovery text', 'recover.png']);
   await page.reload();
   await expect(thread.getByTestId('runtime-composer')).toHaveValue('Unsent browser recovery text');
-  await expect(thread.getByTestId('runtime-images')).toContainText('recover.png');
+  await expect(thread.getByTestId('runtime-images').getByRole('img', { name: 'recover.png' })).toBeVisible();
   expect(promptRequests).toBe(0);
   const storedValues = await page.evaluate(() => Object.values(localStorage).join('\n'));
   expect(storedValues).not.toContain('Unsent browser recovery text');
@@ -579,13 +601,13 @@ test('composer drafts recover after reload and page reopen without sending; fail
   await reopened.getByTestId('threads-sidebar').getByText('Recover my unsent draft', { exact: true }).click();
   const recovered = reopened.getByTestId(`runtime-thread-${id}`);
   await expect(recovered.getByTestId('runtime-composer')).toHaveValue('Unsent browser recovery text');
-  await expect(recovered.getByTestId('runtime-images')).toContainText('recover.png');
+  await expect(recovered.getByTestId('runtime-images').getByRole('img', { name: 'recover.png' })).toBeVisible();
   expect(promptRequests).toBe(0);
   await reopened.route(`**/api/v1/runtime-sessions/${id}/prompt`, route => route.fulfill({ status: 400, json: { code: 'invalid', message: 'Test provider cannot start' } }));
   await recovered.getByTestId('runtime-send').click();
   await expect(recovered).toContainText('Test provider cannot start');
   await expect(recovered.getByTestId('runtime-composer')).toHaveValue('Unsent browser recovery text');
-  await expect(recovered.getByTestId('runtime-images')).toContainText('recover.png');
+  await expect(recovered.getByTestId('runtime-images').getByRole('img', { name: 'recover.png' })).toBeVisible();
   await reopened.screenshot({ path: info.outputPath('draft-recovered-light.png') });
   await reopened.emulateMedia({ colorScheme: 'dark' });
   await reopened.screenshot({ path: info.outputPath('draft-recovered-dark.png') });
@@ -635,4 +657,149 @@ test('native Codex question forms answer near the composer on phone and desktop'
   await expect(thread.getByText(/question answers:.*strategy_native/)).toBeVisible({ timeout: 15_000 });
   await expect(thread.getByTestId('runtime-question-send')).toHaveCount(0);
   await expect(composer).toHaveValue('');
+});
+
+test('threads composer typing and timeline scrolling stay lag-free with clamped long reasoning and layout isolation', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const created = await ctx.post(`${base}/api/v1/workspaces/${wsId}/runtime-sessions`, {
+    data: { provider: 'codex', cwd: fixtureDir, title: 'Smooth typing & scroll' },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const { id } = (await created.json()) as { id: string };
+
+  const T0 = Date.parse('2026-11-14T10:00:00Z');
+  const at = (s: number) => new Date(T0 + s * 1000).toISOString();
+  const longReason = Array.from(
+    { length: 80 },
+    (_, i) => `Step ${i + 1}: analyzing crate graph, checking borrow lifetimes, and verifying SQLite WAL concurrency invariants.`,
+  ).join('\n') + '\n\n```rust\npub fn tail_marker_final() -> bool { true }\n```';
+
+  const turns = Array.from({ length: 20 }, (_, idx) => ({
+    id: `t-${idx + 1}`,
+    ordinal: idx + 1,
+    status: 'completed',
+    started_at: at(idx * 30),
+    completed_at: at(idx * 30 + 20),
+    origin: 'user',
+  }));
+  const turn_items: Record<string, unknown>[] = [];
+  let ord = 1;
+  for (let idx = 0; idx < 20; idx++) {
+    turn_items.push({
+      id: `u-${idx + 1}`,
+      turn_id: `t-${idx + 1}`,
+      ordinal: ord++,
+      status: 'completed',
+      title: null,
+      started_at: at(idx * 30),
+      completed_at: at(idx * 30 + 1),
+      updated_at: at(idx * 30 + 1),
+      type: 'user_message',
+      text: `Prompt #${idx + 1}: inspect subsystem ${idx + 1}`,
+    });
+    if (idx === 19) {
+      turn_items.push({
+        id: 'r-long',
+        turn_id: 't-20',
+        ordinal: ord++,
+        status: 'completed',
+        title: 'Thinking',
+        started_at: at(idx * 30 + 2),
+        completed_at: at(idx * 30 + 10),
+        updated_at: at(idx * 30 + 10),
+        type: 'reasoning',
+        text: longReason,
+      });
+    }
+    turn_items.push({
+      id: `a-${idx + 1}`,
+      turn_id: `t-${idx + 1}`,
+      ordinal: ord++,
+      status: 'completed',
+      title: null,
+      started_at: at(idx * 30 + 11),
+      completed_at: at(idx * 30 + 20),
+      updated_at: at(idx * 30 + 20),
+      type: 'assistant_message',
+      message_id: `m-${idx + 1}`,
+      streaming: false,
+      text: `### Reply ${idx + 1}\n\nVerified module \`crate_${idx + 1}\` with zero warnings and clean allocations.`,
+    });
+  }
+
+  let eventReplays = 0;
+  await page.route(`**/api/v1/runtime-sessions/${id}/events**`, (route) => {
+    eventReplays++;
+    return route.fulfill({
+      json: {
+        kind: 'snapshot',
+        snapshot_sequence: 500,
+        snapshot: {
+          provider_session: { status: 'ready', cwd: fixtureDir, model: null, updated_at: at(700), last_error: null },
+          provider_thread: null,
+          turns,
+          turn_items,
+          runtime_requests: [],
+          plans: [],
+        },
+      },
+    });
+  });
+
+  await page.goto(`/#/threads/${id}`);
+  const thread = page.getByTestId(`runtime-thread-${id}`);
+  await expect(thread).toBeVisible({ timeout: 30_000 });
+  await expect(thread.getByText('Reply 20')).toBeVisible();
+
+  // 1) Scroller uses CSS layout/paint containment (`contain: content` === `layout style paint`) while no modal overlay is open.
+  const containCss = await thread.locator('.rt-scroll').evaluate((el) => getComputedStyle(el).contain);
+  expect(
+    containCss === 'content' || (containCss.includes('layout') && containCss.includes('paint')),
+    `expected CSS containment on .rt-scroll, got "${containCss}"`,
+  ).toBe(true);
+
+  // 2) Long reasoning trace renders a compact preview while collapsed (no 80-line DOM bloat), and full text on "More".
+  const thinkRow = thread.getByTestId('runtime-item-r-long');
+  await expect(thinkRow).toBeVisible();
+  const collapsedLen = await thinkRow.locator('.rw-think').innerText();
+  expect(collapsedLen.length).toBeLessThan(700);
+  expect(collapsedLen).not.toContain('tail_marker_final');
+  await thinkRow.getByRole('button', { name: 'More' }).click();
+  await expect(thinkRow.locator('.rw-think')).toContainText('tail_marker_final');
+  await thinkRow.getByRole('button', { name: 'Less' }).click();
+
+  // 3) Composer disables spellcheck/autocorrect and handles 40 rapid keystrokes with p95 < 8ms and 0 mid-typing /events GETs.
+  const composer = thread.getByTestId('runtime-composer');
+  expect(await composer.getAttribute('spellcheck')).toBe('false');
+  const replaysBeforeTyping = eventReplays;
+  const p95Ms = await composer.evaluate(async (ta: HTMLTextAreaElement) => {
+    ta.focus();
+    const samples: number[] = [];
+    const sampleText = 'Checking runtimeView & timelineRows perf!';
+    for (const ch of sampleText) {
+      const t0 = performance.now();
+      ta.setRangeText(ch, ta.selectionStart ?? ta.value.length, ta.selectionEnd ?? ta.value.length, 'end');
+      ta.dispatchEvent(new InputEvent('input', { bubbles: true, data: ch, inputType: 'insertText' }));
+      ta.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: ch }));
+      samples.push(performance.now() - t0);
+    }
+    samples.sort((a, b) => a - b);
+    return samples[Math.floor(samples.length * 0.95)] ?? 0;
+  });
+  expect(p95Ms, `composer input p95 ${p95Ms.toFixed(2)}ms exceeded 8ms`).toBeLessThan(8);
+  expect(eventReplays).toBe(replaysBeforeTyping);
+
+  // 4) Smooth programmatic timeline scroll sweep across the 20 turns.
+  const scrollOk = await thread.locator('.rt-scroll').evaluate(async (el: HTMLElement) => {
+    el.scrollTop = 0;
+    const steps = 12;
+    const max = Math.max(1, el.scrollHeight - el.clientHeight);
+    for (let i = 1; i <= steps; i++) {
+      el.scrollTop = Math.round((max * i) / steps);
+      el.dispatchEvent(new Event('scroll'));
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    }
+    return el.scrollTop > 0;
+  });
+  expect(scrollOk).toBe(true);
 });

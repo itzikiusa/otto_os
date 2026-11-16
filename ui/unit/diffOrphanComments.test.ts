@@ -3,7 +3,7 @@
 // vanish; it is now listed in the file's comments block, marked "not shown".
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildFileRows, indexComments, orphanComments } from '../src/modules/git/diff-model.ts';
+import { buildFileRows, indexComments, orphanComments } from '../src/lib/diff/diff-model.ts';
 import type { FileDiff, PrComment } from '../src/lib/api/types.ts';
 
 const c = (id: string, line: number | null): PrComment => ({

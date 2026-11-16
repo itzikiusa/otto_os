@@ -44,16 +44,67 @@ pub(super) async fn put<S: RuntimeCtx>(
             .await?,
     ))
 }
-fn validate(draft: &RuntimeDraftContent) -> otto_core::Result<()> {
-    if draft.text.len() > 1024 * 1024 || draft.images.len() > 12 || draft.context.len() > 32 {
+pub(crate) fn validate_model_name(model: &str) -> otto_core::Result<()> {
+    let trimmed = model.trim();
+    if trimmed.len() > 256 || trimmed.starts_with('-') {
+        return Err(Error::Invalid("Invalid model selection.".into()));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_attachment_bytes(
+    mime: &str,
+    data_base64: &str,
+) -> otto_core::Result<Vec<u8>> {
+    if data_base64.len() > 4 * (10_usize * 1024 * 1024).div_ceil(3) {
         return Err(Error::PayloadTooLarge(
-            "Draft allows 1 MiB text, 12 attachments and 32 context chips.".into(),
+            "Attachment exceeds its size limit.".into(),
         ));
     }
-    if draft.model.as_ref().is_some_and(|v| v.len() > 256)
-        || draft.effort.as_ref().is_some_and(|v| {
-            !["low", "medium", "high", "xhigh", "max", "ultra"].contains(&v.as_str())
-        })
+    if ![
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "application/pdf",
+    ]
+    .contains(&mime)
+    {
+        return Err(Error::UnsupportedMedia(
+            "Attachments support PNG, JPEG, GIF, WebP and PDF.".into(),
+        ));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64)
+        .map_err(|_| Error::Invalid("Attachment has invalid base64.".into()))?;
+    if bytes.len() > 10 * 1024 * 1024 {
+        return Err(Error::PayloadTooLarge("Attachment exceeds 10 MiB.".into()));
+    }
+    let valid = match mime {
+        "application/pdf" => bytes.starts_with(b"%PDF-"),
+        _ => crate::tool_images::image_mime(&bytes) == Some(mime),
+    };
+    if !valid {
+        return Err(Error::Invalid(
+            "Attachment content does not match its type.".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn validate(draft: &RuntimeDraftContent) -> otto_core::Result<()> {
+    if draft.text.len() > 1024 * 1024 || draft.images.len() > 20 || draft.context.len() > 32 {
+        return Err(Error::PayloadTooLarge(
+            "Draft allows 1 MiB text, 20 attachments and 32 context chips.".into(),
+        ));
+    }
+    if let Some(m) = draft.model.as_deref() {
+        validate_model_name(m)?;
+    }
+    if draft
+        .effort
+        .as_ref()
+        .is_some_and(|v| !otto_core::agent_runtime::EFFORT_RANK.contains(&v.as_str()))
     {
         return Err(Error::Invalid("Invalid model or effort selection.".into()));
     }
@@ -71,47 +122,12 @@ fn validate(draft: &RuntimeDraftContent) -> otto_core::Result<()> {
         }
     }
     for image in &draft.images {
-        if image.name.len() > 1024
-            || image.data_base64.len() > 4 * (10_usize * 1024 * 1024).div_ceil(3)
-        {
+        if image.name.len() > 1024 {
             return Err(Error::PayloadTooLarge(
                 "Draft attachment exceeds its size limit.".into(),
             ));
         }
-        if ![
-            "image/png",
-            "image/jpeg",
-            "image/gif",
-            "image/webp",
-            "application/pdf",
-        ]
-        .contains(&image.mime.as_str())
-        {
-            return Err(Error::UnsupportedMedia(
-                "Draft attachments support PNG, JPEG, GIF, WebP and PDF.".into(),
-            ));
-        }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&image.data_base64)
-            .map_err(|_| Error::Invalid("Draft attachment has invalid base64.".into()))?;
-        if bytes.len() > 10 * 1024 * 1024 {
-            return Err(Error::PayloadTooLarge(
-                "Draft attachment exceeds 10 MiB.".into(),
-            ));
-        }
-        let valid = match image.mime.as_str() {
-            "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
-            "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
-            "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
-            "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
-            "application/pdf" => bytes.starts_with(b"%PDF-"),
-            _ => false,
-        };
-        if !valid {
-            return Err(Error::Invalid(
-                "Draft attachment content does not match its type.".into(),
-            ));
-        }
+        validate_attachment_bytes(&image.mime, &image.data_base64)?;
     }
     Ok(())
 }
@@ -124,6 +140,7 @@ mod tests {
     fn drafts_reject_malformed_and_mislabeled_attachments() {
         let mut draft = RuntimeDraftContent::default();
         draft.images.push(PromptFile {
+            path: None,
             name: "a.png".into(),
             mime: "image/png".into(),
             data_base64: "not base64!".into(),
@@ -135,5 +152,38 @@ mod tests {
         assert!(validate(&draft).is_ok());
         draft.images[0].mime = "image/svg+xml".into();
         assert!(matches!(validate(&draft), Err(Error::UnsupportedMedia(_))));
+    }
+
+    #[test]
+    fn drafts_accept_every_effort_a_driver_offers() {
+        for effort in ["none", "minimal", "low", "ultra"] {
+            let draft = RuntimeDraftContent {
+                effort: Some(effort.into()),
+                ..Default::default()
+            };
+            assert!(validate(&draft).is_ok(), "{effort}");
+        }
+        let draft = RuntimeDraftContent {
+            effort: Some("turbo".into()),
+            ..Default::default()
+        };
+        assert!(matches!(validate(&draft), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn drafts_allow_up_to_twenty_attachments_and_reject_twenty_first() {
+        let png = PromptFile {
+            path: None,
+            name: "shot.png".into(),
+            mime: "image/png".into(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nok"),
+        };
+        let mut draft = RuntimeDraftContent {
+            images: vec![png.clone(); 20],
+            ..Default::default()
+        };
+        assert!(validate(&draft).is_ok());
+        draft.images.push(png);
+        assert!(matches!(validate(&draft), Err(Error::PayloadTooLarge(_))));
     }
 }

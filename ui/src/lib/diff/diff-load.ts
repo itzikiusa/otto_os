@@ -1,0 +1,307 @@
+// Lazy diff loading (docs/contracts/api.md, `/diff` + PR diff): the viewer
+// paints a `summary=true` file list first and fetches one file's hunks only
+// when that file is expanded AND near the viewport. Every fetch takes an
+// AbortSignal. The PR diff is shared between the Files tab (PrDetail) and the
+// Review tab's comment snippets (ReviewPanel) through one short-lived cache,
+// so a PR visit downloads it once instead of twice.
+import { api } from '../api/client';
+import type { DiffResp, FileDiff } from '../api/types';
+
+/** Fetch one file's hunks. `full` bypasses the per-file cap ("Load anyway").
+ *  Resolves null when the server has no diff for that path. */
+export type DiffFileLoader = (
+  file: FileDiff,
+  opts: { full: boolean; signal: AbortSignal },
+) => Promise<FileDiff | null>;
+
+function fileQuery(file: FileDiff, full: boolean): string {
+  let q = `path=${encodeURIComponent(file.path)}`;
+  if (file.old_path && file.old_path !== file.path) q += `&old_path=${encodeURIComponent(file.old_path)}`;
+  if (full) q += '&full=true';
+  return q;
+}
+
+/** The entry for `path` in a diff response. A type change (file ↔ symlink)
+ *  is ONE summary row but TWO patch entries for the same path — a delete and
+ *  an add; they are merged so the added half isn't silently dropped. */
+export function fileFor(resp: DiffResp, path: string): FileDiff | null {
+  const hits = resp.files.filter((f) => f.path === path);
+  if (hits.length <= 1) return hits[0] ?? null;
+  const main = hits.find((f) => f.status !== 'deleted') ?? hits[0];
+  const sum = (k: 'added' | 'deleted') =>
+    hits.every((h) => h[k] != null) ? hits.reduce((n, h) => n + (h[k] ?? 0), 0) : main[k];
+  return {
+    ...main,
+    hunks: hits.flatMap((h) => h.hunks),
+    too_large: hits.some((h) => h.too_large) || main.too_large,
+    hunks_omitted: hits.some((h) => h.hunks_omitted) || main.hunks_omitted,
+    added: sum('added'),
+    deleted: sum('deleted'),
+  };
+}
+
+/** The fetched entry for `file`. A lone entry is accepted only when it is the
+ *  same file under its other name (a rename reported from the other side) —
+ *  any other file's hunks must never render under this file's header. */
+export function pick(resp: DiffResp, file: FileDiff): FileDiff | null {
+  const hit = fileFor(resp, file.path);
+  if (hit) return hit;
+  const only = resp.files.length === 1 ? resp.files[0] : null;
+  if (!only) return null;
+  const names = new Set([file.path, file.old_path].filter((p): p is string => !!p));
+  return names.has(only.path) || (only.old_path !== null && names.has(only.old_path)) ? only : null;
+}
+
+/** Loader for a local repo diff target (`worktree` | `staged` | `working` |
+ *  `commit:<sha>` | `range:<a>..<b>`). */
+export function repoDiffFileLoader(repoId: string, target: string): DiffFileLoader {
+  return async (file, { full, signal }) => {
+    const r = await api.get<DiffResp>(
+      `/repos/${repoId}/diff?target=${encodeURIComponent(target)}&${fileQuery(file, full)}`,
+      signal,
+    );
+    return pick(r, file);
+  };
+}
+
+// ── Shared PR diff cache ──────────────────────────────────────────────────
+const PR_TTL_MS = 60_000;
+const PR_MAX_ENTRIES = 8;
+const PR_MAX_BYTES = 48 * 1024 * 1024;
+
+interface Shared<T> {
+  promise: Promise<T>;
+  ctl: AbortController;
+  waiters: number;
+  settled: boolean;
+}
+interface PrEntry {
+  at: number;
+  head: string;
+  rev: string;
+  summary: Shared<DiffResp> | null;
+  files: Map<string, Shared<FileDiff | null>>;
+  bytes: number;
+}
+const prCache = new Map<string, PrEntry>();
+
+/** Rough heap size of a file's hunks: UTF-16 text plus per-object overhead. */
+export function fileDiffBytes(f: FileDiff | null | undefined): number {
+  if (!f) return 64;
+  let n = 256 + (f.path.length + (f.old_path?.length ?? 0)) * 2;
+  for (const h of f.hunks ?? []) {
+    n += 96 + h.header.length * 2;
+    for (const l of h.lines) n += 56 + l.content.length * 2;
+  }
+  return n;
+}
+
+function busy(e: PrEntry): boolean {
+  if (e.summary && e.summary.waiters > 0) return true;
+  for (const sh of e.files.values()) if (sh.waiters > 0) return true;
+  return false;
+}
+
+function evictPrCache(keep: string): void {
+  const now = Date.now();
+  for (const [k, e] of prCache) {
+    if (k !== keep && now - e.at > PR_TTL_MS && !busy(e)) prCache.delete(k);
+  }
+  let total = 0;
+  for (const e of prCache.values()) total += e.bytes;
+  for (const [k, e] of prCache) {
+    if (prCache.size <= PR_MAX_ENTRIES && total <= PR_MAX_BYTES) break;
+    if (k === keep || busy(e)) continue;
+    prCache.delete(k);
+    total -= e.bytes;
+  }
+}
+
+function charge(key: string, e: PrEntry, bytes: number): void {
+  if (prCache.get(key) !== e) return;
+  e.bytes += bytes;
+  evictPrCache(key);
+}
+
+export function prDiffCacheNearCap(): boolean {
+  let mru = 0;
+  for (const e of prCache.values()) mru = e.bytes;
+  return mru >= PR_MAX_BYTES * 0.75;
+}
+
+export function prCacheSnapshot(): [string, number][] {
+  return [...prCache].map(([k, e]) => [k, e.bytes]);
+}
+
+const PREF_IGNORE_WS = 'otto_pr_ignore_ws';
+let ignoreWs = ((): boolean => {
+  try {
+    return localStorage.getItem(PREF_IGNORE_WS) === '1';
+  } catch {
+    return false;
+  }
+})();
+const wsListeners = new Set<() => void>();
+export function prIgnoreWhitespace(): boolean {
+  return ignoreWs;
+}
+export function setPrIgnoreWhitespace(v: boolean): void {
+  if (v === ignoreWs) return;
+  ignoreWs = v;
+  try {
+    localStorage.setItem(PREF_IGNORE_WS, v ? '1' : '0');
+  } catch {
+    /* blocked storage: the choice just doesn't persist */
+  }
+  for (const fn of wsListeners) fn();
+}
+export function onPrWhitespaceChange(fn: () => void): () => void {
+  wsListeners.add(fn);
+  return () => {
+    wsListeners.delete(fn);
+  };
+}
+const prCacheKey = (repoId: string, num: number, ws: boolean): string => `${repoId}#${num}${ws ? '~ws' : ''}`;
+
+function prEntry(repoId: string, num: number, head?: string | null, ws = false): PrEntry {
+  const key = prCacheKey(repoId, num, ws);
+  let e = prCache.get(key);
+  const expired = !e || Date.now() - e.at > PR_TTL_MS;
+  if (!e || expired || (head && e.head && e.head !== head)) {
+    const h = head || e?.head || '';
+    const rev = (h ? `&rev=${encodeURIComponent(h)}` : '') + (ws ? '&ignore_whitespace=true' : '');
+    e = { at: Date.now(), head: h, rev, summary: null, files: new Map(), bytes: 0 };
+    prCache.delete(key);
+    prCache.set(key, e);
+  } else {
+    if (head && !e.head) e.head = head;
+    prCache.delete(key);
+    prCache.set(key, e);
+  }
+  evictPrCache(key);
+  return e;
+}
+
+function share<T>(run: (signal: AbortSignal) => Promise<T>): Shared<T> {
+  const ctl = new AbortController();
+  const s: Shared<T> = { promise: undefined as unknown as Promise<T>, ctl, waiters: 0, settled: false };
+  s.promise = run(ctl.signal).finally(() => {
+    s.settled = true;
+  });
+  return s;
+}
+
+function join<T>(s: Shared<T>, signal: AbortSignal | undefined, drop: () => void): Promise<T> {
+  s.waiters++;
+  if (!signal) {
+    return s.promise.finally(() => s.waiters--);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      s.waiters--;
+      if (s.waiters <= 0 && !s.settled) {
+        s.ctl.abort();
+        drop();
+      }
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    s.promise.then(
+      (v) => {
+        signal.removeEventListener('abort', onAbort);
+        s.waiters--;
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener('abort', onAbort);
+        s.waiters--;
+        reject(e);
+      },
+    );
+  });
+}
+
+export function prDiffSummary(
+  repoId: string,
+  num: number,
+  signal?: AbortSignal,
+  head?: string | null,
+  ws = false,
+): Promise<DiffResp> {
+  const e = prEntry(repoId, num, head, ws);
+  if (!e.summary) {
+    const sh = share((sig) => api.get<DiffResp>(`/repos/${repoId}/prs/${num}/diff?summary=true${e.rev}`, sig));
+    e.summary = sh;
+    const key = prCacheKey(repoId, num, ws);
+    sh.promise.then(
+      (resp) => {
+        let bytes = 0;
+        for (const f of resp.files) bytes += fileDiffBytes(f);
+        charge(key, e, bytes);
+        for (const f of resp.files) {
+          if (f.hunks_omitted || f.too_large || e.files.has(f.path)) continue;
+          const done: Shared<FileDiff | null> = {
+            promise: Promise.resolve(f),
+            ctl: new AbortController(),
+            waiters: 0,
+            settled: true,
+          };
+          e.files.set(f.path, done);
+        }
+      },
+      () => {
+        if (e.summary === sh) e.summary = null;
+      },
+    );
+  }
+  const sh = e.summary;
+  return join(sh, signal, () => {
+    if (e.summary === sh) e.summary = null;
+  });
+}
+
+export function prDiffFile(
+  repoId: string,
+  num: number,
+  file: FileDiff,
+  full: boolean,
+  signal?: AbortSignal,
+  ws = false,
+): Promise<FileDiff | null> {
+  const e = prEntry(repoId, num, undefined, ws);
+  const key = full ? `${file.path}\u0000full` : file.path;
+  let sh = e.files.get(key);
+  if (!sh) {
+    const created = share((sig) =>
+      api.get<DiffResp>(`/repos/${repoId}/prs/${num}/diff?${fileQuery(file, full)}${e.rev}`, sig).then((r) => pick(r, file)),
+    );
+    created.promise.then(
+      (f) => charge(prCacheKey(repoId, num, ws), e, fileDiffBytes(f)),
+      () => {
+        if (e.files.get(key) === created) e.files.delete(key);
+      },
+    );
+    e.files.set(key, created);
+    sh = created;
+  }
+  const mine = sh;
+  return join(mine, signal, () => {
+    if (e.files.get(key) === mine) e.files.delete(key);
+  });
+}
+
+export function prDiffFileLoader(repoId: string, num: number): DiffFileLoader {
+  return (file, { full, signal }) => prDiffFile(repoId, num, file, full, signal, ignoreWs);
+}
+
+export function prDiffHead(repoId: string, num: number): string {
+  return prCache.get(prCacheKey(repoId, num, ignoreWs))?.head ?? '';
+}
+
+export function notePrHead(repoId: string, num: number, head: string | null | undefined): void {
+  for (const ws of [false, true]) if (head && prCache.has(prCacheKey(repoId, num, ws))) prEntry(repoId, num, head, ws);
+}

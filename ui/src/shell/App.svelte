@@ -22,22 +22,14 @@
   import LoadState from '../lib/components/LoadState.svelte';
   import LazyMount from '../lib/components/LazyMount.svelte';
   import {
-    SharePageChunk,
-    HandoverChunk,
-    AttachIssueChunk,
-    AttachProductStoryChunk,
-    BroadcastModalChunk,
-    NewSessionChunk,
-    NewWorkspaceChunk,
-    SlackSendChunk,
+    SharePageChunk, HandoverChunk, AttachIssueChunk, AttachProductStoryChunk,
+    BroadcastModalChunk, NewSessionChunk, NewWorkspaceChunk, SlackSendChunk,
+    PaletteChunk, ShortcutsOverlayChunk, FloatingBarChunk,
   } from './overlays.svelte';
   import { loadErrorText } from '../lib/loadError';
   import StatusBar from './StatusBar.svelte';
   import CapsBanner from './CapsBanner.svelte';
-  import Palette from './Palette.svelte';
-  import FloatingBar from '../lib/components/FloatingBar.svelte';
   import { barStore } from '../lib/stores/bar.svelte';
-  import ShortcutsOverlay from './ShortcutsOverlay.svelte';
   import { confirmer } from '../lib/confirm.svelte';
   import NotificationBell from './NotificationBell.svelte';
   import { serviceHealth } from '../lib/stores/serviceHealth.svelte';
@@ -566,7 +558,7 @@
         // Desktop: ⌘K focuses the floating bar (the one command surface).
         // Phone/tablet, pop-outs and a hidden bar keep the palette sheet.
         if (ui.paletteOpen) ui.paletteOpen = false;
-        else if (barStore.mounted) barStore.requestFocus();
+        else if (barStore.mounted || (!isPopout && !isEmbedded && viewport.isDesktop && barStore.pref !== 'hidden' && !FloatingBarChunk.error)) barStore.requestFocus();
         else ui.openPalette('commands');
         break;
       case 'askOtto':
@@ -1158,7 +1150,7 @@
               <!-- The floating "Type or speak… ⌘K" bar (layout.md §7): bottom-
                    centre over the content column, docking into the status bar
                    while you scroll or type elsewhere. -->
-              <FloatingBar host="app" />
+              <LazyMount lazy={FloatingBarChunk} what="the command bar" quiet props={{ host: 'app' }} />
             {/if}
           </div>
 
@@ -1203,9 +1195,8 @@
 {/if}
 
 
-<Palette />
-
-<ShortcutsOverlay open={shortcutsOpen} onclose={() => (shortcutsOpen = false)} />
+{#if ui.paletteOpen}<LazyMount lazy={PaletteChunk} what="the command palette" quiet onerror={() => (ui.paletteOpen = false)} />{/if}
+{#if shortcutsOpen}<LazyMount lazy={ShortcutsOverlayChunk} what="keyboard shortcuts" quiet onerror={() => (shortcutsOpen = false)} props={{ open: true, onclose: () => (shortcutsOpen = false) }} />{/if}
 
 <!-- Focused-session action modals opened from the palette (mirror SessionView). -->
 <!-- These dialogs load on first open (their chunks are shared with the

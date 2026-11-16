@@ -38,6 +38,12 @@ export const askTargets = new AskTargets();
 export async function askFromComposer(parentId: string, draft: RuntimeComposerDraft, text: string, access: RuntimeAccessMode | null): Promise<void> {
   const targets = askTargets.for(parentId);
   if (targets.length === 0 || draft.sending) return;
+  const nonImages = draft.images.filter((f) => !f.mime.startsWith('image/'));
+  if (nonImages.length > 0) {
+    draft.startError =
+      'PDF attachments can only be sent directly to this thread — remove the PDF or clear the @agent chips first.';
+    return;
+  }
   const pics = draft.images.filter((f) => f.mime.startsWith('image/'));
   draft.sending = true;
   try {
@@ -46,7 +52,9 @@ export async function askFromComposer(parentId: string, draft: RuntimeComposerDr
       targets,
       // Omitted = this thread's own mode; a wider pick is refused (400) in words.
       ...(access ? { access_mode: access } : {}),
-      ...(pics.length ? { images: pics.map(({ mime, data_base64 }) => ({ mime, data_base64 })) } : {}),
+      ...(pics.length
+        ? { images: pics.map(({ name, mime, data_base64 }) => ({ ...(name ? { name } : {}), mime, data_base64 })) }
+        : {}),
     });
     draft.text = '';
     draft.images = [];

@@ -14,6 +14,8 @@
 //!   choose their own whitespace policy.
 //! - [`clip_bytes`] — at most `max` BYTES (char-boundary safe), plus `…`
 //!   when cut.
+//! - [`trim_incomplete_utf8_tail`] — drop a code point cut at the end of a
+//!   capped read.
 //! - [`extract_json`] / [`find_json_object`] — the one tolerant
 //!   JSON-from-LLM-reply extractor (```json fence, else the first balanced
 //!   `{…}` that parses). Four divergent copies (product, swarm recruiter,
@@ -61,6 +63,28 @@ pub fn clip_bytes_on_char_boundary(s: &str, max: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+/// `bytes` without an incomplete UTF-8 sequence cut at its end (a read capped
+/// mid code point), so decoding a truncated read never adds `U+FFFD`. Any
+/// other invalid byte is left for the caller's decoder.
+pub fn trim_incomplete_utf8_tail(bytes: &[u8]) -> &[u8] {
+    if bytes.is_empty() {
+        return bytes;
+    }
+    let mut i = bytes.len() - 1;
+    let min_i = bytes.len().saturating_sub(4);
+    while i > min_i && (bytes[i] & 0xC0) == 0x80 {
+        i -= 1;
+    }
+    if (bytes[i] & 0xC0) == 0x80 {
+        return bytes;
+    }
+    match std::str::from_utf8(&bytes[i..]) {
+        Ok(_) => bytes,
+        Err(e) if e.error_len().is_none() => &bytes[..i + e.valid_up_to()],
+        Err(_) => bytes,
+    }
 }
 
 /// `s` unchanged when it is at most `max` BYTES, else its longest
@@ -227,6 +251,15 @@ pub fn bytes_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trim_incomplete_utf8_tail_drops_only_a_cut_code_point() {
+        let e = "aé".as_bytes();
+        assert_eq!(trim_incomplete_utf8_tail(&e[..2]), b"a");
+        assert_eq!(trim_incomplete_utf8_tail(e), e);
+        assert_eq!(trim_incomplete_utf8_tail(b""), b"");
+        assert_eq!(trim_incomplete_utf8_tail(b"a\xff"), b"a\xff");
+    }
 
     #[test]
     fn clip_bytes_cuts_on_a_char_boundary_and_marks_the_cut() {

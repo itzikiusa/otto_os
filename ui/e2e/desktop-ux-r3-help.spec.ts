@@ -211,7 +211,7 @@ test('queued chapter requests use the latest selection and survive fullscreen re
   // A spinner image (not a live region): the loading state is drawn, not inserted with text.
   await expect(page.getByRole('img', { name: 'Loading the tour' })).toBeVisible();
   const insights = tourChapter('Insights and Usage');
-  await page.getByRole('button', { name: tourChapter('Git, reviews and proof').label }).click();
+  await page.getByRole('button', { name: tourChapter('Git and AI review').label }).click();
   await page.getByRole('button', { name: insights.label }).click();
   release();
   const video = page.getByTestId('tour-film-video');

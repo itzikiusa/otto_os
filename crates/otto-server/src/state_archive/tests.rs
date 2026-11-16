@@ -481,6 +481,37 @@ async fn exported_rows_follow_the_primary_key() {
     assert_eq!(ids, vec![2, 10]);
 }
 
+/// Composer drafts past their 30 days (`updated_at` is unix seconds) are
+/// left out of the export.
+#[tokio::test]
+async fn expired_composer_drafts_are_not_exported() {
+    let pool = otto_state::db::test_pool().await;
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    for (session, at) in [("fresh", now), ("expired", now - 31 * 86_400)] {
+        sqlx::query(
+            "INSERT INTO runtime_composer_drafts(user_id,workspace_id,session_id,payload_json,updated_at) VALUES('u','ws',?,'{}',?)",
+        )
+        .bind(session)
+        .bind(at)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    }
+    let rows = schema::read_rows(&mut conn, "runtime_composer_drafts")
+        .await
+        .unwrap();
+    let kept: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r.get("session_id").and_then(Value::as_str))
+        .collect();
+    assert_eq!(kept, vec!["fresh"]);
+}
+
 /// data-integrity-6-03: a custom default MCP profile, an edited preset and a
 /// session naming the custom profile all survive a restore onto a fresh
 /// install — the seeded presets merge instead of conflicting, and the
@@ -572,4 +603,273 @@ async fn mcp_profiles_restore_onto_a_fresh_install_with_their_default() {
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].id, custom.id, "the session keeps its narrowing");
     assert!(!resolved[0].all_tools);
+}
+
+#[tokio::test]
+async fn ide_tables_scrub_credentials_and_enforce_portable_export_rules() {
+    use sqlx::Row;
+
+    let source = otto_state::db::test_pool().await;
+    fixture(&source).await;
+    let mut conn = source.acquire().await.unwrap();
+    let tables = schema::schema(&mut conn).await.unwrap();
+
+    // Every core IDE configuration table is present and included in portable
+    // exports (while any non-allowlisted runtime/cache `ide_*` table stays
+    // excluded in portable mode).
+    let allowlisted_ide = [
+        "ide_project_environments",
+        "ide_run_configs",
+        "ide_local_sdks",
+        "ide_named_projects",
+    ];
+    for t in allowlisted_ide {
+        assert!(tables.contains_key(t), "expected IDE table {t} in schema");
+        assert!(!schema::excluded_table(t, false), "{t} full export");
+        assert!(!schema::excluded_table(t, true), "{t} portable export");
+    }
+    for t in tables.keys().filter(|t| t.starts_with("ide_")) {
+        let should_include_portable = allowlisted_ide.contains(&t.as_str());
+        assert_eq!(
+            !schema::excluded_table(t, true),
+            should_include_portable,
+            "portable exclusion mismatch for {t}"
+        );
+    }
+
+    async fn insert_ide_seed(
+        conn: &mut sqlx::SqliteConnection,
+        table: &str,
+        spec: &schema::TableSpec,
+        overrides: Value,
+    ) {
+        let ddl: String = sqlx::query_scalar(
+            "SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name=?",
+        )
+        .bind(table)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+        let check_literal = |col: &str| -> Option<String> {
+            for pat in [format!("CHECK ({col} IN ('"), format!("CHECK({col} IN ('")] {
+                if let Some(rest) = ddl.split(&pat).nth(1) {
+                    if let Some((lit, _)) = rest.split_once('\'') {
+                        return Some(lit.to_owned());
+                    }
+                }
+            }
+            None
+        };
+        let pragma = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "PRAGMA table_info({})",
+            schema::quoted(table)
+        )))
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap();
+        let mut seed = ArchiveRow::new();
+        let map = overrides.as_object().unwrap();
+        for col in pragma {
+            let name: String = col.get("name");
+            let notnull: i64 = col.get("notnull");
+            let pk: i64 = col.get("pk");
+            let has_default = col
+                .try_get::<Option<String>, _>("dflt_value")
+                .unwrap()
+                .is_some();
+            if let Some(v) = map.get(&name) {
+                seed.insert(name, v.clone());
+            } else if spec.user_columns.contains(&name) {
+                seed.insert(name, json!("old-user"));
+            } else if name == "workspace_id" {
+                seed.insert(name, json!("ws"));
+            } else if (notnull != 0 || pk > 0) && !has_default {
+                let col_type: String = col.get("type");
+                let val = if let Some(lit) = check_literal(&name) {
+                    json!(lit)
+                } else if col_type.to_ascii_uppercase().contains("INT") {
+                    json!(1)
+                } else if name.ends_with("_json") {
+                    json!("{}")
+                } else if name == "language" {
+                    json!("rust")
+                } else if name == "kind" {
+                    json!("shell")
+                } else {
+                    json!(format!("{table}-seed-{name}"))
+                };
+                seed.insert(name, val);
+            }
+        }
+        assert!(
+            schema::insert_row(conn, table, spec, &seed).await.unwrap(),
+            "seed row insert for {table}"
+        );
+    }
+
+    let env_vars = json!([
+        {
+            "key": "DB_SECRET",
+            "value": "raw-keychain-value-1",
+            "secret": true,
+            "secret_ref": "keychain:ide/db-secret"
+        },
+        {
+            "key": "OPENAI_API_KEY",
+            "value": "sk-inline-secret-2",
+            "secret": false
+        },
+        {
+            "key": "DATABASE_URL",
+            "value": "postgres://app:url-secret-3@db.internal:5432/main?token=query-secret-4&sslmode=disable",
+            "secret": false
+        },
+        {
+            "key": "__otto_module_sdks__",
+            "value": "{\"rust\":\"stable-aarch64\"}",
+            "secret": false
+        },
+        {
+            "key": "RUST_LOG",
+            "value": "info",
+            "secret": false
+        }
+    ]);
+    insert_ide_seed(
+        &mut conn,
+        "ide_project_environments",
+        &tables["ide_project_environments"],
+        json!({
+            "project_key": "local:/external/repo",
+            "env_vars_json": env_vars.to_string(),
+        }),
+    )
+    .await;
+
+    insert_ide_seed(
+        &mut conn,
+        "ide_run_configs",
+        &tables["ide_run_configs"],
+        json!({
+            "id": "rc-main",
+            "project_key": "local:/external/repo",
+            "name": "API Server",
+            "command": "PASSWORD=env_pw_5 API_KEY=\"env_key_6\" SECRET='env_sec_7' curl -H 'Authorization: Bearer bearer_tok_8' https://alice:url_pw_9@api.example.test/v1 --password=flag_pw_10 --token flag_tok_11 && mysql -u root -p short_pw_12 && cargo run -p demo-bin -- --port 8080",
+            "before_launch": json!([
+                {"kind": "shell", "command": "GITHUB_TOKEN=gh_sec_13 ./prep.sh --api-key=ak_sec_14 -p prep_pw_15"}
+            ]).to_string(),
+            "env_json": json!({"SERVICE_TOKEN": "json_env_tok_16", "PORT": "8080"}).to_string(),
+        }),
+    )
+    .await;
+
+    insert_ide_seed(
+        &mut conn,
+        "ide_run_configs",
+        &tables["ide_run_configs"],
+        json!({
+            "id": "rc-plain-before",
+            "project_key": "local:/external/repo",
+            "name": "Worker",
+            "command": "mkdir -p target/out && ./worker",
+            "before_launch": "TOKEN=plain_tok_17 ./auth.sh https://bob:plain_pw_18@registry.example.test",
+        }),
+    )
+    .await;
+
+    insert_ide_seed(
+        &mut conn,
+        "ide_local_sdks",
+        &tables["ide_local_sdks"],
+        json!({"id": "sdk-rust-1", "name": "Rust Stable", "path": "/toolchains/rust"}),
+    )
+    .await;
+
+    insert_ide_seed(
+        &mut conn,
+        "ide_named_projects",
+        &tables["ide_named_projects"],
+        json!({"id": "proj-1", "name": "External Repo", "root_path": "/external/repo"}),
+    )
+    .await;
+    drop(conn);
+
+    let archive = snapshot_with(&source, true).await;
+    for t in allowlisted_ide {
+        assert!(
+            archive.records.get(t).is_some_and(|rows| !rows.is_empty()),
+            "portable archive should carry seeded rows for {t}"
+        );
+    }
+
+    let serialized = serde_json::to_string(&archive).unwrap();
+    for secret in [
+        "raw-keychain-value-1",
+        "keychain:ide/db-secret",
+        "sk-inline-secret-2",
+        "url-secret-3",
+        "query-secret-4",
+        "env_pw_5",
+        "env_key_6",
+        "env_sec_7",
+        "bearer_tok_8",
+        "url_pw_9",
+        "flag_pw_10",
+        "flag_tok_11",
+        "short_pw_12",
+        "gh_sec_13",
+        "ak_sec_14",
+        "prep_pw_15",
+        "json_env_tok_16",
+        "plain_tok_17",
+        "plain_pw_18",
+    ] {
+        assert!(
+            !serialized.contains(secret),
+            "portable archive leaked {secret}: {serialized}"
+        );
+    }
+
+    // Non-secret SDK metadata, non-secret env vars, and benign `-p` flags (`cargo run -p`, `mkdir -p`) survive intact.
+    assert!(serialized.contains("__otto_module_sdks__"));
+    assert!(serialized.contains("stable-aarch64"));
+    assert!(serialized.contains("sslmode=disable"));
+    assert!(serialized.contains("cargo run -p demo-bin -- --port 8080"));
+    assert!(serialized.contains("mkdir -p target/out && ./worker"));
+
+    // Verify exact structure of scrubbed `ide_project_environments` entries.
+    let env_row = &archive.records["ide_project_environments"][0];
+    let parsed_entries: Vec<Value> =
+        serde_json::from_str(env_row["env_vars_json"].as_str().unwrap()).unwrap();
+    let by_key = |k: &str| {
+        parsed_entries
+            .iter()
+            .find(|e| e["key"].as_str() == Some(k))
+            .unwrap_or_else(|| panic!("missing env entry {k}"))
+    };
+    assert!(by_key("DB_SECRET")["value"].is_null());
+    assert!(by_key("DB_SECRET")["secret_ref"].is_null());
+    assert_eq!(by_key("OPENAI_API_KEY")["value"], json!(""));
+    assert_eq!(
+        by_key("__otto_module_sdks__")["value"],
+        json!("{\"rust\":\"stable-aarch64\"}")
+    );
+    assert_eq!(by_key("RUST_LOG")["value"], json!("info"));
+
+    assert!(
+        archive
+            .reconnect
+            .iter()
+            .any(|m| m.starts_with("ide_project_environments/")),
+        "expected reconnect notice for ide_project_environments: {:?}",
+        archive.reconnect
+    );
+    assert!(
+        archive
+            .reconnect
+            .iter()
+            .any(|m| m.starts_with("ide_run_configs/")),
+        "expected reconnect notice for ide_run_configs: {:?}",
+        archive.reconnect
+    );
 }

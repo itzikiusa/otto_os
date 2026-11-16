@@ -20,9 +20,20 @@ impl AgentRuntimeRepo {
         workspace: &Id,
         session: &Id,
     ) -> Result<RuntimeDraftRecord> {
-        self.expire_drafts().await?;
-        let row = sqlx::query("SELECT revision, payload_json FROM runtime_composer_drafts WHERE user_id=? AND workspace_id=? AND session_id=?")
-            .bind(user).bind(workspace).bind(session).fetch_optional(&self.pool).await.map_err(dberr("load composer draft"))?;
+        let cutoff = Utc::now().timestamp() - RETENTION_SECONDS;
+        let row = sqlx::query(
+            "SELECT CASE WHEN payload_json IS NOT NULL AND updated_at < ? THEN revision + 1 ELSE revision END AS revision, \
+             CASE WHEN updated_at >= ? THEN payload_json ELSE NULL END AS payload_json \
+             FROM runtime_composer_drafts WHERE user_id=? AND workspace_id=? AND session_id=?",
+        )
+        .bind(cutoff)
+        .bind(cutoff)
+        .bind(user)
+        .bind(workspace)
+        .bind(session)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("load composer draft"))?;
         let Some(row) = row else {
             return Ok(RuntimeDraftRecord {
                 revision: 0,
@@ -60,8 +71,10 @@ impl AgentRuntimeRepo {
             || !draft.images.is_empty()
             || !draft.context.is_empty()
             || draft.fresh_context;
-        let has_preferences =
-            draft.model.is_some() || draft.effort.is_some() || draft.access_mode.is_some();
+        let has_preferences = draft.model.is_some()
+            || draft.model_default
+            || draft.effort.is_some()
+            || draft.access_mode.is_some();
         let payload = (has_content || has_preferences).then_some(json.as_str());
         let mut tx = self
             .pool
@@ -256,5 +269,87 @@ mod tests {
         repo.save_composer_draft(&u, &w, &r, 2, &value)
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn composer_draft_get_is_strictly_read_only() {
+        let (repo, pool) = seeded().await;
+        let (u, w, r) = ("u1".into(), "w1".into(), "r1".into());
+        let value = RuntimeDraftContent {
+            text: "expired draft".into(),
+            ..Default::default()
+        };
+        repo.save_composer_draft(&u, &w, &r, 0, &value)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runtime_composer_drafts SET updated_at=0 WHERE session_id='r1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let got = repo.composer_draft(&u, &w, &r).await.unwrap();
+        assert_eq!(got.revision, 2);
+        assert!(got.draft.is_none());
+
+        let raw: (i64, Option<String>, i64) = sqlx::query_as(
+            "SELECT revision, payload_json, updated_at FROM runtime_composer_drafts WHERE session_id='r1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(raw.0, 1, "GET must not mutate stored revision");
+        assert!(raw.1.is_some(), "GET must not prune payload_json on read");
+        assert_eq!(raw.2, 0);
+    }
+
+    #[tokio::test]
+    async fn composer_draft_three_state_model_round_trips() {
+        let (repo, _pool) = seeded().await;
+        let (u, w, r) = ("u1".into(), "w1".into(), "r1".into());
+
+        // 1) Explicit model override (`Some("opus")`, `model_default: false`).
+        let explicit = RuntimeDraftContent {
+            model: Some("opus".into()),
+            model_default: false,
+            ..Default::default()
+        };
+        let saved = repo
+            .save_composer_draft(&u, &w, &r, 0, &explicit)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 1);
+        let got = repo.composer_draft(&u, &w, &r).await.unwrap();
+        let d = got.draft.expect("explicit model draft");
+        assert_eq!(d.model.as_deref(), Some("opus"));
+        assert!(!d.model_default);
+
+        // 2) Explicit "Default" selection (`model: None`, `model_default: true`)
+        //    must persist even with empty text so a user resetting a pinned
+        //    session's model to Default survives reload!
+        let explicit_default = RuntimeDraftContent {
+            model: None,
+            model_default: true,
+            ..Default::default()
+        };
+        let saved = repo
+            .save_composer_draft(&u, &w, &r, 1, &explicit_default)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 2);
+        let got = repo.composer_draft(&u, &w, &r).await.unwrap();
+        let d = got.draft.expect("explicit default draft");
+        assert_eq!(d.model, None);
+        assert!(d.model_default);
+
+        // 3) Inherit / untouched (`model: None`, `model_default: false`) with
+        //    no other content clears `payload_json` back to `None`.
+        let inherit = RuntimeDraftContent::default();
+        let saved = repo
+            .save_composer_draft(&u, &w, &r, 2, &inherit)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 3);
+        assert!(saved.draft.is_none());
+        let got = repo.composer_draft(&u, &w, &r).await.unwrap();
+        assert!(got.draft.is_none());
     }
 }

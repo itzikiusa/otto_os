@@ -63,7 +63,7 @@ test('phone reload restores unsent text and attachment without sending', async (
   await expect.poll(async () => ((await storedDraft(id))?.images as unknown[])?.length).toBe(1);
   await page.reload();
   await expect(composer).toHaveValue('Check this screenshot before changing anything', { timeout: 30_000 });
-  await expect(thread.getByTestId('runtime-images')).toContainText('draft.png');
+  await expect(thread.getByTestId('runtime-images').getByRole('img', { name: 'draft.png' })).toBeVisible();
   await expect(thread.getByText('echo: Check this screenshot before changing anything')).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: info.outputPath('draft-phone.png'), animations: 'disabled' });

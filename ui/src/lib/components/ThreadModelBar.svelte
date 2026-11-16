@@ -5,6 +5,7 @@
   import { confirmer } from '../confirm.svelte';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
   import {
+    canonicalModelId,
     effortsForModel,
     formatEffortLabel,
     formatEffortShort,
@@ -57,16 +58,24 @@
   let modeBtnEl = $state<HTMLButtonElement | null>(null);
 
   const meta = $derived(auth.meta);
-  const canPickModel = $derived(parts.includes('model') && supportsModelSelection(provider, meta));
-  const canPickEffort = $derived(parts.includes('effort') && supportsEffortSelection(provider));
-  const canPickMode = $derived(parts.includes('mode') && supportsInteractionMode(provider));
-
   const catalog = $derived(modelsForProvider(provider, meta));
   const shownModelId = $derived(pinnedModel ?? effectiveModel ?? null);
   const modelLabel = $derived(formatModelLabel(provider, shownModelId, meta));
   const supportedEfforts = $derived(effortsForModel(provider, shownModelId, meta));
   const effortLabel = $derived(formatEffortShort(effort));
   const modeLabel = $derived(formatInteractionModeLabel(interactionMode));
+
+  const canPickModel = $derived(parts.includes('model') && supportsModelSelection(provider, meta));
+  const canPickEffort = $derived(
+    Boolean(
+      provider &&
+        parts.includes('effort') &&
+        supportsEffortSelection(provider) &&
+        !disabled &&
+        supportedEfforts.length > 0,
+    ),
+  );
+  const canPickMode = $derived(parts.includes('mode') && supportsInteractionMode(provider));
 
   async function promptCustomModel(): Promise<void> {
     const picked = await confirmer.promptText(
@@ -75,7 +84,7 @@
         title: 'Custom model',
         confirmLabel: 'Use model',
         initial: pinnedModel ?? '',
-        placeholder: provider === 'codex' ? 'e.g. gpt-5.4' : provider === 'agy' ? 'e.g. gemini-4-argon-high' : 'e.g. claude-opus-5-5',
+        placeholder: provider === 'codex' ? 'e.g. gpt-5.4' : provider === 'agy' ? 'e.g. gemini-4-carbon' : 'e.g. claude-opus-5-5',
         validate: (v) => (v.trim() ? null : 'Model ID is required'),
       },
     );
@@ -100,8 +109,15 @@
           label: m.label,
           hint: m.id !== m.label ? m.id : (m.default_effort ? `${m.default_effort} default` : undefined),
           title: m.description || m.id,
-          checked: pinnedModel === m.id || (pinnedModel === null && effectiveModel === m.id),
-          action: () => onmodelchange(m.id),
+          checked:
+            canonicalModelId(provider, pinnedModel, meta) === m.id ||
+            (pinnedModel === null && canonicalModelId(provider, effectiveModel, meta) === m.id),
+          action: () => {
+            onmodelchange(m.id);
+            if (effort !== null && !effortsForModel(provider, m.id, meta).includes(effort)) {
+              oneffortchange(null);
+            }
+          },
         }),
       ),
       { separator: true, pinned: true },
@@ -122,12 +138,19 @@
 
   export function openEffortPicker(): void {
     if (!canPickEffort || disabled) return;
+    const applyEffort = (nextEffort: EffortLevel | null): void => {
+      const canon = canonicalModelId(provider, pinnedModel, meta);
+      if (pinnedModel !== null && canon !== null && pinnedModel !== canon) {
+        onmodelchange(canon);
+      }
+      oneffortchange(nextEffort);
+    };
     const items: MenuItem[] = [
       {
         label: 'Default effort',
         hint: 'Model default',
         checked: effort === null,
-        action: () => oneffortchange(null),
+        action: () => applyEffort(null),
       },
       { separator: true },
       ...supportedEfforts.map(
@@ -135,7 +158,7 @@
           label: formatEffortLabel(lvl),
           hint: lvl,
           checked: effort === lvl,
-          action: () => oneffortchange(lvl),
+          action: () => applyEffort(lvl),
         }),
       ),
     ];

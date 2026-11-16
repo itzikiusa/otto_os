@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortenHomePath } from '../../../lib/homePath';
   // T3-Code-style calm metadata footer strip under the composer card:
   // harness/provider token, live status dot, model, git branch, CWD, and
   // unsent terminal input banner when present.
@@ -85,7 +86,7 @@
         supportsInteractionMode(provider)),
   );
 
-  const shortCwd = $derived(cwd.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~'));
+  const shortCwd = $derived(shortenHomePath(cwd));
   const pendingNudges = $derived(activity.tasks(sessionId).filter((t) => t.nudge_pending).length);
   const statusLabel = $derived(st.key === 'working' ? 'Working…' : st.label);
 </script>

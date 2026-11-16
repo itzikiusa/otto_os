@@ -8,7 +8,7 @@ mod drafts;
 
 use chrono::{DateTime, Utc};
 use otto_core::agent_runtime::{
-    RuntimeAccessMode, RuntimeProvider, RuntimeSession, RuntimeSessionStatus,
+    RuntimeAccessMode, RuntimeCapabilities, RuntimeProvider, RuntimeSession, RuntimeSessionStatus,
 };
 use otto_core::{Error, Id, Result};
 use sqlx::Row;
@@ -55,11 +55,23 @@ pub struct RuntimeEntityRow {
     pub payload: serde_json::Value,
 }
 
+/// Unparsed entity row fetched directly from SQLite so callers can deserialize
+/// directly into typed structs on a blocking worker without an intermediate
+/// `serde_json::Value` allocation tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawRuntimeEntityRow {
+    pub kind: String,
+    pub entity_id: String,
+    pub sequence: u64,
+    pub payload_json: String,
+}
+
 /// Column list (a macro so the queries stay `&'static str`, as sqlx requires).
 macro_rules! session_cols {
     () => {
         "id, workspace_id, provider, title, cwd, model, native_thread_id, closed, \
-         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id, ui_control, meta"
+         created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id, ui_control, meta, \
+         title_auto"
     };
 }
 
@@ -101,6 +113,8 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
                 .get::<Option<String>, _>("ui_control")
                 .and_then(|j| serde_json::from_str(&j).ok()),
             background_tasks: Vec::new(),
+            capabilities: RuntimeCapabilities::for_provider(provider),
+            title_auto: r.get::<i64, _>("title_auto") != 0,
             meta: r
                 .get::<Option<String>, _>("meta")
                 .and_then(|j| serde_json::from_str(&j).ok()),
@@ -108,6 +122,22 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
         closed,
         seq_reserved: u(r.get("seq_reserved")),
     })
+}
+
+/// The rows a list can show. One a build can't read (a provider added by a
+/// newer build, after a rollback) is skipped and logged, never failing the
+/// whole list.
+fn listable(rows: &[sqlx::sqlite::SqliteRow]) -> Vec<RuntimeSessionRecord> {
+    rows.iter()
+        .filter_map(|r| {
+            row_to_session(r)
+                .inspect_err(|e| {
+                    let id = r.try_get::<String, _>("id").unwrap_or_default();
+                    tracing::warn!(%id, "skipping runtime session row: {e}")
+                })
+                .ok()
+        })
+        .collect()
 }
 
 impl AgentRuntimeRepo {
@@ -172,7 +202,7 @@ impl AgentRuntimeRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list runtime sessions"))?;
-        rows.iter().map(row_to_session).collect()
+        Ok(listable(&rows))
     }
 
     /// Sessions of every workspace, newest activity first; `owner` narrows to
@@ -190,7 +220,7 @@ impl AgentRuntimeRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list runtime sessions"))?;
-        rows.iter().map(row_to_session).collect()
+        Ok(listable(&rows))
     }
 
     /// [`Self::list`] narrowed to the threads whose `meta.source` and/or
@@ -244,7 +274,7 @@ impl AgentRuntimeRepo {
             }
         }
         .map_err(dberr("list runtime sessions"))?;
-        rows.iter().map(row_to_session).collect()
+        Ok(listable(&rows))
     }
 
     /// Up to `limit` OPEN sessions whose `meta.source` is one of `sources`
@@ -298,9 +328,12 @@ impl AgentRuntimeRepo {
         Ok(())
     }
 
-    pub async fn set_title(&self, id: &Id, title: &str) -> Result<()> {
-        sqlx::query("UPDATE agent_runtime_sessions SET title = ? WHERE id = ?")
+    /// `auto`: the title is still Otto's placeholder (the agent's own name
+    /// for the conversation may replace it); a person's rename is not.
+    pub async fn set_title(&self, id: &Id, title: &str, auto: bool) -> Result<()> {
+        sqlx::query("UPDATE agent_runtime_sessions SET title = ?, title_auto = ? WHERE id = ?")
             .bind(title)
+            .bind(auto)
             .bind(id)
             .execute(&self.pool)
             .await
@@ -437,6 +470,27 @@ impl AgentRuntimeRepo {
         .map_err(dberr("upsert entities"))?;
         tx.commit().await.map_err(dberr("upsert entities"))?;
         Ok(())
+    }
+
+    /// Every entity of a session as raw JSON text, oldest update first.
+    pub async fn raw_entities(&self, session_id: &Id) -> Result<Vec<RawRuntimeEntityRow>> {
+        let rows = sqlx::query(
+            "SELECT kind, entity_id, sequence, payload_json FROM agent_runtime_entities \
+             WHERE session_id = ? ORDER BY sequence ASC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list runtime entities"))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| RawRuntimeEntityRow {
+                kind: r.get("kind"),
+                entity_id: r.get("entity_id"),
+                sequence: u(r.get("sequence")),
+                payload_json: r.get("payload_json"),
+            })
+            .collect())
     }
 
     /// Every entity of a session, oldest update first.
@@ -689,6 +743,29 @@ mod tests {
                 .len(),
             6
         );
+    }
+
+    /// A row from a newer build (a provider this build can't parse) is left
+    /// out of every list instead of failing it.
+    #[tokio::test]
+    async fn lists_skip_a_row_with_an_unknown_provider() {
+        let pool = mem_pool().await;
+        seed(&pool).await;
+        let repo = AgentRuntimeRepo::new(pool.clone());
+        new_session(&repo, "a", "u1", json!({"source": "pr-agent"})).await;
+        new_session(&repo, "b", "u1", json!({"source": "pr-agent"})).await;
+        sqlx::query("UPDATE agent_runtime_sessions SET provider = 'future' WHERE id = 'b'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let w = "w1".to_string();
+        assert_eq!(ids(&repo.list(&w, None).await.unwrap()), ["a"]);
+        assert_eq!(ids(&repo.list_all(None).await.unwrap()), ["a"]);
+        let got = repo
+            .list_filtered(&w, None, Some("pr-agent"), None)
+            .await
+            .unwrap();
+        assert_eq!(ids(&got), ["a"]);
     }
 
     /// The auto-close sweep's candidates: open, a listed source, idle before

@@ -241,7 +241,7 @@ impl ReviewsRepo {
     /// UI. `json_replace` does the replace in a single SQL statement, which
     /// SQLite executes atomically under its write lock, so concurrent writers to
     /// *different* indices can never clobber each other. Requires the array
-    /// element to already exist (the initial [`set_agents`] seeds every index).
+    /// element to already exist (the initial `set_agents` seeds every index).
     pub async fn set_agent_at(
         &self,
         id: &Id,

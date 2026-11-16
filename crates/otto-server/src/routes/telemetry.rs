@@ -144,6 +144,8 @@ fn validate_ui(spans: &[SpanRecord]) -> ApiResult<()> {
                 | "http.client"
                 | "ui.request.queue"
                 | "ui.response.decode"
+                | "ui.thread.open"
+                | "ui.thread.send"
         ) || !matches!(span.kind.as_str(), "client" | "internal")
             || !UI_COMPONENTS.contains(&span.component.as_str())
             || span.attributes.contains_key("http.route")
@@ -157,6 +159,8 @@ fn validate_ui(spans: &[SpanRecord]) -> ApiResult<()> {
 }
 const UI_COMPONENTS: &[&str] = &[
     "agents",
+    "threads",
+    "ide",
     "workbench",
     "connections",
     "history",
@@ -224,6 +228,10 @@ mod tests {
         let mut spans = vec![
             SpanRecord::new("ui.navigation", "git", 12.0),
             SpanRecord::new("ui.render", "git", 2.0),
+            SpanRecord::new("ui.navigation", "threads", 8.0),
+            SpanRecord::new("ui.navigation", "ide", 9.0),
+            SpanRecord::new("ui.thread.open", "threads", 24.0),
+            SpanRecord::new("ui.thread.send", "threads", 3.0),
         ];
         for request in fixture["requests"].as_array().unwrap() {
             let mut span = SpanRecord::new(

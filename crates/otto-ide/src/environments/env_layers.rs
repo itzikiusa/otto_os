@@ -1,0 +1,417 @@
+//! Effective environment layer resolution and `.env` file discovery
+//! for [`super::EnvironmentManager`].
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use otto_core::Result;
+
+use super::db_store::{
+    apply_run_config_sdk_override, discover_local_dotenv_files, is_dangerous_loader_env_key,
+    is_reserved_internal_env_key, is_valid_env_key, parse_dotenv, push_unique,
+    safe_join_allowed_roots, StoredEnvVar,
+};
+use super::{shell_env, EnvironmentManager, SecretAccess};
+use crate::target::TargetManager;
+use crate::toolchains::system_search_dirs;
+use crate::types::{IdeProjectEnvironment, IdeRunConfig, IdeSshSpec, IdeTargetKind, IdeTargetSpec};
+
+/// Insert an explicit environment variable (`env_vars`, `env_overrides`, `launch.env`)
+/// while always blocking reserved internal keys, malformed names, and (when `!caller_is_root`)
+/// dangerous loader/compiler/PATH hijack keys.
+pub(crate) fn insert_filtered_env_var(
+    map: &mut BTreeMap<String, String>,
+    key: &str,
+    val: String,
+    caller_is_root: bool,
+) {
+    if is_reserved_internal_env_key(key)
+        || !is_valid_env_key(key)
+        || (!caller_is_root && is_dangerous_loader_env_key(key))
+    {
+        return;
+    }
+    map.insert(key.to_string(), val);
+}
+
+/// Resolve a `.env` / `env_file` path confined inside `allowed_roots` (preventing
+/// symlink escape even on default `.env`), rejecting protected credential directories
+/// unconditionally and enforcing non-root secret-file checks when `!caller_is_root`.
+pub(crate) fn resolve_confined_dotenv_path(
+    allowed_roots: &[String],
+    rel_or_abs: &str,
+    caller_is_root: bool,
+) -> Option<PathBuf> {
+    let trimmed = rel_or_abs.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+        return None;
+    }
+    let canon = safe_join_allowed_roots(allowed_roots, trimmed)?;
+    if !canon.is_file() || otto_core::secret_paths::in_protected_dir(&canon) {
+        return None;
+    }
+    if !caller_is_root
+        && (otto_core::secret_paths::is_denied_file(&canon)
+            || crate::target::enforce_non_root_path(&canon).is_err())
+    {
+        return None;
+    }
+    Some(canon)
+}
+
+/// Merge parsed `.env` key-values into `map`, unconditionally blocking reserved internal
+/// keys and dangerous loader/compiler/PATH hijack keys from repo-controlled `.env` files.
+pub(crate) fn extend_from_dotenv_str(map: &mut BTreeMap<String, String>, raw: &str) {
+    for (k, v) in parse_dotenv(raw) {
+        if is_reserved_internal_env_key(&k)
+            || !is_valid_env_key(&k)
+            || is_dangerous_loader_env_key(&k)
+        {
+            continue;
+        }
+        map.insert(k, v);
+    }
+}
+
+/// Apply configured project SDK homes (`JAVA_HOME`, `GOROOT`, `RUSTUP_TOOLCHAIN`,
+/// `VIRTUAL_ENV`, `node_home`) onto `map` and return prepended `PATH` directories.
+pub(crate) fn apply_project_sdk_layers(
+    proj: &IdeProjectEnvironment,
+    target_kind: IdeTargetKind,
+    allow_sdk_and_path_overrides: bool,
+    map: &mut BTreeMap<String, String>,
+) -> (Vec<String>, bool) {
+    let mut proj_path_dirs: Vec<String> = Vec::new();
+    let mut has_explicit_py = false;
+    if !allow_sdk_and_path_overrides {
+        return (proj_path_dirs, has_explicit_py);
+    }
+    if let Some(py) = proj.python_interpreter.as_deref().filter(|s| !s.is_empty()) {
+        has_explicit_py = true;
+        if let Some(bin_dir) = Path::new(py).parent() {
+            push_unique(&mut proj_path_dirs, bin_dir.to_string_lossy().into_owned());
+            if let Some(venv) = bin_dir.parent() {
+                if venv.join("pyvenv.cfg").is_file() || target_kind == IdeTargetKind::Ssh {
+                    map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    if let Some(jh) = proj.java_home.as_deref().filter(|s| !s.is_empty()) {
+        map.insert("JAVA_HOME".into(), jh.to_string());
+        push_unique(
+            &mut proj_path_dirs,
+            format!("{}/bin", jh.trim_end_matches('/')),
+        );
+    }
+    if let Some(gr) = proj.go_root.as_deref().filter(|s| !s.is_empty()) {
+        map.insert("GOROOT".into(), gr.to_string());
+        push_unique(
+            &mut proj_path_dirs,
+            format!("{}/bin", gr.trim_end_matches('/')),
+        );
+    }
+    if let Some(rt) = proj.rust_toolchain.as_deref().filter(|s| !s.is_empty()) {
+        if rt.starts_with('/') {
+            push_unique(
+                &mut proj_path_dirs,
+                format!("{}/bin", rt.trim_end_matches('/')),
+            );
+        } else {
+            map.insert("RUSTUP_TOOLCHAIN".into(), rt.to_string());
+        }
+    }
+    if let Some(nh) = proj.node_home.as_deref().filter(|s| !s.is_empty()) {
+        push_unique(
+            &mut proj_path_dirs,
+            format!("{}/bin", nh.trim_end_matches('/')),
+        );
+    }
+    (proj_path_dirs, has_explicit_py)
+}
+
+impl EnvironmentManager {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn resolve_env_layers<S: SecretAccess + ?Sized>(
+        &self,
+        proj: &IdeProjectEnvironment,
+        stored_vars: &[StoredEnvVar],
+        secrets: Option<&S>,
+        target: &IdeTargetSpec,
+        cfg: Option<&IdeRunConfig>,
+        await_shell: bool,
+        caller_is_root: bool,
+    ) -> Result<BTreeMap<String, String>> {
+        let mut map = BTreeMap::new();
+        let inherit_shell =
+            proj.inherit_shell_env && cfg.map(|c| c.inherit_shell_env).unwrap_or(true);
+
+        if target.kind == IdeTargetKind::Local {
+            if caller_is_root {
+                map.extend(shell_env::collect_process_base_env());
+                if inherit_shell {
+                    let shell_vars = if await_shell {
+                        self.shell_env.vars_or_load().await
+                    } else {
+                        self.shell_env.vars_snapshot()
+                    };
+                    map.extend(shell_vars);
+                }
+            } else {
+                map.extend(shell_env::collect_safe_non_root_base_env());
+            }
+        }
+
+        let allow_sdk_and_path_overrides = caller_is_root || target.kind == IdeTargetKind::Ssh;
+        let mut path_dirs: Vec<String> = Vec::new();
+        if allow_sdk_and_path_overrides {
+            if let Some(extra) = proj.extra_path.as_deref().filter(|s| !s.is_empty()) {
+                for seg in extra.split(':').filter(|s| !s.trim().is_empty()) {
+                    push_unique(&mut path_dirs, seg.trim().to_string());
+                }
+            }
+        }
+
+        let (proj_path_dirs, _) =
+            apply_project_sdk_layers(proj, target.kind, allow_sdk_and_path_overrides, &mut map);
+
+        let cfg_sdk = cfg
+            .filter(|_| allow_sdk_and_path_overrides)
+            .and_then(|c| c.sdk_path.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let (Some(c), Some(sdk_p)) = (cfg, cfg_sdk) {
+            apply_run_config_sdk_override(c.runner, sdk_p, target.kind, &mut map, &mut path_dirs);
+        }
+        for d in proj_path_dirs {
+            push_unique(&mut path_dirs, d);
+        }
+
+        // On SSH targets, do not populate literal `$HOME/...` entries or clobber
+        // the remote shell's `$PATH`; `build_remote_exec_line` prepends explicit
+        // project SDK overrides + remote `$HOME/.otto/toolchains/...` onto `$PATH`.
+        if target.kind == IdeTargetKind::Local {
+            for d in crate::toolchains::ToolchainManager::with_shell_env(
+                self.data_dir.clone(),
+                Arc::clone(&self.shell_env),
+            )
+            .extra_local_bin_dirs()
+            {
+                push_unique(&mut path_dirs, d.to_string_lossy().into_owned());
+            }
+            if !otto_core::e2e::isolated() && caller_is_root {
+                if let Some(home) = dirs::home_dir() {
+                    for rel in ["go/bin", ".cargo/bin", ".local/bin"] {
+                        let p = home.join(rel);
+                        if p.is_dir() {
+                            push_unique(&mut path_dirs, p.to_string_lossy().into_owned());
+                        }
+                    }
+                }
+            }
+            if let Some(gopath) = map.get("GOPATH").filter(|s| !s.trim().is_empty()) {
+                for seg in std::env::split_paths(gopath) {
+                    push_unique(
+                        &mut path_dirs,
+                        seg.join("bin").to_string_lossy().into_owned(),
+                    );
+                }
+            }
+            if let Some(inherited_path) = map.get("PATH") {
+                for seg in inherited_path.split(':').filter(|s| !s.is_empty()) {
+                    push_unique(&mut path_dirs, seg.to_string());
+                }
+            }
+            for d in system_search_dirs() {
+                push_unique(&mut path_dirs, d.to_string_lossy().into_owned());
+            }
+        }
+        if !path_dirs.is_empty() {
+            map.insert("PATH".into(), path_dirs.join(":"));
+        }
+
+        if target.kind == IdeTargetKind::Local {
+            let mut all_roots = vec![target.root.clone()];
+            let extra_iter: Box<dyn Iterator<Item = String>> = if caller_is_root {
+                Box::new(
+                    proj.additional_roots
+                        .iter()
+                        .cloned()
+                        .chain(target.merged_extra_roots()),
+                )
+            } else {
+                Box::new(target.merged_extra_roots().into_iter())
+            };
+            for r in extra_iter {
+                if !r.is_empty() && !all_roots.contains(&r) {
+                    all_roots.push(r);
+                }
+            }
+
+            let dotenv_rel = proj
+                .dotenv_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(".env");
+            if let Some(dotenv_file) =
+                resolve_confined_dotenv_path(&all_roots, dotenv_rel, caller_is_root)
+            {
+                if let Ok(raw) = tokio::fs::read_to_string(&dotenv_file).await {
+                    extend_from_dotenv_str(&mut map, &raw);
+                }
+            }
+
+            if let Some(cfg_env_file) = cfg
+                .and_then(|c| c.env_file.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if let Some(resolved_ef) =
+                    resolve_confined_dotenv_path(&all_roots, cfg_env_file, caller_is_root)
+                {
+                    if let Ok(raw) = tokio::fs::read_to_string(&resolved_ef).await {
+                        extend_from_dotenv_str(&mut map, &raw);
+                    }
+                }
+            }
+        }
+
+        for item in stored_vars {
+            if is_reserved_internal_env_key(&item.key)
+                || !is_valid_env_key(&item.key)
+                || (!caller_is_root && is_dangerous_loader_env_key(&item.key))
+            {
+                continue;
+            }
+            if item.secret {
+                if let Some(sec_store) = secrets {
+                    if let Some(sref) = &item.secret_ref {
+                        match sec_store.get_secret(sref).await {
+                            Ok(Some(secret_val)) => {
+                                map.insert(item.key.clone(), secret_val);
+                            }
+                            Ok(None) => {
+                                tracing::warn!(
+                                    key = %item.key,
+                                    "configured IDE secret env var was not found in secret store"
+                                );
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    key = %item.key,
+                                    error = %err,
+                                    "failed to read IDE secret env var from secret store"
+                                );
+                                return Err(err);
+                            }
+                        }
+                    }
+                } else if item.secret_ref.is_some() {
+                    map.insert(item.key.clone(), "••••••••".into());
+                }
+            } else if let Some(val) = &item.value {
+                map.insert(item.key.clone(), val.clone());
+            }
+        }
+
+        if let Some(c) = cfg {
+            for (k, v) in &c.env_overrides {
+                insert_filtered_env_var(&mut map, k, v.clone(), caller_is_root);
+            }
+        }
+
+        Ok(map)
+    }
+
+    /// Merge late-resolved login-shell variables into an already-layered local
+    /// environment without clobbering higher-precedence SDK, `.env`, project, or
+    /// launch overrides.
+    pub fn merge_late_shell_vars(
+        map: &mut BTreeMap<String, String>,
+        mut shell_vars: BTreeMap<String, String>,
+    ) {
+        let shell_path = shell_vars.remove("PATH");
+        for (k, v) in shell_vars {
+            if is_valid_env_key(&k) {
+                map.entry(k).or_insert(v);
+            }
+        }
+
+        let sys_dirs: Vec<String> = system_search_dirs()
+            .into_iter()
+            .map(|d| d.to_string_lossy().into_owned())
+            .collect();
+        let mut head_dirs: Vec<String> = Vec::new();
+        let mut tail_sys_dirs: Vec<String> = Vec::new();
+        if let Some(existing) = map.get("PATH") {
+            for seg in existing.split(':').filter(|s| !s.is_empty()) {
+                if sys_dirs.iter().any(|sd| sd == seg) {
+                    push_unique(&mut tail_sys_dirs, seg.to_string());
+                } else {
+                    push_unique(&mut head_dirs, seg.to_string());
+                }
+            }
+        }
+        if let Some(gopath) = map.get("GOPATH").filter(|s| !s.trim().is_empty()) {
+            for seg in std::env::split_paths(gopath) {
+                push_unique(
+                    &mut head_dirs,
+                    seg.join("bin").to_string_lossy().into_owned(),
+                );
+            }
+        }
+        if let Some(sp) = shell_path {
+            for seg in sp.split(':').filter(|s| !s.is_empty()) {
+                if !tail_sys_dirs.iter().any(|sd| sd == seg) {
+                    push_unique(&mut head_dirs, seg.to_string());
+                }
+            }
+        }
+        for sd in tail_sys_dirs {
+            push_unique(&mut head_dirs, sd);
+        }
+        for sd in sys_dirs {
+            push_unique(&mut head_dirs, sd);
+        }
+        if !head_dirs.is_empty() {
+            map.insert("PATH".into(), head_dirs.join(":"));
+        }
+    }
+
+    pub async fn discover_dotenv_files(
+        &self,
+        targets: &TargetManager,
+        target: &IdeTargetSpec,
+        ssh: Option<&IdeSshSpec>,
+    ) -> Result<Vec<String>> {
+        match target.kind {
+            IdeTargetKind::Local => Ok(discover_local_dotenv_files(Path::new(&target.root))),
+            IdeTargetKind::Ssh => {
+                let Some(spec) = ssh else {
+                    return Ok(Vec::new());
+                };
+                let resolved = targets.resolve_with_ssh(target, "ide-env", spec.clone())?;
+                let script = "for f in .env .env.local .env.development .env.test .env.staging .env.production; do [ -f \"$f\" ] && echo \"$f\"; done";
+                let out = targets
+                    .exec_shell(
+                        &resolved,
+                        script,
+                        Some(&target.root),
+                        &BTreeMap::new(),
+                        Duration::from_secs(10),
+                    )
+                    .await?;
+                Ok(out
+                    .stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect())
+            }
+        }
+    }
+}

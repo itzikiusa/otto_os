@@ -56,7 +56,7 @@ pub fn known_hosts(
     hosts_from_urls(&request_urls, &history_urls, vars)
 }
 
-/// [`known_hosts`] over urls already filtered to human-authored requests and
+/// `known_hosts` over urls already filtered to human-authored requests and
 /// human / legacy runs (see `ApiClientRepo::known_host_urls`). Request urls
 /// get the workspace variables; run urls are already resolved.
 pub fn hosts_from_urls(

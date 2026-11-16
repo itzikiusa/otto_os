@@ -164,6 +164,8 @@ pub struct ServerCtx {
     pub ui_bridge: Arc<crate::ui_bridge::UiBridge>,
     /// Structured agent runtime (`/runtime-sessions`, otto-agent-protocol).
     pub agent_runtime: otto_agent_protocol::AgentRuntime,
+    /// Full multi-language IDE engine (`/ide/*`, `otto-ide`).
+    pub ide: Arc<otto_ide::IdeEngine>,
 }
 
 impl ServerCtx {

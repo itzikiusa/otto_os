@@ -231,7 +231,8 @@ Two `kind`s are auto-discovered:
   (`ctx.context_library.list_skills()`), labelled `name · library`. Description
   comes from the library entry.
 - **`provider`** — on-disk skills for each agent CLI, scanned at
-  `~/.claude/skills`, `~/.codex/skills`, and `~/.agy/skills`. A directory counts
+  `~/.claude/skills`, `~/.codex/skills`, `~/.gemini/skills` (agy) and
+  `~/.config/muse/skills` (Muse). A directory counts
   if it has a `SKILL.md` and a safe name; the description is parsed from the
   skill's YAML frontmatter (`description:`). Labelled `name · <provider>`.
 

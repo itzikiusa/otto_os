@@ -79,7 +79,7 @@ pub fn branches_by_repo(
 
 /// One PR a run names (`pr: 15` / `pr: "repo-a#15, repo-b#340"`), resolved
 /// through the repo's provider: its head + base branches and head commit, and
-/// — once [`pin_pr_heads`] ran — the local ref its head commit is read from
+/// — once `pin_pr_heads` ran — the local ref its head commit is read from
 /// (`refs/remotes/origin/<head>`, or a fetched `refs/otto/pr-review/*` for a
 /// fork PR). Written to the run's `prs.json`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -228,7 +228,7 @@ pub fn publish_prs(
     input
 }
 
-/// Release the fork-head refs [`pin_pr_heads`] fetched for a run (listed in
+/// Release the fork-head refs `pin_pr_heads` fetched for a run (listed in
 /// its `prs.json`). Only `refs/otto/pr-review/*` is ever deleted.
 pub async fn release_pr_heads(data_dir: &Path, run_id: &str) {
     let path = data_dir

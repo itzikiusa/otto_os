@@ -14,7 +14,8 @@ export interface RuntimeComposerDraft {
   retrySave: () => void;
   flushSave: () => void;
   images: ComposerFile[];
-  model: string | null;
+  /** `undefined` = inherit `session.model`; `null` = explicit "Default model". */
+  model: string | null | undefined;
   effort: EffortLevel | null;
   pickedMode: RuntimeAccessMode | null;
   sending: boolean;
@@ -63,7 +64,7 @@ export class RuntimeDrafts {
     if (this.byId[id]) return this.byId[id];
     this.byId[id] = {
       freshContext: false, context: [], recovered: false, saveStatus: 'loading', saveError: null, retrySave: () => {}, flushSave: () => {},
-      text: '', images: [], model: null, effort: null, pickedMode: null,
+      text: '', images: [], model: undefined, effort: null, pickedMode: null,
       sending: false, reopening: false, stopping: false, awaitSeq: null, startError: null,
     };
     const stop = this.initialize?.(id, this.byId[id]);

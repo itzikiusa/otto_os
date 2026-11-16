@@ -22,7 +22,7 @@
 //!   reloaded.
 //! - **Never mid-turn.** A session that is working, streaming output, held
 //!   by an engine turn or has a fresh open provider turn
-//!   ([`SessionManager::busy_for_restart`]) is deferred: a background waiter
+//!   (`SessionManager::busy_for_restart`) is deferred: a background waiter
 //!   re-checks it every [`DEFER_POLL`] and restarts it once idle — unless its
 //!   process was already replaced (a user restart picked the new binary up)
 //!   or it went away. Restarts are staggered by [`RESTART_STAGGER`].
@@ -310,7 +310,7 @@ struct ReloadTally {
 pub async fn run(ctx: &ServerCtx, cfg: &CliAutoUpdateConfig) {
     let settings = SettingsRepo::new(ctx.pool.clone());
 
-    let mut pairs = ctx.manager.provider_update_commands();
+    let mut pairs = ctx.manager.provider_update_commands().await;
     if pairs.is_empty() {
         info!("cli_auto_update: no providers have an update command; nothing to do");
         let _ = settings.put(LAST_RUN_KEY, &json_now()).await;

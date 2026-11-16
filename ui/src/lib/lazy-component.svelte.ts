@@ -37,6 +37,8 @@ export function lazyComponent<T extends Component<any>>(loader: () => Promise<{ 
     if (mod || pending) return;
     pending = loader().then(
       (m) => {
+        pending = null;
+        error = null;
         mod = m.default;
       },
       (e: unknown) => {
@@ -55,7 +57,10 @@ export function lazyComponent<T extends Component<any>>(loader: () => Promise<{ 
     get error() {
       return error;
     },
-    prefetch: () => load(true),
+    prefetch: () => {
+      if (error !== null) error = null;
+      load(true);
+    },
     retry() {
       error = null;
       load();

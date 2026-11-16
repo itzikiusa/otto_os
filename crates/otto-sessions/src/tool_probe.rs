@@ -10,8 +10,269 @@ use otto_core::api::ToolStatus;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+/// Cold-cache inline wait budget on `/meta` before serving fast filesystem
+/// presence and letting the spawned version probe finish in the background.
+const COLD_INLINE_BUDGET: Duration = Duration::from_millis(300);
+
+/// Expand a leading `~` or `~/…` against `$HOME`.
+pub(crate) fn expand_tilde(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed == "~" || trimmed.starts_with("~/") {
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            let home_path = std::path::PathBuf::from(home);
+            return otto_transcript::claude_config::expand_home_path(trimmed, &home_path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| trimmed.to_string());
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Extract the executable token from a custom provider command string,
+/// skipping leading `KEY=VALUE` environment assignments and stripping trailing
+/// arguments (including `{cwd}` / `{sid}` flag templates). Returns `None` when
+/// the executable token itself is empty or contains `{cwd}` / `{sid}`.
+pub fn extract_custom_cmd_executable(cmd: &str) -> Option<String> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Preserve an unquoted executable path containing spaces when that exact
+    // path exists on disk (e.g. `/Applications/My Agent/agent`).
+    let whole = expand_tilde(trimmed);
+    if whole.contains(' ')
+        && !whole.contains("{cwd}")
+        && !whole.contains("{sid}")
+        && std::path::Path::new(&whole).is_file()
+    {
+        return Some(whole);
+    }
+    let tokens = otto_transcript::claude_config::split_command_tokens(trimmed);
+    let bin = tokens.into_iter().find(|tok| {
+        tok != "env" && otto_transcript::claude_config::parse_env_assignment(tok).is_none()
+    })?;
+    let bin = expand_tilde(&bin);
+    if bin.is_empty() || bin.contains("{cwd}") || bin.contains("{sid}") {
+        return None;
+    }
+    Some(bin)
+}
+
+/// Fast synchronous check whether `cmd` resolves to an executable file on
+/// `$PATH`/filesystem or a shell alias/function in the user's rc files.
+pub fn command_resolves_fast(cmd: &str) -> bool {
+    let Some(bin) = extract_custom_cmd_executable(cmd) else {
+        return false;
+    };
+    executable_in_path_or_fs(&bin) || (!bin.contains('/') && rc_defines_alias_or_fn(&bin))
+}
+
+/// Probe whether a custom provider command (`cmd`) is runnable on this machine:
+/// returns `None` when the executable token itself uses `{cwd}` / `{sid}`
+/// templates (unchecked until spawn), `Some(true)` when found on `$PATH` /
+/// filesystem, in shell rc aliases/functions, or via bounded (`1.5s`) login
+/// shell `command -v`, and `Some(false)` otherwise.
+pub async fn probe_custom_command_available(cmd: &str) -> Option<bool> {
+    let bin = extract_custom_cmd_executable(cmd)?;
+    if executable_in_path_or_fs(&bin) {
+        return Some(true);
+    }
+    if bin.contains('/') {
+        return Some(false);
+    }
+    Some(
+        rc_defines_alias_or_fn(&bin) || shell_knows_within(&bin, Duration::from_millis(1500)).await,
+    )
+}
+
+/// Batch custom-command availability probe keyed by provider slug.
+pub async fn probe_custom_command_statuses<I, K, V>(cmds: I) -> BTreeMap<String, Option<bool>>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    let tasks: Vec<_> = cmds
+        .into_iter()
+        .map(|(k, v)| {
+            let (k, v) = (k.into(), v.into());
+            tokio::spawn(async move { (k, probe_custom_command_available(&v).await) })
+        })
+        .collect();
+    let mut out = BTreeMap::new();
+    for task in tasks {
+        if let Ok((k, status)) = task.await {
+            out.insert(k, status);
+        }
+    }
+    out
+}
+
+/// Fast in-process executable check (`is_file` + execute bit on Unix) across
+/// explicit paths or `$PATH`, avoiding a `which` subprocess per tool.
+pub fn executable_in_path_or_fs(program: &str) -> bool {
+    fn is_exec(p: &std::path::Path) -> bool {
+        let Ok(meta) = std::fs::metadata(p) else {
+            return false;
+        };
+        if !meta.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    }
+
+    let expanded = expand_tilde(program);
+    let p = std::path::Path::new(&expanded);
+    if expanded.contains('/') {
+        return is_exec(p);
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(&expanded))
+        .any(|cand| is_exec(&cand))
+}
+
+fn rc_content_defines_alias_or_fn(content: &str, program: &str) -> bool {
+    if program.is_empty() {
+        return false;
+    }
+    for raw_line in content.lines() {
+        let mut line = raw_line.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("alias ") {
+            let rest = rest.trim_start();
+            for prefix in [
+                format!("{program}="),
+                format!("'{program}'="),
+                format!("\"{program}\"="),
+            ] {
+                if rest.starts_with(&prefix) {
+                    return true;
+                }
+            }
+        }
+        if let Some(rest) = line.strip_prefix("function ") {
+            line = rest.trim_start();
+            if let Some(after) = line.strip_prefix(program) {
+                if after.is_empty()
+                    || after.starts_with(char::is_whitespace)
+                    || after.starts_with('(')
+                    || after.starts_with('{')
+                {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if let Some(after) = line.strip_prefix(program) {
+            let after = after.trim_start();
+            if after.starts_with("()") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Fast (<1 ms) scan of standard shell rc files for an `alias <program>=…` or
+/// `<program>()` shell function definition so custom providers like
+/// `claudework -> claude-work` resolve immediately during cold `/meta` probes
+/// without waiting on an interactive login shell boot.
+pub fn rc_defines_alias_or_fn(program: &str) -> bool {
+    if program.is_empty() || program.contains('/') {
+        return false;
+    }
+    let mut candidates = Vec::with_capacity(11);
+    if let Some(zdot) = std::env::var_os("ZDOTDIR").filter(|v| !v.is_empty()) {
+        let zdir = std::path::PathBuf::from(zdot);
+        for name in [".zshrc", ".zshenv", ".zprofile"] {
+            candidates.push(zdir.join(name));
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        let hdir = std::path::PathBuf::from(home);
+        for name in [
+            ".zshrc",
+            ".zshenv",
+            ".zprofile",
+            ".bashrc",
+            ".bash_profile",
+            ".bash_aliases",
+            ".aliases",
+            ".profile",
+        ] {
+            let p = hdir.join(name);
+            if !candidates.contains(&p) {
+                candidates.push(p);
+            }
+        }
+    }
+    for path in candidates {
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        use std::io::Read;
+        let mut buf = String::new();
+        if file.take(256 * 1024).read_to_string(&mut buf).is_ok()
+            && rc_content_defines_alias_or_fn(&buf, program)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn fast_tool_statuses(specs: &BTreeMap<String, String>) -> Vec<ToolStatus> {
+    specs
+        .iter()
+        .filter_map(|(name, program)| {
+            let builtin_name = DETECTED_TOOLS.contains(&name.as_str()) && program == name;
+            if executable_in_path_or_fs(program)
+                || (!builtin_name && !program.contains('/') && rc_defines_alias_or_fn(program))
+            {
+                Some(ToolStatus {
+                    name: name.clone(),
+                    found: true,
+                    version: None,
+                })
+            } else if !builtin_name && !program.contains('/') {
+                // Bare custom command may be defined in a sourced shell plugin:
+                // omit from the provisional vector so pickers keep it enabled
+                // (`checked: false`) until `run_tool_probe` finishes.
+                None
+            } else {
+                Some(ToolStatus {
+                    name: name.clone(),
+                    found: false,
+                    version: None,
+                })
+            }
+        })
+        .collect()
+}
 /// Tools probed by name on every `/meta`.
-pub const DETECTED_TOOLS: [&str; 5] = ["claude", "codex", "agy", "git", "clickhouse"];
+pub const DETECTED_TOOLS: [&str; 8] = [
+    "claude",
+    "codex",
+    "agy",
+    "opencode",
+    "pi",
+    "muse",
+    "git",
+    "clickhouse",
+];
 
 /// The `name → program` map to probe: [`DETECTED_TOOLS`] by name, overridden
 /// by each provider's configured executable (`None` = no executable).
@@ -47,8 +308,19 @@ type ToolsCache = Option<(
 )>;
 
 static TOOLS_CACHE: tokio::sync::Mutex<ToolsCache> = tokio::sync::Mutex::const_new(None);
+static TOOLS_CACHE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// One background refresh at a time.
 static TOOLS_REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Synchronously invalidate `/meta`'s tool availability cache (e.g. after CLI
+/// installation or provider login).
+pub fn invalidate_tools_cache() {
+    use std::sync::atomic::Ordering;
+    TOOLS_CACHE_GEN.fetch_add(1, Ordering::AcqRel);
+    if let Ok(mut guard) = TOOLS_CACHE.try_lock() {
+        *guard = None;
+    }
+}
 
 /// What a cached probe of `age` may be used for.
 #[derive(Debug, PartialEq, Eq)]
@@ -105,14 +377,25 @@ async fn run_tool_probe(specs: &BTreeMap<String, String>) -> Vec<ToolStatus> {
 /// up at once. A stale probe of the same specs is served while one background
 /// refresh replaces it (see [`freshness`]).
 pub async fn probe_tools_cached(specs: BTreeMap<String, String>) -> Vec<ToolStatus> {
+    probe_tools_cached_with_status(specs).await.0
+}
+
+/// Like [`probe_tools_cached`], also returning whether the returned vector is a
+/// cold-boot provisional fast snapshot while the background probe is still in
+/// flight.
+pub async fn probe_tools_cached_with_status(
+    specs: BTreeMap<String, String>,
+) -> (Vec<ToolStatus>, bool) {
     use std::sync::atomic::Ordering;
     let mut slot = TOOLS_CACHE.lock().await;
+    let cur_gen = TOOLS_CACHE_GEN.load(Ordering::Acquire);
     if let Some((at, cached_specs, tools)) = slot.as_ref() {
         if *cached_specs == specs {
             match freshness(at.elapsed(), tools) {
-                Freshness::Fresh => return tools.clone(),
+                Freshness::Fresh => return (tools.clone(), false),
                 Freshness::Stale => {
                     if !TOOLS_REFRESHING.swap(true, Ordering::AcqRel) {
+                        let start_gen = cur_gen;
                         tokio::spawn(async move {
                             // Cleared even if the probe panics.
                             struct Done;
@@ -123,19 +406,52 @@ pub async fn probe_tools_cached(specs: BTreeMap<String, String>) -> Vec<ToolStat
                             }
                             let _done = Done;
                             let tools = run_tool_probe(&specs).await;
-                            *TOOLS_CACHE.lock().await =
-                                Some((std::time::Instant::now(), specs, tools));
+                            let mut guard = TOOLS_CACHE.lock().await;
+                            if TOOLS_CACHE_GEN.load(Ordering::Acquire) == start_gen {
+                                *guard = Some((std::time::Instant::now(), specs, tools));
+                            }
                         });
                     }
-                    return tools.clone();
+                    return (tools.clone(), false);
                 }
                 Freshness::Expired => {}
             }
         }
     }
-    let tools = run_tool_probe(&specs).await;
-    *slot = Some((std::time::Instant::now(), specs, tools.clone()));
-    tools
+    if TOOLS_REFRESHING.load(Ordering::Acquire) {
+        return match slot.as_ref().filter(|(_, s, _)| *s == specs) {
+            Some((_, _, t)) => (t.clone(), true),
+            None => (fast_tool_statuses(&specs), true),
+        };
+    }
+    let specs_bg = specs.clone();
+    let start_gen = cur_gen;
+    let (tx, rx) = tokio::sync::oneshot::channel::<Vec<ToolStatus>>();
+    TOOLS_REFRESHING.store(true, Ordering::Release);
+    tokio::spawn(async move {
+        struct Done;
+        impl Drop for Done {
+            fn drop(&mut self) {
+                TOOLS_REFRESHING.store(false, Ordering::Release);
+            }
+        }
+        let _done = Done;
+        let tools = run_tool_probe(&specs_bg).await;
+        let _ = tx.send(tools.clone());
+        let mut guard = TOOLS_CACHE.lock().await;
+        if TOOLS_CACHE_GEN.load(Ordering::Acquire) == start_gen {
+            *guard = Some((std::time::Instant::now(), specs_bg, tools));
+        }
+    });
+    match timeout(COLD_INLINE_BUDGET, rx).await {
+        Ok(Ok(tools)) => {
+            if TOOLS_CACHE_GEN.load(Ordering::Acquire) == start_gen {
+                *slot = Some((std::time::Instant::now(), specs, tools.clone()));
+            }
+            (tools, false)
+        }
+        _ => (fast_tool_statuses(&specs), true),
+    }
 }
 
 /// Count of real probe passes run (test hook for the single-flight cache).
@@ -145,34 +461,30 @@ static PROBE_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 /// A template cannot be checked until a session supplies its cwd/id. Omit its
 /// row so callers report unchecked rather than disabling a valid provider.
 fn configure_provider_probe(tools: &mut BTreeMap<String, String>, name: &str, program: String) {
-    if program.contains("{cwd}") || program.contains("{sid}") {
-        tools.remove(name);
-    } else {
-        tools.insert(name.to_string(), program);
+    match extract_custom_cmd_executable(&program) {
+        Some(bin) => {
+            tools.insert(name.to_string(), bin);
+        }
+        None => {
+            tools.remove(name);
+        }
     }
 }
 
 /// Probe one external tool: `which <name>` for presence, then
 /// `<name> --version` (2s timeout) for the version string.
 async fn detect_tool(name: &str, program: &str) -> ToolStatus {
-    let found = match timeout(
-        Duration::from_secs(2),
-        Command::new("which")
-            .arg(program)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    {
-        Ok(Ok(out)) => out.status.success(),
-        _ => false,
-    };
+    let found = executable_in_path_or_fs(program);
     // A configured command that isn't on PATH may be a shell alias/function
     // (`alias claude-work='CLAUDE_CONFIG_DIR=… claude'`); spawn runs those via
-    // the login shell (`otto_sessions::providers::shell_wrapped`), so ask that
-    // same shell before reporting it missing. Plain built-in names skip this.
+    // the login shell (`otto_sessions::providers::shell_wrapped`), so check
+    // standard rc files first (<1 ms) and fall back to that login shell before
+    // reporting it missing. Plain built-in names skip this.
     let builtin_name = DETECTED_TOOLS.contains(&name) && program == name;
-    let found = found || (!builtin_name && !program.contains('/') && shell_knows(program).await);
+    let found = found
+        || (!builtin_name
+            && !program.contains('/')
+            && (rc_defines_alias_or_fn(program) || shell_knows(program).await));
 
     let mut version = None;
     if found && DETECTED_TOOLS.contains(&name) {
@@ -180,6 +492,7 @@ async fn detect_tool(name: &str, program: &str) -> ToolStatus {
             Duration::from_secs(2),
             Command::new(program)
                 .arg("--version")
+                .envs([otto_core::agent_runtime::MUSE_NO_AUTO_UPDATE])
                 .kill_on_drop(true)
                 .output(),
         )
@@ -204,9 +517,13 @@ async fn detect_tool(name: &str, program: &str) -> ToolStatus {
 
 /// Whether the user's interactive login shell resolves `program` (alias,
 /// function or executable). The name travels as `$1`, never spliced into the
-/// script. 5s cap: rc files can be slow, and the result is cached for
-/// [`TOOLS_TTL`].
+/// script. 15s cap: interactive rc plugins can take several seconds under
+/// post-deploy boot load, and the result is cached for [`TOOLS_TTL`].
 async fn shell_knows(program: &str) -> bool {
+    shell_knows_within(program, Duration::from_millis(1500)).await
+}
+
+async fn shell_knows_within(program: &str, budget: Duration) -> bool {
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -214,14 +531,14 @@ async fn shell_knows(program: &str) -> bool {
     let mut cmd = Command::new(shell);
     cmd.args([
         "-ilc",
-        r#"command -v "$1" >/dev/null"#,
+        r#"shopt -s expand_aliases 2>/dev/null; command -v "$1" >/dev/null 2>&1 || alias "$1" >/dev/null 2>&1"#,
         "otto-probe",
         program,
     ])
     .stdin(std::process::Stdio::null())
     .kill_on_drop(true);
     matches!(
-        timeout(Duration::from_secs(5), cmd.output()).await,
+        timeout(budget, cmd.output()).await,
         Ok(Ok(out)) if out.status.success()
     )
 }
@@ -252,6 +569,53 @@ mod tests {
         );
         configure_provider_probe(&mut probes, "custom-agent", "/bin/sh".into());
         assert_eq!(probes["custom-agent"], "/bin/sh");
+    }
+
+    #[test]
+    fn rc_alias_and_function_definitions_are_detected_and_provisional_probe_never_disables_custom_bare_cmd(
+    ) {
+        let rc = r#"
+            # alias commented-out='claude'
+            alias claude-work='CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude'
+            alias "claude-alt"="claude --profile alt"
+            my-wrapper() {
+              claude "$@"
+            }
+            function other-wrapper {
+              codex "$@"
+            }
+        "#;
+        assert!(rc_content_defines_alias_or_fn(rc, "claude-work"));
+        assert!(rc_content_defines_alias_or_fn(rc, "claude-alt"));
+        assert!(rc_content_defines_alias_or_fn(rc, "my-wrapper"));
+        assert!(rc_content_defines_alias_or_fn(rc, "other-wrapper"));
+        assert!(!rc_content_defines_alias_or_fn(rc, "commented-out"));
+        assert!(!rc_content_defines_alias_or_fn(rc, "claude-work-extra"));
+
+        let specs = BTreeMap::from([
+            ("sh-ready".to_string(), "/bin/sh".to_string()),
+            (
+                "custom-sourced-alias".to_string(),
+                "otto-nonexistent-sourced-alias-xyz".to_string(),
+            ),
+            (
+                "missing-abs".to_string(),
+                "/nonexistent/otto-missing-bin".to_string(),
+            ),
+        ]);
+        let fast = fast_tool_statuses(&specs);
+        assert!(
+            fast.iter().any(|t| t.name == "sh-ready" && t.found),
+            "path executable reported ready"
+        );
+        assert!(
+            !fast.iter().any(|t| t.name == "custom-sourced-alias"),
+            "bare custom command omitted from provisional list instead of false-negative found:false"
+        );
+        assert!(
+            fast.iter().any(|t| t.name == "missing-abs" && !t.found),
+            "explicit path missing executable still reported false"
+        );
     }
 
     /// S8-04: 50 concurrent `/meta` probes run the tool detection ONCE per

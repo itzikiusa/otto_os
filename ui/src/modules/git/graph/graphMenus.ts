@@ -8,7 +8,7 @@ import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
 import type { CommitInfo, RefBranch, RefTag, RefsResp, StashInfo, SubmoduleInfo, WorktreeInfo } from '../../../lib/api/types';
 import { ui } from '../../../lib/stores/ui.svelte';
 import { splitRemoteRef } from '../refTracking';
-import { gitBridge } from '../gitBridge.svelte';
+import { gitBridge } from '../../../lib/diff/gitBridge.svelte';
 import type { RefChip } from '../ref-menus';
 import type { GraphActions, RefKnowledge } from './graphActions.svelte';
 

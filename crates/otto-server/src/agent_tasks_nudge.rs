@@ -96,7 +96,14 @@ pub fn nested_agent_alive(
     pid: Option<u32>,
     table: &[otto_sessions::nested::ProcInfo],
 ) -> bool {
-    if matches!(session.provider.as_str(), "claude" | "codex") {
+    if matches!(session.provider.as_str(), "claude" | "codex")
+        || (session.provider != "shell"
+            && matches!(
+                otto_sessions::providers::infer_model_family(None, "", &session.provider)
+                    .as_deref(),
+                Some("claude" | "codex")
+            ))
+    {
         return true;
     }
     let Some(expected) = session.meta.get("nested_provider").and_then(|v| v.as_str()) else {

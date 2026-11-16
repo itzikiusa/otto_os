@@ -20,7 +20,7 @@ function data(firstPage: number) {
     '../../../lib/toast.svelte': { toasts: {} },
     '../../../lib/toastError': { toastError() {} },
     '../../../lib/stores/git.svelte': { git: { refsRev: {} } },
-    '../gitBridge.svelte': { gitBridge: { stashCount: {} } },
+    '../../../lib/diff/gitBridge.svelte': { gitBridge: { stashCount: {} } },
     '../graph-cache': { graphCache: { get: () => null, set() {} } },
     '../graph-splice': { spliceHistory: () => null },
     '../ref-menus': loadSource(git('ref-menus.ts'), {}),

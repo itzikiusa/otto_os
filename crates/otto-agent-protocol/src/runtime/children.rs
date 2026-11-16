@@ -31,8 +31,8 @@
 //!   as `stopped` ("… was interrupted when Otto restarted").
 
 use otto_core::agent_runtime::{
-    AskChildReq, ChildOf, ChildOpener, RuntimeAccessMode, RuntimeProvider, ASK_CHILD_MAX_TARGETS,
-    CHILD_META_KEY,
+    AskChildReq, ChildOf, ChildOpener, OpenPeerReq, RuntimeAccessMode, RuntimeProvider,
+    ASK_CHILD_MAX_TARGETS, CHILD_META_KEY, PROVIDER_SLUG_META_KEY,
 };
 
 use super::*;
@@ -53,6 +53,15 @@ pub(super) struct WakeKey {
 
 /// `meta.child_of` for a thread `opener` opens.
 pub(super) fn child_meta(opener: &Id, by: ChildOpener) -> serde_json::Value {
+    child_meta_with_slug(opener, by, None)
+}
+
+/// `meta.child_of` (plus optional `provider_slug`) for a thread `opener` opens.
+pub(super) fn child_meta_with_slug(
+    opener: &Id,
+    by: ChildOpener,
+    custom_slug: Option<&str>,
+) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     m.insert(
         CHILD_META_KEY.into(),
@@ -62,6 +71,12 @@ pub(super) fn child_meta(opener: &Id, by: ChildOpener) -> serde_json::Value {
         })
         .unwrap_or_default(),
     );
+    if let Some(slug) = custom_slug.map(str::trim).filter(|s| !s.is_empty()) {
+        m.insert(
+            PROVIDER_SLUG_META_KEY.into(),
+            serde_json::Value::String(slug.to_string()),
+        );
+    }
     serde_json::Value::Object(m)
 }
 
@@ -97,6 +112,16 @@ fn provider_label(p: RuntimeProvider) -> &'static str {
         RuntimeProvider::Agy => "Antigravity",
         RuntimeProvider::Opencode => "opencode",
         RuntimeProvider::Pi => "pi",
+        RuntimeProvider::Muse => "Muse",
+    }
+}
+
+fn session_provider_label(s: &RuntimeSession) -> &str {
+    let slug = s.provider_slug();
+    if slug != s.provider.as_str() {
+        slug
+    } else {
+        provider_label(s.provider)
     }
 }
 
@@ -104,7 +129,7 @@ fn provider_label(p: RuntimeProvider) -> &'static str {
 pub(super) fn started_notice(children: &[RuntimeSession], prompt: &str) -> String {
     let who = children
         .iter()
-        .map(|c| provider_label(c.provider))
+        .map(session_provider_label)
         .collect::<Vec<_>>()
         .join(", ");
     let ids = children
@@ -124,7 +149,7 @@ pub(super) fn ended_notice(
     status: TurnTerminalStatus,
     answer: &str,
 ) -> String {
-    let who = provider_label(child.provider);
+    let who = session_provider_label(child);
     let (verb, event) = match status {
         TurnTerminalStatus::Completed => ("finished", "finished"),
         TurnTerminalStatus::Failed => ("failed", "failed"),
@@ -142,7 +167,7 @@ pub(super) fn ended_notice(
 /// The parent's notice for a child turn a daemon restart cut off (the card
 /// reads it as stopped; the words say why).
 pub(super) fn restart_notice(child: &RuntimeSession, answer: &str) -> String {
-    let who = provider_label(child.provider);
+    let who = session_provider_label(child);
     let line = one_line(answer, NOTICE_LINE_CHARS);
     let body = if line.is_empty() {
         format!("{who} was interrupted when Otto restarted")
@@ -183,7 +208,7 @@ fn wake_text_how(child: &RuntimeSession, how: &str, answer: &str) -> String {
         "[Reply from thread \"{}\" ({}, id {}): its turn {how}. Answer it with the \
          otto_thread_message tool (session_id {}); read it again with otto_thread_read.]\n\n{body}",
         child.title,
-        child.provider.as_str(),
+        child.provider_slug(),
         child.id,
         child.id
     )
@@ -284,13 +309,17 @@ impl AgentRuntime {
                 open.saturating_sub(1)
             )));
         }
+        let mut resolved = Vec::with_capacity(n);
         for t in &req.targets {
-            if self.inner.drivers.create(t.provider).is_none() {
+            let (provider, custom_slug) =
+                self.resolve_target_provider(t.provider, t.provider_slug.as_deref())?;
+            if self.inner.drivers.create(provider).is_none() {
                 return Err(Error::Invalid(format!(
                     "no structured driver for provider '{}' yet",
-                    t.provider.as_str()
+                    custom_slug.as_deref().unwrap_or_else(|| provider.as_str())
                 )));
             }
+            resolved.push((provider, custom_slug));
         }
         let base = req
             .title
@@ -307,9 +336,12 @@ impl AgentRuntime {
                 }
             });
         let mut made: Vec<RuntimeSession> = Vec::with_capacity(n);
-        for t in &req.targets {
+        for (t, (provider, custom_slug)) in req.targets.iter().zip(&resolved) {
             let title = if n > 1 {
-                format!("{base} · {}", provider_label(t.provider))
+                let who = custom_slug
+                    .as_deref()
+                    .unwrap_or_else(|| provider_label(*provider));
+                format!("{base} · {who}")
             } else {
                 base.clone()
             };
@@ -317,13 +349,17 @@ impl AgentRuntime {
                 .open_linked(
                     caller,
                     OpenPeerReq {
-                        provider: t.provider,
+                        provider: *provider,
                         prompt: None,
                         title: Some(title),
                         model: t.model.clone(),
                         effort: None,
                         cwd: None,
-                        meta: Some(child_meta(caller, ChildOpener::Person)),
+                        meta: Some(child_meta_with_slug(
+                            caller,
+                            ChildOpener::Person,
+                            custom_slug.as_deref(),
+                        )),
                     },
                     false,
                 )
@@ -501,6 +537,7 @@ mod tests {
 
     fn session(provider: RuntimeProvider) -> RuntimeSession {
         RuntimeSession {
+            title_auto: false,
             id: "kid".into(),
             workspace_id: "w".into(),
             provider,
@@ -517,6 +554,7 @@ mod tests {
             parent_id: Some("root".into()),
             ui_control: None,
             background_tasks: Vec::new(),
+            capabilities: Default::default(),
             meta: Some(child_meta(&"lead".into(), ChildOpener::Agent)),
         }
     }

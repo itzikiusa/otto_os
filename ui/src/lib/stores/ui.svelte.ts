@@ -15,16 +15,7 @@ import { insertFavorite, loadReconciledSidebarStorage, mergeSavedOrder, persistK
 export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
 export type Direction = 'ltr' | 'rtl';
-export type RightTab =
-  | 'git'
-  | 'files'
-  | 'notes'
-  | 'activity'
-  | 'outputs'
-  | 'info'
-  | 'browser'
-  | 'api'
-  | 'canvas';
+export type RightTab = 'git' | 'files' | 'notes' | 'activity' | 'outputs' | 'info' | 'browser' | 'api' | 'canvas';
 /** What the Side panel can show: a shell tab, or a tab a page contributes
  *  while it is mounted (`page:<name>`, stores/rightPanel.svelte.ts). */
 export type RightPanelTab = RightTab | `page:${string}`;
@@ -44,12 +35,14 @@ export const TERM_FONT_OPTIONS: { id: TermFontKey; name: string; desc: string }[
   { id: 'menlo', name: 'Menlo', desc: 'Classic macOS mono — Hebrew via Cousine' },
 ];
 
+const EMOJI_FALLBACK = "'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji'";
 const TERM_FONT_STACKS: Record<TermFontKey, string> = {
   // 'Cousine' sits after the Latin fonts: the browser only falls through to it
-  // for codepoints SF Mono/Menlo lack (i.e. Hebrew), so Latin/code is unchanged.
-  system: "'SF Mono', SFMono-Regular, Menlo, Monaco, 'Cousine', 'Courier New', monospace",
-  cousine: "'Cousine', 'SF Mono', SFMono-Regular, Menlo, monospace",
-  menlo: "Menlo, Monaco, 'Cousine', 'Courier New', monospace",
+  // for codepoints SF Mono/Menlo lack (i.e. Hebrew), so Latin/code is unchanged;
+  // color emoji fallbacks precede generic `monospace` so Courier doesn't hijack symbols.
+  system: `'SF Mono', SFMono-Regular, Menlo, Monaco, 'Cousine', 'Courier New', ${EMOJI_FALLBACK}, monospace`,
+  cousine: `'Cousine', 'SF Mono', SFMono-Regular, Menlo, ${EMOJI_FALLBACK}, monospace`,
+  menlo: `Menlo, Monaco, 'Cousine', 'Courier New', ${EMOJI_FALLBACK}, monospace`,
 };
 
 const LS = {

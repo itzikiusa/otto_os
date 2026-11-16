@@ -8,10 +8,12 @@
   import { placeAnchored } from '../anchorPlace';
   import { confirmer } from '../confirm.svelte';
   import {
+    canonicalModelId,
     effortsForModel,
     formatEffortLabel,
     INTERACTION_MODES,
     modelsForProvider,
+    normalizeEffort,
     supportsEffortSelection,
     supportsInteractionMode,
     supportsModelSelection,
@@ -37,6 +39,9 @@
     onmodel: (m: string | null) => void;
     /** Omitted: the target takes no effort / access mode (no control shown). */
     oneffort?: (e: EffortLevel | null) => void;
+    /** The levels the target's agent reports it takes (a runtime thread's
+     *  `capabilities.efforts`); given, they bound the list. */
+    effortLevels?: readonly string[];
     onmode?: (m: InteractionMode) => void;
     onclose: () => void;
   }
@@ -52,12 +57,13 @@
     onprovider,
     onmodel,
     oneffort,
+    effortLevels,
     onmode,
     onclose,
   }: Props = $props();
 
   const FAV_KEY = 'otto_model_favorites';
-  const PAGE = 8;
+  const PAGE = 12;
 
   function readFavs(): string[] {
     try {
@@ -81,42 +87,102 @@
   let view = $state<string>(untrack(() => provider));
   let query = $state('');
   let showAll = $state(false);
+  let activeIdx = $state(0);
   let panelEl = $state<HTMLDivElement | null>(null);
   let searchEl = $state<HTMLInputElement | null>(null);
   let pos = $state<{ top: number; left: number; maxH: number }>({ top: -9999, left: 0, maxH: 480 });
 
   const meta = $derived(auth.meta);
   const current = $derived(model ?? effectiveModel);
+  const currentId = $derived(canonicalModelId(provider, current, meta));
   const rows = $derived.by(() => {
     const q = query.trim().toLowerCase();
     const list =
       view === '★'
-        ? favs.flatMap((key) => {
-            const i = key.indexOf(':');
-            const p = key.slice(0, i);
-            const m = modelsForProvider(p, meta).find((x) => x.id === key.slice(i + 1));
-            return m ? [{ p, m }] : [];
-          })
+        ? (() => {
+            const seen = new Set<string>();
+            return favs.flatMap((key) => {
+              const i = key.indexOf(':');
+              const p = key.slice(0, i);
+              if (!providers.includes(p)) return [];
+              const resolved = canonicalModelId(p, key.slice(i + 1), meta);
+              const m = resolved
+                ? modelsForProvider(p, meta).find((x) => x.id === resolved)
+                : undefined;
+              if (!m || seen.has(`${p}:${m.id}`)) return [];
+              seen.add(`${p}:${m.id}`);
+              return [{ p, m }];
+            });
+          })()
         : modelsForProvider(view, meta).map((m) => ({ p: view, m }));
     return q ? list.filter(({ m }) => `${m.label} ${m.id}`.toLowerCase().includes(q)) : list;
   });
   const shown = $derived(showAll || query.trim() ? rows : rows.slice(0, PAGE));
-  const efforts = $derived(oneffort && supportsEffortSelection(provider) ? effortsForModel(provider, current, meta) : []);
+  const hasDefaultRow = $derived(view !== '★' && supportsModelSelection(view, meta) && !query);
+  const selectableItems = $derived.by(() => {
+    const out: Array<{ p: string; id: string | null }> = [];
+    if (hasDefaultRow && pickable(view)) out.push({ p: view, id: null });
+    for (let i = 0; i < shown.length; i++) {
+      const r = shown[i];
+      if (pickable(r.p)) out.push({ p: r.p, id: r.m.id });
+    }
+    return out;
+  });
+
+  $effect(() => {
+    void view;
+    void query;
+    activeIdx = 0;
+  });
+  const efforts = $derived.by((): EffortLevel[] => {
+    if (!oneffort) return [];
+    if (!effortLevels) return supportsEffortSelection(provider, meta) ? effortsForModel(provider, current, meta) : [];
+    const reported = effortLevels.map(normalizeEffort).filter((e): e is EffortLevel => e !== null);
+    // The model's own levels, bounded by what the agent takes.
+    const model = supportsEffortSelection(provider, meta) ? effortsForModel(provider, current, meta).filter((e) => reported.includes(e)) : [];
+    return model.length ? model : reported;
+  });
 
   function pickable(p: string): boolean {
     return providerReadiness(p).available && (!lockProvider || p === provider);
   }
 
   function pick(p: string, id: string | null): void {
+    if (!pickable(p)) return;
     if (p !== provider) {
-      if (!pickable(p)) return;
       onprovider?.(p);
     }
     onmodel(id);
+    if (effort !== null && oneffort) {
+      const nextEfforts = supportsEffortSelection(p, meta) ? effortsForModel(p, id, meta) : [];
+      if (!nextEfforts.includes(effort)) {
+        oneffort(null);
+      }
+    }
+  }
+
+  function pickEffort(lvl: EffortLevel | null): void {
+    if (model !== null && currentId !== null && model !== currentId) {
+      onmodel(currentId);
+    }
+    oneffort?.(lvl);
   }
 
   function place(): void {
     if (panelEl) pos = placeAnchored(anchor, panelEl, { prefer: 'above', align: 'end' });
+  }
+
+  function closePicker(): void {
+    onclose();
+    anchor.focus();
+  }
+
+  async function expandMore(): Promise<void> {
+    const firstNewIdx = (hasDefaultRow && pickable(view) ? 1 : 0) + PAGE;
+    showAll = true;
+    await tick();
+    const target = panelEl?.querySelector<HTMLElement>(`[data-mp-idx="${firstNewIdx}"]`) ?? searchEl;
+    target?.focus();
   }
 
   onMount(() => {
@@ -125,8 +191,18 @@
       searchEl?.focus();
     });
     const onResize = (): void => place();
+    const onWinKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      closePicker();
+    };
     window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    window.addEventListener('keydown', onWinKey, true);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('keydown', onWinKey, true);
+    };
   });
 
   $effect(() => {
@@ -135,12 +211,32 @@
     void tick().then(place);
   });
 
+  function onSearchKeydown(e: KeyboardEvent): void {
+    if (selectableItems.length === 0) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const count = selectableItems.length;
+      const clamped = Math.min(Math.max(activeIdx, 0), count - 1);
+      activeIdx = (clamped + (e.key === 'ArrowDown' ? 1 : count - 1)) % count;
+      void tick().then(() => {
+        panelEl?.querySelector<HTMLElement>(`[data-mp-idx="${activeIdx}"]`)?.scrollIntoView({ block: 'nearest' });
+      });
+      return;
+    }
+    if (e.key === 'Enter') {
+      const target = selectableItems[Math.min(Math.max(activeIdx, 0), selectableItems.length - 1)];
+      if (target) {
+        e.preventDefault();
+        pick(target.p, target.id);
+      }
+    }
+  }
+
   function onKey(e: KeyboardEvent): void {
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      onclose();
-      anchor.focus();
+      closePicker();
       return;
     }
     if ((e.metaKey || e.ctrlKey) && /^[1-4]$/.test(e.key)) {
@@ -164,7 +260,7 @@
   }
 </script>
 
-<button type="button" class="mp-catch" aria-label="Close model picker" title="Close" tabindex="-1" onclick={onclose}></button>
+<button type="button" class="mp-catch" aria-label="Close model picker" title="Close model picker" tabindex="-1" onclick={onclose}></button>
 <div
   bind:this={panelEl}
   class="mp-panel"
@@ -184,24 +280,25 @@
       class:on={view === '★'}
       aria-pressed={view === '★'}
       aria-label="Favorite models"
-      title="Favorites"
+      title="Favorite models"
       onclick={() => (view = '★')}
     >
       <Icon name="star" size={14} />
     </button>
     {#each providers as p (p)}
       {@const ready = providerReadiness(p)}
+      {@const provTitle = !ready.available
+        ? `${harnessLabel(p)} — ${ready.message}`
+        : lockProvider && p !== provider
+          ? `${harnessLabel(p)} — start a new thread to use it`
+          : harnessLabel(p)}
       <button
         type="button"
         class="mp-prov"
         class:on={view === p}
         aria-pressed={view === p}
-        aria-label={harnessLabel(p)}
-        title={!ready.available
-          ? `${harnessLabel(p)} — ${ready.message}`
-          : lockProvider && p !== provider
-            ? `${harnessLabel(p)} — start a new thread to use it`
-            : harnessLabel(p)}
+        aria-label={provTitle}
+        title={provTitle}
         disabled={!ready.available}
         data-testid="model-picker-provider-{p}"
         onclick={() => {
@@ -228,14 +325,18 @@
             placeholder="Search models…"
             aria-label="Search models"
             data-testid="model-picker-search"
+            onkeydown={onSearchKeydown}
           />
         </div>
-        {#if view !== '★' && supportsModelSelection(view, meta) && !query}
+        {#if hasDefaultRow}
+          {@const defaultSelectable = pickable(view)}
           <button
             type="button"
             class="mp-row"
             class:cur={view === provider && model === null}
-            disabled={!pickable(view)}
+            class:kbd-active={defaultSelectable && activeIdx === 0}
+            data-mp-idx={defaultSelectable ? 0 : undefined}
+            disabled={!defaultSelectable}
             onclick={() => pick(view, null)}
           >
             <span class="mp-check">{#if view === provider && model === null}<Icon name="check" size={12} />{/if}</span>
@@ -244,14 +345,19 @@
         {/if}
         {#each shown as r, i (`${r.p}:${r.m.id}`)}
           {@const key = `${r.p}:${r.m.id}`}
-          {@const isCur = r.p === provider && current === r.m.id}
+          {@const isCur = r.p === provider && model !== null && currentId === r.m.id}
+          {@const rowSelectable = pickable(r.p)}
+          {@const rowIdx = rowSelectable ? selectableItems.findIndex((s) => s.p === r.p && s.id === r.m.id) : -1}
+          {@const favTitle = favs.includes(key) ? `Remove ${r.m.label} from favorites` : `Add ${r.m.label} to favorites`}
           <div class="mp-rowwrap">
             <button
               type="button"
               class="mp-row"
               class:cur={isCur}
+              class:kbd-active={rowIdx >= 0 && activeIdx === rowIdx}
+              data-mp-idx={rowIdx >= 0 ? rowIdx : undefined}
               title={r.m.description || r.m.id}
-              disabled={!pickable(r.p)}
+              disabled={!rowSelectable}
               onclick={() => pick(r.p, r.m.id)}
             >
               <span class="mp-check">{#if isCur}<Icon name="check" size={12} />{/if}</span>
@@ -264,8 +370,8 @@
               class="icon-btn mp-fav"
               class:on={favs.includes(key)}
               aria-pressed={favs.includes(key)}
-              aria-label="{favs.includes(key) ? 'Unfavorite' : 'Favorite'} {r.m.label}"
-              title={favs.includes(key) ? 'Remove from favorites' : 'Add to favorites'}
+              aria-label={favTitle}
+              title={favTitle}
               onclick={() => toggleFav(key)}
             >
               <Icon name="star" size={12} />
@@ -275,7 +381,7 @@
           <p class="mp-empty">{view === '★' ? 'Star a model to keep it here.' : 'No models match.'}</p>
         {/each}
         {#if !showAll && !query.trim() && rows.length > PAGE}
-          <button type="button" class="btn small ghost mp-more" onclick={() => (showAll = true)}>
+          <button type="button" class="btn small ghost mp-more" onclick={() => void expandMore()}>
             Show {rows.length - PAGE} more
           </button>
         {/if}
@@ -287,12 +393,12 @@
       {#if efforts.length > 0}
         <section class="mp-effort" aria-label="Reasoning" data-testid="picker-effort">
           <h3 class="mp-head">Reasoning</h3>
-          <button type="button" class="mp-row" class:cur={effort === null} onclick={() => oneffort?.(null)}>
+          <button type="button" class="mp-row" class:cur={effort === null} onclick={() => pickEffort(null)}>
             <span class="mp-check">{#if effort === null}<Icon name="check" size={12} />{/if}</span>
             <span class="mp-name">Default</span>
           </button>
           {#each efforts as lvl (lvl)}
-            <button type="button" class="mp-row" class:cur={effort === lvl} onclick={() => oneffort?.(lvl)}>
+            <button type="button" class="mp-row" class:cur={effort === lvl} onclick={() => pickEffort(lvl)}>
               <span class="mp-check">{#if effort === lvl}<Icon name="check" size={12} />{/if}</span>
               <span class="mp-name">{formatEffortLabel(lvl)}</span>
             </button>
@@ -450,8 +556,13 @@
     text-align: start;
     cursor: pointer;
   }
-  .mp-row:hover:not(:disabled) {
+  .mp-row:hover:not(:disabled),
+  .mp-row.kbd-active:not(:disabled) {
     background: var(--hover);
+  }
+  .mp-row.kbd-active:not(:disabled) {
+    outline: 1px solid var(--accent-line);
+    outline-offset: -1px;
   }
   .mp-row.cur {
     font-weight: 500;

@@ -191,7 +191,7 @@ pub fn client_ip(ext: &axum::http::Extensions) -> Option<IpAddr> {
     })
 }
 
-/// Process-global share throttle used by the live [`ws_auth_gate`].
+/// Process-global share throttle used by the live `ws_auth_gate`.
 pub fn global() -> &'static ShareThrottle {
     static STORE: OnceLock<ShareThrottle> = OnceLock::new();
     STORE.get_or_init(ShareThrottle::default)

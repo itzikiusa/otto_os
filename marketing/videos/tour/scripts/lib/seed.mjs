@@ -4,6 +4,7 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildDemoRepo } from './demo-repo.mjs';
+import { buildLedger } from './demo-ledger.mjs';
 import { writeVault } from './vault.mjs';
 import { writeInsights } from './insights.mjs';
 
@@ -444,6 +445,15 @@ export async function seedAll(api, { dataDir, home, fakeBin, repoRoot, docker })
       { path: 'test/rateLimit.test.ts', line: 3, line_end: 6, severity: 'low', category: 'tests', title: 'No refill test', body: 'Only the burst case is covered.', evidence: 'refillPerSec: 0', reasoning: 'Refill math is the tricky part.', suggested_fix: 'Add a fake-timer refill test.', status: 'open', requires_human_approval: false },
     ]) await api.try('POST', `${W}/__e2e/findings`, { review_id: ids.review, repo_id: ids.repo, ...f });
   }
+
+  // ── IDE: the multi-language acme-ledger project, its run configurations ──
+  ids.ledgerDir = buildLedger(join(code, 'acme-ledger'), home);
+  const ideTarget = { kind: 'local', workspace_id: ws.id, root: ids.ledgerDir, connection_id: null };
+  await api.try('PUT', '/ide/environments', { target: ideTarget, extra_path: '/opt/homebrew/bin:/usr/local/bin', env_vars: [] });
+  for (const rc of [
+    { id: 'ledger-tests', name: 'pytest · settlement', runner: 'pytest', command: 'pytest', args: ['-v', '--no-header'], cwd: ids.ledgerDir, target_path: join(ids.ledgerDir, 'tests') },
+    { id: 'ledger-settle', name: 'Settle payouts', runner: 'python', command: 'python3', args: [], cwd: ids.ledgerDir, target_path: join(ids.ledgerDir, 'pyapp', 'settlement.py') },
+  ]) await api.try('POST', '/ide/run-configs', { target: ideTarget, ...rc });
 
   await clearCredentialNotices(api);
   return ids;

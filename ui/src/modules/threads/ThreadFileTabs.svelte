@@ -7,6 +7,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { renderMarkdownGfm } from '../../lib/md';
+  import { router } from '../../lib/router.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -362,6 +363,20 @@
         {/if}
 
         <div class="tf-file-actions">
+          <button
+            type="button"
+            class="btn small ghost"
+            title="Open file in IDE"
+            onclick={() => {
+              const full = resolveFilePath(activeTab.path);
+              const q = new URLSearchParams({ file: full });
+              if (rootPath.trim()) q.set('root', rootPath.trim());
+              router.go(`ide?${q.toString()}`);
+            }}
+          >
+            <Icon name="ide" size={12} />
+            Open in IDE
+          </button>
           <button
             type="button"
             class="btn small ghost"

@@ -114,12 +114,12 @@ test('real instrumental tour: playback, audio, seek, captions, guide and retry',
   expect(await video.evaluate((el: HTMLVideoElement) => el.textTracks[0].mode)).toBe('hidden');
   await page.getByRole('button', { name: 'CC off', exact: true }).click();
   expect(await video.evaluate((el: HTMLVideoElement) => el.textTracks[0].mode)).toBe('showing');
-  const git = tourChapter('Git, reviews and proof');
+  const git = tourChapter('Git and AI review');
   await page.getByRole('button', { name: git.label }).click();
   await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.currentTime)).toBeGreaterThanOrEqual(git.start + 0.9);
   await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.textTracks[0].activeCues?.length ?? 0)).toBeGreaterThan(0);
   await page.screenshot({ path: `/tmp/otto-ux-help-${info.project.name}-playing.png` });
-  await page.locator('.chapter').filter({ hasText: 'Git, reviews and proof' }).getByRole('button', { name: 'Read the guide' }).click();
+  await page.locator('.chapter').filter({ hasText: 'Git and AI review' }).getByRole('button', { name: 'Read the guide' }).click();
   await expect(page.getByTestId('guide-article')).toHaveAttribute('data-guide-id', 'git');
   await page.getByTestId('guide-watch-part').click();
   video = page.getByTestId('tour-film-video');

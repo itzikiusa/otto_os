@@ -134,6 +134,10 @@ pub trait GitProvider: Send + Sync {
         ))
     }
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail>;
+    /// Drop any cached GET responses for `r` so the very next read hits the
+    /// forge directly (explicit Refresh or eventual-consistency retry after a
+    /// write). Default: no-op.
+    fn invalidate_repo_reads(&self, _r: &RemoteRef) {}
     /// Fetch a hosted **issue** (not a PR). Default: unsupported — only GitHub
     /// overrides it (the Run with Otto github-issue source). GitLab/Bitbucket
     /// issues are out of scope for v1.

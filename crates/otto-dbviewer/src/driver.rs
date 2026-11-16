@@ -142,7 +142,7 @@ pub trait Driver: Send + Sync {
         None
     }
 
-    /// Produce a normalized [`DbQueryPlan`] for `statement` by running the engine's
+    /// Produce a normalized `DbQueryPlan` for `statement` by running the engine's
     /// native EXPLAIN (the statement is EXPLAIN-wrapped, **never executed raw** —
     /// read-only by construction). `node` scopes the active database (same
     /// semantics as [`QueryRequest::node`]). The default is unsupported (Redis);

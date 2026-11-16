@@ -179,3 +179,21 @@ test('Send to → Database — Run on… opens prefilled with the brand sweep', 
   await expect(page.locator('.query-editor .qe-edit .cm-content')).toContainText(SQL);
   await expect(page).toHaveURL(/#\/database/);
 });
+
+test('unified IDE header switches cleanly between Project and Scratches with one sidebar destination', async ({ page }) => {
+  await openWorkbench(page);
+  const tabs = page.getByTestId('ide-mode-tabs');
+  await expect(tabs).toBeVisible();
+  await expect(page.getByTestId('ide-mode-scratches')).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByTestId('ide-mode-project')).toHaveAttribute('aria-selected', 'false');
+
+  // Switch to Project mode (`#/ide`) and back to Scratches (`#/workbench`).
+  await page.getByTestId('ide-mode-project').click();
+  await expect(page).toHaveURL(/#\/ide(\?|$)/);
+  await expect(page.getByTestId('ide-mode-project')).toHaveAttribute('aria-selected', 'true');
+
+  await page.getByTestId('ide-mode-scratches').click();
+  await expect(page).toHaveURL(/#\/workbench(\/|$)/);
+  await expect(page.getByTestId('ide-mode-scratches')).toHaveAttribute('aria-selected', 'true');
+  await expectNoHorizontalOverflow(page);
+});

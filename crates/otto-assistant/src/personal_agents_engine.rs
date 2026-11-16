@@ -422,7 +422,11 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
     ctx: &C,
     agent: &PersonalAgent,
 ) -> Result<String> {
-    let provider = persona_provider(&agent.provider)?.to_string();
+    // A custom slug (`claudework`) carries its CLI family's persona bundle —
+    // the one the session manager reads for it.
+    let slug = agent.provider.trim();
+    let family = ctx.manager().providers().model_family_for(slug);
+    let provider = persona_provider(family.as_deref().unwrap_or(slug))?.to_string();
     let dir = agent_directory(ctx, agent)?;
     crate::personal_agent_documents::seed_memory(&dir, &seed_notes(&agent.name)).await?;
     let cwd = dir.to_string_lossy().to_string();
@@ -496,7 +500,7 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
 
 /// The provider a persona is provisioned for (empty = Claude, the default),
 /// refused when its CLI cannot be handed a context file for one launch
-/// (`otto_context::materialize::delivers_context`: gemini, pi, a custom CLI):
+/// (`otto_context::materialize::delivers_context`: gemini, Muse, a custom CLI):
 /// the agent would otherwise run with none of its instructions, rules or team.
 pub fn persona_provider(provider: &str) -> Result<&str> {
     let p = match provider.trim() {
@@ -507,7 +511,7 @@ pub fn persona_provider(provider: &str) -> Result<&str> {
         return Ok(p);
     }
     Err(Error::Invalid(format!(
-        "{p} can't load a persona for one launch — pick Claude, Codex, agy, Grok or opencode"
+        "{p} can't load a persona for one launch — pick Claude, Codex, agy, Grok, opencode or pi"
     )))
 }
 
@@ -1901,10 +1905,10 @@ mod cwd_tests {
     fn a_persona_needs_a_provider_that_loads_one_per_launch() {
         assert_eq!(persona_provider("").unwrap(), "claude");
         assert_eq!(persona_provider("  ").unwrap(), "claude");
-        for p in ["claude", "codex", "agy", "grok", "opencode"] {
+        for p in ["claude", "codex", "agy", "grok", "opencode", "pi"] {
             assert_eq!(persona_provider(p).unwrap(), p);
         }
-        for p in ["gemini", "pi", "my-cli"] {
+        for p in ["gemini", "muse", "my-cli"] {
             match persona_provider(p) {
                 Err(Error::Invalid(m)) => {
                     assert!(m.starts_with(p) && m.contains("pick Claude"), "{m}")

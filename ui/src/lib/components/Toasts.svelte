@@ -1,6 +1,5 @@
 <script lang="ts">
   import { toasts, type Toast } from '../toast.svelte';
-  import { barStore } from '../stores/bar.svelte';
   import Icon, { type IconName } from './Icon.svelte';
 
   // The stripe carries the tone, and the glyph repeats it (colour is never
@@ -22,7 +21,7 @@
      each toast re-reads the whole toast when its ×N count bumps. No role on
      the container, so it isn't a second "status" landmark.
      The lift is set HERE, not on :root — see FloatingBar's toast-lift effect. -->
-<div class="toasts" aria-live="polite" aria-relevant="additions text" style:--toast-lift="{barStore.toastLift}px">
+<div class="toasts" aria-live="polite" aria-relevant="additions text" style:--toast-lift="{toasts.lift}px">
   {#each toasts.toasts as t (t.id)}
     <!-- An error interrupts (assertive); everything else waits its turn in
          the container's polite region. The timer holds while the pointer or

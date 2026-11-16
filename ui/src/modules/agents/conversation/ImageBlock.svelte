@@ -5,7 +5,8 @@
   import { getContext } from 'svelte';
   import { authedBlobUrl } from '../../../lib/api/client';
   import Icon from '../../../lib/components/Icon.svelte';
-  import Lightbox from './Lightbox.svelte';
+  import { fileUriToPath } from '../../../lib/fileUri';
+  import Lightbox from '../../../lib/components/Lightbox.svelte';
   import { fetchImageUrl } from './api';
   import { CONV_CTX, type ConvContext } from './context';
 
@@ -21,13 +22,9 @@
   const ctx = getContext<ConvContext>(CONV_CTX);
 
   const localPath = $derived.by(() => {
-    if (id.startsWith('file://')) {
-      const raw = id.replace(/^file:\/\/(?:localhost)?/i, '');
-      try {
-        return decodeURIComponent(raw);
-      } catch {
-        return raw;
-      }
+    if (/^file:\/\//i.test(id)) {
+      const decoded = fileUriToPath(id);
+      return decoded.startsWith('/') || /^[A-Za-z]:\//.test(decoded) ? decoded : null;
     }
     return id.startsWith('/') ? id : null;
   });

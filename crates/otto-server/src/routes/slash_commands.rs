@@ -21,7 +21,7 @@ pub async fn slash_commands(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<SlashCommand>>> {
     let session = super::transcript::session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
-    let provider = super::transcript::effective_provider(&session);
+    let provider = super::transcript::effective_provider_in(ctx.manager.providers(), &session);
     let cwd = session
         .meta
         .get("nested_cwd")

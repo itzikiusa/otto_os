@@ -75,6 +75,8 @@ pub async fn meta(
             default_provider: None,
             model_flags: Default::default(),
             provider_models: Default::default(),
+            runtime_capabilities: Default::default(),
+            provider_families: Default::default(),
             alt_loopback_base: None,
         }));
     }
@@ -120,26 +122,19 @@ pub async fn meta(
             .iter()
             .map(|name| (name.as_str(), ctx.manager.providers().program_for(name))),
     );
-    let tools = otto_sessions::tool_probe::probe_tools_cached(tool_specs.clone()).await;
-    // A family's `models` subcommand runs through the first INSTALLED
-    // provider of that family (a custom `grok` provider is the grok CLI).
     let families = ctx.manager.providers().model_families();
-    let program_of = |family: &str| {
-        families
-            .iter()
-            .filter(|(_, f)| f == family)
-            .find(|(p, _)| tools.iter().any(|t| &t.name == p && t.found))
-            .and_then(|(p, _)| tool_specs.get(p).cloned())
-    };
-    let probe = otto_sessions::provider_models::ModelProbe {
-        agy_program: program_of("agy"),
-        grok_program: program_of("grok"),
-        opencode_program: program_of("opencode"),
-        pi_program: program_of("pi"),
-        families,
-    };
-    let provider_models =
-        otto_sessions::provider_models::probe_provider_models_cached(&probe).await;
+    let provider_families: std::collections::HashMap<String, String> =
+        families.iter().cloned().collect();
+    let claude_dirs = ctx
+        .manager
+        .providers()
+        .active_claude_config_dirs(&otto_transcript::roots::home_dir());
+    let probe = otto_sessions::provider_models::ModelProbe::from_tool_specs(families, &tool_specs)
+        .with_claude_config_dirs(claude_dirs);
+    let (tools, provider_models) = tokio::join!(
+        otto_sessions::tool_probe::probe_tools_cached(tool_specs),
+        otto_sessions::provider_models::probe_provider_models_cached(&probe),
+    );
 
     Ok(Json(MetaResp {
         version: ctx.version.clone(),
@@ -151,6 +146,14 @@ pub async fn meta(
         default_provider,
         model_flags,
         provider_models,
+        runtime_capabilities: otto_core::agent_runtime::RuntimeProvider::ALL
+            .into_iter()
+            .map(|p| {
+                let caps = otto_core::agent_runtime::RuntimeCapabilities::for_provider(p);
+                (p.as_str().to_string(), caps)
+            })
+            .collect(),
+        provider_families,
         alt_loopback_base: crate::transport::alt_loopback_base(),
     }))
 }

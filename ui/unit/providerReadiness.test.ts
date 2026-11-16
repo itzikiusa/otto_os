@@ -25,3 +25,18 @@ test('context-dependent and legacy unchecked providers remain launchable without
     assert.match(providers.providerReadiness(name).message, /not been checked/);
   }
 });
+
+test('a CLI older than the version Otto drives is not ready, and says why', () => {
+  const providers = loadSource(new URL('../src/lib/providers.ts', import.meta.url), {
+    './stores/auth.svelte': { auth: { meta: { providers: ['pi', 'claude'], tools: [
+      { name: 'pi', found: true, version: '0.65.0' }, { name: 'claude', found: true, version: '2.1.323 (Claude Code)' },
+    ] } } },
+  });
+  const pi = providers.providerReadiness('pi');
+  assert.equal(pi.available, false);
+  assert.match(pi.message, /0\.65\.0 is older than 0\.75\.0/);
+  assert.equal(providers.providerReadiness('claude').available, true);
+  assert.equal(providers.versionBelow('1.5.0', '0.75.0'), false);
+  assert.equal(providers.versionBelow('v0.74', '0.75.0'), true);
+  assert.equal(providers.versionBelow(null, '0.75.0'), false);
+});

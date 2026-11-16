@@ -88,12 +88,44 @@ fn main() {
                             let _ = w.close();
                         }
                     }
+                    // View ▸ Hard Reload Window (⌃⇧⌘R): native WebKit reload
+                    // on the focused window (or `main`) so a wedged JS main
+                    // thread can still recover without restarting the app.
+                    "hard_reload_window" => {
+                        let target = app
+                            .webview_windows()
+                            .into_values()
+                            .find(|w| {
+                                windows::is_app_window(w.label()) && w.is_focused().unwrap_or(false)
+                            })
+                            .or_else(|| {
+                                app.webview_windows()
+                                    .into_values()
+                                    .find(|w| w.is_focused().unwrap_or(false))
+                            })
+                            .or_else(|| app.get_webview_window("main"));
+                        if let Some(win) = target {
+                            lifecycle::event(&format!(
+                                "menu hard_reload_window label={}",
+                                win.label()
+                            ));
+                            let _ = win.reload();
+                        }
+                    }
                     "quit" => {
                         lifecycle::durable("exit: menu quit");
                         quit::arm("menu quit");
                         windows::mark_quitting();
                         windows::snapshot_all(app);
                         app.exit(0);
+                    }
+                    "emoji-palette" => {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let _ = app.run_on_main_thread(|| {
+                                appkit_guard::order_front_character_palette();
+                            });
+                        }
                     }
                     // Menu-bar item's right-click menu (tray.rs).
                     tray::MENU_OPEN => {
@@ -427,8 +459,21 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
             // document. The SPA handles this id (see ui/src/lib/selectall.ts)
             // and selects against the real text model.
             &MenuItem::with_id(handle, "select-all", "Select All", true, Some("Cmd+A"))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(
+                handle,
+                "emoji-palette",
+                "Emoji & Symbols",
+                true,
+                Some("Cmd+Ctrl+Space"),
+            )?,
         ],
     )?;
+
+    #[cfg(target_os = "macos")]
+    let hard_reload_accel = "Cmd+Ctrl+Shift+R";
+    #[cfg(not(target_os = "macos"))]
+    let hard_reload_accel = "Ctrl+Alt+Shift+R";
 
     let view_menu = Submenu::with_items(
         handle,
@@ -448,6 +493,14 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
                 "Toggle Right Panel",
                 true,
                 Some("Cmd+J"),
+            )?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(
+                handle,
+                "hard_reload_window",
+                "Hard Reload Window",
+                true,
+                Some(hard_reload_accel),
             )?,
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(handle, "zoom-in", "Zoom In", true, Some("Cmd+="))?,

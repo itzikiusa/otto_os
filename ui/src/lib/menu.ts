@@ -10,7 +10,8 @@ import { installUndoKeyGuard, undoRedoInFocus } from './undoredo';
 import { sidePane } from './stores/sidePane.svelte';
 import { nativePane } from './nativePane';
 import { isEmbedded, closePopoutWindow } from './desktop';
-import { dismissTopDialog, modalKeyVerdict } from './keys';
+import { postToHost } from './embedGuest';
+import { dismissTopDialog, keyContext, modalKeyVerdict, pageClaimsAlias } from './keys';
 import { sessionVerbsApply } from './stores/sessionScope';
 
 export function handleMenu(id: string): void {
@@ -48,19 +49,27 @@ export function handleMenu(id: string): void {
       selectAllInFocus();
       break;
     case 'settings':
+      if (!keyContext.terminalFocused && pageClaimsAlias(',')) break;
       router.go('settings/appearance');
       break;
     case 'new-session':
+      if (!keyContext.terminalFocused && pageClaimsAlias('t')) break;
       ui.newSessionOpen = true;
       break;
     case 'new-workspace':
       ui.newWorkspaceOpen = true;
       break;
     case 'close-tab':
-      // Off the Agents page there is no tab to close: a pop-out closes itself.
-      if (!ws.closeActiveTab()) void closePopoutWindow();
+      if (!keyContext.terminalFocused && pageClaimsAlias('w')) break;
+      // Off the Agents page there is no tab to close: an embedded side-pane
+      // asks its host to close the pane, and a pop-out closes itself.
+      if (!ws.closeActiveTab()) {
+        if (isEmbedded) postToHost({ type: 'close' });
+        else void closePopoutWindow();
+      }
       break;
     case 'toggle-rail':
+      if (!keyContext.terminalFocused && pageClaimsAlias('1')) break;
       ui.toggleRail();
       break;
     case 'toggle-panel':
@@ -99,8 +108,10 @@ export function handleMenu(id: string): void {
  *  the action (multi-window). */
 export async function attachMenuBridge(): Promise<() => void> {
   // Once per window: the side-by-side pane gets menu items forwarded by its
-  // host instead (a second listener would run every item twice).
-  if (isEmbedded || !('__TAURI_INTERNALS__' in window)) return () => {};
+  // host instead (a second listener would run every item twice), though it
+  // still needs the undo key guard so relayed ⌘Z never double-undoes.
+  if (!('__TAURI_INTERNALS__' in window)) return () => {};
+  if (isEmbedded) return installUndoKeyGuard();
   try {
     const { getCurrentWebview } = await import('@tauri-apps/api/webview');
     const unlisten = await getCurrentWebview().listen<string>('otto://menu', (e) =>

@@ -984,6 +984,13 @@ impl super::GitProvider for Github {
         self.edit_reviewers(r, number, add, remove).await
     }
 
+    fn invalidate_repo_reads(&self, r: &RemoteRef) {
+        super::client::invalidate_scope(&format!(
+            "{}/repos/{}/{}/pulls",
+            self.base, r.owner, r.repo
+        ));
+    }
+
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {
         let pr = self.pr_raw(r, number).await?;
         let head_sha = vstr(&pr, &["head", "sha"]);

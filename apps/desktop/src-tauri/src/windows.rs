@@ -709,6 +709,10 @@ mod tests {
             covered(crate::tray::POPOVER_LABEL),
             "tray popover needs IPC"
         );
+        assert!(
+            covered("otto-ide-window") && covered("ide-2"),
+            "standalone IDE windows need IPC"
+        );
         // Tripwire only: browser webviews reach the label predicate via their
         // PARENT window's label, so this alone can't protect them — the
         // context assertions below are the real gate.

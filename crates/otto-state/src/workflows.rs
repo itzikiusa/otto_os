@@ -1131,7 +1131,7 @@ impl WorkflowsRepo {
             .ok_or_else(|| Error::NotFound(format!("workflow run {id}")))
     }
 
-    /// [`update_run`] as a compare-and-set on the lifecycle: writes only while
+    /// `update_run` as a compare-and-set on the lifecycle: writes only while
     /// the row's status is one of `expected`, returning `None` (nothing
     /// written) otherwise. Every engine lifecycle transition goes through
     /// this so a late writer can never undo a newer decision — e.g. the
@@ -1469,7 +1469,7 @@ impl WorkflowsRepo {
     /// never silently resurrected back to Running by a progress save — the old
     /// `update_run(.., Running, ..)` did a bare `SET status = ?` and clobbered
     /// it, so a canceled run "came back" on the next node. Bumps + returns the
-    /// monotonic `rev` like [`update_run`], so callers can still stamp the WS
+    /// monotonic `rev` like `update_run`, so callers can still stamp the WS
     /// event with it.
     pub async fn update_run_progress(&self, id: &Id, nodes: &[NodeRunState]) -> Result<i64> {
         // Serialize + project off the runtime: on a big run this is tens of ms

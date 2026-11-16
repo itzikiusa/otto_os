@@ -337,7 +337,7 @@ pub fn review_agent_timeout(diff_len: usize, override_secs: Option<u64>) -> Dura
 /// `finish_review`): `(300 + 3 s/finding).clamp(300, 1_800)`.
 pub const SUMMARIZER_BUDGET_CAP: Duration = Duration::from_secs(1_800);
 
-/// Pure half of [`review_wait_budget`].
+/// Pure half of `review_wait_budget`.
 pub fn review_wait_budget_for(cfg: &ReviewConfig, diff_len: usize) -> Duration {
     let agents = review_agent_timeout(diff_len, cfg.timeout_secs);
     let agents = if mode_source(cfg).0 == otto_core::domain::ReviewMode::Orchestrator {
@@ -1648,7 +1648,7 @@ pub fn workflow_review_config_from_json(
 /// forbids substituting a *different* skill, while explicitly permitting the
 /// named lens itself — so it never suppresses the correct skill on claude (which
 /// may still invoke `Skill(<lens>)`, the same method). Empty `skill_text` ⇒ the
-/// agent prompt is returned unchanged (mirrors [`compose_draft_prompt`]).
+/// agent prompt is returned unchanged (mirrors `compose_draft_prompt`).
 pub fn compose_review_lens_prompt(lens: &str, skill_text: &str, agent_prompt: &str) -> String {
     if skill_text.trim().is_empty() {
         return agent_prompt.to_string();

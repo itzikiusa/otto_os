@@ -1646,6 +1646,13 @@ mod cached_reads {
             2,
             "the approve cleared the cached list — no 15 s of stale state"
         );
+        gh.invalidate_repo_reads(&rr());
+        gh.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(
+            list_gets(&server).await,
+            3,
+            "explicit fresh=true invalidation bypasses the 15 s GET cache"
+        );
     }
 
     #[tokio::test]
@@ -1916,6 +1923,99 @@ mod cached_reads {
         assert_eq!(posts().await, 2, "the resolve mutation");
         gh.get_pr(&rr(), 7).await.unwrap();
         assert_eq!(posts().await, 3, "the resolve dropped the memo");
+    }
+
+    #[tokio::test]
+    async fn gitlab_and_bitbucket_invalidate_repo_reads_evicts_cached_gets() {
+        use crate::providers::bitbucket::Bitbucket;
+        use crate::providers::gitlab::Gitlab;
+
+        // GitLab
+        let gl_server = MockServer::start().await;
+        let gl = Gitlab::new("tok".into(), Some(gl_server.uri()));
+        enable_cache_for_tests(&gl_server.uri());
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/acme%2Fapp/merge_requests"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "iid": 5,
+                "title": "MR 5",
+                "state": "opened",
+                "author": { "name": "Dev" },
+                "source_branch": "feat",
+                "target_branch": "main",
+                "updated_at": "2026-09-01T10:00:00Z",
+                "web_url": "https://gitlab.com/acme/app/-/merge_requests/5",
+                "merge_status": "can_be_merged"
+            }])))
+            .mount(&gl_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "id": 1, "username": "dev", "name": "Dev" })),
+            )
+            .mount(&gl_server)
+            .await;
+        let gl_list_gets = || async {
+            gl_server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.url.path() == "/api/v4/projects/acme%2Fapp/merge_requests")
+                .count()
+        };
+        gl.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        gl.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(gl_list_gets().await, 1);
+        gl.invalidate_repo_reads(&rr());
+        gl.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(gl_list_gets().await, 2);
+
+        // Bitbucket
+        let bb_server = MockServer::start().await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), bb_server.uri());
+        enable_cache_for_tests(&bb_server.uri());
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "username": "dev", "display_name": "Dev" })),
+            )
+            .mount(&bb_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme/app/pullrequests"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [{
+                    "id": 9,
+                    "title": "PR 9",
+                    "state": "OPEN",
+                    "author": { "display_name": "Dev" },
+                    "source": { "branch": { "name": "feat" } },
+                    "destination": { "branch": { "name": "main" } },
+                    "updated_on": "2026-09-01T10:00:00Z",
+                    "links": { "html": { "href": "https://bitbucket.org/acme/app/pull-requests/9" } }
+                }]
+            })))
+            .mount(&bb_server)
+            .await;
+        let bb_list_gets = || async {
+            bb_server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.url.path() == "/repositories/acme/app/pullrequests")
+                .count()
+        };
+        bb.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        bb.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(bb_list_gets().await, 1);
+        bb.invalidate_repo_reads(&rr());
+        bb.list_prs(&rr(), PrState::Open, 1, 50).await.unwrap();
+        assert_eq!(bb_list_gets().await, 2);
     }
 }
 

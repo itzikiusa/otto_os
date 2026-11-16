@@ -1,7 +1,7 @@
 # Threads — structured agent runtime (how T3 Code does it → how Otto mirrors it)
 
-Status: new Claude, Codex, Gemini, Grok, Antigravity (`agy acp`), opencode
-and pi threads use `/runtime-sessions` (§5), including Scratch. Other
+Status: new Claude, Codex, Gemini, Grok, Antigravity (`agy acp`), opencode,
+pi and Muse Code (`muse acp`) threads use `/runtime-sessions` (§5), including Scratch. Other
 harnesses and existing PTY sessions (older Antigravity threads included) keep
 their terminal-backed view. Structured threads support recoverable
 composer drafts, typed provider questions, fresh context in the same visible
@@ -43,7 +43,8 @@ Otto ports that design rather than inventing its own.
 
 Installed CLIs it was built against: claude 2.1.318, codex-cli 0.166.0,
 gemini (with `--acp`), grok 1.0.70 (`agent stdio`, ACP protocol v1), agy
-1.5.8 (`acp`), opencode 1.19.5 (`acp`), pi 1.5.0 (`--mode rpc`).
+1.5.8 (`acp`), opencode 1.19.5 (`acp`), pi 1.5.0 (`--mode rpc`), Muse Code
+1.4.20 (`acp`).
 
 **Claude, ACP or SDK?** T3 Code's own Claude provider is the SDK path. The
 ACP adapter (`@agentclientprotocol/claude-agent-acp`) is only a Registry
@@ -451,6 +452,77 @@ working login on the test machine.
   about 2 s warm, so its probe gets 10 s. `pi --offline --list-models` prints
   a `provider model context …` table, read as `provider/model` ids.
 
+### Muse Code (`muse acp`; `AcpDriver::muse`)
+
+Built against **Muse Code 1.4.20** (`curl -fsSL https://dev.meta.ai/install.sh
+| bash`: `~/.local/bin/muse` is a bash launcher that keeps the versioned
+binary beside it up to date). T3 Code drives Muse over its own session
+protocol (`muse serve`, `packages/provider-muse`); Otto uses the ACP server
+Muse ships (`muse acp`, ACP v1) through the shared ACP driver instead of a
+second protocol stack. What it advertises (verified live):
+
+- `initialize`: `loadSession`, `promptCapabilities {image, embeddedContext}`
+  (images and PDFs), MCP over stdio and HTTP, one auth method `muse-login`
+  ("Sign in with a device code shown in your browser").
+- `session/new|load`: the modes `allowAll`, `promptUnmatched`, `onRequest`
+  (default), `denyUnmatched` — approval policies, no plan mode — and, from
+  Muse's model catalog once signed in, a `thought_level` config option.
+  `session/load` replays the history and continues the session.
+- Updates: `session_info_update.title` (a generated name), `usage_update`
+  (context used / size), the usual message, thought and tool updates,
+  `available_commands_update` (its skills plus `/compact`).
+
+How Otto launches it: `muse acp --trust-workspace [--model <id>]
+[--disable-sandbox]` with `MUSE_NO_AUTO_UPDATE=1`.
+
+- **Access mode** is a live `session/set_mode`: approval-required
+  `promptUnmatched`, auto-accept-edits `onRequest` (Muse's default: asks only
+  when an action needs it), full access `allowAll`.
+- **Model** is `--model` (a change respawns and loads the session); the list
+  comes from `muse serve`'s `model/list` (below). **Effort** is the
+  `thought_level` option, sent by the tier name Muse lists (`minimal` …
+  `max`, `ultra` behind its experiment); the picker orders them low to high.
+- **Sandbox:** Muse's own OS sandbox is turned off (`--disable-sandbox`, in a
+  thread and a terminal session alike) only when Otto's Seatbelt confines the
+  process (macOS refuses a nested sandbox); otherwise it stays on. `--trust-workspace` loads the folder's skills and rules, as every other
+  CLI's pre-trusted cwd does.
+- **Seatbelt home rules** (`otto-sandbox`, terminal and thread alike): Muse
+  may write its session logs, index and runtime sockets
+  (`~/.local/share/muse/{sessions,session-server,runtime,local-tracing}` and
+  that folder's top-level files) and the top-level files of `~/.config/muse`
+  (a login's `auth.json` refresh) — never `~/.config/muse/{settings.json,
+  AGENTS.md}`, its `skills/`, `plugins/`, `hooks/`, `rules/`, or
+  `~/.local/share/muse/{plugins,skills}` (code every later session loads).
+  Verified: `muse acp` runs a turn under the generated agent profile.
+- **Updates:** `MUSE_NO_AUTO_UPDATE=1` keeps the launcher from checking for a
+  new binary on every spawn (T3 Code does the same). Otto's update pass runs
+  the launcher's synchronous refresh: `MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1
+  MUSE_UPDATE_INTERVAL_SECONDS=0 muse --version`. The "installed binary is
+  missing; rerun the installer" error comes from the launcher when it cannot
+  read `.muse-version` beside itself; Otto's Seatbelt leaves reads open, and
+  with auto-update off the launcher writes nothing.
+- **Sign-in:** a signed-out Muse refuses `session/new` with "log in to Muse
+  before opening a session". Otto never calls `authenticate` for it
+  (`AcpFlavor::no_authenticate`): `muse-login` would open a browser from the
+  daemon. The thread shows Muse's message; run `muse login` (or set
+  `META_API_KEY`) and retry.
+- **Models:** `muse serve --disable-shell --disable-write --no-session-log`
+  answers `initialize` → `initialized` → `model/list` on stdin, signed in or
+  not: `modelId`, `displayLabel`, `variants` (effort tiers) and
+  `defaultReasoningEffort`. `muse-spark-1.3` shows as "Muse Spark 1.3".
+- **Terminal sessions:** `muse --trust-workspace [--yolo] [--model id]`.
+  Muse mints its own session ids and `muse resume --last` would cross-wire
+  sessions that share a folder, so terminal Muse starts fresh on every
+  respawn, like opencode; the ACP path resumes exactly.
+- **Not delivered:** Otto's context bundle (no system-prompt flag or setting —
+  Muse reads the tree's and the user's own rules, `~/.claude/skills` and
+  `~/.codex/skills` included), so a persona-carrying run refuses Muse as it
+  does Gemini.
+- **Live check:** `cargo test -p otto-agent-protocol --test runtime muse_live
+  -- --ignored` runs the installed `muse acp` (its offline `echo` provider,
+  no login) through the runtime and this flavor: a prompt round-trip and an
+  image prompt.
+
 ### Access modes
 
 The session's `access_mode` is T3 Code's `RuntimeMode` without `auto`:
@@ -465,7 +537,8 @@ enabled, approval-required otherwise. Each driver passes it the way T3 Code does
 kept `externalSandbox` under Otto's Seatbelt); Grok's argv
 (`grokAcpSpawnArgs`, `acpSupport.ts:47-58`; no accept-edits variant, so that
 mode asks); Gemini's `--approval-mode` and live `session/set_mode` when
-advertised; agy's `session/set_mode` plus its launch-only full access. A driver that cannot switch
+advertised; agy's `session/set_mode` plus its launch-only full access; Muse's
+`session/set_mode` approval policies. A driver that cannot switch
 live (`StructuredDriver::switches_access_live`) is respawned in the new mode
 and resumes its thread, as for a model switch. Otto does NOT port T3 Code's
 client-side auto-answering (`clientPolicy.ts:143-200`): whatever the CLI
@@ -663,10 +736,37 @@ and still remembered the image.
 
   T3 Code persists the same `nativeThreadRef` (`adapter.ts:861-903`,
   `orchestrationV2.ts:145-151`).
-- **Daemon restart, stated plainly.** A structured child is a direct child
-  of `ottod` with piped stdio, so it dies with the daemon. A PTY agent with
-  `session_persistence` survives in its PTY holder; a structured child does
-  not. At boot (`AgentRuntime::recover`, from `recover_before_serve`):
+- **Daemon restart: the agent keeps running.** With **Settings → Daemon →
+  Sessions → "Keep sessions running when the daemon restarts"**
+  (`session_persistence`, default on), a structured child runs inside a
+  detached **runtime holder** (`ottod runtime-holder`, `crates/otto-agent-protocol/src/holder/`;
+  own session via `setsid`, a 0600 socket in `<data dir>/runtime-holders/`)
+  instead of as a direct child of `ottod`, for **every provider**:
+  - **The holder buffers output.** Every stdout line gets a sequence number
+    and stays in a bounded ring (16 MiB) until the daemon acknowledges it.
+  - **The daemon checkpoints** into the holder (`runtime/held_proc.rs`): the
+    driver's protocol state (`StructuredDriver::snapshot_state` — the
+    driver struct serialized whole; MCP servers, whose env carries the
+    session credential, are never in it), the running turn, its streaming
+    items, the request-id generation and the last acknowledged line —
+    throttled to every 250 ms while lines stream, immediately on critical
+    transitions and at shutdown.
+  - **Shutdown detaches** (`AgentRuntime::shutdown_for_restart`): the child
+    and its holder keep running. Closing, deleting, a respawn and the
+    child's own exit still end it.
+  - **Boot adopts** (`runtime/held_adopt.rs`): the new daemon re-attaches to
+    each holder socket, restores a fresh driver from the checkpoint, and
+    replays the lines after the acknowledged one — the turn continues and
+    completes in the new daemon.
+  - **No session reaches a holder.** Seatbelt-confined sessions are denied
+    `connect()` to the socket directory and its `/tmp/otto-rth-*` fallback,
+    and to the PTY holders' sockets.
+- **Without holders** (the setting off, a child with a network profile, a
+  socket directory Otto can't keep private — another account owning the
+  `/tmp/otto-rth-*` fallback, logged as a warning — or an unadoptable child)
+  a structured
+  child dies with the daemon. At boot (`AgentRuntime::recover`, from
+  `recover_before_serve`):
   - every in-flight turn ends **`interrupted`**, and so do its open items;
   - every pending request becomes `expired` / `not_resumable`;
   - the provider session becomes `stopped`.
@@ -676,10 +776,10 @@ and still remembered the image.
   because the daemon stopped the turn. The next prompt respawns the CLI and
   resumes the provider's own session id. The interrupted turn's partial work
   is whatever the provider itself saved. T3 Code can also auto-continue
-  (`RestartContinuation.ts:33-36`); Otto does not. Background work dies with
-  the child: recovery clears `background_tasks`, and open background
-  subagent cards settle `interrupted` (also when the process exits or the
-  thread closes).
+  (`RestartContinuation.ts:33-36`); it never keeps the process, Otto does.
+  Background work dies with the child: recovery clears `background_tasks`,
+  and open background subagent cards settle `interrupted` (also when the
+  process exits or the thread closes).
 - **The queue survives a restart.** A message sent with `delivery: "queue"`
   (or `"interrupt"`) while a turn runs is stored whole (text, images, files)
   as the projection's `queue` entity. After a restart `recover` sends what is
@@ -838,8 +938,10 @@ private helpers as `SessionManager::create`, in the same order:
 6. `apply_sandbox`, **last**, over the fully built argv: the
    `process_sandbox` Seatbelt profile, same `sandbox_decision`.
 
-A named provider account or a workspace network profile is **refused**, not
-skipped.
+A named provider account and a workspace network profile apply as for a
+terminal session; an unknown or unusable account or profile fails the spawn.
+A child with a network profile is not held across a daemon restart (its
+tunnels end with the daemon): it resumes by a respawn with fresh tunnels.
 
 The PTY prompt guard types keystrokes to accept folder-trust or "press
 Enter" dialogs on a terminal screen. A structured child has no terminal:
@@ -866,6 +968,7 @@ secret question forms are refused instead of being collected into history.
 | `crates/otto-agent-protocol/src/{claude,codex,acp,pi}.rs` | the drivers |
 | `crates/otto-agent-protocol/src/claude_tasks.rs` | Claude background tasks, subagent cards, their nested activity |
 | `crates/otto-agent-protocol/src/runtime.rs`, `runtime/{fresh,request_ids}.rs` | processes, turns, sequencing, coalescing, replay, recovery, fresh context and process-scoped request IDs |
+| `crates/otto-agent-protocol/src/holder/`, `runtime/held_proc.rs`, `runtime/held_adopt.rs` | children that survive a daemon restart: the runtime holder, checkpoints, adoption |
 | `crates/otto-agent-protocol/src/{questions,tool_images}.rs` | native question schema normalization and bounded tool image extraction |
 | `crates/otto-agent-protocol/src/http/drafts.rs`, `crates/otto-state/src/agent_runtime/drafts.rs` | draft validation, authorization, revision checks, quotas and expiry |
 | `crates/otto-agent-protocol/src/{host,process,ring,http}.rs` | safety host, child I/O, replay ring, `/runtime-sessions` router |
@@ -902,20 +1005,21 @@ secret question forms are refused instead of being collected into history.
   images ride `POST …/prompt` (`model`, `effort`, `images`).
 - **Idle live-entry eviction** remains a runtime lifecycle follow-up. Daemon
   shutdown already calls `AgentRuntime::shutdown()`.
-- **Features T3 Code has that Otto does not yet:** restart continuation,
-  steering for Codex (`turn/steer`) and ACP, Codex `thread/unarchive`,
+- **Features T3 Code has that Otto does not yet:** restart continuation
+  (Otto keeps the process instead, §4), steering for Codex (`turn/steer`) and ACP, Codex `thread/unarchive`,
   Claude thinking summaries, subagent / background tracking for the other
   providers, ACP v2.
 - **Known limits.** A Claude resume key is persisted once the CLI answers its
   handshake, so a daemon that dies before that loses the resume (the next
   spawn starts fresh). A subagent's streamed text is not shown live (its
   complete messages are).
-- **Named provider accounts and network profiles** (refused today).
+- ~~Named provider accounts and network profiles~~ — done: applied as for a
+  terminal session; an unknown or unusable account or profile fails the spawn.
 - ~~Otto MCP tools for structured sessions~~ — done: `prepare_runtime_spawn`
   mints the per-session `otto` credential and applies the workspace's enabled
   MCP servers. Claude / Codex get them as a terminal session does
   (`.mcp.json` + `claude --mcp-config` with Otto's managed entries, codex
-  `-c`); ACP agents (Gemini, Grok, Antigravity, opencode) get
+  `-c`); ACP agents (Gemini, Grok, Antigravity, opencode, Muse) get
   them in `session/new|load.mcpServers` with each server's env. pi (1.x) gets
   them through a private per-session `-e` extension that registers each
   server (see "opencode and pi" above). The credential is revoked when the

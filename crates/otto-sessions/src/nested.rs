@@ -122,10 +122,10 @@ pub fn parse_ps_etime(s: &str) -> Option<Duration> {
 /// Which agent CLI (if any) a command line is running.
 ///
 /// Two shapes are recognized, because the CLIs ship both ways:
-///   - a native launcher — argv[0]'s file name IS the provider (`claude`,
+///   - a native launcher — `argv[0]`'s file name IS the provider (`claude`,
 ///     `/opt/homebrew/bin/codex`, …);
 ///   - a JS entrypoint under a runtime — `node …/@anthropic-ai/claude-code/cli.js`.
-///     Here argv[0] is the runtime, so the remaining tokens are matched against
+///     Here `argv[0]` is the runtime, so the remaining tokens are matched against
 ///     each provider's package/binary marker.
 ///
 /// Returns the canonical provider id (matching [`crate::providers`]' built-in

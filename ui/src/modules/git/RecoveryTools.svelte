@@ -10,7 +10,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { gitBridge, type RecoveryMode } from './gitBridge.svelte';
+  import { gitBridge, type RecoveryMode } from '../../lib/diff/gitBridge.svelte';
 
   let { repoId, initialMode = 'history', initialOnto, onclose, onresolve }: {
     repoId: string; initialMode?: RecoveryMode; initialOnto?: string;

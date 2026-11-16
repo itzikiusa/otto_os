@@ -10,7 +10,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { plural } from '../../lib/plural';
   import { ListWindow } from '../../lib/listWindow.svelte';
-  import { fileStat } from './diff-model';
+  import { fileStat } from '../../lib/diff/diff-model';
   import { fileStatus, type NavDir } from './diff-pr';
 
   interface Props {

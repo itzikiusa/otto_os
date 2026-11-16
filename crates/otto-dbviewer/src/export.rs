@@ -202,7 +202,7 @@ impl<W: Write> ExportSink<W> {
     }
 
     /// Write one result row. `row` cells align positionally with the columns
-    /// passed to [`write_header`].
+    /// passed to `write_header`.
     pub fn write_row(&mut self, row: &[Value]) -> std::io::Result<()> {
         match self.format {
             ExportFormat::Csv

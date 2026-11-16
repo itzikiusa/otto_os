@@ -7,7 +7,9 @@
 // Pure (unit/runtimeWorkLog.test.ts).
 import type { ProviderTurn, TurnItem } from '../../../lib/api/types';
 import { threadCall } from './agentRows';
-import { workLabel, type WorkEntry } from './timeline';
+import { formatDuration, workLabel, type WorkEntry } from './timeline';
+
+export { formatDuration };
 
 const LIVE: ReadonlySet<string> = new Set(['running', 'pending', 'waiting']);
 export const isLive = (i: TurnItem): boolean => LIVE.has(i.status);
@@ -25,22 +27,14 @@ export function relativeToCwd(text: string, cwd: string | null | undefined): str
   return text.split(`${root}/`).join('');
 }
 
-/** "820ms", "14s", "2m 14s", "1h 3m". */
-export function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return '';
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
-}
-
-/** A finished call's run time, or null when it has no start / end. */
+/** A finished call's run time, or null when it has no start / end.
+ *  Legacy persisted reasoning rows had identical start/end (`0ms`); hide `<50ms` on reasoning. */
 export function itemDuration(i: TurnItem): string | null {
   if (!i.started_at || !i.completed_at || isLive(i)) return null;
   const ms = Date.parse(i.completed_at) - Date.parse(i.started_at);
-  return Number.isFinite(ms) && ms >= 0 ? formatDuration(ms) : null;
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  if (i.type === 'reasoning' && ms < 50) return null;
+  return formatDuration(ms);
 }
 
 /** "Error: Exit code 2" / "Exit code 2" → "exit 2"; anything else unchanged. */
@@ -70,9 +64,13 @@ export function needsEyes(entries: readonly WorkEntry[], pendingRequestIds: Read
 }
 
 /** The stretch is over: nothing in it runs and its turn(s) ended. */
-export function stretchDone(entries: readonly WorkEntry[], turns: readonly ProviderTurn[]): boolean {
+export function stretchDone(
+  entries: readonly WorkEntry[],
+  turns: readonly ProviderTurn[],
+  turnById?: ReadonlyMap<string, ProviderTurn>,
+): boolean {
   if (entries.some((e) => isLive(e.item))) return false;
-  const byId = new Map(turns.map((t) => [t.id, t] as const));
+  const byId = turnById ?? new Map(turns.map((t) => [t.id, t] as const));
   return entries.every(({ item }) => {
     const t = item.turn_id ? byId.get(item.turn_id) : undefined;
     return !t || (t.status !== 'running' && t.status !== 'pending');
@@ -105,11 +103,12 @@ export function shouldFold(
   entries: readonly WorkEntry[],
   turns: readonly ProviderTurn[],
   pendingRequestIds: ReadonlySet<string>,
+  turnById?: ReadonlyMap<string, ProviderTurn>,
 ): boolean {
   return (
     entries.length > 1 &&
     entries.every((e) => FOLDABLE.has(e.item.type) && threadCall(e.item)?.verb !== 'Opened') &&
-    stretchDone(entries, turns) &&
+    stretchDone(entries, turns, turnById) &&
     !needsEyes(entries, pendingRequestIds)
   );
 }

@@ -9,6 +9,9 @@
 //! - **codex**  → `$CODEX_HOME/skills/<name>/` (`CODEX_HOME` if set, else `~/.codex/skills/<name>/`)
 //! - **agy**    → `~/.gemini/skills/<name>/` (agy's home is `~/.gemini`)
 //!
+//! Not Muse Code: it already loads `~/.claude/skills` and `~/.codex/skills`,
+//! so a copy in its own `~/.config/muse/skills` would list every skill twice.
+//!
 //! All three share the same multi-file `SKILL.md` (+ `references/`/`assets/`/
 //! `scripts/`) layout, so a single recursive copy works for each. We **only**
 //! write inside these user-level skills dirs — never into a working/repo tree.

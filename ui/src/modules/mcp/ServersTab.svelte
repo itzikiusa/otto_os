@@ -21,6 +21,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import type { McpServerDetail } from '../../lib/api/types';
   import Switch from '../../lib/components/Switch.svelte';
+  import { mcpUiState } from './mcpUiState.svelte';
   import McpPill from './McpPill.svelte';
   import RulesDrawer from './RulesDrawer.svelte';
   import ServerForm from './ServerForm.svelte';
@@ -37,7 +38,7 @@
     onPatch: (s: McpServerDetail) => void;
     onSelect: (id: string) => void;
   }
-  let { wsId, servers, loading, error = null, onReload, onPatch }: Props = $props();
+  let { wsId, servers, loading, error = null, selectedServerId, onReload, onPatch, onSelect }: Props = $props();
 
   let accessId = $state<string | null>(null);
   const can = (id: string, op: string) => resourceAccess.can('mcp_server',id,op,'mcp','admin');
@@ -52,7 +53,7 @@
   let formOpen = $state(false);
   let editing = $state<McpServerDetail | null>(null);
   let rulesOpen = $state(false);
-  let expandedId = $state<string | null>(null);
+  const expandedId = $derived(mcpUiState.expandedServerId);
   /** Per-server in-flight action so the right buttons spin without blocking others. */
   let busy = $state<Record<string, string>>({});
 
@@ -161,6 +162,7 @@
   const ROOT_ONLY = 'Only an Otto admin can add MCP servers';
 
   function rowMenu(e: MouseEvent, s: McpServerDetail): void {
+    onSelect(s.id);
     const configure = can(s.id, 'configure');
     const to: McpRunMode = serverRuns(s) === 'native' ? 'governed' : 'native';
     const blocked = !auth.isRoot ? 'Only the owner can change how a server runs' : switchBlocked(s, to);
@@ -183,7 +185,8 @@
   }
 
   function toggleExpanded(id: string): void {
-    expandedId = expandedId === id ? null : id;
+    onSelect(id);
+    mcpUiState.expandedServerId = mcpUiState.expandedServerId === id ? null : id;
   }
 </script>
 
@@ -233,16 +236,27 @@
       {#each servers as s (s.id)}
         {@const endpoint = s.transport === 'stdio' ? `${s.command} ${s.args.join(' ')}`.trim() : (s.url ?? '')}
         {@const native = serverRuns(s) === 'native'}
-        <div class="srow" data-testid="mcp-server-row" data-runs={serverRuns(s)}>
+        {@const isSelected = selectedServerId === s.id}
+        <div class="srow" class:selected={isSelected} data-selected={isSelected ? 'true' : undefined} data-testid="mcp-server-row" data-runs={serverRuns(s)}>
           <div class="name-cell">
           {#if native}
-            <button class="name" onclick={() => (editing = s)} disabled={!can(s.id, 'configure')} title={can(s.id, 'configure') ? `Edit ${s.name}` : NO_CONFIGURE}>
+            <button
+              class="name"
+              aria-current={isSelected ? 'true' : undefined}
+              disabled={!can(s.id, 'configure')}
+              onclick={() => {
+                onSelect(s.id);
+                editing = s;
+              }}
+              title={can(s.id, 'configure') ? `Edit ${s.name}` : NO_CONFIGURE}
+            >
               <span class="nm">{s.name}</span>
               <span class="endpoint mono" title={endpoint}>{endpoint}</span>
             </button>
           {:else}
           <button
             class="name"
+            aria-current={isSelected ? 'true' : undefined}
             onclick={() => toggleExpanded(s.id)}
             title={expandedId === s.id ? 'Hide tools' : 'View tools'}
             aria-expanded={expandedId === s.id}
@@ -286,16 +300,16 @@
           </span>
           <span class="cell actions">
             {#if native}
-              <button class="btn small" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? `Edit ${s.name}` : NO_CONFIGURE} onclick={() => (editing = s)}>Edit</button>
+              <button class="btn small" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? `Edit ${s.name}` : NO_CONFIGURE} onclick={() => { onSelect(s.id); editing = s; }}>Edit</button>
             {:else}
-            <button class="btn small" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? 'Fetch the tool list from this server' : NO_CONFIGURE} onclick={() => void discover(s)}>
+            <button class="btn small" disabled={!!busy[s.id] || !can(s.id,'configure')} title={can(s.id,'configure') ? 'Fetch the tool list from this server' : NO_CONFIGURE} onclick={() => { onSelect(s.id); void discover(s); }}>
               {busy[s.id] === 'discover' ? 'Discovering…' : 'Discover'}
             </button>
             {/if}
             <button
               class="icon-btn"
               aria-label={`More actions for ${s.name}`}
-              title="More actions"
+              title={`More actions for ${s.name}`}
               disabled={!!busy[s.id]}
               onclick={(e) => rowMenu(e, s)}
             >
@@ -376,6 +390,12 @@
   }
   .srow:hover {
     background: var(--hover);
+  }
+  .srow.selected {
+    background: var(--accent-soft);
+  }
+  .srow.selected:hover {
+    background: var(--accent-soft-strong);
   }
   .num {
     text-align: end;

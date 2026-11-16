@@ -67,6 +67,7 @@ function openableModules(): Set<string> {
     set.add('canvas');
   }
   if (set.has('scheduled-tasks')) set.add('personal-agents');
+  if (set.has('ide')) set.add('workbench');
   set.add('settings');
   return set;
 }

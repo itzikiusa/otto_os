@@ -1,77 +1,34 @@
-//! Claude Code driver — the Claude Agent SDK's transport, ported to Rust.
+//! Claude Code driver — the Claude Agent SDK's stream-json control protocol
+//! over stdio, ported from T3 Code (`ClaudeAdapterV2.ts`, MIT, Copyright (c)
+//! 2026 T3 Tools Inc.) to pure Rust without Node/npm:
 //!
-//! T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.) drives Claude through the
-//! TypeScript Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`,
-//! `apps/server/package.json:37`; `query()` at
-//! `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts:1090`). The
-//! SDK itself only spawns the `claude` CLI and speaks its stream-json control
-//! protocol over stdio; Otto speaks that protocol directly (no Node, no npm
-//! package):
-//!
-//! * argv — the SDK's (`sdk.mjs` `ProcessTransport.initialize`):
-//!   `--output-format stream-json --verbose --input-format stream-json`,
-//!   `--permission-prompt-tool stdio` (the SDK's `canUseTool` callback),
-//!   `--permission-mode` per access mode (`permissionModeForClaudeRuntimePolicy`,
-//!   `ClaudeAdapterV2.ts:2573-2620`: approval-required → `default`,
-//!   auto-accept-edits → `acceptEdits`, full-access → `bypassPermissions`
-//!   plus the SDK's `allowDangerouslySkipPermissions` →
-//!   `--allow-dangerously-skip-permissions`, `:2681`), `--include-partial-messages`
-//!   (`:1617`), `--model`, and `--session-id <uuid>` on a fresh thread /
-//!   `--resume <id>` after (`threadIdentity`, `:1578-1580`). Env
-//!   `CLAUDE_CODE_ENTRYPOINT=sdk-ts`, as the SDK sets it.
-//! * control protocol — `{type:"control_request", request_id, request:
-//!   {subtype:"initialize"}}` first; `can_use_tool` requests from the CLI
-//!   answered with `{type:"control_response", response:{subtype:"success",
-//!   request_id, response: PermissionResult}}`; `{subtype:"interrupt"}` to
-//!   stop; `control_cancel_request` withdraws a pending question;
-//!   `{subtype:"set_permission_mode", mode}` switches the access mode live
-//!   (the SDK's `setPermissionMode`) — into `bypassPermissions` only when
-//!   the process was launched with the allow flag, else the runtime
-//!   respawns with `--resume`. Like the SDK, the prompt is written right
-//!   away; the CLI reads stdin in order. Images go as `image` blocks, PDFs as
-//!   base64 `document` blocks.
-//! * decisions — `permissionResultFromDecision` (`ClaudeAdapterV2.ts:
-//!   3502-3545`): accept → `allow` + the original input; accept-for-session →
-//!   `allow` + `updatedPermissions` (the CLI's suggestions re-targeted at
-//!   `session`, else an `addRules` allow rule for the tool); decline → `deny`;
-//!   cancel → `deny` + `interrupt: true`. Otto drops `setMode` suggestions
-//!   (a whole-session mode switch is a wider grant than the one tool the
-//!   person approved — T3 Code drops them too under a managed ceiling).
-//! * tools — `CLAUDE_KNOWN_TOOL_CLASSIFICATIONS` (`:2819-2860`): Bash →
-//!   `command_execution`; Edit / MultiEdit / Write / NotebookEdit →
-//!   `file_change`; WebFetch / WebSearch → `web_search`; the rest →
-//!   `dynamic_tool`; a root `TodoWrite` is the plan (`:9313`).
-//! * turn end — the `result` message (`terminalStatusFromResult`,
-//!   `:3708-3738`): `terminal_reason` aborted_* → interrupted; `success`
-//!   without `is_error` → completed; errors mentioning interrupt / cancel →
-//!   interrupted / cancelled; anything else failed.
-//!
-//! Subagents and background work (`claude_tasks.rs`): an `Agent` / `Task`
-//! call is a `subagent` card whose frames (`parent_tool_use_id` set) are
-//! projected under it; `run_in_background` work is tracked from the CLI's
-//! `task_*` frames into the session's background-task list. Subagent
-//! permission requests reach a person like the root's.
-//!
-//! Auto turns: after `result` the CLI may run a turn on its own (a
-//! background task finished and its notification was fed to the model).
-//! Root frames arriving with no prompt of ours running open one
-//! ([`DriverEvent::TurnStarted`]); its `result` ends it.
+//! * argv: `--output-format stream-json --verbose --input-format stream-json`,
+//!   `--permission-prompt-tool stdio`, `--permission-mode` per access mode,
+//!   `--include-partial-messages`, `--model`, and `--session-id` / `--resume`.
+//! * control protocol: `initialize`, `can_use_tool` → `PermissionResult`
+//!   (dropping `setMode` suggestions), `interrupt`, `control_cancel_request`,
+//!   and `set_permission_mode`.
+//! * tools & subagents (`claude_tasks.rs`): Bash → `command_execution`,
+//!   Edit/MultiEdit/Write/NotebookEdit → `file_change`, WebFetch/WebSearch →
+//!   `web_search`, `Agent`/`Task` → `subagent` with `parent_tool_use_id` child
+//!   routing, and `task_*` background tracking + auto-turn support.
 
 use std::collections::HashMap;
 
 #[path = "claude_tasks.rs"]
-mod tasks;
+pub(crate) mod tasks;
 
 use otto_core::agent_runtime::{
-    ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, PlanStepStatus, ProviderFailure,
-    RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus,
-    ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, PlanStepStatus, ProviderCommand,
+    ProviderFailure, RequestKind, RuntimeAccessMode, RuntimePromptReq, RuntimeProvider,
+    RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus,
+    TurnTerminalStatus, TurnTokenUsage,
 };
 use serde_json::{json, Value};
 
 use crate::driver::{
-    item, tool_error, DriverError, DriverEvent, DriverStep, LaunchContext, LaunchSpec,
-    StructuredDriver,
+    item, restore_keeping_program, tool_error, DriverError, DriverEvent, DriverStep, LaunchContext,
+    LaunchSpec, StructuredDriver,
 };
 
 /// Claude Code's switch for connecting MCP servers before the first request.
@@ -112,20 +69,22 @@ fn classify(tool: &str) -> (ToolType, RequestKind) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum BlockKind {
     Text,
     Thinking,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Block {
     kind: BlockKind,
     item_id: String,
     message_id: String,
     text: String,
+    started_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Tool {
     name: String,
     input: Value,
@@ -135,6 +94,7 @@ struct Tool {
     status: TurnItemStatus,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Pending {
     cli_request_id: String,
     tool_name: String,
@@ -143,7 +103,22 @@ struct Pending {
     suggestions: Vec<Value>,
 }
 
+/// Blocks as a map, or as the `[(index, block)]` pairs a holder snapshotted
+/// by an earlier build carries.
+fn blocks_compat<'de, D: serde::Deserializer<'de>>(d: D) -> Result<HashMap<u64, Block>, D::Error> {
+    let v: Value = serde::Deserialize::deserialize(d)?;
+    if v.is_array() {
+        serde_json::from_value::<Vec<(u64, Block)>>(v).map(|p| p.into_iter().collect())
+    } else {
+        serde_json::from_value(v)
+    }
+    .map_err(serde::de::Error::custom)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClaudeDriver {
+    /// The factory's binary: kept across a restore, never snapshotted.
+    #[serde(skip)]
     program: String,
     /// `--session-id` for a fresh thread (the resume key from the start).
     fresh_session_id: String,
@@ -152,6 +127,7 @@ pub struct ClaudeDriver {
     init_req: Option<String>,
     turn_id: Option<String>,
     /// Streamed content blocks of the current message, by block index.
+    #[serde(deserialize_with = "blocks_compat")]
     blocks: HashMap<u64, Block>,
     message_id: Option<String>,
     /// Messages whose text arrived as stream events (their final `assistant`
@@ -187,6 +163,18 @@ pub struct ClaudeDriver {
     finished: Vec<String>,
     /// The background list last reported.
     reported_background: Vec<BackgroundTask>,
+    /// This process's running `result.total_cost_usd` (it sums every turn
+    /// the process ran): a turn's cost is the difference.
+    #[serde(default)]
+    cost_total: f64,
+    /// The last prompt asked for plan mode (`set_permission_mode: plan`).
+    #[serde(default)]
+    plan: bool,
+    /// Where Claude Code keeps this session's transcript (its `ai-title`).
+    #[serde(default)]
+    transcript: Option<std::path::PathBuf>,
+    #[serde(default)]
+    cwd: String,
 }
 
 impl Default for ClaudeDriver {
@@ -222,6 +210,10 @@ impl ClaudeDriver {
             bg_inputs: HashMap::new(),
             finished: Vec::new(),
             reported_background: Vec::new(),
+            cost_total: 0.0,
+            plan: false,
+            transcript: None,
+            cwd: String::new(),
         }
     }
 
@@ -310,7 +302,9 @@ impl ClaudeDriver {
                 streaming,
             },
         };
-        item(b.item_id.clone(), status, None, kind)
+        let mut it = item(b.item_id.clone(), status, None, kind);
+        it.started_at = Some(b.started_at);
+        it
     }
 
     fn close_blocks(&mut self, step: &mut DriverStep) {
@@ -383,6 +377,7 @@ impl ClaudeDriver {
                         item_id: format!("{}:{mid}:{index}", self.turn()),
                         message_id: mid,
                         text: String::new(),
+                        started_at: chrono::Utc::now(),
                     },
                 );
             }
@@ -426,18 +421,28 @@ impl ClaudeDriver {
                 output: t.output.clone(),
                 exit_code: None,
             },
-            ToolType::FileChange => TurnItemKind::FileChange {
-                file_name: s("file_path")
+            ToolType::FileChange => {
+                let file_name = s("file_path")
                     .or_else(|| s("notebook_path"))
-                    .unwrap_or_else(|| t.name.clone()),
-                diff_str: None,
-                old_str: s("old_string"),
-                new_str: s("new_string").or_else(|| s("content")),
-            },
+                    .unwrap_or_else(|| t.name.clone());
+                let (diff_str, old_str, new_str) = crate::diff_compact::compact_file_change_fields(
+                    &file_name,
+                    None,
+                    s("old_string"),
+                    s("new_string").or_else(|| s("content")),
+                );
+                TurnItemKind::FileChange {
+                    file_name,
+                    diff_str,
+                    old_str,
+                    new_str,
+                }
+            }
             ToolType::WebSearch => TurnItemKind::WebSearch {
                 patterns: s("query").or_else(|| s("url")).into_iter().collect(),
             },
             ToolType::Dynamic => TurnItemKind::DynamicTool {
+                image_files: Vec::new(),
                 tool_name: t.name.clone(),
                 input: t.input.clone(),
                 output: t.output.clone(),
@@ -516,6 +521,7 @@ impl ClaudeDriver {
                         item_id: format!("{}:{mid}:a{n}", self.turn()),
                         message_id: mid.clone(),
                         text: text.to_string(),
+                        started_at: chrono::Utc::now(),
                     };
                     self.emit_closed(step, b);
                 }
@@ -766,10 +772,16 @@ impl ClaudeDriver {
         if let Some(usage) = self.context_usage(msg) {
             step.push(DriverEvent::ContextUsage(usage));
         }
+        let cost = msg
+            .get("total_cost_usd")
+            .and_then(Value::as_f64)
+            .filter(|c| c.is_finite() && *c >= self.cost_total)
+            .map(|total| total - std::mem::replace(&mut self.cost_total, total));
         if let Some(u) = msg.get("usage") {
             let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
             let cached = n("cache_read_input_tokens");
             step.push(DriverEvent::Usage(TurnTokenUsage {
+                cost_usd: cost,
                 input_tokens: n("input_tokens") + cached + n("cache_creation_input_tokens"),
                 output_tokens: n("output_tokens"),
                 cached_input_tokens: (cached > 0).then_some(cached),
@@ -778,6 +790,8 @@ impl ClaudeDriver {
                     .and_then(Value::as_u64)
                     .filter(|t| *t > 0),
             }));
+        } else if let Some(c) = cost {
+            step.push(DriverEvent::TurnCost(c));
         }
         step.push(DriverEvent::Terminal {
             status,
@@ -868,6 +882,25 @@ impl ClaudeDriver {
             native_thread_id: self.session_id.clone(),
             model: None,
         });
+        // Its skills, custom and built-in commands, with descriptions.
+        if let Some(list) = resp.pointer("/response/commands").and_then(Value::as_array) {
+            step.push(DriverEvent::Commands(
+                list.iter()
+                    .filter_map(|c| {
+                        let mut cmd = ProviderCommand::new(
+                            c.get("name")?.as_str()?,
+                            c.get("description").and_then(Value::as_str).unwrap_or(""),
+                        );
+                        cmd.hint = c
+                            .get("argumentHint")
+                            .and_then(Value::as_str)
+                            .filter(|h| !h.trim().is_empty())
+                            .map(str::to_string);
+                        Some(cmd)
+                    })
+                    .collect(),
+            ));
+        }
     }
 }
 
@@ -996,8 +1029,42 @@ impl StructuredDriver for ClaudeDriver {
         }
     }
 
+    fn adopt_spec(&mut self, spec: &mut LaunchSpec) {
+        // Custom provider specs often bake `--dangerously-skip-permissions` into
+        // `cmd`/`args` for PTY sessions; in `stream-json` SDK mode Claude uses
+        // `--permission-mode` + `--allow-dangerously-skip-permissions` instead.
+        if spec
+            .args
+            .iter()
+            .any(|a| a == "--dangerously-skip-permissions")
+        {
+            spec.args.retain(|a| a != "--dangerously-skip-permissions");
+            self.bypass_allowed = true;
+            if !spec
+                .args
+                .iter()
+                .any(|a| a == "--allow-dangerously-skip-permissions")
+            {
+                spec.args
+                    .push("--allow-dangerously-skip-permissions".into());
+            }
+        }
+        // The config dir the CLI runs with (a subscription account's own, else
+        // `~/.claude`) locates its transcript, where it writes its `ai-title`.
+        let dir = spec
+            .env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+            .map(|(_, v)| std::path::PathBuf::from(v))
+            .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(Into::into))
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".claude")));
+        self.transcript = dir.map(|d| d.join("projects"));
+    }
+
     fn start(&mut self, ctx: &LaunchContext) -> DriverStep {
         self.model = ctx.model.clone();
+        self.cwd = ctx.cwd.clone();
         self.access = ctx.access_mode;
         self.bypass_allowed = ctx.access_mode == RuntimeAccessMode::FullAccess;
         self.session_id = Some(
@@ -1021,11 +1088,20 @@ impl StructuredDriver for ClaudeDriver {
         // `initialize` before its answer (as the SDK streams them).
         let mut step = DriverStep::default();
         self.switch_selection(&mut step, req);
-        if let Some(mode) = req.access_mode.filter(|m| *m != self.access) {
-            self.access = mode;
-            let (id, line) = self.control_request(
-                json!({"subtype": "set_permission_mode", "mode": permission_mode(mode)}),
-            );
+        let access = req.access_mode.unwrap_or(self.access);
+        // Plan mode is a permission mode; leaving it restores the access
+        // mode. Re-sent on every plan turn: approving `ExitPlanMode` leaves
+        // plan mode inside the CLI.
+        if access != self.access || req.plan || self.plan {
+            self.access = access;
+            self.plan = req.plan;
+            let mode = if req.plan {
+                "plan"
+            } else {
+                permission_mode(access)
+            };
+            let (id, line) =
+                self.control_request(json!({"subtype": "set_permission_mode", "mode": mode}));
             self.switches.push(id);
             step.write(line);
         }
@@ -1051,8 +1127,22 @@ impl StructuredDriver for ClaudeDriver {
         true
     }
 
+    fn steers_model_live(&self) -> bool {
+        true
+    }
+
     fn switches_access_live(&self, to: RuntimeAccessMode) -> bool {
         to != RuntimeAccessMode::FullAccess || self.bypass_allowed
+    }
+
+    fn title_transcript(&self) -> Option<std::path::PathBuf> {
+        let sid = self.session_id.as_deref()?;
+        Some(
+            self.transcript
+                .as_ref()?
+                .join(otto_transcript::roots::encode_cwd(&self.cwd))
+                .join(format!("{sid}.jsonl")),
+        )
     }
 
     fn interrupt(&mut self) -> DriverStep {
@@ -1238,6 +1328,14 @@ impl StructuredDriver for ClaudeDriver {
         self.turn_id = None;
         DriverStep::default()
     }
+
+    fn snapshot_state(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+
+    fn restore_state(&mut self, state: &Value) -> Result<(), DriverError> {
+        restore_keeping_program(self, state, |d| &mut d.program)
+    }
 }
 
 #[cfg(test)]
@@ -1308,6 +1406,7 @@ mod tests {
             images: vec![otto_core::agent_runtime::PromptImage {
                 mime: "image/png".into(),
                 data_base64: "AAAA".into(),
+                name: None,
             }],
             ..RuntimePromptReq::of("what is this?")
         };
@@ -1577,6 +1676,7 @@ mod tests {
         ready(&mut d);
         let pdf = RuntimePromptReq {
             files: vec![otto_core::agent_runtime::PromptFile {
+                path: None,
                 mime: "application/pdf".into(),
                 name: "spec.pdf".into(),
                 data_base64: "JVBERg==".into(),
@@ -1684,9 +1784,14 @@ mod tests {
             json!({"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"tu1","status":"completed","summary":"exit 0","output_file":"/tmp/b1"}),
         );
         let notice = &items(&s)[0];
-        assert!(
-            matches!(&notice.kind, TurnItemKind::SystemNotice { message } if message == "Background command finished: Wait five minutes")
-        );
+        assert!(matches!(
+            &notice.kind,
+            TurnItemKind::SystemNotice {
+                message,
+                task_settlement: Some(ts),
+            } if message == "Background command finished: Wait five minutes"
+                && ts.status == "completed"
+        ));
         assert_eq!(notice.turn_id, None, "no turn running");
         assert_eq!(bg_lists(&s), vec![Vec::<BackgroundTask>::new()]);
         // A duplicate notification changes nothing.
@@ -1789,8 +1894,13 @@ mod tests {
             json!({"type":"system","subtype":"task_updated","task_id":"f1","patch":{"status":"killed"}}),
         );
         assert_eq!(bg_lists(&s)[0].len(), 1);
-        assert!(items(&s).iter().any(|i| matches!(&i.kind,
-            TurnItemKind::SystemNotice { message } if message.starts_with("Background command stopped"))));
+        assert!(items(&s).iter().any(|i| matches!(
+            &i.kind,
+            TurnItemKind::SystemNotice {
+                message,
+                task_settlement: Some(ts),
+            } if message.starts_with("Background command stopped") && ts.status == "stopped"
+        )));
     }
 
     #[test]
@@ -2178,5 +2288,90 @@ mod tests {
             .events
             .iter()
             .any(|e| matches!(e, DriverEvent::ContextUsage(_))));
+    }
+
+    #[test]
+    fn snapshot_and_restore_preserve_mid_turn_blocks_tools_and_pending_approvals() {
+        let mut d1 = ClaudeDriver::new();
+        ready(&mut d1);
+        feed(
+            &mut d1,
+            json!({"type":"system","subtype":"init","session_id":"claude-sid-1","model":"claude-sonnet"}),
+        );
+        d1.prompt("t1", &RuntimePromptReq::of("inspect")).unwrap();
+        feed(
+            &mut d1,
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"msg_1"}}}),
+        );
+        feed(
+            &mut d1,
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}),
+        );
+        feed(
+            &mut d1,
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}}),
+        );
+        let perm = feed(
+            &mut d1,
+            json!({"type":"control_request","request_id":"req_9","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"tu_1"}}),
+        );
+        assert!(perm
+            .events
+            .iter()
+            .any(|e| matches!(e, DriverEvent::Request { id, .. } if id == "claude-req_9")));
+        feed(
+            &mut d1,
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}),
+        );
+        feed(
+            &mut d1,
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hel"}}}),
+        );
+
+        // The shape an earlier build's holder snapshotted: blocks as
+        // `[(index, block)]`, none of the later fields, no `program`.
+        let mut snap = d1.snapshot_state();
+        assert!(snap.get("program").is_none());
+        let o = snap.as_object_mut().unwrap();
+        for k in ["cost_total", "plan", "transcript", "cwd"] {
+            o.remove(k);
+        }
+        let pairs: Vec<Value> = o["blocks"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, b)| json!([k.parse::<u64>().unwrap(), b]))
+            .collect();
+        o["blocks"] = Value::Array(pairs);
+        let mut d2 = ClaudeDriver::with_program("otto-fake-claude");
+        d2.restore_state(&snap).unwrap();
+        assert_eq!(d2.program, "otto-fake-claude");
+
+        let resp = d2
+            .respond("claude-req_9", ApprovalDecision::Accept)
+            .unwrap();
+        let sent_resp: Value = serde_json::from_str(&resp.writes[0]).unwrap();
+        assert_eq!(sent_resp["response"]["request_id"], "req_9");
+
+        let delta = feed(
+            &mut d2,
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"lo"}}}),
+        );
+        assert!(delta.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::TurnItem(i)
+                if matches!(&i.kind, TurnItemKind::AssistantMessage { text, streaming: true, .. } if text == "Hello")
+        )));
+        let done = feed(
+            &mut d2,
+            json!({"type":"result","subtype":"success","is_error":false}),
+        );
+        assert!(done.events.iter().any(|e| matches!(
+            e,
+            DriverEvent::Terminal {
+                status: TurnTerminalStatus::Completed,
+                ..
+            }
+        )));
     }
 }

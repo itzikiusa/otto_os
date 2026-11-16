@@ -7,11 +7,33 @@ multi-agent code review, Jira/Confluence product workflows, SSH/database
 connections, an HTTP API client, real token-usage tracking, and Slack/Telegram
 bridges so an agent can work a ticket from a chat thread.
 
-**Version 0.2.2** · macOS (Apple Silicon; Intel from source) · actively developed, so
+**Version 0.3.0** · macOS (Apple Silicon; Intel from source) · actively developed, so
 expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
-🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.2.2/otto-tour-20261113.mp4)**
+🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.3.0/otto-tour-20261116.mp4)**
 (also in the app under **Help → Walkthroughs**).
+
+### What's new in 0.3.0
+
+- **IDE (Beta).** A multi-language IDE inside Otto: local and remote-SSH
+  projects, multi-folder projects, SDK and toolchain manager, run and debug
+  configurations (DAP), language servers, refactorings, a git gutter, local
+  history, dependency and vulnerability views, live shared editing and IDE
+  plugins. Chat with an agent about the open project from the IDE itself.
+- **Threads: every agent, fully.** Claude, Codex, Antigravity, Gemini, Grok,
+  OpenCode, pi and Muse run as structured agents. Each one reports what it
+  can do (images, files, plan mode, effort, steering) and Threads offers
+  exactly that. Agents name their threads, list their own slash commands and
+  report cost and context; tool screenshots show inline; subagents,
+  background tasks and Antigravity swarms open from **Agents & tasks**.
+- **Agents survive a restart.** A deploy or daemon restart no longer kills a
+  running agent: it keeps working in a holder process and the thread picks it
+  up again, mid-turn, approvals and queued messages included.
+- **Safer by default.** Sandboxed sessions can't reach other sessions'
+  agents, shared-editing guests can't write git or agent config, and local
+  language servers run only for the Mac's owner.
+
+![The IDE (Beta) paused at a breakpoint in a Python project, with the git gutter, frames, variables and an evaluated expression](docs/screenshots/ide.jpg)
 
 ### What's new in 0.2.2
 
@@ -64,8 +86,8 @@ including behaviour changes to know before upgrading.
 
 ### What's new in 0.2.1
 
-- **Threads on structured agent protocols.** Codex, Claude, Antigravity, pi and
-  opencode run as structured sessions instead of terminals: plans, commands,
+- **Threads on structured agent protocols.** Codex, Claude, Antigravity, pi,
+  opencode and Muse Code run as structured sessions instead of terminals: plans, commands,
   file edits and test runs stream into the thread, approvals appear inline
   where the agent asks, and threads can open, message and close **linked
   threads**. Thread agents get the Otto MCP tools, can make changes, and can
@@ -137,7 +159,7 @@ including behaviour changes to know before upgrading.
 
 - **Threads** — an inbox-first conversational workspace (`#/threads`)
   inspired by modern agentic IDEs while keeping Otto's multi-session power:
-  - **Structured runtime:** Codex, Claude, Antigravity, pi and opencode run
+  - **Structured runtime:** Codex, Claude, Antigravity, pi, opencode and Muse run
     over their structured protocols (`otto-agent-protocol`), so plans,
     commands, file changes and tool calls are real items, approvals answer
     inline, and threads link into teams (`otto.thread_open` / `_message` /
@@ -194,6 +216,11 @@ including behaviour changes to know before upgrading.
   screen share, draw annotations directly on the shared screen (with permission),
   hand over and reclaim terminal control at any moment, and generate a local
   structured recap (decisions, actions, open questions) once participants consent.
+- **IDE (Beta)** — a multi-language IDE (`#/ide`) on your local or SSH
+  projects: language servers (hover, diagnostics, rename), a git gutter, run
+  configurations with live output and test trees, a DAP debugger with
+  breakpoints, and an agent dock that proposes diffs you apply or undo. See
+  `docs/features/ide.md`.
 - **Git & Pull Requests** — a GitKraken-style **commit graph** with a WIP row +
   staging panel, per-file diffs, folder-level stage/discard, an interactive
   **conflict resolver** (A/B line picking with live output) that covers merge,
@@ -485,8 +512,8 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
 
 ## Download (prebuilt DMG)
 
-**Versioned releases:** [Otto 0.2.2](../../releases/tag/v0.2.2) ships
-`Otto_0.2.2_aarch64.dmg` with its `.sha256` and the tour film.
+**Versioned releases:** [Otto 0.3.0](../../releases/tag/v0.3.0) ships
+`Otto_0.3.0_aarch64.dmg` with its `.sha256` and the tour film.
 
 A GitHub Actions workflow builds the Apple-Silicon `.dmg` **monthly** (on the
 1st, 05:00 UTC; maintainers can also run it on demand via `workflow_dispatch`)

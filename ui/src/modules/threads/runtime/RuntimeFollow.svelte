@@ -7,7 +7,7 @@
   // composer: the pill floats over the scroller's bottom edge.
   import { tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { END_BAND, followAfterScroll, followPillText, unreadSince } from './follow';
+  import { didScrollUpByUser, END_BAND, followAfterScroll, followPillText, unreadSince } from './follow';
 
   interface Props {
     scroller: HTMLDivElement | null;
@@ -27,6 +27,7 @@
 
   $effect(() => {
     if (atBottom) lastSeenId = messageIds[messageIds.length - 1] ?? null;
+    if (scroller) scroller.dataset.atBottom = atBottom ? '1' : '0';
   });
   const unread = $derived(atBottom ? 0 : unreadSince(messageIds, lastSeenId));
   const text = $derived(atBottom ? null : followPillText(unread, unseen, farUp));
@@ -38,6 +39,7 @@
   $effect(() => {
     const el = scroller;
     if (!el) return;
+    el.dataset.atBottom = untrack(() => (atBottom ? '1' : '0'));
     // The reader's input; a scroll within this window of it is theirs
     // (iOS momentum keeps scrolling after the finger lifts).
     let gestureAt = -Infinity;
@@ -45,23 +47,34 @@
       gestureAt = performance.now();
     };
     let lastTop = el.scrollTop;
+    let lastScrollHeight = el.scrollHeight;
+    let lastClientHeight = el.clientHeight;
     const onScroll = (): void => {
       const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-      const up = el.scrollTop < lastTop;
+      const up = didScrollUpByUser(el.scrollTop, lastTop, el.scrollHeight, lastScrollHeight);
       lastTop = el.scrollTop;
+      lastScrollHeight = el.scrollHeight;
+      lastClientHeight = el.clientHeight;
       atBottom = followAfterScroll(atBottom, gap, performance.now() - gestureAt < 600, up);
       farUp = gap > el.clientHeight;
       if (gap < END_BAND) unseen = 0;
     };
-    // Content that grows on its own (a diagram or an image finishing)
-    // keeps the end in view while following, not only on the next event.
-    // Growth the reader caused (opening a fold) moves the end away instead
-    // of dragging what they opened out of view.
+    // Observe both `.rt-scroll` (viewport height changes when `.rt-dock` banners
+    // mount/unmount) and `.rt-stream` (all streaming rows, images, and folds
+    // added after mount) so bottom-following never misses late layout growth.
     const grown = new ResizeObserver(() => {
+      const changed = el.scrollHeight !== lastScrollHeight || el.clientHeight !== lastClientHeight;
+      lastScrollHeight = el.scrollHeight;
+      lastClientHeight = el.clientHeight;
       if (performance.now() - gestureAt < 600) onScroll();
-      else if (untrack(() => atBottom)) pin();
+      else if (changed && untrack(() => atBottom)) {
+        pin();
+        lastTop = el.scrollTop;
+      }
     });
-    for (const child of el.children) grown.observe(child);
+    grown.observe(el);
+    const stream = el.querySelector('[data-runtime-stream]') ?? el.firstElementChild;
+    if (stream) grown.observe(stream);
     const keys = (e: KeyboardEvent): void => {
       if (['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' '].includes(e.key)) gesture();
     };
@@ -94,6 +107,12 @@
     atBottom = true;
     farUp = false;
     unseen = 0;
+  }
+
+  /** Unpin bottom-following before prepending older history above the viewport. */
+  export function releaseBottom(): void {
+    atBottom = false;
+    if (scroller) scroller.dataset.atBottom = '0';
   }
 </script>
 

@@ -19,6 +19,10 @@ mod children;
 pub mod council;
 mod descendants;
 mod fresh;
+mod held_adopt;
+mod held_proc;
+mod paging;
+mod peers;
 mod request_ids;
 use request_ids::RequestIds;
 
@@ -31,15 +35,15 @@ use chrono::Utc;
 use dashmap::DashMap;
 use otto_core::agent_runtime::{
     ApprovalDecision, Attachment, AttachmentKind, CancelReason, CreateRuntimeSessionReq,
-    OpenPeerReq, PeerInfo, PeerReply, PlanArtifact, PromptDelivery, ProviderFailure,
-    ProviderSession, ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus,
-    QueuedPrompt, ResponseCapability, RuntimeEvent, RuntimeEventBody, RuntimePromptReq,
-    RuntimePromptResp, RuntimeReplay, RuntimeRequest, RuntimeRequestStatus, RuntimeSession,
-    RuntimeSessionStatus, RuntimeSnapshot, TurnItem, TurnItemKind, TurnItemStatus, TurnOrigin,
-    TurnTerminalStatus,
+    PlanArtifact, PromptDelivery, ProviderCommand, ProviderFailure, ProviderSession,
+    ProviderSessionStatus, ProviderThread, ProviderTurn, ProviderTurnStatus, QueuedPrompt,
+    ResponseCapability, RuntimeEvent, RuntimeEventBody, RuntimePromptReq, RuntimePromptResp,
+    RuntimeReplay, RuntimeRequest, RuntimeRequestStatus, RuntimeSession, RuntimeSessionStatus,
+    RuntimeSnapshot, TurnItem, TurnItemKind, TurnItemStatus, TurnOrigin, TurnTerminalStatus,
+    TurnTokenUsage,
 };
 use otto_core::{new_id, Error, Id, Result};
-use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RuntimeEntityRow};
+use otto_state::{AgentRuntimeRepo, NewRuntimeSession, RawRuntimeEntityRow, RuntimeEntityRow};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::driver::{
@@ -71,6 +75,10 @@ pub struct RuntimeConfig {
     /// chunk goes out at once; the latest text of a held item is flushed
     /// when the window ends or before any other event. Zero disables.
     pub stream_coalesce: Duration,
+    /// Quiet period after which an idle agent-initiated turn (`origin: agent`)
+    /// whose driver lacks a protocol turn-end frame (ACP `session/update`)
+    /// settles cleanly to `Completed` and persists its items. Zero disables.
+    pub autonomous_settle: Duration,
     /// Prompt attachments, one folder per session (`<dir>/<session>/<id>`).
     pub attachments_dir: PathBuf,
     /// How long a reopen waits for the resumed agent to get ready before
@@ -83,6 +91,13 @@ pub struct RuntimeConfig {
     /// The same allowance while one of the turn's tools is still running
     /// (a long build, a subagent).
     pub stall_tool_after: Duration,
+    /// Socket directory for detached `runtime-holder` processes (`<data_dir>/runtime-holders`).
+    /// When `Some` and a [`crate::holder::HolderLauncher`] is configured or auto-detected,
+    /// spawned CLIs survive `ottod` restarts.
+    pub holders_dir: Option<PathBuf>,
+    /// Explicit launcher binary for `runtime-holder` (tests pass `otto-runtime-holder`;
+    /// `None` auto-detects `ottod runtime-holder` or `OTTO_RUNTIME_HOLDER_BIN`).
+    pub holder_launcher: Option<crate::holder::HolderLauncher>,
 }
 
 impl Default for RuntimeConfig {
@@ -93,10 +108,13 @@ impl Default for RuntimeConfig {
             interrupt_grace: Duration::from_secs(10),
             close_grace: Duration::from_secs(3),
             stream_coalesce: Duration::from_millis(50),
+            autonomous_settle: Duration::from_millis(1500),
             attachments_dir: std::env::temp_dir().join("otto-runtime-attachments"),
             start_wait: Duration::from_secs(20),
             stall_after: Duration::from_secs(15 * 60),
             stall_tool_after: Duration::from_secs(45 * 60),
+            holders_dir: None,
+            holder_launcher: None,
         }
     }
 }
@@ -108,6 +126,7 @@ const K_ITEM: &str = "turn_item";
 const K_REQUEST: &str = "runtime_request";
 const K_PLAN: &str = "plan";
 const K_QUEUE: &str = "queue";
+const K_COMMANDS: &str = "commands";
 
 /// A queued message as persisted: the whole prompt (its images / files
 /// too), so it goes out unchanged after a restart.
@@ -137,6 +156,8 @@ enum PersistOp {
     Upsert(Vec<RuntimeEntityRow>),
     Reserve(u64),
     NativeThreadId(String),
+    /// The agent's own name for the conversation (the title stays auto).
+    Title(String),
     ClearNativeThreadId,
     Closed,
     Opened,
@@ -145,56 +166,74 @@ enum PersistOp {
 
 /// Every entity's latest state (+ the sequence that set it).
 #[derive(Default)]
-struct Projection {
+pub(crate) struct Projection {
     session: Option<ProviderSession>,
     thread: Option<ProviderThread>,
     turns: HashMap<Id, ProviderTurn>,
     items: HashMap<Id, TurnItem>,
+    /// O(1) index of item IDs currently in `is_streaming()` state for fast
+    /// holder checkpoints without scanning all `M` historical items.
+    pub(super) streaming_ids: std::collections::HashSet<Id>,
     requests: HashMap<Id, RuntimeRequest>,
     /// request id → its `approval_request` item id.
     request_items: HashMap<Id, Id>,
     plans: HashMap<String, PlanArtifact>,
     /// Messages waiting for the running turn to end, oldest first.
     queue: Vec<QueuedRecord>,
+    /// The agent's own slash commands.
+    commands: Vec<ProviderCommand>,
     next_item_ordinal: u32,
     next_turn_ordinal: u32,
 }
 
 impl Projection {
-    fn load(rows: Vec<RuntimeEntityRow>) -> Self {
+    pub(super) fn upsert_item_entry(&mut self, item: TurnItem) {
+        if item.is_streaming() {
+            self.streaming_ids.insert(item.id.clone());
+        } else {
+            self.streaming_ids.remove(&item.id);
+        }
+        self.items.insert(item.id.clone(), item);
+    }
+
+    fn load_raw(rows: Vec<RawRuntimeEntityRow>) -> Self {
         let mut p = Projection::default();
         for r in rows {
-            let v = r.payload;
+            let s = r.payload_json.as_str();
             match r.kind.as_str() {
-                K_SESSION => p.session = serde_json::from_value(v).ok(),
-                K_THREAD => p.thread = serde_json::from_value(v).ok(),
+                K_SESSION => p.session = serde_json::from_str(s).ok(),
+                K_THREAD => p.thread = serde_json::from_str(s).ok(),
                 K_TURN => {
-                    if let Ok(t) = serde_json::from_value::<ProviderTurn>(v) {
+                    if let Ok(t) = serde_json::from_str::<ProviderTurn>(s) {
                         p.next_turn_ordinal = p.next_turn_ordinal.max(t.ordinal);
                         p.turns.insert(t.id.clone(), t);
                     }
                 }
                 K_ITEM => {
-                    if let Ok(i) = serde_json::from_value::<TurnItem>(v) {
+                    if let Ok(mut i) = serde_json::from_str::<TurnItem>(s) {
+                        crate::diff_compact::bound_item_in_place(&mut i);
                         p.next_item_ordinal = p.next_item_ordinal.max(i.ordinal);
                         if let TurnItemKind::ApprovalRequest { request_id, .. } = &i.kind {
                             p.request_items.insert(request_id.clone(), i.id.clone());
                         }
-                        p.items.insert(i.id.clone(), i);
+                        p.upsert_item_entry(i);
                     }
                 }
                 K_REQUEST => {
-                    if let Ok(q) = serde_json::from_value::<RuntimeRequest>(v) {
+                    if let Ok(q) = serde_json::from_str::<RuntimeRequest>(s) {
                         p.requests.insert(q.id.clone(), q);
                     }
                 }
                 K_PLAN => {
-                    if let Ok(pl) = serde_json::from_value::<PlanArtifact>(v) {
+                    if let Ok(pl) = serde_json::from_str::<PlanArtifact>(s) {
                         p.plans.insert(pl.id.clone(), pl);
                     }
                 }
                 K_QUEUE => {
-                    p.queue = serde_json::from_value(v).unwrap_or_default();
+                    p.queue = serde_json::from_str(s).unwrap_or_default();
+                }
+                K_COMMANDS => {
+                    p.commands = serde_json::from_str(s).unwrap_or_default();
                 }
                 _ => {}
             }
@@ -203,9 +242,20 @@ impl Projection {
     }
 
     fn snapshot(&self) -> RuntimeSnapshot {
+        self.snapshot_compact(false)
+    }
+
+    fn snapshot_compact(&self, compact: bool) -> RuntimeSnapshot {
         let mut turns: Vec<ProviderTurn> = self.turns.values().cloned().collect();
         turns.sort_by_key(|t| t.ordinal);
-        let mut turn_items: Vec<TurnItem> = self.items.values().cloned().collect();
+        let mut turn_items: Vec<TurnItem> = if compact {
+            self.items
+                .values()
+                .map(TurnItem::compact_for_snapshot)
+                .collect()
+        } else {
+            self.items.values().cloned().collect()
+        };
         turn_items.sort_by_key(|i| i.ordinal);
         let mut runtime_requests: Vec<RuntimeRequest> = self.requests.values().cloned().collect();
         runtime_requests.sort_by_key(|r| r.created_at);
@@ -219,6 +269,10 @@ impl Projection {
             runtime_requests,
             plans,
             queued_prompts: self.queue.iter().map(QueuedRecord::public).collect(),
+            commands: self.commands.clone(),
+            has_older: false,
+            oldest_turn_ordinal: None,
+            older_turns: 0,
         }
     }
 
@@ -250,10 +304,17 @@ impl Projection {
                     self.request_items
                         .insert(request_id.clone(), turn_item.id.clone());
                 }
-                self.items.insert(turn_item.id.clone(), turn_item.clone());
+                let existed = self.items.contains_key(&turn_item.id);
+                self.upsert_item_entry(turn_item.clone());
                 // Streaming text is written once it settles (T3 Code persists
                 // every update; the settled item carries the whole text).
-                (!turn_item.is_streaming()).then(|| row(K_ITEM, &turn_item.id, json(turn_item)))
+                // Open subagent cards likewise persist on initial creation and
+                // settlement, skipping intermediate `sub_calls` churn.
+                let skip_db = turn_item.is_streaming()
+                    || (existed
+                        && matches!(turn_item.kind, TurnItemKind::Subagent { .. })
+                        && turn_item.status.is_open());
+                (!skip_db).then(|| row(K_ITEM, &turn_item.id, json(turn_item)))
             }
             RuntimeEventBody::RuntimeRequestUpdated { runtime_request } => {
                 self.requests
@@ -263,6 +324,10 @@ impl Projection {
             RuntimeEventBody::PlanUpdated { plan } => {
                 self.plans.insert(plan.id.clone(), plan.clone());
                 Some(row(K_PLAN, &plan.id, json(plan)))
+            }
+            RuntimeEventBody::CommandsUpdated { commands } => {
+                self.commands = commands.clone();
+                Some(row(K_COMMANDS, "commands", json(commands)))
             }
             // The queue's row (the whole prompts) is written by `emit_queue`.
             RuntimeEventBody::CommandOutputDelta { .. }
@@ -284,34 +349,81 @@ mod erased {
     }
 }
 
-struct Proc {
-    epoch: u64,
-    request_ids: RequestIds,
-    pid: u32,
-    stdin: mpsc::UnboundedSender<String>,
-    driver: Box<dyn StructuredDriver>,
+pub(super) enum ProcTransport {
+    Direct {
+        stdin: mpsc::UnboundedSender<String>,
+    },
+    Held {
+        client: crate::holder::HolderClient,
+        acked_seq: u64,
+        claude_login: Option<Option<PathBuf>>,
+        last_checkpoint_at: Option<Instant>,
+        checkpoint_dirty: bool,
+        #[cfg(test)]
+        checkpoint_writes: usize,
+    },
 }
 
-struct ActiveTurn {
-    id: Id,
-    interrupting: bool,
+pub(super) struct Proc {
+    pub(super) epoch: u64,
+    pub(super) request_ids: RequestIds,
+    pub(super) pid: u32,
+    pub(super) transport: ProcTransport,
+    pub(super) driver: Box<dyn StructuredDriver>,
+}
+
+impl Proc {
+    fn send_stdin(&self, line: String) {
+        match &self.transport {
+            ProcTransport::Direct { stdin } => {
+                let _ = stdin.send(line);
+            }
+            ProcTransport::Held { client, .. } => {
+                let _ = client.send_stdin(line);
+            }
+        }
+    }
+
+    fn interrupt_process_group(&self) {
+        match &self.transport {
+            ProcTransport::Direct { .. } => signal_group(self.pid, libc::SIGINT),
+            ProcTransport::Held { client, .. } => {
+                client.signal(crate::holder::HolderSignal::Interrupt);
+            }
+        }
+    }
+
+    fn kill_process_group(&self) {
+        match &self.transport {
+            ProcTransport::Direct { .. } => signal_group(self.pid, libc::SIGKILL),
+            ProcTransport::Held { client, .. } => {
+                client.signal(crate::holder::HolderSignal::Kill);
+            }
+        }
+    }
+}
+
+pub(super) struct ActiveTurn {
+    pub(super) id: Id,
+    pub(super) origin: TurnOrigin,
+    pub(super) interrupting: bool,
     /// Stopped by the stall watchdog.
-    stalled: bool,
+    pub(super) stalled: bool,
 }
 
-struct State {
-    session: RuntimeSession,
-    next_seq: u64,
-    reserved: u64,
-    epoch: u64,
+pub(super) struct State {
+    pub(super) session: RuntimeSession,
+    pub(super) next_seq: u64,
+    pub(super) reserved: u64,
+    pub(super) epoch: u64,
     /// Native identity is committed only after the first fresh prompt is accepted.
-    fresh_starting: bool,
+    pub(super) fresh_starting: bool,
     ring: EventRing,
-    proj: Projection,
-    turn: Option<ActiveTurn>,
-    proc: Option<Proc>,
+    pub(super) proj: Projection,
+    pub(super) turn: Option<ActiveTurn>,
+    pub(super) proc: Option<Proc>,
     /// Streaming upserts waiting out their coalescing window (latest per id).
-    held: Vec<TurnItem>,
+    pub(super) held: Vec<TurnItem>,
     /// When each streaming item was last emitted.
     stream_emitted: HashMap<Id, Instant>,
     /// When the session last emitted anything (the stall watchdog's clock).
@@ -334,7 +446,7 @@ impl State {
     }
 }
 
-struct Live {
+pub(super) struct Live {
     /// Serializes prompt admission, queue delivery and fresh provider replacement.
     prompt_lock: tokio::sync::Mutex<()>,
     spawn_lock: tokio::sync::Mutex<()>,
@@ -343,7 +455,12 @@ struct Live {
     state: Mutex<State>,
     /// External turn/request changes can arm a deadline while the child is silent.
     deadline_changed: tokio::sync::Notify,
+    /// Wakes `descendants::watch` immediately when `st.proc` ends or detaches.
+    pub(super) proc_ended: tokio::sync::Notify,
     persist: mpsc::UnboundedSender<PersistOp>,
+    /// Set during `shutdown_for_restart` so `descendants::watch` does not kill
+    /// Claude background processes when `st.proc` is detached.
+    pub(super) detaching_for_restart: std::sync::atomic::AtomicBool,
 }
 
 impl Live {
@@ -352,7 +469,7 @@ impl Live {
     }
 }
 
-struct Inner {
+pub(super) struct Inner {
     /// This runtime, for work a sync path hands off (draining the queue).
     me: Weak<Inner>,
     repo: AgentRuntimeRepo,
@@ -360,6 +477,7 @@ struct Inner {
     drivers: Arc<dyn DriverFactory>,
     config: RuntimeConfig,
     live: DashMap<Id, Arc<Live>>,
+    loading: otto_core::keyed_lock::KeyedLocks<Id>,
 }
 
 /// Cheap to clone.
@@ -383,7 +501,27 @@ impl AgentRuntime {
                 drivers,
                 config,
                 live: DashMap::new(),
+                loading: otto_core::keyed_lock::KeyedLocks::new(),
             }),
+        }
+    }
+
+    /// Pre-hydrate the `limit` most recently active open sessions in the
+    /// background at daemon boot so opening an active thread on phone/desktop
+    /// never blocks on a cold SQLite projection load.
+    pub async fn warm_recent(&self, limit: usize) {
+        if limit == 0 {
+            return;
+        }
+        let Ok(records) = self.inner.repo.list_all(None).await else {
+            return;
+        };
+        for rec in records
+            .into_iter()
+            .filter(|r| r.session.status != RuntimeSessionStatus::Closed)
+            .take(limit)
+        {
+            let _ = self.live(&rec.session.id).await;
         }
     }
 
@@ -403,11 +541,63 @@ impl AgentRuntime {
     /// turn this cut off reports it to its parent (`children.rs`). Returns
     /// sessions touched.
     pub async fn recover(&self) -> Result<usize> {
+        self.recover_excluding(&std::collections::HashSet::new())
+            .await
+    }
+
+    /// Evict idle cached projections and reconcile non-live sessions in SQLite
+    /// after a state-archive restore without auto-spawning queued prompts.
+    pub async fn settle_after_restore(&self) -> Result<usize> {
+        let active: std::collections::HashSet<Id> = self
+            .inner
+            .live
+            .iter()
+            .filter_map(|e| {
+                let st = e.value().lock();
+                (st.proc.is_some() || st.starting > 0).then(|| e.key().clone())
+            })
+            .collect();
+        self.inner.live.retain(|id, _| active.contains(id));
+        self.inner.repo.expire_drafts().await?;
+        let mut touched = 0;
+        for sid in self.inner.repo.session_ids().await? {
+            if active.contains(&sid) {
+                continue;
+            }
+            let rec = self.inner.repo.get(&sid).await?;
+            let mut seq = rec.seq_reserved.max(rec.session.last_sequence);
+            let mut rows = Vec::new();
+            for mut r in self.inner.repo.entities(&sid).await? {
+                let raw = serde_json::to_string(&r.payload).unwrap_or_default();
+                if let Some(next_str) = settle_archived_entity_json(&r.kind, &raw) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&next_str) {
+                        seq += 1;
+                        r.payload = v;
+                        r.sequence = seq;
+                        rows.push(r);
+                    }
+                }
+            }
+            if !rows.is_empty() {
+                touched += 1;
+                self.inner.repo.upsert_entities(&sid, &rows).await?;
+            }
+        }
+        Ok(touched)
+    }
+
+    pub(super) async fn recover_excluding(
+        &self,
+        excluded: &std::collections::HashSet<Id>,
+    ) -> Result<usize> {
         self.inner.repo.expire_drafts().await?;
         let mut touched = 0;
         let mut queued = Vec::new();
         let mut cut_children = Vec::new();
         for sid in self.inner.repo.session_ids().await? {
+            if excluded.contains(&sid) {
+                continue;
+            }
             let rec = self.inner.repo.get(&sid).await?;
             let mut seq = rec.seq_reserved.max(rec.session.last_sequence);
             let now = Utc::now();
@@ -515,18 +705,66 @@ impl AgentRuntime {
             .iter()
             .map(|e| Arc::clone(e.value()))
             .collect();
+        let mut held_shutdowns = Vec::new();
         for live in &lives {
             if let Some(p) = live.lock().proc.take() {
-                let pid = p.pid;
-                drop(p);
-                signal_group(pid, libc::SIGTERM);
+                live.proc_ended.notify_waiters();
+                match p.transport {
+                    ProcTransport::Direct { stdin } => {
+                        drop(stdin);
+                        signal_group(p.pid, libc::SIGTERM);
+                    }
+                    ProcTransport::Held { client, .. } => {
+                        held_shutdowns.push(tokio::spawn(async move {
+                            client.shutdown(Duration::ZERO).await;
+                        }));
+                    }
+                }
             }
+        }
+        for task in held_shutdowns {
+            let _ = task.await;
         }
         for live in lives {
             let (tx, rx) = oneshot::channel();
             let _ = live.persist.send(PersistOp::Flush(tx));
             let _ = rx.await;
         }
+    }
+
+    /// Evict all cached in-memory [`Live`] sessions (stopping any live child
+    /// processes first) and reconcile the persisted projection after a
+    /// portable state-archive restore.
+    pub async fn reset_for_restore(&self) -> Result<usize> {
+        let keys: Vec<Id> = self.inner.live.iter().map(|e| e.key().clone()).collect();
+        let mut held_shutdowns = Vec::new();
+        for id in keys {
+            if let Some((_, live)) = self.inner.live.remove(&id) {
+                let proc = {
+                    let mut st = live.lock();
+                    st.epoch += 1;
+                    st.proc.take()
+                };
+                if let Some(p) = proc {
+                    live.proc_ended.notify_waiters();
+                    match p.transport {
+                        ProcTransport::Direct { stdin } => {
+                            drop(stdin);
+                            signal_group(p.pid, libc::SIGTERM);
+                        }
+                        ProcTransport::Held { client, .. } => {
+                            held_shutdowns.push(tokio::spawn(async move {
+                                client.shutdown(Duration::ZERO).await;
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        for task in held_shutdowns {
+            let _ = task.await;
+        }
+        self.recover().await
     }
 
     // ---- sessions -------------------------------------------------------
@@ -550,6 +788,19 @@ impl AgentRuntime {
         let provider = req
             .provider
             .ok_or_else(|| Error::Invalid("provider is required".into()))?;
+        let effective_slug = req
+            .meta
+            .as_ref()
+            .and_then(|m| m.get(otto_core::agent_runtime::PROVIDER_SLUG_META_KEY))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| provider.as_str());
+        if !self.inner.host.is_provider_enabled(effective_slug) {
+            return Err(Error::Invalid(format!(
+                "unknown or disabled runtime provider '{effective_slug}'"
+            )));
+        }
         if self.inner.drivers.create(provider).is_none() {
             return Err(Error::Invalid(format!(
                 "no structured driver for provider '{}' yet",
@@ -569,11 +820,14 @@ impl AgentRuntime {
             .title
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| format!("{} thread", provider.as_str()));
+            .unwrap_or_else(|| format!("{effective_slug} thread"));
         let model = req
             .model
             .map(|m| m.trim().to_string())
             .filter(|m| !m.is_empty());
+        if let Some(m) = &model {
+            crate::http::drafts::validate_model_name(m)?;
+        }
         let rec = self
             .inner
             .repo
@@ -595,6 +849,12 @@ impl AgentRuntime {
             })
             .await?;
         let id = rec.session.id.clone();
+        if req.title_auto {
+            self.inner
+                .repo
+                .set_title(&id, &rec.session.title, true)
+                .await?;
+        }
         // Spawn now so a refused folder / missing CLI fails the create.
         let live = self.live(&id).await?;
         if let Err(e) = self.ensure_process(&live).await {
@@ -605,268 +865,6 @@ impl AgentRuntime {
         }
         let s = live.lock().session.clone();
         Ok(s)
-    }
-
-    // ---- linked threads (agent ↔ agent) ----------------------------------
-
-    /// The linked group `caller` belongs to: its root and every thread opened
-    /// under it, same owner, not closed — `caller` first-class among them.
-    async fn group(&self, caller: &RuntimeSession) -> Result<Vec<RuntimeSession>> {
-        let root = caller
-            .parent_id
-            .clone()
-            .unwrap_or_else(|| caller.id.clone());
-        Ok(self
-            .list(&caller.workspace_id, Some(&caller.created_by))
-            .await?
-            .into_iter()
-            .filter(|s| s.status != RuntimeSessionStatus::Closed)
-            .filter(|s| s.id == root || s.parent_id.as_ref() == Some(&root))
-            .collect())
-    }
-
-    /// 409 when `c`'s linked group has no room for another thread. One
-    /// confused agent must not fan out without bound: `group` lists the OPEN
-    /// threads of this linked group, the root included.
-    async fn ensure_group_room(&self, c: &RuntimeSession) -> Result<()> {
-        if self.group(c).await?.len() > MAX_LINKED_OPEN {
-            return Err(Error::Conflict(format!(
-                "this thread group already has {MAX_LINKED_OPEN} open linked threads — close \
-                 one (otto_thread_close) before opening another"
-            )));
-        }
-        Ok(())
-    }
-
-    fn peer_info(s: &RuntimeSession, caller: &Id) -> PeerInfo {
-        PeerInfo {
-            id: s.id.clone(),
-            provider: s.provider,
-            title: s.title.clone(),
-            status: s.status,
-            is_self: &s.id == caller,
-        }
-    }
-
-    /// `peer` when it is in `caller`'s group (and not `caller` itself).
-    async fn group_member(&self, caller: &RuntimeSession, peer: &Id) -> Result<RuntimeSession> {
-        if peer == &caller.id {
-            return Err(Error::Invalid("that is this thread itself".into()));
-        }
-        self.group(caller)
-            .await?
-            .into_iter()
-            .find(|s| &s.id == peer)
-            .ok_or_else(|| {
-                Error::NotFound(format!(
-                    "no linked thread '{peer}' (list them with otto_thread_list)"
-                ))
-            })
-    }
-
-    /// The header a peer's message arrives under, so the receiving agent
-    /// knows who wrote it and how to answer.
-    fn peer_header(from: &RuntimeSession, verb: &str) -> String {
-        format!(
-            "[{verb} thread \"{}\" ({}, id {}). Answer it with the otto_thread_message tool \
-             (session_id {}); see every linked thread with otto_thread_list.]",
-            from.title,
-            from.provider.as_str(),
-            from.id,
-            from.id
-        )
-    }
-
-    /// Open a linked thread from `caller`: same owner, workspace, cwd and
-    /// access mode (never wider than the opener's), grouped under the
-    /// caller's root; the opening prompt (if any) is sent framed. The
-    /// daemon-only `req.cwd` / `req.meta` give the thread its own folder and
-    /// meta (a delegated personal agent); a read-only opener's thread is
-    /// read-only too, whatever `req.meta` says.
-    pub async fn open_peer(&self, caller: &Id, mut req: OpenPeerReq) -> Result<RuntimeSession> {
-        // A plain `otto.thread_open`: its answers come back to this agent
-        // (children.rs). A daemon caller's own meta reports back its own way.
-        if req.meta.is_none() {
-            req.meta = Some(children::child_meta(
-                caller,
-                otto_core::agent_runtime::ChildOpener::Agent,
-            ));
-        }
-        self.open_linked(caller, req, true).await
-    }
-
-    /// [`Self::open_peer`]. `framed = false` (daemon-only) sends the opening
-    /// prompt as it is, without the "Opened by …" header: a prompt the daemon
-    /// built itself (a council synthesis) that no thread's agent wrote.
-    async fn open_linked(
-        &self,
-        caller: &Id,
-        req: OpenPeerReq,
-        framed: bool,
-    ) -> Result<RuntimeSession> {
-        let c = self.get(caller).await?;
-        if c.status == RuntimeSessionStatus::Closed {
-            return Err(Error::Conflict("the session is closed".into()));
-        }
-        self.ensure_group_room(&c).await?;
-        let root = c.parent_id.clone().unwrap_or_else(|| c.id.clone());
-        let mut meta = req.meta;
-        if c.meta_flag("read_only") {
-            let m = meta.get_or_insert_with(|| serde_json::json!({}));
-            if let Some(o) = m.as_object_mut() {
-                o.insert("read_only".into(), serde_json::Value::Bool(true));
-            }
-        }
-        inherit_embedded_origin(&c, &mut meta);
-        let created = self
-            .create_linked(
-                &c.created_by,
-                &c.workspace_id,
-                CreateRuntimeSessionReq {
-                    provider: Some(req.provider),
-                    cwd: Some(req.cwd.unwrap_or_else(|| c.cwd.clone())),
-                    title: req.title,
-                    model: req.model,
-                    access_mode: Some(c.access_mode),
-                    meta,
-                },
-                Some(root),
-            )
-            .await?;
-        if let Some(p) = req.prompt.filter(|p| !p.trim().is_empty()) {
-            let text = if framed {
-                format!("{}\n\n{p}", Self::peer_header(&c, "Opened by"))
-            } else {
-                p
-            };
-            let mut prompt = RuntimePromptReq::of(&text);
-            prompt.effort = req.effort.filter(|e| !e.trim().is_empty());
-            self.prompt_with(&created.id, &prompt).await?;
-        }
-        self.get(&created.id).await
-    }
-
-    /// Every thread in `caller`'s linked group.
-    pub async fn peers(&self, caller: &Id) -> Result<Vec<PeerInfo>> {
-        let c = self.get(caller).await?;
-        Ok(self
-            .group(&c)
-            .await?
-            .iter()
-            .map(|s| Self::peer_info(s, caller))
-            .collect())
-    }
-
-    /// Send `text` to linked thread `peer` as its next turn. A peer still
-    /// working its turn refuses (409) — read it with [`Self::peer_reply`]
-    /// and send again.
-    pub async fn message_peer(
-        &self,
-        caller: &Id,
-        peer: &Id,
-        text: &str,
-    ) -> Result<RuntimePromptResp> {
-        if text.trim().is_empty() {
-            return Err(Error::Invalid("message text is empty".into()));
-        }
-        let c = self.get(caller).await?;
-        let p = self.group_member(&c, peer).await?;
-        let framed = format!("{}\n\n{text}", Self::peer_header(&c, "Message from"));
-        self.prompt(&p.id, &framed).await.map_err(|e| match e {
-            Error::Conflict(m) if m.contains("turn is already running") => Error::Conflict(format!(
-                "thread \"{}\" is busy with a turn — wait for it with otto_thread_read, then send again",
-                p.title
-            )),
-            other => other,
-        })
-    }
-
-    /// Close linked thread `peer` (stop its agent; it stays in History). A
-    /// thread closes the ones in its group, never itself or the group's
-    /// root (the lead a person opened) — those stay the person's to close.
-    pub async fn close_peer(&self, caller: &Id, peer: &Id) -> Result<RuntimeSession> {
-        let c = self.get(caller).await?;
-        let p = self.group_member(&c, peer).await?;
-        if p.parent_id.is_none() {
-            return Err(Error::Forbidden(
-                "that is the group's lead thread — only a person closes it".into(),
-            ));
-        }
-        self.close(&p.id).await
-    }
-
-    /// Linked thread `peer`'s latest reply: waits up to `wait` for its
-    /// running turn to settle, then returns that turn's assistant text.
-    pub async fn peer_reply(&self, caller: &Id, peer: &Id, wait: Duration) -> Result<PeerReply> {
-        let c = self.get(caller).await?;
-        let p = self.group_member(&c, peer).await?;
-        let mut reply = self.latest_reply(&p.id, wait).await?;
-        reply.peer.is_self = false;
-        Ok(reply)
-    }
-
-    /// Session `id`'s latest reply: waits up to `wait` for it to settle —
-    /// no turn running (the person's or one the agent started itself) and
-    /// no background work pending — then returns the assistant messages of
-    /// its last turn that has any, joined (a subagent's own messages are
-    /// not the agent's answer). `busy` = the wait ran out. What a
-    /// daemon-driven run (a personal agent's) waits on for its result.
-    pub async fn latest_reply(&self, id: &Id, wait: Duration) -> Result<PeerReply> {
-        let deadline = Instant::now() + wait;
-        let live = self.live(id).await?;
-        loop {
-            if Instant::now() >= deadline {
-                break;
-            }
-            if !is_busy(&live.lock()) {
-                // A background task that just ended is followed, a moment
-                // later, by the agent's own continuation turn. Only a thread
-                // that STAYS idle is done; without this a waiter could be
-                // handed the answer from before the background work.
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                if !is_busy(&live.lock()) {
-                    break;
-                }
-                continue;
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        let st = live.lock();
-        let busy = is_busy(&st);
-        let snap = st.proj.snapshot();
-        let session = st.session.clone();
-        drop(st);
-        let mut turns: Vec<&ProviderTurn> = snap.turns.iter().collect();
-        turns.sort_by_key(|t| std::cmp::Reverse(t.ordinal));
-        let answer = |t: &ProviderTurn| {
-            snap.turn_items
-                .iter()
-                .filter(|i| i.turn_id.as_ref() == Some(&t.id) && i.parent_item_id.is_none())
-                .filter_map(|i| match &i.kind {
-                    TurnItemKind::AssistantMessage { text, .. } if !text.trim().is_empty() => {
-                        Some(text.as_str())
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        };
-        let last = turns.first().copied();
-        let text = turns
-            .iter()
-            .map(|t| answer(t))
-            .find(|t| !t.is_empty())
-            .unwrap_or_default();
-        Ok(PeerReply {
-            peer: Self::peer_info(&session, id),
-            busy,
-            background_tasks: session.background_tasks.len().min(u32::MAX as usize) as u32,
-            turn_status: last
-                .filter(|t| t.status.is_terminal())
-                .and_then(|t| serde_json::to_value(t.status).ok())
-                .and_then(|v| v.as_str().map(str::to_string)),
-            text,
-        })
     }
 
     pub async fn get(&self, id: &Id) -> Result<RuntimeSession> {
@@ -938,9 +936,12 @@ impl AgentRuntime {
             return Err(Error::Invalid("title is empty".into()));
         }
         let live = self.live(id).await?;
-        self.inner.repo.set_title(id, title).await?;
+        self.inner.repo.set_title(id, title, false).await?;
         let mut st = live.lock();
         st.session.title = title.to_string();
+        st.session.title_auto = false;
+        let (status, last_error) = current_status(&st);
+        set_session_status(&self.inner, &live, &mut st, status, last_error);
         Ok(st.session.clone())
     }
 
@@ -950,38 +951,52 @@ impl AgentRuntime {
         if let Some(l) = self.inner.live.get(id) {
             return Ok(Arc::clone(l.value()));
         }
-        let rec = self.inner.repo.get(id).await?;
-        let proj = Projection::load(self.inner.repo.entities(id).await?);
-        let (tx, rx) = mpsc::unbounded_channel();
-        let next_seq = rec.seq_reserved.max(rec.session.last_sequence) + 1;
-        let live = Arc::new(Live {
-            prompt_lock: tokio::sync::Mutex::new(()),
-            spawn_lock: tokio::sync::Mutex::new(()),
-            drain_lock: tokio::sync::Mutex::new(()),
-            deadline_changed: tokio::sync::Notify::new(),
-            state: Mutex::new(State {
-                session: rec.session,
-                next_seq,
-                reserved: rec.seq_reserved,
-                epoch: 0,
-                fresh_starting: false,
-                ring: EventRing::new(self.inner.config.ring),
-                proj,
-                turn: None,
-                proc: None,
-                held: Vec::new(),
-                stream_emitted: HashMap::new(),
-                last_activity: Instant::now(),
-                starting: 0,
-                stop_requested: false,
-            }),
-            persist: tx,
-        });
-        let entry = self.inner.live.entry(id.clone()).or_insert_with(|| {
-            tokio::spawn(persister(self.inner.repo.clone(), id.clone(), rx));
-            Arc::clone(&live)
-        });
-        Ok(Arc::clone(entry.value()))
+        let _guard = self.inner.loading.lock(id).await;
+        if let Some(l) = self.inner.live.get(id) {
+            return Ok(Arc::clone(l.value()));
+        }
+        otto_telemetry::context::measure_result("threads.hydrate_db", async {
+            let rec = self.inner.repo.get(id).await?;
+            let raw_rows = self.inner.repo.raw_entities(id).await?;
+            let proj = tokio::task::spawn_blocking(move || Projection::load_raw(raw_rows))
+                .await
+                .map_err(|e| Error::Internal(format!("projection load join error: {e}")))?;
+            let (tx, rx) = mpsc::unbounded_channel();
+            let next_seq = rec.seq_reserved.max(rec.session.last_sequence) + 1;
+            let live = Arc::new(Live {
+                prompt_lock: tokio::sync::Mutex::new(()),
+                spawn_lock: tokio::sync::Mutex::new(()),
+                drain_lock: tokio::sync::Mutex::new(()),
+                deadline_changed: tokio::sync::Notify::new(),
+                proc_ended: tokio::sync::Notify::new(),
+                state: Mutex::new(State {
+                    session: rec.session,
+                    next_seq,
+                    reserved: rec.seq_reserved,
+                    epoch: 0,
+                    fresh_starting: false,
+                    ring: EventRing::new(self.inner.config.ring),
+                    proj,
+                    turn: None,
+                    proc: None,
+                    held: Vec::new(),
+                    stream_emitted: HashMap::new(),
+                    last_activity: Instant::now(),
+                    starting: 0,
+                    stop_requested: false,
+                }),
+                persist: tx,
+                detaching_for_restart: std::sync::atomic::AtomicBool::new(false),
+            });
+            let entry = self.inner.live.entry(id.clone()).or_insert_with(|| {
+                tokio::spawn(persister(self.inner.repo.clone(), id.clone(), rx));
+                Arc::clone(&live)
+            });
+            let out = Arc::clone(entry.value());
+            drop(entry);
+            Ok(out)
+        })
+        .await
     }
 
     async fn ensure_process(&self, live: &Arc<Live>) -> Result<()> {
@@ -996,6 +1011,14 @@ impl AgentRuntime {
             }
             st.session.clone()
         };
+        otto_telemetry::context::measure_result(
+            "threads.spawn_driver",
+            self.spawn_driver_inner(live, session),
+        )
+        .await
+    }
+
+    async fn spawn_driver_inner(&self, live: &Arc<Live>, session: RuntimeSession) -> Result<()> {
         let mut driver = self.inner.drivers.create(session.provider).ok_or_else(|| {
             Error::Invalid(format!(
                 "no structured driver for provider '{}'",
@@ -1025,6 +1048,8 @@ impl AgentRuntime {
         })
         .await
         .map_err(|e| Error::Internal(format!("spawn preparation failed: {e}")))?;
+        crate::acp_sideband::io::seed_resume(&mut *driver, ctx.resume.as_deref(), &session.cwd)
+            .await;
         // A host that left the tail in place (tests) still gets it last.
         let mut args = spec.args;
         args.append(&mut spec.tail_args);
@@ -1036,23 +1061,60 @@ impl AgentRuntime {
                     .iter()
                     .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
                     .map(|(_, v)| PathBuf::from(v))
+                    .or_else(|| {
+                        self.inner
+                            .host
+                            .claude_config_dir_for(session.provider_slug())
+                    })
             });
-        let child = spawn_child(&ChildCommand {
+        let cmd = ChildCommand {
             program: spec.program.clone(),
             args,
             cwd: session.cwd.clone(),
             env: spec.env,
-        })
-        .map_err(|e| {
-            Error::Invalid(format!(
-                "could not start {} ({}): {e}",
-                session.provider.as_str(),
-                spec.program
-            ))
-        })?;
+        };
+        if let Some(holders_dir) = self.inner.config.holders_dir.as_deref() {
+            if !self.inner.host.network_profile_active(&session)
+                && self.inner.host.session_persistence_enabled().await
+            {
+                let launcher = self
+                    .inner
+                    .config
+                    .holder_launcher
+                    .clone()
+                    .or_else(crate::holder::HolderLauncher::auto_detect);
+                // A socket dir that can't be made private (another account
+                // took the shared /tmp fallback) costs only restart survival.
+                let socket = launcher.as_ref().and_then(|_| {
+                    crate::holder::socket_path_for(holders_dir, &session.id)
+                        .inspect_err(|e| {
+                            tracing::warn!(session = %session.id, "runtime holder socket unavailable, spawning directly: {e}")
+                        })
+                        .ok()
+                });
+                if let (Some(launcher), Some(socket)) = (launcher, socket) {
+                    return held_proc::spawn_via_holder(
+                        &self.inner,
+                        live,
+                        &session,
+                        driver,
+                        &ctx,
+                        cmd,
+                        claude_login,
+                        socket,
+                        &launcher,
+                    )
+                    .await;
+                }
+            }
+        }
+        let child = spawn_child(&cmd)
+            .map_err(|e| map_spawn_error(session.provider.as_str(), &spec.program, e))?;
         let cli_pid = child.pid;
         let (epoch, flushed) = {
             let mut st = live.lock();
+            live.detaching_for_restart
+                .store(false, std::sync::atomic::Ordering::Release);
             st.epoch += 1;
             let epoch = st.epoch;
             let step = driver.start(&ctx);
@@ -1060,7 +1122,7 @@ impl AgentRuntime {
                 epoch,
                 request_ids: RequestIds::new(),
                 pid: child.pid,
-                stdin: child.stdin,
+                transport: ProcTransport::Direct { stdin: child.stdin },
                 driver,
             });
             st.reserved = st.next_seq + self.inner.config.seq_reserve;
@@ -1074,16 +1136,23 @@ impl AgentRuntime {
                 ProviderSessionStatus::Starting,
                 None,
             );
-            apply_step(&self.inner, live, &mut st, step);
+            apply_step_opts(&self.inner, live, &mut st, step, true, true);
             (epoch, frx)
         };
         if claude_login.is_some() {
             // Claude Code moves some jobs out of its group (see the module).
-            descendants::watch(Arc::clone(live), epoch, cli_pid);
+            descendants::watch(
+                Arc::clone(&self.inner),
+                Arc::clone(live),
+                session.id.clone(),
+                epoch,
+                cli_pid,
+            );
         }
         tokio::spawn(pump(
             Arc::clone(&self.inner),
             Arc::clone(live),
+            session.id.clone(),
             epoch,
             child.messages,
             claude_login,
@@ -1104,15 +1173,38 @@ impl AgentRuntime {
     pub async fn prompt_with(&self, id: &Id, req: &RuntimePromptReq) -> Result<RuntimePromptResp> {
         let live = self.live(id).await?;
         let _prompt = live.prompt_lock.lock().await;
-        self.prompt_locked(id, &live, req).await
+        otto_telemetry::context::measure_result(
+            "threads.prompt",
+            self.prompt_locked(id, &live, req),
+        )
+        .await
     }
 
     async fn prompt_locked(
         &self,
         id: &Id,
         live: &Arc<Live>,
-        req: &RuntimePromptReq,
+        raw_req: &RuntimePromptReq,
     ) -> Result<RuntimePromptResp> {
+        let normalized_req = RuntimePromptReq {
+            model: raw_req
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string),
+            effort: raw_req
+                .effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+                .map(str::to_string),
+            ..raw_req.clone()
+        };
+        let req = &normalized_req;
+        if let Some(m) = req.model.as_deref() {
+            crate::http::drafts::validate_model_name(m)?;
+        }
         if req.text.trim().is_empty() && req.images.is_empty() && req.files.is_empty() {
             return Err(Error::Invalid("prompt text is empty".into()));
         }
@@ -1128,8 +1220,43 @@ impl AgentRuntime {
                 bad.name, bad.mime
             )));
         }
+        // Same caps as a saved draft (`http::drafts`): 20 attachments, 1 KiB names.
+        if req.images.len() + req.files.len() > 20 {
+            return Err(Error::PayloadTooLarge(
+                "at most 20 attachments per prompt".into(),
+            ));
+        }
+        for img in &req.images {
+            if img.name.as_ref().is_some_and(|n| n.len() > 1024) {
+                return Err(Error::Invalid("attachment filename is too long".into()));
+            }
+            crate::http::drafts::validate_attachment_bytes(&img.mime, &img.data_base64)?;
+        }
+        for file in &req.files {
+            if file.name.len() > 1024 {
+                return Err(Error::Invalid("attachment filename is too long".into()));
+            }
+            crate::http::drafts::validate_attachment_bytes(&file.mime, &file.data_base64)?;
+        }
         if req.fresh_context {
             return self.prompt_fresh(id, live, req).await;
+        }
+        for _ in 0..8 {
+            if !poll_driver_sideband(&self.inner, live, None).await {
+                break;
+            }
+        }
+        {
+            let mut st = live.lock();
+            let ready_to_settle = idle_settle_deadline(&st, &self.inner.config).is_some();
+            if ready_to_settle {
+                if let Some(proc) = st.proc.as_mut() {
+                    let step = proc.driver.on_idle_settle();
+                    if !step.events.is_empty() || !step.writes.is_empty() || step.signal.is_some() {
+                        apply_step(&self.inner, live, &mut st, step);
+                    }
+                }
+            }
         }
         let first = check_can_prompt(&live.lock());
         match (first, req.delivery) {
@@ -1184,6 +1311,7 @@ impl AgentRuntime {
                 )
             };
             if let Some(p) = stale {
+                live.proc_ended.notify_waiters();
                 stop_child(p, self.inner.config.interrupt_grace);
             }
             if let Some(m) = &model {
@@ -1199,7 +1327,19 @@ impl AgentRuntime {
                 "the fresh agent could not start — retry the message".into(),
             ));
         }
+        if !req.images.is_empty() || !req.files.is_empty() {
+            let still_starting = live.lock().proj.session.as_ref().is_none_or(|p| {
+                matches!(
+                    p.status,
+                    ProviderSessionStatus::Starting | ProviderSessionStatus::Stopped
+                )
+            });
+            if still_starting {
+                let _ = self.wait_started(&live).await;
+            }
+        }
         let attachments = self.store_attachments(id, req).await?;
+        let req = &self.with_paths(id, req, &attachments);
         let res = self.start_turn(&live, req, attachments.clone());
         if res.is_err() {
             for a in &attachments {
@@ -1247,6 +1387,7 @@ impl AgentRuntime {
         };
         st.turn = Some(ActiveTurn {
             id: turn_id.clone(),
+            origin: TurnOrigin::User,
             interrupting: false,
             stalled: false,
         });
@@ -1267,6 +1408,8 @@ impl AgentRuntime {
                 attachments,
             },
         );
+        user.started_at = Some(now);
+        user.completed_at = Some(now);
         user.turn_id = Some(turn_id.clone());
         upsert_item(&self.inner, live, &mut st, user);
         set_session_status(
@@ -1277,7 +1420,7 @@ impl AgentRuntime {
             None,
         );
         st.session.last_active_at = now;
-        apply_step(&self.inner, live, &mut st, step);
+        apply_step_opts(&self.inner, live, &mut st, step, true, true);
         let stop = std::mem::take(&mut st.stop_requested);
         drop(st);
         if stop {
@@ -1303,7 +1446,16 @@ impl AgentRuntime {
     ) -> Result<RuntimePromptResp> {
         if delivery == PromptDelivery::Steer {
             let attachments = self.store_attachments(id, req).await?;
-            if let Some(resp) = steer_turn(&self.inner, live, req, attachments.clone()) {
+            let stored = self.with_paths(id, req, &attachments);
+            if let Some((resp, steered_model, steered_mode)) =
+                steer_turn(&self.inner, live, &stored, attachments.clone())
+            {
+                if let Some(m) = &steered_model {
+                    let _ = self.inner.repo.set_model(id, m).await;
+                }
+                if let Some(m) = steered_mode {
+                    let _ = self.inner.repo.set_access_mode(id, m).await;
+                }
                 return Ok(resp);
             }
             for a in &attachments {
@@ -1346,17 +1498,26 @@ impl AgentRuntime {
         })
     }
 
-    /// Drop a queued message (`false` when it is not queued any more).
-    pub async fn unqueue(&self, id: &Id, queued_id: &str) -> Result<bool> {
+    /// Drop a queued message and return its original prompt payload (`None`
+    /// when it is not queued any more).
+    pub async fn unqueue_prompt(
+        &self,
+        id: &Id,
+        queued_id: &str,
+    ) -> Result<Option<RuntimePromptReq>> {
         let live = self.live(id).await?;
         let mut st = live.lock();
-        let before = st.proj.queue.len();
-        st.proj.queue.retain(|q| q.id != queued_id);
-        if st.proj.queue.len() == before {
-            return Ok(false);
-        }
+        let Some(idx) = st.proj.queue.iter().position(|q| q.id == queued_id) else {
+            return Ok(None);
+        };
+        let rec = st.proj.queue.remove(idx);
         emit_queue(&self.inner, &live, &mut st);
-        Ok(true)
+        Ok(Some(rec.req))
+    }
+
+    /// Drop a queued message (`false` when it is not queued any more).
+    pub async fn unqueue(&self, id: &Id, queued_id: &str) -> Result<bool> {
+        Ok(self.unqueue_prompt(id, queued_id).await?.is_some())
     }
 
     /// Deliver a queued message now: steer it into the running turn, or
@@ -1444,6 +1605,7 @@ impl AgentRuntime {
                     None,
                     TurnItemKind::SystemNotice {
                         message: format!("A queued message could not be sent: {e}"),
+                        task_settlement: None,
                     },
                 );
                 n.turn_id = None;
@@ -1459,13 +1621,40 @@ impl AgentRuntime {
         self.inner.config.attachments_dir.join(id)
     }
 
-    /// Write the prompt's images and files under the session's folder.
+    /// `req` with each file's stored path (in order), for an agent that
+    /// takes a file only as a path to read.
+    fn with_paths(
+        &self,
+        id: &Id,
+        req: &RuntimePromptReq,
+        stored: &[Attachment],
+    ) -> RuntimePromptReq {
+        let mut req = req.clone();
+        let files = stored.iter().filter(|a| a.kind == AttachmentKind::File);
+        for (f, a) in req.files.iter_mut().zip(files) {
+            f.path = Some(
+                self.attachments(id)
+                    .join(&a.id)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        req
+    }
+
+    /// Write the prompt's images and files under the session's folder. A
+    /// file keeps its extension, so an agent that reads it from disk sees
+    /// what it is.
     async fn store_attachments(&self, id: &Id, req: &RuntimePromptReq) -> Result<Vec<Attachment>> {
         use base64::Engine;
-        let images = req
-            .images
-            .iter()
-            .map(|i| (AttachmentKind::Image, &i.mime, None, &i.data_base64));
+        let images = req.images.iter().map(|i| {
+            (
+                AttachmentKind::Image,
+                &i.mime,
+                i.name.as_ref(),
+                &i.data_base64,
+            )
+        });
         let files = req
             .files
             .iter()
@@ -1475,8 +1664,12 @@ impl AgentRuntime {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data)
                 .map_err(|e| Error::Invalid(format!("an attachment is not valid base64: {e}")))?;
+            let ext = match (kind, mime.as_str()) {
+                (AttachmentKind::File, "application/pdf") => ".pdf",
+                _ => "",
+            };
             let a = Attachment {
-                id: new_id(),
+                id: format!("{}{ext}", new_id()),
                 kind,
                 mime: mime.clone(),
                 name: name.cloned(),
@@ -1493,19 +1686,49 @@ impl AgentRuntime {
 
     /// A stored attachment of `id`: its mime type and bytes.
     pub async fn attachment(&self, id: &Id, attachment_id: &str) -> Result<(String, Vec<u8>)> {
-        let live = self.live(id).await?;
-        let mime = live.lock().proj.items.values().find_map(|i| match &i.kind {
-            TurnItemKind::UserMessage { attachments, .. } => attachments
-                .iter()
-                .find(|a| a.id == attachment_id)
-                .map(|a| a.mime.clone()),
-            _ => None,
-        });
+        let mime = {
+            let live = self.live(id).await?;
+            let found = live.lock().proj.items.values().find_map(|i| match &i.kind {
+                TurnItemKind::UserMessage { attachments, .. } => attachments
+                    .iter()
+                    .find(|a| a.id == attachment_id)
+                    .map(|a| a.mime.clone()),
+                _ => None,
+            });
+            found
+        };
+        try_evict_dead(&self.inner, id);
         let mime = mime.ok_or_else(|| Error::NotFound("no such attachment".into()))?;
         let bytes = tokio::fs::read(self.attachments(id).join(attachment_id))
             .await
             .map_err(|_| Error::NotFound("the attachment is gone".into()))?;
         Ok((mime, bytes))
+    }
+
+    /// Image `n` a tool of item `item_id` left on disk (Codex `imageView` /
+    /// `imageGeneration`): its mime type and bytes. Only a PNG, JPEG, GIF or
+    /// WebP file (by its bytes) of at most 25 MB is served — the path comes
+    /// from the agent, so nothing else on disk is.
+    pub async fn tool_image(&self, id: &Id, item_id: &str, n: usize) -> Result<(String, Vec<u8>)> {
+        let live = self.live(id).await?;
+        let path = live
+            .lock()
+            .proj
+            .items
+            .get(item_id)
+            .and_then(|i| match &i.kind {
+                TurnItemKind::DynamicTool { image_files, .. } => image_files.get(n).cloned(),
+                _ => None,
+            })
+            .ok_or_else(|| Error::NotFound("no such image".into()))?;
+        let gone = || Error::NotFound("the image is gone".into());
+        let meta = tokio::fs::metadata(&path).await.map_err(|_| gone())?;
+        if !meta.is_file() || meta.len() > 25 * 1024 * 1024 {
+            return Err(gone());
+        }
+        let bytes = tokio::fs::read(&path).await.map_err(|_| gone())?;
+        let mime = crate::tool_images::image_mime(&bytes).ok_or_else(gone)?;
+        Ok((mime.to_string(), bytes))
     }
 
     /// Interrupt the running turn. `false` when no turn was running.
@@ -1567,7 +1790,7 @@ impl AgentRuntime {
             let next = settled_status(&st);
             set_session_status(&self.inner, &live, &mut st, next, None);
         }
-        apply_step(&self.inner, &live, &mut st, step);
+        apply_step_opts(&self.inner, &live, &mut st, step, true, true);
         Ok(())
     }
 
@@ -1617,7 +1840,7 @@ impl AgentRuntime {
             let next = settled_status(&st);
             set_session_status(&self.inner, &live, &mut st, next, None);
         }
-        apply_step(&self.inner, &live, &mut st, step);
+        apply_step_opts(&self.inner, &live, &mut st, step, true, true);
         Ok(())
     }
 
@@ -1661,17 +1884,21 @@ impl AgentRuntime {
             let next = settled_status(&st);
             set_session_status(&self.inner, &live, &mut st, next, None);
         }
-        apply_step(&self.inner, &live, &mut st, step);
+        apply_step_opts(&self.inner, &live, &mut st, step, true, true);
         Ok(())
     }
 
     /// Close the session: end any turn as interrupted, stop the child, refuse
     /// further prompts. Idempotent.
     pub async fn close(&self, id: &Id) -> Result<RuntimeSession> {
-        let live = self.live(id).await?;
-        let _prompt = live.prompt_lock.lock().await;
-        let mut st = live.lock();
-        Ok(close_locked(&self.inner, &live, &mut st))
+        let s = {
+            let live = self.live(id).await?;
+            let _prompt = live.prompt_lock.lock().await;
+            let mut st = live.lock();
+            close_locked(&self.inner, &live, &mut st)
+        };
+        evict_if_dead_after_flush(&self.inner, id).await;
+        Ok(s)
     }
 
     /// Revive a closed or dormant session: it takes prompts again and its agent is
@@ -1706,6 +1933,88 @@ impl AgentRuntime {
             self.kick_queue(id);
         }
         Ok(s)
+    }
+
+    /// Low-latency HTTP reopen: validates & spawns the CLI process immediately
+    /// (`< 30 ms`), returning the revived [`RuntimeSession`] without blocking
+    /// the HTTP caller for up to `start_wait` (20 s) on MCP/CLI boot. A
+    /// background task finishes the readiness check, fresh-thread fallback on
+    /// refused resume, and queued reply delivery.
+    pub async fn reopen_fast(&self, id: &Id) -> Result<RuntimeSession> {
+        let live = self.live(id).await?;
+        let (s, resume_key, need_bg_watch) = {
+            let _prompt = live.prompt_lock.lock().await;
+            {
+                let mut st = live.lock();
+                if st.session.status == RuntimeSessionStatus::Closed {
+                    st.session.status = RuntimeSessionStatus::Dormant;
+                    let _ = live.persist.send(PersistOp::Opened);
+                } else if st.proc.is_some() {
+                    return Ok(st.session.clone());
+                }
+            }
+            self.flush(id).await;
+            self.ensure_process(&live).await?;
+            let st = live.lock();
+            let resume_key = st.session.native_thread_id.clone();
+            let need_bg = resume_key.is_some() || !st.proj.queue.is_empty();
+            (st.session.clone(), resume_key, need_bg)
+        };
+        if need_bg_watch {
+            let rt = self.clone();
+            let sid = id.clone();
+            let live_bg = Arc::clone(&live);
+            tokio::spawn(async move {
+                let started = resume_key.is_none() || rt.wait_started(&live_bg).await;
+                if !started {
+                    let _prompt = live_bg.prompt_lock.lock().await;
+                    let idle = {
+                        let st = live_bg.lock();
+                        st.proc.is_none() && st.turn.is_none() && st.starting == 0
+                    };
+                    if idle {
+                        if let Err(e) = rt.spawn_resuming(&sid, &live_bg).await {
+                            tracing::warn!(session = %sid, "background reopen_fast resume failed: {e}");
+                            let mut st = live_bg.lock();
+                            if st.proc.is_none() && st.turn.is_none() {
+                                set_session_status(
+                                    &rt.inner,
+                                    &live_bg,
+                                    &mut st,
+                                    ProviderSessionStatus::Error,
+                                    Some(e.to_string()),
+                                );
+                            }
+                        }
+                    }
+                }
+                let queued = {
+                    let st = live_bg.lock();
+                    !st.proj.queue.is_empty() && st.turn.is_none()
+                };
+                if queued {
+                    rt.kick_queue(&sid);
+                }
+            });
+        }
+        Ok(s)
+    }
+
+    /// Fetch a single full (uncompacted) `TurnItem` by ID for lazy row expansion.
+    pub async fn get_item(&self, id: &Id, item_id: &Id) -> Result<TurnItem> {
+        let res = otto_telemetry::context::measure_result("threads.get_item", async {
+            let live = self.live(id).await?;
+            let mut st = live.lock();
+            flush_held(&self.inner, &live, &mut st);
+            st.proj
+                .items
+                .get(item_id)
+                .cloned()
+                .ok_or_else(|| Error::NotFound(format!("turn item '{item_id}' not found")))
+        })
+        .await;
+        try_evict_dead(&self.inner, id);
+        res
     }
 
     /// Spawn the agent if it is not running, resuming the provider's own
@@ -1798,6 +2107,7 @@ impl AgentRuntime {
             None,
             TurnItemKind::SystemNotice {
                 message: message.to_string(),
+                task_settlement: None,
             },
         );
         n.turn_id = st.turn.as_ref().map(|t| t.id.clone());
@@ -1821,28 +2131,52 @@ impl AgentRuntime {
     /// The events after `after_sequence`, or a snapshot when the ring no
     /// longer holds them or they exceed T3 Code's replay limits.
     pub async fn replay(&self, id: &Id, after_sequence: u64) -> Result<RuntimeReplay> {
-        let live = self.live(id).await?;
-        let st = live.lock();
-        let last_sequence = st.next_seq - 1;
-        if after_sequence >= last_sequence {
-            return Ok(RuntimeReplay::Events {
-                events: Vec::new(),
-                last_sequence,
-            });
-        }
-        if let Some(events) =
-            st.ring
-                .replayable(after_sequence, MAX_REPLAY_EVENTS, MAX_REPLAY_BYTES)
-        {
-            return Ok(RuntimeReplay::Events {
-                events,
-                last_sequence,
-            });
-        }
-        Ok(RuntimeReplay::Snapshot {
-            snapshot_sequence: last_sequence,
-            snapshot: Box::new(st.proj.snapshot()),
-        })
+        let out = {
+            let live = self.live(id).await?;
+            otto_telemetry::context::measure("threads.sideband_poll", async {
+                let _ = poll_driver_sideband(&self.inner, &live, None).await;
+            })
+            .await;
+            let fast = {
+                let mut st = live.lock();
+                flush_held(&self.inner, &live, &mut st);
+                let last_sequence = st.next_seq - 1;
+                if after_sequence >= last_sequence {
+                    Ok(Some(RuntimeReplay::Events {
+                        events: Vec::new(),
+                        last_sequence,
+                    }))
+                } else if let Some(events) =
+                    st.ring
+                        .replayable(after_sequence, MAX_REPLAY_EVENTS, MAX_REPLAY_BYTES)
+                {
+                    Ok(Some(RuntimeReplay::Events {
+                        events,
+                        last_sequence,
+                    }))
+                } else {
+                    Err(last_sequence)
+                }
+            };
+            match fast {
+                Ok(Some(r)) => r,
+                Ok(None) => unreachable!(),
+                Err(last_sequence) => {
+                    let snapshot =
+                        otto_telemetry::context::measure("threads.snapshot_slice", async {
+                            let st = live.lock();
+                            Box::new(st.proj.snapshot())
+                        })
+                        .await;
+                    RuntimeReplay::Snapshot {
+                        snapshot_sequence: last_sequence,
+                        snapshot,
+                    }
+                }
+            }
+        };
+        try_evict_dead(&self.inner, id);
+        Ok(out)
     }
 
     /// Wait until every queued DB write of `id` landed (tests, shutdown).
@@ -1915,6 +2249,7 @@ fn close_locked(inner: &Arc<Inner>, live: &Arc<Live>, st: &mut State) -> Runtime
         Some("the session was closed".into()),
     );
     if let Some(p) = st.proc.take() {
+        live.proc_ended.notify_waiters();
         stop_child(p, inner.config.close_grace);
     }
     settle_background(inner, live, st, TurnItemStatus::Interrupted);
@@ -1958,7 +2293,7 @@ fn interrupt_turn(inner: &Arc<Inner>, live: &Arc<Live>) -> bool {
     };
     let step = proc.driver.interrupt();
     let (epoch, pid) = (proc.epoch, proc.pid);
-    apply_step(inner, live, &mut st, step);
+    apply_step_opts(inner, live, &mut st, step, true, true);
     drop(st);
     let grace = inner.config.interrupt_grace;
     let live = Arc::clone(live);
@@ -1969,7 +2304,11 @@ fn interrupt_turn(inner: &Arc<Inner>, live: &Arc<Live>) -> bool {
             && st.proc.as_ref().is_some_and(|p| p.epoch == epoch);
         if stuck {
             tracing::warn!("runtime turn ignored interrupt; killing its process group");
-            signal_group(pid, libc::SIGKILL);
+            if let Some(p) = st.proc.as_ref() {
+                p.kill_process_group();
+            } else {
+                signal_group(pid, libc::SIGKILL);
+            }
         }
     });
     true
@@ -1996,16 +2335,44 @@ impl Drop for Starting {
     }
 }
 
-/// Steer `req` into the running turn when its driver takes it.
+/// Steer `req` into the running turn when its driver takes it (and can honor
+/// any requested mid-turn model or access-mode switch).
 fn steer_turn(
     inner: &Inner,
     live: &Live,
     req: &RuntimePromptReq,
     attachments: Vec<Attachment>,
-) -> Option<RuntimePromptResp> {
+) -> Option<(
+    RuntimePromptResp,
+    Option<String>,
+    Option<otto_core::agent_runtime::RuntimeAccessMode>,
+)> {
     let mut st = live.lock();
     let turn_id = st.turn.as_ref()?.id.clone();
+    let model_change = req
+        .model
+        .as_ref()
+        .filter(|m| st.session.model.as_ref() != Some(*m))
+        .cloned();
+    let mode_change = req.access_mode.filter(|m| *m != st.session.access_mode);
+    {
+        let proc = st.proc.as_ref()?;
+        if model_change.is_some() && !proc.driver.steers_model_live() {
+            return None;
+        }
+        if let Some(m) = mode_change {
+            if !proc.driver.steers_access_live(m) {
+                return None;
+            }
+        }
+    }
     let step = st.proc.as_mut()?.driver.steer(req).ok()?;
+    if let Some(m) = &model_change {
+        st.session.model = Some(m.clone());
+    }
+    if let Some(m) = mode_change {
+        st.session.access_mode = m;
+    }
     let mut user = item(
         format!("{turn_id}:steer:{}", new_id()),
         TurnItemStatus::Completed,
@@ -2019,13 +2386,17 @@ fn steer_turn(
     upsert_item(inner, live, &mut st, user);
     let sequence = st.session.last_sequence;
     st.session.last_active_at = Utc::now();
-    apply_step(inner, live, &mut st, step);
-    Some(RuntimePromptResp {
-        turn_id,
-        sequence,
-        queued_id: None,
-        steered: true,
-    })
+    apply_step_opts(inner, live, &mut st, step, true, true);
+    Some((
+        RuntimePromptResp {
+            turn_id,
+            sequence,
+            queued_id: None,
+            steered: true,
+        },
+        model_change,
+        mode_change,
+    ))
 }
 
 /// Spawn a drain of `id`'s queue (no-op when the runtime is gone).
@@ -2035,6 +2406,93 @@ fn kick_queue(inner: &Inner, id: &Id) {
         let id = id.clone();
         tokio::spawn(async move { rt.drain_queue(&id).await });
     }
+}
+
+/// The agent's own name for the conversation replaces the placeholder title
+/// (one line, at most 120 characters); a person's rename is never replaced.
+fn adopt_title(inner: &Inner, live: &Live, st: &mut State, title: &str) {
+    let title: String = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title: String = title.chars().take(120).collect();
+    if st.session.title_auto && !title.is_empty() && title != st.session.title {
+        st.session.title = title.clone();
+        let _ = live.persist.send(PersistOp::Title(title));
+        let (status, last_error) = current_status(st);
+        set_session_status(inner, live, st, status, last_error);
+    }
+}
+
+/// Read the title the agent wrote into its transcript (off the runtime) and
+/// adopt it.
+fn probe_title(inner: &Inner, id: &Id, path: PathBuf) {
+    let Some(me) = inner.me.upgrade() else {
+        return;
+    };
+    let rt = AgentRuntime { inner: me };
+    let id = id.clone();
+    tokio::spawn(async move {
+        let Ok(Some(title)) = tokio::task::spawn_blocking(move || transcript_title(&path)).await
+        else {
+            return;
+        };
+        if let Ok(live) = rt.live(&id).await {
+            let mut st = live.lock();
+            adopt_title(&rt.inner, &live, &mut st, &title);
+        }
+    });
+}
+
+/// The last `{"type":"ai-title","aiTitle":…}` line of a Claude Code
+/// transcript, from its last 64 KB (it re-writes the line as it goes), else
+/// its first 64 KB.
+fn transcript_title(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const WINDOW: u64 = 64 * 1024;
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let find = |buf: &[u8]| {
+        String::from_utf8_lossy(buf)
+            .lines()
+            .filter(|l| l.contains("\"ai-title\""))
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| v.get("aiTitle")?.as_str().map(str::to_string))
+            .rfind(|t| !t.trim().is_empty())
+    };
+    let mut tail = Vec::new();
+    f.seek(SeekFrom::Start(len.saturating_sub(WINDOW))).ok()?;
+    f.read_to_end(&mut tail).ok()?;
+    if let Some(t) = find(&tail) {
+        return Some(t);
+    }
+    if len <= WINDOW {
+        return None;
+    }
+    let mut head = vec![0; WINDOW as usize];
+    f.seek(SeekFrom::Start(0)).ok()?;
+    f.read_exact(&mut head).ok()?;
+    find(&head)
+}
+
+/// An agent's command list as the session keeps it: at most 400 commands,
+/// unique by name, each description one line of at most 160 characters
+/// (Claude Code lists every skill with its whole description).
+fn bounded_commands(list: Vec<ProviderCommand>) -> Vec<ProviderCommand> {
+    let mut seen = std::collections::HashSet::new();
+    list.into_iter()
+        .filter(|c| !c.name.trim().is_empty() && seen.insert(c.name.clone()))
+        .take(400)
+        .map(|mut c| {
+            let line = c
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            c.description = match line.char_indices().nth(160) {
+                Some((i, _)) => format!("{}…", line[..i].trim_end()),
+                None => line,
+            };
+            c
+        })
+        .collect()
 }
 
 /// Persist and publish the queue (`queue.updated`). Returns its sequence.
@@ -2082,6 +2540,35 @@ fn stall_deadline(st: &State, cfg: &RuntimeConfig) -> Option<Instant> {
     Some(st.last_activity + allowance)
 }
 
+/// When an agent-initiated (`origin: agent`) turn whose driver has no protocol
+/// turn-end frame (ACP `session/update`) settles after quiet stdout.
+fn idle_settle_deadline(st: &State, cfg: &RuntimeConfig) -> Option<Instant> {
+    let turn = st
+        .turn
+        .as_ref()
+        .filter(|t| t.origin == TurnOrigin::Agent && !t.interrupting)?;
+    if cfg.autonomous_settle.is_zero() || has_pending(st) {
+        return None;
+    }
+    let proc = st.proc.as_ref()?;
+    if !proc.driver.needs_idle_turn_settle() {
+        return None;
+    }
+    let tool_running = st.proj.items.values().any(|i| {
+        i.turn_id.as_deref() == Some(turn.id.as_str())
+            && i.status.is_open()
+            && matches!(
+                i.kind,
+                TurnItemKind::CommandExecution { .. }
+                    | TurnItemKind::DynamicTool { .. }
+                    | TurnItemKind::WebSearch { .. }
+                    | TurnItemKind::FileChange { .. }
+                    | TurnItemKind::Subagent { .. }
+            )
+    });
+    (!tool_running).then(|| st.last_activity + cfg.autonomous_settle)
+}
+
 /// Working: a turn (the person's or the agent's own) or background work.
 fn is_busy(st: &State) -> bool {
     st.turn.is_some() || !st.session.background_tasks.is_empty()
@@ -2127,6 +2614,7 @@ fn open_agent_turn(inner: &Inner, live: &Live, st: &mut State, turn_id: String) 
     };
     st.turn = Some(ActiveTurn {
         id: turn_id,
+        origin: TurnOrigin::Agent,
         interrupting: false,
         stalled: false,
     });
@@ -2148,14 +2636,23 @@ fn open_agent_turn(inner: &Inner, live: &Live, st: &mut State, turn_id: String) 
 }
 
 /// The process (and so its background work) is gone: settle every
-/// background subagent still open and clear the background list.
+/// background subagent or background command still open and clear the list.
 fn settle_background(inner: &Inner, live: &Live, st: &mut State, status: TurnItemStatus) {
     let now = Utc::now();
+    let bg_item_ids: std::collections::HashSet<String> = st
+        .session
+        .background_tasks
+        .iter()
+        .filter_map(|b| b.item_id.clone())
+        .collect();
     let mut open: Vec<TurnItem> = st
         .proj
         .items
         .values()
-        .filter(|i| i.is_background_open())
+        .filter(|i| {
+            i.is_background_open()
+                || ((i.status.is_open() || i.is_streaming()) && bg_item_ids.contains(&i.id))
+        })
         .cloned()
         .collect();
     open.sort_by_key(|i| i.ordinal);
@@ -2168,6 +2665,27 @@ fn settle_background(inner: &Inner, live: &Live, st: &mut State, status: TurnIte
         let (status, last_error) = current_status(st);
         set_session_status(inner, live, st, status, last_error);
     }
+}
+
+fn is_open_bg_item_or_child(st: &State, i: &TurnItem) -> bool {
+    if i.is_background_open() {
+        return true;
+    }
+    if st
+        .session
+        .background_tasks
+        .iter()
+        .any(|b| b.item_id.as_deref() == Some(i.id.as_str()))
+    {
+        return true;
+    }
+    i.parent_item_id.as_deref().is_some_and(|pid| {
+        st.held
+            .iter()
+            .find(|h| h.id == pid)
+            .or_else(|| st.proj.items.get(pid))
+            .is_some_and(TurnItem::is_background_open)
+    })
 }
 
 fn has_pending(st: &State) -> bool {
@@ -2200,13 +2718,24 @@ fn resume_refused_for_good(st: &State) -> bool {
 /// Close stdin (EOF), then SIGTERM and SIGKILL the group after `grace`.
 fn stop_child(p: Proc, grace: Duration) {
     let pid = p.pid;
-    drop(p);
-    tokio::spawn(async move {
-        tokio::time::sleep(grace).await;
-        signal_group(pid, libc::SIGTERM);
-        tokio::time::sleep(grace).await;
-        signal_group(pid, libc::SIGKILL);
-    });
+    match p.transport {
+        ProcTransport::Direct { stdin } => {
+            drop(stdin);
+            drop(p.driver);
+            tokio::spawn(async move {
+                tokio::time::sleep(grace).await;
+                signal_group(pid, libc::SIGTERM);
+                tokio::time::sleep(grace).await;
+                signal_group(pid, libc::SIGKILL);
+            });
+        }
+        ProcTransport::Held { client, .. } => {
+            drop(p.driver);
+            tokio::spawn(async move {
+                client.shutdown(grace).await;
+            });
+        }
+    }
 }
 
 /// Sequence, project, record and publish one event. Returns its sequence.
@@ -2261,9 +2790,15 @@ fn set_session_status(
     let model = st.session.model.clone();
     let cwd = st.session.cwd.clone();
     let background_tasks = st.session.background_tasks.clone();
+    let capabilities = Some(st.session.capabilities.clone());
+    let title = Some(st.session.title.clone());
     let prev = st.proj.session.as_ref();
     if prev.is_some_and(|p| {
-        p.status == status && p.last_error == last_error && p.background_tasks == background_tasks
+        p.status == status
+            && p.last_error == last_error
+            && p.background_tasks == background_tasks
+            && p.capabilities == capabilities
+            && p.title == title
     }) {
         return;
     }
@@ -2274,6 +2809,8 @@ fn set_session_status(
         updated_at: Utc::now(),
         last_error,
         background_tasks,
+        capabilities,
+        title,
     };
     emit(
         inner,
@@ -2302,10 +2839,43 @@ fn flush_held(inner: &Inner, live: &Live, st: &mut State) {
 }
 
 fn upsert_item(inner: &Inner, live: &Live, st: &mut State, mut item: TurnItem) {
+    let now_utc = Utc::now();
+    if let Some(prior) = st
+        .held
+        .iter()
+        .find(|h| h.id == item.id)
+        .or_else(|| st.proj.items.get(&item.id))
+    {
+        if prior.started_at.is_some() {
+            item.started_at = prior.started_at;
+        } else if item.started_at.is_none() {
+            item.started_at = Some(now_utc);
+        }
+        if item.status.is_open() {
+            item.completed_at = None;
+        } else if !prior.status.is_open() && prior.completed_at.is_some() {
+            item.completed_at = prior.completed_at;
+        } else if item.completed_at.is_none() {
+            item.completed_at = prior.completed_at.or(Some(now_utc));
+        }
+    } else {
+        if item.started_at.is_none() {
+            item.started_at = Some(now_utc);
+        }
+        if item.status.is_open() {
+            item.completed_at = None;
+        } else if item.completed_at.is_none() {
+            item.completed_at = Some(now_utc);
+        }
+    }
     // Superseded: the newer state of a held item replaces it.
     st.held.retain(|h| h.id != item.id);
     let window = inner.config.stream_coalesce;
-    if item.is_streaming() && !window.is_zero() {
+    let coalesce_eligible = item.is_streaming()
+        || (item.status.is_open()
+            && matches!(item.kind, TurnItemKind::Subagent { .. })
+            && st.proj.items.contains_key(&item.id));
+    if coalesce_eligible && !window.is_zero() {
         let now = Instant::now();
         let recent = st
             .stream_emitted
@@ -2313,8 +2883,9 @@ fn upsert_item(inner: &Inner, live: &Live, st: &mut State, mut item: TurnItem) {
             .is_some_and(|t| now.duration_since(*t) < window);
         if recent && st.proj.items.contains_key(&item.id) {
             item.ordinal = st.proj.items[&item.id].ordinal;
-            item.updated_at = Utc::now();
+            item.updated_at = now_utc;
             st.held.push(item);
+            live.deadline_changed.notify_waiters();
             return;
         }
         st.stream_emitted.insert(item.id.clone(), now);
@@ -2328,18 +2899,68 @@ fn upsert_item(inner: &Inner, live: &Live, st: &mut State, mut item: TurnItem) {
             st.proj.next_item_ordinal
         }
     };
-    item.updated_at = Utc::now();
+    item.updated_at = now_utc;
+    let settled_subagent =
+        matches!(item.kind, TurnItemKind::Subagent { .. }) && !item.status.is_open();
+    let parent_id = settled_subagent.then(|| item.id.clone());
+    let parent_status = item.status;
     emit(
         inner,
         live,
         st,
         RuntimeEventBody::TurnItemUpdated { turn_item: item },
     );
+    if let Some(pid) = parent_id {
+        settle_children_of(inner, live, st, &pid, parent_status, now_utc);
+    }
+}
+
+fn settle_children_of(
+    inner: &Inner,
+    live: &Live,
+    st: &mut State,
+    parent_id: &str,
+    status: TurnItemStatus,
+    now: chrono::DateTime<Utc>,
+) {
+    let mut child_map: HashMap<Id, TurnItem> = st
+        .proj
+        .items
+        .values()
+        .filter(|i| {
+            i.id != parent_id
+                && i.parent_item_id.as_deref() == Some(parent_id)
+                && (i.status.is_open() || i.is_streaming())
+        })
+        .map(|i| (i.id.clone(), i.clone()))
+        .collect();
+    for h in &st.held {
+        if h.id != parent_id
+            && h.parent_item_id.as_deref() == Some(parent_id)
+            && (h.status.is_open() || h.is_streaming())
+        {
+            child_map.insert(h.id.clone(), h.clone());
+        }
+    }
+    if child_map.is_empty() {
+        return;
+    }
+    let mut children: Vec<TurnItem> = child_map.into_values().collect();
+    children.sort_by_key(|i| i.ordinal);
+    for mut child in children {
+        settle_item(&mut child, status, now);
+        upsert_item(inner, live, st, child);
+    }
 }
 
 fn settle_item(item: &mut TurnItem, status: TurnItemStatus, now: chrono::DateTime<Utc>) {
+    if item.started_at.is_none() {
+        item.started_at = Some(now);
+    }
     if item.status.is_open() {
         item.status = status;
+        item.completed_at = Some(now);
+    } else if item.completed_at.is_none() {
         item.completed_at = Some(now);
     }
     match &mut item.kind {
@@ -2349,6 +2970,61 @@ fn settle_item(item: &mut TurnItem, status: TurnItemStatus, now: chrono::DateTim
         }
         _ => {}
     }
+}
+
+/// Settle an archived `agent_runtime_entities` JSON payload so exported or
+/// restored history never preserves mid-turn spinners, running provider
+/// sessions, or pending approvals. Returns `Some(updated_json)` only when the
+/// entity required settling.
+pub fn settle_archived_entity_json(kind: &str, payload_json: &str) -> Option<String> {
+    let now = Utc::now();
+    let raw: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    let updated = match kind {
+        K_TURN => serde_json::from_value::<ProviderTurn>(raw)
+            .ok()
+            .filter(|t| !t.status.is_terminal())
+            .and_then(|mut t| {
+                t.status = ProviderTurnStatus::Interrupted;
+                t.completed_at = Some(now);
+                serde_json::to_value(t).ok()
+            }),
+        K_ITEM => serde_json::from_value::<TurnItem>(raw)
+            .ok()
+            .filter(|i| i.status.is_open() || i.is_streaming())
+            .and_then(|mut i| {
+                settle_item(&mut i, TurnItemStatus::Interrupted, now);
+                serde_json::to_value(i).ok()
+            }),
+        K_REQUEST => serde_json::from_value::<RuntimeRequest>(raw)
+            .ok()
+            .filter(|q| q.status == RuntimeRequestStatus::Pending)
+            .and_then(|mut q| {
+                q.status = RuntimeRequestStatus::Expired;
+                q.response_capability = ResponseCapability::NotResumable {
+                    reason: "Imported history; pending request was not resumed.".into(),
+                };
+                serde_json::to_value(q).ok()
+            }),
+        K_SESSION => serde_json::from_value::<ProviderSession>(raw)
+            .ok()
+            .filter(|s| {
+                s.status != ProviderSessionStatus::Stopped || !s.background_tasks.is_empty()
+            })
+            .and_then(|mut s| {
+                s.background_tasks.clear();
+                s.status = ProviderSessionStatus::Stopped;
+                s.updated_at = now;
+                serde_json::to_value(s).ok()
+            }),
+        // Imported prompts never send themselves: boot recovery would dispatch a
+        // person's queued message on the next start.
+        K_QUEUE => raw
+            .as_array()
+            .filter(|q| !q.is_empty())
+            .map(|_| serde_json::json!([])),
+        _ => None,
+    }?;
+    serde_json::to_string(&updated).ok()
 }
 
 fn resolve_request(
@@ -2449,9 +3125,9 @@ fn finish_turn(
         .items
         .values()
         .filter(|i| {
-            i.turn_id.as_deref() == Some(active.id.as_str())
+            (i.turn_id.as_deref() == Some(active.id.as_str()) || i.turn_id.is_none())
                 && (i.status.is_open() || i.is_streaming())
-                && !i.is_background_open()
+                && !is_open_bg_item_or_child(st, i)
         })
         .cloned()
         .collect();
@@ -2488,6 +3164,7 @@ fn finish_turn(
                 updated_at: now,
                 error: None,
                 parent_item_id: None,
+                detail_omitted: false,
                 kind: TurnItemKind::Error { failure: f.clone() },
             },
         );
@@ -2515,6 +3192,7 @@ fn finish_turn(
                     "Stopped: the agent showed no progress for about {mins} min. \
                      Send a message to continue."
                 ),
+                task_settlement: None,
             },
         );
         n.turn_id = Some(active.id.clone());
@@ -2531,8 +3209,36 @@ fn finish_turn(
     }
 }
 
+fn step_forces_checkpoint(step: &DriverStep) -> bool {
+    step.signal.is_some()
+        || step.events.iter().any(|ev| {
+            matches!(
+                ev,
+                DriverEvent::Ready { .. }
+                    | DriverEvent::TurnStarted { .. }
+                    | DriverEvent::Request { .. }
+                    | DriverEvent::Question { .. }
+                    | DriverEvent::RequestClosed { .. }
+                    | DriverEvent::Terminal { .. }
+                    | DriverEvent::Fatal(_)
+            )
+        })
+}
+
 /// Apply a driver step: events, then stdin writes, then the signal.
 fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
+    apply_step_opts(inner, live, st, step, false, true);
+}
+
+pub(super) fn apply_step_opts(
+    inner: &Inner,
+    live: &Live,
+    st: &mut State,
+    step: DriverStep,
+    force_checkpoint: bool,
+    sync_checkpoint: bool,
+) {
+    let force = force_checkpoint || step_forces_checkpoint(&step);
     for ev in step.events {
         match ev {
             DriverEvent::Ready {
@@ -2549,6 +3255,10 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                 }
                 if model.is_some() && st.session.model.is_none() {
                     st.session.model = model;
+                }
+                // What the agent reported it takes in its handshake.
+                if let Some(p) = st.proc.as_ref() {
+                    st.session.capabilities = p.driver.capabilities();
                 }
                 let provider_thread = ProviderThread {
                     native_thread_id: st.session.native_thread_id.clone(),
@@ -2716,6 +3426,32 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     .and_then(|t| st.proj.turns.get(&t.id))
                     .cloned();
                 if let Some(mut turn) = turn {
+                    let cost = usage
+                        .cost_usd
+                        .or_else(|| turn.turn_token_usage.as_ref().and_then(|u| u.cost_usd));
+                    turn.turn_token_usage = Some(TurnTokenUsage {
+                        cost_usd: cost,
+                        ..usage
+                    });
+                    emit(
+                        inner,
+                        live,
+                        st,
+                        RuntimeEventBody::ProviderTurnUpdated {
+                            provider_turn: turn,
+                        },
+                    );
+                }
+            }
+            DriverEvent::TurnCost(cost) => {
+                let turn = st
+                    .turn
+                    .as_ref()
+                    .and_then(|t| st.proj.turns.get(&t.id))
+                    .cloned();
+                if let Some(mut turn) = turn.filter(|_| cost.is_finite() && cost >= 0.0) {
+                    let mut usage = turn.turn_token_usage.take().unwrap_or_default();
+                    usage.cost_usd = Some(cost);
                     turn.turn_token_usage = Some(usage);
                     emit(
                         inner,
@@ -2727,6 +3463,25 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     );
                 }
             }
+            DriverEvent::Commands(list) => {
+                let commands = bounded_commands(list);
+                if commands != st.proj.commands {
+                    emit(
+                        inner,
+                        live,
+                        st,
+                        RuntimeEventBody::CommandsUpdated { commands },
+                    );
+                }
+            }
+            DriverEvent::Title(title) => adopt_title(inner, live, st, &title),
+            DriverEvent::ContextUsage(usage)
+                if st
+                    .proj
+                    .thread
+                    .as_ref()
+                    .and_then(|t| t.context_usage.as_ref())
+                    == Some(&usage) => {}
             DriverEvent::ContextUsage(usage) => {
                 let provider_thread = ProviderThread {
                     native_thread_id: st.session.native_thread_id.clone(),
@@ -2765,6 +3520,11 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     status
                 };
                 finish_turn(inner, live, st, status, failure, reason);
+                if st.session.title_auto {
+                    if let Some(path) = st.proc.as_ref().and_then(|p| p.driver.title_transcript()) {
+                        probe_title(inner, &st.session.id, path);
+                    }
+                }
             }
             DriverEvent::Fatal(failure) => {
                 if st.turn.is_some() {
@@ -2778,6 +3538,7 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
                     );
                 }
                 if let Some(p) = st.proc.take() {
+                    live.proc_ended.notify_waiters();
                     stop_child(p, inner.config.close_grace);
                 }
                 set_session_status(
@@ -2802,23 +3563,152 @@ fn apply_step(inner: &Inner, live: &Live, st: &mut State, step: DriverStep) {
     }
     if let Some(p) = st.proc.as_ref() {
         for line in step.writes {
-            let _ = p.stdin.send(line);
+            p.send_stdin(line);
         }
         if step.signal == Some(ChildSignal::Interrupt) {
-            signal_group(p.pid, libc::SIGINT);
+            p.interrupt_process_group();
         }
     }
+    if sync_checkpoint {
+        held_proc::sync_holder_checkpoint(st, force);
+    }
+}
+
+/// Poll the driver's off-lock sideband session log (`agy`, `grok`, `gemini`,
+/// `opencode`, or `OTTO_ACP_SIDEBAND_FILE`) and feed any new step payload into
+/// [`StructuredDriver::on_sideband`]. Returns `true` when unread data remains.
+async fn poll_driver_sideband(inner: &Inner, live: &Live, expected_epoch: Option<u64>) -> bool {
+    let (epoch, poll) = {
+        let st = live.lock();
+        let Some(proc) = st.proc.as_ref() else {
+            return false;
+        };
+        if expected_epoch.is_some_and(|e| proc.epoch != e) {
+            return false;
+        }
+        let Some(poll) = proc.driver.sideband_poll() else {
+            return false;
+        };
+        (proc.epoch, poll)
+    };
+
+    let (Some(payload), has_more) = crate::acp_sideband::io::fetch_sideband(&poll).await else {
+        return false;
+    };
+
+    let mut st = live.lock();
+    let Some(proc) = st.proc.as_mut() else {
+        return false;
+    };
+    if proc.epoch != epoch {
+        return false;
+    }
+    let step = proc.driver.on_sideband(payload);
+    if !step.events.is_empty() || !step.writes.is_empty() || step.signal.is_some() {
+        apply_step(inner, live, &mut st, step);
+    } else {
+        held_proc::sync_holder_checkpoint(&mut st, false);
+    }
+    has_more
+}
+
+pub(super) fn record_claude_stdout_line(claude_login: &Option<Option<PathBuf>>, line: &str) {
+    if let Some(dir) = claude_login {
+        otto_usage::limits::record_claude_line(dir.as_deref(), line, Utc::now());
+    }
+}
+
+pub(super) fn dispatch_child_stdout(
+    inner: &Inner,
+    live: &Live,
+    st: &mut State,
+    line_or_overlong: std::result::Result<&str, usize>,
+    sync_checkpoint: bool,
+) {
+    let step = match line_or_overlong {
+        Ok(line) => st
+            .proc
+            .as_mut()
+            .expect("checked by caller")
+            .driver
+            .on_line(line),
+        Err(n) => DriverStep {
+            events: vec![DriverEvent::Error(ProviderFailure {
+                class: "protocol_error".into(),
+                message: format!("dropped an agent output line of {n} bytes"),
+                code: None,
+                retryable: None,
+            })],
+            ..DriverStep::default()
+        },
+    };
+    apply_step_opts(inner, live, st, step, false, sync_checkpoint);
+}
+
+pub(super) fn is_evictable_dead(st: &State) -> bool {
+    if st.proc.is_some()
+        || st.turn.is_some()
+        || st.starting > 0
+        || !st.held.is_empty()
+        || has_pending(st)
+    {
+        return false;
+    }
+    if st.session.status == RuntimeSessionStatus::Closed {
+        return true;
+    }
+    st.proj.queue.is_empty()
+        && st.proj.session.as_ref().is_some_and(|p| {
+            p.status == ProviderSessionStatus::Error
+                || (p.status == ProviderSessionStatus::Stopped && p.last_error.is_some())
+        })
+}
+
+pub(super) fn try_evict_dead(inner: &Inner, id: &Id) {
+    inner.live.remove_if(id, |_, l| {
+        Arc::strong_count(l) == 1 && is_evictable_dead(&l.lock())
+    });
+}
+
+pub(super) async fn evict_if_dead_after_flush(inner: &Arc<Inner>, id: &Id) {
+    let maybe_persist = inner.live.get(id).and_then(|entry| {
+        let l = entry.value();
+        is_evictable_dead(&l.lock()).then(|| l.persist.clone())
+    });
+    let Some(persist) = maybe_persist else {
+        return;
+    };
+    let (tx, rx) = oneshot::channel();
+    if persist.send(PersistOp::Flush(tx)).is_ok() {
+        let _ = rx.await;
+    }
+    drop(persist);
+    try_evict_dead(inner, id);
 }
 
 /// Feed one child's messages to its driver until it exits.
 async fn pump(
     inner: Arc<Inner>,
     live: Arc<Live>,
+    sid: Id,
+    epoch: u64,
+    rx: mpsc::Receiver<ChildMsg>,
+    claude_login: Option<Option<PathBuf>>,
+) {
+    pump_inner(&inner, &live, epoch, rx, claude_login).await;
+    drop(live);
+    evict_if_dead_after_flush(&inner, &sid).await;
+}
+
+async fn pump_inner(
+    inner: &Arc<Inner>,
+    live: &Arc<Live>,
     epoch: u64,
     mut rx: mpsc::Receiver<ChildMsg>,
     claude_login: Option<Option<PathBuf>>,
 ) {
     let window = inner.config.stream_coalesce;
+    let mut next_sideband: Option<Instant> = None;
     loop {
         // Register before reading state, so a change between the snapshot and
         // select cannot leave an idle pump waiting indefinitely on child output.
@@ -2830,9 +3720,31 @@ async fn pump(
             if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
                 return; // closed or superseded
             }
+            let sideband_iv = st
+                .proc
+                .as_ref()
+                .and_then(|p| p.driver.sideband_poll())
+                .map(|s| s.interval);
+            match sideband_iv {
+                Some(iv) => {
+                    let target = Instant::now() + iv;
+                    next_sideband = Some(match next_sideband {
+                        Some(prev) => prev.min(target),
+                        None => target,
+                    });
+                }
+                None => {
+                    next_sideband = None;
+                }
+            }
             let held = st.held_deadline(window);
+            let settle = idle_settle_deadline(&st, &inner.config);
             let stall = stall_deadline(&st, &inner.config);
-            held.into_iter().chain(stall).min()
+            held.into_iter()
+                .chain(settle)
+                .chain(stall)
+                .chain(next_sideband)
+                .min()
         };
         let msg = tokio::select! {
             _ = &mut changed => continue,
@@ -2843,11 +3755,33 @@ async fn pump(
                     None => std::future::pending::<()>().await,
                 }
             } => {
+                let need_poll = next_sideband.is_some_and(|at| at <= Instant::now()) || {
+                    let st = live.lock();
+                    idle_settle_deadline(&st, &inner.config)
+                        .is_some_and(|at| at <= Instant::now())
+                };
+                if need_poll {
+                    next_sideband = None;
+                    for _ in 0..8 {
+                        if !poll_driver_sideband(inner, live, Some(epoch)).await {
+                            break;
+                        }
+                    }
+                }
                 let mut st = live.lock();
                 if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
                     return; // closed or superseded
                 }
-                flush_held(&inner, &live, &mut st);
+                flush_held(inner, live, &mut st);
+                let settled = idle_settle_deadline(&st, &inner.config)
+                    .is_some_and(|at| at <= Instant::now());
+                if settled {
+                    if let Some(proc) = st.proc.as_mut() {
+                        let step = proc.driver.on_idle_settle();
+                        apply_step(inner, live, &mut st, step);
+                    }
+                    continue;
+                }
                 let stalled =
                     stall_deadline(&st, &inner.config).is_some_and(|at| at <= Instant::now());
                 if stalled {
@@ -2856,7 +3790,7 @@ async fn pump(
                         t.stalled = true;
                     }
                     drop(st);
-                    interrupt_turn(&inner, &live);
+                    interrupt_turn(inner, live);
                 }
                 continue;
             }
@@ -2864,8 +3798,8 @@ async fn pump(
         let Some(msg) = msg else { break };
         // Claude's plan limits ride `rate_limit_event` frames: recorded
         // passively, outside the session lock (a substring test skips the rest).
-        if let (Some(dir), ChildMsg::Line(line)) = (&claude_login, &msg) {
-            otto_usage::limits::record_claude_line(dir.as_deref(), line, Utc::now());
+        if let ChildMsg::Line(line) = &msg {
+            record_claude_stdout_line(&claude_login, line);
         }
         let mut st = live.lock();
         if st.proc.as_ref().map(|p| p.epoch) != Some(epoch) {
@@ -2873,68 +3807,14 @@ async fn pump(
         }
         match msg {
             ChildMsg::Line(line) => {
-                let step = st
-                    .proc
-                    .as_mut()
-                    .expect("checked above")
-                    .driver
-                    .on_line(&line);
-                apply_step(&inner, &live, &mut st, step);
+                dispatch_child_stdout(inner, live, &mut st, Ok(line.as_str()), true);
             }
             ChildMsg::Overlong(n) => {
-                let step = DriverStep {
-                    events: vec![DriverEvent::Error(ProviderFailure {
-                        class: "protocol_error".into(),
-                        message: format!("dropped an agent output line of {n} bytes"),
-                        code: None,
-                        retryable: None,
-                    })],
-                    ..DriverStep::default()
-                };
-                apply_step(&inner, &live, &mut st, step);
+                dispatch_child_stdout(inner, live, &mut st, Err(n), true);
             }
             ChildMsg::Exited { code, stderr_tail } => {
-                let mut proc = st.proc.take().expect("checked above");
-                retire(&inner, &st.session);
-                let step = proc.driver.on_exit(code);
-                apply_step(&inner, &live, &mut st, step);
-                settle_background(&inner, &live, &mut st, TurnItemStatus::Interrupted);
-                let detail = stderr_tail
-                    .lines()
-                    .rev()
-                    .find(|l| !l.trim().is_empty())
-                    .map(|l| format!(": {}", l.trim()))
-                    .unwrap_or_default();
-                let code_s = code.map_or("a signal".to_string(), |c| format!("code {c}"));
-                let message = format!("the agent process exited ({code_s}){detail}");
-                if let Some(turn) = st.turn.as_ref() {
-                    // T3 Code finalizes a turn whose process died as a
-                    // `transport_error` failure.
-                    let (status, failure) = if turn.interrupting {
-                        (TurnTerminalStatus::Interrupted, None)
-                    } else {
-                        (
-                            TurnTerminalStatus::Failed,
-                            Some(ProviderFailure {
-                                class: "transport_error".into(),
-                                message: message.clone(),
-                                code: code.map(|c| c.to_string()),
-                                retryable: Some(true),
-                            }),
-                        )
-                    };
-                    finish_turn(&inner, &live, &mut st, status, failure, None);
-                } else {
-                    cancel_pending(&inner, &live, &mut st, CancelReason::Agent);
-                }
-                let last_error = (code != Some(0)).then_some(message);
-                set_session_status(
-                    &inner,
-                    &live,
-                    &mut st,
-                    ProviderSessionStatus::Stopped,
-                    last_error,
-                );
+                let proc = st.proc.take().expect("checked above");
+                held_proc::finalize_child_exit(inner, live, &mut st, proc, code, stderr_tail);
                 return;
             }
         }
@@ -2947,6 +3827,7 @@ async fn persister(repo: AgentRuntimeRepo, id: Id, mut rx: mpsc::UnboundedReceiv
             PersistOp::Upsert(rows) => repo.upsert_entities(&id, &rows).await,
             PersistOp::Reserve(upto) => repo.reserve_seq(&id, upto).await,
             PersistOp::NativeThreadId(n) => repo.set_native_thread_id(&id, &n).await,
+            PersistOp::Title(t) => repo.set_title(&id, &t, true).await,
             PersistOp::ClearNativeThreadId => repo.clear_native_thread_id(&id).await,
             PersistOp::Closed => repo.set_closed(&id).await,
             PersistOp::Opened => repo.set_open(&id).await,
@@ -2975,3 +3856,18 @@ fn scope_request_id(st: &State, native: &str) -> String {
         .request_ids
         .scoped(native)
 }
+
+pub(super) fn map_spawn_error(provider: &str, program: &str, e: std::io::Error) -> Error {
+    let msg = format!("could not start {provider} ({program}): {e}");
+    match e.kind() {
+        std::io::ErrorKind::NotFound
+        | std::io::ErrorKind::PermissionDenied
+        | std::io::ErrorKind::InvalidInput => Error::Invalid(msg),
+        std::io::ErrorKind::TimedOut => Error::Upstream(msg),
+        _ => Error::Internal(msg),
+    }
+}
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;

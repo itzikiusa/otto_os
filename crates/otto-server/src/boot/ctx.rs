@@ -103,6 +103,7 @@ impl ServerCtx {
             otto_agent_protocol::daemon_runtime(pool.clone(), manager.clone(), &data_dir, {
                 move |ev| crate::ws_fanout::publish_stream(&bus, ev)
             });
+        let ide = Arc::new(otto_ide::IdeEngine::new(data_dir.clone()));
         ServerCtx {
             authenticator: Arc::new(authenticator),
             roles: Arc::new(otto_rbac::RbacRoleChecker::new(pool.clone())),
@@ -186,6 +187,7 @@ impl ServerCtx {
             browser,
             ui_bridge: Default::default(),
             agent_runtime,
+            ide,
             secrets,
             events,
             pool,

@@ -5,8 +5,8 @@ import { deferred, loadSource } from './sourceHarness.ts';
 import { splitRemoteRef } from '../src/modules/git/refTracking.ts';
 import { editLines, editSeed, isCrlfBlock } from '../src/modules/git/conflictEdit.ts';
 import { alreadyOnPr } from '../src/modules/git/reviewPost.ts';
-import { carryViewState, carryViewed } from '../src/modules/git/diff-viewstate.ts';
-import { ROW_KEY_SEP, buildFileRows } from '../src/modules/git/diff-model.ts';
+import { carryViewState, carryViewed } from '../src/lib/diff/diff-viewstate.ts';
+import { ROW_KEY_SEP, buildFileRows } from '../src/lib/diff/diff-model.ts';
 
 // Review S15 / S20 (iteration 2): destructive and outward git flows must act on
 // exactly what the user saw and confirmed. Each test drives the real component

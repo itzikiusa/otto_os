@@ -10,6 +10,7 @@
   // their own sessions (`summary.scope === 'own'`). All data comes from the
   // daemon's /usage/* endpoints (otto-usage engine).
   import { onMount } from 'svelte';
+  import { router } from '../../lib/router.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import { onTabKey } from '../../lib/tabKeys';
@@ -36,23 +37,28 @@
   import UsageHealthBanner from './UsageHealthBanner.svelte';
   import RemainingLimits from './RemainingLimits.svelte';
   import ModelBreakdown from './ModelBreakdown.svelte';
+  import { usageUi, type UsageSubView } from './usageUiState.svelte';
   let reportLoad = $state(0);
 
   /** Root sees everything and owns the engine/budget controls; anyone else
    *  with Usage:View gets a read-only view of their own sessions. */
   const admin = $derived(auth.isRoot);
   const canView = $derived(auth.isRoot || auth.can('usage', 'view'));
-  /** Overview dashboard vs the ccusage-style report tables. */
-  let view = $state<'overview' | 'report' | 'otto'>('overview');
-  const ottoUsage = () => import('./OttoUsage.svelte');
-  /** Bumped by the Otto-usage Retry: re-keys the block for a fresh import(). */
+  $effect(() => {
+    if (router.module !== 'usage') return;
+    const sub = router.parts[1];
+    usageUi.view = sub === 'report' ? 'report' : sub === 'otto' && admin ? 'otto' : 'overview';
+  });
+  const view = $derived<UsageSubView>(usageUi.view === 'otto' && !admin ? 'overview' : usageUi.view);
+  let ottoUsageChunk: Promise<typeof import('./OttoUsage.svelte')> | null = null;
+  const ottoUsage = () => (ottoUsageChunk ??= import('./OttoUsage.svelte'));
   let ottoLoad = $state(0);
-  let telemetryDirty = $state(false);
-  async function selectView(next: typeof view): Promise<void> {
+  async function selectView(next: UsageSubView): Promise<void> {
     if (next === view) return;
-    if (telemetryDirty && !await confirmer.ask('You have unsaved telemetry settings. Leaving now discards them.', { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing', danger: true })) return;
-    telemetryDirty = false;
-    view = next;
+    if (usageUi.telemetryDirty && !await confirmer.ask('You have unsaved telemetry settings. Leaving now discards them.', { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing', danger: true })) return;
+    if (usageUi.telemetryDirty) usageUi.discardTelemetry();
+    usageUi.view = next;
+    if (router.module === 'usage') router.go(next === 'overview' ? 'usage' : `usage/${next}`);
   }
 
   // Navigate to a session from the top-sessions table (click-through drill-down).
@@ -72,9 +78,8 @@
   let retention = $state(180);
   let interval = $state(60);
   let chPath = $state('');
-  let configOpen = $state(false);
   const storageDirty = $derived(
-    configOpen &&
+    usageUi.configOpen &&
       !!usage.status &&
       (retention !== usage.status.retention_days ||
         interval !== usage.status.metrics_interval_secs ||
@@ -97,10 +102,9 @@
     workspaces: [],
     providers: [],
   });
-  let budgetsOpen = $state(false);
   let budgetsDirty = $state(false);
   let budgetValidated = $state(false);
-  $effect(() => guardUnsaved(() => budgetsDirty || telemetryDirty || storageDirty, { what: 'your usage settings' }));
+  $effect(() => guardUnsaved(() => budgetsDirty || usageUi.telemetryDirty || storageDirty, { what: 'your usage settings', allow: (to) => to === 'usage' || to.startsWith('usage/') }));
   const budgetWindowInvalid = $derived(!Number.isInteger(budgetCfg.window_days) || budgetCfg.window_days < 1 || budgetCfg.window_days > 3650);
   const budgetValidation = $derived.by(() => {
     if (budgetWindowInvalid)
@@ -152,8 +156,8 @@
   // sessions table, so the gear looked like it did nothing).
   let settingsEl: HTMLElement | undefined = $state();
   function toggleSettings(): void {
-    configOpen = !configOpen;
-    if (configOpen) queueMicrotask(() => settingsEl?.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() }));
+    usageUi.configOpen = !usageUi.configOpen;
+    if (usageUi.configOpen) queueMicrotask(() => settingsEl?.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() }));
   }
 
   // ⌘K verbs while Usage is open.
@@ -164,7 +168,7 @@
       { id: 'usage.view-report', title: 'Show usage report tables', group: 'Usage', keywords: 'ccusage daily monthly table', run: () => void selectView('report') },
       ...WINDOWS.map((w) => ({ id: `usage.window-${w.days}`, title: `Show the last ${w.days} days`, group: 'Usage', keywords: `usage window range ${w.label}`, run: () => usage.setDays(w.days) })),
       { id: 'usage.export-summary', title: 'Export usage summary (JSON)', group: 'Usage', keywords: 'download save json report', run: exportSummary },
-      ...(admin ? [{ id: 'usage.view-otto', title: 'Show Otto performance and profiling', group: 'Usage', keywords: 'telemetry cpu ram slow traces', run: () => void selectView('otto') }, { id: 'usage.settings', title: 'Open usage storage and retention', group: 'Usage', keywords: 'clickhouse retention interval settings', run: () => { if (!configOpen) toggleSettings(); } }] : []),
+      ...(admin ? [{ id: 'usage.view-otto', title: 'Show Otto performance and profiling', group: 'Usage', keywords: 'telemetry cpu ram slow traces', run: () => void selectView('otto') }, { id: 'usage.settings', title: 'Open usage storage and retention', group: 'Usage', keywords: 'clickhouse retention interval settings', run: () => { if (!usageUi.configOpen) toggleSettings(); } }] : []),
     ]),
   );
 
@@ -198,17 +202,16 @@
   function discardBudgets(): void {
     budgetsDirty = false;
     if (usage.budgets) budgetCfg = structuredClone($state.snapshot(usage.budgets.config));
-    budgetsOpen = false;
+    usageUi.budgetsOpen = false;
   }
 
   onMount(() => {
     usage.admin = admin;
     if (canView) void usage.loadAll();
-    // Live metric ticks refetch the sparkline only while this page is mounted.
     const unwatch = usage.watchMetrics();
     return () => {
       unwatch();
-      // Tear down auto-refresh on unmount so we don't poll in the background.
+      if (usageUi.telemetryDirty) usageUi.discardTelemetry();
       usage.setAutoRefresh(false);
     };
   });
@@ -322,7 +325,6 @@
   // Chart viewport (inner drawing area, inside the axis labels).
   let dailyChartWidth = $state(500);
   const SVG_W = $derived(dailyChartWidth || 500);
-  let selectedDailyKey = $state('');
   const SVG_H = 110;
   const AXIS_L = 52;  // left margin for y-axis labels
   const AXIS_B = 22;  // bottom margin for x-axis labels
@@ -330,7 +332,7 @@
   const dailyTokens = $derived((usage.summary?.daily ?? []).map((d) => d.total_tokens));
   const dailyMaxTokens = $derived(Math.max(...dailyTokens, 0));
   const dailyDays = $derived(usage.summary?.daily ?? []);
-  const selectedDaily = $derived(dailyDays.find(d => d.day === selectedDailyKey) ?? dailyDays.at(-1));
+  const selectedDaily = $derived(dailyDays.find(d => d.day === usageUi.selectedDailyKey) ?? dailyDays.at(-1));
   const hasUsage = $derived(Boolean(usage.summary && (usage.summary.total_tokens > 0 || usage.summary.total_events > 0 || usage.summary.sessions.length > 0)));
 
   // Y-axis: 4 ticks from 0 to ceiling. Round the top tick to a "nice" value
@@ -477,8 +479,8 @@
         {#if admin}
         <button
           class="icon-btn"
-          class:on={configOpen}
-          aria-pressed={configOpen}
+          class:on={usageUi.configOpen}
+          aria-pressed={usageUi.configOpen}
           onclick={toggleSettings}
           title="Storage and retention settings"
           aria-label="Storage and retention settings"
@@ -494,13 +496,9 @@
 
   <PageBody>
     {#if view === 'otto' && admin}
-      <!-- A failed chunk load (usually Otto updated in the background) gets the
-           shell's wording: Retry re-runs the import (the key bump makes a fresh
-           import() promise), Reload Otto picks up the new build, and going
-           back is its own honestly labelled action. -->
       {#key ottoLoad}
-        {#await ottoUsage()}<LoadState what="Otto usage" loading empty />{:then module}<module.default bind:dirty={telemetryDirty} />{:catch}
-          <LoadState what="Otto usage" error="Otto may have been updated in the background. Retry, or reload Otto to pick up the new version." empty onretry={() => ottoLoad++}>
+        {#await ottoUsage()}<LoadState what="Otto usage" loading empty />{:then module}<module.default />{:catch}
+          <LoadState what="Otto usage" error="Otto may have been updated in the background. Retry, or reload Otto to pick up the new version." empty onretry={() => { ottoUsageChunk = null; ottoLoad++; }}>
             {#snippet errorActions()}<button class="btn" onclick={() => location.reload()}>Reload Otto</button><button class="btn" onclick={() => void selectView('overview')}>Back to overview</button>{/snippet}
           </LoadState>
         {/await}
@@ -643,11 +641,11 @@
         {/if}
         <!-- Engine config (opened from the header gear). Rendered first so
              opening it never lands off-screen below the sessions table. -->
-        {#if configOpen && admin}
+        {#if usageUi.configOpen && admin}
           <section class="panel card" bind:this={settingsEl} aria-labelledby="usage-cfg-title">
             <div class="panel-head">
               <h3 id="usage-cfg-title">Storage and retention</h3>
-              <button class="icon-btn" onclick={() => (configOpen = false)} title="Close" aria-label="Close storage and retention">
+              <button class="icon-btn" onclick={() => (usageUi.configOpen = false)} title="Close" aria-label="Close storage and retention">
                 <Icon name="x" size={14} />
               </button>
             </div>
@@ -900,9 +898,9 @@
                       tabindex={selectedDaily?.day === d.day ? 0 : -1}
                       aria-label="{d.day}: {d.total_tokens.toLocaleString()} tokens, {formatUsd(d.cost_usd)}"
                       aria-pressed={selectedDaily?.day === d.day}
-                      onclick={() => (selectedDailyKey = d.day)}
-                      onfocus={() => (selectedDailyKey = d.day)}
-                      onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectedDailyKey = d.day; } }}
+                      onclick={() => (usageUi.selectedDailyKey = d.day)}
+                      onfocus={() => (usageUi.selectedDailyKey = d.day)}
+                      onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); usageUi.selectedDailyKey = d.day; } }}
                       x={x - barW / 2}
                       y={0}
                       width={barW}
@@ -928,7 +926,7 @@
                 </div>
                 {#if selectedDaily}
                   <div class="usage-chart-details" data-testid="usage-daily-details">
-                    <label>Day <select class="input" aria-label="Daily tokens day" value={selectedDaily.day} onchange={(event) => (selectedDailyKey = event.currentTarget.value)}>
+                    <label>Day <select class="input" aria-label="Daily tokens day" value={selectedDaily.day} onchange={(event) => (usageUi.selectedDailyKey = event.currentTarget.value)}>
                       {#each days as d (d.day)}<option value={d.day}>{d.day}</option>{/each}
                     </select></label>
                     <p role="status">{selectedDaily.day} · {selectedDaily.total_tokens.toLocaleString()} tokens · ≈ {formatUsd(selectedDaily.cost_usd)} · {breakdownTitle(selectedDaily)}</p>
@@ -994,12 +992,12 @@
             {#if admin && usage.budgets}<!-- no editor over an unreadable config -->
             <button
               class="btn small"
-              aria-expanded={budgetsOpen}
+              aria-expanded={usageUi.budgetsOpen}
               aria-controls="usage-budget-editor"
-              onclick={() => (budgetsOpen ? discardBudgets() : (budgetsOpen = true))}
-              title={budgetsOpen && budgetsDirty ? 'Close the editor and discard unsaved changes' : undefined}
+              onclick={() => (usageUi.budgetsOpen ? discardBudgets() : (usageUi.budgetsOpen = true))}
+              title={usageUi.budgetsOpen && budgetsDirty ? 'Close the editor and discard unsaved changes' : undefined}
             >
-              {#if budgetsOpen}{budgetsDirty ? 'Discard changes' : 'Close editor'}{:else}<Icon name="edit" size={12} /> Edit budgets{/if}
+              {#if usageUi.budgetsOpen}{budgetsDirty ? 'Discard changes' : 'Close editor'}{:else}<Icon name="edit" size={12} /> Edit budgets{/if}
             </button>
             {/if}
           </div>
@@ -1063,12 +1061,12 @@
             <LoadState what="budgets" variant="compact" error={usage.budgetsError} empty onretry={() => void usage.loadBudgets()} />
           {:else if !usage.budgets}
             <LoadState what="budgets" variant="compact" loading empty />
-          {:else if !budgetsOpen}
+          {:else if !usageUi.budgetsOpen}
             <p class="dim small">{admin ? 'No budgets yet. Use Edit budgets to set a cap and track spend against it.' : 'No budgets set.'}</p>
           {/if}
 
           <!-- Editor -->
-          {#if budgetsOpen && admin && usage.budgets}
+          {#if usageUi.budgetsOpen && admin && usage.budgets}
             <div class="budget-editor" id="usage-budget-editor">
               <label class="checkbox-row">
                 <input type="checkbox" bind:checked={budgetCfg.enforce} onchange={() => (budgetsDirty = true)} />
@@ -1178,7 +1176,7 @@
                 <span class="dim small">Rows without a scope or a cap above $0 are dropped on save.</span>
                 <button
                   class="btn"
-                  class:primary={!configOpen}
+                  class:primary={!usageUi.configOpen}
                   disabled={usage.savingBudgets || !budgetsDirty || !!budgetValidation}
                   title={budgetValidation || (budgetsDirty ? undefined : 'No changes to save')}
                   onclick={saveBudgets}

@@ -20,6 +20,7 @@
   const GAP = 4; // trigger ↔ menu
 
   let menuEl: HTMLDivElement | null = $state(null);
+  let subEl: HTMLDivElement | null = $state(null);
 
   // Final position + height cap. `ready` keeps the menu invisible for the one
   // frame before it has been measured, so it never flashes at a wrong spot.
@@ -28,7 +29,73 @@
   let maxH = $state(0);
   let ready = $state(false);
 
+  // Cascading 1-level flyout submenu (`item.children`).
+  let openSubIndex = $state(-1);
+  let subAnchorRect: DOMRect | null = null;
+  let subX = $state(0);
+  let subY = $state(0);
+  let subReady = $state(false);
+
   const isRtl = (): boolean => document.documentElement.dir === 'rtl';
+
+  function hasChildren(item: MenuItem | undefined): boolean {
+    return Boolean(item && !item.disabled && item.children && item.children.length > 0);
+  }
+
+  function placeSub(): void {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    maxH = Math.max(80, vh - PAD * 2);
+    if (!subEl || !subAnchorRect) return;
+    const w = subEl.offsetWidth;
+    const h = Math.min(subEl.offsetHeight, maxH);
+    const rtl = isRtl();
+    const rightX = subAnchorRect.right + 2;
+    const leftX = subAnchorRect.left - 2 - w;
+    let x: number;
+    if (!rtl) {
+      x = rightX + w <= vw - PAD || leftX < PAD ? rightX : leftX;
+    } else {
+      x = leftX >= PAD || rightX + w > vw - PAD ? leftX : rightX;
+    }
+    const y = subAnchorRect.top - 4;
+    subX = Math.max(PAD, Math.min(x, vw - w - PAD));
+    subY = Math.max(PAD, Math.min(y, vh - h - PAD));
+  }
+
+  function openSubmenuAt(index: number, rowEl: HTMLElement | null, focusFirst = false): void {
+    const item = view.items[index];
+    if (!hasChildren(item) || !rowEl) {
+      openSubIndex = -1;
+      subAnchorRect = null;
+      subReady = false;
+      return;
+    }
+    subAnchorRect = rowEl.getBoundingClientRect();
+    if (openSubIndex !== index) {
+      subReady = false;
+      openSubIndex = index;
+    }
+    requestAnimationFrame(async () => {
+      placeSub();
+      subReady = true;
+      if (focusFirst) {
+        await tick();
+        focusSubAt(0);
+      }
+    });
+  }
+
+  function closeSubmenu(refocusParent = false): void {
+    const prevIdx = openSubIndex;
+    openSubIndex = -1;
+    subAnchorRect = null;
+    subReady = false;
+    if (refocusParent && prevIdx >= 0 && menuEl) {
+      const parentBtn = menuEl.querySelector<HTMLButtonElement>(`.ctx-item[data-ctx-idx="${prevIdx}"]`);
+      parentBtn?.focus({ preventScroll: true });
+    }
+  }
 
   function place(): void {
     const vw = window.innerWidth;
@@ -59,9 +126,17 @@
   }
 
   $effect(() => {
-    if (!ctxMenu.open) return;
+    if (!ctxMenu.open) {
+      openSubIndex = -1;
+      subAnchorRect = null;
+      subReady = false;
+      return;
+    }
     void ctxMenu.seq; // re-run for a menu re-opened in the same tick
     ready = false;
+    openSubIndex = -1;
+    subAnchorRect = null;
+    subReady = false;
     maxH = Math.max(80, window.innerHeight - PAD * 2);
     // Defer one frame so the menu has rendered and can be measured.
     const raf = requestAnimationFrame(async () => {
@@ -75,26 +150,29 @@
   });
 
   // ── Roving focus ───────────────────────────────────────────────────────────
-  function itemEls(): HTMLButtonElement[] {
-    return menuEl ? Array.from(menuEl.querySelectorAll<HTMLButtonElement>('.ctx-item:not([aria-disabled="true"])')) : [];
+  function itemEls(root: HTMLElement | null = menuEl): HTMLButtonElement[] {
+    return root ? Array.from(root.querySelectorAll<HTMLButtonElement>(':scope > .ctx-item:not([aria-disabled="true"])')) : [];
   }
-  function focusAt(i: number): void {
-    const els = itemEls();
+  function focusAt(i: number, root: HTMLElement | null = menuEl): void {
+    const els = itemEls(root);
     if (!els.length) {
-      menuEl?.focus();
+      root?.focus();
       return;
     }
     els[(i + els.length) % els.length].focus();
   }
-  function move(delta: number): void {
-    const els = itemEls();
-    const cur = els.indexOf(document.activeElement as HTMLButtonElement);
-    if (cur === -1) focusAt(delta > 0 ? 0 : -1);
-    else if (ctxMenu.filter && cur === 0 && delta < 0) searchEl?.focus();
-    else focusAt(cur + delta);
+  function focusSubAt(i: number): void {
+    focusAt(i, subEl);
   }
-  function typeAhead(ch: string): void {
-    const els = itemEls();
+  function move(delta: number, root: HTMLElement | null = menuEl): void {
+    const els = itemEls(root);
+    const cur = els.indexOf(document.activeElement as HTMLButtonElement);
+    if (cur === -1) focusAt(delta > 0 ? 0 : -1, root);
+    else if (root === menuEl && ctxMenu.filter && cur === 0 && delta < 0) searchEl?.focus();
+    else focusAt(cur + delta, root);
+  }
+  function typeAhead(ch: string, root: HTMLElement | null = menuEl): void {
+    const els = itemEls(root);
     if (!els.length) return;
     const start = els.indexOf(document.activeElement as HTMLButtonElement);
     for (let k = 1; k <= els.length; k++) {
@@ -113,6 +191,10 @@
   function onWindowKey(e: KeyboardEvent): void {
     if (!ctxMenu.open) return;
     const inSearch = !!searchEl && document.activeElement === searchEl;
+    const inSub = !!subEl && subEl.contains(document.activeElement);
+    const activeRoot = inSub ? subEl : menuEl;
+    const openKey = isRtl() ? 'ArrowLeft' : 'ArrowRight';
+    const closeKey = isRtl() ? 'ArrowRight' : 'ArrowLeft';
     const swallow = (): void => {
       e.preventDefault();
       e.stopPropagation();
@@ -120,7 +202,8 @@
     switch (e.key) {
       case 'Escape':
         swallow();
-        ctxMenu.close();
+        if (inSub) closeSubmenu(true);
+        else ctxMenu.close();
         return;
       case 'Tab':
         swallow();
@@ -129,17 +212,36 @@
       case 'ArrowDown':
         swallow();
         if (inSearch) focusAt(0);
-        else move(1);
+        else move(1, activeRoot);
         return;
       case 'ArrowUp':
         swallow();
-        if (!inSearch) move(-1);
+        if (!inSearch) move(-1, activeRoot);
         return;
+      case openKey: {
+        if (inSearch || inSub) return;
+        const activeBtn = document.activeElement;
+        if (activeBtn instanceof HTMLButtonElement && menuEl?.contains(activeBtn)) {
+          const idx = Number(activeBtn.dataset.ctxIdx ?? '-1');
+          if (idx >= 0 && hasChildren(view.items[idx])) {
+            swallow();
+            openSubmenuAt(idx, activeBtn, true);
+          }
+        }
+        return;
+      }
+      case closeKey: {
+        if (inSub) {
+          swallow();
+          closeSubmenu(true);
+        }
+        return;
+      }
       case 'Home':
       case 'End':
         if (inSearch) return; // caret movement in the field
         swallow();
-        focusAt(e.key === 'Home' ? 0 : -1);
+        focusAt(e.key === 'Home' ? 0 : -1, activeRoot);
         return;
       case 'Enter':
       case ' ': {
@@ -152,12 +254,12 @@
     }
     if (inSearch || e.metaKey || e.ctrlKey || e.altKey || e.key.length !== 1) return;
     swallow();
-    if (ctxMenu.filter && searchEl) {
+    if (!inSub && ctxMenu.filter && searchEl) {
       // Typing on a row of a filterable menu goes to its search box.
       searchEl.focus();
       ctxMenu.query += e.key;
     } else {
-      typeAhead(e.key.toLowerCase());
+      typeAhead(e.key.toLowerCase(), activeRoot);
     }
   }
 
@@ -188,8 +290,12 @@
     return out;
   }
 
-  function clickItem(item: MenuItem): void {
+  function clickItem(item: MenuItem, index?: number, rowEl?: HTMLElement | null): void {
     if (item.disabled) return;
+    if (hasChildren(item) && index !== undefined && rowEl) {
+      openSubmenuAt(index, rowEl, true);
+      return;
+    }
     // Close FIRST: an action may open another menu (a ⋯ row that clicks a
     // collapsed "New ▾" button) and must not be closed right after.
     ctxMenu.close();
@@ -224,6 +330,12 @@
     return { items: tidy(out), hidden };
   });
 
+  const activeSubItems = $derived.by((): MenuItem[] => {
+    if (openSubIndex < 0 || openSubIndex >= view.items.length) return [];
+    const parent = view.items[openSubIndex];
+    return hasChildren(parent) ? tidy(parent.children ?? []) : [];
+  });
+
   let searchEl: HTMLInputElement | null = $state(null);
 
   /** Enter in the search box activates the first matched list item. */
@@ -235,7 +347,14 @@
   }
 </script>
 
-<svelte:window onkeydowncapture={onWindowKey} onresize={() => ctxMenu.open && place()} />
+<svelte:window
+  onkeydowncapture={onWindowKey}
+  onresize={() => {
+    if (!ctxMenu.open) return;
+    place();
+    if (openSubIndex >= 0) placeSub();
+  }}
+/>
 
 {#if ctxMenu.open}
   <!-- Backdrop: transparent, full-screen, closes menu on any interaction -->
@@ -255,6 +374,7 @@
     role="menu"
     aria-label="Context menu"
     tabindex="-1"
+    onscroll={() => { if (openSubIndex >= 0) closeSubmenu(false); }}
   >
     {#if ctxMenu.filter}
       <div class="ctx-search">
@@ -268,6 +388,7 @@
           bind:value={ctxMenu.query}
           spellcheck="false"
           onkeydown={onSearchKey}
+          oninput={() => { if (openSubIndex >= 0) closeSubmenu(false); }}
         />
       </div>
     {/if}
@@ -275,16 +396,25 @@
       {#if item.separator || !item.label}
         <div class="ctx-sep" role="separator"></div>
       {:else}
+        {@const itemHasSub = hasChildren(item)}
         <button
           class="ctx-item"
           class:danger={item.danger}
           class:disabled={item.disabled}
+          class:has-open-sub={openSubIndex === i}
+          data-ctx-idx={i}
           aria-disabled={item.disabled ? 'true' : undefined}
+          aria-haspopup={itemHasSub ? 'menu' : undefined}
+          aria-expanded={itemHasSub ? openSubIndex === i : undefined}
           role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
           aria-checked={item.checked === undefined ? undefined : item.checked}
           tabindex="-1"
-          onclick={() => clickItem(item)}
-          onmouseenter={(e) => titleIfClipped(e, item)}
+          onclick={(e) => clickItem(item, i, e.currentTarget)}
+          onmouseenter={(e) => {
+            titleIfClipped(e, item);
+            if (itemHasSub) openSubmenuAt(i, e.currentTarget, false);
+            else if (openSubIndex >= 0) closeSubmenu(false);
+          }}
           onmousemove={(e) => {
             // Pointer and keyboard share one highlight: hovering moves focus
             // (not onto a disabled row — it only shows its tooltip).
@@ -307,7 +437,11 @@
             <span class="ctx-icon-gap"></span>
           {/if}
           <span class="ctx-label">{item.label}</span>
-          {#if item.hint}<span class="ctx-hint">{item.hint}</span>{/if}
+          {#if itemHasSub}
+            <span class="ctx-chevron"><Icon name="chevronRight" size={12} /></span>
+          {:else if item.hint}
+            <span class="ctx-hint">{item.hint}</span>
+          {/if}
         </button>
       {/if}
     {/each}
@@ -315,6 +449,56 @@
       <div class="ctx-more">+{view.hidden} more — type to narrow</div>
     {/if}
   </div>
+
+  {#if activeSubItems.length > 0}
+    <div
+      bind:this={subEl}
+      class="ctx-menu ctx-submenu glass-raised"
+      class:ctx-ready={subReady}
+      style="left:{subX}px;top:{subY}px;max-height:{maxH}px"
+      role="menu"
+      aria-label={view.items[openSubIndex]?.label ?? 'Submenu'}
+      tabindex="-1"
+    >
+      {#each activeSubItems as subItem, si (si)}
+        {#if subItem.separator || !subItem.label}
+          <div class="ctx-sep" role="separator"></div>
+        {:else}
+          <button
+            class="ctx-item"
+            class:danger={subItem.danger}
+            class:disabled={subItem.disabled}
+            aria-disabled={subItem.disabled ? 'true' : undefined}
+            role={subItem.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
+            aria-checked={subItem.checked === undefined ? undefined : subItem.checked}
+            tabindex="-1"
+            onclick={() => clickItem(subItem)}
+            onmouseenter={(e) => titleIfClipped(e, subItem)}
+            onmousemove={(e) => {
+              const el = e.currentTarget;
+              if (subItem.disabled) return;
+              if (document.activeElement !== el) el.focus({ preventScroll: true });
+            }}
+          >
+            {#if subItem.checked !== undefined}
+              {#if subItem.checked}
+                <span class="ctx-icon ctx-check"><Icon name="check" size={13} /></span>
+              {:else}
+                <span class="ctx-icon-gap"></span>
+              {/if}
+              {#if subItem.icon}<span class="ctx-icon"><Icon name={asIcon(subItem.icon)} size={13} /></span>{/if}
+            {:else if subItem.icon}
+              <span class="ctx-icon"><Icon name={asIcon(subItem.icon)} size={13} /></span>
+            {:else}
+              <span class="ctx-icon-gap"></span>
+            {/if}
+            <span class="ctx-label">{subItem.label}</span>
+            {#if subItem.hint}<span class="ctx-hint">{subItem.hint}</span>{/if}
+          </button>
+        {/if}
+      {/each}
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -376,11 +560,19 @@
 
   /* Hover and keyboard focus are one highlight (hover moves focus). */
   .ctx-item:hover:not(.disabled),
-  .ctx-item:focus:not(.disabled) {
+  .ctx-item:focus:not(.disabled),
+  .ctx-item.has-open-sub:not(.disabled) {
     background: var(--hover);
   }
   .ctx-item:focus-visible {
     box-shadow: inset 0 0 0 2px var(--accent-text);
+  }
+  .ctx-chevron {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    margin-inline-start: 10px;
+    color: var(--text-dim);
   }
 
   .ctx-item.danger {

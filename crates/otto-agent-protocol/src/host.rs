@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use otto_core::agent_runtime::{RuntimeAccessMode, RuntimeEvent, RuntimeSession};
+use otto_core::agent_runtime::{RuntimeAccessMode, RuntimeEvent, RuntimeProvider, RuntimeSession};
 use otto_core::domain::{Session, SessionKind, SessionStatus, Workspace};
 use otto_core::event::Event;
 use otto_core::{Id, Result};
@@ -39,10 +39,40 @@ pub trait RuntimeHost: Send + Sync + 'static {
     /// its spawn minted (the `otto` MCP credential). Best-effort.
     async fn retire(&self, _session: &RuntimeSession) {}
 
+    /// Whether the spawn just prepared for `session` brought up a network
+    /// profile. Its tunnels end with the daemon, so such a child is not
+    /// held across a restart: it respawns (resumes) with fresh tunnels.
+    fn network_profile_active(&self, _session: &RuntimeSession) -> bool {
+        false
+    }
+
     /// The access mode a new session starts in when the request names none —
     /// the default terminal sessions follow.
     fn default_access_mode(&self) -> RuntimeAccessMode {
         RuntimeAccessMode::ApprovalRequired
+    }
+
+    /// Resolve a custom provider slug (e.g. `"claudework"`) to its underlying
+    /// structured [`RuntimeProvider`] when enabled in `ProviderRegistry`.
+    fn resolve_custom_provider(&self, _slug: &str) -> Option<RuntimeProvider> {
+        None
+    }
+
+    /// Whether `slug` (built-in or custom) is enabled in `ProviderRegistry`.
+    /// Defaults to `true` for unit tests without a registry.
+    fn is_provider_enabled(&self, _slug: &str) -> bool {
+        true
+    }
+
+    /// Resolved custom `CLAUDE_CONFIG_DIR` for a Claude-family provider `slug`
+    /// (including wrapper-script / `~/.zshrc` alias inference).
+    fn claude_config_dir_for(&self, _slug: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// Whether session persistence across daemon restarts is enabled.
+    async fn session_persistence_enabled(&self) -> bool {
+        true
     }
 
     /// Deliver one event to WebSocket clients (owner / admin / root).
@@ -68,7 +98,7 @@ pub fn as_agent_session(s: &RuntimeSession) -> Session {
         id: s.id.clone(),
         workspace_id: s.workspace_id.clone(),
         kind: SessionKind::Agent,
-        provider: s.provider.as_str().to_string(),
+        provider: s.provider_slug().to_string(),
         title: s.title.clone(),
         status: SessionStatus::Running,
         cwd: s.cwd.clone(),
@@ -146,6 +176,13 @@ impl RuntimeHost for SessionManagerHost {
             .await;
     }
 
+    fn network_profile_active(&self, session: &RuntimeSession) -> bool {
+        self.manager
+            .network_status(session.id.as_str())
+            .profile_id
+            .is_some()
+    }
+
     /// Full access while Settings › Providers skips permission prompts (the
     /// default) — what a terminal session launches with.
     fn default_access_mode(&self) -> RuntimeAccessMode {
@@ -154,6 +191,22 @@ impl RuntimeHost for SessionManagerHost {
         } else {
             RuntimeAccessMode::ApprovalRequired
         }
+    }
+
+    fn resolve_custom_provider(&self, slug: &str) -> Option<RuntimeProvider> {
+        self.manager.providers().runtime_provider_for(slug)
+    }
+
+    fn is_provider_enabled(&self, slug: &str) -> bool {
+        self.manager.providers().is_enabled(slug)
+    }
+
+    fn claude_config_dir_for(&self, slug: &str) -> Option<std::path::PathBuf> {
+        self.manager.claude_config_dir_for(slug)
+    }
+
+    async fn session_persistence_enabled(&self) -> bool {
+        self.manager.session_persistence_enabled().await
     }
 
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>) {

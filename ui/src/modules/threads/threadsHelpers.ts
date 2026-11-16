@@ -1,14 +1,11 @@
 import type { Repo, Session } from '../../lib/api/types';
 import { ws } from '../../lib/stores/workspace.svelte';
+import { harnessLabel, isPlainShellSession } from '../../lib/providers';
 import { delegatedParentId, inThreadsScope, type SessionPool } from '../../lib/stores/sessionBuckets';
 
 export type PreviewKind = 'markdown' | 'json' | 'csv' | 'svg' | 'image' | 'code';
 
-/** Whether a session is a raw interactive shell PTY (not a coding-agent CLI). */
-export function isPlainShellSession(s: Session | null | undefined): boolean {
-  if (!s) return false;
-  return s.provider === 'shell' && typeof (s.meta as Record<string, unknown> | undefined)?.nested_provider !== 'string';
-}
+export { harnessLabel, isPlainShellSession };
 
 /**
  * Whether a session belongs in the Threads workspace (`#/threads`): the shared
@@ -123,9 +120,6 @@ export function forgeLabel(repo: Repo | null | undefined): string | null {
   if (kind === 'gitlab') return 'GitLab';
   return null;
 }
-
-/** Harness display name (lives in lib/providers so lib pickers share it). */
-export { harnessLabel } from '../../lib/providers';
 
 /** File basename (`src/App.svelte` -> `App.svelte`). */
 export function baseName(path: string): string {

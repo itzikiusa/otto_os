@@ -66,8 +66,12 @@ impl SessionManager {
                     })
             }
         };
+        let cli_family = self
+            .providers
+            .model_family_for(&session.provider)
+            .unwrap_or_else(|| session.provider.clone());
         let has_otto = otto_tools.is_some();
-        let pi_otto = otto_tools.clone().filter(|_| session.provider == "pi");
+        let pi_otto = otto_tools.clone().filter(|_| cli_family == "pi");
         let cfg = crate::mcp::ManagedMcpConfig {
             browser: session_browser,
             user_servers: user_servers.clone(),
@@ -76,11 +80,7 @@ impl SessionManager {
         // The launcher reconciles are synchronous file IO under a per-cwd std
         // mutex: run them (and the canonicalize) on ONE blocking-pool thread,
         // so a contended cwd parks that thread, never a tokio worker.
-        let (sid, cwd, provider) = (
-            session.id.clone(),
-            session.cwd.clone(),
-            session.provider.clone(),
-        );
+        let (sid, cwd, provider) = (session.id.clone(), session.cwd.clone(), cli_family.clone());
         let reconciled = tokio::task::spawn_blocking(move || {
             let mut cfg = cfg;
             if !cfg.browser && !browser_cwds.is_empty() {
@@ -118,7 +118,7 @@ impl SessionManager {
             (Vec::new(), None, None)
         });
         let mut launch_args = Vec::new();
-        let delivered: Vec<String> = match session.provider.as_str() {
+        let delivered: Vec<String> = match cli_family.as_str() {
             // agy never reads `.mcp.json` — same managed set, its own file.
             "agy" => agy_names.unwrap_or_default(),
             // grok: `otto` via `enable_otto_tools_grok` (at token mint), user
@@ -208,7 +208,7 @@ impl SessionManager {
         // claimed skipped; `mcp_servers_error` already says so.
         let skipped = user_servers
             .as_deref()
-            .map(|users| crate::mcp::skipped_servers(&session.provider, users, &delivered))
+            .map(|users| crate::mcp::skipped_servers(&cli_family, users, &delivered))
             .filter(|s| !s.is_empty());
         // Snapshot-at-spawn: what this provider was actually given, what it
         // was not, plus the lookup fault if any (json_patch: a null clears a

@@ -18,7 +18,7 @@
 import { api, ApiError } from '../../lib/api/client';
 import { loadErrorText } from '../../lib/loadError';
 import { pollWhileVisible, type Poller } from '../../lib/poll';
-import { defaultAgentProvider } from '../../lib/providers';
+import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 import { ws } from '../../lib/stores/workspace.svelte';
 import type { Connection, CreateRuntimeSessionReq, RuntimePromptResp, RuntimeSession } from '../../lib/api/types';
 import { DIAGNOSE_SOURCE, diagnosePrompt, originLabel, pickDiagnoseThread, type DiagnoseProbe, type DiagnoseThreadRow } from './diagnose-prompt';
@@ -26,7 +26,7 @@ import { DIAGNOSE_SOURCE, diagnosePrompt, originLabel, pickDiagnoseThread, type 
 export type DiagnosePhase = 'starting' | 'running' | 'finished' | 'failed';
 
 /** Providers the structured runtime runs (RuntimeProvider). */
-const RUNTIME_PROVIDERS = new Set(['claude', 'codex', 'gemini', 'grok', 'agy', 'opencode', 'pi']);
+const RUNTIME_PROVIDERS = new Set(['claude', 'codex', 'gemini', 'grok', 'agy', 'opencode', 'pi', 'muse']);
 const POLL_MS = 3000;
 
 interface Active {
@@ -117,8 +117,9 @@ class ConnDiagnose {
 
   private async create(workspaceId: string, conn: Connection): Promise<RuntimeSession> {
     const def = defaultAgentProvider();
+    const fallback = agentProviders().find((p) => RUNTIME_PROVIDERS.has(p)) ?? 'claude';
     const base: CreateRuntimeSessionReq = {
-      provider: (RUNTIME_PROVIDERS.has(def) ? def : 'claude') as CreateRuntimeSessionReq['provider'],
+      provider: (RUNTIME_PROVIDERS.has(def) ? def : fallback) as CreateRuntimeSessionReq['provider'],
       title: `Diagnose ${conn.name}`,
       // The most restrictive mode: every command waits for the user's OK.
       access_mode: 'approval-required',

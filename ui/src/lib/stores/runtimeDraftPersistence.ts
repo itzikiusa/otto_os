@@ -16,6 +16,11 @@ export function composerContent(d: ComposerContent): RuntimeDraftContent {
     get text() { return d.text; }, set text(v) { d.text = v; },
     get images() { return d.images; }, set images(v) { d.images = v; },
     get model() { return d.model; }, set model(v) { d.model = v; },
+    get model_default() { return d.model === null; },
+    set model_default(v) {
+      if (v === true) d.model = null;
+      else if (v === false && d.model === null) d.model = undefined;
+    },
     get effort() { return d.effort; }, set effort(v) { d.effort = v; },
     get access_mode() { return d.pickedMode; }, set access_mode(v) { d.pickedMode = v; },
     get fresh_context() { return d.freshContext; }, set fresh_context(v) { d.freshContext = v; },
@@ -23,17 +28,63 @@ export function composerContent(d: ComposerContent): RuntimeDraftContent {
   };
 }
 export function snapshotDraft(d: ComposerContent): RuntimeDraftContent {
-  return JSON.parse(JSON.stringify(composerContent(d))) as RuntimeDraftContent;
+  const cloned = JSON.parse(JSON.stringify(composerContent(d))) as RuntimeDraftContent;
+  if (d.model === undefined) cloned.model = undefined;
+  return cloned;
 }
 export function acknowledgeComposer(d: ComposerContent, sent: RuntimeDraftContent): void {
   acknowledgeDraft(composerContent(d), sent);
 }
 
 export function emptyDraft(): RuntimeDraftContent {
-  return { text: '', images: [], model: null, effort: null, access_mode: null, fresh_context: false, context: [] };
+  return {
+    text: '',
+    images: [],
+    model: undefined,
+    model_default: false,
+    effort: null,
+    access_mode: null,
+    fresh_context: false,
+    context: [],
+  };
 }
-const copy = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
-const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+function normalizeRemoteDraftModel(draft: RuntimeDraftContent): string | null | undefined {
+  if (typeof draft.model === 'string' && draft.model !== '') return draft.model;
+  if (draft.model_default === true) return null;
+  return undefined;
+}
+function isEmptyDraftContent(d: RuntimeDraftContent | null | undefined): boolean {
+  return (
+    !d ||
+    (!d.text &&
+      d.images.length === 0 &&
+      d.context.length === 0 &&
+      !d.fresh_context &&
+      !d.model &&
+      !d.model_default &&
+      !d.effort &&
+      !d.access_mode)
+  );
+}
+const DRAFT_KEYS: readonly (keyof RuntimeDraftContent)[] = [
+  'text',
+  'images',
+  'model',
+  'effort',
+  'access_mode',
+  'fresh_context',
+  'context',
+];
+const copy = <T>(v: T): T => {
+  if (v === undefined) return undefined as T;
+  const cloned = JSON.parse(JSON.stringify(v)) as T;
+  if (v && typeof v === 'object' && 'model' in (v as Record<string, unknown>) && (v as Record<string, unknown>).model === undefined) {
+    (cloned as Record<string, unknown>).model = undefined;
+  }
+  return cloned;
+};
+const equal = (a: unknown, b: unknown): boolean =>
+  a === b || (a !== undefined && b !== undefined && JSON.stringify(a) === JSON.stringify(b));
 
 /** Only acknowledged content is removed; edits made during the request survive. */
 export function acknowledgeDraft(current: RuntimeDraftContent, sent: RuntimeDraftContent): void {
@@ -59,7 +110,9 @@ export class DraftPersistence {
   private revision = 0;
   private loaded = false;
   private loading: Promise<void> | null = null;
+  private syncing: Promise<void> | null = null;
   private writing: Promise<void> | null = null;
+  private inSaveCall = false;
   private saved = '';
   private conflicted = false;
   private baseline: RuntimeDraftContent;
@@ -82,8 +135,18 @@ export class DraftPersistence {
       if (record.draft) {
         const addedContext = this.current.context;
         const addedImages = this.current.images;
-        for (const key of Object.keys(before) as (keyof RuntimeDraftContent)[]) {
-          if (equal(this.current[key], before[key])) Object.assign(this.current, { [key]: record.draft[key] });
+        const remoteModel = normalizeRemoteDraftModel(record.draft);
+        for (const key of DRAFT_KEYS) {
+          if (!equal(this.current[key], before[key])) continue;
+          if (key === 'model') {
+            if (!equal(this.current.model_default ?? (this.current.model === null), before.model_default ?? (before.model === null))) {
+              continue;
+            }
+            this.current.model = remoteModel;
+            this.current.model_default = remoteModel === null;
+            continue;
+          }
+          Object.assign(this.current, { [key]: record.draft[key] });
         }
         if (!equal(addedContext, before.context)) {
           this.current.context = [...record.draft.context.filter(x => !addedContext.some(c => c.id === x.id)), ...addedContext];
@@ -93,10 +156,56 @@ export class DraftPersistence {
         }
       }
       this.loaded = true;
-      this.saved = JSON.stringify(record.draft ?? emptyDraft());
+      this.saved = JSON.stringify(this.current);
       this.status('saved');
     }).catch(e => { if (this.owns()) this.status('error', String(e)); }).finally(() => { this.loading = null; });
     return this.loading;
+  }
+  /** Refresh `revision` on an idle, clean composer so another surface sending/clearing
+   *  the draft never causes a spurious `409` on the next keystroke or image paste. */
+  syncIfClean(): Promise<void> {
+    if (
+      !this.owns() ||
+      !this.loaded ||
+      this.loading ||
+      this.inSaveCall ||
+      this.conflicted ||
+      JSON.stringify(this.current) !== this.saved
+    ) {
+      return Promise.resolve();
+    }
+    if (this.syncing) return this.syncing;
+    this.syncing = this.transport
+      .load()
+      .then(record => {
+        if (!this.owns() || this.inSaveCall || this.conflicted) return;
+        const remoteDraft = record.draft ?? emptyDraft();
+        const remoteJson = JSON.stringify(remoteDraft);
+        if (JSON.stringify(this.current) === this.saved) {
+          this.revision = record.revision;
+          const remoteModel = normalizeRemoteDraftModel(remoteDraft);
+          for (const key of DRAFT_KEYS) {
+            if (key === 'model') {
+              this.current.model = remoteModel;
+              this.current.model_default = remoteModel === null;
+              continue;
+            }
+            Object.assign(this.current, { [key]: copy(remoteDraft[key]) });
+          }
+          this.saved = JSON.stringify(this.current);
+          this.status('saved');
+        } else if (isEmptyDraftContent(record.draft)) {
+          this.revision = record.revision;
+          this.saved = remoteJson;
+        }
+      })
+      .catch(() => {
+        /* background sync: keep the clean composer undisturbed */
+      })
+      .finally(() => {
+        this.syncing = null;
+      });
+    return this.syncing;
   }
   save(): Promise<void> {
     if (!this.owns() || this.conflicted) return Promise.resolve();
@@ -105,21 +214,27 @@ export class DraftPersistence {
     return this.writing;
   }
   private async drain(): Promise<void> {
+    if (this.syncing) await this.syncing;
     if (!this.loaded) await this.load();
     if (!this.loaded || !this.owns()) return;
-    while (this.owns() && JSON.stringify(this.current) !== this.saved) {
-      const snapshot = copy(this.current);
+    while (this.owns()) {
+      const currentJson = JSON.stringify(this.current);
+      if (currentJson === this.saved) break;
+      const snapshot = JSON.parse(currentJson) as RuntimeDraftContent;
       this.status('saving');
+      this.inSaveCall = true;
       try {
         const record = await this.transport.save(snapshot, this.revision);
         if (!this.owns()) return;
         this.revision = record.revision;
-        this.saved = JSON.stringify(snapshot);
+        this.saved = currentJson;
       } catch (e) {
         if (!this.owns()) return;
         this.conflicted = (e as { status?: number }).status === 409;
         this.status('error', this.conflicted ? 'This draft changed in another window. Retry to save this version.' : 'Draft not saved. Retry when connected.');
         return;
+      } finally {
+        this.inSaveCall = false;
       }
     }
     if (this.owns()) this.status('saved');

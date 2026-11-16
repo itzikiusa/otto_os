@@ -1,8 +1,8 @@
 {
-  "file": "otto-tour-20261113.mp4",
-  "poster": "otto-tour-20261113-poster.jpg",
-  "captions": "otto-tour-20261113.vtt",
-  "duration": 156.01,
+  "file": "otto-tour-20261116.mp4",
+  "poster": "otto-tour-20261116-poster.jpg",
+  "captions": "otto-tour-20261116.vtt",
+  "duration": 172.01,
   "chapters": [
     {
       "id": "intro",
@@ -68,66 +68,73 @@
       "duration": 8
     },
     {
+      "id": "ide",
+      "section": "ide",
+      "title": "IDE (Beta)",
+      "start": 72,
+      "duration": 16
+    },
+    {
       "id": "git",
       "section": "git",
       "title": "Git and AI review",
-      "start": 72,
+      "start": 88,
       "duration": 8
     },
     {
       "id": "product",
       "section": "product",
       "title": "Product and Design Hall",
-      "start": 80,
+      "start": 96,
       "duration": 10
     },
     {
       "id": "vault",
       "section": "vault",
       "title": "Vault and Skills Lab",
-      "start": 90,
+      "start": 106,
       "duration": 6
     },
     {
       "id": "database",
       "section": "database",
       "title": "Database Explorer",
-      "start": 96,
+      "start": 112,
       "duration": 8
     },
     {
       "id": "infra",
       "section": "connections",
       "title": "Connections and cloud",
-      "start": 104,
+      "start": 120,
       "duration": 8
     },
     {
       "id": "insights",
       "section": "insights",
       "title": "Insights and Usage",
-      "start": 112,
+      "start": 128,
       "duration": 8
     },
     {
       "id": "rooms",
       "section": "rooms",
       "title": "Rooms · collaborate and recap",
-      "start": 120,
+      "start": 136,
       "duration": 16
     },
     {
       "id": "phone",
       "section": "phone-and-remote",
       "title": "Phone access",
-      "start": 136,
+      "start": 152,
       "duration": 8
     },
     {
       "id": "outro",
       "section": "channels",
       "title": "Everywhere",
-      "start": 144,
+      "start": 160,
       "duration": 12
     }
   ]

@@ -1711,3 +1711,168 @@ async fn bulk_branch_delete_reports_per_branch_outcomes() {
         .trim()
         .is_empty());
 }
+
+#[tokio::test]
+async fn pr_detail_fresh_query_bypasses_provider_get_cache() {
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    crate::providers::client::enable_cache_for_tests(&server.uri());
+
+    let mr_json = json!({
+        "iid": 101,
+        "title": "PR 101",
+        "state": "opened",
+        "author": { "name": "Omer", "username": "omer" },
+        "source_branch": "feature/GRV-5390",
+        "target_branch": "release/26.11.08",
+        "sha": "abc1234def01",
+        "diff_refs": { "head_sha": "abc1234def01" },
+        "merge_status": "can_be_merged",
+        "updated_at": "2026-11-15T09:00:00Z",
+        "web_url": "https://gitlab.ssh.example/acme/app/-/merge_requests/101"
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/acme%2Fapp/merge_requests/101"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(mr_json))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/api/v4/projects/acme%2Fapp/merge_requests/101/approvals",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "approved_by": [] })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/api/v4/projects/acme%2Fapp/merge_requests/101/approvals",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "approved_by": [{ "user": { "name": "Itzik", "username": "itzik" } }]
+        })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/api/v4/projects/acme%2Fapp/merge_requests/101/discussions",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/api/v4/projects/acme%2Fapp/merge_requests/101/pipelines",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/user"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "id": 1, "username": "itzik", "name": "Itzik" })),
+        )
+        .mount(&server)
+        .await;
+
+    let pool = mem_pool().await;
+    let user = seed_user(&pool, "itzik").await;
+    let ws = seed_workspace(&pool).await;
+    let repo_dir = init_git_repo().await;
+    LocalGit::new(&repo_dir)
+        .remote_op(
+            crate::ops::RemoteOp::Add,
+            "origin",
+            Some("ssh://git@gitlab.ssh.example/acme/app.git"),
+        )
+        .await
+        .unwrap();
+    let store = GitStore::new(pool.clone());
+    let account = store
+        .create_account(NewGitAccount {
+            user_id: user.clone(),
+            provider: GitProviderKind::Gitlab,
+            label: "gl".into(),
+            username: "itzik".into(),
+            token_ref: "gl-1".into(),
+            api_base_url: Some(server.uri()),
+            namespace: Some("acme".into()),
+            token_expires_at: None,
+        })
+        .await
+        .unwrap();
+    let repo = store
+        .create_repo(NewRepo {
+            workspace_id: ws,
+            name: "app".into(),
+            path: repo_dir.to_string_lossy().into_owned(),
+            remote_url: Some("ssh://git@gitlab.ssh.example/acme/app.git".into()),
+            provider: Some(GitProviderKind::Gitlab),
+            git_account_id: Some(account.id),
+        })
+        .await
+        .unwrap();
+    let ctx = TestCtx {
+        store,
+        workspaces: WorkspacesRepo::new(pool),
+        secrets: Arc::new(FixedSecret),
+        roles: Arc::new(AllowAll),
+        events: tokio::sync::broadcast::channel(8).0,
+    };
+
+    let approval_gets = || async {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                r.method.as_str() == "GET"
+                    && r.url.path() == "/api/v4/projects/acme%2Fapp/merge_requests/101/approvals"
+            })
+            .count()
+    };
+
+    let Json(first) = pr_detail(
+        State(ctx.clone()),
+        Extension(auth(&user, false)),
+        Path((repo.id.clone(), 101)),
+        Query(PrDetailQuery { fresh: false }),
+    )
+    .await
+    .unwrap();
+    assert!(first.approved_by.is_empty());
+    assert_eq!(approval_gets().await, 1);
+
+    // Cached read within TTL still returns the first response without hitting upstream.
+    let Json(cached) = pr_detail(
+        State(ctx.clone()),
+        Extension(auth(&user, false)),
+        Path((repo.id.clone(), 101)),
+        Query(PrDetailQuery { fresh: false }),
+    )
+    .await
+    .unwrap();
+    assert!(cached.approved_by.is_empty());
+    assert_eq!(approval_gets().await, 1);
+
+    // Explicit `fresh=true` invalidates the repo GET cache and observes the approval immediately.
+    let Json(refreshed) = pr_detail(
+        State(ctx),
+        Extension(auth(&user, false)),
+        Path((repo.id, 101)),
+        Query(PrDetailQuery { fresh: true }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(refreshed.approved_by, vec!["Itzik"]);
+    assert_eq!(approval_gets().await, 2);
+    let _ = tokio::fs::remove_dir_all(&repo_dir).await;
+}

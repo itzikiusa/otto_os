@@ -1,0 +1,40 @@
+[package]
+name = "otto-ide"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Full multi-language IDE engine: Local + SSH targets, OS/arch SDK manager, environments, DAP debugger, LSP intelligence, collaborative editing, and runtime IDE plugins"
+
+[dependencies]
+otto-core = { workspace = true }
+otto-state = { workspace = true }
+otto-ssh = { workspace = true }
+otto-netguard = { workspace = true }
+otto-git-cmd = { workspace = true }
+otto-telemetry = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+regex = "1.13"
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+sqlx = { workspace = true }
+dashmap = { workspace = true }
+dirs = { workspace = true }
+shell-words = { workspace = true }
+ignore = { workspace = true }
+bytes = { workspace = true }
+ring = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+otto-rbac = { workspace = true }
+tower = { version = "0.5.3", features = ["util"] }
+http-body-util = "0.1.5"

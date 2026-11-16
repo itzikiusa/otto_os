@@ -4275,3 +4275,102 @@ async fn verify_ingest_token_accepts_only_the_sessions_own_token() {
     assert!(mgr.verify_ingest_token(&a, &token_a), "the right token");
     assert!(mgr.verify_ingest_token(&b, &token_b));
 }
+
+#[tokio::test]
+async fn restore_all_with_kept_preserves_managed_mcp_tokens_for_adopted_runtime_sessions() {
+    let (mgr, repo, ws, owner) = test_manager().await;
+    let pool = repo.pool();
+    let now = chrono::Utc::now().to_rfc3339();
+    let auth = mgr.auth.as_ref().expect("test manager wires auth");
+    let adopted_runtime_id: Id = new_id();
+    let orphaned_runtime_id: Id = new_id();
+    for id in [&adopted_runtime_id, &orphaned_runtime_id] {
+        sqlx::query(
+            "INSERT INTO agent_runtime_sessions (id, workspace_id, provider, title, cwd, closed, created_by, created_at, last_active_at) VALUES (?, ?, 'claude', 't', '/tmp', 0, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(&ws.id)
+        .bind(&owner)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let (kept_token, _) = auth
+        .issue_session_api_token(&owner, &adopted_runtime_id)
+        .await
+        .unwrap();
+    let (expired_token, _) = auth
+        .issue_session_api_token(&owner, &orphaned_runtime_id)
+        .await
+        .unwrap();
+
+    mgr.restore_all_with_kept(&|_| None, std::slice::from_ref(&adopted_runtime_id))
+        .await
+        .unwrap();
+
+    assert!(
+        auth.authenticate(&kept_token).await.is_ok(),
+        "adopted runtime session token must survive daemon boot restore"
+    );
+    assert!(
+        auth.authenticate(&expired_token).await.is_err(),
+        "unadopted runtime session token must expire on daemon boot restore"
+    );
+}
+
+/// Under Otto's Seatbelt a Muse terminal session starts with Muse's own
+/// sandbox off (it cannot nest), on the real create spawn.
+#[tokio::test]
+async fn sandboxed_muse_session_starts_with_its_own_sandbox_off() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (mgr0, repo, mut workspace, user) = test_manager().await;
+    let settings = otto_state::SettingsRepo::new(repo.pool());
+    settings
+        .put("process_sandbox", &serde_json::json!({"enabled": true}))
+        .await
+        .unwrap();
+    let manager = Arc::new(
+        Arc::try_unwrap(mgr0)
+            .ok()
+            .expect("sole owner")
+            .with_settings_repo(settings),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().canonicalize().unwrap();
+    workspace.root_path = cwd.to_string_lossy().into_owned();
+    let script = "printf '%s\\n' \"$@\" > argv; exec /bin/sleep 60";
+    manager.providers.reload(Some(&serde_json::json!({
+        "muse": { "cmd": "/bin/sh", "args": ["-c", script, "fake-muse"] }
+    })));
+    let request = CreateSessionReq {
+        kind: SessionKind::Agent,
+        provider: Some("muse".into()),
+        title: Some("Sandboxed Muse fixture".into()),
+        cwd: Some(workspace.root_path.clone()),
+        connection_id: None,
+        model: None,
+        meta: None,
+    };
+    let session = manager
+        .create(&workspace, &user, request, None)
+        .await
+        .unwrap();
+    let argv = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(args) = std::fs::read_to_string(cwd.join("argv")) {
+                if !args.is_empty() {
+                    break args;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(argv.lines().any(|a| a == "--disable-sandbox"), "{argv}");
+    manager.remove(&session.id).await.unwrap();
+}

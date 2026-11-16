@@ -1,12 +1,9 @@
 <script lang="ts">
   import { announceShown } from '../../lib/announce.svelte';
-  // Workbench — per-user scratch files (scripts, JSON, Markdown, diagrams…)
-  // with formatting, a live preview, placeholders, Send to… and the full,
-  // append-only edit history. Layout: files | tabs + editor (+ preview) |
-  // side panel (Placeholders or History). On a phone the files list and the
-  // editor are two panes behind a segmented control.
+  // Scratches (`#/workbench`) — per-user scratch files with formatting, live preview, placeholders, Send to… and revision history.
   import { onMount, untrack } from 'svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import IdeModeTabs from '../../lib/components/IdeModeTabs.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -57,11 +54,7 @@
   const wsId = $derived(ws.currentId);
   const active = $derived(workbench.activeDoc);
   const doc = $derived(active?.doc ?? null);
-  // ── Language: detected from a STICKY snapshot of the buffer ────────────────
-  // Sniffing the live buffer flipped the language on every transient state
-  // while typing (`{` → `{}` is JSON, `{""}` is not, `# H` is Markdown), and
-  // each flip rebuilt the editor. Snapshot on open, on load, on paste, on Format
-  // and after 400 ms idle; one sniff serves `lang` and the "Auto (…)" label.
+  // Language detected from a sticky snapshot (open, load, paste, Format, or 400 ms idle) so typing never rebuilds the editor.
   let sniffText = $state('');
   let sniffKey = '';
   /** Set by a paste: the next buffer change re-sniffs at once. Plain field. */
@@ -489,7 +482,10 @@
 </script>
 
 <div class="wb-page">
-  <PageHeader title="Workbench" subtitle="Scratch files with full history">
+  <PageHeader title="IDE (Beta)">
+    {#snippet tabs()}
+      <IdeModeTabs active="scratches" />
+    {/snippet}
     {#snippet actions()}
       {#if workbench.docs.length > 0 || workbench.showTrash}
         <button class="btn small primary" data-testid="wb-new" onclick={() => void newFile()} title="New scratch file">

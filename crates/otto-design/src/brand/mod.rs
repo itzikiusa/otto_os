@@ -5,7 +5,7 @@
 //!
 //! - [`doc`] — the schema validator (run on every save through
 //!   `format::validate`) and the lenient [`BrandModel`];
-//! - [`extract`] — links (logo assets `embeds`) + search text for a kit;
+//! - `extract` — links (logo assets `embeds`) + search text for a kit;
 //! - [`export`] — CSS custom properties (`--brand-<group>-<name>`), a
 //!   Tailwind v4 `@theme`, W3C DTCG JSON;
 //! - [`contrast`] — WCAG ratios of every colour vs white / the kit's ink /

@@ -187,6 +187,7 @@ pub async fn summary(
         (all, own, otto_only, summary)
     };
     let mut summary = summary.map_err(ApiError)?;
+    active_limit_providers(&ctx.manager).canonicalize_summary(&mut summary, !otto_only);
     enrich_sessions(&ctx, &mut summary.sessions, &all_sessions).await;
     summary.by_kind =
         by_kind_rollup_with(&ctx, days, otto_only, &all_sessions, own.as_deref()).await;
@@ -409,16 +410,48 @@ pub fn read_routes() -> axum::Router<ServerCtx> {
         .route("/usage/limits/claude-check/run", post(limits_claude_run))
 }
 
+fn active_limit_providers(
+    manager: &otto_sessions::SessionManager,
+) -> otto_usage::limits::ActiveLimitProviders {
+    let reg = manager.providers();
+    let specs = reg.enabled_specs();
+    let installed = ["claude", "codex", "agy", "grok", "muse"]
+        .into_iter()
+        .filter(|fam| reg.resolved_family_program(fam).is_some());
+    otto_usage::limits::ActiveLimitProviders::from_specs_with_env(specs.iter().map(
+        |(name, spec)| {
+            (
+                name.as_str(),
+                spec.cmd.as_str(),
+                spec.args.as_slice(),
+                spec.model_family.as_deref(),
+                Some(&spec.env),
+            )
+        },
+    ))
+    .with_installed_families(installed)
+}
+
+fn enabled_provider_program(manager: &otto_sessions::SessionManager, p: &str) -> Option<String> {
+    manager.providers().resolved_family_program(p)
+}
+
 /// `GET /usage/limits` — plan allowance left per provider login (`otto_usage::limits`).
 pub async fn limits(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<otto_usage::limits::LimitsResp>> {
     if user.is_root {
-        let program = |p| ctx.manager.provider_program(p);
-        otto_usage::limits::refresh_cli_limits(program("agy"), program("grok")).await;
+        otto_usage::limits::refresh_cli_limits(|p| enabled_provider_program(&ctx.manager, p)).await;
     }
-    let l = otto_usage::limits::remaining_limits(&ctx.pool, &user.id, user.is_root, &ctx.data_dir);
+    let active = active_limit_providers(&ctx.manager);
+    let l = otto_usage::limits::remaining_limits_filtered(
+        &ctx.pool,
+        &user.id,
+        user.is_root,
+        &ctx.data_dir,
+        Some(&active),
+    );
     Ok(Json(l.await.map_err(ApiError)?))
 }
 
@@ -430,7 +463,15 @@ pub async fn limits_claude_check(
     CurrentUser(u): CurrentUser,
     Json(req): Json<otto_usage::limits::ClaudeCheckReq>,
 ) -> Limits {
-    let l = otto_usage::limits::set_claude_check(&ctx.pool, &u.id, u.is_root, &ctx.data_dir, &req);
+    let active = active_limit_providers(&ctx.manager);
+    let l = otto_usage::limits::set_claude_check_filtered(
+        &ctx.pool,
+        &u.id,
+        u.is_root,
+        &ctx.data_dir,
+        &req,
+        Some(&active),
+    );
     Ok(Json(l.await.map_err(ApiError)?))
 }
 
@@ -441,8 +482,18 @@ pub async fn limits_claude_run(
     Json(req): Json<otto_usage::limits::ClaudeRunReq>,
 ) -> Limits {
     let (pool, dir) = (&ctx.pool, &ctx.data_dir);
-    let cli = ctx.manager.provider_program("claude");
-    let l = otto_usage::limits::run_claude_check(pool, &u.id, u.is_root, dir, &req.key, cli);
+    let cli = enabled_provider_program(&ctx.manager, "claude")
+        .or_else(|| ctx.manager.provider_program("claude"));
+    let active = active_limit_providers(&ctx.manager);
+    let l = otto_usage::limits::run_claude_check_filtered(
+        pool,
+        &u.id,
+        u.is_root,
+        dir,
+        &req.key,
+        cli,
+        Some(&active),
+    );
     Ok(Json(l.await.map_err(ApiError)?))
 }
 
@@ -841,47 +892,6 @@ pub struct WorkspaceSessionsUsage {
     pub sessions: Vec<SessionTotals>,
 }
 
-/// How long the daemon-wide per-session rollup is reused. Every rollup spawns
-/// a ClickHouse query over the whole window, and the sidebar asks per
-/// workspace switch / minute; a minute of staleness is invisible there.
-const SESSIONS_USAGE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-
-type SessionsUsageCache =
-    std::sync::Mutex<Option<(std::time::Instant, u32, std::sync::Arc<Vec<SessionTotals>>)>>;
-
-static SESSIONS_USAGE_CACHE: SessionsUsageCache = std::sync::Mutex::new(None);
-
-/// The daemon-wide `session_totals(days)` rollup, cached for
-/// [`SESSIONS_USAGE_TTL`] per window. Errors are not cached.
-async fn cached_session_totals(
-    ctx: &ServerCtx,
-    days: u32,
-) -> Result<std::sync::Arc<Vec<SessionTotals>>, ApiError> {
-    if let Some((at, d, rows)) = SESSIONS_USAGE_CACHE
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .as_ref()
-    {
-        if *d == days && at.elapsed() < SESSIONS_USAGE_TTL {
-            return Ok(std::sync::Arc::clone(rows));
-        }
-    }
-    let rows = std::sync::Arc::new(
-        ctx.usage
-            .session_totals(days, false)
-            .await
-            .map_err(ApiError)?,
-    );
-    *SESSIONS_USAGE_CACHE
-        .lock()
-        .unwrap_or_else(|p| p.into_inner()) = Some((
-        std::time::Instant::now(),
-        days,
-        std::sync::Arc::clone(&rows),
-    ));
-    Ok(rows)
-}
-
 /// Keep the rollup rows for `visible` sessions only.
 fn filter_session_totals(
     rows: &[SessionTotals],
@@ -896,9 +906,8 @@ fn filter_session_totals(
 /// `GET /workspaces/{wid}/sessions/usage?days=30` — tokens + cost per session
 /// of this workspace (the Agents sidebar's tokens sort / row tooltip). Same
 /// visibility as the session list: a workspace admin (or root) sees every
-/// session, anyone else only their own. Backed by one cached daemon-wide
-/// rollup ([`cached_session_totals`]). `Usage:View` (policy) + workspace
-/// viewer (here).
+/// session, anyone else only their own. Backed by `UsageEngine::sidebar_session_totals`.
+/// `Usage:View` (policy) + workspace viewer (here).
 pub async fn workspace_sessions_usage(
     axum::extract::Path(wid): axum::extract::Path<Id>,
     State(ctx): State<ServerCtx>,
@@ -928,7 +937,11 @@ pub async fn workspace_sessions_usage(
         .await
         .map_err(ApiError)?;
     let visible: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
-    let rows = cached_session_totals(&ctx, days).await?;
+    let rows = ctx
+        .usage
+        .sidebar_session_totals(days)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(WorkspaceSessionsUsage {
         available: true,
         days,

@@ -837,6 +837,10 @@ impl super::GitProvider for Bitbucket {
         self.edit_reviewers(r, number, add, remove).await
     }
 
+    fn invalidate_repo_reads(&self, r: &RemoteRef) {
+        super::client::invalidate_scope(&format!("{}{}", self.base, Self::pr_path(r, "")));
+    }
+
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {
         // A PR detail must be WHOLE — follow the `next` cursor instead of
         // stopping at the first 100 comments. The PR and its comments are

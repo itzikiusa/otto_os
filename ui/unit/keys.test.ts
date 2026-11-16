@@ -35,7 +35,7 @@ test('nothing focused / page body → the global map handles everything', () => 
   }
 });
 
-import { appModifier, isMacPlatform } from '../src/lib/keys.ts';
+import { appModifier, installKeyMap, isMacPlatform, keyContext } from '../src/lib/keys.ts';
 
 test('⌃ never stands in for ⌘ on a Mac — ⌃K/⌃T/⌃W are text editing there', () => {
   const ctrl = { metaKey: false, ctrlKey: true };
@@ -55,4 +55,104 @@ test('isMacPlatform recognises Mac / iOS clients only', () => {
   assert.equal(isMacPlatform({ platform: '', userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' }), true);
   assert.equal(isMacPlatform({ platform: 'Win32' }), false);
   assert.equal(isMacPlatform({ platform: 'Linux x86_64' }), false);
+});
+
+test('installKeyMap routes Option+⌘ IDE chords (⌥⌘R, ⌥⌘L, ⌥⌘O, ⌥⌘S) to pageChords even inside CodeMirror', () => {
+  const listenerBox: { fn: ((e: KeyboardEvent) => void) | null } = { fn: null };
+  const prevWindow = (globalThis as Record<string, unknown>).window;
+  const prevDocument = (globalThis as Record<string, unknown>).document;
+  const prevNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const prevPageChords = keyContext.pageChords;
+  const prevTermFocused = keyContext.terminalFocused;
+
+  const focusedCmEl = {
+    tagName: 'DIV',
+    isContentEditable: true,
+    closest: (sel: string) => (sel.includes('.cm-editor') ? {} : null),
+  };
+
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { platform: 'MacIntel', userAgent: 'Macintosh' },
+  });
+  (globalThis as Record<string, unknown>).window = {
+    addEventListener: (type: string, fn: (e: KeyboardEvent) => void) => {
+      if (type === 'keydown') listenerBox.fn = fn;
+    },
+    removeEventListener: (type: string) => {
+      if (type === 'keydown') listenerBox.fn = null;
+    },
+  };
+  (globalThis as Record<string, unknown>).document = { activeElement: focusedCmEl, body: {} };
+
+  const claimed: string[] = [];
+  const globalActions: string[] = [];
+  keyContext.terminalFocused = false;
+  keyContext.pageChords = (e: KeyboardEvent) => {
+    if (e.metaKey && e.altKey) {
+      claimed.push(e.code || e.key);
+      e.preventDefault();
+      return true;
+    }
+    return false;
+  };
+
+  const uninstall = installKeyMap((action) => { globalActions.push(action); });
+  try {
+    const dispatchKey = listenerBox.fn;
+    assert.ok(dispatchKey);
+    for (const [k, code] of [['r', 'KeyR'], ['l', 'KeyL'], ['o', 'KeyO'], ['s', 'KeyS']] as const) {
+      let prevented = false;
+      dispatchKey({
+        key: k,
+        code,
+        metaKey: true,
+        altKey: true,
+        ctrlKey: false,
+        shiftKey: false,
+        preventDefault: () => { prevented = true; },
+      } as unknown as KeyboardEvent);
+      assert.equal(prevented, true, `expected ⌥⌘${k.toUpperCase()} to be handled by pageChords`);
+    }
+    assert.deepEqual(claimed, ['KeyR', 'KeyL', 'KeyO', 'KeyS']);
+    assert.deepEqual(globalActions, []);
+
+    // Plain ⌘D inside CodeMirror is still owned by the editor and never reaches pageChords or global dispatch.
+    let cmdDClaimed = false;
+    keyContext.pageChords = () => { cmdDClaimed = true; return true; };
+    dispatchKey({
+      key: 'd',
+      code: 'KeyD',
+      metaKey: true,
+      altKey: false,
+      ctrlKey: false,
+      shiftKey: false,
+      preventDefault: () => {},
+    } as unknown as KeyboardEvent);
+    assert.equal(cmdDClaimed, false);
+
+    // Terminal focus keeps ownership of Option+⌘ keys away from pageChords.
+    keyContext.terminalFocused = true;
+    let termClaimed = false;
+    keyContext.pageChords = () => { termClaimed = true; return true; };
+    dispatchKey({
+      key: 'r',
+      code: 'KeyR',
+      metaKey: true,
+      altKey: true,
+      ctrlKey: false,
+      shiftKey: false,
+      preventDefault: () => {},
+    } as unknown as KeyboardEvent);
+    assert.equal(termClaimed, false);
+  } finally {
+    uninstall();
+    keyContext.pageChords = prevPageChords;
+    keyContext.terminalFocused = prevTermFocused;
+    if (prevWindow === undefined) delete (globalThis as Record<string, unknown>).window;
+    else (globalThis as Record<string, unknown>).window = prevWindow;
+    if (prevDocument === undefined) delete (globalThis as Record<string, unknown>).document;
+    else (globalThis as Record<string, unknown>).document = prevDocument;
+    if (prevNavigator) Object.defineProperty(globalThis, 'navigator', prevNavigator);
+  }
 });

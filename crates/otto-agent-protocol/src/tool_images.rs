@@ -35,7 +35,7 @@ impl ToolOutput {
             !b.is_empty()
                 && b.len() <= MAX_IMAGE_BYTES
                 && self.bytes + b.len() <= MAX_TOTAL_BYTES
-                && raster_signature(mime, b)
+                && image_mime(b) == Some(mime)
         }) {
             self.bytes += bytes.len();
             self.images.push(ToolOutputImage {
@@ -90,13 +90,18 @@ impl ToolOutput {
     }
 }
 
-fn raster_signature(mime: &str, b: &[u8]) -> bool {
-    match mime {
-        "image/png" => b.starts_with(b"\x89PNG\r\n\x1a\n"),
-        "image/jpeg" => b.starts_with(b"\xff\xd8\xff"),
-        "image/gif" => b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a"),
-        "image/webp" => b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP"),
-        _ => false,
+/// A raster image's mime type by its first bytes.
+pub(crate) fn image_mime(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if b.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else {
+        None
     }
 }
 

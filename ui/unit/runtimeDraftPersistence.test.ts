@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DraftPersistence, emptyDraft, acknowledgeDraft } from '../src/lib/stores/runtimeDraftPersistence.ts';
+import {
+  clampComposerCursor,
+  clearComposerCursorStates,
+  getComposerCursorState,
+  restoreComposerCursorOnElement,
+  saveComposerCursorState,
+} from '../src/lib/stores/runtimeDraftCursor.ts';
 
 const deferred = <T>() => { let resolve!: (value:T)=>void; const promise = new Promise<T>(r=>resolve=r); return {promise,resolve}; };
 test('late recovery keeps typing and restores untouched attachment fields', async () => {
@@ -71,4 +78,207 @@ test('acknowledgement consumes only the submitted count of identical attachments
   draft.images.push({...image});
   acknowledgeDraft(draft,submitted);
   assert.deepEqual(draft.images,[image]);
+});
+
+test('syncIfClean updates revision after another surface sends/clears the draft so subsequent edits never 409', async () => {
+  const draft = emptyDraft();
+  let serverRevision = 1;
+  let serverDraft: ReturnType<typeof emptyDraft> | null = {
+    ...emptyDraft(),
+    text: 'draft before mobile send',
+  };
+  const savedRevisions: number[] = [];
+  const p = new DraftPersistence(
+    draft,
+    {
+      load: async () => ({
+        revision: serverRevision,
+        draft: serverDraft ? structuredClone(serverDraft) : null,
+      }),
+      save: async (d, r) => {
+        savedRevisions.push(r);
+        if (r !== serverRevision) throw { status: 409 };
+        serverRevision = r + 1;
+        serverDraft = structuredClone(d);
+        return { revision: serverRevision, draft: structuredClone(d) };
+      },
+    },
+    () => true,
+  );
+
+  await p.load();
+  assert.equal(draft.text, 'draft before mobile send');
+
+  // Another window/mobile sends the prompt: clears server draft and bumps revision 1 -> 4.
+  serverRevision = 4;
+  serverDraft = { ...emptyDraft(), model: 'claude-sonnet-4-6' };
+
+  await p.syncIfClean();
+  assert.equal(draft.text, '');
+  assert.equal(draft.model, 'claude-sonnet-4-6');
+
+  // User returns to this window, pastes an image + types, and saves cleanly at revision 4 with zero 409.
+  draft.text = 'follow-up after mobile turn';
+  draft.images = [{ name: 'clip.png', mime: 'image/png', data_base64: 'AA==' }];
+  await p.save();
+  assert.deepEqual(savedRevisions, [4]);
+  assert.equal(serverRevision, 5);
+});
+
+test('syncIfClean never overwrites typing or image paste started while GET is in flight', async () => {
+  const inflightSync = deferred<any>();
+  const draft = emptyDraft();
+  let loadCalls = 0;
+  const savedCalls: Array<{ text: string; imageCount: number; rev: number }> = [];
+
+  const p = new DraftPersistence(
+    draft,
+    {
+      load: () => {
+        loadCalls++;
+        if (loadCalls === 1) return Promise.resolve({ revision: 2, draft: null });
+        return inflightSync.promise;
+      },
+      save: async (d, r) => {
+        savedCalls.push({ text: d.text, imageCount: d.images.length, rev: r });
+        if (r !== 7) throw { status: 409 };
+        return { revision: 8, draft: structuredClone(d) };
+      },
+    },
+    () => true,
+  );
+
+  await p.load();
+
+  // Window regains focus -> syncIfClean() starts GET; user immediately pastes & types before GET finishes!
+  const syncing = p.syncIfClean();
+  draft.text = 'typed during focus sync';
+  draft.images = [{ name: 'paste.png', mime: 'image/png', data_base64: 'BB==' }];
+  const saving = p.save();
+
+  // Server had cleared the draft at revision 7 after another surface sent a turn.
+  inflightSync.resolve({ revision: 7, draft: null });
+  await Promise.all([syncing, saving]);
+
+  assert.equal(draft.text, 'typed during focus sync');
+  assert.equal(draft.images.length, 1);
+  assert.deepEqual(savedCalls, [{ text: 'typed during focus sync', imageCount: 1, rev: 7 }]);
+
+  // And when local composer already has unsaved edits, syncIfClean() is a complete no-op.
+  draft.text = 'dirty local edit';
+  const loadsBefore = loadCalls;
+  await p.syncIfClean();
+  assert.equal(loadCalls, loadsBefore);
+  assert.equal(draft.text, 'dirty local edit');
+});
+
+test('composer cursor and scrollTop state persists across thread switches and clamps safely to draft length', () => {
+  clearComposerCursorStates();
+  saveComposerCursorState('rt:ses_alpha', {
+    selectionStart: 12,
+    selectionEnd: 18,
+    scrollTop: 94,
+    direction: 'forward',
+  });
+  saveComposerCursorState('rt:ses_beta', {
+    selectionStart: 3,
+    selectionEnd: 3,
+    scrollTop: 0,
+  });
+
+  const alpha = getComposerCursorState('rt:ses_alpha');
+  assert.deepEqual(alpha, {
+    selectionStart: 12,
+    selectionEnd: 18,
+    scrollTop: 94,
+    direction: 'forward',
+  });
+
+  const clamped = clampComposerCursor(alpha!, 15);
+  assert.deepEqual(clamped, {
+    selectionStart: 12,
+    selectionEnd: 15,
+    scrollTop: 94,
+    direction: 'forward',
+  });
+
+  let appliedRange: [number, number, string | undefined] | null = null;
+  const fakeTextarea = {
+    value: '0123456789abcdef',
+    scrollTop: 0,
+    setSelectionRange(s: number, e: number, d?: string) {
+      appliedRange = [s, e, d];
+    },
+  };
+  assert.equal(restoreComposerCursorOnElement(fakeTextarea, 'rt:ses_alpha'), true);
+  assert.deepEqual(appliedRange, [12, 16, 'forward']);
+  assert.equal(fakeTextarea.scrollTop, 94);
+
+  clearComposerCursorStates();
+  assert.equal(getComposerCursorState('rt:ses_alpha'), null);
+});
+
+test('explicit "Default model" choice (model: null) persists as model_default: true and recovers without spurious saves', async () => {
+  const { composerContent } = await import('../src/lib/stores/runtimeDraftPersistence.ts');
+  const composer = {
+    text: '',
+    images: [],
+    context: [],
+    model: undefined as string | null | undefined,
+    effort: null,
+    pickedMode: null,
+    freshContext: false,
+  };
+  let serverDraft: ReturnType<typeof emptyDraft> | null = null;
+  let serverRev = 0;
+  let writeCount = 0;
+
+  const p1 = new DraftPersistence(
+    composerContent(composer),
+    {
+      load: async () => ({ revision: serverRev, draft: serverDraft ? structuredClone(serverDraft) : null }),
+      save: async (d, r) => {
+        writeCount++;
+        serverRev = r + 1;
+        serverDraft = structuredClone(d);
+        return { revision: serverRev, draft: structuredClone(d) };
+      },
+    },
+    () => true,
+  );
+
+  await p1.load();
+  assert.equal(composer.model, undefined, 'unchosen model stays undefined so session.model is inherited');
+
+  // User explicitly chooses "Default model" (`model = null`) on a session with a pinned model.
+  composer.model = null;
+  await p1.save();
+  assert.equal(writeCount, 1);
+  assert.equal((serverDraft as ReturnType<typeof emptyDraft> | null)?.model_default, true);
+
+  // Fresh window recovers the draft: `composer.model` comes back `null` (not `undefined`), with zero extra writes.
+  const composer2 = {
+    text: '',
+    images: [],
+    context: [],
+    model: undefined as string | null | undefined,
+    effort: null,
+    pickedMode: null,
+    freshContext: false,
+  };
+  const p2 = new DraftPersistence(
+    composerContent(composer2),
+    {
+      load: async () => ({ revision: serverRev, draft: serverDraft ? structuredClone(serverDraft) : null }),
+      save: async (d, r) => {
+        writeCount++;
+        return { revision: r + 1, draft: structuredClone(d) };
+      },
+    },
+    () => true,
+  );
+  await p2.load();
+  assert.equal(composer2.model, null, 'explicit Default model survives round-trip as null');
+  await p2.save();
+  assert.equal(writeCount, 1, 'recovering unchanged model_default draft must not write a new revision');
 });

@@ -195,7 +195,8 @@ pub struct NewMember {
     /// The new agent's persona / standing instructions (its `soul_md`).
     #[serde(default)]
     pub instructions: String,
-    /// One of [`THREAD_PROVIDERS`]; omitted = the lead's (or Claude).
+    /// One of [`THREAD_PROVIDERS`] that takes a persona
+    /// ([`pa_engine::persona_provider`]); omitted = the lead's (or Claude).
     #[serde(default)]
     pub provider: Option<String>,
     #[serde(default)]
@@ -224,10 +225,17 @@ pub async fn create_member<C: AssistantCtx>(
         _ if thread_provider(&lead.provider).is_some() => lead.provider.clone(),
         _ => "claude".into(),
     };
-    if thread_provider(&provider).is_none() {
+    // Runs as a Threads thread and can be handed its persona for one launch.
+    let usable = |p: &str| thread_provider(p).is_some() && pa_engine::persona_provider(p).is_ok();
+    if !usable(&provider) {
+        let accepted: Vec<&str> = THREAD_PROVIDERS
+            .iter()
+            .copied()
+            .filter(|p| usable(p))
+            .collect();
         return Err(Error::Invalid(format!(
             "provider must be one of {} (got '{provider}')",
-            THREAD_PROVIDERS.join(", ")
+            accepted.join(", ")
         )));
     }
     let repo = pa_engine::repo(ctx);

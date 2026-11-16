@@ -17,7 +17,7 @@ function setup(fail: (title: string, attempt: number) => boolean) {
     successes.push(request.title); return {id: request.title};
   };
   const context: Record<string, any> = {busy: false, total: 2, chosen: ['claude'], counts: {claude: 2}, provider: 'claude',
-    providerReadiness: () => ({available: true}), extraDirs: ['/shared'], dirDraft: '/pending', title: 'Review', prompt: 'Check ownership', cwd: '~/repo',
+    providerReadiness: () => ({available: true}), inferProviderFamily: (p: string) => p, auth: {meta: null}, extraDirs: ['/shared'], dirDraft: '/pending', title: 'Review', prompt: 'Check ownership', cwd: '~/repo',
     accountIds: {claude: 'account-a'}, networkProfileId: 'net-a', mcpProfileIds: [], browser: true, BROWSER_PROVIDERS: ['claude', 'codex', 'agy'], supportsModel: true, model: 'model-a', scratchMode: true,
     pendingSpawns: [], batchFailures: [], batchSuccesses: [],
     // The typed-folder pre-check (resume-missing-folder fix): the folder exists.

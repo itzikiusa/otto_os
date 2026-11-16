@@ -1,5 +1,6 @@
-// The runtime timeline's "new messages" pill (RuntimeFollow.svelte), pure so
-// it is unit-tested (unit/threadsRuntimeFollow.test.ts).
+// The runtime timeline's "new messages" pill and scroll-stability rules
+// (RuntimeFollow.svelte + RuntimeWorkFold.svelte), pure so they are unit-tested
+// (unit/threadsRuntimeFollow.test.ts, unit/runtimeLiveSyncAndScroll.test.ts).
 
 /** Messages that arrived after the one the reader last saw at the bottom. A
  *  missing anchor (the reader never saw one) counts nothing. */
@@ -18,6 +19,35 @@ export function followPillText(unread: number, unseen: number, farUp: boolean): 
 
 /** How close to the end counts as "at the bottom", in px. */
 export const END_BAND = 40;
+
+/** True only when `scrollTop` moved upward WITHOUT content shrinking
+ *  (`scrollHeight < lastScrollHeight` clamps `scrollTop` downward and must not
+ *  be misclassified as the reader scrolling up). */
+export function didScrollUpByUser(
+  scrollTop: number,
+  lastTop: number,
+  scrollHeight: number,
+  lastScrollHeight: number,
+): boolean {
+  return scrollTop < lastTop && scrollHeight >= lastScrollHeight - 1;
+}
+
+/** Scroll delta (`scroller.scrollTop += delta`) needed when a work-log block
+ *  auto-folds (`shouldFold`: `false -> true`) while the reader is NOT pinned to
+ *  the bottom, so visible text below the collapsing block moves 0 px. */
+export function foldScrollCompensation(
+  following: boolean,
+  beforeTop: number,
+  beforeBottom: number,
+  afterBottom: number,
+  viewportHeight: number,
+): number {
+  if (following) return 0;
+  // Block is completely below the viewport: collapsing it moves nothing on screen.
+  if (beforeTop >= viewportHeight) return 0;
+  const delta = afterBottom - beforeBottom;
+  return Math.abs(delta) >= 1 ? delta : 0;
+}
 
 /** Whether the timeline keeps following its end after a scroll that left it
  *  `gap` px above the end (`up`: it moved toward the top). T3 Code's rule

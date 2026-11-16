@@ -21,7 +21,7 @@
   import { prWorkspace } from './prWorkspaceStore.svelte';
   import RepoView from './RepoView.svelte';
   import GitToolbar from './GitToolbar.svelte';
-  import { gitBridge } from './gitBridge.svelte';
+  import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { graphCache } from './graph-cache';
   import FocusView from './FocusView.svelte';

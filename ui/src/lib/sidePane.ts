@@ -42,6 +42,7 @@ export function paneKey(route: string): string {
   if (mod === 'database' || mod === 'brokers') return 'connections';
   if (mod === 'design' || mod === 'canvas') return 'product';
   if (mod === 'personal-agents') return 'scheduled-tasks';
+  if (mod === 'workbench') return 'ide';
   return mod;
 }
 
@@ -218,6 +219,7 @@ export function embeddedKeyTarget(action: string, paneModuleKey: string): EmbedK
   if (PANE_LOCAL.has(action)) return 'local';
   if (SESSION_VERBS.has(action)) {
     if (paneModuleKey === 'agents') return 'local';
+    if (action === 'closeTab' && paneModuleKey === 'ide') return 'local';
     return action === 'closeTab' ? 'close-pane' : 'host';
   }
   return 'host';
@@ -234,7 +236,9 @@ export type MenuTarget = 'main' | 'side' | 'close-pane';
 export function sideMenuTarget(id: string, sideFocused: boolean, paneModuleKey: string | null): MenuTarget {
   if (!sideFocused || !paneModuleKey) return 'main';
   if (id === 'select-all' || id === 'undo' || id === 'redo') return 'side';
-  if (id === 'close-tab') return paneModuleKey === 'agents' ? 'side' : 'close-pane';
+  if (id === 'close-tab') return paneModuleKey === 'agents' || paneModuleKey === 'ide' ? 'side' : 'close-pane';
+  if (id === 'new-session' && (paneModuleKey === 'threads' || paneModuleKey === 'api')) return 'side';
+  if ((id === 'settings' || id === 'toggle-rail') && paneModuleKey === 'ide') return 'side';
   if (id === 'session-restart' || id === 'session-kill') return paneModuleKey === 'agents' ? 'side' : 'main';
   return 'main';
 }

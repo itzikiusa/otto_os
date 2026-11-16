@@ -444,7 +444,7 @@
   }
 
   // ⌘K (shell keymap → barStore.requestFocus): focus the bar, or close it.
-  let lastTick = untrack(() => barStore.focusTick);
+  let lastTick = inApp ? 0 : untrack(() => barStore.focusTick);
   $effect(() => {
     const t = barStore.focusTick;
     if (!inApp || t === lastTick) return;

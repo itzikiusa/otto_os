@@ -7,6 +7,8 @@
 //!   delta, exit 0), `decline` marks it declined, `cancel` interrupts the
 //!   turn.
 //! * `tool image` — a completed MCP result with text, metadata and two PNGs.
+//! * `slow <secs>` — "Working…", then waits `<secs>` before completing; a
+//!   `turn/steer` meanwhile emits `steered: <text>` in the same turn.
 //! * `hang`  — one delta, then waits for `turn/interrupt` → `interrupted`.
 //! * `crash` — exit 3 at once (mid-turn).
 //! * `fail`  — a `commandExecution` that fails (exit 1, output `boom`).
@@ -17,6 +19,8 @@
 //! fails otherwise. stdin EOF ends the process.
 
 use std::io::{BufRead, Write};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -60,19 +64,83 @@ fn command(thread: &str, turn_id: &str, status: &str, output: Option<&str>) -> V
                     "aggregatedOutput": output, "exitCode": output.map(|_| 0)}})
 }
 
+/// What a plain turn echoes besides its text: `model` / `effort` / the image
+/// count, a collaboration mode and a skill input.
+fn echo_extras(params: &Value, input: &[Value]) -> String {
+    let images = input.iter().filter(|i| i["type"] == "image").count();
+    let mut extras = match (params["model"].as_str(), params["effort"].as_str()) {
+        (None, None) if images == 0 => String::new(),
+        (m, e) => format!(" [{} {} {images}]", m.unwrap_or("-"), e.unwrap_or("-")),
+    };
+    if let Some(m) = params
+        .pointer("/collaborationMode/mode")
+        .and_then(Value::as_str)
+    {
+        extras.push_str(&format!(" (mode {m})"));
+    }
+    if let Some(skill) = input.iter().find(|i| i["type"] == "skill") {
+        extras.push_str(&format!(
+            " (skill {})",
+            skill["name"].as_str().unwrap_or("?")
+        ));
+    }
+    extras
+}
+
+enum In {
+    Line(Value),
+    Eof,
+}
+
 fn main() {
-    let stdin = std::io::stdin();
+    let (tx, rx) = mpsc::channel::<In>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if let Ok(msg) = serde_json::from_str::<Value>(&line) {
+                let _ = tx.send(In::Line(msg));
+            }
+        }
+        let _ = tx.send(In::Eof);
+    });
     let mut thread = String::new();
     let mut turns = 0u32;
+    let mut steers = 0u32;
     let mut current: Option<String> = None;
+    let mut waiting_until: Option<Instant> = None;
     // The approval this server is waiting on: (rpc id, turn id).
     let mut asking: Option<(u64, String)> = None;
     let mut question: Option<(u64, String)> = None;
     let mut next_server_id = 100u64;
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
-        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+    loop {
+        let msg = match waiting_until {
+            Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                Ok(m) => Some(m),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            },
+            None => match rx.recv() {
+                Ok(m) => Some(m),
+                Err(_) => return,
+            },
+        };
+        let Some(msg) = msg else {
+            if let Some(until) = waiting_until {
+                if until <= Instant::now() {
+                    waiting_until = None;
+                    if let Some(tid) = current.take() {
+                        notify(
+                            "turn/completed",
+                            json!({"threadId": thread, "turn": turn(&tid, "completed")}),
+                        );
+                    }
+                }
+            }
             continue;
+        };
+        let msg = match msg {
+            In::Line(v) => v,
+            In::Eof => return,
         };
         let id = msg.get("id").cloned().unwrap_or(Value::Null);
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -121,13 +189,39 @@ fn main() {
                     .find_map(|i| i["text"].as_str())
                     .unwrap_or_default()
                     .to_string();
-                // `model` / `effort` / image inputs are echoed back.
-                let images = input.iter().filter(|i| i["type"] == "image").count();
-                let extras = match (params["model"].as_str(), params["effort"].as_str()) {
-                    (None, None) if images == 0 => String::new(),
-                    (m, e) => format!(" [{} {} {images}]", m.unwrap_or("-"), e.unwrap_or("-")),
-                };
+                let extras = echo_extras(&params, &input);
                 match text.as_str() {
+                    // `stream:<n>:<ms>`: `c0 `…`c<n-1> `, one delta per <ms>.
+                    t if t.starts_with("stream:") => {
+                        let mut f = t[7..].split(':');
+                        let n: usize = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let ms: u64 = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        notify(
+                            "item/started",
+                            json!({"threadId": thread, "turnId": tid, "startedAtMs": 0,
+                                   "item": {"type": "agentMessage", "id": "msg-s", "text": ""}}),
+                        );
+                        let mut all = String::new();
+                        for i in 0..n {
+                            let d = format!("c{i} ");
+                            all.push_str(&d);
+                            notify(
+                                "item/agentMessage/delta",
+                                json!({"threadId": thread, "turnId": tid, "itemId": "msg-s", "delta": d}),
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(ms));
+                        }
+                        notify(
+                            "item/completed",
+                            json!({"threadId": thread, "turnId": tid, "completedAtMs": 0,
+                                   "item": {"type": "agentMessage", "id": "msg-s", "text": all}}),
+                        );
+                        notify(
+                            "turn/completed",
+                            json!({"threadId": thread, "turn": turn(&tid, "completed")}),
+                        );
+                        current = None;
+                    }
                     "tool image" => {
                         let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=";
                         notify(
@@ -144,6 +238,41 @@ fn main() {
                         notify(
                             "turn/completed",
                             json!({"threadId":thread,"turn":turn(&tid,"completed")}),
+                        );
+                        current = None;
+                    }
+                    // `name me`: Codex names the thread.
+                    "name me" => {
+                        notify(
+                            "thread/name/updated",
+                            json!({"threadId": thread, "threadName": "Named by Codex"}),
+                        );
+                        agent_message(&thread, &tid, "msg-n", &["named"]);
+                        notify(
+                            "turn/completed",
+                            json!({"threadId": thread, "turn": turn(&tid, "completed")}),
+                        );
+                        current = None;
+                    }
+                    // `make image`: an image it generated, as a file on disk.
+                    "make image" => {
+                        use base64::Engine;
+                        let png = base64::engine::general_purpose::STANDARD
+                            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5V8AAAAASUVORK5CYII=")
+                            .unwrap_or_default();
+                        let path = std::env::temp_dir()
+                            .join(format!("fake-codex-{}-{tid}.png", std::process::id()));
+                        let _ = std::fs::write(&path, png);
+                        notify(
+                            "item/completed",
+                            json!({"threadId": thread, "turnId": tid, "item": {"type": "imageGeneration",
+                                "id": "ig-1", "status": "completed", "revisedPrompt": "a red dot",
+                                "savedPath": path, "inputImages": []}}),
+                        );
+                        agent_message(&thread, &tid, "msg-i", &["made it"]);
+                        notify(
+                            "turn/completed",
+                            json!({"threadId": thread, "turn": turn(&tid, "completed")}),
                         );
                         current = None;
                     }
@@ -189,6 +318,15 @@ fn main() {
                             json!({"threadId": thread, "turnId": tid, "itemId": "msg-h", "delta": "working"}),
                         );
                     }
+                    s if s == "slow" || s.starts_with("slow ") => {
+                        let secs: f64 = s
+                            .split_whitespace()
+                            .nth(1)
+                            .and_then(|w| w.parse().ok())
+                            .unwrap_or(1.0);
+                        agent_message(&thread, &tid, "msg-slow", &["Working…"]);
+                        waiting_until = Some(Instant::now() + Duration::from_secs_f64(secs));
+                    }
                     other => {
                         let parts: Vec<&str> = ["echo: ", other, &extras]
                             .into_iter()
@@ -211,7 +349,40 @@ fn main() {
                     }
                 }
             }
+            "skills/list" => out(
+                json!({"id": id, "result": {"data": [{"cwd": "/", "errors": [], "skills": [
+                    {"name": "review", "description": "Review a diff thoroughly", "enabled": true,
+                     "path": "/fake/skills/review/SKILL.md", "scope": "user"}
+                ]}]}}),
+            ),
+            "turn/steer" => {
+                let want_thread = params["threadId"].as_str().unwrap_or_default();
+                let want_turn = params["expectedTurnId"].as_str().unwrap_or_default();
+                if want_thread != thread || current.as_deref() != Some(want_turn) {
+                    out(json!({
+                        "id": id,
+                        "error": {"code": -32600, "message": "no matching active turn to steer"},
+                    }));
+                    continue;
+                }
+                let tid = current.clone().unwrap();
+                out(json!({"id": id, "result": {"turnId": tid}}));
+                let input = params["input"].as_array().cloned().unwrap_or_default();
+                let text = input
+                    .iter()
+                    .find_map(|i| i["text"].as_str())
+                    .unwrap_or_default();
+                let images = input.iter().filter(|i| i["type"] == "image").count();
+                let reply = if images > 0 {
+                    format!("steered: {text} [{images}]")
+                } else {
+                    format!("steered: {text}")
+                };
+                steers += 1;
+                agent_message(&thread, &tid, &format!("msg-steer-{steers}"), &[&reply]);
+            }
             "turn/interrupt" => {
+                waiting_until = None;
                 out(json!({"id": id, "result": {}}));
                 if let Some((rid, _)) = question.take() {
                     notify(

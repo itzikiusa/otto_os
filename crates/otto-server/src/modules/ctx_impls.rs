@@ -71,6 +71,240 @@ impl otto_phone::PhoneCtx for ServerCtx {
     }
 }
 
+impl otto_ide::IdeCtx for ServerCtx {
+    fn ide(&self) -> &Arc<otto_ide::IdeEngine> {
+        &self.ide
+    }
+    fn pool(&self) -> otto_state::DbPool {
+        self.pool.clone()
+    }
+    fn secrets(&self) -> &Arc<dyn otto_core::secrets::SecretStore> {
+        &self.secrets
+    }
+    fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+    fn resolve_ssh_connection<'a>(
+        &'a self,
+        user: &'a User,
+        connection_id: &'a Id,
+    ) -> BoxFuture<'a, Result<otto_ide::IdeSshSpec>> {
+        Box::pin(async move {
+            let (conn, params) = otto_connections::http::resolve_ssh_params_for(
+                self,
+                user,
+                connection_id,
+                WorkspaceRole::Editor,
+                "shell",
+            )
+            .await?;
+            if let Some(ws) = &conn.workspace_id {
+                self.roles.check(user, ws, WorkspaceRole::Editor).await?;
+            }
+            Ok(otto_ide::IdeSshSpec {
+                connection_id: conn.id,
+                name: conn.name,
+                host: params.host,
+                port: params.port,
+                user: params.user.unwrap_or_default(),
+                identity_file: params.identity_file,
+                proxy_jump: params.jump,
+                environment: Some(conn.environment.as_str().to_string()),
+            })
+        })
+    }
+    fn authorize_local_target<'a>(
+        &'a self,
+        user: &'a User,
+        spec: &'a otto_ide::types::IdeTargetSpec,
+        write: bool,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let has_root = if write {
+                otto_core::auth::root_authority(user)
+            } else {
+                user.is_root
+            };
+            if has_root || spec.kind != otto_ide::types::IdeTargetKind::Local {
+                return Ok(());
+            }
+            let raw_root = spec.root.trim();
+            if raw_root.is_empty() {
+                return Err(Error::Invalid("target root must not be empty".into()));
+            }
+            let mut candidates = vec![raw_root.to_string()];
+            for extra in spec.merged_extra_roots() {
+                let t = extra.trim();
+                if !t.is_empty() {
+                    candidates.push(t.to_string());
+                }
+            }
+            for raw in candidates {
+                let expanded =
+                    otto_core::paths::expand_home_strict(&raw).map_err(Error::Invalid)?;
+                if !crate::lsp::ide_local_root_authorized(self, user, &expanded, write).await? {
+                    return Err(Error::Forbidden(
+                        "target root is not inside a workspace you have permission to access"
+                            .into(),
+                    ));
+                }
+            }
+            Ok(())
+        })
+    }
+    fn list_saved_db_targets<'a>(
+        &'a self,
+        user: &'a User,
+    ) -> BoxFuture<'a, Result<Vec<otto_ide::db_watch::IdeSavedDbTarget>>> {
+        Box::pin(async move {
+            let items = self
+                .db_explorer
+                .list_saved_watch_targets(&self.roles, user)
+                .await?;
+            Ok(items
+                .into_iter()
+                .map(|t| otto_ide::db_watch::IdeSavedDbTarget {
+                    target_kind: "saved".into(),
+                    connection_id: t.connection_id,
+                    name: t.name,
+                    engine: map_dbviewer_engine(t.engine),
+                    host: t.host,
+                    port: t.port,
+                    database: t.database,
+                    environment: Some(t.environment),
+                })
+                .collect())
+        })
+    }
+    fn execute_db_watch_query<'a>(
+        &'a self,
+        user: &'a User,
+        exec: otto_ide::db_watch::DbWatchQueryExec,
+    ) -> BoxFuture<'a, Result<otto_ide::db_watch::DbWatchExecOutcome>> {
+        Box::pin(async move {
+            let endpoint = match exec.target {
+                otto_ide::db_watch::DbWatchQueryTarget::Saved { connection_id } => {
+                    otto_dbviewer::WatchEndpoint::Saved { connection_id }
+                }
+                otto_ide::db_watch::DbWatchQueryTarget::EphemeralLoopback {
+                    port,
+                    user,
+                    password,
+                    database,
+                } => otto_dbviewer::WatchEndpoint::EphemeralLoopback {
+                    port,
+                    user,
+                    password,
+                    database,
+                },
+            };
+            let res = self
+                .db_explorer
+                .execute_watch_query(
+                    &self.roles,
+                    user,
+                    otto_dbviewer::WatchExecReq {
+                        endpoint,
+                        engine: map_ide_db_engine(exec.engine),
+                        database: exec.database,
+                        object_name: exec.object_name,
+                        statement: exec.statement,
+                        is_custom_query: exec.is_custom_query,
+                        limit: exec.limit,
+                    },
+                )
+                .await?;
+            Ok(otto_ide::db_watch::DbWatchExecOutcome {
+                target_label: res.target_label,
+                columns: res.columns,
+                rows: res.rows,
+                duration_ms: res.duration_ms,
+            })
+        })
+    }
+
+    fn resolve_k8s_cluster<'a>(
+        &'a self,
+        user: &'a otto_core::domain::User,
+        cluster_id: &'a otto_core::Id,
+        namespace: Option<&'a str>,
+    ) -> otto_core::auth::BoxFuture<'a, Result<otto_ide::netbridge::IdeK8sSpec>> {
+        Box::pin(async move {
+            let cluster = otto_k8s::clusters::Clusters::new(self)
+                .get(cluster_id)
+                .await?;
+            let ns = namespace
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    cluster
+                        .default_namespace
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                })
+                .unwrap_or("default")
+                .to_ascii_lowercase();
+            otto_k8s::access::check(&self.pool, user, cluster_id, "exec", Some(&ns)).await?;
+            let policy = otto_state::resource_access::ResourceAccessRepo::new(self.pool.clone())
+                .get_policy(otto_core::access::ResourceKind::K8sCluster, cluster_id)
+                .await?;
+            if policy.mode == otto_core::access::AccessMode::Legacy
+                && otto_state::GrantsRepo::new(self.pool.clone())
+                    .capability_of(user, otto_core::domain::Feature::Kubernetes)
+                    .await?
+                    < otto_core::domain::Capability::Edit
+            {
+                return Err(otto_core::Error::Forbidden(
+                    "Kubernetes Edit grant required to open cluster network bridge".into(),
+                ));
+            }
+            let allow_cross_namespace =
+                otto_k8s::access::allowed(&self.pool, user, cluster_id, "exec", None).await?;
+            let cluster_env = serde_json::to_value(&cluster).ok().and_then(|v| {
+                v.get("environment")
+                    .and_then(|e| e.as_str())
+                    .map(str::to_string)
+            });
+            let k = otto_k8s::clusters::kubectl_for(self, &cluster).await?;
+            Ok(otto_ide::netbridge::IdeK8sSpec {
+                cluster_id: cluster.id,
+                cluster_name: cluster.name,
+                environment: cluster_env,
+                namespace: ns,
+                allow_cross_namespace,
+                kubectl_program: k.program,
+                kubectl_query_args: k.base,
+                kubectl_base_args: k.base_stream,
+                kubectl_env: k.env,
+            })
+        })
+    }
+}
+
+fn map_dbviewer_engine(e: otto_dbviewer::Engine) -> otto_ide::db_watch::IdeDbEngine {
+    match e {
+        otto_dbviewer::Engine::Mysql => otto_ide::db_watch::IdeDbEngine::Mysql,
+        otto_dbviewer::Engine::Postgres => otto_ide::db_watch::IdeDbEngine::Postgres,
+        otto_dbviewer::Engine::Mongodb => otto_ide::db_watch::IdeDbEngine::Mongodb,
+        otto_dbviewer::Engine::Redis => otto_ide::db_watch::IdeDbEngine::Redis,
+        otto_dbviewer::Engine::Clickhouse => otto_ide::db_watch::IdeDbEngine::Clickhouse,
+    }
+}
+
+fn map_ide_db_engine(e: otto_ide::db_watch::IdeDbEngine) -> otto_dbviewer::Engine {
+    match e {
+        otto_ide::db_watch::IdeDbEngine::Mysql => otto_dbviewer::Engine::Mysql,
+        otto_ide::db_watch::IdeDbEngine::Postgres => otto_dbviewer::Engine::Postgres,
+        otto_ide::db_watch::IdeDbEngine::Mongodb => otto_dbviewer::Engine::Mongodb,
+        otto_ide::db_watch::IdeDbEngine::Redis => otto_dbviewer::Engine::Redis,
+        otto_ide::db_watch::IdeDbEngine::Clickhouse => otto_dbviewer::Engine::Clickhouse,
+    }
+}
+
 impl otto_aws::AwsCtx for ServerCtx {
     fn pool(&self) -> otto_state::DbPool {
         self.pool.clone()

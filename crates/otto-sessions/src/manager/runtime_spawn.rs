@@ -2,8 +2,11 @@
 //! (`otto-agent-protocol`; design `docs/features/threads-structured-runtime.md`
 //! §Safety). Same helpers, same order as [`SessionManager::create`]: folder
 //! refusal, trust pre-seed, context provisioning, then the Seatbelt wrap as the
-//! very last step over the fully-built spec. What the runtime cannot honour
-//! yet (named provider accounts, network profiles) is REFUSED, never skipped.
+//! very last step over the fully-built spec. A named provider account
+//! (`meta.account_id`) and a network profile (`meta.network_profile_id`)
+//! apply exactly as for a terminal session: the account's home and
+//! credentials, the profile's SSH tunnels and proxy env (kept up until the
+//! child is retired).
 
 use super::*;
 
@@ -103,6 +106,94 @@ fn context_injection(
     hook.before_spawn(ws, cwd, provider)
 }
 
+/// Rewrite a structured driver's `spec` when `session.provider` resolves to a
+/// custom or overridden [`crate::providers::ProviderSpec`] (e.g. `claudework` ->
+/// `claude-work`). Strips PTY-only `--session-id`/`--resume` flags and strips
+/// unconditional skip-permissions flags unless the structured runtime session's
+/// `RuntimeAccessMode` (`FullAccess`) already requested skip-permissions.
+fn apply_custom_provider_spec(
+    pspec: Option<&crate::providers::ProviderSpec>,
+    session: &Session,
+    spec: &mut CommandSpec,
+    tail_args: &[String],
+) -> bool {
+    let Some(pspec) = pspec.filter(|p| p.shell_fallback) else {
+        return false;
+    };
+    let is_skip_flag = |a: &str| {
+        matches!(
+            a,
+            "--dangerously-skip-permissions"
+                | "--dangerously-bypass-approvals-and-sandbox"
+                | "--yolo"
+                | "--always-approve"
+                | "--auto"
+        )
+    };
+    let driver_allows_skip = spec
+        .args
+        .iter()
+        .chain(tail_args.iter())
+        .any(|a| is_skip_flag(a.as_str()));
+    let driver_sets_perm_mode = spec
+        .args
+        .iter()
+        .chain(tail_args.iter())
+        .any(|a| a == "--permission-mode" || a.starts_with("--permission-mode="));
+    spec.program = crate::providers::expand_template(&pspec.cmd, &session.id, &session.cwd);
+    let home = otto_transcript::roots::home_dir();
+    for (k, v) in &pspec.env {
+        let expanded = crate::providers::expand_template(v, &session.id, &session.cwd);
+        let expanded = if expanded.starts_with("~/") || expanded == "~" {
+            otto_transcript::claude_config::expand_home_path(&expanded, &home)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(expanded)
+        } else {
+            expanded
+        };
+        spec.env.retain(|(ek, _)| ek != k);
+        spec.env.push((k.clone(), expanded));
+    }
+    let mut prefix = Vec::with_capacity(pspec.args.len());
+    let mut i = 0;
+    while i < pspec.args.len() {
+        let raw = &pspec.args[i];
+        if raw == "--session-id"
+            || raw == "--resume"
+            || raw == "--conversation"
+            || (driver_sets_perm_mode && raw == "--permission-mode")
+        {
+            i += 2;
+            continue;
+        }
+        if raw.starts_with("--session-id=")
+            || raw.starts_with("--resume=")
+            || raw.starts_with("--conversation=")
+            || (driver_sets_perm_mode && raw.starts_with("--permission-mode="))
+        {
+            i += 1;
+            continue;
+        }
+        let expanded = crate::providers::expand_template(raw, &session.id, &session.cwd);
+        if is_skip_flag(&expanded)
+            && (!driver_allows_skip
+                || driver_sets_perm_mode
+                || spec.args.contains(&expanded)
+                || prefix.contains(&expanded))
+        {
+            i += 1;
+            continue;
+        }
+        prefix.push(expanded);
+        i += 1;
+    }
+    if !prefix.is_empty() {
+        prefix.extend(std::mem::take(&mut spec.args));
+        spec.args = prefix;
+    }
+    true
+}
+
 impl SessionManager {
     /// Prepare `spec` (the runtime driver's launch command) for spawning as
     /// agent session `session` in `ws`. `tail_args` go after the context
@@ -118,10 +209,11 @@ impl SessionManager {
     /// driver's handshake.
     ///
     /// Errors: the cwd is refused (`/`, `$HOME` while confined, the data dir —
-    /// [`Self::check_session_cwd`]); the daemon is shutting down; the session
-    /// asks for a named provider account or the workspace selects a network
-    /// profile (not supported by the runtime yet — refused so traffic and
-    /// credentials never silently take a different path than a PTY session's).
+    /// [`Self::check_session_cwd`]); the daemon is shutting down; the named
+    /// account is unknown, someone else's or another provider's; the network
+    /// profile is not usable (another workspace's, archived, its connection
+    /// refused) — never a silent fallback to the default account or a direct
+    /// connection.
     pub async fn prepare_runtime_spawn(
         &self,
         ws: &Workspace,
@@ -134,28 +226,32 @@ impl SessionManager {
         if session.kind != SessionKind::Agent {
             return Err(Error::Invalid("runtime sessions are agent sessions".into()));
         }
-        if session.meta.get("account_id").is_some_and(|v| !v.is_null()) {
-            return Err(Error::Invalid(
-                "named provider accounts are not supported for structured sessions yet".into(),
-            ));
-        }
-        if self.networks.prepare(session).await?.is_some() {
-            return Err(Error::Invalid(
-                "this workspace routes agents through a network profile, which structured \
-                 sessions do not support yet — use a terminal session"
-                    .into(),
-            ));
-        }
+        let account = self
+            .resolve_account(&session.created_by, &session.provider, &session.meta)
+            .await?;
+        let network = self.networks.prepare(session).await?;
         let read_only = session.meta.get("read_only").and_then(|v| v.as_bool()) == Some(true);
         let unconfined = !read_only && !self.process_sandbox_enabled().await;
         self.check_session_cwd(ws, &session.cwd, unconfined)?;
         let _ = std::fs::create_dir_all(&session.cwd);
-        crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
+        let cli_family = self.cli_family(&session.provider);
+        let custom_spec = self.providers.get(&session.provider);
+        let shell_fallback =
+            apply_custom_provider_spec(custom_spec.as_ref(), session, spec, &tail_args);
+        // A named account's CLI keeps trust in its own home (as `create`).
+        if account.is_none() {
+            crate::trust::ensure_trusted_with_claude_dir_async(
+                &cli_family,
+                &session.cwd,
+                self.claude_config_dir_for(&session.provider),
+            )
+            .await;
+        }
         // MCP before the context hook — the PTY spawn's order.
         let _mcp_activation = crate::mcp::activation_gate().read().await;
         let protocol_mcp = match delivery {
             RuntimeMcpDelivery::Launcher => {
-                self.apply_launcher_mcp(session, spec).await;
+                self.apply_launcher_mcp(session, &cli_family, spec).await;
                 Vec::new()
             }
             RuntimeMcpDelivery::Protocol => self.protocol_mcp_servers(session).await,
@@ -164,10 +260,19 @@ impl SessionManager {
             let hook = Arc::clone(hook);
             let ws_owned = ws.clone();
             let cwd = session.cwd.clone();
-            let prov = session.provider.clone();
+            let prov = cli_family.clone();
             let persona = carries_persona(&session.meta);
-            let injection = tokio::task::spawn_blocking(move || {
-                context_injection(hook.as_ref(), &ws_owned, &cwd, &prov, persona)
+            // A named account gets its bundle scoped to its home (`create`).
+            let context = account
+                .as_ref()
+                .map(|(_, home)| otto_core::hooks::SessionSpawnContext {
+                    namespace: session.id.clone(),
+                    provider_home: Some(home.clone()),
+                    extra_context_md: String::new(),
+                });
+            let injection = tokio::task::spawn_blocking(move || match context {
+                Some(context) => hook.before_spawn_session(&ws_owned, &cwd, &prov, &context),
+                None => context_injection(hook.as_ref(), &ws_owned, &cwd, &prov, persona),
             })
             .await
             .unwrap_or_default();
@@ -178,12 +283,42 @@ impl SessionManager {
         // what its terminal spawn adds; `read_only_strip` has nothing to drop
         // from a structured driver's argv.
         spec.args
-            .extend(cli_flags::read_only_args(&session.provider, &session.meta));
-        // A subcommand that must follow the injected top-level flags.
-        spec.args.extend(tail_args);
+            .extend(cli_flags::read_only_args(&cli_family, &session.meta));
+        // A subcommand that must follow the injected top-level flags (unless a
+        // custom provider spec already carried it).
+        if !tail_args.is_empty()
+            && !spec
+                .args
+                .windows(tail_args.len())
+                .any(|w| w == tail_args.as_slice())
+        {
+            spec.args.extend(tail_args);
+        }
         // The PTY spawn's build budget (`manager/resources.rs`); priority and
         // admission stay with the runtime, which spawns the child itself.
         self.apply_machine_budget(session, spec).await;
+        if let Some((account, home)) = &account {
+            crate::accounts::apply_account(spec, account, home)?;
+        }
+        if let Some(network) = &network {
+            spec.env
+                .retain(|(key, _)| !network.env.iter().any(|(mapped, _)| mapped == key));
+            spec.env.extend(network.env.clone());
+        }
+        // The profile's tunnels live until this child is retired (`clear`):
+        // the exit signal never fires, its sender lives as long as the
+        // profile's monitor holds the receiver.
+        let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
+        tokio::spawn(async move { exit_tx.closed().await });
+        self.networks.activate(session.id.clone(), network, exit_rx);
+        // Wrap shell aliases/functions (e.g. `claude-work` in `~/.zshrc`) BEFORE
+        // Seatbelt so the outer sandbox wraps the login shell cleanly.
+        if shell_fallback && !crate::providers::resolves_on_path(&spec.program) {
+            let (prog, wrapped_args) =
+                crate::providers::shell_wrapped(&spec.program, std::mem::take(&mut spec.args));
+            spec.program = prog;
+            spec.args = wrapped_args;
+        }
         // Last, over the fully-built spec — as `create` does.
         self.apply_sandbox(spec, session).await;
         Ok(protocol_mcp)
@@ -191,7 +326,12 @@ impl SessionManager {
 
     /// [`RuntimeMcpDelivery::Launcher`]: the PTY spawn's MCP steps, plus
     /// `--mcp-config` for Claude.
-    async fn apply_launcher_mcp(&self, session: &Session, spec: &mut CommandSpec) {
+    async fn apply_launcher_mcp(
+        &self,
+        session: &Session,
+        cli_family: &str,
+        spec: &mut CommandSpec,
+    ) {
         let otto_tools = self.maybe_enable_otto_tools(session).await;
         let codex_otto = !otto_tools.args.is_empty();
         spec.args.extend(otto_tools.args);
@@ -200,7 +340,7 @@ impl SessionManager {
             .sync_workspace_mcp(session, otto_tools.server, codex_otto)
             .await;
         spec.args.extend(codex_user_args);
-        if session.provider != "claude" {
+        if cli_family != "claude" {
             return;
         }
         let cwd = session.cwd.clone();
@@ -267,6 +407,7 @@ impl SessionManager {
     /// MCP credential and remove its per-session MCP files, as a PTY session's
     /// retirement does. Every respawn mints a fresh one. Best-effort.
     pub async fn retire_runtime_credentials(&self, session: &Session) {
+        self.networks.clear(&session.id);
         self.retire_credentials(session).await;
         let _ = tokio::fs::remove_file(claude_mcp_config_path(&session.id)).await;
     }

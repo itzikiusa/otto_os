@@ -5,15 +5,32 @@
 // Otto a picked chip sends the message to a NEW thread on that agent, linked
 // to this one (POST /runtime-sessions/{id}/children). Pure
 // (unit/threadsChildren.test.ts).
-import type { AskChildTarget, RuntimeProvider } from '../../../lib/api/types';
+import type { AskChildTarget, RuntimeProvider, RuntimeProviderOrSlug } from '../../../lib/api/types.ts';
+import {
+  isRuntimeProvider,
+  orderThreadHarnesses,
+  RUNTIME_PROVIDERS,
+  type ProviderFamilyMeta,
+} from '../../../lib/providerRegistry.ts';
 
-/** The runtime providers a child thread can run on. */
-export const ASK_PROVIDERS: readonly RuntimeProvider[] = ['claude', 'codex', 'gemini', 'grok', 'opencode', 'pi'];
+/** The built-in runtime providers a child thread can run on. */
+export const ASK_PROVIDERS: readonly RuntimeProvider[] = RUNTIME_PROVIDERS;
 /** Agents one ask reaches (the daemon's ASK_CHILD_MAX_TARGETS). */
 export const ASK_MAX_TARGETS = 4;
 
+/** Filter registered `/meta.providers` down to enabled structured-runtime providers
+ *  (including custom providers like `claudework` mapped to a runtime driver). */
+export function askableProviders(
+  registered: readonly string[],
+  meta?: ProviderFamilyMeta | null,
+): RuntimeProviderOrSlug[] {
+  const clean = registered.map((p) => p.trim()).filter((p) => p && p !== 'shell');
+  if (clean.length === 0) return [...ASK_PROVIDERS];
+  return orderThreadHarnesses(clean).filter((p) => isRuntimeProvider(p, meta));
+}
+
 export interface AskOption {
-  provider: RuntimeProvider;
+  provider: RuntimeProviderOrSlug;
   /** null = the provider's default model. */
   model: string | null;
   label: string;
@@ -37,13 +54,15 @@ export function dropMention(text: string, start: number): string {
  *  the model's id or its label. */
 export function mentionOptions(
   query: string,
-  modelsOf: (p: RuntimeProvider) => readonly { id: string; label: string }[],
-  nameOf: (p: RuntimeProvider) => string,
+  modelsOf: (p: RuntimeProviderOrSlug) => readonly { id: string; label: string }[],
+  nameOf: (p: RuntimeProviderOrSlug) => string,
   limit = 8,
+  /** The providers that can take it now (installed, registered, new enough). */
+  providers: readonly RuntimeProviderOrSlug[] = ASK_PROVIDERS,
 ): AskOption[] {
   const words = query.toLowerCase().split(/[:/\s-]+/).filter(Boolean);
   const all: AskOption[] = [];
-  for (const p of ASK_PROVIDERS) {
+  for (const p of providers) {
     const name = nameOf(p);
     all.push({ provider: p, model: null, label: name, detail: 'default model' });
     for (const m of modelsOf(p)) all.push({ provider: p, model: m.id, label: m.label, detail: name });

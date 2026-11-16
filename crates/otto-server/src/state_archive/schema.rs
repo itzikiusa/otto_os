@@ -1,3 +1,6 @@
+#[path = "schema_ide.rs"]
+mod schema_ide;
+
 use super::{invalid, ArchiveRow};
 use crate::error::ApiResult;
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -131,6 +134,10 @@ pub fn excluded_table(name: &str, portable: bool) -> bool {
                 | "k8s_clusters"
                 | "git_accounts"
                 | "issue_accounts"
+                | "ide_project_environments"
+                | "ide_run_configs"
+                | "ide_local_sdks"
+                | "ide_named_projects"
                 | "users"
         ))
 }
@@ -267,7 +274,7 @@ pub fn secret_key(key: &str) -> bool {
         ))
 }
 /// Sanitize structured transport credentials without rewriting free-form documents.
-fn scrub_string(text: &str) -> String {
+pub(super) fn scrub_string(text: &str) -> String {
     if text.starts_with("keychain:")
         || text.starts_with("secret:")
         || text.starts_with("otto-keychain:")
@@ -340,15 +347,28 @@ fn scrub_string(text: &str) -> String {
 fn has_credentials(value: &Value) -> bool {
     match value {
         Value::Object(map) => {
+            if map
+                .get("key")
+                .and_then(Value::as_str)
+                .is_some_and(schema_ide::is_otto_internal_key)
+            {
+                return false;
+            }
             map.get("type").and_then(Value::as_str).is_some_and(|kind| {
                 crate::api_secrets::secret_members(kind)
                     .iter()
                     .any(|key| map.contains_key(*key))
-            }) || map.keys().any(|k| secret_key(k) || k == "$secret")
+            }) || map
+                .keys()
+                .filter(|k| !schema_ide::is_otto_internal_key(k))
+                .any(|k| secret_key(k) || k == "$secret")
                 || ["key", "name"]
                     .iter()
                     .any(|k| map.get(*k).and_then(Value::as_str).is_some_and(secret_key))
-                || map.values().any(has_credentials)
+                || map
+                    .iter()
+                    .filter(|(k, _)| !schema_ide::is_otto_internal_key(k))
+                    .any(|(_, v)| has_credentials(v))
         }
         Value::Array(values) => values.iter().any(has_credentials),
         Value::String(text) => {
@@ -380,6 +400,159 @@ fn has_credentials(value: &Value) -> bool {
         _ => false,
     }
 }
+fn non_secret_short_p_command(segment: &str) -> bool {
+    for token in segment.split_whitespace() {
+        if matches!(token, "env" | "export" | "sudo" | "command" | "nohup")
+            || (token.contains('=') && !token.starts_with('-'))
+        {
+            continue;
+        }
+        let bin = token.rsplit('/').next().unwrap_or(token);
+        return matches!(
+            bin,
+            "cargo" | "mkdir" | "rmdir" | "cp" | "install" | "type" | "jobs" | "read" | "ulimit"
+        );
+    }
+    false
+}
+
+/// Scrub inline credentials and secret CLI/env arguments from shell command
+/// strings stored in portable run configurations (`command`, `before_launch`).
+pub(super) fn scrub_shell_text(input: &str) -> (String, bool) {
+    use regex::{Captures, Regex};
+    use std::sync::OnceLock;
+
+    static RE_URL_CRED: OnceLock<Regex> = OnceLock::new();
+    static RE_URL_QUERY: OnceLock<Regex> = OnceLock::new();
+    static RE_AUTH: OnceLock<Regex> = OnceLock::new();
+    static RE_LONG_EQ: OnceLock<Regex> = OnceLock::new();
+    static RE_LONG_SP: OnceLock<Regex> = OnceLock::new();
+    static RE_SHORT_P: OnceLock<Regex> = OnceLock::new();
+    static RE_ENV: OnceLock<Regex> = OnceLock::new();
+
+    if input.is_empty() {
+        return (String::new(), false);
+    }
+    let redacted = otto_core::redact::redact_text(input);
+    let mut text = redacted.value;
+
+    let re_url_cred = RE_URL_CRED.get_or_init(|| {
+        Regex::new(r#"([a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@'"]+):([^@\s'"]+)@"#).expect("regex")
+    });
+    text = re_url_cred
+        .replace_all(&text, |caps: &Captures<'_>| {
+            if &caps[2] == "[REDACTED]" {
+                caps[0].to_owned()
+            } else {
+                format!("{}:[REDACTED]@", &caps[1])
+            }
+        })
+        .into_owned();
+
+    let re_url_query = RE_URL_QUERY
+        .get_or_init(|| Regex::new(r#"([?&])([A-Za-z0-9_.-]+)=([^&\s'"]+)"#).expect("regex"));
+    text = re_url_query
+        .replace_all(&text, |caps: &Captures<'_>| {
+            if secret_key(&caps[2]) && &caps[3] != "[REDACTED]" {
+                format!("{}{}=[REDACTED]", &caps[1], &caps[2])
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    let re_auth = RE_AUTH
+        .get_or_init(|| Regex::new(r#"(?i)\b(bearer|basic)\s+([^\s'";|&)]+)"#).expect("regex"));
+    text = re_auth
+        .replace_all(&text, |caps: &Captures<'_>| {
+            if &caps[2] == "[REDACTED]" {
+                caps[0].to_owned()
+            } else {
+                format!("{} [REDACTED]", &caps[1])
+            }
+        })
+        .into_owned();
+
+    let re_long_eq = RE_LONG_EQ.get_or_init(|| {
+        Regex::new(r#"(?i)(--[a-z0-9][a-z0-9_-]*)=("[^"]*"|'[^']*'|[^\s;|&)"]+)"#).expect("regex")
+    });
+    text = re_long_eq
+        .replace_all(&text, |caps: &Captures<'_>| {
+            let flag = caps[1].trim_start_matches('-');
+            if secret_key(flag) && &caps[2] != "[REDACTED]" {
+                format!("{}=[REDACTED]", &caps[1])
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    let re_long_sp = RE_LONG_SP.get_or_init(|| {
+        Regex::new(r#"(?i)(--[a-z0-9][a-z0-9_-]*)(\s+)("[^"]*"|'[^']*'|[^\s-][^\s;|&)"]*)"#)
+            .expect("regex")
+    });
+    text = re_long_sp
+        .replace_all(&text, |caps: &Captures<'_>| {
+            let flag = caps[1].trim_start_matches('-');
+            if secret_key(flag) && &caps[3] != "[REDACTED]" {
+                format!("{}{}[REDACTED]", &caps[1], &caps[2])
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    let re_short_p = RE_SHORT_P.get_or_init(|| {
+        Regex::new(
+            r#"((?:^|[\s;|&(])-p)(?:=("[^"]*"|'[^']*'|[^\s;|&)"]+)|(\s+)("[^"]*"|'[^']*'|[^\s-][^\s;|&)"]*))"#,
+        )
+        .expect("regex")
+    });
+    let snapshot_for_p = text.clone();
+    text = re_short_p
+        .replace_all(&snapshot_for_p, |caps: &Captures<'_>| {
+            let m = caps.get(0).expect("match");
+            let prefix = &snapshot_for_p[..m.start()];
+            let seg_start = prefix
+                .rfind([';', '|', '&', '\n', '('])
+                .map_or(0, |idx| idx + 1);
+            if non_secret_short_p_command(&snapshot_for_p[seg_start..m.end()]) {
+                return caps[0].to_owned();
+            }
+            if let Some(eq_val) = caps.get(2) {
+                if eq_val.as_str() == "[REDACTED]" {
+                    caps[0].to_owned()
+                } else {
+                    format!("{}=[REDACTED]", &caps[1])
+                }
+            } else if caps.get(4).is_some_and(|v| v.as_str() == "[REDACTED]") {
+                caps[0].to_owned()
+            } else {
+                format!("{}{}[REDACTED]", &caps[1], &caps[3])
+            }
+        })
+        .into_owned();
+
+    let re_env = RE_ENV.get_or_init(|| {
+        Regex::new(
+            r#"(^|[\s;|&(])((?:export\s+|env\s+)?)([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;|&)]*)"#,
+        )
+        .expect("regex")
+    });
+    text = re_env
+        .replace_all(&text, |caps: &Captures<'_>| {
+            if secret_key(&caps[3]) && !caps[4].is_empty() && &caps[4] != "[REDACTED]" {
+                format!("{}{}{}=[REDACTED]", &caps[1], &caps[2], &caps[3])
+            } else {
+                caps[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    let changed = text != input;
+    (text, changed)
+}
+
 pub fn scrub_json(value: &mut Value) {
     match value {
         Value::Object(map) => {
@@ -442,6 +615,38 @@ pub fn inert(table: &str, row: &mut ArchiveRow) {
     if table == "sessions" {
         row.insert("status".into(), json!("exited"));
         row.insert("provider_session_id".into(), Value::Null);
+    }
+    if table == "agent_runtime_sessions" {
+        for col in ["ui_control", "ui_control_json", "native_thread_id"] {
+            if row.contains_key(col) {
+                row.insert(col.into(), Value::Null);
+            }
+        }
+    }
+    if table == "agent_runtime_entities" {
+        let kind = row
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let payload_col = if row.contains_key("payload_json") {
+            Some("payload_json")
+        } else if row.contains_key("payload") {
+            Some("payload")
+        } else {
+            None
+        };
+        if let Some(col) = payload_col {
+            if let Some(Value::String(raw)) = row.get_mut(col) {
+                if let Some(settled) = otto_agent_protocol::settle_archived_entity_json(&kind, raw)
+                {
+                    *raw = settled;
+                }
+            }
+        }
+    }
+    if table == "ide_project_environments" {
+        schema_ide::disable_ide_network_bridge_row(row);
     }
     if (table == "goal_loops" && row.get("status") == Some(&json!("running")))
         || (matches!(table, "swarms" | "swarm_agents")
@@ -510,7 +715,11 @@ pub fn sanitize(
     row: &mut ArchiveRow,
     reconnect: &mut BTreeSet<String>,
 ) {
-    let id = row.get("id").map(Value::to_string).unwrap_or_default();
+    let id = row
+        .get("id")
+        .or_else(|| row.get("project_key"))
+        .map(Value::to_string)
+        .unwrap_or_default();
     let mcp_env_keys: Vec<String> = row
         .get("secret_env_keys")
         .and_then(Value::as_str)
@@ -573,7 +782,14 @@ pub fn sanitize(
                     }
                     // User documents/history remain private, lossless content; only
                     // configuration/request JSON passes through credential filtering.
-                    if matches!(
+                    if table == "ide_project_environments" && column.name == "env_vars_json" {
+                        if schema_ide::sanitize_ide_project_env_vars(&mut document) {
+                            reconnect.insert(format!(
+                                "{table}/{id}: review and reconnect saved credentials"
+                            ));
+                        }
+                        *text = document.to_string();
+                    } else if matches!(
                         table,
                         "settings"
                             | "workspaces"
@@ -656,6 +872,11 @@ pub fn sanitize(
             }
         }
     }
+    if table == "ide_run_configs" && schema_ide::sanitize_ide_run_config_row(row) {
+        reconnect.insert(format!(
+            "{table}/{id}: review and reconnect saved credentials"
+        ));
+    }
     inert(table, row);
 }
 pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> ApiResult<Vec<ArchiveRow>> {
@@ -696,6 +917,9 @@ pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> ApiResult<Ve
     let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).fetch(conn);
     let mut output = Vec::new();
     let mut size = 0;
+    // `updated_at` is INTEGER unix seconds (migration 0205).
+    let draft_cutoff = (table == "runtime_composer_drafts")
+        .then(|| (chrono::Utc::now() - chrono::Duration::days(30)).timestamp());
     while let Some(row) = rows.try_next().await.map_err(super::db_error)? {
         let mut values = ArchiveRow::new();
         for column in row.columns() {
@@ -719,6 +943,15 @@ pub async fn read_rows(conn: &mut SqliteConnection, table: &str) -> ApiResult<Ve
                 }
             };
             values.insert(column.name().into(), value);
+        }
+        if let Some(cutoff) = draft_cutoff {
+            if values
+                .get("updated_at")
+                .and_then(Value::as_i64)
+                .is_some_and(|ts| ts < cutoff)
+            {
+                continue;
+            }
         }
         size += serde_json::to_vec(&values)
             .map_err(|e| invalid(&e.to_string()))?

@@ -299,6 +299,7 @@ export const runtimeMockRoutes: MockRoute[] = [
         cwd: b?.cwd ?? '/Users/dev', status: 'idle', access_mode: b?.access_mode ?? 'approval-required',
         created_by: 'usr_root', created_at: now(), last_active_at: now(), last_sequence: 0,
         meta: b?.source ? { source: b.source, ...(b.origin ? { origin: b.origin } : {}) } : null,
+        capabilities: { steer: true, images: true, files: true },
       };
       threads.push(t);
       return { status: 201, json: t };

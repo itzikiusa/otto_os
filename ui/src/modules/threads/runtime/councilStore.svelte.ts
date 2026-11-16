@@ -5,7 +5,8 @@
 import { api } from '../../../lib/api/client';
 import { formatEffortShort, formatModelLabel } from '../../../lib/providerModels';
 import { harnessLabel } from '../../../lib/providers';
-import type { CouncilFollowUpReq, CouncilResp, CouncilRoundsResp, CreateCouncilReq, RuntimeProvider, RuntimeSession, SynthesizeCouncilReq } from '../../../lib/api/types';
+import { auth } from '../../../lib/stores/auth.svelte';
+import type { CouncilFollowUpReq, CouncilResp, CouncilRoundsResp, CreateCouncilReq, RuntimeProviderOrSlug, RuntimeSession, SynthesizeCouncilReq } from '../../../lib/api/types';
 import { threads } from '../threadsStore.svelte';
 import { COUNCIL_MAX_SEATS, COUNCIL_MIN_SEATS, councilChipLabel, councilMembers, councilOf, toggleSeat, type CouncilSeat } from './council';
 import { isRuntimeProvider, runtimeThreads } from './runtimeThreads.svelte';
@@ -34,7 +35,7 @@ class CouncilStore {
   /** Turn "Ask several" on (seeded with the stage's pick) or off. */
   toggle(current: CouncilSeat): void {
     this.on = !this.on;
-    this.seats = this.on && isRuntimeProvider(current.provider) ? [current] : [];
+    this.seats = this.on && isRuntimeProvider(current.provider, auth.meta) ? [current] : [];
   }
 
   /** While the model picker is open, remember whether ⌘ / Shift is held on
@@ -56,11 +57,11 @@ class CouncilStore {
   /** A model picked in the stage: with "Ask several" on (or ⌘ / Shift held)
    *  it is added to the seats, or taken out when already there. */
   pick(seat: CouncilSeat): void {
-    if (!isRuntimeProvider(seat.provider)) return;
+    if (!isRuntimeProvider(seat.provider, auth.meta)) return;
     if (!this.on) {
       if (!this.multi) return;
       this.on = true;
-      this.seats = this.base && isRuntimeProvider(this.base.provider) ? [this.base] : [];
+      this.seats = this.base && isRuntimeProvider(this.base.provider, auth.meta) ? [this.base] : [];
     }
     this.seats = toggleSeat(this.seats, seat);
   }
@@ -80,7 +81,7 @@ class CouncilStore {
       title: req.title,
       ...(req.cwd ? { cwd: req.cwd } : {}),
       seats: this.seats.map((s) => ({
-        provider: s.provider as RuntimeProvider,
+        provider: s.provider as RuntimeProviderOrSlug,
         ...(s.model ? { model: s.model } : {}),
         ...(s.effort ? { effort: s.effort } : {}),
       })),

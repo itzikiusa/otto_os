@@ -1,29 +1,44 @@
 // Single source of truth for the agent-provider list across the whole UI.
 //
-// The daemon's provider registry (built-ins claude/codex/agy/shell + any CUSTOM
-// providers the user configures in Settings → Providers, e.g. `grok`) is
+// The daemon's provider registry (built-ins claude/codex/agy/gemini/grok/… + any CUSTOM
+// providers the user configures in Settings → Providers, e.g. `kilo`) is
 // surfaced on `GET /meta`.providers and cached on the auth store. EVERY surface
 // that lets the user pick which agent CLI to launch/use — PR review, ⌘K
 // orchestrator, swarm, workflows, scheduled tasks, self-improve, evals, … —
 // must render from THIS list so a custom provider is a first-class citizen,
 // never a hardcoded subset. Supports any number of providers (10, 50, …).
 //
-// These are plain functions (not $derived) so any module can import them; call
-// them inside a component `$derived(...)` and they stay reactive, because they
-// read `auth.meta` (a $state field).
-//
-// NOTE: the Product tabs' `claude/openai/gemini` picker is a DIFFERENT axis
-// (direct LLM-API model providers, not spawnable agent CLIs) and intentionally
-// does not use this registry.
+// Pure zero-Svelte constants, capabilities, and harness helpers live in
+// `providerRegistry.ts` and are re-exported here so callers have one import.
 
 import { auth } from './stores/auth.svelte';
+import { inferProviderFamily, KNOWN_AGENT_FAMILIES, SHELL_PROVIDER } from './providerRegistry.ts';
 
-/** The pseudo-provider that opens a raw shell — can't plan/review/analyze. */
-export const SHELL_PROVIDER = 'shell';
+export {
+  attachmentSupport,
+  capsOf,
+  harnessLabel,
+  IDE_RUNTIME_PROVIDERS,
+  inferProviderFamily,
+  isPlainShellSession,
+  isRuntimeProvider,
+  KNOWN_AGENT_FAMILIES,
+  orderThreadHarnesses,
+  providerSubtitle,
+  resolveIdeHarnesses,
+  resolveIdeInlineProviders,
+  RUNTIME_PROVIDERS,
+  runtimeBaselineCaps,
+  sessionProviderSlug,
+  SHELL_PROVIDER,
+  takesFile,
+  type IdeRuntimeProvider,
+  type TakesCaps,
+} from './providerRegistry.ts';
 
 /** Built-in fallback used only before `/meta` has loaded (meta is normally
  *  present by the time any picker renders). */
-const FALLBACK: readonly string[] = ['claude', 'codex', 'agy', 'shell'];
+const FALLBACK: readonly string[] = ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi', 'muse', 'shell'];
 
 /** All registered provider names (built-ins + custom), INCLUDING `shell`.
  *  Already sorted by the daemon. Use for surfaces where a shell is valid
@@ -42,9 +57,27 @@ export function agentProviders(): string[] {
 
 /** Shared launch readiness. Older daemons may not probe custom executables;
  *  keep those launchable but say the check is unknown instead of claiming it passed. */
+/** The oldest CLI version Otto's driver for that agent speaks (pi.rs: RPC
+ *  mode as of 0.75). */
+const MIN_VERSION: Record<string, string> = { pi: '0.75.0' };
+
+/** `a` < `b` for dotted versions (the first `x.y.z` in each); unknown = false. */
+export function versionBelow(a: string | null | undefined, b: string): boolean {
+  const parse = (v: string): number[] | null => /(\d+)\.(\d+)(?:\.(\d+))?/.exec(v)?.slice(1).map((n) => Number(n ?? 0)) ?? null;
+  const x = a ? parse(a) : null;
+  const y = parse(b);
+  if (!x || !y) return false;
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i];
+  return false;
+}
+
 export function providerReadiness(provider: string): { available: boolean; checked: boolean; message: string; version?: string } {
   if (!allProviders().includes(provider)) return { available: false, checked: true, message: 'Provider is not registered. Configure it in Settings → Providers.' };
   const tool = auth.meta?.tools?.find((t) => t.name === provider);
+  const floor = MIN_VERSION[provider];
+  if (tool?.found && floor && versionBelow(tool.version, floor)) {
+    return { available: false, checked: true, message: `Version ${tool.version} is older than ${floor}, the oldest Otto can drive. Update the CLI.`, version: tool.version ?? undefined };
+  }
   if (tool) return {
     available: tool.found,
     checked: true,
@@ -79,28 +112,18 @@ export function defaultAgentProvider(): string {
   return list[0] ?? 'claude';
 }
 
+/** `provider`'s CLI family, honouring the daemon's `/meta.provider_families` (a custom slug's explicit family). */
+export function providerFamily(provider: string): string {
+  return inferProviderFamily(provider, auth.meta);
+}
+
 /** Whether `provider` accepts a model flag — its daemon spec carries a
  *  `model_args` template (`/meta.model_flags`). Surfaces hide their model
  *  control when false, so a picked model is never silently dropped. Falls back
- *  to the built-in trio before `/meta` has loaded (or on an older daemon). */
+ *  to the built-in CLI harnesses before `/meta` has loaded (or on an older daemon). */
 export function providerSupportsModel(provider: string): boolean {
   const flags = auth.meta?.model_flags;
   if (flags && provider in flags) return flags[provider];
-  return provider === 'claude' || provider === 'codex' || provider === 'agy';
-}
-
-/** Harness display name for pickers, cards and badges. */
-export function harnessLabel(provider: string): string {
-  switch (provider) {
-    case 'claude':
-      return 'Claude Code';
-    case 'codex':
-      return 'Codex';
-    case 'agy':
-      return 'Antigravity';
-    case 'shell':
-      return 'Shell';
-    default:
-      return provider.charAt(0).toUpperCase() + provider.slice(1);
-  }
+  const fam = inferProviderFamily(provider, auth.meta);
+  return (KNOWN_AGENT_FAMILIES as readonly string[]).includes(fam);
 }

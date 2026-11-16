@@ -11,13 +11,15 @@ import { componentFunctions } from './componentFunctions.ts';
 // A DOM-free stand-in for the browser bits installKeyMap touches.
 class FakeKeyboardEvent {
   key: string;
+  code: string;
   metaKey: boolean;
   ctrlKey: boolean;
   shiftKey: boolean;
   altKey: boolean;
   defaultPrevented = false;
-  constructor(_type: string, init: { key: string; metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean }) {
+  constructor(_type: string, init: { key: string; code?: string; metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean }) {
     this.key = init.key;
+    this.code = init.code ?? '';
     this.metaKey = !!init.metaKey;
     this.ctrlKey = !!init.ctrlKey;
     this.shiftKey = !!init.shiftKey;
@@ -54,6 +56,14 @@ test('pageClaimsAlias hands the page a plain ⌘T, and is false with no claim', 
   keyContext.pageChords = (e) => (seen.push({ key: e.key, metaKey: e.metaKey, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey }), true);
   assert.equal(pageClaimsAlias('t'), true);
   assert.deepEqual(seen, [{ key: 't', metaKey: true, shiftKey: false, ctrlKey: false }]);
+  keyContext.pageChords = null;
+});
+
+test('pageClaimsAlias gives digit chords their `code` (the IDE ⌘1 claim matches on Digit1)', () => {
+  let code = '';
+  keyContext.pageChords = (e) => ((code = e.code), true);
+  pageClaimsAlias('1');
+  assert.equal(code, 'Digit1');
   keyContext.pageChords = null;
 });
 

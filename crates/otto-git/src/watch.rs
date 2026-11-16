@@ -76,6 +76,7 @@ struct RepoState {
     root: PathBuf,
     git_dir: PathBuf,
     ignore: RwLock<Gitignore>,
+    events: Mutex<broadcast::Sender<Event>>,
     /// Set by the first change of a burst, cleared when its event is sent.
     pending: AtomicBool,
     /// The burst's changed paths ([`Touched`]), taken when its event is sent.
@@ -151,6 +152,7 @@ fn note_touched(root: &Path, git_dir: &Path, path: &Path, t: &mut Touched) {
 struct Entry {
     /// Owns the OS stream; its callback holds the `RepoState`.
     _watcher: RecommendedWatcher,
+    state: Arc<RepoState>,
     last_touch: Instant,
 }
 
@@ -158,58 +160,74 @@ struct Entry {
 /// their own with [`RepoWatchers::new`].
 pub struct RepoWatchers {
     entries: Mutex<HashMap<Id, Entry>>,
-    tx: mpsc::UnboundedSender<Arc<RepoState>>,
+    default_events: Mutex<broadcast::Sender<Event>>,
+    tx: Mutex<mpsc::UnboundedSender<Arc<RepoState>>>,
 }
 
 static GLOBAL: OnceLock<RepoWatchers> = OnceLock::new();
 
 /// The daemon-wide registry, created on first use (must be inside a tokio
-/// runtime: it spawns the dispatcher task).
+/// runtime: it spawns the dispatcher task). If a previous test's runtime has
+/// shut down, re-arms the dispatcher on the current runtime.
 pub fn global(events: &broadcast::Sender<Event>) -> &'static RepoWatchers {
-    GLOBAL.get_or_init(|| RepoWatchers::new(events.clone()))
+    let w = GLOBAL.get_or_init(|| RepoWatchers::new(events.clone()));
+    *w.default_events.lock().unwrap_or_else(|e| e.into_inner()) = events.clone();
+    let needs_respawn = w.tx.lock().unwrap_or_else(|e| e.into_inner()).is_closed();
+    if needs_respawn && tokio::runtime::Handle::try_current().is_ok() {
+        w.entries.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        *w.tx.lock().unwrap_or_else(|e| e.into_inner()) = spawn_dispatcher();
+    }
+    w
+}
+
+fn spawn_dispatcher() -> mpsc::UnboundedSender<Arc<RepoState>> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<Arc<RepoState>>();
+    tokio::spawn(async move {
+        while let Some(state) = rx.recv().await {
+            tokio::spawn(async move {
+                let wait = {
+                    let last = state.last_emit.lock().unwrap_or_else(|e| e.into_inner());
+                    let min_gap = event_gap(crate::status_cache::last_status(&state.repo_id));
+                    let gap = last
+                        .map(|t| min_gap.saturating_sub(t.elapsed()))
+                        .unwrap_or_default();
+                    gap.max(DEBOUNCE)
+                };
+                tokio::time::sleep(wait).await;
+                // Clear BEFORE sending: a change landing after this point
+                // schedules the next event instead of being swallowed.
+                state.pending.store(false, Ordering::SeqCst);
+                // Taken AFTER `pending` is cleared: a change racing in
+                // between lands in this event (its own then reports an
+                // empty set), never in a set nobody will send.
+                let touched =
+                    std::mem::take(&mut *state.touched.lock().unwrap_or_else(|e| e.into_inner()));
+                *state.last_emit.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+                // Invalidate the shared status memo BEFORE anyone hears
+                // of the change, so no reader is served the old tree.
+                crate::status_cache::bump(&state.repo_id);
+                let events = state
+                    .events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let _ = events.send(Event::RepoStatusChanged {
+                    workspace_id: state.workspace_id.clone(),
+                    repo_id: state.repo_id.clone(),
+                    paths: touched.into_wire(),
+                });
+            });
+        }
+    });
+    tx
 }
 
 impl RepoWatchers {
     pub fn new(events: broadcast::Sender<Event>) -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Arc<RepoState>>();
-        tokio::spawn(async move {
-            while let Some(state) = rx.recv().await {
-                let events = events.clone();
-                tokio::spawn(async move {
-                    let wait = {
-                        let last = state.last_emit.lock().unwrap_or_else(|e| e.into_inner());
-                        let min_gap = event_gap(crate::status_cache::last_status(&state.repo_id));
-                        let gap = last
-                            .map(|t| min_gap.saturating_sub(t.elapsed()))
-                            .unwrap_or_default();
-                        gap.max(DEBOUNCE)
-                    };
-                    tokio::time::sleep(wait).await;
-                    // Clear BEFORE sending: a change landing after this point
-                    // schedules the next event instead of being swallowed.
-                    state.pending.store(false, Ordering::SeqCst);
-                    // Taken AFTER `pending` is cleared: a change racing in
-                    // between lands in this event (its own then reports an
-                    // empty set), never in a set nobody will send.
-                    let touched = std::mem::take(
-                        &mut *state.touched.lock().unwrap_or_else(|e| e.into_inner()),
-                    );
-                    *state.last_emit.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(Instant::now());
-                    // Invalidate the shared status memo BEFORE anyone hears
-                    // of the change, so no reader is served the old tree.
-                    crate::status_cache::bump(&state.repo_id);
-                    let _ = events.send(Event::RepoStatusChanged {
-                        workspace_id: state.workspace_id.clone(),
-                        repo_id: state.repo_id.clone(),
-                        paths: touched.into_wire(),
-                    });
-                });
-            }
-        });
         Self {
             entries: Mutex::new(HashMap::new()),
-            tx,
+            default_events: Mutex::new(events),
+            tx: Mutex::new(spawn_dispatcher()),
         }
     }
 
@@ -218,15 +236,29 @@ impl RepoWatchers {
     /// armed just means changes surface on the next poll instead.
     pub fn touch(&self, repo_id: &Id, workspace_id: &Id, root: &Path, git_dir: Option<&Path>) {
         let now = Instant::now();
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries.retain(|_, e| now.duration_since(e.last_touch) < IDLE_TTL);
-        if let Some(e) = entries.get_mut(repo_id) {
-            e.last_touch = now;
-            return;
+        let events = self
+            .default_events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        {
+            let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            entries.retain(|_, e| now.duration_since(e.last_touch) < IDLE_TTL);
+            if let Some(e) = entries.get_mut(repo_id) {
+                e.last_touch = now;
+                *e.state.events.lock().unwrap_or_else(|p| p.into_inner()) = events;
+                return;
+            }
         }
-        let Some(entry) = self.arm(repo_id, workspace_id, root, git_dir, now) else {
+        let tx = self.tx.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(entry) = self.arm(repo_id, workspace_id, root, git_dir, now, events, tx) else {
             return;
         };
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = entries.get_mut(repo_id) {
+            existing.last_touch = now;
+            return;
+        }
         if entries.len() >= MAX_WATCHED {
             if let Some(oldest) = entries
                 .iter()
@@ -248,10 +280,11 @@ impl RepoWatchers {
     }
 
     #[cfg(test)]
-    fn watched(&self) -> usize {
+    pub(crate) fn watched(&self) -> usize {
         self.entries.lock().unwrap().len()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn arm(
         &self,
         repo_id: &Id,
@@ -259,24 +292,33 @@ impl RepoWatchers {
         root: &Path,
         git_dir: Option<&Path>,
         now: Instant,
+        events: broadcast::Sender<Event>,
+        tx: mpsc::UnboundedSender<Arc<RepoState>>,
     ) -> Option<Entry> {
+        if otto_core::paths::is_broad_non_project_root(root) {
+            return None;
+        }
         // FSEvents reports real paths (/private/var/…, resolved symlinks).
         let root = std::fs::canonicalize(root).ok()?;
+        if otto_core::paths::is_broad_non_project_root(&root) {
+            return None;
+        }
         let git_dir = git_dir
             .and_then(|g| std::fs::canonicalize(g).ok())
+            .or_else(|| resolve_git_dir(&root))
             .unwrap_or_else(|| root.join(".git"));
         let state = Arc::new(RepoState {
             repo_id: repo_id.clone(),
             workspace_id: workspace_id.clone(),
             ignore: RwLock::new(build_ignore(&root, &git_dir)),
+            events: Mutex::new(events),
             root: root.clone(),
             git_dir: git_dir.clone(),
             pending: AtomicBool::new(false),
             touched: Mutex::new(Touched::default()),
             last_emit: Mutex::new(None),
         });
-        let cb_state = state;
-        let tx = self.tx.clone();
+        let cb_state = state.clone();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let Ok(ev) = res else { return };
             // Opens/reads never change status (inotify reports them; our own
@@ -318,9 +360,32 @@ impl RepoWatchers {
         }
         Some(Entry {
             _watcher: watcher,
+            state,
             last_touch: now,
         })
     }
+}
+
+fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return std::fs::canonicalize(&dot_git).ok().or(Some(dot_git));
+    }
+    if dot_git.is_file() {
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let line = text.lines().next()?.trim();
+        let raw = line.strip_prefix("gitdir:")?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let candidate = if Path::new(raw).is_absolute() {
+            PathBuf::from(raw)
+        } else {
+            root.join(raw)
+        };
+        return std::fs::canonicalize(&candidate).ok().or(Some(candidate));
+    }
+    None
 }
 
 /// Top-level `.gitignore`, one level of sub-directory `.gitignore` files (the
@@ -545,5 +610,55 @@ mod tests {
         assert_eq!(w.watched(), 1);
         w.forget(&"r1".to_string());
         assert_eq!(w.watched(), 0);
+    }
+
+    #[tokio::test]
+    async fn multi_repo_and_worktree_gitdir_stay_armed_concurrently() {
+        let (_d1, root1) = repo_with_ignore("");
+        let (_d2, root2) = repo_with_ignore("");
+        let (_d3, root3) = repo_with_ignore("");
+        let wt_tmp = tempfile::tempdir().unwrap();
+        let wt_base = wt_tmp.path().canonicalize().unwrap();
+        let wt_root = wt_base.join("worktree");
+        let ext_git = wt_base.join("common.git/worktrees/wt1");
+        std::fs::create_dir_all(&wt_root).unwrap();
+        std::fs::create_dir_all(ext_git.join("refs/heads")).unwrap();
+        std::fs::write(
+            wt_root.join(".git"),
+            format!("gitdir: {}\n", ext_git.display()),
+        )
+        .unwrap();
+
+        let (tx, mut rx) = broadcast::channel(128);
+        let w = RepoWatchers::new(tx);
+        w.touch(&"r1".to_string(), &"w1".to_string(), &root1, None);
+        w.touch(&"r2".to_string(), &"w1".to_string(), &root2, None);
+        w.touch(&"r3".to_string(), &"w1".to_string(), &root3, None);
+        w.touch(&"r4".to_string(), &"w1".to_string(), &wt_root, None);
+        assert_eq!(w.watched(), 4, "all 4 multi-root repos remain armed");
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        while next_change(&mut rx, Duration::from_millis(400))
+            .await
+            .is_some()
+        {}
+
+        std::fs::write(root1.join("a.rs"), b"1").unwrap();
+        std::fs::write(root3.join("c.rs"), b"3").unwrap();
+        std::fs::write(ext_git.join("index"), b"idx").unwrap();
+
+        let mut seen = std::collections::HashSet::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+        while seen.len() < 3 && tokio::time::Instant::now() < deadline {
+            if let Some(id) = next_change(&mut rx, Duration::from_secs(2)).await {
+                seen.insert(id);
+            }
+        }
+        assert!(seen.contains("r1"), "seen={seen:?}");
+        assert!(seen.contains("r3"), "seen={seen:?}");
+        assert!(
+            seen.contains("r4"),
+            "worktree external gitdir index must fire: {seen:?}"
+        );
     }
 }

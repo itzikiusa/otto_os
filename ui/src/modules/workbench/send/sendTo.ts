@@ -9,8 +9,6 @@
 
 import { router } from '../../../lib/router.svelte';
 import { whenMounted } from '../../../lib/uiCommands';
-import { database } from '../../../lib/stores/database.svelte';
-import { apiClient } from '../../../lib/stores/apiClient.svelte';
 import { ws as wsStore } from '../../../lib/stores/workspace.svelte';
 import { confirmer } from '../../../lib/confirm.svelte';
 import { toasts } from '../../../lib/toast.svelte';
@@ -52,6 +50,9 @@ export async function sendToDatabase(ctx: SendCtx): Promise<void> {
     toasts.error('Nothing to run', 'This file is empty.');
     return;
   }
+  // The stores load on demand: they are ~50 KB gzip the Workbench page would
+  // otherwise ship to every visit (bundle budget).
+  const { database } = await import('../../../lib/stores/database.svelte');
   // An in-flight load is joined (loadConnections shares it), so a send made
   // while the list is still loading never reads as "no connections".
   if (!database.connections.length) await database.loadConnections();
@@ -128,6 +129,7 @@ export async function sendToApiClient(ctx: SendCtx): Promise<void> {
   // own environment variables to resolve.
   const text = filled(ctx);
   try {
+    const { apiClient } = await import('../../../lib/stores/apiClient.svelte');
     await apiClient.ensureLoaded();
     if (looksLikeCurl(text)) {
       if (!(await apiClient.importCurl(text))) {

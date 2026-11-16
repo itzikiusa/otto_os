@@ -172,7 +172,7 @@
     refreshing = true;
     try {
       if (manual) prListCache.delete(prListKey(repoId, st, 1));
-      const r = await api.get<PrListResp>(prListUrl(repoId, st, 1, PER_PAGE));
+      const r = await api.get<PrListResp>(prListUrl(repoId, st, 1, PER_PAGE) + (manual ? '&fresh=true' : ''));
       prListCache.set(prListKey(repoId, st, 1), r);
       if (revision !== loadRevision) return;
       prs = mergeRefreshed(prs, r.items, page1Count);
@@ -255,11 +255,21 @@
       ci_status: p.ci_status ?? row.ci_status,
       labels: p.labels ?? row.labels,
       head_sha: p.head_sha ?? row.head_sha,
+      is_mine: p.is_mine ?? row.is_mine,
+      review: p.review !== undefined ? p.review : row.review,
     };
     if (JSON.stringify(next) === JSON.stringify(row)) return;
     const copy = prs.slice();
     copy[i] = next;
     prs = copy;
+    const key = prListKey(repoId, listTok, 1);
+    const cached = prListCache.get(key);
+    if (cached) {
+      prListCache.set(key, {
+        ...cached.value,
+        items: cached.value.items.map((it) => (it.number === next.number ? next : it)),
+      });
+    }
   });
 
   // ── Identity ("Authored by you") ────────────────────────────────────────

@@ -20,15 +20,12 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { sessionState } from '../../lib/status';
-  import StartRoomModal from '../rooms/StartRoomModal.svelte'; // ui-guards: allow — shared session room modal
   import NewThreadStage from './NewThreadStage.svelte';
   import ThreadCanvas from './ThreadCanvas.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   const ThreadInspector = lazyComponent(() => import('./ThreadInspector.svelte'));
   import LazyMount from '../../lib/components/LazyMount.svelte';
-  import ThreadProjectCard from './ThreadProjectCard.svelte';
-  import ThreadSheets from './ThreadSheets.svelte';
-  import { PullRequestsView, TerminalDock } from './threadLazy.svelte';
+  import { ProjectCardView, PullRequestsView, StartRoomView, TerminalDock, ThreadSheetsView } from './threadLazy.svelte';
   import { threadRepos } from './threadRepos.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import ThreadSidebar from './ThreadSidebar.svelte';
@@ -486,8 +483,8 @@
             <NewThreadStage showCard={showStageCard} />
           {:else}
             <ThreadCanvas onstartroom={(sid) => (roomSessionId = sid)} />
-            {#if cardPopover && contextCwd}
-              <div class="th-card-pop" class:docked={!cardReserve}><ThreadProjectCard floating cwd={contextCwd} /></div>
+            {#if cardPopover && contextCwd && ProjectCardView.component}
+              <div class="th-card-pop" class:docked={!cardReserve}><ProjectCardView.component floating cwd={contextCwd} /></div>
             {/if}
           {/if}
         </div>
@@ -526,10 +523,12 @@
   </PageBody>
 </div>
 
-<ThreadSheets />
+{#if threadsChrome.sheet && ThreadSheetsView.component}
+  <ThreadSheetsView.component />
+{/if}
 
-{#if roomSessionId}
-  <StartRoomModal sessionId={roomSessionId} onclose={() => (roomSessionId = null)} />
+{#if roomSessionId && StartRoomView.component}
+  <StartRoomView.component sessionId={roomSessionId} onclose={() => (roomSessionId = null)} />
 {/if}
 
 <style>

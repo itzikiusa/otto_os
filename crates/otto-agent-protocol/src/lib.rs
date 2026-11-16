@@ -18,11 +18,15 @@
 //! agent stdio`, Antigravity `agy acp`, opencode `opencode acp`).
 
 pub mod acp;
+pub(crate) mod acp_sideband;
 pub mod claude;
 pub mod codex;
+pub(crate) mod diff_compact;
 pub mod driver;
+pub mod holder;
 pub mod host;
 mod http;
+mod native_work;
 pub mod pi;
 pub mod process;
 mod questions;
@@ -37,12 +41,14 @@ use std::sync::Arc;
 use axum::Router;
 use otto_core::auth::{AuthContext, RoleChecker};
 
+pub use acp_sideband::confinement::validate_confined_tail_path;
 pub use driver::{
-    ChildSignal, DriverError, DriverEvent, DriverFactory, DriverStep, LaunchContext, LaunchSpec,
-    McpDelivery, McpServerDef, StructuredDriver,
+    ActiveTailChunk, ActiveTailKind, ActiveTailSource, ChildSignal, DriverError, DriverEvent,
+    DriverFactory, DriverStep, LaunchContext, LaunchSpec, McpDelivery, McpServerDef,
+    SidebandPayload, SidebandPoll, SidebandResumeSeed, SidebandSource, StructuredDriver,
 };
 pub use host::{RuntimeHost, SessionManagerHost};
-pub use runtime::{AgentRuntime, RuntimeConfig};
+pub use runtime::{settle_archived_entity_json, AgentRuntime, RuntimeConfig};
 
 /// The daemon surface the `/runtime-sessions` router runs against
 /// (otto-server's impl: `modules/ctx_impls.rs`).
@@ -60,8 +66,8 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
 
 /// The production driver set — the providers T3 Code drives over a
 /// structured protocol: Claude (Agent SDK transport), Codex (app-server),
-/// Gemini, Grok, Antigravity (`agy acp`) and opencode (ACP), pi (its RPC
-/// mode). A missing CLI fails the spawn, not the create.
+/// Gemini, Grok, Antigravity (`agy acp`), opencode and Muse (ACP), pi (its
+/// RPC mode). A missing CLI fails the spawn, not the create.
 pub fn default_drivers() -> Arc<dyn DriverFactory> {
     use otto_core::agent_runtime::RuntimeProvider;
     Arc::new(
@@ -74,6 +80,7 @@ pub fn default_drivers() -> Arc<dyn DriverFactory> {
                 RuntimeProvider::Agy => Box::new(acp::AcpDriver::agy("agy")),
                 RuntimeProvider::Opencode => Box::new(acp::AcpDriver::opencode()),
                 RuntimeProvider::Pi => Box::new(pi::PiDriver::with_program("pi")),
+                RuntimeProvider::Muse => Box::new(acp::AcpDriver::muse("muse")),
             })
         },
     )
@@ -99,6 +106,7 @@ pub fn daemon_runtime(
         default_drivers(),
         RuntimeConfig {
             attachments_dir: data_dir.join("runtime-attachments"),
+            holders_dir: Some(data_dir.join("runtime-holders")),
             ..RuntimeConfig::default()
         },
     )

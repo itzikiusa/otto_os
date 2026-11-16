@@ -12,7 +12,7 @@
   import GitToolbar from './GitToolbar.svelte';
   import GraphView from './GraphView.svelte';
   import GraphSearchBar from './GraphSearchBar.svelte';
-  import { gitBridge } from './gitBridge.svelte';
+  import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';

@@ -66,6 +66,21 @@ extern "C-unwind" fn not_eligible(_cls: &AnyClass, _cmd: Sel) -> Bool {
     Bool::NO
 }
 
+/// Open macOS's system Emoji & Symbols palette (`-[NSApplication orderFrontCharacterPalette:]`).
+/// Must be called on the main thread.
+pub fn order_front_character_palette() {
+    let Some(cls) = AnyClass::get(c"NSApplication") else {
+        return;
+    };
+    let _ = objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+        let app: *mut AnyObject = objc2::msg_send![cls, sharedApplication];
+        if !app.is_null() {
+            let null_sender: *mut AnyObject = std::ptr::null_mut();
+            let _: () = objc2::msg_send![app, orderFrontCharacterPalette: null_sender];
+        }
+    }));
+}
+
 /// Wrap `-[NSApplication sendEvent:]` and `-[NSWindow sendEvent:]` in an
 /// Objective-C exception handler. Call once, on the main thread, before the
 /// event loop starts.

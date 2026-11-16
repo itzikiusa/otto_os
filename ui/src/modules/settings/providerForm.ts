@@ -7,14 +7,20 @@
 // join/split turned `["--system", "be terse"]` into three args on the first
 // Edit → Save, and typed quotes reached the CLI literally.
 
+import { joinArgs, splitArgs } from '../../lib/shellArgs.ts';
+
+export { joinArgs, quoteArg, splitArgs } from '../../lib/shellArgs.ts';
+
 export interface ProviderDef {
   cmd: string;
   args?: string[];
   resume_args?: string[] | null;
   update_command?: string | null;
   /** Model-flag template, `{model}` substituted at spawn (e.g. `--model {model}`).
-   *  Unset = the CLI takes no model flag; pickers hide the model control. */
+   *  Unset = default/no model flag; `[]` = explicitly opt out of inherited model flags. */
   model_args?: string[] | null;
+  /** Canonical CLI model family (`claude`, `codex`, `agy`, `gemini`, `grok`, `opencode`, `pi`, `muse`). */
+  model_family?: string | null;
 }
 
 export interface ProviderFormValues {
@@ -23,53 +29,7 @@ export interface ProviderFormValues {
   resumeArgs: string;
   updateCmd: string;
   modelArgs: string;
-}
-
-/** One argv element as a shell word: bare when it has nothing to quote,
- *  otherwise single-quoted (`'` written as `'\''`). */
-export function quoteArg(a: string): string {
-  if (a !== '' && /^[^\s'"\\]+$/.test(a)) return a;
-  return `'${a.replace(/'/g, `'\\''`)}'`;
-}
-
-export function joinArgs(list: readonly string[] | null | undefined): string {
-  return (list ?? []).map(quoteArg).join(' ');
-}
-
-/** Shell-style word split: whitespace separates words; '…' is literal;
- *  "…" keeps spaces with `\"` / `\\` escapes; a backslash outside quotes
- *  escapes the next character. An unclosed quote runs to the end. */
-export function splitArgs(line: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  let has = false;
-  let quote: '' | "'" | '"' = '';
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote === "'") {
-      if (c === "'") quote = '';
-      else cur += c;
-    } else if (quote === '"') {
-      if (c === '"') quote = '';
-      else if (c === '\\' && (line[i + 1] === '"' || line[i + 1] === '\\')) cur += line[++i];
-      else cur += c;
-    } else if (c === "'" || c === '"') {
-      quote = c;
-      has = true;
-    } else if (c === '\\' && i + 1 < line.length) {
-      cur += line[++i];
-      has = true;
-    } else if (/\s/.test(c)) {
-      if (has) out.push(cur);
-      cur = '';
-      has = false;
-    } else {
-      cur += c;
-      has = true;
-    }
-  }
-  if (has) out.push(cur);
-  return out;
+  modelFamily?: string;
 }
 
 export function providerToForm(p: ProviderDef): ProviderFormValues {
@@ -79,6 +39,7 @@ export function providerToForm(p: ProviderDef): ProviderFormValues {
     resumeArgs: joinArgs(p.resume_args),
     updateCmd: p.update_command ?? '',
     modelArgs: joinArgs(p.model_args),
+    ...(p.model_family !== undefined ? { modelFamily: p.model_family ?? '' } : {}),
   };
 }
 
@@ -94,6 +55,12 @@ export function formToProvider(f: ProviderFormValues, prev?: ProviderDef): Provi
   else delete def.update_command;
   const ma = splitArgs(f.modelArgs);
   if (ma.length) def.model_args = ma;
+  else if (Array.isArray(prev?.model_args) && prev.model_args.length === 0) def.model_args = [];
   else delete def.model_args;
+  if (f.modelFamily !== undefined) {
+    const mf = f.modelFamily.trim().toLowerCase();
+    if (mf !== '') def.model_family = mf;
+    else delete def.model_family;
+  }
   return def;
 }

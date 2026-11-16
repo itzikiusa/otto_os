@@ -168,6 +168,12 @@ export async function startStack({ bin, dist, log, prepare }) {
   // child threads) gets the scripted lib/demo-claude.mjs; a PTY claude keeps
   // the agent-sim transcript.
   const demoClaude = join(dirname(fileURLToPath(import.meta.url)), 'demo-claude.mjs');
+  // The newer structured agents only need to be "installed" for the pickers
+  // (pi has a version floor, so the stand-ins answer --version).
+  for (const cli of ['opencode', 'pi', 'muse']) {
+    writeFileSync(join(fakeBin, cli), `#!/bin/sh\n[ "$1" = --version ] && { echo "${cli} 1.0.0"; exit 0; }\nexec "${join(fakeBin, 'agent-sim')}" ${cli}\n`);
+    chmodSync(join(fakeBin, cli), 0o755);
+  }
   for (const cli of ['claude', 'codex', 'agy', 'gemini', 'grok']) {
     const shim = join(fakeBin, cli);
     const runtime =
@@ -259,6 +265,15 @@ export async function startStack({ bin, dist, log, prepare }) {
       /* gone */
     }
     killClickhouseFor(dataDir);
+    // Sessions outlive a daemon restart in holder processes: stop this
+    // binary's holders and the stand-ins they ran.
+    for (const pattern of [`${bin} (pty|runtime)-holder`, rootDir, demoClaude, demoCodex]) {
+      try {
+        execSync(`pkill -f -- '${pattern}'`);
+      } catch {
+        /* none left */
+      }
+    }
     await new Promise((r) => server.close(() => r()));
     await new Promise((r) => tailnet.close(() => r()));
     try {

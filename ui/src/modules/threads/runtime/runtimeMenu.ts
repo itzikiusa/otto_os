@@ -12,12 +12,17 @@ import { uiControl } from '../../../lib/stores/uiControl.svelte';
 import { toastError } from '../../../lib/toastError';
 import { threads } from '../threadsStore.svelte';
 import { phoneHandoff } from '../../../lib/stores/phoneHandoff.svelte';
+import { openProjectInIde } from '../ideProjects.svelte';
 import { runtimeThreads } from './runtimeThreads.svelte';
 
 export function runtimeThreadMenu(id: string): MenuItem[] {
+  const cwd = (runtimeThreads.get(id)?.cwd ?? '').trim().replace(/\/+$/, '');
   return [
     { label: threads.isPinned(id) ? 'Unpin thread' : 'Pin thread', icon: 'pin', action: () => threads.togglePin(id) },
     { label: 'Open beside', icon: 'split', action: () => threads.openBeside(id) },
+    ...(cwd && cwd !== '~'
+      ? [{ label: 'Open in IDE', icon: 'ide' as const, action: () => openProjectInIde(cwd, id) }]
+      : []),
     { label: 'Rename…', icon: 'edit', action: () => void renameThread(id) },
     {
       label: threads.isTerminalOpen(id) ? 'Hide terminal drawer' : 'Open terminal drawer',

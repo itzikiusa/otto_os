@@ -14,8 +14,9 @@
 
 use otto_core::agent_runtime::{
     ApprovalDecision, ApprovalOption, BackgroundTask, PlanStep, ProviderFailure, RequestKind,
-    RuntimeAccessMode, RuntimePromptReq, RuntimeProvider, RuntimeRequestStatus, ThreadTokenUsage,
-    TurnItem, TurnItemKind, TurnItemStatus, TurnTerminalStatus, TurnTokenUsage,
+    RuntimeAccessMode, RuntimeCapabilities, RuntimePromptReq, RuntimeProvider,
+    RuntimeRequestStatus, ThreadTokenUsage, TurnItem, TurnItemKind, TurnItemStatus,
+    TurnTerminalStatus, TurnTokenUsage,
 };
 
 #[derive(Debug, Clone)]
@@ -44,7 +45,7 @@ pub enum McpDelivery {
 }
 
 /// One stdio MCP server handed over the protocol. `command` is absolute.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct McpServerDef {
     pub name: String,
     pub command: String,
@@ -118,7 +119,15 @@ pub enum DriverEvent {
         status: RuntimeRequestStatus,
     },
     Usage(TurnTokenUsage),
+    /// What the running turn cost in US dollars (merged into its usage).
+    TurnCost(f64),
     ContextUsage(ThreadTokenUsage),
+    /// The agent's own slash commands, whole (`commands.updated`).
+    Commands(Vec<otto_core::agent_runtime::ProviderCommand>),
+    /// The agent named the conversation (Codex `thread/name/updated`, an
+    /// ACP `session_info_update`). Adopted while the thread still has the
+    /// title Otto gave it.
+    Title(String),
     /// The agent started a turn on its own (no prompt of ours is running —
     /// Claude Code continues when background work it started finishes).
     /// `turn_id` is the driver's; the runtime opens it as an `agent` turn
@@ -179,6 +188,7 @@ pub fn item(
         updated_at: now,
         error: None,
         parent_item_id: None,
+        detail_omitted: false,
         kind,
     }
 }
@@ -192,6 +202,30 @@ pub fn tool_error(text: &str) -> Option<String> {
         end -= 1;
     }
     (!t.is_empty()).then(|| t[..end].to_string())
+}
+
+/// `text` with a line per attached file the agent must read from disk (an
+/// agent whose input has no document type): T3 Code's
+/// `providerMessageTextWithAttachmentPaths`.
+pub fn with_file_paths(text: &str, files: &[otto_core::agent_runtime::PromptFile]) -> String {
+    let mut out = text.to_string();
+    for f in files {
+        let line = match &f.path {
+            Some(p) => format!(
+                "[Attached file \"{}\" ({}) is saved at: {p}]",
+                f.name, f.mime
+            ),
+            None => format!(
+                "[Attached file \"{}\" is unavailable: it was not saved]",
+                f.name
+            ),
+        };
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&line);
+    }
+    out
 }
 
 /// A JSON-RPC id as a map key.
@@ -216,6 +250,133 @@ pub fn rpc_failure(class: &str, e: &serde_json::Value) -> ProviderFailure {
     }
 }
 
+/// Sideband storage source polled asynchronously off the session lock when an
+/// ACP agent buffers between-prompt notifications in memory while persisting
+/// real-time session steps on disk (`agy`, `grok`, `gemini`, `opencode`, or an
+/// explicit `OTTO_ACP_SIDEBAND_FILE` stream).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebandSource {
+    /// No primary session transcript poll (active child tails / timer ticks only).
+    None,
+    /// Append-only `\n`-terminated JSONL (`agy` `transcript_full.jsonl`, `grok`
+    /// `updates.jsonl`, or `OTTO_ACP_SIDEBAND_FILE`).
+    AppendLines {
+        path: std::path::PathBuf,
+        fallback_path: Option<std::path::PathBuf>,
+        /// Optional `<sessions_root>/<project_dir>/<session_id>/updates.jsonl`
+        /// scan fallback when `cwd` was symlink-resolved differently by the CLI.
+        scan_sessions_dir: Option<(std::path::PathBuf, String)>,
+        offset: u64,
+        using_fallback: bool,
+    },
+    /// Rewritten JSON session snapshot (`gemini --acp` `chats/session-*.json`),
+    /// read only when `(mtime_ns, len)` changes.
+    GeminiJson {
+        gemini_home: std::path::PathBuf,
+        cwd: String,
+        session_id: String,
+        resolved_path: Option<std::path::PathBuf>,
+        last_stamp: (u64, u64),
+        allow_scan: bool,
+    },
+    /// Read-only SQLite `part` + `message` rows (`opencode acp` `opencode.db`),
+    /// queried only when `(db_mtime_ns, db_len, wal_mtime_ns, wal_len)` changes.
+    OpencodeSqlite {
+        db_path: std::path::PathBuf,
+        session_id: String,
+        min_time_ms: i64,
+        min_part_id: String,
+        last_stamp: (u64, u64, u64, u64),
+    },
+}
+
+/// Kind of auxiliary background file tailed off-lock alongside the session's
+/// primary sideband stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ActiveTailKind {
+    CommandLog,
+    AgySubagentTranscript,
+}
+
+/// One active background command `.log` or `agy` child `transcript.jsonl` to
+/// tail off-lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTailSource {
+    pub task_id: String,
+    pub kind: ActiveTailKind,
+    pub path: std::path::PathBuf,
+    pub fallback_path: Option<std::path::PathBuf>,
+    pub offset: u64,
+    pub using_fallback: bool,
+    pub allowed_cwd: Option<std::path::PathBuf>,
+    pub agy_brain_dir: Option<std::path::PathBuf>,
+    pub allowed_agy_conv_ids: Option<Vec<String>>,
+    pub otto_session_id: Option<String>,
+}
+
+/// Off-lock read chunk from an [`ActiveTailSource`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTailChunk {
+    pub task_id: String,
+    pub kind: ActiveTailKind,
+    pub using_fallback: bool,
+    pub next_offset: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// Periodic sideband poll descriptor returned by a sans-IO driver while idle
+/// between `session/prompt` RPCs (or while tailing active background tasks).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebandPoll {
+    pub source: SidebandSource,
+    pub interval: std::time::Duration,
+    pub active_tails: Vec<ActiveTailSource>,
+    pub timer_expired: bool,
+}
+
+/// Initial watermark seeded asynchronously before spawning a resumed session so
+/// historical on-disk steps are skipped in `O(1)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebandResumeSeed {
+    AppendOffset {
+        resolved_path: Option<std::path::PathBuf>,
+        using_fallback: bool,
+        offset: u64,
+    },
+    IdleSinceMs(u64),
+}
+
+/// Off-lock read result delivered to [`StructuredDriver::on_sideband`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebandPayload {
+    AppendLines {
+        resolved_path: Option<std::path::PathBuf>,
+        using_fallback: bool,
+        next_offset: u64,
+        bytes: Vec<u8>,
+    },
+    GeminiJson {
+        resolved_path: std::path::PathBuf,
+        stamp: (u64, u64),
+        doc: serde_json::Value,
+    },
+    OpencodeSqlite {
+        stamp: (u64, u64, u64, u64),
+        rows_jsonl: Vec<u8>,
+        has_more: bool,
+    },
+    /// Directory scan attempted to locate an unresolved transcript file and
+    /// found no matching file; arms a negative-lookup backoff on the driver.
+    Unresolved,
+    /// Combined primary sideband payload, active child/command tail chunks,
+    /// and/or due timer tick.
+    Batch {
+        primary: Option<Box<SidebandPayload>>,
+        tails: Vec<ActiveTailChunk>,
+        timer_tick: bool,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriverError(pub String);
 
@@ -223,6 +384,23 @@ impl std::fmt::Display for DriverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// [`StructuredDriver::restore_state`] for a driver that snapshots itself
+/// whole: a non-null `state` replaces `driver`, which keeps its own `program`
+/// (the field `program` picks), never part of a snapshot.
+pub(crate) fn restore_keeping_program<T: serde::de::DeserializeOwned>(
+    driver: &mut T,
+    state: &serde_json::Value,
+    program: fn(&mut T) -> &mut String,
+) -> Result<(), DriverError> {
+    if !state.is_null() {
+        let mut restored: T =
+            serde_json::from_value(state.clone()).map_err(|e| DriverError(e.to_string()))?;
+        std::mem::swap(program(&mut restored), program(driver));
+        *driver = restored;
+    }
+    Ok(())
 }
 
 /// One provider's protocol translator.
@@ -255,10 +433,36 @@ pub trait StructuredDriver: Send + 'static {
         false
     }
 
+    /// Whether `steer` can switch `req.model` mid-turn without queuing for the
+    /// next turn boundary.
+    fn steers_model_live(&self) -> bool {
+        false
+    }
+
     /// Whether the running process can switch to access mode `to` (its next
     /// `prompt` carries it). Otherwise the runtime restarts the child in the
     /// new mode, resuming its thread.
     fn switches_access_live(&self, _to: RuntimeAccessMode) -> bool {
+        false
+    }
+
+    /// What this agent takes (steer, images, PDFs, efforts): the provider
+    /// baseline, refined by a driver that learns it in its handshake. Read
+    /// by the runtime when the driver reports `Ready`.
+    fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities::for_provider(self.provider())
+    }
+
+    /// A transcript the agent writes its own title for the conversation
+    /// into (Claude Code's `ai-title` lines): the host reads it after a turn
+    /// while the thread's title is still Otto's placeholder.
+    fn title_transcript(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// Whether `steer` can switch to access mode `to` mid-turn without queuing
+    /// for the next turn boundary.
+    fn steers_access_live(&self, _to: RuntimeAccessMode) -> bool {
         false
     }
 
@@ -304,8 +508,53 @@ pub trait StructuredDriver: Send + 'static {
 
     fn on_line(&mut self, line: &str) -> DriverStep;
 
+    /// Whether the running agent-initiated (`origin: agent`) turn has no
+    /// protocol-level end frame (e.g. ACP notifications) and is ready to settle
+    /// once stdout stays quiet for `RuntimeConfig::autonomous_settle`.
+    fn needs_idle_turn_settle(&self) -> bool {
+        false
+    }
+
+    /// Settle an idle agent-initiated turn once `autonomous_settle` elapses.
+    fn on_idle_settle(&mut self) -> DriverStep {
+        DriverStep::default()
+    }
+
+    /// Optional sideband file tail descriptor while the driver is idle between
+    /// prompts. All disk I/O runs asynchronously outside the session lock.
+    fn sideband_poll(&self) -> Option<SidebandPoll> {
+        None
+    }
+
+    /// Optional sideband source for `resume_id` so `ensure_process` can seed
+    /// the initial watermark asynchronously before spawning.
+    fn sideband_resume_poll(&self, _resume_id: &str, _cwd: &str) -> Option<SidebandSource> {
+        None
+    }
+
+    /// Seed the initial sideband watermark on resume (`session/load`) before
+    /// the child spawns so historical steps on disk are skipped in `O(1)`.
+    fn init_sideband_resume(&mut self, _seed: SidebandResumeSeed) {}
+
+    /// Translate off-lock sideband data into a sans-IO [`DriverStep`].
+    fn on_sideband(&mut self, _payload: SidebandPayload) -> DriverStep {
+        DriverStep::default()
+    }
+
     fn on_exit(&mut self, _code: Option<i32>) -> DriverStep {
         DriverStep::default()
+    }
+
+    /// Snapshot live protocol state so a restarted daemon adopting a detached
+    /// holder can resume mid-turn without losing request correlations or
+    /// negotiated session capabilities.
+    fn snapshot_state(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// Restore live protocol state captured by [`Self::snapshot_state`].
+    fn restore_state(&mut self, _state: &serde_json::Value) -> Result<(), DriverError> {
+        Ok(())
     }
 }
 
@@ -321,4 +570,44 @@ where
     fn create(&self, provider: RuntimeProvider) -> Option<Box<dyn StructuredDriver>> {
         self(provider)
     }
+}
+
+/// Extract a clamped one-shot timer `due_at` (`0..=365d`) from tool arguments,
+/// returning `None` when a recurring `CronExpression` / `cron_expression` is set
+/// or when the duration is missing/negative.
+pub fn one_shot_due_at(
+    raw: Option<&serde_json::Value>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    const MAX_TIMER_SECS: i64 = 86_400 * 365;
+    let v = raw?;
+    let has_cron = v
+        .get("CronExpression")
+        .or_else(|| v.get("cron_expression"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+    if has_cron {
+        return None;
+    }
+    let dur = v
+        .get("DurationSeconds")
+        .or_else(|| v.get("duration_seconds"))
+        .or_else(|| v.get("delay_seconds"))?;
+    if let Some(secs) = dur.as_i64() {
+        if secs < 0 {
+            return None;
+        }
+        return Some(now + chrono::Duration::seconds(secs.clamp(0, MAX_TIMER_SECS)));
+    }
+    if let Some(secs) = dur.as_u64() {
+        let clamped = secs.min(MAX_TIMER_SECS as u64) as i64;
+        return Some(now + chrono::Duration::seconds(clamped));
+    }
+    if let Some(secs_f) = dur.as_f64() {
+        if secs_f.is_finite() && secs_f >= 0.0 {
+            let ms = (secs_f.min(MAX_TIMER_SECS as f64) * 1_000.0) as i64;
+            return Some(now + chrono::Duration::milliseconds(ms));
+        }
+    }
+    None
 }

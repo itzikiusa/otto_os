@@ -1,16 +1,18 @@
 // Which agent CLIs can run a personal agent. A persona (its instructions,
 // rules, team and personality) reaches the CLI as a context file handed over
-// for one launch; Gemini and Pi (and a custom CLI) have no such mechanism, so
-// the daemon refuses them (`otto_context::materialize::delivers_context`,
+// for one launch (pi: `--append-system-prompt` + `--skill`); Gemini (and a
+// custom CLI) have no such mechanism, so the daemon refuses them (`otto_context::materialize::delivers_context`,
 // `personal_agents_engine::persona_provider`). Keep the list in step.
 
-import { harnessLabel } from '../../lib/providers';
+import { harnessLabel, providerFamily } from '../../lib/providers';
 
-export const PERSONA_PROVIDERS: readonly string[] = ['claude', 'codex', 'agy', 'grok', 'opencode'];
+export const PERSONA_PROVIDERS: readonly string[] = ['claude', 'codex', 'agy', 'grok', 'opencode', 'pi'];
 
 /** Empty = the daemon's default, Claude. */
 export function canCarryPersona(provider: string | null | undefined): boolean {
-  return PERSONA_PROVIDERS.includes((provider ?? '').trim() || 'claude');
+  const raw = (provider ?? '').trim();
+  if (!raw) return true;
+  return PERSONA_PROVIDERS.includes(providerFamily(raw));
 }
 
 /** The registered providers a personal agent may pick. */
@@ -19,9 +21,14 @@ export function personaProviders(registered: string[]): string[] {
 }
 
 /** A provider to start a new agent on: the configured default when it can
- *  carry a persona, else Claude. */
-export function personaDefault(preferred: string): string {
-  return canCarryPersona(preferred) ? preferred : 'claude';
+ *  carry a persona (and is enabled in `registered` when supplied), else the
+ *  first enabled persona provider (preferring Claude). */
+export function personaDefault(preferred: string, registered?: readonly string[]): string {
+  // Enabled custom slugs of a persona family (e.g. `claudework`) count too.
+  const allowed = registered && registered.length > 0 ? registered.filter(canCarryPersona) : PERSONA_PROVIDERS;
+  if (allowed.includes(preferred)) return preferred;
+  if (allowed.includes('claude')) return 'claude';
+  return allowed[0] ?? (canCarryPersona(preferred) ? preferred : 'claude');
 }
 
 /** Why `provider` is not offered — shown under the picker for an agent saved

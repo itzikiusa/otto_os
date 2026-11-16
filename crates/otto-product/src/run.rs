@@ -107,7 +107,7 @@ pub struct FoundLearning {
 
 /// Outcome of one lens (or the summarizer) running as a real session. This is the
 /// caller-facing shape; the host's run mechanics return their own outcome type,
-/// which [`ProductRunHost::run_agent_with_recovery`] flattens into this (keeping
+/// which `ProductRunHost::run_agent_with_recovery` flattens into this (keeping
 /// `reason` as a stable `&str` for the existing notification/error-note code).
 /// [`LensRunResult::reason`] when a newer run (a Retry after Stop) took the
 /// agent row over mid-flight: the caller must skip every status write (S4-16).

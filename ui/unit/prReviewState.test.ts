@@ -3,8 +3,23 @@
 // changes lands — so the header and reviewer list change at once.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { myReview, myReviewer, withMyReview, withoutMyReview } from '../src/modules/git/pr-review-state.ts';
-import type { PrDetail, PrReviewer } from '../src/lib/api/types';
+import {
+  REVIEW_RECONCILE_WINDOW_MS,
+  createReviewReconciler,
+  myReview,
+  myReviewer,
+  reconcileConfirmedReview,
+  reviewSummaryFrom,
+  withMyReview,
+  withoutMyReview,
+} from '../src/modules/git/pr-review-state.ts';
+import {
+  canonicalizeModelSelection,
+  formatModelChipLabel,
+  stripEmbeddedEffortTier,
+  unifyModelCatalog,
+} from '../src/lib/providerModels.ts';
+import type { PrDetail, PrMergeCheck, PrReviewer, ProviderModelOption } from '../src/lib/api/types';
 
 const me = (n: string) => n.toLowerCase() === 'itzik';
 const rv = (name: string, approved = false, changes_requested = false): PrReviewer => ({ name, approved, changes_requested, avatar_url: null, reviewed_at: null });
@@ -94,4 +109,196 @@ test('withdrawing a change request clears it; approve → withdraw → approve r
   // Withdrawing what isn't yours to withdraw changes nothing.
   const untouched = withoutMyReview(pr([flagged('Ann Lee', false, true)], ['Ann Lee']), 'approved', bbMe);
   assert.deepEqual(untouched.approved_by, ['Ann Lee']);
+});
+
+test('optimistic review updates PrSummary.review and Bitbucket merge_checks immediately', () => {
+  const checks: PrMergeCheck[] = [
+    { key: 'approvals', label: 'At least 1 approval', passed: false, detail: '0 of 1' },
+    { key: 'no_changes_requested', label: 'No changes requested', passed: true, detail: null },
+  ];
+  const initial = {
+    reviewers: [flagged('Ann Lee', false)],
+    approved_by: [],
+    review: reviewSummaryFrom([flagged('Ann Lee', false)], []),
+    merge_checks: checks,
+    updated_at: '2026-11-15T08:00:00Z',
+  } as unknown as PrDetail;
+
+  const approved = withMyReview(initial, 'approved', bbMe, 'Itzik');
+  assert.deepEqual(approved.review, { status: 'approved', approvals: 1 });
+  assert.deepEqual(approved.merge_checks, [
+    { key: 'approvals', label: 'At least 1 approval', passed: true, detail: '1 of 1' },
+    { key: 'no_changes_requested', label: 'No changes requested', passed: true, detail: null },
+  ]);
+
+  const changes = withMyReview(approved, 'changes', bbMe, 'Itzik');
+  assert.deepEqual(changes.review, { status: 'changes_requested', approvals: 0 });
+  assert.deepEqual(changes.merge_checks, [
+    { key: 'approvals', label: 'At least 1 approval', passed: false, detail: '0 of 1' },
+    { key: 'no_changes_requested', label: 'No changes requested', passed: false, detail: '1 reviewer requested changes' },
+  ]);
+
+  const withdrawn = withoutMyReview(changes, 'changes', bbMe);
+  assert.deepEqual(withdrawn.review, { status: 'waiting', approvals: 0 });
+  assert.deepEqual(withdrawn.merge_checks, [
+    { key: 'approvals', label: 'At least 1 approval', passed: false, detail: '0 of 1' },
+    { key: 'no_changes_requested', label: 'No changes requested', passed: true, detail: null },
+  ]);
+});
+
+test('reconcileConfirmedReview shields UI from lagging read replicas after approve/withdraw', () => {
+  // Bitbucket read replica still says Itzik hasn't approved yet right after POST /approve.
+  const staleReplica = pr([flagged('Ann Lee', false), flagged('Itzik Cohen', true, false, false)], []);
+  const rec1 = reconcileConfirmedReview(staleReplica, 'approved', bbMe, 'Itzik');
+  assert.equal(rec1.caughtUp, false);
+  assert.equal(myReview(rec1.detail, bbMe), 'approved');
+  assert.deepEqual(rec1.detail.review, { status: 'approved', approvals: 1 });
+
+  // Replica catches up on the retry.
+  const caughtUpReplica = pr([flagged('Ann Lee', false), flagged('Itzik Cohen', true, true, false)], ['Itzik Cohen']);
+  const rec2 = reconcileConfirmedReview(caughtUpReplica, 'approved', bbMe, 'Itzik');
+  assert.equal(rec2.caughtUp, true);
+  assert.equal(rec2.detail, caughtUpReplica);
+
+  // Lagging replica still says approved right after DELETE /approve.
+  const rec3 = reconcileConfirmedReview(caughtUpReplica, null, bbMe, 'Itzik');
+  assert.equal(rec3.caughtUp, false);
+  assert.equal(myReview(rec3.detail, bbMe), null);
+  assert.deepEqual(rec3.detail.review, { status: 'waiting', approvals: 0 });
+});
+
+test('createReviewReconciler schedules retry when replica lags and clears once caught up', () => {
+  const rec = createReviewReconciler();
+  rec.note('repo-1', 101, 'approved');
+  const stale = pr([flagged('Itzik Cohen', true, false, false)], []);
+  let scheduled = false;
+  const out = rec.reconcile('repo-1', 101, stale, bbMe, 'Itzik', () => { scheduled = true; });
+  assert.equal(myReview(out, bbMe), 'approved');
+  assert.equal(scheduled, false); // timer pending, not fired synchronously
+  const caughtUp = pr([flagged('Itzik Cohen', true, true, false)], ['Itzik Cohen']);
+  const out2 = rec.reconcile('repo-1', 101, caughtUp, bbMe, 'Itzik');
+  assert.equal(out2, caughtUp);
+  rec.clear();
+});
+
+test('reconcileConfirmedReview preserves server updated_at and createReviewReconciler retries 1.5s/3s/4.5s, expires at 12s, and reports ownReviewSettled', () => {
+  let nowMs = 50_000;
+  let nextId = 0;
+  const timers = new Map<number, { fn: () => void; ms: number }>();
+  const rec = createReviewReconciler({
+    now: () => nowMs,
+    setTimer: (fn, ms) => {
+      const id = ++nextId;
+      timers.set(id, { fn, ms });
+      return id as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearTimer: (id) => {
+      timers.delete(id as unknown as number);
+    },
+  });
+
+  const stale = {
+    reviewers: [flagged('Itzik Cohen', true, false, false)],
+    approved_by: [],
+    updated_at: '2026-11-15T09:00:00Z',
+  } as unknown as PrDetail;
+
+  const direct = reconcileConfirmedReview(stale, 'approved', bbMe, 'Itzik');
+  assert.equal(direct.caughtUp, false);
+  assert.equal(direct.serverUpdatedAt, '2026-11-15T09:00:00Z');
+  assert.equal(direct.detail.updated_at, '2026-11-15T09:00:00Z');
+
+  rec.note('repo-1', 101, 'approved');
+  let retryCalls = 0;
+  const expectedDelays = [1500, 3000, 4500];
+  for (const expectedMs of expectedDelays) {
+    const r = rec.reconcileWithMeta('repo-1', 101, stale, bbMe, 'Itzik', () => {
+      retryCalls += 1;
+    });
+    assert.equal(r.ownReviewSettled, false);
+    assert.equal(r.detail.updated_at, '2026-11-15T09:00:00Z');
+    assert.equal(timers.size, 1);
+    const [tid, entry] = [...timers.entries()][0];
+    assert.equal(entry.ms, expectedMs);
+    timers.delete(tid);
+    entry.fn();
+  }
+  assert.equal(retryCalls, 3);
+
+  // 4th lagging read within window still shields UI, but schedules no 4th timer.
+  const r4 = rec.reconcileWithMeta('repo-1', 101, stale, bbMe, 'Itzik', () => {
+    retryCalls += 1;
+  });
+  assert.equal(myReview(r4.detail, bbMe), 'approved');
+  assert.equal(timers.size, 0);
+  assert.equal(retryCalls, 3);
+
+  // Replica catches up with server's bumped `updated_at`: `ownReviewSettled: true` suppresses false "Updated" pill!
+  const caughtUp = {
+    reviewers: [flagged('Itzik Cohen', true, true, false)],
+    approved_by: ['Itzik Cohen'],
+    updated_at: '2026-11-15T09:00:02Z',
+  } as unknown as PrDetail;
+  const settled = rec.reconcileWithMeta('repo-1', 101, caughtUp, bbMe, 'Itzik');
+  assert.equal(settled.detail, caughtUp);
+  assert.equal(settled.ownReviewSettled, true);
+
+  // Subsequent poll after someone else comments is NOT treated as own review settling.
+  const laterComment = { ...caughtUp, updated_at: '2026-11-15T09:05:00Z' } as PrDetail;
+  const after = rec.reconcileWithMeta('repo-1', 101, laterComment, bbMe, 'Itzik');
+  assert.equal(after.ownReviewSettled, false);
+
+  // Window expiry after `REVIEW_RECONCILE_WINDOW_MS` (12s) drops stale write override cleanly.
+  rec.note('repo-1', 101, 'approved');
+  nowMs += REVIEW_RECONCILE_WINDOW_MS + 1;
+  const expired = rec.reconcileWithMeta('repo-1', 101, stale, bbMe, 'Itzik', () => {
+    retryCalls += 1;
+  });
+  assert.equal(expired.detail, stale);
+  assert.equal(myReview(expired.detail, bbMe), null);
+  assert.equal(timers.size, 0);
+});
+
+test('providerModels scopes tier-suffix unification to agy and WeakMap-memoizes catalog arrays', () => {
+  const agyRaw: ProviderModelOption[] = [
+    { id: 'gemini-4-carbon-low', label: 'Gemini 4 Carbon (Low)', description: 'Fast', default_effort: null, supported_efforts: [] },
+    { id: 'gemini-4-carbon-medium', label: 'Gemini 4 Carbon (Medium)', description: 'Balanced', default_effort: null, supported_efforts: [] },
+    { id: 'gemini-4-carbon-high', label: 'Gemini 4 Carbon (High)', description: 'Deep', default_effort: null, supported_efforts: [] },
+  ];
+  const unified1 = unifyModelCatalog('agy', agyRaw);
+  const unified2 = unifyModelCatalog('agy', agyRaw);
+  assert.equal(unified1, unified2, 'expected WeakMap memoization to return identical array instance');
+  assert.equal(unified1.length, 1);
+  assert.equal(unified1[0].id, 'gemini-4-carbon');
+  assert.equal(unified1[0].label, 'Gemini 4 Carbon');
+  assert.deepEqual(unified1[0].supported_efforts, ['low', 'medium', 'high']);
+
+  const meta = { provider_models: { agy: agyRaw } };
+  assert.deepEqual(canonicalizeModelSelection('agy', 'gemini-4-carbon-high', null, meta), {
+    model: 'gemini-4-carbon',
+    effort: 'high',
+  });
+  assert.equal(formatModelChipLabel('agy', 'gemini-4-carbon-high', meta), 'Gemini 4 Carbon');
+
+  // Non-`agy` providers MUST NEVER rewrite custom model IDs ending in `-low` / `-high` / `-max`!
+  const customModels: ProviderModelOption[] = [
+    { id: 'custom-sonnet-high', label: 'Custom Sonnet (High)', description: 'Gateway route', default_effort: null, supported_efforts: [] },
+    { id: 'gpt-5-mini-low', label: 'GPT-5 Mini (Low)', description: 'Low latency route', default_effort: null, supported_efforts: [] },
+    { id: 'qwen-coder-max', label: 'Qwen Coder Max', description: 'Alibaba flagship', default_effort: null, supported_efforts: [] },
+  ];
+  for (const provider of ['claude', 'codex', 'opencode', 'pi']) {
+    assert.equal(stripEmbeddedEffortTier(provider, 'custom-sonnet-high', 'Custom Sonnet (High)'), null);
+    const out = unifyModelCatalog(provider, customModels);
+    assert.equal(out, unifyModelCatalog(provider, customModels));
+    assert.deepEqual(
+      out.map((m) => m.id),
+      ['custom-sonnet-high', 'gpt-5-mini-low', 'qwen-coder-max'],
+    );
+    const nonAgyMeta = { provider_models: { [provider]: customModels } };
+    assert.deepEqual(canonicalizeModelSelection(provider, 'qwen-coder-max', null, nonAgyMeta), {
+      model: 'qwen-coder-max',
+      effort: null,
+    });
+    assert.equal(formatModelChipLabel(provider, 'unlisted-gateway-high', nonAgyMeta), 'unlisted-gateway-high');
+  }
 });

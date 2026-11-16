@@ -164,8 +164,24 @@ const PROVIDER_ROOT_DENY_WRITE_LITERAL: &[&str] = &[
     "CLAUDE.md",
     "AGENTS.md",
     "AGENTS.override.md",
+    "GEMINI.md",
+    "instructions.md",
+    // `mcpServers` every later gemini/agy starts.
+    "mcp_config.json",
+    "config/mcp_config.json",
+    "antigravity/mcp_config.json",
 ];
 const PROVIDER_ROOT_DENY_WRITE_SUBPATH: &[&str] = &[
+    // Code every later session runs: claude's staged installer binaries,
+    // codex's standalone packages / Computer Use bundle, gemini extensions
+    // (their `mcpServers`) and policies — the default homes' allowlist never
+    // opens these either.
+    "downloads",
+    "local",
+    "packages",
+    "computer-use",
+    "extensions",
+    "policies",
     "plugins",
     "hooks",
     "agents",
@@ -226,6 +242,10 @@ const HOME_DENY_WRITE_LITERAL: &[&str] = &[
     ".codex/AGENTS.md",
     ".codex/AGENTS.override.md",
     ".gemini/GEMINI.md",
+    // Muse Code: its settings (`mcpServers`, permission profiles, hooks) and
+    // its user rules. `auth.json` beside them stays writable (token refresh).
+    ".config/muse/settings.json",
+    ".config/muse/AGENTS.md",
 ];
 const HOME_DENY_WRITE_SUBPATH: &[&str] = &[
     ".config/git",
@@ -251,6 +271,13 @@ const HOME_DENY_WRITE_SUBPATH: &[&str] = &[
     // Gemini CLI extensions declare `mcpServers` that every gemini/agy starts.
     ".gemini/extensions",
     ".gemini/skills",
+    // Muse Code's user skills, plugins and hooks.
+    ".config/muse/skills",
+    ".config/muse/plugins",
+    ".config/muse/hooks",
+    ".config/muse/rules",
+    ".local/share/muse/plugins",
+    ".local/share/muse/skills",
     // Otto's own context bundles: every claude session is launched with
     // `--settings ~/.otto/context/claude/<cwd>/settings.json` (hooks).
     ".otto/context",
@@ -326,6 +353,17 @@ const CLI_STATE_DIRS: &[(&str, &[&str])] = &[
             // `mcp_config.json`, whose `mcpServers` every gemini/agy starts.
             "config/projects",
         ],
+    ),
+    // Muse Code keeps its config (`settings.json`, `auth.json`, `skills/`)
+    // under `$XDG_CONFIG_HOME/muse` and its state under `$XDG_DATA_HOME/muse`.
+    // The config home grants only its top-level files (a login's token
+    // refresh), minus the denied settings; the data home its session logs,
+    // index and runtime sockets — NOT `plugins/` or `skills/` (code every
+    // later session loads).
+    (".config/muse", &[]),
+    (
+        ".local/share/muse",
+        &["sessions", "session-server", "runtime", "local-tracing"],
     ),
 ];
 
@@ -630,6 +668,23 @@ impl SandboxPolicy {
             .map(|p| filter("literal", Path::new(p)))
             .collect();
         trailing.push(format!("(deny process-exec {})", exec.join(" ")));
+        // Session holders' sockets (runtime `<data_dir>/runtime-holders`, PTY
+        // `<data_dir>/pty-holders`, and their short-path fallbacks
+        // `/tmp/otto-rth-<hash>` / `$TMPDIR/otto-ptyh-<hash>`): connecting to
+        // one replays another session's output and types into it, and a file
+        // deny does not stop `connect()`. One `remote unix-socket` per filter.
+        let mut sockets = vec![
+            r#"(remote unix-socket (path-regex #"/otto-(rth|ptyh)-[0-9a-f]+/[^/]+$"))"#.to_string(),
+        ];
+        if data_dir_set {
+            for d in ["runtime-holders", "pty-holders"] {
+                sockets.push(format!(
+                    "(remote unix-socket {})",
+                    filter("subpath", &data_dir.join(d))
+                ));
+            }
+        }
+        trailing.push(format!("(deny network-outbound {})", sockets.join(" ")));
 
         Self {
             writable_roots: roots,
@@ -687,6 +742,13 @@ impl SandboxPolicy {
             "(deny file-read* file-write* {})",
             secrets.join(" ")
         ));
+        // Live OpenSSH ControlMaster sockets (IDE `/tmp/oi-<pid>-<n>/c.s`, SFTP
+        // `$TMPDIR/otto-sftp-*/ctl.sock`) would hand this session a logged-in
+        // shell on the remote host without the `~/.ssh` it is denied above.
+        pol.trailing_rules.push(
+            r#"(deny network-outbound (remote unix-socket (path-regex #"/(oi-[0-9]+-[0-9]+|otto-sftp-[^/]+)/[^/]+$")))"#
+                .to_string(),
+        );
         pol
     }
 
@@ -711,6 +773,53 @@ impl SandboxPolicy {
             self.trailing_rules.push(format!("(deny file-write* {r})"));
         }
         self
+    }
+
+    /// Re-open a custom provider CLI home (e.g. `CLAUDE_CONFIG_DIR=~/.claude-work`)
+    /// only when it is an absolute path outside `data_dir` that does NOT cover
+    /// `home` or `/`. When `read_only` is true, also write-denies
+    /// `<root>/projects/*/memory` to match `~/.claude/projects/*/memory`.
+    pub fn allow_provider_home_safe(
+        self,
+        root: &Path,
+        home: &Path,
+        data_dir: &Path,
+        read_only: bool,
+    ) -> Self {
+        if !root.is_absolute() {
+            return self;
+        }
+        let canon_root = canonicalize_lenient(root);
+        let canon_home = canonicalize_lenient(home);
+        if canon_root.as_os_str().is_empty() || covers_home(&canon_root, &canon_home) {
+            return self;
+        }
+        if !data_dir.as_os_str().is_empty() {
+            let canon_data = canonicalize_lenient(data_dir);
+            if canon_root.starts_with(&canon_data) {
+                return self;
+            }
+        }
+        // The default homes keep their stricter `for_agent` allowlist even when
+        // `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GEMINI_CLI_HOME` names them.
+        if !home.as_os_str().is_empty()
+            && [".claude", ".codex", ".gemini"]
+                .iter()
+                .any(|d| canon_root == canonicalize_lenient(&home.join(d)))
+        {
+            return self;
+        }
+        let mut pol = self.allow_provider_home(&canon_root);
+        if read_only {
+            let projects = canon_root.join("projects");
+            if let Some(d) = projects.to_str().filter(|d| !d.contains('"')) {
+                pol.trailing_rules.push(format!(
+                    "(deny file-write* (regex #\"^{}/[^/]+/memory(/|$)\"))",
+                    regex_escape(d)
+                ));
+            }
+        }
+        pol
     }
 
     /// Build the policy for a **daemon-spawned tool** (today: a headless Blender
@@ -1179,6 +1288,15 @@ mod tests {
         assert!(sbpl.contains(&format!("(subpath \"{data}/tls\")")));
         // The carve-outs come after every grant, network included.
         assert!(deny > at(&sbpl, "(allow network-outbound)"));
+        // No session reaches another session's holder socket.
+        let sockets = at(&sbpl, "(deny network-outbound (remote unix-socket");
+        assert!(sockets > at(&sbpl, "(allow network-outbound)"));
+        for d in ["runtime-holders", "pty-holders"] {
+            assert!(
+                sbpl[sockets..].contains(&format!("(remote unix-socket (subpath \"{data}/{d}\"))"))
+            );
+        }
+        assert!(sbpl[sockets..].contains(r#"/otto-(rth|ptyh)-[0-9a-f]+/[^/]+$"#));
     }
 
     /// Design-assist turns edit `<data>/design/<artifact>/work/**` in place:
@@ -1602,13 +1720,45 @@ mod tests {
                 "{rel} must not be a writable root"
             );
         }
-        for rel in [".codex/sessions", ".codex/tmp", ".gemini/antigravity-cli"] {
+        for rel in [
+            ".codex/sessions",
+            ".codex/tmp",
+            ".gemini/antigravity-cli",
+            ".local/share/muse/sessions",
+            ".local/share/muse/runtime",
+        ] {
             assert!(
                 pol.writable_roots.iter().any(|r| r == &h.join(rel)),
                 "{rel}"
             );
         }
+        for rel in [
+            ".config/muse",
+            ".local/share/muse",
+            ".local/share/muse/plugins",
+        ] {
+            assert!(
+                !pol.writable_roots.iter().any(|r| r == &h.join(rel)),
+                "{rel} must not be a writable root"
+            );
+        }
         let sbpl = pol.to_sbpl();
+        // Muse: its top-level files (auth.json) yes, its settings, skills and
+        // plugins never.
+        let muse_top = at(
+            &sbpl,
+            "(regex #\"^/nonexistent-otto-home/u/\\.config/muse/[^/]+$\")",
+        );
+        for deny in [
+            "(literal \"/nonexistent-otto-home/u/.config/muse/settings.json\")",
+            "(subpath \"/nonexistent-otto-home/u/.config/muse/skills\")",
+            "(subpath \"/nonexistent-otto-home/u/.local/share/muse/plugins\")",
+        ] {
+            assert!(
+                at(&sbpl, deny) > muse_top,
+                "{deny} must follow the top-level allow"
+            );
+        }
         let top = at(
             &sbpl,
             "(regex #\"^/nonexistent-otto-home/u/\\.codex/[^/]+$\")",
@@ -1713,6 +1863,10 @@ mod tests {
             "(deny file-read* file-write* (subpath \"/nonexistent-otto-home/u/.ssh\")",
         );
         assert!(deny > read_all);
+        assert!(
+            at(&sbpl, "(deny network-outbound (remote unix-socket") > read_all,
+            "read-only sessions must not reach live SSH mux sockets"
+        );
         for rel in [".aws", ".gnupg", ".config/gh", ".kube", ".netrc"] {
             assert!(
                 sbpl[deny..].contains(&format!("(subpath \"/nonexistent-otto-home/u/{rel}\")")),
@@ -1755,9 +1909,29 @@ mod tests {
             "(subpath \"{s}/skills\")",
             "(literal \"{s}/AGENTS.md\")",
             "(subpath \"{s}/prompts\")",
+            "(subpath \"{s}/packages\")",
+            "(subpath \"{s}/extensions\")",
+            "(literal \"{s}/config/mcp_config.json\")",
         ] {
             let f = f.replace("{s}", shadow);
             assert!(sbpl[reopen..].contains(&f), "{f}");
+        }
+    }
+
+    #[test]
+    fn explicit_default_cli_home_keeps_its_allowlist() {
+        let home = Path::new("/nonexistent-otto-home/u");
+        let base = agent_policy("/nonexistent-otto-test/Otto").to_sbpl();
+        for d in [".claude", ".codex", ".gemini"] {
+            let sbpl = agent_policy("/nonexistent-otto-test/Otto")
+                .allow_provider_home_safe(
+                    &home.join(d),
+                    home,
+                    Path::new("/nonexistent-otto-test/Otto"),
+                    false,
+                )
+                .to_sbpl();
+            assert_eq!(sbpl, base, "{d} must not be re-opened wholesale");
         }
     }
 }

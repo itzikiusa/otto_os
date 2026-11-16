@@ -253,6 +253,12 @@ const PUBLIC_ROUTES: &[&str] = &[
     "POST /api/v1/webhooks/{workspace_id}",
     // Room guests join with an invite credential.
     "POST /api/v1/room-join",
+    // IDE "Share with Friends" guest POST routes (capability token / peer_secret
+    // verified inside JSON body; GET state/events answer 401 without ?token=).
+    "POST /api/v1/ide/collab/guest/{room_id}/cursor",
+    "POST /api/v1/ide/collab/guest/{room_id}/debug-action",
+    "POST /api/v1/ide/collab/guest/{room_id}/edit",
+    "POST /api/v1/ide/collab/guest/{room_id}/join",
     // Plugin host API — the plugin's own host token.
     "GET /api/v1/plugin-host/jira/credentials",
     "POST /api/v1/plugin-host/agents/run",

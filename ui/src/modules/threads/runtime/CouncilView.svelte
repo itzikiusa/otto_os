@@ -15,11 +15,13 @@
   import { announceShown } from '../../../lib/announce.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
-  import type { CouncilRound, RuntimeProvider } from '../../../lib/api/types';
+  import type { CouncilRound, RuntimeProviderOrSlug } from '../../../lib/api/types';
   import { loadErrorText } from '../../../lib/loadError';
-  import { agentProviders, harnessLabel, providerReadiness } from '../../../lib/providers';
+  import { agentProviders, harnessLabel, providerReadiness, sessionProviderSlug } from '../../../lib/providers';
   import type { RuntimeEmbedStatus } from '../../../lib/runtimeThreadPort';
+  import { auth } from '../../../lib/stores/auth.svelte';
   import { now } from '../../../lib/stores/now.svelte';
+  import { getTransientComposerDraft, saveTransientComposerDraft } from '../../../lib/stores/runtimeDraftCursor';
   import { toastError } from '../../../lib/toastError';
   import { councilMembers, councilOf, councilSyntheses } from './council';
   import { askOthersText, missingSeats, roundSynthBlocker, seatRounds, synthesisRound, type SeatRound, type SeatRoundState } from './councilRounds';
@@ -47,7 +49,7 @@
   const working = (id: string): boolean => statuses[id] === 'working' || runtimeThreads.get(id)?.status === 'working';
   /** The seat a phone shows (index into `seats`, or -1 = the synthesis). */
   let picked = $state(0);
-  let judge = $state<RuntimeProvider | null>(null);
+  let judge = $state<string | null>(null);
   let judgeEl = $state<HTMLButtonElement | null>(null);
   let synthesizing = $state(false);
   let synthError = $state<string | null>(null);
@@ -112,7 +114,7 @@
     ...seats.map((_, i) => ({ id: String(i), label: `Seat ${seatNo(i)}`, testid: `council-tab-${seatNo(i)}` })),
     ...(synthesis ? [{ id: '-1', label: 'Synthesis', testid: 'council-tab-synthesis' }] : []),
   ]);
-  const judgeProvider = $derived<RuntimeProvider>(judge ?? seats[0]?.provider ?? 'claude');
+  const judgeProvider = $derived<RuntimeProviderOrSlug>(judge ?? (seats[0] ? sessionProviderSlug(seats[0]) : 'claude'));
   const blocker = $derived(
     seats.length
       ? roundSynthBlocker(current.n, currentSeats, synthesis ? working(synthesis.id) : false, seats[0]?.status === 'closed')
@@ -131,6 +133,19 @@
     ).catch((e: unknown) => (loadError = loadErrorText(e)));
   });
   const councilId = $derived(members?.meta.id ?? null);
+  const councilDraftKey = $derived(`council:${councilId ?? sessionId}`);
+  let activeCouncilDraftKey = '';
+  $effect(() => {
+    const key = councilDraftKey;
+    if (key !== activeCouncilDraftKey) {
+      activeCouncilDraftKey = key;
+      followText = getTransientComposerDraft(key);
+    }
+  });
+  function setFollowText(next: string): void {
+    followText = next;
+    saveTransientComposerDraft(councilDraftKey, next);
+  }
   $effect(() => {
     const cid = councilId;
     const id = sessionId;
@@ -152,7 +167,7 @@
 
   function pickJudge(): void {
     if (!judgeEl) return;
-    const options = agentProviders().filter(isRuntimeProvider);
+    const options = agentProviders().filter((p) => isRuntimeProvider(p, auth.meta));
     ctxMenu.showAt(
       judgeEl,
       options.map((p) => ({
@@ -190,7 +205,7 @@
       const to = [...targets];
       const all = to.length === seatNumbers.length;
       await council.followUp(councilId, seats[0].id, { text, ...(all ? {} : { seats: to }) });
-      followText = '';
+      setFollowText('');
       followTargets = [];
       // On a phone, the seat asked (or the first one) is in view.
       picked = Math.max(0, seatNumbers.indexOf(to[0]));
@@ -214,7 +229,7 @@
   }
 
   function askOthers(n: number, answer: string): void {
-    followText = askOthersText(n, answer);
+    setFollowText(askOthersText(n, answer));
     followTargets = seatNumbers.filter((m) => m !== n);
     followError = null;
   }
@@ -323,6 +338,7 @@
     </div>
 
     <CouncilComposer
+      draftKey={councilDraftKey}
       {seatNumbers}
       {targets}
       text={followText}
@@ -333,7 +349,7 @@
       working={workingSeats.length}
       {stopping}
       ontargets={(t) => (followTargets = t.length === seatNumbers.length ? [] : t)}
-      ontext={(t) => (followText = t)}
+      ontext={setFollowText}
       onsend={() => void sendFollowUp()}
       onstop={() => void stopAll()}
     />

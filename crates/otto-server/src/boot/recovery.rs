@@ -12,12 +12,20 @@ use crate::state::ServerCtx;
 /// Restore sessions, fail orphaned reviews / skill evals, settle interrupted
 /// API runs and recover workflow runs. Marks the `restore` boot phase.
 pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Result<(), String> {
-    restore_sessions(ctx).await?;
+    // Adopt detached runtime-holder processes before `restore_sessions` sweeps
+    // per-session `OTTO_MCP_TOKEN` credentials so live runtime sessions keep
+    // working MCP tools across restart, while unadopted turns end `interrupted`.
+    let adopted_runtime = match ctx.agent_runtime.recover_and_adopt().await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("agent-runtime recovery: {e}");
+            std::collections::HashSet::new()
+        }
+    };
+    restore_sessions(ctx, &adopted_runtime).await?;
     boot.mark("restore");
     fail_orphaned_reviews(ctx).await;
     fail_orphaned_skill_evals(ctx).await;
-    // Structured runtime: turns the last life left open end `interrupted`.
-    warn_on_err("agent-runtime recovery", ctx.agent_runtime.recover().await);
     // Hand-offs to personal agents that restart interrupted (or whose
     // outcome never reached the main agent's chat) are reported there now —
     // delivery runs in the background, after this settles their rows' state.
@@ -70,7 +78,10 @@ fn warn_on_err<T>(step: &str, result: otto_core::Result<T>) {
 
 /// Restore sessions from the previous daemon run: resumable agent
 /// sessions respawn, everything else becomes reconnectable.
-async fn restore_sessions(ctx: &ServerCtx) -> Result<(), String> {
+async fn restore_sessions(
+    ctx: &ServerCtx,
+    adopted_runtime: &std::collections::HashSet<otto_core::Id>,
+) -> Result<(), String> {
     let ws_paths: std::collections::HashMap<String, String> = ctx
         .workspaces
         .list_all()
@@ -79,9 +90,13 @@ async fn restore_sessions(ctx: &ServerCtx) -> Result<(), String> {
         .into_iter()
         .map(|w| (w.id, w.root_path))
         .collect();
+    let extra_keep: Vec<otto_core::Id> = adopted_runtime.iter().cloned().collect();
     match ctx
         .manager
-        .restore_all(&move |ws_id| ws_paths.get(ws_id.as_str()).cloned())
+        .restore_all_with_kept(
+            &move |ws_id| ws_paths.get(ws_id.as_str()).cloned(),
+            &extra_keep,
+        )
         .await
     {
         Ok(summary) => {

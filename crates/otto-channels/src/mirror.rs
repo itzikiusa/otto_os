@@ -738,11 +738,17 @@ impl Mirror {
                 return None;
             }
             if let Ok(session) = self.manager.get(session_id).await {
-                if !matches!(session.provider.as_str(), "claude" | "codex") {
+                // A custom slug (`claudework`) tails its CLI family's transcript.
+                let family = self
+                    .manager
+                    .providers()
+                    .model_family_for(&session.provider)
+                    .unwrap_or(session.provider);
+                if !matches!(family.as_str(), "claude" | "codex") {
                     return None;
                 }
                 if let Some(path) = self.manager.activity_artifact(session_id).await {
-                    return Some((session.cwd, path, session.provider));
+                    return Some((session.cwd, path, family));
                 }
             }
             if Instant::now() >= deadline {

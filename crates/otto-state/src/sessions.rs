@@ -415,7 +415,7 @@ impl SessionsRepo {
     ///
     /// Used to owner-scope the session list for non-admin callers so user A's
     /// sessions never appear in user B's list (leak #L1). Admins/root keep the
-    /// unfiltered [`list_by_workspace`].
+    /// unfiltered `list_by_workspace`.
     pub async fn list_by_workspace_for_user(&self, ws: &Id, user_id: &Id) -> Result<Vec<Session>> {
         let rows = sqlx::query(
             "SELECT * FROM sessions WHERE workspace_id = ? AND created_by = ? ORDER BY created_at",

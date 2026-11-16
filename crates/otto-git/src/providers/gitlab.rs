@@ -562,6 +562,10 @@ impl super::GitProvider for Gitlab {
         self.edit_reviewers(r, number, add, remove).await
     }
 
+    fn invalidate_repo_reads(&self, r: &RemoteRef) {
+        super::client::invalidate_scope(&format!("{}/api/v4{}", self.base, Self::mr_path(r, "")));
+    }
+
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {
         // The MR, its discussions, approvals and pipeline status are
         // independent reads — fetched together (≈1 forge RTT, not 4).

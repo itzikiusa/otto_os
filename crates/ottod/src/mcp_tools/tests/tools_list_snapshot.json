@@ -2331,7 +2331,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "claude|codex|gemini|grok|opencode|pi"
+          "description": "claude|codex|gemini|grok|opencode|pi|muse"
         },
         "prompt": {
           "type": "string"
@@ -2411,7 +2411,7 @@
         },
         "provider": {
           "type": "string",
-          "description": "claude|codex|gemini|grok|opencode|pi (default: yours)"
+          "description": "claude|codex|agy|grok|opencode|pi (default: yours)"
         },
         "model": {
           "type": "string"

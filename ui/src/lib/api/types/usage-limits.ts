@@ -30,7 +30,7 @@ export interface WindowLimit {
 
 export interface AccountLimits {
   key: string;
-  provider: 'codex' | 'claude' | 'agy' | 'grok' | string;
+  provider: 'codex' | 'claude' | 'agy' | 'grok' | 'muse' | string;
   account_id: string | null;
   label: string;
   /** `default` (the CLI's own home) | `config_dir` (~/.claude-*) | `account` (an Otto profile). */

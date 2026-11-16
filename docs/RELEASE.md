@@ -156,6 +156,11 @@ the app and the daemon together: the app's supervisor reinstalls its bundled
 `ottod` at every launch, so restoring `bin/ottod.prev` alone does not stick
 while a newer app is installed.
 
+Before rolling back below 0.3.0, close and delete any Muse threads: a 0.2.x
+daemon can't read a Muse thread row, and its Threads list then fails to load.
+Builds from 0.3.0 on skip (and log) a thread row with a provider they don't
+know.
+
 ## Walkthrough videos (separate from the DMG)
 
 The in-app Walkthroughs page streams its MP4s from the rolling GitHub release

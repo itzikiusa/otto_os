@@ -27,6 +27,10 @@ pub struct RuntimeDraftContent {
     pub text: String,
     pub images: Vec<PromptFile>,
     pub model: Option<String>,
+    /// True when the user explicitly chose "Default model" (`model: null` in UI)
+    /// rather than leaving the model untouched (`model: undefined` / inherit).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_default: bool,
     pub effort: Option<String>,
     pub access_mode: Option<RuntimeAccessMode>,
     pub fresh_context: bool,

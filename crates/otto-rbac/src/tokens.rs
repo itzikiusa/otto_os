@@ -22,9 +22,9 @@
 //!   cache-less `AuthRepo::new(pool)` repos (S8-302), so there is no window
 //!   where a revoked token is served from the authenticator's cache.
 //! - Grant changes invalidate the user's cached context via
-//!   [`GrantsInvalidator::invalidate_user`], implemented by `AuthCache`.
+//!   `GrantsInvalidator::invalidate_user`, implemented by `AuthCache`.
 //! - The cache is disabled entirely (all paths hit the DB) when
-//!   [`AUTH_CACHE_ENABLED`] is `false`.
+//!   `AUTH_CACHE_ENABLED` is `false`.
 
 use chrono::{DateTime, Duration, Utc};
 use otto_core::api::{ApiTokenInfo, McpTokenInfo, ShareInfo};
@@ -1213,7 +1213,7 @@ impl AuthRepo {
     /// the RAW token (shown to the caller exactly once).
     ///
     /// The token's TTL is a SHORT fixed window (`ttl`, e.g. 30 min); it is never
-    /// slid in [`authenticate`], so the overlay always times out predictably.
+    /// slid in `authenticate`, so the overlay always times out predictably.
     /// All guardrails (caller authority, no impersonating up/sideways, no nesting,
     /// disabled/absent/self target) are enforced by the *route* before this is
     /// called — this method only persists the row.
@@ -1357,13 +1357,13 @@ impl AuthRepo {
     ///   share can never escalate.
     /// - **Short FIXED TTL** — `ttl_secs` is clamped to
     ///   `[SHARE_TOKEN_TTL_MIN_SECS, SHARE_TOKEN_TTL_MAX_SECS]` and `expires_at`
-    ///   is `now + ttl`; [`authenticate`] never slides it.
+    ///   is `now + ttl`; `authenticate` never slides it.
     /// - Stored hashed exactly like a PAT (`kind='share'`, `session_scope`,
     ///   `scope_role`, `revoked=0`); the raw 64-hex token never persists.
     ///
     /// The share's effective identity is the **owner who minted it** (the
     /// `user_id`) — this is *not* impersonation; containment to the one session
-    /// is provided entirely by the scope the [`authenticate`] path attaches.
+    /// is provided entirely by the scope the `authenticate` path attaches.
     pub async fn issue_share_token(
         &self,
         owner_user_id: &Id,
@@ -1426,7 +1426,7 @@ impl AuthRepo {
     /// Mint a scoped share-link token **gated by an emailed OTP** (mobile plan
     /// Task 7.2 / design addendum "Email-OTP gate for share links").
     ///
-    /// Like [`issue_share_token`] but additionally:
+    /// Like `issue_share_token` but additionally:
     /// - generates a **6-digit OTP** from the OS RNG and stores only its SHA-256
     ///   (`otp_hash`) — the plaintext is returned exactly once so the caller can
     ///   email it (the DB never holds the raw code);
@@ -1439,7 +1439,7 @@ impl AuthRepo {
     ///   guest redeems the code via `verify_share_otp`.
     ///
     /// The scoped-token `expires_at` (the bearer-token TTL the base
-    /// [`authenticate`] checks) is set to the same window end so the token row
+    /// `authenticate` checks) is set to the same window end so the token row
     /// can never outlive its session window. Returns the RAW token, the RAW OTP
     /// (caller emails it), and the [`ShareInfo`] metadata.
     #[allow(clippy::too_many_arguments)]

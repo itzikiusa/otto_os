@@ -1,22 +1,21 @@
 <script lang="ts">
   // The calm start state (T3 Code's draft hero): one heading that names the
   // project, ONE composer — attach on the start, a single agent chip (harness ·
-  // model · effort, Panda-style) and a round send on the end — and a quiet meta
-  // row under it: checkout on the start, branch + access mode on the end. Every
-  // other launch option (empty thread, open beside) lives in the agent chip's
-  // menu; the project card floats top-right on wide screens.
-  import { enterSends } from '../../lib/enterSends';
+  // model · effort) and a round send on the end — unified `@` file/folder &
+  // agent completion (`RuntimeMentionMenu`), `/` slash popup, Council picker,
+  // and `NewThreadMetaRow` beneath it.
   import { untrack } from 'svelte';
   import { announceShown } from '../../lib/announce.svelte';
   import { api } from '../../lib/api/client';
-  import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import type { Repo } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { enterSends } from '../../lib/enterSends';
   import { checkFolder } from '../../lib/folderCheck';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import {
     formatEffortShort,
-    formatInteractionModeLabel,
     formatModelLabel,
     nextInteractionModeToggle,
     supportsEffortSelection,
@@ -24,45 +23,46 @@
     type EffortLevel,
     type InteractionMode,
   } from '../../lib/providerModels';
-  import { agentProviders, defaultAgentProvider, providerReadiness } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider, orderThreadHarnesses, providerReadiness, runtimeBaselineCaps } from '../../lib/providers';
   import {
     isImmediateSlashCommand,
     parseInteractiveSlashInput,
     type ComposerSlashCommand,
   } from '../../lib/slashActions';
   import { auth } from '../../lib/stores/auth.svelte';
+  import { composerViewState, getTransientComposerDraft, saveTransientComposerDraft } from '../../lib/stores/runtimeDraftCursor';
   import { git } from '../../lib/stores/git.svelte';
   import { transcript } from '../../lib/stores/transcript.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
-  import type { Repo } from '../../lib/api/types';
   import { buildFolderMenuItems, buildWorkspaceMenuItems, STAGE_SLASH_COMMANDS } from './newThreadMenus';
-  import { openBranchMenu, openCheckoutMenu } from './threadGitMenus';
-  import { lazyComponent } from '../../lib/lazy-component.svelte';
-  // The model panel loads on first open (prefetched when the chip is hovered).
-  const ModelPicker = lazyComponent(() => import('../../lib/components/ModelPickerPopover.svelte'));
-  import { buildModeMenu } from './threadPickerMenus';
-  import StageSlashPopup from './StageSlashPopup.svelte';
-  import ThreadProjectCard from './ThreadProjectCard.svelte';
-  import { harnessLabel, projectNameFromCwd, relToRoot } from './threadsHelpers';
-  import { threadRepos } from './threadRepos.svelte';
-  import { threads } from './threadsStore.svelte';
-  import { isRuntimeProvider, runtimeThreads } from './runtime/runtimeThreads.svelte';
-  import { council, councilAgentLabel } from './runtime/councilStore.svelte';
+  import NewThreadMetaRow from './NewThreadMetaRow.svelte';
+  import { addComposerContext, assembleComposerMessage, fileMentionContext, type ComposerContext } from './runtime/composerContext';
   import CouncilStagePicker from './runtime/CouncilStagePicker.svelte';
+  import { council, councilAgentLabel } from './runtime/councilStore.svelte';
+  import { handleSlashMenuKey } from './runtime/runtimeComposer';
+  import RuntimeContextChips from './runtime/RuntimeContextChips.svelte';
+  import type { PickedAgentMention, PickedFileMention } from './runtime/RuntimeMentionMenu.svelte';
+  import { isRuntimeProvider, runtimeThreads } from './runtime/runtimeThreads.svelte';
+  import StageAttach from './runtime/StageAttach.svelte';
+  import { StageAttachments } from './runtime/stageAttachments.svelte';
+  import { capsOf } from './runtime/attachmentSupport';
+  import { placeholderTitle } from './threadTitle';
+  import { FolderPickerModal, MentionMenuView, ProjectCardView, StageSlashView } from './threadLazy.svelte';
+  import { buildModeMenu } from './threadPickerMenus';
+  import { threadRepos } from './threadRepos.svelte';
+  import { harnessLabel, projectNameFromCwd, relToRoot } from './threadsHelpers';
+  import { threads } from './threadsStore.svelte';
+
+  const ModelPicker = lazyComponent(() => import('../../lib/components/ModelPickerPopover.svelte'));
 
   interface Props {
-    /** Float the project card top-right (wide screen, right panel closed). */
     showCard?: boolean;
   }
   let { showCard = false }: Props = $props();
 
-  const harnesses = $derived.by(() => {
-    const merged = ['claude', 'codex', 'agy'];
-    for (const p of agentProviders()) if (!merged.includes(p)) merged.push(p);
-    return merged;
-  });
+  const harnesses = $derived(orderThreadHarnesses(agentProviders()));
 
   let provider = $state('');
   let selectedModel = $state<string | null>(null);
@@ -71,24 +71,50 @@
   let cwd = $state('');
   let useScratch = $state(false);
   let prompt = $state('');
+  let stageContext = $state<ComposerContext[]>([]);
   let cwdError = $state('');
   let busy = $state(false);
   let picker = $state<'none' | 'folder' | 'file'>('none');
   let openInBeside = $state(false);
   let worktree = $state<{ path: string; branch: string | null; repo: Repo } | null>(null);
+  let composerBoxEl = $state<HTMLDivElement | null>(null);
   let composerEl = $state<HTMLTextAreaElement | null>(null);
   let agentEl = $state<HTMLButtonElement | null>(null);
-  let modeEl = $state<HTMLButtonElement | null>(null);
   let projectEl = $state<HTMLButtonElement | null>(null);
+  let mentionEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
 
   const homePath = $derived(ws.scratch?.root_path ?? '~');
   const scratchActive = $derived(useScratch || ws.current === null);
   const targetWs = $derived(scratchActive ? SCRATCH_WORKSPACE_ID : (ws.currentId ?? SCRATCH_WORKSPACE_ID));
-  // Claude / Codex / Gemini / Grok threads run on the structured runtime:
-  // they always ask before acting (no access-mode switch).
-  const runtime = $derived(isRuntimeProvider(provider));
-  const modeSupported = $derived(supportsInteractionMode(provider) && !runtime);
+  const runtime = $derived(isRuntimeProvider(provider, auth.meta));
+  // A runtime thread's attachments, plan mode and effort levels come from what
+  // its agent reports (`MetaResp.runtime_capabilities`), never from its name.
+  const stageCaps = $derived(capsOf(null, runtimeBaselineCaps(provider, auth.meta)));
+  const files = new StageAttachments(() => stageCaps, () => runtime && !council.on);
+  const modeSupported = $derived(supportsInteractionMode(provider, auth.meta) && !runtime);
+  const planSupported = $derived(runtime && !!stageCaps.plan);
+  const takesEffort = $derived(runtime ? (stageCaps.efforts?.length ?? 0) > 0 : supportsEffortSelection(provider, auth.meta));
   const cleanCwd = $derived(cwd.trim().replace(/\/+$/, ''));
+  const stageDraftKey = $derived(`threads-stage:${cleanCwd || targetWs}`);
+  const stageViewStateArg = $derived({ key: stageDraftKey, hasText: prompt.length > 0 });
+  let hydratedStageKey = '';
+  $effect(() => {
+    const key = stageDraftKey;
+    if (key !== hydratedStageKey) {
+      hydratedStageKey = key;
+      const saved = getTransientComposerDraft(key);
+      if (saved && !prompt) {
+        prompt = saved;
+      }
+    }
+  });
+  $effect(() => {
+    const key = stageDraftKey;
+    const val = prompt;
+    if (key === hydratedStageKey) {
+      saveTransientComposerDraft(key, val);
+    }
+  });
   const onWorktree = $derived(worktree !== null && worktree.path.replace(/\/+$/, '') === cleanCwd);
   const repo = $derived(onWorktree ? worktree!.repo : threadRepos.repoFor(cleanCwd, scratchActive ? null : ws.currentId));
   const branch = $derived(onWorktree ? worktree!.branch : repo ? (git.statusById[repo.id]?.branch ?? null) : null);
@@ -99,14 +125,14 @@
     const meta = auth.meta;
     if (council.on) return councilAgentLabel(meta);
     const model = selectedModel ? formatModelLabel(provider, selectedModel, meta) : harnessLabel(provider);
-    return supportsEffortSelection(provider) && selectedEffort ? `${model} · ${formatEffortShort(selectedEffort)}` : model;
+    return takesEffort && selectedEffort ? `${model} · ${formatEffortShort(selectedEffort)}` : model;
   });
 
   $effect(() => {
-    if (!provider) {
+    if (!provider || (harnesses.length > 0 && !harnesses.includes(provider))) {
       const def = defaultAgentProvider();
       const ready = harnesses.find((h) => providerReadiness(h).available);
-      provider = providerReadiness(def).available ? def : (ready ?? harnesses[0] ?? 'claude');
+      provider = harnesses.includes(def) && providerReadiness(def).available ? def : (ready ?? harnesses[0] ?? def);
     }
   });
 
@@ -116,12 +142,10 @@
       cwd = seeded;
       useScratch = false;
     } else if (!cwd) {
-      // T3's "use last project": a fresh draft opens where the last thread started.
       cwd = threads.lastProject ?? (scratchActive ? homePath : (ws.current?.root_path ?? homePath));
     }
   });
 
-  // The inspector / project card follow the folder this draft targets.
   $effect(() => {
     threads.stageCwd = cleanCwd || null;
   });
@@ -142,7 +166,11 @@
     cwdError = '';
   }
 
+  const SUPPORTS_FIELD_SIZING =
+    typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('field-sizing', 'content');
+
   function autoGrow(el: HTMLTextAreaElement): void {
+    if (SUPPORTS_FIELD_SIZING) return;
     el.style.height = 'auto';
     el.style.height = `${Math.min(240, Math.max(56, el.scrollHeight))}px`;
   }
@@ -156,20 +184,17 @@
     });
   }
 
-  // ── Menus ────────────────────────────────────────────────────────────────
-
-  // The one model panel (T3): provider rail · models · reasoning · access.
   let pickerOpen = $state(false);
   function openModelMenu(): void {
     if (agentEl) pickerOpen = true;
   }
   const openEffortMenu = openModelMenu;
-  // A ⌘ / Shift-click on a model starts "Ask several" with the current pick.
   $effect(() => (pickerOpen ? untrack(() => council.watchModifiers({ provider, model: selectedModel, effort: selectedEffort })) : undefined));
 
-  function openModeMenu(): void {
-    if (!modeEl || !modeSupported) return;
-    ctxMenu.showAt(modeEl, buildModeMenu(interactionMode, (m) => (interactionMode = m)), { align: 'end' });
+  function openModeMenu(anchor?: HTMLElement): void {
+    const target = anchor ?? agentEl;
+    if (!target || !modeSupported) return;
+    ctxMenu.showAt(target, buildModeMenu(interactionMode, (m) => (interactionMode = m)), { align: 'end' });
   }
 
   function openProjectMenu(anchor: HTMLElement): void {
@@ -216,8 +241,6 @@
     );
   }
 
-  // ── Launch ───────────────────────────────────────────────────────────────
-
   async function launch(withPrompt: boolean, overridePrompt?: string): Promise<void> {
     if (busy) return;
     const readiness = providerReadiness(provider);
@@ -244,7 +267,7 @@
             selectedEffort = slash.effort;
             return;
           case 'open-mode-picker':
-            queueMicrotask(openModeMenu);
+            queueMicrotask(() => openModeMenu());
             return;
           case 'set-mode':
             interactionMode = slash.mode;
@@ -258,12 +281,15 @@
         }
       }
     }
-    const firstMsg = rawPrompt.trim();
-    if (withPrompt && !firstMsg) {
+    const rawTrimmed = rawPrompt.trim();
+    if (withPrompt && !rawTrimmed && files.list.length === 0 && stageContext.length === 0) {
       composerEl?.focus();
       return;
     }
-    if (withPrompt && council.on && !council.ready) { cwdError = 'Pick at least two agents to ask, or turn Ask several off.'; return; }
+    if (withPrompt && council.on && !council.ready) {
+      cwdError = 'Pick at least two agents to ask, or turn Ask several off.';
+      return;
+    }
     let dir = cwd.trim();
     if (homePath !== '~' && (dir === '~' || dir.startsWith('~/'))) dir = homePath + dir.slice(1);
     if (dir !== '') {
@@ -274,6 +300,8 @@
         return;
       }
     }
+    const firstMsg = withPrompt ? assembleComposerMessage(rawTrimmed, stageContext) : '';
+    const titleSeed = rawTrimmed || stageContext[0]?.label || '';
     busy = true;
     try {
       const meta: Record<string, unknown> = {
@@ -282,20 +310,31 @@
         ...(selectedModel ? { model: selectedModel } : {}),
         ...(selectedEffort ? { effort: selectedEffort } : {}),
       };
-      const title = firstMsg ? firstMsg.replace(/\s+/g, ' ').slice(0, 56) : `${harnessLabel(provider)} thread`;
+      const title = placeholderTitle(titleSeed, `${harnessLabel(provider)} thread`);
       const opts = { scratch: scratchActive && ws.currentId !== SCRATCH_WORKSPACE_ID };
       const asCouncil = withPrompt && council.ready;
       const created = asCouncil
         ? (await council.start(targetWs, { prompt: firstMsg, title, cwd: dir || null }))[0]
-        : runtime && isRuntimeProvider(provider)
-        ? await runtimeThreads.start(targetWs, {
-            provider, title, cwd: dir || null, model: selectedModel, effort: selectedEffort ?? undefined, prompt: firstMsg,
-          })
-        : firstMsg
-          ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
-          : await ws.createSessionQuiet({ kind: 'agent', provider, title, cwd: dir || null, meta }, opts);
+        : runtime && isRuntimeProvider(provider, auth.meta)
+          ? await runtimeThreads.start(targetWs, {
+              provider,
+              title,
+              titleAuto: !!titleSeed,
+              cwd: dir || null,
+              model: selectedModel,
+              effort: takesEffort ? (selectedEffort ?? undefined) : undefined,
+              plan: planSupported && interactionMode === 'plan',
+              prompt: firstMsg,
+              attachments: withPrompt ? files.list : [],
+            })
+          : firstMsg
+            ? await ws.openSessionWithPrompt({ provider, title, cwd: dir || null, prompt: firstMsg, meta }, opts)
+            : await ws.createSessionQuiet({ kind: 'agent', provider, title, cwd: dir || null, meta }, opts);
       if (firstMsg && !runtime && !asCouncil) transcript.recordOptimisticPrompt(created.id, firstMsg);
+      saveTransientComposerDraft(stageDraftKey, '');
       prompt = '';
+      stageContext = [];
+      files.picked = [];
       threads.draftCwd = null;
       threads.rememberProject(dir || null);
       if (openInBeside && threads.paneIds.length > 0) threads.openBeside(created.id);
@@ -306,8 +345,6 @@
       busy = false;
     }
   }
-
-  // ── Slash popup ──────────────────────────────────────────────────────────
 
   let cmdIdx = $state(0);
   let cmdDismissed = $state(false);
@@ -342,35 +379,57 @@
     focusComposer(true);
   }
 
+  function handleMentionFile(picked: PickedFileMention): void {
+    prompt = picked.nextText;
+    stageContext = addComposerContext(
+      stageContext,
+      fileMentionContext({
+        path: picked.path,
+        label: picked.display,
+        isDir: picked.isDir,
+      }),
+    );
+    queueMicrotask(() => composerEl && autoGrow(composerEl));
+  }
+
+  function handleMentionAgent(picked: PickedAgentMention): void {
+    prompt = picked.nextText;
+    const o = picked.option;
+    if (council.on) {
+      council.pick({ provider: o.provider, model: o.model ?? null, effort: null });
+    } else {
+      provider = o.provider;
+      selectedModel = o.model || null;
+      if (!supportsEffortSelection(o.provider, auth.meta)) selectedEffort = null;
+    }
+  }
+
   function onComposerKeydown(e: KeyboardEvent): void {
-    if (e.isComposing) return;
+    if (e.isComposing || mentionEl?.onKey(e)) return;
     if (e.key === 'Tab' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !cmdOpen) {
       if (modeSupported) {
         e.preventDefault();
         interactionMode = nextInteractionModeToggle(interactionMode);
         return;
       }
+      if (planSupported) {
+        e.preventDefault();
+        interactionMode = interactionMode === 'plan' ? 'full' : 'plan';
+        return;
+      }
     }
-    if (cmdOpen) {
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        const n = slashSuggestions.length;
-        cmdIdx = (cmdIdx + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
-        return;
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        cmdDismissed = true;
-        return;
-      }
-      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
-        const pick = slashSuggestions[cmdIdx];
-        if (pick) {
-          e.preventDefault();
-          acceptStageCmd(pick);
-          return;
-        }
-      }
+    if (
+      cmdOpen &&
+      handleSlashMenuKey(
+        e,
+        slashSuggestions,
+        cmdIdx,
+        (i) => (cmdIdx = i),
+        () => (cmdDismissed = true),
+        acceptStageCmd,
+      )
+    ) {
+      return;
     }
     if (e.key === 'Escape' && threads.paneIds.length > 0 && !prompt) {
       e.preventDefault();
@@ -379,8 +438,7 @@
     }
     if (enterSends(e)) {
       e.preventDefault();
-      // ⌘↵ with nothing typed opens the session without a first prompt.
-      void launch(!((e.metaKey || e.ctrlKey) && !prompt.trim()));
+      void launch(!((e.metaKey || e.ctrlKey) && !prompt.trim() && stageContext.length === 0 && files.list.length === 0));
     }
   }
 
@@ -388,21 +446,21 @@
     const rel = relToRoot(path, cleanCwd);
     const token = `@${/\s/.test(rel) ? `"${rel}"` : rel} `;
     prompt = prompt && !/\s$/.test(prompt) ? `${prompt} ${token}` : `${prompt}${token}`;
+    stageContext = addComposerContext(stageContext, fileMentionContext({ path, label: rel, isDir: false }));
     focusComposer(true);
   }
 </script>
 
 <div class="nt-stage" class:with-card={showCard} data-testid="new-thread-stage">
-  {#if showCard}
+  {#if showCard && ProjectCardView.component}
     <div class="nt-card-slot">
-      <ThreadProjectCard floating cwd={cleanCwd} onpickfolder={openProjectMenu} />
+      <ProjectCardView.component floating cwd={cleanCwd} onpickfolder={openProjectMenu} />
     </div>
   {/if}
 
   <div class="nt-inner">
     <h1 class="nt-title">
       {#if projectName}
-        <!-- One text run: no flex gap or block-edge whitespace around the name. -->
         What should we build in <button
           bind:this={projectEl}
           type="button"
@@ -416,9 +474,9 @@
       {/if}
     </h1>
 
-    <div class="nt-composer" class:plan={interactionMode === 'plan'}>
-      {#if cmdOpen}
-        <StageSlashPopup
+    <div class="nt-composer" class:plan={interactionMode === 'plan' && (modeSupported || planSupported)} bind:this={composerBoxEl}>
+      {#if cmdOpen && StageSlashView.component}
+        <StageSlashView.component
           id={slashPopId}
           items={slashSuggestions}
           active={cmdIdx}
@@ -426,23 +484,54 @@
           onhover={(i) => (cmdIdx = i)}
         />
       {/if}
+      {#if prompt.includes('@') && MentionMenuView.component}
+        <MentionMenuView.component
+          bind:this={mentionEl}
+          text={prompt}
+          cwd={cleanCwd || null}
+          textareaEl={composerEl}
+          anchorEl={composerBoxEl}
+          allowAgents={true}
+          agentSectionLabel={council.on ? 'Add council agent' : 'Switch agent'}
+          onpickfile={handleMentionFile}
+          onpickagent={handleMentionAgent}
+          ondrilldir={(nextText) => { prompt = nextText; }}
+        />
+      {/if}
+      <RuntimeContextChips
+        context={stageContext}
+        onremove={(id) => (stageContext = stageContext.filter((c) => c.id !== id))}
+        onfocus={() => focusComposer()}
+      />
       <textarea
         bind:this={composerEl}
         bind:value={prompt}
+        use:composerViewState={stageViewStateArg}
         dir="auto"
         rows={2}
-        placeholder={interactionMode === 'plan'
-          ? 'Describe what to explore and plan. / commands, ⇧⇥ leaves Plan'
-          : 'Ask anything. @ files, / commands'}
+        spellcheck="false"
+        {...{ autocorrect: 'off' }}
+        autocapitalize="off"
+        autocomplete="off"
+        placeholder={interactionMode === 'plan' && (modeSupported || planSupported)
+          ? 'Describe what to explore and plan. @ files, / commands, ⇧⇥ leaves Plan'
+          : 'Ask anything. @ files or agents, / commands'}
         aria-label="Opening prompt for new thread"
         aria-autocomplete="list"
         aria-controls={cmdOpen ? `${slashPopId}-list` : undefined}
         aria-activedescendant={cmdOpen ? `${slashPopId}-opt-${cmdIdx}` : undefined}
         data-testid="new-thread-input"
         disabled={busy}
-        oninput={(e) => autoGrow(e.currentTarget)}
+        onfocus={() => { MentionMenuView.prefetch(); StageSlashView.prefetch(); }}
+        oninput={(e) => {
+          if (e.currentTarget.value.includes('@')) MentionMenuView.prefetch();
+          if (e.currentTarget.value.startsWith('/')) StageSlashView.prefetch();
+          autoGrow(e.currentTarget);
+        }}
         onkeydown={onComposerKeydown}
+        onpaste={(e) => files.paste(e)}
       ></textarea>
+      <StageAttach part="list" {files} />
 
       {#if cwdError}
         <p class="nt-error" use:announceShown={{ text: cwdError, assertive: true }}>{cwdError}</p>
@@ -461,6 +550,7 @@
         >
           <Icon name="link" size={16} />
         </button>
+        <StageAttach part="button" {files} disabled={busy} />
         <span class="nt-spacer"></span>
         <CouncilStagePicker part="toggle" {provider} model={selectedModel} effort={selectedEffort} disabled={busy} />
         <button
@@ -490,7 +580,7 @@
           aria-label={busy ? 'Starting thread' : council.ready ? `Ask ${council.seats.length} agents` : 'Start thread'}
           title="Start thread (↵) — ⌘↵ with no text opens an empty one"
           data-testid="new-thread-send-btn"
-          disabled={busy || !prompt.trim()}
+          disabled={busy || (!prompt.trim() && stageContext.length === 0 && files.list.length === 0)}
           onclick={() => void launch(true)}
         >
           {#if busy}
@@ -504,81 +594,26 @@
       </div>
     </div>
 
-    <div class="nt-meta">
-      {#if repo}
-        <button
-          type="button"
-          class="nt-meta-btn"
-          aria-haspopup="menu"
-          title="Run in the current checkout or another worktree"
-          data-testid="new-thread-checkout"
-          onclick={(e) =>
-            void openCheckoutMenu(e.currentTarget, repo!, cleanCwd, (path, br) => {
-              worktree = { path, branch: br, repo: repo! };
-              setCwd(path);
-            })}
-        >
-          <Icon name={onWorktree && !cleanCwd.startsWith(repo.path) ? 'worktree' : 'folder'} size={13} />
-          <span class="ellipsis">{onWorktree && !cleanCwd.startsWith(repo.path) ? projectNameFromCwd(cleanCwd) : 'Current checkout'}</span>
-        </button>
-      {:else}
-        <button
-          type="button"
-          class="nt-meta-btn"
-          aria-haspopup="menu"
-          title={cleanCwd || 'Choose a folder'}
-          onclick={(e) => openProjectMenu(e.currentTarget)}
-        >
-          <Icon name="folder" size={13} />
-          <span class="ellipsis">{scratchActive && !projectName ? 'Scratch' : 'Choose folder'}</span>
-        </button>
-      {/if}
-      <span class="nt-spacer"></span>
-      {#if threads.paneIds.length > 0}
-        <button
-          type="button"
-          class="nt-meta-btn"
-          class:on={openInBeside}
-          aria-pressed={openInBeside}
-          title="Open the new thread beside the current one (Split)"
-          onclick={() => (openInBeside = !openInBeside)}
-        >
-          <Icon name="split" size={13} />
-          <span>Beside</span>
-        </button>
-      {/if}
-      {#if repo && branch}
-        <button
-          type="button"
-          class="nt-meta-btn mono"
-          dir="ltr"
-          aria-haspopup="menu"
-          title="Git branch: {branch}"
-          data-testid="new-thread-branch"
-          disabled={onWorktree}
-          onclick={(e) => void openBranchMenu(e.currentTarget, repo!)}
-        >
-          <Icon name="branch" size={13} />
-          <span class="ellipsis">{branch}</span>
-        </button>
-      {/if}
-      {#if modeSupported}
-        <button
-          bind:this={modeEl}
-          type="button"
-          class="nt-meta-btn"
-          class:warn={interactionMode === 'plan'}
-          aria-haspopup="menu"
-          aria-label="Access mode: {formatInteractionModeLabel(interactionMode)}"
-          title="Access mode (/mode · ⇧⇥ toggles Plan)"
-          data-testid="picker-mode"
-          onclick={openModeMenu}
-        >
-          <Icon name={interactionMode === 'plan' ? 'compass' : interactionMode === 'accept-edits' ? 'shield' : 'unlock'} size={13} />
-          <span>{formatInteractionModeLabel(interactionMode)}</span>
-        </button>
-      {/if}
-    </div>
+    <NewThreadMetaRow
+      {repo}
+      {cleanCwd}
+      {onWorktree}
+      {scratchActive}
+      {projectName}
+      {openInBeside}
+      {branch}
+      {modeSupported}
+      {planSupported}
+      {interactionMode}
+      onPickWorktree={(path, br, r) => {
+        worktree = { path, branch: br, repo: r };
+        setCwd(path);
+      }}
+      onOpenProjectMenu={openProjectMenu}
+      onToggleBeside={() => (openInBeside = !openInBeside)}
+      onOpenModeMenu={(anchor) => openModeMenu(anchor)}
+      onTogglePlan={() => (interactionMode = interactionMode === 'plan' ? 'full' : 'plan')}
+    />
   </div>
 </div>
 
@@ -592,14 +627,15 @@
     mode={interactionMode}
     onprovider={selectProvider}
     onmodel={(m) => { council.pick({ provider, model: m, effort: selectedEffort }); selectedModel = m; }}
-    oneffort={(e) => (selectedEffort = e)}
+    oneffort={takesEffort ? (e) => (selectedEffort = e) : undefined}
+    effortLevels={runtime ? (stageCaps.efforts ?? []) : undefined}
     onmode={modeSupported ? (m) => (interactionMode = m) : undefined}
     onclose={() => (pickerOpen = false)}
   />
 {/if}
 
-{#if picker !== 'none'}
-  <FolderPicker
+{#if picker !== 'none' && FolderPickerModal.component}
+  <FolderPickerModal.component
     title={picker === 'file' ? 'Attach a file' : 'Choose project folder'}
     files={picker === 'file'}
     start={cleanCwd || homePath || ''}
@@ -616,8 +652,8 @@
   .nt-stage {
     position: relative;
     flex: 1;
-    min-width: 0;
-    min-height: 0;
+    min-inline-size: 0;
+    min-block-size: 0;
     overflow-y: auto;
     display: flex;
     align-items: center;
@@ -633,14 +669,14 @@
     z-index: var(--z-sticky);
   }
   .nt-inner {
-    width: 100%;
-    max-width: 720px;
+    inline-size: 100%;
+    max-inline-size: 720px;
     display: flex;
     flex-direction: column;
     gap: 14px;
   }
   .nt-title {
-    margin: 0 0 6px;
+    margin-block: 0 6px;
     overflow-wrap: anywhere;
     font-size: var(--fs-hero);
     font-weight: 400;
@@ -650,8 +686,8 @@
     text-align: center;
   }
   .nt-project {
-    max-width: 100%;
-    padding: 0 2px;
+    max-inline-size: 100%;
+    padding-inline: 2px;
     border: 0;
     border-radius: var(--radius-s);
     background: transparent;
@@ -680,7 +716,7 @@
     border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
   }
   .nt-composer textarea {
-    width: 100%;
+    inline-size: 100%;
     min-block-size: 56px;
     max-block-size: 240px;
     resize: none;
@@ -694,6 +730,7 @@
     unicode-bidi: plaintext;
     text-align: start;
     outline: none;
+    field-sizing: content;
   }
   .nt-error {
     margin: 0;
@@ -704,7 +741,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    min-width: 0;
+    min-inline-size: 0;
   }
   .nt-spacer {
     flex: 1;
@@ -713,8 +750,8 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    min-width: 0;
-    max-width: 260px;
+    min-inline-size: 0;
+    max-inline-size: 260px;
     block-size: 30px;
     padding-inline: 8px;
     border: 0;
@@ -745,46 +782,14 @@
     color: var(--text-dim);
     cursor: default;
   }
-  .nt-send.ask { inline-size: auto; padding-inline: 12px; border-radius: 999px; font-weight: 600; }
+  .nt-send.ask {
+    inline-size: auto;
+    padding-inline: 12px;
+    border-radius: 999px;
+    font-weight: 600;
+  }
   .nt-send .spinner {
     --spinner-size: 14px;
-  }
-  .nt-meta {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 4px;
-    padding-inline: 6px;
-    min-width: 0;
-  }
-  .nt-meta-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    max-width: 240px;
-    block-size: 26px;
-    padding-inline: 6px;
-    border: 0;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--fs-s);
-    cursor: pointer;
-  }
-  .nt-meta-btn:hover:not(:disabled) {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .nt-meta-btn:disabled {
-    cursor: default;
-  }
-  .nt-meta-btn.on {
-    color: var(--accent-text);
-  }
-  .nt-meta-btn.warn {
-    color: var(--warning);
   }
   @media (max-width: 640px) {
     .nt-title {

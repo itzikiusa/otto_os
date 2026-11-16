@@ -5,12 +5,8 @@
   import { sectionLabel } from './sections';
   import { settingsSaveErrorText } from './ownerOnly';
   import PageBody from '../../lib/components/PageBody.svelte';
-  // Custom agent providers (root): add any CLI (opencode, kilo, …) as a
-  // session provider. Stored in the `providers` settings key; the daemon
-  // reloads its registry live on save. A non-root settings admin sees only
-  // what their own role reaches — Update all CLIs (ws editor) and the model
-  // catalog (Agents) — never the daemon-wide settings (`GET|PUT /settings`
-  // are root-only).
+  // Custom agent providers (root): add any CLI (kilo, aider, …) in `providers`;
+  // non-root admins see Update all CLIs and the model catalog only.
   import { api } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -19,7 +15,7 @@
   import SectionIntro from './SectionIntro.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import Modal from '../../lib/components/Modal.svelte';
+  import CustomProviderModal from './CustomProviderModal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import SettingToggle from './SettingToggle.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -44,10 +40,15 @@
 
   // Built-in providers with their default update commands (None for shell).
   const BUILTINS: { name: string; updateCmd: string | null }[] = [
-    { name: 'claude', updateCmd: 'claude update' },
-    { name: 'codex',  updateCmd: 'codex update' },
-    { name: 'agy',    updateCmd: 'agy update' },
-    { name: 'shell',  updateCmd: null },
+    { name: 'claude',   updateCmd: 'claude update' },
+    { name: 'codex',    updateCmd: 'codex update' },
+    { name: 'agy',      updateCmd: 'agy update' },
+    { name: 'gemini',   updateCmd: 'npm install -g @google/gemini-cli@latest' },
+    { name: 'grok',     updateCmd: 'grok update' },
+    { name: 'opencode', updateCmd: 'opencode upgrade' },
+    { name: 'pi',       updateCmd: 'pi update' },
+    { name: 'muse',     updateCmd: 'MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1 MUSE_UPDATE_INTERVAL_SECONDS=0 muse --version' },
+    { name: 'shell',    updateCmd: null },
   ];
 
   let loading = $state(true);
@@ -149,6 +150,7 @@
   let resumeArgs = $state('');
   let updateCmd = $state('');
   let modelArgs = $state('');
+  let modelFamily = $state('');
   let formOpen = $state(false);
   // Inline validation for the provider sheet (not a toast — components.md §2).
   let formError = $state('');
@@ -205,6 +207,7 @@
     resumeArgs = '';
     updateCmd = '';
     modelArgs = '';
+    modelFamily = '';
     formError = '';
     formOpen = true;
   }
@@ -213,7 +216,13 @@
     const p = custom[n];
     editing = n;
     name = n;
-    ({ cmd, args, resumeArgs, updateCmd, modelArgs } = providerToForm(p));
+    const form = providerToForm(p);
+    cmd = form.cmd;
+    args = form.args;
+    resumeArgs = form.resumeArgs;
+    updateCmd = form.updateCmd;
+    modelArgs = form.modelArgs;
+    modelFamily = form.modelFamily ?? '';
     formError = '';
     formOpen = true;
   }
@@ -226,6 +235,7 @@
       });
       custom = (allSettings['providers'] as Record<string, ProviderDef>) ?? {};
       await auth.refreshMeta();
+      void loadCatalog();
       toasts.success('Providers saved', 'Available immediately for new sessions');
       formOpen = false;
     } catch (e) {
@@ -296,6 +306,7 @@
       allSettings = r.value;
       disabled = new Set((allSettings['disabled_providers'] as string[] | undefined) ?? []);
       await auth.refreshMeta();
+      void loadCatalog();
       toasts.success(
         enable ? `${nameOfProvider} enabled` : `${nameOfProvider} hidden`,
         enable
@@ -386,7 +397,7 @@
       return;
     }
     if (!/^[a-z0-9][a-z0-9_-]*$/.test(n)) {
-      formError = 'Use lowercase letters, digits, - or _ in the name (for example opencode).';
+      formError = 'Use lowercase letters, digits, - or _ in the name (for example kilo).';
       return;
     }
     if (editing !== n && custom[n]) {
@@ -395,7 +406,7 @@
     }
     formError = '';
     const def = formToProvider(
-      { cmd, args, resumeArgs, updateCmd, modelArgs },
+      { cmd, args, resumeArgs, updateCmd, modelArgs, modelFamily },
       editing ? custom[editing] : undefined,
     );
 
@@ -406,9 +417,12 @@
   }
 
   async function remove(n: string): Promise<void> {
+    const builtin = BUILTINS.some((b) => b.name === n);
     if (
       !(await confirmer.ask(
-        `Remove the custom provider “${n}”? It disappears from every picker; sessions already running on it keep working. You’d have to re-enter its command to add it back.`,
+        builtin
+          ? `Remove your override of “${n}”? It goes back to the built-in command; sessions already running on it keep working.`
+          : `Remove the custom provider “${n}”? It disappears from every picker; sessions already running on it keep working. You’d have to re-enter its command to add it back.`,
         { title: 'Remove provider?', danger: true, confirmLabel: 'Remove' },
       ))
     )
@@ -436,7 +450,7 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-  <SectionIntro>Built-ins are always available; add any other CLI (opencode, kilo, …) under Custom. Every change here applies immediately to new sessions.</SectionIntro>
+  <SectionIntro>Built-ins are always available; add any other CLI (kilo, aider, …) under Custom. Every change here applies immediately to new sessions.</SectionIntro>
   <div class="providers-body">
 
   {#if !auth.isRoot}
@@ -576,14 +590,14 @@
     <section class="section">
       <h2 class="section-title">Built-in</h2>
       <div class="list">
-        {#each BUILTINS as b (b)}
+        <!-- An overridden built-in is listed once, under Custom. -->
+        {#each BUILTINS.filter((b) => !custom[b.name]) as b (b.name)}
           <div class="item" class:off={disabled.has(b.name)}>
             <span class="mono name">{b.name}</span>
             {#if b.updateCmd}
               <span class="dim sm mono meta" title="Update command">{b.updateCmd}</span>
             {/if}
             <span class="grow"></span>
-            {#if custom[b.name]}<span class="chip">Overridden below</span>{/if}
             {#if b.name !== 'shell'}
               {@render enableToggle(b.name)}
             {:else}
@@ -610,6 +624,8 @@
             <span class="mono name">{n}</span>
             <span class="dim sm mono meta" title={`${p.cmd} ${joinArgs(p.args)}`}>{p.cmd} {joinArgs(p.args)}</span>
             <span class="grow"></span>
+            {#if BUILTINS.some((b) => b.name === n)}<span class="chip" title="Replaces the built-in {n} provider">Overrides built-in</span>{/if}
+            {#if p.model_family}<span class="chip" title={`CLI family: ${p.model_family}`}>{p.model_family}</span>{/if}
             {#if p.resume_args?.length}<span class="chip" title="Resume arguments set">resume</span>{/if}
             {#if p.update_command}<span class="chip" title={`Update command: ${p.update_command}`}>update</span>{/if}
             {#if p.model_args?.length}<span class="chip" title={`Model flag: ${joinArgs(p.model_args)}`}>model</span>{/if}
@@ -680,53 +696,20 @@
 </div>
 
 {#if formOpen}
-  <Modal title={editing ? `Edit ${editing}` : 'New provider'} width={560} onclose={() => (formOpen = false)}>
-    <form
-      class="grid"
-      id="provider-form"
-      onsubmit={(e) => {
-        e.preventDefault();
-        void save();
-      }}
-    >
-      <div class="field">
-        <label for="pv-name">Name</label>
-        <input dir="ltr" id="pv-name" class="input mono-in" bind:value={name} placeholder="opencode" spellcheck="false" autocomplete="off" />
-      </div>
-      <div class="field">
-        <label for="pv-cmd">Command</label>
-        <input dir="ltr" id="pv-cmd" class="input mono-in" bind:value={cmd} placeholder="opencode" spellcheck="false" autocomplete="off" />
-      </div>
-      <div class="field">
-        <label for="pv-args">Arguments (optional)</label>
-        <input dir="ltr" id="pv-args" class="input mono-in" bind:value={args} placeholder={'--session {sid}'} spellcheck="false" />
-      </div>
-      <div class="field">
-        <label for="pv-resume">Resume arguments (optional)</label>
-        <input dir="ltr" id="pv-resume" class="input mono-in" bind:value={resumeArgs} placeholder={'--resume {sid}'} spellcheck="false" />
-      </div>
-      <div class="field">
-        <label for="pv-update">Update command (optional)</label>
-        <input dir="ltr" id="pv-update" class="input mono-in" bind:value={updateCmd} placeholder={'npm i -g opencode'} spellcheck="false" />
-      </div>
-      <div class="field">
-        <label for="pv-model">Model flag template (optional)</label>
-        <input dir="ltr" id="pv-model" class="input mono-in" bind:value={modelArgs} placeholder={'--model {model}'} spellcheck="false" />
-      </div>
-    </form>
-    <p class="hint">
-      <code>{'{sid}'}</code> and <code>{'{cwd}'}</code> expand in arguments; <code>{'{model}'}</code> in the model flag
-      template. Quote an argument that contains spaces (<code>--system 'be terse'</code>). Leave the model template
-      empty if the CLI takes no model flag.
-    </p>
-    {#if formError}<p class="field-err" role="alert">{formError}</p>{/if}
-    {#snippet footer()}
-      <button class="btn" onclick={() => (formOpen = false)}>Cancel</button>
-      <button class="btn primary" type="submit" form="provider-form" disabled={saving}>
-        {saving ? 'Saving…' : editing ? 'Save provider' : 'Add provider'}
-      </button>
-    {/snippet}
-  </Modal>
+  <CustomProviderModal
+    {editing}
+    bind:name
+    bind:cmd
+    bind:args
+    bind:resumeArgs
+    bind:updateCmd
+    bind:modelArgs
+    bind:modelFamily
+    {formError}
+    {saving}
+    onclose={() => (formOpen = false)}
+    onsave={() => void save()}
+  />
 {/if}
 
 <style>
@@ -873,15 +856,6 @@
   .select {
     max-width: 320px;
   }
-  .grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0 12px;
-  }
-  .mono-in {
-    font-family: var(--font-mono);
-    font-size: var(--fs-s);
-  }
   /* A flag is one token — never break it mid-word across lines. */
   code.flag {
     white-space: nowrap;
@@ -894,9 +868,6 @@
     border-radius: var(--radius-s);
   }
   @media (max-width: 640px) {
-    .grid {
-      grid-template-columns: 1fr;
-    }
     .item {
       flex-wrap: wrap;
     }

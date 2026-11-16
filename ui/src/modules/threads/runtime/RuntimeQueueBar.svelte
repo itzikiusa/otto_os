@@ -1,14 +1,16 @@
 <script lang="ts">
   // Above a runtime thread's composer: background work the agent started that
   // is still running, the messages waiting in the thread's (durable,
-  // server-side) queue — Steer (into the running turn; Claude), Send now
-  // (stop the turn and send it), Edit, Remove — and, on a closed thread, the
+  // server-side) queue — Send now (into the running turn, where the agent
+  // takes it; it never stops the turn), Edit, Remove — and, on a closed thread, the
   // "Revive" line for a closed or dormant agent.
   import Icon from '../../../lib/components/Icon.svelte';
   import type { PromptDelivery, QueuedPrompt } from '../../../lib/api/types';
   import { backgroundStripText, type AgentTask } from './agentTasks';
   import { toastError } from '../../../lib/toastError';
   import { runtimeThreads } from './runtimeThreads.svelte';
+
+  import type { ComposerFile } from './runtimeComposer';
 
   interface Props {
     sessionId: string;
@@ -23,31 +25,34 @@
     dormant: boolean;
     reopening: boolean;
     onreopen: () => void;
-    /** Put a queued message back in the composer. */
-    onedit: (text: string) => void;
+    /** Put a queued message (and any attached screenshots/files) back in the composer. */
+    onedit: (text: string, attachments: ComposerFile[], targetSessionId: string) => void;
   }
   let { sessionId, background, onshowtasks, queued, running, canSteer, closed, dormant, reopening, onreopen, onedit }: Props = $props();
   const bgText = $derived(backgroundStripText(background));
   const bgTitle = $derived(background.map((b) => b.label).join('\n'));
 
   async function deliver(q: QueuedPrompt, delivery: PromptDelivery): Promise<void> {
+    const targetSessionId = sessionId;
     try {
-      await runtimeThreads.deliverQueued(sessionId, q.id, delivery);
+      await runtimeThreads.deliverQueued(targetSessionId, q.id, delivery);
     } catch (e) {
       toastError(delivery === 'steer' ? 'Couldn’t send it into the turn' : 'Couldn’t send it now', e);
     }
   }
   async function edit(q: QueuedPrompt): Promise<void> {
+    const targetSessionId = sessionId;
     try {
-      await runtimeThreads.unqueue(sessionId, q.id);
-      onedit(q.text);
+      const popped = await runtimeThreads.unqueue(targetSessionId, q.id);
+      onedit(popped.text ?? q.text, popped.attachments, targetSessionId);
     } catch (e) {
       toastError('Couldn’t edit the queued message', e);
     }
   }
   async function remove(q: QueuedPrompt): Promise<void> {
+    const targetSessionId = sessionId;
     try {
-      await runtimeThreads.unqueue(sessionId, q.id);
+      await runtimeThreads.unqueue(targetSessionId, q.id);
     } catch (e) {
       toastError('Couldn’t remove the queued message', e);
     }
@@ -71,11 +76,9 @@
 {#each queued as q (q.id)}
   <div class="qb" data-testid="runtime-queued">
     <span class="ellipsis" dir="auto">Queued: {q.text}{q.attachments ? ` (+${q.attachments})` : ''}</span>
+    <!-- Send now steers into the running turn; it never stops it (Stop does that). -->
     {#if running && canSteer}
-      <button type="button" class="btn small" title="Send it into the running turn — the agent reads it at its next step" onclick={() => void deliver(q, 'steer')}>Steer</button>
-    {/if}
-    {#if running}
-      <button type="button" class="btn small" title="Stop the running turn and send this now" onclick={() => void deliver(q, 'interrupt')}>Send now</button>
+      <button type="button" class="btn small" title="Send it into the running turn — the agent reads it at its next step" onclick={() => void deliver(q, 'steer')}>Send now</button>
     {/if}
     <button type="button" class="btn small" onclick={() => void edit(q)}>Edit</button>
     <button type="button" class="icon-btn" aria-label="Remove queued message" title="Remove" onclick={() => void remove(q)}>
