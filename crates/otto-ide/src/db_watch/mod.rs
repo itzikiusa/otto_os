@@ -87,6 +87,9 @@ pub struct IdeSavedDbTarget {
 pub enum IdeEphemeralSource {
     Testcontainers,
     Process,
+    /// Any other local Docker DB container (no `org.testcontainers` label):
+    /// possibly another project's, so it never outranks a saved connection.
+    Container,
 }
 
 /// A live local Testcontainer or in-process `miniredis` endpoint discovered server-side.

@@ -6914,6 +6914,6 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | POST /ide/plugins/install | human + Settings: Admin + root | `IdeInstallPluginReq` | `IdePluginResp` |
 | POST /ide/plugins/{slug}/toggle | human + Settings: Admin + root | `IdeTogglePluginReq` | `IdePluginResp` |
 | DELETE /ide/plugins/{slug} | human + Settings: Admin + root | — | `IdeOkResp` |
-| POST /ide/db-watch/detect | Agents: Edit (+ workspace target auth; ephemeral targets root-only) | `IdeDbWatchDetectReq` (`root`, `connection_id?`, `active_file?`, `additional_roots?`) | `IdeDbWatchDetectResp` (`detected_objects`, `saved_connections`, `ephemeral_targets`) |
+| POST /ide/db-watch/detect | Agents: Edit (+ workspace target auth; ephemeral targets root-only) | `IdeDbWatchDetectReq` (`root`, `connection_id?`, `active_file?`, `additional_roots?`) | `IdeDbWatchDetectResp` (`detected_objects`, `saved_connections`, `ephemeral_targets` — each `source: "testcontainers" \| "process" \| "container"`; `container` is a local DB container without the `org.testcontainers` label, ranked below saved connections) |
 | POST /ide/db-watch/snapshot | Agents: Edit (+ `Database: View` & connection RBAC for `saved`, or `human + root` for `ephemeral`) | `IdeDbWatchSnapshotReq` (`root`, `target_kind`, `connection_id?`, `ephemeral_id?`, `engine`, `database?`, `object_name`, `custom_query?`, `limit?`, `previous?`) | `IdeDbWatchSnapshotResp` (`engine`, `target_label`, `object_name`, `executed_query`, `captured_at_ms`, `duration_ms`, `snapshot`, optional `diff` `Before -> After`) |
 
