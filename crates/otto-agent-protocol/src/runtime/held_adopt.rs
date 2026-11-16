@@ -212,6 +212,12 @@ impl AgentRuntime {
                     });
                 }
             }
+            // The agent is as it was: what it takes, and its background
+            // work still runs.
+            st.session.capabilities = driver.capabilities();
+            if let Some(ps) = &st.proj.session {
+                st.session.background_tasks = ps.background_tasks.clone();
+            }
             st.reserved = st.next_seq + self.inner.config.seq_reserve;
             let _ = live.persist.send(PersistOp::Reserve(st.reserved));
             st.proc = Some(Proc {
