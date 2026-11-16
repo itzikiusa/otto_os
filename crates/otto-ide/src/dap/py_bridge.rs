@@ -318,6 +318,9 @@ try:
                     resolved_ok = False
                     break
             if resolved_ok and callable(target_obj):
+                # runcall() restarts bdb in step mode: like the import above, run to the
+                # first breakpoint instead of stopping on the test's first line.
+                dbg.initial_run = True
                 dbg.runcall(target_obj)
             else:
                 sys.stderr.write("otto py_bridge: test target '%s' not found or not callable in %s\n" % (tname, prog))
