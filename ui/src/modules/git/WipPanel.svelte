@@ -1072,6 +1072,11 @@
     max-height: 45%;
   }
   .wp-compose { flex-shrink: 0; }
+  /* Stacked, the composer kept its height and squeezed the diff to a header
+     (60 px at 1100×700). The diff keeps half the body; the body scrolls to
+     the composer instead. */
+  .wp-body.has-diff { overflow-y: auto; overscroll-behavior: contain; }
+  .wp-body.has-diff .wp-diff { min-height: 50%; }
   @container wip (min-width: 760px) {
     .wp-body.has-diff {
       display: grid;

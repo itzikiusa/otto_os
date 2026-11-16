@@ -66,3 +66,21 @@ test('canOpenPrs: supported forge yes; unrecognized or no remote no', () => {
   assert.equal(needResolution(1), '1 file needs resolution');
   assert.equal(needResolution(2), '2 files need resolution');
 });
+
+test('New branch: a refused name re-opens the dialog holding what was typed', async () => {
+  const { componentFunctions } = await import('./componentFunctions.ts');
+  const answers = ['bad..name', null];
+  const prompts: (string | undefined)[] = [];
+  const s = componentFunctions(new URL('../src/modules/git/GitToolbar.svelte', import.meta.url), ['doCreateBranch'], {
+    status: { branch: 'main' },
+    repoId: 'r1',
+    busy: '',
+    confirmer: { promptText: async (_m: string, o: any) => { prompts.push(o.initial); return answers.shift(); } },
+    git: { checkout: async () => { throw new Error('not a valid branch name'); } },
+    toasts: { success() {} },
+    toastError() {},
+    onstatus() {},
+  });
+  await s.doCreateBranch();
+  assert.deepEqual(prompts, [undefined, 'bad..name']);
+});

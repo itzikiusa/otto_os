@@ -188,15 +188,17 @@
   // Same sheet the graph's "Create branch here…" uses. (This used to be an
   // absolutely-positioned inline popover, which the ≤1024px toolbar's
   // horizontal scroller clipped — the input was unreachable on a tablet.)
-  async function doCreateBranch(): Promise<void> {
+  async function doCreateBranch(initial?: string): Promise<void> {
     const raw = await confirmer.promptText(`New branch from ${status.branch}`, {
       title: 'Create branch',
       confirmLabel: 'Create',
       placeholder: 'feature/my-branch',
+      initial,
     });
     const name = raw?.trim() ?? '';
     if (!name) return;
     busy = 'branch';
+    let failed = false;
     try {
       const s = await git.checkout(repoId, { branch: name, create: true });
       onstatus(s);
@@ -204,9 +206,12 @@
       toasts.success('Branch created', name);
     } catch (e) {
       toastError('Couldn’t create the branch', e);
+      failed = true;
     } finally {
       busy = '';
     }
+    // A bad or taken name: re-open with what was typed, not an empty field.
+    if (failed) await doCreateBranch(name);
   }
 
   function branchMenu(e: MouseEvent): void {

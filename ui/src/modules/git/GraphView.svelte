@@ -700,7 +700,8 @@
     cursor: pointer;
   }
   .graph-select { flex: 1; height: 100%; }
-  .ref-select { flex-shrink: 1; overflow: hidden; }
+  /* Shrinks to the chip's floor (icons + a few letters), not to nothing. */
+  .ref-select { flex-shrink: 1; min-width: auto; }
   .graph-row:has(.graph-select:focus-visible) {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
@@ -915,7 +916,6 @@
      ends. The HEAD badge and the +N expander stay rigid. */
   .branch-cell :global(.ref-chip) {
     flex-shrink: 1;
-    min-width: 0;
   }
 
   /* ── Multi-ref collapse: the "▾ +N" expander + its grouped popover ──────────── */

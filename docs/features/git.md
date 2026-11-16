@@ -404,7 +404,8 @@ The ⋯ menu on any diff's file header opens:
   parent using porcelain `previous <sha> <path>`, so it follows renames;
   **Back** walks the trail back. Lines longer than 1000 characters are cut.
 
-Both open as a right-side drawer over the graph and close with the ✕. The
+Both open as a right-side drawer over the graph; focus moves into it, and ✕ or
+**Escape** closes it. The
 revision blamed defaults to `HEAD`; a `-`-leading filename is handled (the path
 always rides after `--`).
 
@@ -415,7 +416,9 @@ always rides after `--`).
 userinfo stripped, and a new URL must be `https`/`http`/`ssh`/`git` or scp-like
 `user@host:path` (`git@host:owner/repo.git` — the user part is required). Removing a remote keeps every local branch. Push
 and checkout still address `origin` by name — re-pointing another remote does
-not redirect them.
+not redirect them. With no remote at all, **Pull** and **Publish** are disabled
+("Add a remote first"). In the Git page header, Remotes, Recovery tools and Copy
+repository path share the header's single **⋯** menu.
 
 ---
 
@@ -583,7 +586,11 @@ branch/commit context menu, which pre-fills the source branch).
 
 1. **Pick Source → Target.** The sheet loads the repo's branches; Source defaults
    to the current branch (or the one you opened it from), and Target auto-picks
-   `develop`/`main`/`master` if present, else a different branch.
+   `develop`/`main`/`master` if present, else a different branch — never the
+   source. Target also lists remote-only branches (`origin/master` → `master`).
+   The branch/commit menus offer **Create pull request** only when the remote is
+   GitHub, Bitbucket Cloud or GitLab, and the sheet refuses an unsupported
+   remote before pushing anything.
 2. **(Optional) Draft message with agent.** Click **Draft message with agent**.
    Otto:
    - computes the diff of the current branch against the chosen target
@@ -992,7 +999,8 @@ Use **Recovery tools** in the repository header for:
 
 The conflict resolver also handles binary files and deletion-versus-modification:
 choose a whole side, keep edited working bytes, or explicitly delete the path. An
-absent side is labeled as a deletion. Resolving every file and reopening the view
+absent side is labeled as a deletion, and the pane says which side deleted the
+file — "Mark file resolved" stays off until you pick a side. Resolving every file and reopening the view
 still permits completion; a rebase stopping on another conflict refreshes its list.
 
 Hunk/line operations now validate a byte-exact file-diff fingerprint. Concurrent

@@ -51,13 +51,16 @@ export function fileIsCrlf(
  *  - `null` — not markable. A BINARY (or unreadable/symlink) conflict and a
  *    file ABSENT from the working tree also have zero segments, and
  *    composing them posted `""`: the blob was truncated to 0 bytes, the
- *    deleted file came back empty. Those resolve by taking a side only. */
+ *    deleted file came back empty. Those resolve by taking a side only. So
+ *    does a modify/delete conflict (one side absent): "keep" silently kept
+ *    the surviving side without saying a side was chosen. */
 export function markAction(
-  file: { is_binary: boolean; worktree_present: boolean } | null,
+  file: { is_binary: boolean; worktree_present: boolean; ours_present: boolean; theirs_present: boolean } | null,
   conflictCount: number,
   decidedCount: number,
 ): 'compose' | 'keep' | null {
   if (!file || file.is_binary || !file.worktree_present) return null;
+  if (!file.ours_present || !file.theirs_present) return null;
   if (conflictCount === 0) return 'keep';
   return decidedCount === conflictCount ? 'compose' : null;
 }

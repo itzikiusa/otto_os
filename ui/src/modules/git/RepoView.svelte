@@ -305,6 +305,14 @@
   }
 </script>
 
+<!-- Escape closes the History/Blame drawer unless a dialog above owns the key. -->
+<svelte:window
+  onkeydown={(e) => {
+    if (!fileTool || e.key !== 'Escape' || e.defaultPrevented || document.querySelector('[aria-modal="true"]')) return;
+    gitBridge.closeFileTool();
+  }}
+/>
+
 <div class="repoview">
   <!-- ONE toolbar row: the view switcher, then the git verbs, then ⋯ for the
        repo-level tools. On the Git page the repo tab already names the repo, so
@@ -455,7 +463,8 @@
             onresolveconflicts={openResolver}
           />
           {#if fileTool}
-            <aside class="rv-drawer">
+            <!-- Focus moves in (it stayed on the button behind the drawer). -->
+            <aside class="rv-drawer" tabindex="-1" {@attach (el: HTMLElement) => el.focus({ preventScroll: true })}>
               {#if fileTool.kind === 'history'}
                 <LazyMount lazy={FileHistoryLazy} what="the file history" variant="panel"
                   props={{ repoId: repo.id, path: fileTool.path, onclose: () => gitBridge.closeFileTool() }} />
