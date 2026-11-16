@@ -97,3 +97,25 @@ test('E3: ⌘⌥L says when nothing changed, and when the buffer moved during th
     'info:The file changed while formatting. Format it again',
   ]);
 });
+
+test('E4: an opened tab carries the read flags, so a truncated or binary file is labelled', async () => {
+  const reads: Record<string, unknown> = {
+    big: { content: 'head', sha256: 's', read_only: true, truncated: true, binary: false },
+    blob: { content: '', sha256: 's', read_only: true, truncated: true, binary: true },
+  };
+  const { load } = ideModules({ get: async (url: string) => reads[/big/.test(url) ? 'big' : 'blob'] });
+  const buf = load('store/ideBufferPerf.ts');
+  const perf = new buf.IdeBufferPerfController();
+  const host = {
+    target, targetPayload: target, tabs: [] as { path: string; truncated: boolean; binary?: boolean }[], activePath: null, splitPath: null,
+    sharedBuffers: {}, collabIsGuest: false, canEditCollab: true, recentPaths: [], projectRoots: [], cursorInfo: { line: 1, col: 1 }, splitDirection: null,
+    resolvePath: (p: string) => p, targetQuery: () => 'root=/repo', jumpTo: () => {}, pushNavLocation: () => {},
+    openInSplit: () => {}, loadGutter: async () => {}, loadSymbols: async () => {}, saveFile: async () => true, closeSplit: () => {},
+  };
+  await buf.performOpenFile(host, perf, false, '/repo/big.log', {});
+  await buf.performOpenFile(host, perf, false, '/repo/blob.bin', {});
+  const big = host.tabs.find((t) => t.path === '/repo/big.log');
+  const blob = host.tabs.find((t) => t.path === '/repo/blob.bin');
+  assert.deepEqual([big?.truncated, big?.binary], [true, false]);
+  assert.deepEqual([blob?.truncated, blob?.binary], [true, true]);
+});

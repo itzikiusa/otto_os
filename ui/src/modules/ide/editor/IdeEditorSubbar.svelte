@@ -208,7 +208,9 @@
       <button type="button" class="crumb-sym-btn mono" onclick={() => void copyWithToast(activeJsonPath, 'JSONPath')} title="Click to copy JSONPath" data-testid="ide-jsonpath-crumb">{activeJsonPath}</button>
     {/if}
     {#if sdkLabel}<Badge variant="outline" tone="info" label={sdkLabel} />{/if}
-    {#if activeTab.readOnly}<Badge variant="outline" tone="neutral" label="Read-only" />{/if}
+    {#if activeTab.binary}<Badge variant="outline" tone="warn" label="Binary or not UTF-8 text" title="Otto shows UTF-8 text only. This file has bytes that aren’t UTF-8 text, so it is read-only and may look blank or garbled." testid="ide-binary-badge" />
+    {:else if activeTab.truncated}<Badge variant="outline" tone="warn" label="Truncated · first 4 MB" title="Only the first 4 MB of this file is shown, read-only. Open it in another editor to see or edit the rest." testid="ide-truncated-badge" />
+    {:else if activeTab.readOnly}<Badge variant="outline" tone="neutral" label="Read-only" />{/if}
     {#if lspLinkHere?.state === 'reconnecting' || lspLinkHere?.state === 'waiting'}<Badge variant="outline" tone="neutral" label="Language features restarting…" title={lspLinkHere.state === 'waiting' ? 'Otto is restarting; the language server reconnects when it is back.' : 'The language server connection dropped; reconnecting.'} testid="ide-lsp-reconnecting" />{/if}
     {#if lspLinkHere?.state === 'lost'}
       <LoadState what="language features" variant="compact" error="The language server connection dropped." onretry={() => { if (lspLinkHere) retryLspNow(lspLinkHere.rootPath); }} />
