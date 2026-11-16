@@ -66,6 +66,9 @@
     titleContent?: Snippet;
     /** Buttons/controls, right-aligned; overflow into "⋯". */
     actions?: Snippet;
+    /** Rows the "⋯" menu always carries (after any collapsed actions), so a
+     *  page's own overflow menu shares the one ⋯ instead of a second one. */
+    more?: () => MenuItem[];
     /** Segmented control / tab row. */
     tabs?: Snippet;
     tabsPlacement?: 'inline' | 'below';
@@ -82,6 +85,7 @@
     crumbs = [],
     titleContent,
     actions,
+    more,
     tabs,
     tabsPlacement = 'inline',
     class: klass = '',
@@ -191,7 +195,7 @@
       // than the kept controls being clipped off the start of the row.
       const keep = visible.filter((k) => !canCollapse(k));
       let keepW = keep.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, keep.length - 1);
-      if (keep.length < visible.length) keepW += MORE_W + (keep.length ? GAP : 0);
+      if (more || keep.length < visible.length) keepW += MORE_W + (keep.length ? GAP : 0);
       // …but the title block never gives up its title line (h1 + badges).
       // Every layout READ happens before the first style WRITE below.
       let titleMin = 0;
@@ -237,8 +241,9 @@
       // the wrap's width is flex-basis 0, independent of what it contains.)
       let avail = wrapEl.clientWidth - RING * 2;
       const hidden: HTMLElement[] = [];
+      if (more) avail -= MORE_W + GAP;
       if (need > avail + 0.5) {
-        avail -= MORE_W + GAP;
+        if (!more) avail -= MORE_W + GAP;
         const order = visible
           .map((el, i) => ({ el, i, p: Number(el.dataset.overflow ?? 0) || 0 }))
           .filter((o) => canCollapse(o.el))
@@ -251,7 +256,7 @@
       }
       const focused = document.activeElement;
       const hidingFocus = focused instanceof HTMLElement && hidden.some((el) => el.contains(focused));
-      const removingFocusedMore = focused === moreEl && hidden.length === 0;
+      const removingFocusedMore = !more && focused === moreEl && hidden.length === 0;
       const expandedFocus = removingFocusedMore ? overflowFocus ?? collapsed
         .flatMap((el) => el.matches('button, a, [role="button"]') ? [el] : Array.from(el.querySelectorAll<HTMLElement>('button, a, [role="button"]')))
         .find((el) => !el.matches(':disabled') && el.getAttribute('aria-disabled') !== 'true') : null;
@@ -357,6 +362,9 @@
         for (const b of inner) items.push(rowFor(b));
       }
     }
+    const extra = more?.() ?? [];
+    if (items.length && extra.length) items.push({ separator: true });
+    items.push(...extra);
     // Directly under the button, end edges aligned (mirrored in RTL);
     // ContextMenu measures the real menu and clamps it into the viewport.
     ctxMenu.showAt(e.currentTarget as HTMLElement, items, { align: 'end' });
@@ -397,7 +405,7 @@
       <div class="ph-actions" bind:this={actionsEl}>
         {#if actions}{@render actions()}{/if}
       </div>
-      {#if collapsed.length}
+      {#if collapsed.length || more}
         <button
           bind:this={moreEl}
           class="icon-btn ph-more"

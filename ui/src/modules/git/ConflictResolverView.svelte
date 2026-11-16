@@ -118,7 +118,7 @@
   // A/B side labels for the hunk pickers: A = the checked-out branch (ours),
   // B = the branch being merged in (theirs). Best-effort — plain OURS/THEIRS
   // when the repo status / merge source isn't known.
-  const oursLabel = $derived(git.statusById[repoId]?.branch ?? 'OURS');
+  const oursLabel = $derived(status?.ours ?? git.statusById[repoId]?.branch ?? 'OURS');
   const theirsLabel = $derived(sourceLabel ?? 'THEIRS');
   const allFiles = $derived([...pending]);
   const allResolved = $derived(canCompleteOperation(op, allFiles, resolved));
@@ -224,7 +224,7 @@
     <Icon name="merge" size={14} />
     <span class="head-title">Resolve {opName ?? 'file'} conflicts</span>
     {#if sourceLabel}
-      <span class="head-source">{opName === 'merge' ? 'merging' : 'from'} <span class="mono"><Badge tone="accent" label={sourceLabel} /></span></span>
+      <span class="head-source">{opName === 'merge' ? 'merging' : opName === 'rebase' ? 'rebasing' : 'from'} <span class="mono"><Badge tone="accent" label={sourceLabel} /></span></span>
     {:else if op === null}
       <span class="head-source">from a stash pop or squash — resolutions are staged as you go</span>
     {/if}

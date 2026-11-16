@@ -131,3 +131,21 @@ test('a failed repo load surfaces an error and retries on demand', async () => {
   assert.equal(git.reposError, null);
   assert.equal(git.primary.id, 'R1');
 });
+
+test('activating a repo tab makes it the status bar\'s repo', async () => {
+  const { git, find } = fixture();
+  git.allRepos = [A, B];
+  git.allReposLoaded = true;
+  void git.selectPrimary(A);
+  find('/repos/A/status').resolve(status('main'));
+  await flush();
+  git.openRepoTab('A');
+  git.openRepoTab('B');
+  find('/repos/B/status').resolve(status('develop'));
+  await flush();
+  assert.equal(git.primary.id, 'B');
+  assert.equal(git.primaryStatus.branch, 'develop');
+  git.activateRepoTab('A');
+  await flush();
+  assert.equal(git.primary.id, 'A');
+});

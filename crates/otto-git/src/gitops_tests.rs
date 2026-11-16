@@ -312,6 +312,23 @@ async fn stash_counts_detail_and_pop_by_sha() {
     ));
 }
 
+/// Non-ASCII stash paths read as UTF-8, not git's `"\303\274…"` escapes,
+/// for both a tracked change and an untracked file.
+#[tokio::test]
+async fn stash_detail_keeps_unicode_paths() {
+    let (_tmp, repo) = fixture();
+    commit(&repo, "ü.txt", "a\n", "add");
+    std::fs::write(repo.join("ü.txt"), "b\n").unwrap();
+    std::fs::write(repo.join("ñ new.txt"), "u\n").unwrap();
+    sh(&repo, &["stash", "push", "-q", "-u"]);
+    let git = LocalGit::new(&repo);
+    let sha = git.stash_list().await.unwrap()[0].sha.clone();
+    let d = git.stash_detail(&sha).await.unwrap();
+    let paths: Vec<&str> = d.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, vec!["ü.txt", "ñ new.txt"]);
+    assert_eq!(d.files[0].additions, Some(1));
+}
+
 /// Regression (the "can't remove a worktree" report): removal used to be
 /// `git worktree remove` under the 30 s local budget, and git deletes ignored
 /// bulk (`target/`, `node_modules`) too — big trees were killed mid-delete.

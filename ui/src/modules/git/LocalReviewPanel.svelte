@@ -191,9 +191,9 @@
       // computed against an earlier working tree that may no longer exist. Only
       // a still-running review is re-adopted (and polling resumed) so an
       // in-flight run survives navigating away from the tab and back.
-      const newest = runs.length > 0 ? runs[0] : null;
-      if (newest && newest.status === 'running') {
-        review = newest;
+      const running = runs.find((r) => r.status === 'running');
+      if (running) {
+        review = running;
         schedulePoll();
       } else {
         review = null;
@@ -480,7 +480,7 @@
     <button
       class="btn small"
       class:primary={review?.status !== 'done'}
-      disabled={starting || !selectedBase || refsLoading}
+      disabled={starting || review?.status === 'running' || !selectedBase || refsLoading}
       onclick={startReview}
     >
       {#if starting}

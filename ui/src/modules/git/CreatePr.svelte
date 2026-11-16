@@ -13,6 +13,8 @@
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { git } from '../../lib/stores/git.svelte';
+  import { canOpenPrs } from '../../lib/api/git';
+  import { defaultPrTarget, prTargetNames } from './refTracking';
   import { loadErrorText } from '../../lib/loadError';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { router } from '../../lib/router.svelte';
@@ -46,6 +48,8 @@
   const providerName = $derived(prRepo?.provider ? (PROVIDER_LABEL[prRepo.provider] ?? prRepo.provider) : 'the provider');
   let source = $state('');
   let target = $state('');
+  /** Target choices: local branches plus remote-only ones (`prTargetNames`). */
+  let targetNames: string[] = $state([]);
   let title = $state('');
   let description = $state('');
   let busy = $state(false);
@@ -162,26 +166,24 @@
   $effect(() => {
     void branchesRev;
     branchesError = null;
-    void api
-      .get<BranchInfo[]>(`/repos/${repoId}/branches`)
-      .then((b) => {
+    void Promise.all([api.get<BranchInfo[]>(`/repos/${repoId}/branches`), git.refs(repoId)])
+      .then(([b, r]) => {
         branches = b;
+        targetNames = prTargetNames(
+          b.map((x) => x.name),
+          (r.refs?.remote ?? []).map((x) => x.name),
+        );
         if (source === '')
           source =
             (initialSource && b.some((x) => x.name === initialSource) ? initialSource : '') ||
             b.find((x) => x.is_current)?.name ||
             b[0]?.name ||
             '';
-        if (target === '') {
-          target =
-            b.find((x) => x.name === 'develop' || x.name === 'main' || x.name === 'master')?.name ??
-            b.find((x) => x.name !== source)?.name ??
-            b[0]?.name ??
-            '';
-        }
+        if (target === '') target = defaultPrTarget(targetNames, source);
       })
       .catch((e) => {
         branches = [];
+        targetNames = [];
         branchesError = loadErrorText(e);
       });
   });
@@ -241,6 +243,12 @@
   }
 
   async function create(): Promise<void> {
+    // Refuse BEFORE the push: a remote Otto can't open PRs on would get the
+    // branch pushed and then fail.
+    if (!canOpenPrs(prRepo)) {
+      toasts.warn('Pull requests aren’t available', 'This repository’s remote isn’t GitHub, Bitbucket Cloud or GitLab.');
+      return;
+    }
     busy = true;
     try {
       // Push the SELECTED source branch first (sets upstream for a fresh
@@ -345,7 +353,7 @@
     <div class="field grow" style="margin: 0">
       <label for="pr-tgt">Target</label>
       <select id="pr-tgt" class="input" bind:value={target}>
-        {#each branches as b (b.name)}<option value={b.name}>{b.name}</option>{/each}
+        {#each targetNames as n (n)}<option value={n}>{n}</option>{/each}
       </select>
     </div>
   </div>

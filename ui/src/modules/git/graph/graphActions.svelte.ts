@@ -42,7 +42,7 @@ export interface GraphActionsHost {
   adoptRefsRev(): void;
   refreshAfter(status?: RepoStatusResp): Promise<void>;
   refreshAfterCheckout(status: RepoStatusResp, stashed: boolean): Promise<void>;
-  mutate(path: string, body: unknown, okTitle: string, okDetail?: string): Promise<void>;
+  mutate(path: string, body: unknown, okTitle: string, okDetail?: string): Promise<boolean>;
   holdDiff(): void;
   stashShortMsg(s: StashInfo): string;
 }
@@ -103,18 +103,27 @@ export function createGraphActions(h: GraphActionsHost) {
     await mutate('/revert', { sha: c.sha }, 'Reverted', c.short_sha);
   }
 
+  /** Ask for a name and run `submit`; a refusal (bad or taken name) re-opens
+   *  the dialog with what was typed instead of losing it. */
+  async function promptUntilDone(
+    message: string,
+    opts: { title: string; confirmLabel: string; placeholder?: string; initial?: string },
+    submit: (value: string) => Promise<boolean>,
+  ): Promise<void> {
+    let initial = opts.initial;
+    for (;;) {
+      const value = await confirmer.promptText(message, { ...opts, initial });
+      if (!value || value === opts.initial) return;
+      if (await submit(value)) return;
+      initial = value;
+    }
+  }
+
   async function createBranchAt(startPoint: string): Promise<void> {
-    const name = await confirmer.promptText('New branch name', {
-      title: 'Create branch',
-      confirmLabel: 'Create',
-      placeholder: 'feature/my-branch',
-    });
-    if (!name) return;
-    await mutate(
-      '/branch',
-      { name, start_point: startPoint, checkout: true },
-      'Branch created',
-      name,
+    await promptUntilDone(
+      'New branch name',
+      { title: 'Create branch', confirmLabel: 'Create', placeholder: 'feature/my-branch' },
+      (name) => mutate('/branch', { name, start_point: startPoint, checkout: true }, 'Branch created', name),
     );
   }
 
@@ -149,23 +158,19 @@ export function createGraphActions(h: GraphActionsHost) {
   }
 
   async function createBranchFrom(ref: string): Promise<void> {
-    const name = await confirmer.promptText(`New branch from ${ref}`, {
-      title: 'Create branch',
-      confirmLabel: 'Create',
-      placeholder: 'feature/my-branch',
-    });
-    if (!name) return;
-    await mutate('/branch', { name, start_point: ref, checkout: true }, 'Branch created', name);
+    await promptUntilDone(
+      `New branch from ${ref}`,
+      { title: 'Create branch', confirmLabel: 'Create', placeholder: 'feature/my-branch' },
+      (name) => mutate('/branch', { name, start_point: ref, checkout: true }, 'Branch created', name),
+    );
   }
 
   async function renameBranch(from: string): Promise<void> {
-    const to = await confirmer.promptText(`Rename branch “${from}” to`, {
-      title: 'Rename branch',
-      confirmLabel: 'Rename',
-      initial: from,
-    });
-    if (!to || to === from) return;
-    await mutate('/branch/rename', { from, to }, 'Branch renamed', `${from} → ${to}`);
+    await promptUntilDone(
+      `Rename branch “${from}” to`,
+      { title: 'Rename branch', confirmLabel: 'Rename', initial: from },
+      (to) => mutate('/branch/rename', { from, to }, 'Branch renamed', `${from} → ${to}`),
+    );
   }
 
   /** `remote` names WHICH remote the `alsoRemote` half deletes on; it is sent

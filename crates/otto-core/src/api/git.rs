@@ -627,8 +627,13 @@ pub struct MergeConflictStatus {
     /// `None` for conflicts with no state file (stash pop / squash).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<String>,
-    /// Best-effort source branch/ref being merged, when known.
+    /// Best-effort label of the incoming (theirs) side: the branch merged in,
+    /// or the branch a rebase replays.
     pub source: Option<String>,
+    /// Label of the ours side when it isn't the checked-out branch: what a
+    /// rebase replays onto (HEAD is detached then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ours: Option<String>,
     #[serde(default)]
     pub conflicted_files: Vec<String>,
 }

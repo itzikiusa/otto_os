@@ -241,8 +241,8 @@
       <LoadState what="this conflict" {loading} error={loadError} empty rows={8} onretry={() => reloadKey++} />
     {:else}
       <div class="whole-actions">
-        <button class="btn small" disabled={saving} onclick={() => takeSide('ours')}>{file.ours_present ? `Take ${oursLabel}` : `Take ${oursLabel} (delete)`}</button>
-        <button class="btn small" disabled={saving} onclick={() => takeSide('theirs')}>{file.theirs_present ? `Take ${theirsLabel}` : `Take ${theirsLabel} (delete)`}</button>
+        <button class="btn small" disabled={saving} title="Take {oursLabel}" onclick={() => takeSide('ours')}>{file.ours_present ? `Take ${oursLabel}` : `Take ${oursLabel} (delete)`}</button>
+        <button class="btn small" disabled={saving} title="Take {theirsLabel}" onclick={() => takeSide('theirs')}>{file.theirs_present ? `Take ${theirsLabel}` : `Take ${theirsLabel} (delete)`}</button>
         {#if conflictCount === 0}
           <button class="btn small" disabled={saving || !file.worktree_present} onclick={() => takeSide('keep')}>Keep working file</button>
           <button class="btn small danger" disabled={saving} onclick={() => takeSide('delete')}>Delete file…</button>
@@ -277,7 +277,10 @@
         {/each}
         {#if conflictCount === 0}
           <div class="dim" style="padding: 16px; font-size: var(--fs-s)">
-            {#if file.worktree_present}
+            {#if !file.ours_present || !file.theirs_present}
+              Deleted on {file.ours_present ? theirsLabel : oursLabel}, changed on {file.ours_present ? oursLabel : theirsLabel}
+              — take the changed version or delete the file above.
+            {:else if file.worktree_present}
               No conflict markers in this file. Mark it resolved to continue.
             {:else}
               This file is deleted in the working tree — take a side or delete it above.
@@ -347,6 +350,8 @@
 
 <style>
   .whole-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  /* "Take <long branch>" ellipsizes within the pane instead of overflowing it. */
+  .whole-actions :global(.btn) { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pane {
     display: flex;
     flex-direction: column;

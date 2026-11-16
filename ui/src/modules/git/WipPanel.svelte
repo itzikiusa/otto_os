@@ -15,6 +15,7 @@
     CommitConfig, CommitInfo, DiffResp, DiscardReq, DraftCommitMessageResp, FileChange, HeadRemotesResp, RepoStatusResp,
   } from '../../lib/api/types';
   import { amendPublishedAt } from './refTracking';
+  import { wipDiffUrl } from './wip/wipDiffUrl';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { git } from '../../lib/stores/git.svelte';
@@ -201,6 +202,7 @@
     return 'working';
   });
 
+
   $effect(() => {
     const path = selectedPath;
     const target = selTarget;
@@ -222,7 +224,7 @@
     const ctl = new AbortController();
     const stale = () => ctl.signal.aborted;
     void api
-      .get<DiffResp>(`/repos/${repoId}/diff?target=${target}&path=${encodeURIComponent(path)}`, ctl.signal)
+      .get<DiffResp>(wipDiffUrl(repoId, target, path, untrack(() => status.changes)), ctl.signal)
       .then((d) => {
         if (!stale()) diff = d;
       })
@@ -249,7 +251,7 @@
   function refetchOpenDiff(path: string, target: typeof selTarget): () => void {
     const ctl = new AbortController();
     void api
-      .get<DiffResp>(`/repos/${repoId}/diff?target=${target}&path=${encodeURIComponent(path)}`, ctl.signal)
+      .get<DiffResp>(wipDiffUrl(repoId, target, path, untrack(() => status.changes)), ctl.signal)
       .then((d) => {
         if (!ctl.signal.aborted && selectedPath === path && selTarget === target) {
           diff = d;
@@ -1057,13 +1059,10 @@
     overflow-y: auto;
     overscroll-behavior: contain;
   }
-  /* With a diff open the list yields: capped (still scrollable) so the diff
-     region below is always on-screen. */
-  .wp-body.has-diff .wp-scroll {
-    flex: 0 1 auto;
-    max-height: 45%;
-  }
+  /* With a diff open the list yields (capped, still scrollable) and the diff keeps half the body (the composer squeezed it to a header); the body scrolls. */
+  .wp-body.has-diff .wp-scroll { flex: 0 1 auto; max-height: 45%; }
   .wp-compose { flex-shrink: 0; }
+  .wp-body.has-diff { overflow-y: auto; overscroll-behavior: contain; } .wp-body.has-diff .wp-diff { min-height: 50%; }
   @container wip (min-width: 760px) {
     .wp-body.has-diff {
       display: grid;
