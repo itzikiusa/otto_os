@@ -304,6 +304,7 @@ pub(super) async fn resolve_java_adapter(
         }
     }
 
+    let mut java_args = req.launch.args.clone();
     let (classpath, main_class) = if req.launch.attach_port.is_some() {
         (cwd.to_string(), String::new())
     } else if req.target.kind == IdeTargetKind::Local {
@@ -333,7 +334,13 @@ pub(super) async fn resolve_java_adapter(
             .launch
             .test_name
             .as_deref()
-            .is_some_and(|s| !s.is_empty());
+            .is_some_and(|s| !s.trim().is_empty());
+        // A test selector (`com.acme.CalcTest#adds`) runs through a JUnit launcher,
+        // unless the class is an app with its own `main` (the gutter's main item also
+        // names its class as the filter).
+        let has_main = std::fs::read_to_string(&program)
+            .is_ok_and(|src| src.contains("static void main("));
+        let test_selector = req.launch.test_name.clone().filter(|_| include_tests && !has_main);
         let mut cwd_hash: u64 = 0xcbf29ce484222325;
         for b in cwd.as_bytes() {
             cwd_hash ^= u64::from(*b);
@@ -346,8 +353,8 @@ pub(super) async fn resolve_java_adapter(
         // A Stop that cancels this debug start drops the guard, which kills javac.
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let _cancel_on_drop = crate::proc_group::CancelOnDrop(std::sync::Arc::clone(&cancel));
-        let plan = tokio::task::spawn_blocking(move || {
-            crate::java_workspace::prepare_java_execution_cancellable(
+        let (plan, launcher_args) = tokio::task::spawn_blocking(move || {
+            let mut plan = crate::java_workspace::prepare_java_execution_cancellable(
                 &target_path,
                 explicit_main.as_deref(),
                 include_tests,
@@ -356,10 +363,20 @@ pub(super) async fn resolve_java_adapter(
                 &javac_bin,
                 &out_base,
                 cancel,
-            )
+            )?;
+            let args = match &test_selector {
+                Some(sel) => crate::java_workspace::test_launcher::use_junit_launcher(
+                    &mut plan, sel, &javac_bin, &out_base, &env_clone,
+                )?,
+                None => Vec::new(),
+            };
+            Ok::<_, Error>((plan, args))
         })
         .await
         .map_err(|e| Error::Internal(format!("java debug build task failed: {e}")))??;
+        if !launcher_args.is_empty() {
+            java_args = launcher_args;
+        }
 
         for sr in &plan.source_roots {
             let s = sr.to_string_lossy().into_owned();
@@ -457,7 +474,7 @@ pub(super) async fn resolve_java_adapter(
             jvm_flags,
             classpath,
             main_class: main_class.clone(),
-            args: req.launch.args.clone(),
+            args: java_args,
             cwd: cwd.to_string(),
             env,
             attach_port: req.launch.attach_port,
@@ -492,7 +509,9 @@ fn resolve_java_source_or_fqcn(target: &IdeTargetSpec, raw_prog: &str, cwd: &str
         return normalize_target_path(target, &in_cwd.to_string_lossy());
     }
     let rel_java = format!("{}.java", raw_prog.replace('.', "/"));
-    for root in std::iter::once(target.root.as_str())
+    // `cwd` is the Maven module a test runs from: its own sources come first.
+    for root in [cwd, target.root.as_str()]
+        .into_iter()
         .chain(target.additional_roots.iter().map(String::as_str))
     {
         for root_sub in ["src/main/java", "src/test/java", "src", "."] {
@@ -502,7 +521,12 @@ fn resolve_java_source_or_fqcn(target: &IdeTargetSpec, raw_prog: &str, cwd: &str
             }
         }
     }
-    norm
+    // A class name no source matched stays a class name, not a path under the root.
+    if raw_prog.contains('/') {
+        norm
+    } else {
+        raw_prog.to_string()
+    }
 }
 
 pub(crate) fn infer_java_source_root(java_file: &str, fallback: &str) -> String {
@@ -522,6 +546,30 @@ pub(crate) fn infer_java_source_root(java_file: &str, fallback: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn java_class_name_resolves_inside_the_module_it_runs_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let module = root.join("legacy");
+        let src = module.join("src/test/java/com/acme/legacy/OldTest.java");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, "package com.acme.legacy;\n").unwrap();
+        let target = IdeTargetSpec {
+            root: root.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let cwd = module.to_string_lossy();
+        assert_eq!(
+            resolve_java_source_or_fqcn(&target, "com.acme.legacy.OldTest", &cwd),
+            src.to_string_lossy()
+        );
+        // An unknown class stays a class name, not a path under the root.
+        assert_eq!(
+            resolve_java_source_or_fqcn(&target, "com.acme.Missing", &cwd),
+            "com.acme.Missing"
+        );
+    }
 
     #[test]
     fn js_test_debug_launches_the_packages_runner_not_node_test() {
