@@ -78,9 +78,9 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 See the [0.2.2 release notes](../../releases/tag/v0.2.2) for the full list,
 including behaviour changes to know before upgrading.
 
-| Threads — ask another agent | Council — rounds and synthesis |
+| Threads — ask another agent | Council — seats side by side, then a judge |
 | :---: | :---: |
-| ![A thread with a child thread's live card, nested under it in the sidebar](docs/screenshots/threads-ask-agent.jpg) | ![A council of two agents answering round 2, with the synthesis of round 1](docs/screenshots/council-rounds.jpg) |
+| ![A thread with a child thread's live card, nested under it in the sidebar](docs/screenshots/threads-ask-agent.jpg) | ![Three council seats and their synthesis as four thread panes in the Grid](docs/screenshots/council-panes.jpg) |
 | **Design Hall — comments on a design** | **Phone — the light version** |
 | ![A pinned comment on a checkout design, listed in the Comments tab](docs/screenshots/design-comments.jpg) | ![The phone light version with its five tabs](docs/screenshots/phone-light.jpg) |
 
@@ -178,8 +178,8 @@ including behaviour changes to know before upgrading.
   - **Several agents in one conversation:** ask another agent from inside a
     thread (its answer arrives as a child thread: a live card in the parent,
     nested under it in the sidebar), or start a **Council**: one prompt to two
-    to four agents, answers side by side, follow-up rounds, and a judge that
-    synthesizes each round.
+    to four agents, each its own thread side by side in Split/Grid panes, and
+    a judge (⋯ › Synthesize with) that compares their latest answers.
   - **Workspace inspector (`Files · Changes · Connections`):** multi-tab
     file explorer with rendered Markdown/image preview + source lines, working-tree
     git status + Unified/Split diffs, live `otto_db_query` activity with 1-click
