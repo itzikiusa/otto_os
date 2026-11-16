@@ -4319,3 +4319,58 @@ async fn restore_all_with_kept_preserves_managed_mcp_tokens_for_adopted_runtime_
         "unadopted runtime session token must expire on daemon boot restore"
     );
 }
+
+/// Under Otto's Seatbelt a Muse terminal session starts with Muse's own
+/// sandbox off (it cannot nest), on the real create spawn.
+#[tokio::test]
+async fn sandboxed_muse_session_starts_with_its_own_sandbox_off() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (mgr0, repo, mut workspace, user) = test_manager().await;
+    let settings = otto_state::SettingsRepo::new(repo.pool());
+    settings
+        .put("process_sandbox", &serde_json::json!({"enabled": true}))
+        .await
+        .unwrap();
+    let manager = Arc::new(
+        Arc::try_unwrap(mgr0)
+            .ok()
+            .expect("sole owner")
+            .with_settings_repo(settings),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().canonicalize().unwrap();
+    workspace.root_path = cwd.to_string_lossy().into_owned();
+    let script = "printf '%s\\n' \"$@\" > argv; exec /bin/sleep 60";
+    manager.providers.reload(Some(&serde_json::json!({
+        "muse": { "cmd": "/bin/sh", "args": ["-c", script, "fake-muse"] }
+    })));
+    let request = CreateSessionReq {
+        kind: SessionKind::Agent,
+        provider: Some("muse".into()),
+        title: Some("Sandboxed Muse fixture".into()),
+        cwd: Some(workspace.root_path.clone()),
+        connection_id: None,
+        model: None,
+        meta: None,
+    };
+    let session = manager
+        .create(&workspace, &user, request, None)
+        .await
+        .unwrap();
+    let argv = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(args) = std::fs::read_to_string(cwd.join("argv")) {
+                if !args.is_empty() {
+                    break args;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(argv.lines().any(|a| a == "--disable-sandbox"), "{argv}");
+    manager.remove(&session.id).await.unwrap();
+}

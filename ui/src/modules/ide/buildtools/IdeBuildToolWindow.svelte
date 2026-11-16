@@ -3,12 +3,12 @@
   // Profiles (Maven/Gradle + Spring Boot), multi-module projects, Lifecycle, Plugins, Dependencies, Repositories.
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { shortenHomePath } from '../../../lib/homePath';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { ide, type IdeBuildToolModule, type IdeBuildToolProfile } from '../ideStore.svelte';
   import {
     executeBuildToolGoal,
-    formatHomeShortPath,
     GRADLE_LIFECYCLE,
     loadBuildToolWorkspaceModel,
     MAVEN_LIFECYCLE,
@@ -134,7 +134,7 @@
           onblur={() => { if (hoveredMod?.root_dir === mod.root_dir) hoveredMod = null; }}
           onclick={() => toggleNode(modKey)}
           ondblclick={() => void ide.openFile(mod.manifest_path, { preview: false })}
-          title={`Project: ${mod.project_coord || [mod.group_id, mod.artifact_id].filter(Boolean).join(':') || mod.name}\nLocation: ${mod.location_display || formatHomeShortPath(mod.root_dir)}`}
+          title={`Project: ${mod.project_coord || [mod.group_id, mod.artifact_id].filter(Boolean).join(':') || mod.name}\nLocation: ${mod.location_display || shortenHomePath(mod.root_dir)}`}
         >
           <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} noflip />
           <span class="bt-mark">{mod.tool === 'gradle' ? 'G' : 'm'}</span>
@@ -147,7 +147,7 @@
           type="button"
           class="bt-mini-btn"
           aria-label={`Open ${mod.name} build file`}
-          title={`Open ${formatHomeShortPath(mod.manifest_path)}`}
+          title={`Open ${shortenHomePath(mod.manifest_path)}`}
           onclick={() => void ide.openFile(mod.manifest_path, { preview: false })}
         >
           <Icon name="file" size={12} />
@@ -310,7 +310,7 @@
   {#if hoveredMod}
     <div class="bt-hover-card" data-testid="ide-bt-module-card">
       <div class="bt-hc-line"><strong>Project:</strong> <span dir="ltr">{hoveredMod.project_coord || [hoveredMod.group_id, hoveredMod.artifact_id].filter(Boolean).join(':') || hoveredMod.name}</span></div>
-      <div class="bt-hc-line"><strong>Location:</strong> <span dir="ltr">{hoveredMod.location_display || formatHomeShortPath(hoveredMod.root_dir)}</span></div>
+      <div class="bt-hc-line"><strong>Location:</strong> <span dir="ltr">{hoveredMod.location_display || shortenHomePath(hoveredMod.root_dir)}</span></div>
     </div>
   {/if}
 

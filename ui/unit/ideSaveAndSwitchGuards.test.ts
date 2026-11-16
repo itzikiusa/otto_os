@@ -7,10 +7,11 @@ class ApiError extends Error {
   constructor(status: number) { super(`HTTP ${status}`); this.status = status; }
 }
 
-function ideModules(api: Record<string, unknown>, confirmAnswers: boolean[] = []) {
+function ideModules(api: Record<string, unknown>, confirmAnswers: boolean[] = [], chooseValue: string | null = null) {
   const asked: string[] = [];
   const toastLog: string[] = [];
-  const confirmer = { ask: async (msg: string) => { asked.push(msg); return confirmAnswers.shift() ?? false; }, choose: async () => ({ value: null }) };
+  const lsWrites: string[] = [];
+  const confirmer = { ask: async (msg: string) => { asked.push(msg); return confirmAnswers.shift() ?? false; }, choose: async () => ({ value: chooseValue }) };
   const toasts = { success: (t: string) => toastLog.push(`ok:${t}`), error: (t: string) => toastLog.push(`err:${t}`), info: () => {} };
   const prefs = { autoSave: false, localHistoryEnabled: false, localHistoryRetentionDays: 7 };
   const client = { api, ApiError, getToken: () => '', laneFetch: () => { throw new Error('unused'); } };
@@ -22,15 +23,17 @@ function ideModules(api: Record<string, unknown>, confirmAnswers: boolean[] = []
     '../../../lib/confirm.svelte': { confirmer },
     '../../../lib/toast.svelte': { toasts },
     '../../../lib/toastError': { toastError: (t: string) => toastLog.push(`err:${t}`) },
-    '../../../lib/ideProjectsModel': { loadNamedIdeProjectsLocal: () => [], saveNamedIdeProjectsLocal: () => {} },
+    '../../../lib/ideProjectsModel': { loadNamedIdeProjectsLocal: () => [], saveNamedIdeProjectsLocal: () => {}, fetchNamedIdeProjectsFromServer: async () => [], parseNamedIdeProject: () => null },
     '../../../lib/ideWorkspacePort.svelte': { ideWorkspacePort: {} },
-    '../../../lib/storage': { lsGet: () => null, lsSet: () => {} },
+    '../../../lib/storage': { lsGet: () => null, lsSet: (k: string) => { lsWrites.push(k); }, lsRemove: () => {} },
+    '../../../lib/components/cm-ide-lsp': { disposePooledLspClients: async () => {} },
   };
   const opts = { relative: true };
   const cache = new Map();
   const buf = loadSource(new URL('../src/modules/ide/store/ideBufferPerf.ts', import.meta.url), imports, {}, opts, cache);
   const helpers = loadSource(new URL('../src/modules/ide/shell/ideProjectHelpers.ts', import.meta.url), imports, {}, opts, cache);
-  return { buf, helpers, asked, toastLog, prefs };
+  const projects = loadSource(new URL('../src/modules/ide/shell/ideProjectsManager.ts', import.meta.url), imports, {}, opts, cache);
+  return { buf, helpers, projects, asked, toastLog, prefs, lsWrites };
 }
 
 function tab(path: string, content: string, savedContent = content) {
@@ -70,6 +73,65 @@ test('a second save of the same file waits for the first and sends the sha256 it
   assert.equal(perf.savesInFlight.size, 0);
 });
 
+test('a queued save with no path saves the tab that was active when it was requested', async () => {
+  const sent: string[] = [];
+  const first = deferred<{ sha256: string }>();
+  const api = { put: async (_p: string, body: { path: string }) => {
+    sent.push(body.path);
+    return sent.length === 1 ? first.promise : { sha256: 'sha-2' };
+  } };
+  const { buf } = ideModules(api);
+  const perf = new buf.IdeBufferPerfController();
+  const h = host([tab('/repo/a.ts', 'x = 2', 'x = 1'), tab('/repo/b.ts', 'y = 2', 'y = 1')]);
+  const a = buf.performSaveFile(h, perf, '/repo/a.ts', false, { silent: true });
+  const queued = buf.performSaveFile(h, perf);
+  h.activePath = '/repo/b.ts';
+  first.resolve({ sha256: 'sha-1' });
+  assert.equal(await a, true);
+  assert.equal(await queued, true);
+  assert.deepEqual(sent, ['/repo/a.ts', '/repo/a.ts']);
+  assert.equal(h.tabs[1].dirty, true, 'b was never asked to save');
+});
+
+test('Overwrite disk after a 409 re-saves inside the queued save instead of waiting on itself', async () => {
+  const sent: (string | undefined)[] = [];
+  const api = { put: async (_p: string, body: { expected_sha256?: string }) => {
+    sent.push(body.expected_sha256);
+    if (sent.length === 1) throw new ApiError(409);
+    return { sha256: 'sha-forced' };
+  } };
+  const { buf } = ideModules(api, [], 'overwrite');
+  const perf = new buf.IdeBufferPerfController();
+  const h = host([tab('/repo/a.ts', 'mine', 'theirs')]);
+  assert.equal(await buf.performSaveFile(h, perf, '/repo/a.ts'), true);
+  assert.deepEqual(sent, ['sha-0', undefined], 'the forced PUT drops expected_sha256');
+  assert.equal(h.tabs[0].sha256, 'sha-forced');
+  assert.equal(perf.conflictedPaths.has('/repo/a.ts'), false);
+  assert.equal(perf.savesInFlight.size, 0);
+});
+
+test('switching to a named project keeps the current tabs when the discard prompt is declined', async () => {
+  const { projects, lsWrites } = ideModules({});
+  const switches: unknown[] = [];
+  let answer = false;
+  const h = {
+    ...host([tab('/repo/a.ts', 'edited', 'saved')]),
+    namedProjects: [{ id: 'p2', name: 'other', primary_root: '/other', folders: ['/other'] }],
+    activeProjectId: 'p1', additionalRoots: [], hasClosedAllTabs: false,
+    confirmDiscardUnsaved: async () => answer,
+    setLocalTarget: async (root: string, _ws: unknown, opts: unknown) => { switches.push([root, opts]); return true; },
+    openFile: async () => {},
+  };
+  await projects.activateNamedProject(h, 'p2');
+  assert.deepEqual(switches, [], 'declined: no switch');
+  assert.deepEqual(lsWrites, [], 'declined: the old project tabs are not snapshotted');
+  answer = true;
+  await projects.activateNamedProject(h, 'p2');
+  assert.equal(switches.length, 1);
+  assert.equal((switches[0] as [string, { discardConfirmed: boolean }])[0], '/other');
+  assert.equal((switches[0] as [string, { discardConfirmed: boolean }])[1].discardConfirmed, true, 'already asked: setLocalTarget must not ask again');
+});
+
 test('switching target asks before dropping unsaved tabs and stops when declined', async () => {
   const { buf, helpers, asked } = ideModules({}, [false, true]);
   const perf = new buf.IdeBufferPerfController();
@@ -104,6 +166,13 @@ test('a dependency update the daemon failed to run is reported, not faked with a
   assert.equal(res.ok, false);
   assert.equal(res.updated_content, undefined);
   assert.match(toastLog.join(), /^err:Couldn’t run/);
+});
+
+test('an action whose tool did not run (200, ok false) is reported', async () => {
+  const { mod, toastLog } = depsModel(async () => ({ ok: false, output: "failed to run 'go': No such file or directory" }));
+  const res = await mod.executeIdeDepAction({ root: '/repo', path: '/repo/go.mod', content: GO_MOD, action: 'tidy' });
+  assert.equal(res.ok, false);
+  assert.match(toastLog.join(), /^err:Couldn’t run tidy/);
 });
 
 test('an action the daemon has no runner for (400) falls back to editing the manifest text', async () => {

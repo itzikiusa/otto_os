@@ -310,7 +310,7 @@ struct ReloadTally {
 pub async fn run(ctx: &ServerCtx, cfg: &CliAutoUpdateConfig) {
     let settings = SettingsRepo::new(ctx.pool.clone());
 
-    let mut pairs = ctx.manager.provider_update_commands();
+    let mut pairs = ctx.manager.provider_update_commands().await;
     if pairs.is_empty() {
         info!("cli_auto_update: no providers have an update command; nothing to do");
         let _ = settings.put(LAST_RUN_KEY, &json_now()).await;

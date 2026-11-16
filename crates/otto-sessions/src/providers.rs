@@ -793,22 +793,14 @@ impl ProviderRegistry {
     }
 
     /// All `(provider_name, update_command)` pairs for enabled providers that
-    /// have an update command set (non-empty) and whose CLI is installed. A
-    /// provider the admin excluded is never updated, and a missing CLI is never
-    /// installed by an update pass: they may not want that CLI at all. Sorted
-    /// by name.
-    pub fn update_commands(&self) -> Vec<(String, String)> {
-        self.update_commands_where(crate::tool_probe::command_resolves_fast)
-    }
-
-    /// [`Self::update_commands`] with `installed(cmd)` deciding which CLIs exist.
-    pub(crate) fn update_commands_where(
-        &self,
-        installed: impl Fn(&str) -> bool,
-    ) -> Vec<(String, String)> {
+    /// have an update command set (non-empty) and that `installed(name)` says
+    /// are installed. A provider the admin excluded is never updated, and a
+    /// missing CLI is never installed by an update pass: they may not want
+    /// that CLI at all. Sorted by name.
+    pub fn update_commands_where(&self, installed: impl Fn(&str) -> bool) -> Vec<(String, String)> {
         self.enabled_specs()
             .into_iter()
-            .filter(|(_, spec)| installed(&spec.cmd))
+            .filter(|(name, _)| installed(name))
             .filter_map(|(name, spec)| {
                 spec.update_command
                     .filter(|s| !s.is_empty())

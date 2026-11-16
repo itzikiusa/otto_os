@@ -142,6 +142,12 @@ async fn rename_refuses_an_existing_destination_and_symlinks_act_on_the_link() {
     assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "b");
     assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "a");
 
+    // The same inode (here the path itself; on APFS also a case-only rename) is not a conflict.
+    mgr.mutate_fs(&target, IdeFsMutateOp::Rename, "a.txt", Some("a.txt"))
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "a");
+
     mgr.mutate_fs(&target, IdeFsMutateOp::Rename, "a-link", Some("c-link"))
         .await
         .unwrap();

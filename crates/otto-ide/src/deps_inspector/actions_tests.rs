@@ -321,3 +321,22 @@ fn pom_dependencies_scoped_confines_parent_relative_path_for_non_root() {
         "non-root caller must not interpolate properties from parent POM outside allowed_roots"
     );
 }
+
+#[tokio::test]
+async fn a_missing_tool_is_a_failed_action_not_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ok, output) = exec_cmd(
+        "otto-no-such-tool-xyz",
+        &["mod", "tidy"],
+        dir.path(),
+        &BTreeMap::new(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(!ok);
+    assert!(
+        output.contains("failed to run 'otto-no-such-tool-xyz'"),
+        "{output}"
+    );
+}

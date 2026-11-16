@@ -296,8 +296,8 @@
             <button
               type="button"
               class="btn small primary"
-              onclick={() => {
-                void ide.setSshTarget(conn.id, sshRemotePath || '~', conn.name);
+              onclick={async () => {
+                if (!(await ide.setSshTarget(conn.id, sshRemotePath || '~', conn.name))) return;
                 toasts.success(`Switched IDE target to ${conn.name}`);
                 ide.settingsOpen = false;
               }}

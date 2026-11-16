@@ -520,6 +520,8 @@
         oncyclediag={cycleNextDiagnostic}
         onfocusagent={focusAgentComposer}
       />
+    {:else if IdeEditorSubbarLazy.error}
+      <LoadState what="the editor toolbar" variant="compact" error={IdeEditorSubbarLazy.error} onretry={() => IdeEditorSubbarLazy.retry()} />
     {:else}
       <div class="ide-subbar-slot" aria-hidden="true"></div>
     {/if}

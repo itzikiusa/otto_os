@@ -88,3 +88,24 @@ test('tool images retain text, enlarge with keyboard, survive reload and fit pho
   await row.locator('.rw-line').click();
   await expect(previews.locator('img')).toHaveCount(2);
 });
+
+test('a tool image the daemon cannot serve shows an error line in its slot', async ({ page }, info) => {
+  test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
+  await page.addInitScript((id) => localStorage.setItem('otto_workspace', id), workspace);
+  await page.route('**/runtime-sessions/*/items/*/images/*', (route) => route.fulfill({ status: 404, body: 'gone' }));
+  await page.goto('/#/threads');
+  const stage = page.getByTestId('new-thread-stage');
+  await expect(stage).toBeVisible({ timeout: 30_000 });
+  await stage.getByTestId('picker-agent').click();
+  await page.getByTestId('model-picker-provider-codex').click();
+  await page.keyboard.press('Escape');
+  await stage.getByTestId('new-thread-input').fill('make image');
+  await stage.getByTestId('new-thread-send-btn').click();
+  const row = page.locator('[data-item-type="dynamic_tool"]');
+  await expect(row).toHaveCount(1, { timeout: 30_000 });
+  await openFinishedWork(page);
+  await row.locator('.rw-line').click();
+  const previews = row.getByTestId('runtime-tool-images');
+  await expect(previews).toContainText('Image 1 could not be displayed.');
+  await expect(previews.locator('img')).toHaveCount(0);
+});

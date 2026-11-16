@@ -2115,10 +2115,19 @@ impl SessionManager {
         }
     }
 
-    /// All `(provider_name, update_command)` pairs for providers that have an
-    /// update command configured. Delegates to the registry.
-    pub fn provider_update_commands(&self) -> Vec<(String, String)> {
-        self.providers.update_commands()
+    /// [`ProviderRegistry::update_commands_where`] with "installed" decided by
+    /// the cached tool probe Settings shows (`/meta` tools), so a CLI found
+    /// only through the login shell is updated too.
+    pub async fn provider_update_commands(&self) -> Vec<(String, String)> {
+        let names = self.providers.names();
+        let specs = crate::tool_probe::tool_specs(
+            names
+                .iter()
+                .map(|n| (n.as_str(), self.providers.program_for(n))),
+        );
+        let tools = crate::tool_probe::probe_tools_cached(specs).await;
+        self.providers
+            .update_commands_where(|name| tools.iter().any(|t| t.name == name && t.found))
     }
 
     /// Return the resolved program binary for `name`, or `None` if the

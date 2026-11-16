@@ -74,7 +74,7 @@ export interface NamedProjectsHost extends ProjectHelperHost {
     root: string,
     workspaceId?: string | null,
     opts?: { additionalRoots?: string[]; projectId?: string | null; skipAutoOpen?: boolean; discardConfirmed?: boolean },
-  ): Promise<void>;
+  ): Promise<boolean>;
 }
 
 interface SavedProjectTabs {

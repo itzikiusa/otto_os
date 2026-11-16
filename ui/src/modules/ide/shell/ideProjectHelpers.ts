@@ -97,26 +97,18 @@ export async function performCloseAllTabs(
     host.closeSplit();
     return;
   }
-  bufPerf.flushAll(host);
-  let dirtyTabs = host.tabs.filter((t) => bufPerf.isTabDirty(t));
-  if (!opts.force && dirtyTabs.length > 0 && readIdePreferences().autoSave && saveTab) {
-    for (let i = 0; i < dirtyTabs.length; i++) {
-      if (!dirtyTabs[i].readOnly) await saveTab(dirtyTabs[i].path);
-    }
-    dirtyTabs = host.tabs.filter((t) => bufPerf.isTabDirty(t));
-  }
-  if (!opts.force && dirtyTabs.length > 0) {
-    const promptMsg =
-      dirtyTabs.length === 1
-        ? `“${dirtyTabs[0].name}” has unsaved changes. Discard changes and close all tabs?`
-        : `${dirtyTabs.length} tabs have unsaved changes. Discard changes and close all tabs?`;
-    const ok = await confirmer.ask(promptMsg, {
-      title: 'Close all tabs?',
-      confirmLabel: 'Discard & close all',
-      danger: true,
-    });
-    if (!ok) return;
-  }
+  const discard =
+    opts.force ||
+    (await askDiscardDirty(
+      host,
+      bufPerf,
+      async (dirty) => {
+        if (!saveTab) return;
+        for (const t of dirty) if (!t.readOnly) await saveTab(t.path);
+      },
+      { question: 'Discard changes and close all tabs?', title: 'Close all tabs?', confirmLabel: 'Discard & close all' },
+    ));
+  if (!discard) return;
   const allPaths = host.tabs.map((t) => t.path);
   host.tabs = [];
   evict(allPaths);
@@ -125,24 +117,37 @@ export async function performCloseAllTabs(
   host.closeSplit();
 }
 
+/** Flush buffers, autosave (when on) what is dirty, then ask before discarding what is still unsaved. */
+async function askDiscardDirty(
+  host: { tabs: IdeOpenTab[] },
+  bufPerf: { flushAll(h: { tabs: IdeOpenTab[] }): void; isTabDirty(t: IdeOpenTab): boolean },
+  autosave: (dirty: IdeOpenTab[]) => Promise<void>,
+  copy: { question: string; title: string; confirmLabel: string },
+): Promise<boolean> {
+  bufPerf.flushAll(host);
+  let dirty = host.tabs.filter((t) => bufPerf.isTabDirty(t));
+  if (dirty.length > 0 && readIdePreferences().autoSave) {
+    await autosave(dirty);
+    dirty = host.tabs.filter((t) => bufPerf.isTabDirty(t));
+  }
+  if (dirty.length === 0) return true;
+  const what = dirty.length === 1 ? `“${dirty[0].name}” has` : `${dirty.length} tabs have`;
+  return confirmer.ask(`${what} unsaved changes. ${copy.question}`, { title: copy.title, confirmLabel: copy.confirmLabel, danger: true });
+}
+
 /** A target switch drops every tab: autosave what it can, then ask before
  *  discarding what is still unsaved (autosave off, a conflict, a failed save). */
-export async function confirmDiscardOnSwitch(
+export function confirmDiscardOnSwitch(
   host: { target: IdeTargetSpec; tabs: IdeOpenTab[] },
   bufPerf: { flushAll(h: { tabs: IdeOpenTab[] }): void; isTabDirty(t: IdeOpenTab): boolean },
   flushAutoSave: () => Promise<void>,
 ): Promise<boolean> {
-  if (!host.target.root) return true;
-  if (readIdePreferences().autoSave) await flushAutoSave();
-  bufPerf.flushAll(host);
-  const dirty = host.tabs.filter((t) => !t.readOnly && bufPerf.isTabDirty(t));
-  if (dirty.length === 0) return true;
-  return confirmer.ask(
-    dirty.length === 1
-      ? `“${dirty[0].name}” has unsaved changes. Discard them and switch?`
-      : `${dirty.length} tabs have unsaved changes. Discard them and switch?`,
-    { title: 'Discard unsaved changes?', confirmLabel: 'Discard & switch', danger: true },
-  );
+  if (!host.target.root) return Promise.resolve(true);
+  return askDiscardDirty(host, bufPerf, flushAutoSave, {
+    question: 'Discard them and switch?',
+    title: 'Discard unsaved changes?',
+    confirmLabel: 'Discard & switch',
+  });
 }
 
 export function projectStorageKey(target: IdeTargetSpec): string {

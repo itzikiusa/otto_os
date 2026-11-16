@@ -381,6 +381,9 @@ pub(super) async fn mutate_remote_fs(
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| Error::Invalid("dest_path is required for rename".into()))?;
             let (dst, _) = resolve_remote_in_roots(root, additional_roots, dst_raw)?;
+            if dst != remote {
+                ensure_remote_path_absent(sftp, &dst).await?;
+            }
             sftp.rename(&remote, &dst).await?;
             Ok(IdeFsMutateResp {
                 ok: true,

@@ -311,11 +311,11 @@ class IdeStore {
     root: string,
     workspaceId: string | null = null,
     opts: { additionalRoots?: string[]; projectId?: string | null; skipAutoOpen?: boolean; discardConfirmed?: boolean } = {},
-  ): Promise<void> {
+  ): Promise<boolean> {
     const clean = normalizeRootPath(root);
-    if (!clean) return;
-    if (opts.projectId === undefined && this.target.kind === 'local' && normalizeRootPath(this.target.root) === clean && !opts.additionalRoots) return;
-    if (!opts.discardConfirmed && !(await this.confirmDiscardUnsaved())) return;
+    if (!clean) return false;
+    if (opts.projectId === undefined && this.target.kind === 'local' && normalizeRootPath(this.target.root) === clean && !opts.additionalRoots) return true;
+    if (!opts.discardConfirmed && !(await this.confirmDiscardUnsaved())) return false;
     const matchedProj = opts.projectId !== undefined ? opts.projectId : (this.namedProjects.find((p) => p.primary_root === clean)?.id ?? null);
     this.activeProjectId = matchedProj;
     saveLastIdeRoot(clean);
@@ -328,14 +328,15 @@ class IdeStore {
     ]);
     if (opts.skipAutoOpen) this.hasClosedAllTabs = false;
     else void restoreWorkspaceTabsOrInitial(this);
+    return true;
   }
 
-  async setSshTarget(connectionId: string, root: string, connectionName: string | null = null): Promise<void> {
-    if (!(await this.confirmDiscardUnsaved())) return;
+  async setSshTarget(connectionId: string, root: string, connectionName: string | null = null): Promise<boolean> {
+    if (!(await this.confirmDiscardUnsaved())) return false;
     const clean = normalizeRootPath(root) || '~';
     this.resetTargetState({ kind: 'ssh', workspace_id: null, root: clean, connection_id: connectionId, connection_name: connectionName });
     await this.loadTree();
-    void this.loadEnvironments();
+    void this.loadEnvironments(); return true;
   }
 
   clearTarget(): void {

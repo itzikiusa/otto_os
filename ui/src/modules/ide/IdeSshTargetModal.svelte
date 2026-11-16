@@ -242,7 +242,7 @@
       }
       switching = true;
       try {
-        await ide.setLocalTarget(root, localWsId);
+        if (!(await ide.setLocalTarget(root, localWsId))) return;
         if (pendingBridge) {
           await ide.saveEnvironment({
             network_bridge: pendingBridge,
@@ -283,7 +283,7 @@
 
     switching = true;
     try {
-      await ide.setSshTarget(conn.id, root, conn.name);
+      if (!(await ide.setSshTarget(conn.id, root, conn.name))) return;
       toasts.success(`Connected to ${conn.name}`, root);
       close();
     } finally {

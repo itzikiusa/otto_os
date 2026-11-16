@@ -544,6 +544,8 @@ export async function executeIdeDepAction(opts: {
       } else {
         toasts.success('Dependency action complete', out?.slice(0, 120) || normAction);
       }
+    } else {
+      toasts.error(`Couldn’t run ${normAction}`, (out ?? '').slice(0, 180));
     }
     return { ok, updated_content: updatedContent, output: out };
   } catch (e) {

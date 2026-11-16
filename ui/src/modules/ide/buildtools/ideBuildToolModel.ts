@@ -1,7 +1,6 @@
 // Maven & Gradle multi-module model loader, fallback manifest parser, and goal runner.
-import { shortenHomePath as formatHomeShortPath } from '../../../lib/homePath';
-
 import { api, ApiError } from '../../../lib/api/client';
+import { shortenHomePath } from '../../../lib/homePath';
 import { normalizeRootPath } from '../shell/ideProjectHelpers';
 import {
   ide,
@@ -158,7 +157,7 @@ async function parseMavenModuleRecursive(
     kind: 'maven',
     root_dir: cleanDir,
     root: cleanDir,
-    location_display: formatHomeShortPath(cleanDir),
+    location_display: shortenHomePath(cleanDir),
     manifest_path: pomPath,
     lifecycle: MAVEN_LIFECYCLE,
     plugins: parsePomPlugins(xml),
@@ -207,7 +206,7 @@ async function parseGradleModule(repoRoot: string, springSet: Set<string>): Prom
       kind: 'gradle',
       root_dir: subRoot,
       root: subRoot,
-      location_display: formatHomeShortPath(subRoot),
+      location_display: shortenHomePath(subRoot),
       manifest_path: `${subRoot}/build.gradle`,
       lifecycle: GRADLE_LIFECYCLE,
       plugins: [{ name: 'verification', goals: ['test', 'check'] }],
@@ -228,7 +227,7 @@ async function parseGradleModule(repoRoot: string, springSet: Set<string>): Prom
     kind: 'gradle',
     root_dir: cleanDir,
     root: cleanDir,
-    location_display: formatHomeShortPath(cleanDir),
+    location_display: shortenHomePath(cleanDir),
     manifest_path: manifestPath,
     lifecycle: GRADLE_LIFECYCLE,
     plugins: [
@@ -324,7 +323,7 @@ function normalizeRawProject(p: RawBuildToolProject, fallbackTool: 'maven' | 'gr
     kind: tool,
     root_dir: rootDir,
     root: rootDir,
-    location_display: p.location_display ?? formatHomeShortPath(rootDir),
+    location_display: p.location_display ?? shortenHomePath(rootDir),
     manifest_path: p.manifest_path,
     lifecycle: p.lifecycle && p.lifecycle.length > 0 ? p.lifecycle : (tool === 'gradle' ? GRADLE_LIFECYCLE : MAVEN_LIFECYCLE),
     plugins: normalizePluginList(p.plugins, tool),
@@ -435,5 +434,3 @@ export function executeBuildToolGoal(mod: IdeBuildToolModule, rawGoal: string, m
     },
   });
 }
-
-export { formatHomeShortPath };

@@ -531,7 +531,7 @@ export function performSaveFile(
 ): Promise<boolean> {
   const key = (path ? host.resolvePath(path) : host.activePath) ?? '';
   const prior = perf.savesInFlight.get(key) ?? Promise.resolve(false);
-  const run = prior.catch(() => false).then(() => saveFileNow(host, perf, path, forceOverwrite, opts));
+  const run = prior.catch(() => false).then(() => saveFileNow(host, perf, key || undefined, forceOverwrite, opts));
   perf.savesInFlight.set(key, run);
   const done = (): void => { if (perf.savesInFlight.get(key) === run) perf.savesInFlight.delete(key); };
   run.then(done, done);

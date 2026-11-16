@@ -556,7 +556,7 @@ async fn update_providers(
     let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
 
     // Collect (name, command) pairs — either the single requested provider or all.
-    let all_cmds = ctx.manager.provider_update_commands();
+    let all_cmds = ctx.manager.provider_update_commands().await;
     let pairs: Vec<(String, String)> = if let Some(ref name) = req.provider {
         let found = all_cmds.into_iter().find(|(n, _)| n == name);
         match found {
@@ -573,7 +573,7 @@ async fn update_providers(
 
     if pairs.is_empty() {
         return Err(ApiError(Error::Invalid(
-            "no providers have an update command configured".into(),
+            "no enabled, installed provider has an update command".into(),
         )));
     }
 

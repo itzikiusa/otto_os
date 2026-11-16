@@ -131,7 +131,10 @@ fn listable(rows: &[sqlx::sqlite::SqliteRow]) -> Vec<RuntimeSessionRecord> {
     rows.iter()
         .filter_map(|r| {
             row_to_session(r)
-                .inspect_err(|e| tracing::warn!("skipping runtime session row: {e}"))
+                .inspect_err(|e| {
+                    let id = r.try_get::<String, _>("id").unwrap_or_default();
+                    tracing::warn!(%id, "skipping runtime session row: {e}")
+                })
                 .ok()
         })
         .collect()
