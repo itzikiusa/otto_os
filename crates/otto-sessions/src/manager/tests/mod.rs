@@ -255,6 +255,36 @@ fn env_based_mcp_providers_preserve_reviewer_source() {
     );
 }
 
+/// Muse hands a stdio MCP child only the names its `.mcp.json` entry lists, so
+/// every variable the bridge reads must be forwarded there: a name added to
+/// `otto_tools_env` but not to `OTTO_TOOLS_ENV_NAMES` would never reach a
+/// Muse session's `ottod mcp-tools`.
+#[test]
+fn mcp_json_forwards_every_otto_tools_env_name() {
+    let session = Session {
+        id: new_id(),
+        workspace_id: new_id(),
+        kind: SessionKind::Agent,
+        provider: "muse".into(),
+        title: "t".into(),
+        status: SessionStatus::Idle,
+        cwd: "/tmp".into(),
+        provider_session_id: None,
+        connection_id: None,
+        created_by: new_id(),
+        created_at: chrono::Utc::now(),
+        last_active_at: chrono::Utc::now(),
+        archived: false,
+        meta: serde_json::json!({"source": "vault-docs-review"}),
+    };
+    for name in otto_tools_env(&session, "t", "b").keys() {
+        assert!(
+            crate::mcp::OTTO_TOOLS_ENV_NAMES.contains(&name.as_str()),
+            "{name} is not forwarded by the .mcp.json otto entry"
+        );
+    }
+}
+
 /// Every provider's `otto` server runs under the session's MCP profile: the
 /// env Claude/agy/grok inherit carries `OTTO_MCP_PROFILES` (the creds file
 /// carries it for Codex — `codex_creds_preserve_session_source_for_mcp_policy`),
