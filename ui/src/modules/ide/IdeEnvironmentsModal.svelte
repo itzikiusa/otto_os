@@ -13,7 +13,7 @@
   import { announceShown } from '../../lib/announce.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { joinArgs, splitArgs } from '../settings/providerForm';
+  import { joinArgs, splitArgs } from '../../lib/shellArgs';
   import { ide, type IdeEnvVar, type IdePythonVenv, type IdeRunConfig } from './ideStore.svelte';
   import IdeNetworkBridgeCard from './shell/IdeNetworkBridgeCard.svelte';
   import IdeRunConfigEditor, { type ConfigDraft, emptyConfigDraft } from './shell/IdeRunConfigEditor.svelte';

@@ -83,7 +83,7 @@
   <p class="hint">
     <code>{'{sid}'}</code> and <code>{'{cwd}'}</code> expand in arguments; <code>{'{model}'}</code> in the model flag
     template. Quote an argument that contains spaces (<code>--system 'be terse'</code>). An empty model template
-    uses the CLI family's default flag.
+    uses the CLI family’s default flag.
   </p>
   {#if formError}<p class="field-err" use:announceShown={{ text: formError, assertive: true }}>{formError}</p>{/if}
   {#snippet footer()}
