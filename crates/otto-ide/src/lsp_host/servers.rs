@@ -352,8 +352,24 @@ fn which_in(executable: &str, extra_dirs: &[PathBuf]) -> Option<String> {
     None
 }
 
+/// `~/.cargo/bin/rust-analyzer` is a rustup proxy that exists even when the
+/// component is not installed; only a successful `--version` means it runs.
+/// Callers reach this through the 60 s detect cache (or a blocking task).
+#[allow(clippy::disallowed_methods)]
+fn runs_version(cmd: &str) -> bool {
+    std::process::Command::new(cmd)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 fn resolve_def(def: &ServerDef, extra_dirs: &[PathBuf]) -> Resolved {
-    if let Some(resolved) = which_in(def.cmd, extra_dirs) {
+    let primary =
+        which_in(def.cmd, extra_dirs).filter(|cmd| def.lang != "rust" || runs_version(cmd));
+    if let Some(resolved) = primary {
         return Resolved {
             lang: def.lang.to_string(),
             available: true,
@@ -576,4 +592,32 @@ pub fn resolve_remote_lang(lang: &str, plugins: &IdePluginRegistry) -> Option<Re
             fallback_cmd: def.fallback_cmd.map(str::to_string),
             fallback_args: def.fallback_args.iter().map(|s| s.to_string()).collect(),
         })
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn rustup_proxy_without_the_component_is_unavailable() {
+        use std::os::unix::fs::PermissionsExt;
+        let def = REGISTRY.iter().find(|d| d.lang == "rust").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("rust-analyzer");
+        let probe = |body: &str| {
+            std::fs::write(&bin, body).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            resolve_def(def, &[tmp.path().to_path_buf()])
+        };
+        let proxy =
+            probe("#!/bin/sh\necho \"error: Unknown binary 'rust-analyzer'\" >&2\nexit 1\n");
+        assert!(!proxy.available);
+        assert_eq!(
+            proxy.install_command.as_deref(),
+            Some("rustup component add rust-analyzer")
+        );
+        let real = probe("#!/bin/sh\necho rust-analyzer 1.0\n");
+        assert!(real.available);
+        assert_eq!(real.command, bin.to_string_lossy());
+    }
 }

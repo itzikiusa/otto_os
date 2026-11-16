@@ -146,6 +146,58 @@ fn canonical_or_existing_ancestor(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// From a module dir, climb to the build root one server should own: a Maven
+/// reactor whose `pom.xml` lists the child in `<modules>`, a Gradle build with
+/// `settings.gradle*`, or the Cargo `[workspace]` that holds the member.
+#[allow(clippy::disallowed_methods)]
+fn climb_to_build_root(norm_lang: &str, module: &Path, allowed: &dyn Fn(&Path) -> bool) -> PathBuf {
+    let read = |p: PathBuf| std::fs::read_to_string(p).unwrap_or_default();
+    let has_settings_gradle =
+        |d: &Path| d.join("settings.gradle").is_file() || d.join("settings.gradle.kts").is_file();
+    let is_cargo_workspace = |d: &Path| {
+        read(d.join("Cargo.toml"))
+            .lines()
+            .any(|l| l.trim() == "[workspace]")
+    };
+    if norm_lang == "rust" && is_cargo_workspace(module) {
+        return module.to_path_buf();
+    }
+    let mut top = module.to_path_buf();
+    let mut cur = module.to_path_buf();
+    for _ in 0..16 {
+        let Some(parent) = cur.parent().map(Path::to_path_buf) else {
+            break;
+        };
+        if !allowed(&parent) {
+            break;
+        }
+        let climb = match norm_lang {
+            "java" | "kotlin" => {
+                let lists_child = read(parent.join("pom.xml"))
+                    .split("<module>")
+                    .skip(1)
+                    .filter_map(|s| s.split("</module>").next())
+                    .any(|m| {
+                        std::fs::canonicalize(parent.join(m.trim())).ok().as_ref() == Some(&cur)
+                    });
+                lists_child || (has_settings_gradle(&parent) && !has_settings_gradle(&cur))
+            }
+            // Cargo binds a member to its nearest `[workspace]` ancestor.
+            "rust" if is_cargo_workspace(&parent) => return parent,
+            "rust" => true,
+            _ => false,
+        };
+        if !climb {
+            break;
+        }
+        if norm_lang != "rust" {
+            top = parent.clone();
+        }
+        cur = parent;
+    }
+    top
+}
+
 /// Scope an LSP root strictly to the nearest module manifest directory for `lang`
 /// and refuse spawning on a multi-repository umbrella folder.
 pub fn resolve_lsp_module_root(
@@ -237,7 +289,8 @@ pub fn resolve_lsp_module_root_with_markers(
                 break;
             }
             if dir_has_any_manifest(cur, manifests, extra_markers) {
-                return Ok(cur.to_string_lossy().into_owned());
+                let top = climb_to_build_root(norm_lang, cur, &within_allowed);
+                return Ok(top.to_string_lossy().into_owned());
             }
             let Some(parent) = cur.parent() else {
                 break;
@@ -483,5 +536,81 @@ mod tests {
         )
         .unwrap();
         assert_eq!(PathBuf::from(resolved_unsaved), rebeltech);
+    }
+
+    #[test]
+    fn jvm_and_cargo_roots_climb_to_the_reactor_and_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let top = std::fs::canonicalize(tmp.path()).unwrap();
+        let w = |p: &str, body: &str| {
+            let f = top.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, body).unwrap();
+        };
+        w(
+            "mvn/pom.xml",
+            "<project><modules>\n<module>svc</module>\n</modules></project>",
+        );
+        w(
+            "mvn/svc/pom.xml",
+            "<project><modules><module>core</module></modules></project>",
+        );
+        w("mvn/svc/core/pom.xml", "<project/>");
+        w("mvn/svc/core/src/main/java/A.java", "class A {}");
+        // A pom next door that does NOT list `lone` keeps it standalone.
+        w(
+            "lone-parent/pom.xml",
+            "<project><modules><module>other</module></modules></project>",
+        );
+        w("lone-parent/lone/pom.xml", "<project/>");
+        w(
+            "cargo/Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        );
+        w("cargo/crates/app/Cargo.toml", "[package]\nname = \"app\"\n");
+        w("cargo/crates/app/src/lib.rs", "");
+        w("solo/Cargo.toml", "[package]\nname = \"solo\"\n");
+        w("gradle/settings.gradle.kts", "include(\"core\")");
+        w("gradle/core/build.gradle.kts", "");
+
+        let root = |lang: &str, file: &str| {
+            let f = top.join(file);
+            PathBuf::from(
+                resolve_lsp_module_root(
+                    lang,
+                    &f.to_string_lossy(),
+                    Some(&f.to_string_lossy()),
+                    &[top.clone()],
+                )
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            root("java", "mvn/svc/core/src/main/java/A.java"),
+            top.join("mvn")
+        );
+        assert_eq!(
+            root("java", "lone-parent/lone/pom.xml"),
+            top.join("lone-parent/lone")
+        );
+        assert_eq!(
+            root("rust", "cargo/crates/app/src/lib.rs"),
+            top.join("cargo")
+        );
+        assert_eq!(root("rust", "solo/Cargo.toml"), top.join("solo"));
+        assert_eq!(
+            root("kotlin", "gradle/core/build.gradle.kts"),
+            top.join("gradle")
+        );
+        // Never above the allowed root.
+        let core = top.join("mvn/svc/core");
+        let scoped = resolve_lsp_module_root(
+            "java",
+            &core.to_string_lossy(),
+            None,
+            &[top.join("mvn/svc")],
+        )
+        .unwrap();
+        assert_eq!(PathBuf::from(scoped), top.join("mvn/svc"));
     }
 }

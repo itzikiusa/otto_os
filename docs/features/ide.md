@@ -509,7 +509,14 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   toolbar and install the matching language server (for example `rust-analyzer`,
   `gopls`, `pyright`, `jdtls`, or `typescript-language-server`, or install/enable
   a runtime IDE plugin for additional languages such as Kotlin or C/C++). The
-  editor reconnects automatically once the install job finishes.
+  editor reconnects automatically once the install job finishes. A rustup
+  `rust-analyzer` proxy only counts as installed once `rust-analyzer --version`
+  succeeds (`rustup component add rust-analyzer`).
+- **One language server per build:** `jdtls` is rooted at the Maven reactor
+  (the parent `pom.xml` that lists the module in `<modules>`) or the Gradle
+  `settings.gradle*` dir, and `rust-analyzer` at the Cargo `[workspace]`, so
+  the modules of one build share a server. The root never climbs above the
+  project's allowed roots.
 - **Remote SSH target fails to connect:** Verify the SSH connection succeeds in
   **Connections** first (`BatchMode=yes` key auth is used for non-interactive
   LSP/DAP/command execution) and confirm your role grants `discover` and `shell`
