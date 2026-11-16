@@ -591,13 +591,19 @@ mod tests {
         assert!(!guard(body.clone(), &prev));
 
         body["java_home"] = serde_json::json!("/evil/jdk");
-        assert!(guard(body.clone(), &prev), "a changed SDK home is root-only");
+        assert!(
+            guard(body.clone(), &prev),
+            "a changed SDK home is root-only"
+        );
 
         body["java_home"] = serde_json::json!("/opt/jdk");
         body["network_bridge"] = serde_json::json!({
             "enabled": true,
             "host_mappings": [{ "from_host": "localhost", "from_port": 5432, "to_host": "x.example", "to_port": 5432 }],
         });
-        assert!(guard(body, &prev), "a Local network bridge edit is root-only");
+        assert!(
+            guard(body, &prev),
+            "a Local network bridge edit is root-only"
+        );
     }
 }

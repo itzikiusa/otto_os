@@ -61,7 +61,8 @@ async fn non_root_netbridge_cross_tenant_ssh_k8s_and_namespace_rbac() {
     let alice_root = ws_alice.to_string_lossy().into_owned();
     let kubectl = write_mock_kubectl(tmp.path());
 
-    let (ctx, app_root) = build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
+    let (ctx, app_root) =
+        build_test_app(tmp.path().join("data"), &tmp.path().join("db.sqlite")).await;
     ctx.k8s_clusters.lock().unwrap().insert(
         "k8s_alice".into(),
         TestK8sEntry {
