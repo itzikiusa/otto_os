@@ -138,13 +138,15 @@ pub(super) async fn resolve_python_adapter(
             ]
         };
         args.extend(req.launch.args.clone());
-        (
-            "launch".to_string(),
-            json!({
-                "module": "pytest", "program": program, "testName": test_name, "args": args,
-                "cwd": cwd, "console": "internalConsole", "justMyCode": false, "python": [py_bin],
-            }),
-        )
+        let mut launch = json!({
+            "module": "pytest", "program": program, "testName": test_name, "args": args,
+            "cwd": cwd, "console": "internalConsole", "justMyCode": false, "python": [py_bin],
+        });
+        // debugpy rejects `module` with `program`; only the bdb bridge needs the file.
+        if let Some(o) = launch.as_object_mut().filter(|_| debugpy_host_py.is_some()) {
+            o.remove("program");
+        }
+        ("launch".to_string(), launch)
     } else {
         (
             "launch".to_string(),

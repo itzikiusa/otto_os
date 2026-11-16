@@ -356,6 +356,15 @@ impl Mux {
                     "initializationOptions".into(),
                     json!({ "pythonPath": py_path }),
                 );
+                // pyright ignores `initializationOptions`; it asks `workspace/configuration`
+                // (answered below) only when the client says it can.
+                let caps = params.entry("capabilities").or_insert_with(|| json!({}));
+                if let Some(caps) = caps.as_object_mut() {
+                    let ws = caps.entry("workspace").or_insert_with(|| json!({}));
+                    if let Some(ws) = ws.as_object_mut() {
+                        ws.insert("configuration".into(), Value::Bool(true));
+                    }
+                }
             } else {
                 params.remove("initializationOptions");
             }

@@ -43,6 +43,7 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
         }
 
         if re_main.is_match(line) {
+            let (args, cwd) = python_main_invocation(path, dir);
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Main,
@@ -51,8 +52,8 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::Python,
                     command: Some("python3".into()),
-                    args: vec![path.to_string()],
-                    cwd: Some(dir.to_string()),
+                    args,
+                    cwd: Some(cwd),
                     target_path: Some(path.to_string()),
                     test_filter: None,
                     debug_program: Some(path.to_string()),
@@ -116,6 +117,27 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
             });
         }
     }
+}
+
+/// A package's `__main__.py` runs as `python3 -m <pkg>` from above the package, so its own
+/// imports resolve; any other file runs as itself from its folder.
+fn python_main_invocation(path: &str, dir: &str) -> (Vec<String>, String) {
+    let file = std::path::Path::new(path);
+    if file.file_name().and_then(|n| n.to_str()) != Some("__main__.py") {
+        return (vec![path.to_string()], dir.to_string());
+    }
+    let mut pkg_dir = std::path::Path::new(dir);
+    let mut module = Vec::new();
+    while let (Some(name), Some(parent)) = (pkg_dir.file_name(), pkg_dir.parent()) {
+        module.push(name.to_string_lossy().into_owned());
+        pkg_dir = parent;
+        if !pkg_dir.join("__init__.py").is_file() {
+            break;
+        }
+    }
+    module.reverse();
+    let cwd = pkg_dir.to_string_lossy().into_owned();
+    (vec!["-m".into(), module.join(".")], cwd)
 }
 
 // ---------------------------------------------------------------------------

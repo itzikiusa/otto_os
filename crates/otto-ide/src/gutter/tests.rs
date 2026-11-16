@@ -508,3 +508,25 @@ fn shell_function_items_only_when_sourcing_runs_nothing_else() {
         "greet() {\n  echo hi\n}\nif [[ \"${BASH_SOURCE[0]}\" == \"$0\" ]]; then\n  greet\nfi\n";
     assert_eq!(fn_labels(guarded), ["Run greet()"]);
 }
+
+#[test]
+fn python_package_main_runs_as_a_module_from_above_the_package() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(src.join("shop/cli")).unwrap();
+    std::fs::write(src.join("shop/__init__.py"), "").unwrap();
+    std::fs::write(src.join("shop/cli/__init__.py"), "").unwrap();
+    let main_src = "if __name__ == \"__main__\":\n    run()\n";
+    let file = src.join("shop/cli/__main__.py");
+    let items = detect_gutter_items(&file.to_string_lossy(), main_src, &[]);
+    assert_eq!(items[0].run_spec.args, ["-m", "shop.cli"]);
+    assert_eq!(
+        items[0].run_spec.cwd.as_deref(),
+        Some(&*src.to_string_lossy())
+    );
+
+    // Any other file still runs as itself.
+    let plain = src.join("tool.py").to_string_lossy().into_owned();
+    let items = detect_gutter_items(&plain, main_src, &[]);
+    assert_eq!(items[0].run_spec.args, [plain]);
+}

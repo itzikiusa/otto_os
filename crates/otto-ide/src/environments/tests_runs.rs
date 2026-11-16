@@ -998,3 +998,27 @@ async fn filtered_test_run_that_ran_nothing_is_not_passed() {
         snap.output
     );
 }
+
+#[test]
+fn module_venv_is_found_up_from_the_run_dir_inside_the_roots() {
+    use super::runner::apply_runtime_profile_and_module_venv;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("proj");
+    std::fs::create_dir_all(root.join(".venv/bin")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(root.join(".venv/pyvenv.cfg"), "").unwrap();
+    std::fs::write(root.join(".venv/bin/python"), "").unwrap();
+    let target = IdeTargetSpec::local(root.to_string_lossy().into_owned());
+    let mut env = BTreeMap::new();
+    let tests_dir = root.join("tests").to_string_lossy().into_owned();
+    apply_runtime_profile_and_module_venv(&IdeRunConfig::default(), &target, &tests_dir, &mut env);
+    assert_eq!(env.get("VIRTUAL_ENV"), Some(&canon(root.join(".venv"))));
+    assert!(env["PATH"].starts_with(&canon(root.join(".venv/bin"))));
+
+    // Never above the workspace root: a venv above the roots is not the project's.
+    let inner = root.join("tests");
+    let target = IdeTargetSpec::local(inner.to_string_lossy().into_owned());
+    let mut env = BTreeMap::new();
+    apply_runtime_profile_and_module_venv(&IdeRunConfig::default(), &target, &tests_dir, &mut env);
+    assert_eq!(env.get("VIRTUAL_ENV"), None);
+}

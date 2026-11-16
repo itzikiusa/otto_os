@@ -255,6 +255,13 @@ How each item runs:
   filter is the module path from `<crate>/src/`, and an `#[ignore]` test runs with
   `--include-ignored`. Debug builds the same target, so it launches that target's
   executable.
+- **Python:** a run uses the nearest `.venv` / `venv` (with `pyvenv.cfg`) found
+  up from its folder inside the workspace roots, so a test in `tests/` gets the
+  project venv. A package's `__main__.py` runs as `python3 -m <package>` from
+  above the package. pytest Debug under `debugpy` launches the `pytest` module
+  without a `program` (debugpy rejects both). pyright gets the workspace venv
+  through `workspace/configuration`, which Otto now advertises for Python
+  (root-owned sessions only).
 - **Shell:** `Run fn()` sources the script and calls the function, so it is
   offered only when sourcing runs nothing else: the top level holds just function
   definitions, assignments, `set`/`shopt`/`export`/`readonly`/`declare`,

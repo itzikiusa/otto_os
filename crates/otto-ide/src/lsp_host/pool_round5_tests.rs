@@ -742,3 +742,47 @@ async fn non_root_mux_handles_multibyte_utf8_and_blocks_rfc8089_secret_uris_and_
     assert_eq!(ok_msg["id"], json!(4));
     assert_eq!(ok_msg["result"]["contents"], json!("confined-hover-ok"));
 }
+
+/// pyright ignores `initializationOptions`; it reads the venv from `workspace/configuration`,
+/// which it asks only when the client advertises `workspace.configuration`.
+#[tokio::test]
+#[cfg(unix)]
+async fn python_initialize_advertises_workspace_configuration_with_the_venv() {
+    let system_py = std::path::Path::new("/usr/bin/python3");
+    if !system_py.is_file() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("py-app");
+    std::fs::create_dir_all(root.join(".venv/bin")).unwrap();
+    std::fs::write(root.join(".venv/pyvenv.cfg"), "").unwrap();
+    std::os::unix::fs::symlink(system_py, root.join(".venv/bin/python")).unwrap();
+    let root_str = std::fs::canonicalize(&root)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let (pool, rec) = recording_pool();
+    pool.record_owner_privilege("root1", true);
+    let key = PoolKey {
+        owner: "root1".into(),
+        lang: "python".into(),
+        root: root_str.clone(),
+        ssh: None,
+        go_build_tags: Vec::new(),
+    };
+    let mut a = pool.attach(key, "pyright-langserver", &[]).unwrap();
+    let init =
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}});
+    assert!(a.send(init.to_string()).await);
+    recv_msg(&mut a).await;
+    let params = rec.init_params.lock().unwrap()[0].clone();
+    assert_eq!(
+        params["capabilities"]["workspace"]["configuration"],
+        json!(true)
+    );
+    assert_eq!(
+        params["initializationOptions"]["pythonPath"],
+        json!(format!("{root_str}/.venv/bin/python"))
+    );
+}

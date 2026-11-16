@@ -21,25 +21,53 @@ pub(in crate::environments) fn apply_runtime_profile_and_module_venv(
     if !spring_csv.is_empty() && !env_map.contains_key("SPRING_PROFILES_ACTIVE") {
         env_map.insert("SPRING_PROFILES_ACTIVE".into(), spring_csv);
     }
-    if target.kind == IdeTargetKind::Local && !env_map.contains_key("VIRTUAL_ENV") {
-        for vname in [".venv", "venv", ".env"] {
-            let cand = Path::new(cwd).join(vname);
-            if cand.join("pyvenv.cfg").is_file() && cand.join("bin/python").is_file() {
-                let bin = cand.join("bin").to_string_lossy().into_owned();
-                let cur_path = env_map.get("PATH").cloned().unwrap_or_default();
-                env_map.insert(
-                    "PATH".into(),
-                    if cur_path.is_empty() {
-                        bin
-                    } else {
-                        format!("{bin}:{cur_path}")
-                    },
-                );
-                env_map.insert("VIRTUAL_ENV".into(), cand.to_string_lossy().into_owned());
-                break;
-            }
-        }
+    if env_map.contains_key("VIRTUAL_ENV") {
+        return;
     }
+    // The nearest venv up from the run dir: a test in `tests/` uses the project's `.venv`.
+    let mut venv = None;
+    nearest_dir_in_roots(target, cwd, |dir| {
+        venv = [".venv", "venv", ".env"]
+            .iter()
+            .map(|v| dir.join(v))
+            .find(|c| c.join("pyvenv.cfg").is_file() && c.join("bin/python").is_file());
+        venv.is_some()
+    });
+    if let Some(cand) = venv {
+        let bin = cand.join("bin").to_string_lossy().into_owned();
+        let cur_path = env_map.get("PATH").cloned().unwrap_or_default();
+        env_map.insert(
+            "PATH".into(),
+            if cur_path.is_empty() {
+                bin
+            } else {
+                format!("{bin}:{cur_path}")
+            },
+        );
+        env_map.insert("VIRTUAL_ENV".into(), cand.to_string_lossy().into_owned());
+    }
+}
+
+/// The nearest ancestor of `cwd` (itself first) inside the target's roots for which `found`
+/// holds. Local targets only.
+pub(in crate::environments) fn nearest_dir_in_roots(
+    target: &IdeTargetSpec,
+    cwd: &str,
+    mut found: impl FnMut(&Path) -> bool,
+) -> Option<PathBuf> {
+    if target.kind != IdeTargetKind::Local {
+        return None;
+    }
+    let roots: Vec<PathBuf> = std::iter::once(target.root.clone())
+        .chain(target.merged_extra_roots())
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .collect();
+    let start = std::fs::canonicalize(cwd).ok()?;
+    start
+        .ancestors()
+        .take_while(|d| roots.iter().any(|r| d.starts_with(r)))
+        .find(|d| found(d))
+        .map(Path::to_path_buf)
 }
 
 pub(super) const GRADLE_BUILD_FILES: [&str; 4] = [
@@ -63,29 +91,18 @@ pub(in crate::environments) fn resolve_jvm_build_dir(
         IdeRunnerKind::Gradle => (false, true),
         _ => return cwd,
     };
-    if target.kind != IdeTargetKind::Local {
-        return cwd;
-    }
-    let roots: Vec<PathBuf> = std::iter::once(target.root.clone())
-        .chain(target.merged_extra_roots())
-        .filter_map(|r| std::fs::canonicalize(r).ok())
-        .collect();
-    let Ok(start) = std::fs::canonicalize(&cwd) else {
+    let mut has_pom = false;
+    let module = nearest_dir_in_roots(target, &cwd, |dir| {
+        has_pom = maven && dir.join("pom.xml").is_file();
+        has_pom || (gradle && GRADLE_BUILD_FILES.iter().any(|f| dir.join(f).is_file()))
+    });
+    let Some(module) = module else {
         return cwd;
     };
-    let mut dir = start.as_path();
-    while roots.iter().any(|r| dir.starts_with(r)) {
-        let has_pom = maven && dir.join("pom.xml").is_file();
-        if has_pom || (gradle && GRADLE_BUILD_FILES.iter().any(|f| dir.join(f).is_file())) {
-            if !has_pom {
-                cfg.runner = IdeRunnerKind::Gradle;
-            }
-            return dir.to_string_lossy().into_owned();
-        }
-        let Some(parent) = dir.parent() else { break };
-        dir = parent;
+    if !has_pom {
+        cfg.runner = IdeRunnerKind::Gradle;
     }
-    cwd
+    module.to_string_lossy().into_owned()
 }
 
 pub(in crate::environments) fn has_manual_classpath(cfg: &IdeRunConfig) -> bool {
