@@ -47,4 +47,29 @@ test.describe('Desktop IDE editor wave 2', () => {
     await expect(page.getByTestId('ide-binary-badge')).toBeVisible({ timeout: 10_000 });
     await expect(page.getByTestId('ide-binary-badge')).toContainText('Binary or not UTF-8 text');
   });
+
+  test('E5: changing the replacement or an option drops the stale replace preview', async ({ page }) => {
+    await bootIde(page, 'flags.ts');
+    await page.keyboard.press('Shift');
+    await page.keyboard.press('Shift');
+    const dialog = page.locator('.sheet[role="dialog"]').last();
+    await expect(dialog).toBeVisible({ timeout: 5_000 });
+    await dialog.getByTestId('ide-se-tab-text').click();
+    await dialog.locator('input.se-input').first().fill('FLAG_ONE');
+    await dialog.getByTestId('ide-se-replace-toggle').click();
+    const replacement = dialog.getByTestId('ide-replace-input');
+    await replacement.fill('FLAG_1');
+    const preview = dialog.locator('.se-preview-box');
+    await dialog.getByRole('button', { name: /^Preview$/ }).click();
+    await expect(preview).toContainText('1 occurrence', { timeout: 10_000 });
+    await expect(preview).toContainText('(1 match)');
+
+    await replacement.fill('FLAG_ONE_RENAMED');
+    await expect(preview).toHaveCount(0);
+
+    await dialog.getByRole('button', { name: /^Preview$/ }).click();
+    await expect(preview).toBeVisible({ timeout: 10_000 });
+    await dialog.getByRole('button', { name: 'Match case' }).click();
+    await expect(preview).toHaveCount(0);
+  });
 });
