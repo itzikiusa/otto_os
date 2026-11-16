@@ -155,7 +155,7 @@ pub(crate) fn make_delete_line_edit(path: &str, lines: &[&str], line_num: u32) -
     } else {
         let len = lines
             .get(line_num.saturating_sub(1) as usize)
-            .map(|l| l.chars().count() as u32)
+            .map(|l| l.encode_utf16().count() as u32)
             .unwrap_or(0);
         IdeTextEdit {
             path: path.to_string(),
@@ -177,7 +177,7 @@ pub(crate) fn make_replace_line_edit(
 ) -> IdeTextEdit {
     let end_col = lines
         .get(line_num.saturating_sub(1) as usize)
-        .map(|l| l.chars().count() as u32 + 1)
+        .map(|l| l.encode_utf16().count() as u32 + 1)
         .unwrap_or(1);
     IdeTextEdit {
         path: path.to_string(),
@@ -233,7 +233,7 @@ pub(crate) fn make_java_add_import_edit(path: &str, lines: &[&str], fqn: &str) -
         let last_ln = total.max(1);
         let end_col = lines
             .last()
-            .map(|l| l.chars().count() as u32 + 1)
+            .map(|l| l.encode_utf16().count() as u32 + 1)
             .unwrap_or(1);
         IdeTextEdit {
             path: path.to_string(),
@@ -359,7 +359,7 @@ pub(crate) fn analyze_java_diagnostics(
                     line: pkg_ln,
                     col: 1,
                     end_line: pkg_ln,
-                    end_col: (lines[(pkg_ln - 1) as usize].chars().count() as u32).max(1),
+                    end_col: (lines[(pkg_ln - 1) as usize].encode_utf16().count() as u32).max(1),
                     severity: "warning".into(),
                     code: "package_mismatch".into(),
                     source: "otto-java".into(),
@@ -544,8 +544,8 @@ pub(crate) fn analyze_java_diagnostics(
                 continue;
             }
 
-            let start_col = code_ln[..byte_start].chars().count() as u32 + 1;
-            let end_col = start_col + tok.chars().count() as u32;
+            let start_col = code_ln[..byte_start].encode_utf16().count() as u32 + 1;
+            let end_col = start_col + tok.encode_utf16().count() as u32;
             if !emitted_type_spans.insert((ln, start_col)) {
                 continue;
             }
@@ -603,9 +603,9 @@ fn parse_java_import_line(raw: &str, trimmed: &str, line_num: u32) -> Option<Par
     };
     let start_col = raw
         .find(target)
-        .map(|b| raw[..b].chars().count() as u32 + 1)
+        .map(|b| raw[..b].encode_utf16().count() as u32 + 1)
         .unwrap_or(1);
-    let end_col = start_col + target.chars().count() as u32;
+    let end_col = start_col + target.encode_utf16().count() as u32;
     Some(ParsedJavaImport {
         line_num,
         start_col,
@@ -782,5 +782,16 @@ fn collect_declared_vars_on_line(
     });
     for cap in var_re.captures_iter(trimmed) {
         declared_vars.insert(cap[1].to_string());
+    }
+}
+
+#[cfg(test)]
+mod utf16_col_tests {
+    #[test]
+    fn line_replacement_spans_the_whole_line_in_utf16_units() {
+        let lines = ["package wrong; // 🚀"];
+        let edit = super::make_replace_line_edit("A.java", &lines, 1, "package ok;");
+        // 18 BMP chars + one surrogate pair = 20 UTF-16 units (19 chars); EOL + 1.
+        assert_eq!(edit.end_col, 21);
     }
 }
