@@ -225,9 +225,9 @@ export async function runFormatActiveFile(
       await host.applyAgentEdit(targetPath, normalizeEditorLf(resp.formatted));
       toasts.info(opts.organizeImports ? 'Optimized imports' : `Formatted with ${resp.formatter || 'formatter'}`);
     } else {
-      toasts.info(resp.formatter === 'builtin'
-        ? 'No changes: no formatter is installed for this file type'
-        : opts.organizeImports ? 'Imports are already in order' : `Already formatted (${resp.formatter || 'formatter'})`);
+      toasts.info(opts.organizeImports ? 'Imports are already in order'
+        : resp.formatter === 'builtin' ? 'No changes: no formatter is installed for this file type'
+        : `Already formatted (${resp.formatter || 'formatter'})`);
     }
   } catch (e) {
     toastError(opts.organizeImports ? 'Couldn’t optimize imports' : 'Couldn’t format file', e);
