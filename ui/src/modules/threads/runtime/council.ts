@@ -54,3 +54,10 @@ export function councilMembers(
     .sort((a, b) => b.created_at.localeCompare(a.created_at));
   return { meta, seats, synthesis: synth[0] ?? null };
 }
+
+/** The threads linked under `parentId` that are its children. A council's
+ *  seats and syntheses sit under seat 1 as its peers, never as its
+ *  background tasks: they are left out. */
+export function linkedChildren(all: readonly RuntimeSession[], parentId: string): RuntimeSession[] {
+  return all.filter((s) => s.parent_id === parentId && !councilOf(s));
+}

@@ -336,13 +336,10 @@ export function buildRuntimeBanners(opts: {
   ];
 }
 
-export function mapChildThreadSummaries(
-  byId: Record<string, RuntimeSession>,
-  parentSessionId: string,
-): LinkedChildThreadSummary[] {
+/** `children`: council.ts `linkedChildren` (a council's peers left out). */
+export function mapChildThreadSummaries(children: readonly RuntimeSession[]): LinkedChildThreadSummary[] {
   const out: LinkedChildThreadSummary[] = [];
-  for (const s of Object.values(byId)) {
-    if (s.parent_id !== parentSessionId) continue;
+  for (const s of children) {
     out.push({
       id: s.id,
       title: s.title,

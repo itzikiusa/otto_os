@@ -130,6 +130,9 @@ test('a council is a group of threads: nested rows, side by side, synthesize and
   const canvas = page.getByTestId('threads-canvas');
   await expect(canvas).toHaveAttribute('data-layout', 'grid');
   for (const id of ['rt_s1', 'rt_s2', 'rt_s3']) await expect(canvas.getByTestId(`thread-pane-${id}`)).toBeVisible();
+  // Seats are peers: seat 3 working is not seat 1's background task.
+  await expect(canvas.getByTestId('thread-pane-rt_s3')).toBeVisible();
+  await expect(canvas.getByTestId('thread-pane-rt_s1')).not.toContainText(/background/i);
 
   // Seat 3 still works: Synthesize waits and says why.
   const synth = await threadMenu(page, 'Synthesize with');

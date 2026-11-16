@@ -28,6 +28,7 @@
   import RuntimeSwarmWork from './RuntimeSwarmWork.svelte';
   import RuntimeTaskOutput from './RuntimeTaskOutput.svelte';
   import RuntimeWorkRow from './RuntimeWorkRow.svelte';
+  import { linkedChildren } from './council';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import { subagentChildren, workLabel } from './timeline';
@@ -52,10 +53,7 @@
   const p = $derived(runtimeViews.projections[sessionId] ?? null);
   const childThreads = $derived.by((): LinkedChildThreadSummary[] => {
     const out: LinkedChildThreadSummary[] = [];
-    const all = Object.values(runtimeThreads.byId);
-    for (let i = 0; i < all.length; i++) {
-      const s = all[i];
-      if (s.parent_id !== sessionId) continue;
+    for (const s of linkedChildren(Object.values(runtimeThreads.byId), sessionId)) {
       const cp = runtimeViews.projections[s.id];
       const lastItem = cp?.items.findLast((it) => it.type !== 'user_message');
       const stepSummary = lastItem

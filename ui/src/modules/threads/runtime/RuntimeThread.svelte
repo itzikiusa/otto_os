@@ -49,6 +49,7 @@
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimePlan from './RuntimePlan.svelte';
   import RuntimeQueueBar from './RuntimeQueueBar.svelte';
+  import { linkedChildren } from './council';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import RuntimeTimelineRows from './RuntimeTimelineRows.svelte';
   import RuntimeTurnStatus from './RuntimeTurnStatus.svelte';
@@ -121,7 +122,7 @@
   const closed = $derived(session?.status === 'closed');
   const dormant = $derived(session?.status === 'dormant');
   const needsRevive = $derived(closed || dormant);
-  const childThreads = $derived(mapChildThreadSummaries(runtimeThreads.byId, sessionId));
+  const childThreads = $derived(mapChildThreadSummaries(linkedChildren(Object.values(runtimeThreads.byId), sessionId)));
   const tasks = $derived(
     agentTasks(
       p?.items ?? [],

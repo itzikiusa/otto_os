@@ -6,6 +6,7 @@ import {
   councilChipLabel,
   councilMembers,
   councilOf,
+  linkedChildren,
   toggleSeat,
   type CouncilSeat,
 } from '../src/modules/threads/runtime/council.ts';
@@ -63,4 +64,20 @@ test('councilMembers finds the seats in order and the latest synthesis, from any
   assert.equal(fromSeat?.synthesis?.id, 'j2');
   assert.deepEqual(councilMembers(all, 'j1')?.seats.map((s) => s.id), ['s1', 's2', 's3']);
   assert.equal(councilMembers(all, 'peer'), null, 'a linked thread outside the council');
+});
+
+test('linkedChildren leaves a council\'s peers out: seat 1 never waits on the other seats', async () => {
+  const { agentTasks } = await import('../src/modules/threads/runtime/agentTasks.ts');
+  const all = [
+    row('s1', { meta: cmeta(1) }),
+    row('s2', { parent_id: 's1', status: 'working', meta: cmeta(2) }),
+    row('j1', { parent_id: 's1', status: 'working', meta: cmeta(0, 'synthesis') }),
+    row('kid', { parent_id: 's1', status: 'working', title: 'A real child' }),
+    row('else', { parent_id: 'other', status: 'working' }),
+  ];
+  const kids = linkedChildren(all, 's1');
+  assert.deepEqual(kids.map((s) => s.id), ['kid'], 'only the thread seat 1 opened itself');
+  const childThreads = kids.map((s) => ({ id: s.id, title: s.title, provider: s.provider, model: null, status: s.status, createdAt: s.created_at, updatedAt: s.last_active_at }));
+  const running = agentTasks([], [], { output: {}, childThreads }).running.filter((t) => t.background);
+  assert.deepEqual(running.map((t) => t.label), ['A real child']);
 });
