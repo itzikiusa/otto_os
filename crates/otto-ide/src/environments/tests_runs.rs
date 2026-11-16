@@ -878,3 +878,123 @@ fn kotlin_pack_gutter_items_run_gradle_from_the_module_with_the_root_wrapper() {
     assert_eq!(run(1).2, ["test", "--tests", "*.adds two items"]);
     assert_eq!(run(2).2, ["test", "--tests", "*.testTotal"]);
 }
+
+const SUREFIRE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.x.CartTest" tests="5" failures="1">
+  <properties><property name="java.version" value="21"/></properties>
+  <testcase name="addsItem" classname="com.x.CartTest" time="0.012"/>
+  <testcase name="removesItem" classname="com.x.CartTest" time="0.003"/>
+  <testcase name="totals" classname="com.x.CartTest" time="0.5">
+    <failure message="expected: &lt;3&gt; but was: &lt;2&gt;" type="AssertionFailedError">trace</failure>
+  </testcase>
+  <testcase name="empty" classname="com.x.CartTest" time="0"/>
+  <testcase name="clears" classname="com.x.CartTest" time="0.001"></testcase>
+</testsuite>
+"#;
+
+#[test]
+fn junit_xml_reports_parse_per_test_rows_for_surefire_and_gradle() {
+    use super::runner_parsers::parse_junit_xml;
+    use crate::types::IdeTestCaseStatus;
+    let rows = parse_junit_xml(SUREFIRE_XML);
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows[0].name, "addsItem");
+    assert_eq!(rows[0].suite.as_deref(), Some("com.x.CartTest"));
+    assert_eq!(rows[0].duration_ms, Some(12));
+    assert_eq!(rows[2].status, IdeTestCaseStatus::Failed);
+    assert_eq!(
+        rows[2].message.as_deref(),
+        Some("expected: <3> but was: <2>")
+    );
+    let failed = rows
+        .iter()
+        .filter(|r| r.status == IdeTestCaseStatus::Failed);
+    assert_eq!(failed.count(), 1);
+
+    let gradle = r#"<testsuite name="CartTest" tests="2" skipped="1">
+  <testcase name="adds two items()" classname="CartTest" time="0.004"/>
+  <testcase name="later()" classname="CartTest" time="0.0">
+    <skipped/>
+  </testcase>
+</testsuite>"#;
+    let rows = parse_junit_xml(gradle);
+    assert_eq!(rows[0].name, "adds two items()");
+    assert_eq!(rows[0].status, IdeTestCaseStatus::Passed);
+    assert_eq!(rows[1].status, IdeTestCaseStatus::Skipped);
+}
+
+#[cfg(unix)]
+fn maven_sh_run_config(script: &str) -> IdeRunConfig {
+    IdeRunConfig {
+        runner: IdeRunnerKind::Maven,
+        test_filter: Some("CartTest".into()),
+        ..sh_run_config(script, None)
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn maven_run_reports_tests_from_the_surefire_xml_it_wrote() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A stale report from an earlier run must not count.
+    let stale = tmp.path().join("old/target/surefire-reports");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("TEST-com.x.OldTest.xml"), SUREFIRE_XML).unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(stale.join("TEST-com.x.OldTest.xml"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let xml = tmp.path().join("CartTest.xml");
+    std::fs::write(&xml, SUREFIRE_XML).unwrap();
+    let script = format!(
+        "mkdir -p core/target/surefire-reports && cp '{}' core/target/surefire-reports/TEST-com.x.CartTest.xml",
+        xml.display()
+    );
+    let (runs, handle, stop_rx) = local_run_handle("run_surefire");
+    let mut cfg = maven_sh_run_config(&script);
+    cfg.cwd = Some(tmp.path().to_string_lossy().into_owned());
+    execute_run_task(
+        runs,
+        Arc::clone(&handle),
+        TargetManager::new(),
+        IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned()),
+        None,
+        vec![(cfg, BTreeMap::new())],
+        None,
+        stop_rx,
+    )
+    .await;
+    let snap = handle.snapshot();
+    assert_eq!(snap.tests.len(), 5, "output: {:?}", snap.output);
+    assert_eq!(snap.status, IdeRunStatus::Passed);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn filtered_test_run_that_ran_nothing_is_not_passed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (runs, handle, stop_rx) = local_run_handle("run_no_tests");
+    execute_run_task(
+        runs,
+        Arc::clone(&handle),
+        TargetManager::new(),
+        IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned()),
+        None,
+        vec![(maven_sh_run_config("echo BUILD SUCCESS"), BTreeMap::new())],
+        None,
+        stop_rx,
+    )
+    .await;
+    let snap = handle.snapshot();
+    assert_eq!(snap.status, IdeRunStatus::Failed);
+    assert!(
+        snap.output
+            .iter()
+            .any(|l| l == "ERROR: No tests matched 'CartTest'"),
+        "{:?}",
+        snap.output
+    );
+}

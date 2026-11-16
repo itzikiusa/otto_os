@@ -214,6 +214,12 @@ secret environment variable values stored in the macOS Keychain via
   `python`, `shell`, `compound`, `custom`), launched in the **Run** bottom dock
   (`POST /ide/runs`) with live output and structured test-result trees, or
   stopped via `POST /ide/runs/{run_id}/stop`.
+- Maven / Gradle runs read the JUnit XML reports the run wrote (`TEST-*.xml`
+  under `**/target/surefire-reports` and `**/build/test-results/**`) for one row
+  per test with its time and failure message, instead of the console's one row
+  per class. A test run with a filter (`go_test`, `cargo_test`, `pytest`,
+  `vitest`, `java_junit`, `maven`, `gradle`) that exits 0 with no tests fails
+  with `No tests matched '<filter>'` instead of showing green.
 - A config's `before_launch` hook runs before the program, in its own process
   group, with its stdout/stderr streamed into the Run console. A non-zero exit
   fails the run (`before_launch failed (exit N)`); a hook that never exits

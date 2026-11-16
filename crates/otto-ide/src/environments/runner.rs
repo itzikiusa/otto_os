@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use dashmap::DashMap;
 use tokio::sync::{broadcast, watch};
@@ -18,7 +18,7 @@ pub(super) use super::runner_cmd::{
     compile_java_main_step, has_manual_classpath, is_default_go_command, resolve_jvm_build_dir,
     resolve_run_cwd,
 };
-use super::runner_parsers::IncrementalTestTracker;
+use super::runner_parsers::{collect_junit_xml_results, IncrementalTestTracker};
 use super::runner_proc::{
     cleanup_remaining_process_group, kill_child_process_group, run_remote_before_launch,
     spawn_run_child, ChildProcessGroupGuard,
@@ -218,6 +218,7 @@ pub(super) async fn execute_run_task(
     let started = Instant::now();
     let multi_step = steps.len() > 1;
     let mut last_exit = Some(0);
+    let mut last_filter: Option<String> = None;
     if let Some(ref nb) = netbridge {
         append_run_line(&handle, nb.summary_banner().await);
     }
@@ -248,6 +249,12 @@ pub(super) async fn execute_run_task(
 
         let cwd = resolve_run_cwd(&target, cfg.cwd.as_deref());
         let cwd = resolve_jvm_build_dir(&mut cfg, &target, cwd);
+        // A Go benchmark run (`-bench`) runs no tests on purpose.
+        last_filter = cfg.test_filter.clone().filter(|f| {
+            is_test_runner(cfg.runner)
+                && !f.trim().is_empty()
+                && !cfg.args.iter().any(|a| a == "-bench")
+        });
         apply_runtime_profile_and_module_venv(&cfg, &target, &cwd, &mut env_map);
         if let Some(ref nb) = netbridge {
             nb.apply_to_env(&mut env_map);
@@ -350,6 +357,7 @@ pub(super) async fn execute_run_task(
         );
 
         let is_local = target.kind == IdeTargetKind::Local;
+        let step_started = SystemTime::now();
         let mut child = match spawn_run_child(
             &targets,
             &target,
@@ -421,6 +429,15 @@ pub(super) async fn execute_run_task(
         if let Some(t) = stderr_task {
             let _ = tokio::time::timeout(Duration::from_millis(250), t).await;
         }
+        if is_local
+            && matches!(wait_res, Some(Ok(_)))
+            && matches!(
+                cfg.runner,
+                IdeRunnerKind::Maven | IdeRunnerKind::Gradle | IdeRunnerKind::JavaJunit
+            )
+        {
+            adopt_junit_xml_results(&handle, &cwd, step_started).await;
+        }
 
         match wait_res {
             None => {
@@ -463,14 +480,45 @@ pub(super) async fn execute_run_task(
         }
     }
 
-    finish_run(
-        &handle,
-        IdeRunStatus::Passed,
-        last_exit,
-        started.elapsed(),
-        None,
-    );
-    evict_finished_runs(&runs);
+    // A filtered test run that ran nothing exits 0 but didn't pass.
+    let no_match = last_filter.filter(|_| {
+        let guard = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.parser.results.is_empty()
+    });
+    let (status, err) = match no_match {
+        Some(f) => (
+            IdeRunStatus::Failed,
+            Some(format!("No tests matched '{f}'")),
+        ),
+        None => (IdeRunStatus::Passed, None),
+    };
+    end_run(&runs, &handle, status, last_exit, started, err);
+}
+
+fn is_test_runner(runner: IdeRunnerKind) -> bool {
+    matches!(
+        runner,
+        IdeRunnerKind::GoTest
+            | IdeRunnerKind::CargoTest
+            | IdeRunnerKind::Pytest
+            | IdeRunnerKind::Vitest
+            | IdeRunnerKind::JavaJunit
+            | IdeRunnerKind::Maven
+            | IdeRunnerKind::Gradle
+    )
+}
+
+/// Maven/Gradle print one row per class (or nothing for passing Gradle tests): use the JUnit
+/// XML reports this step wrote, when there are any.
+async fn adopt_junit_xml_results(handle: &ActiveRunHandle, cwd: &str, since: SystemTime) {
+    let dir = std::path::PathBuf::from(cwd);
+    let collected = tokio::task::spawn_blocking(move || collect_junit_xml_results(&dir, since));
+    if let Ok(results) = collected.await {
+        if !results.is_empty() {
+            let mut guard = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+            guard.parser.results = results;
+        }
+    }
 }
 
 /// Finish the run and trim the finished-run list.
