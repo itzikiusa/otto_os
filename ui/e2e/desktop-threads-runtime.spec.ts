@@ -86,7 +86,8 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect(thread).toBeVisible({ timeout: 30_000 });
   await expect(thread.locator('.rt-bubble', { hasText: 'hello runtime' })).toBeVisible();
   await expect(thread.getByText('echo: hello runtime')).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByTestId('threads-sidebar').getByText('hello runtime').first()).toBeVisible();
+  // The placeholder title drops the polite lead-in ("hello"): threadTitle.ts.
+  await expect(page.getByTestId('threads-sidebar').getByText('Runtime', { exact: true }).first()).toBeVisible();
 
   // An approval shows inline where the agent asked; Approve runs the command.
   const composer = thread.getByTestId('runtime-composer');
@@ -128,7 +129,7 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect(thread.locator('[data-slash-pop]')).toContainText('/btw');
   await composer.fill('/btw what changed so far?');
   await composer.press('Enter');
-  await expect(page.getByTestId('threads-side-chat')).toContainText(/about hello runtime/i, { timeout: 15_000 });
+  await expect(page.getByTestId('threads-side-chat')).toContainText(/about runtime/i, { timeout: 15_000 });
   await expect(composer).toHaveValue('');
 
   await expectNoHorizontalOverflow(page);
