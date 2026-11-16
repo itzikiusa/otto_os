@@ -372,6 +372,8 @@ export interface IdeCollabPeer {
 export interface IdeCollabRoom {
   id: string; title: string; target: IdeTargetSpec;
   default_role: IdeCollabRole; peers: IdeCollabPeer[]; created_at?: string;
+  /** Room list only, for the caller's own rooms: the invite link (`#/ide?collab=…`). */
+  share_hash?: string | null;
 }
 
 export interface IdePeerCursor {

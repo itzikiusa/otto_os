@@ -145,3 +145,40 @@ test('V9: a plugin switch in Settings waits for Apply, and Cancel drops it', asy
   assert.deepEqual(toggles, [['kotlin', false]], 'Apply turns it off');
   assert.equal(Object.keys(ideSettings.pluginDraft).length, 0);
 });
+
+test('V8: a host prepend and a guest append both survive; overlapping edits keep the peer\'s', async () => {
+  const sync = loadSource(ideUrl('store/ideCollabSync.ts'), {
+    '../../../lib/api/client': { laneFetch: async () => ({ ok: false }) },
+    './ideCollabNotices.svelte': { ideCollabNotices: {} },
+    './ideTypes': { IdeCollabHttpError: class extends Error {} },
+  });
+  const base = 'line1\nline2\n';
+  assert.equal(sync.mergeText(base, `HOSTHOST${base}`, `${base}guestguest`), `HOSTHOST${base}guestguest`);
+  assert.equal(sync.mergeText(base, base, 'x'), 'x', 'nothing local: take theirs');
+  assert.equal(sync.mergeText(base, 'mine', base), 'mine', 'nothing remote: keep mine');
+  assert.equal(sync.mergeText(base, 'line1\nMINE\n', 'line1\nTHEIRS\n'), null, 'same line: conflict');
+
+  // The event handler: a guest's typing not yet in the room is merged and sent, not overwritten.
+  let onEvent: (raw: string) => void = () => {};
+  const sent: [string, string][] = [];
+  const ctl = loadSource(ideUrl('store/ideCollabController.ts'), {
+    '../../../lib/api/client': { api: {}, laneFetch: async () => ({ ok: false }) },
+    '../../../lib/loadError': { loadErrorText: String },
+    '../../../lib/toast.svelte': { toasts: { info: () => {} } },
+    '../../../lib/toastError': { toastError: () => {} },
+    './ideCollabNotices.svelte': { ideCollabNotices: {} },
+    './ideCollabSync': sync,
+    './ideTypes': { collabGuestPost: async () => ({}), ideBasename: (p: string) => p, streamIdeSse: async (_p: string, _h: unknown, _s: unknown, cb: (raw: string) => void) => { onEvent = cb; } },
+  });
+  const tab = { path: '/r/shared.txt', content: base, savedContent: base, dirty: false };
+  const store = {
+    tabs: [tab], collabPeerId: 'me', collabIsGuest: true, sharedBuffers: { '/r/shared.txt': { content: base, version: 3 } },
+    getBuffer: () => `${base}guestguest`, clearLiveBuffer: () => {},
+    sendCollabEdit: async (p: string, c: string) => { sent.push([p, c]); return true; },
+  };
+  ctl.attachCollabEventStream(store, 'room', 'tok', 'me', null);
+  onEvent(JSON.stringify({ type: 'buffer_updated', path: '/r/shared.txt', content: `HOSTHOST${base}`, version: 4, peer_id: 'host' }));
+  assert.equal(tab.content, `HOSTHOST${base}guestguest`);
+  assert.deepEqual(sent.map((s) => s[1]), [`HOSTHOST${base}guestguest`], 'the merge goes back to the room');
+  assert.equal(store.sharedBuffers['/r/shared.txt'].version, 4);
+});

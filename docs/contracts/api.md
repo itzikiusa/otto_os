@@ -6900,7 +6900,7 @@ Full multi-language IDE over Local (`kind: "local"`) and Remote SSH (`kind: "ssh
 | POST /ide/debug/sessions/{id}/command | human + Agents: Edit | `IdeDebugCommandReq` (`continue`, `pause`, `step_over`, `step_into`, `step_out`, `run_to_cursor`, `select_frame`, `restart`, `stop`) | `IdeDebugSessionResp` |
 | POST /ide/debug/sessions/{id}/variables | human + Agents: Edit | `IdeDebugVariablesReq` | `IdeDebugVariablesResp` |
 | POST /ide/debug/sessions/{id}/evaluate | human + Agents: Edit | `IdeDebugEvaluateReq` | `IdeDebugEvaluateResp` |
-| GET /ide/collab/rooms | Agents: Edit | — | `IdeCollabRoomsResp` |
+| GET /ide/collab/rooms | Agents: Edit | — | `IdeCollabRoomsResp` — each of the caller's OWN rooms also carries `share_hash` (the invite link, so a reloaded host can show it again); absent on other rooms and in every guest view |
 | POST /ide/collab/rooms | human + Agents: Edit | `IdeCreateCollabRoomReq` | `IdeCreateCollabRoomResp` (`room`, `invite_token`, `share_hash`, `host_peer_id`, `host_peer_secret`) |
 | POST /ide/collab/rooms/{room_id}/role | Agents: Edit | `IdeCollabRoleReq` (`viewer` \| `editor`) | `IdeCollabRoomResp` |
 | DELETE /ide/collab/rooms/{room_id} | Agents: Edit | — | `IdeOkResp` |

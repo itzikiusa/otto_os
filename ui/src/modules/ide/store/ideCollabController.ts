@@ -6,6 +6,7 @@ import { loadErrorText } from '../../../lib/loadError';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { ideCollabNotices } from './ideCollabNotices.svelte';
+import { mergeText } from './ideCollabSync';
 import {
   collabGuestPost,
   ideBasename,
@@ -45,6 +46,8 @@ export interface CollabHostState {
   pluginsError: string | null;
   onCollabJoinFailed?(errorMsg: string): void;
   clearLiveBuffer?(path: string): void;
+  getBuffer?(path: string): string;
+  sendCollabEdit?(path: string, content: string): Promise<boolean>;
   openFile(path: string, opts?: { line?: number; col?: number; preview?: boolean }): Promise<void>;
   applyDebugSnapshot(snap: IdeDebugSessionSnapshot): void;
 }
@@ -96,17 +99,23 @@ export function attachCollabEventStream(
         const editPath = String(ev.path ?? '');
         const content = String(ev.content ?? '');
         if (editPath && ev.peer_id !== store.collabPeerId) {
+          const tab = store.tabs.find((t) => t.path === editPath);
+          // Text typed here and not yet in the room is merged with the peer's, not overwritten.
+          const base = store.sharedBuffers[editPath]?.content;
+          const mine = tab ? (store.getBuffer?.(editPath) ?? tab.content) : content;
+          const merged = base === undefined ? content : mergeText(base, mine, content);
           store.sharedBuffers = { ...store.sharedBuffers, [editPath]: { content, version: Number(ev.version ?? 0) } };
           store.clearLiveBuffer?.(editPath);
-          const tab = store.tabs.find((t) => t.path === editPath);
           if (tab) {
-            tab.content = content;
+            tab.content = merged ?? content;
+            if (merged === null) toasts.info(`A peer edited the same lines of ${ideBasename(editPath)}: their version is kept`);
+            else if (merged !== content) void store.sendCollabEdit?.(editPath, merged);
             if (ev.saved) {
               tab.savedContent = content;
               tab.sha256 = typeof ev.sha256 === 'string' ? ev.sha256 : undefined;
               tab.diskEols = undefined; // a peer's save: its per-line endings are unknown here
             }
-            tab.dirty = content !== tab.savedContent;
+            tab.dirty = tab.content !== tab.savedContent;
           } else if (store.collabIsGuest && store.tabs.length === 0) {
             void store.openFile(editPath);
           }

@@ -68,10 +68,13 @@
   // Workbench below 1000 px wide: at most ONE side panel next to the editor —
   // an open agent / build-tool dock hides the explorer rail instead of
   // squeezing the editor to a sliver.
+  // A live-session guest works only in the host's open files (no tree, run, agent or
+  // terminal routes exist for guests): those controls stay out of its page.
   const treeShown = $derived(
-    stack ? pane === 'files' : explorerVisible && !(ideLayout.width < 1000 && (ideAgent.panelOpen || ide.buildToolOpen)),
+    !ide.collabIsGuest &&
+      (stack ? pane === 'files' : explorerVisible && !(ideLayout.width < 1000 && (ideAgent.panelOpen || ide.buildToolOpen))),
   );
-  const agentShown = $derived(stack ? pane === 'agent' : ideAgent.panelOpen);
+  const agentShown = $derived(!ide.collabIsGuest && (stack ? pane === 'agent' : ideAgent.panelOpen));
   // Typing in a stacked editor squeezed by the on-screen keyboard: the page
   // header steps aside so the code keeps its lines (class:typing below).
   let typing = $state(false);
@@ -408,11 +411,11 @@
     tabsPlacement={stack && ideLayout.height >= STACK_MAX_H ? 'below' : 'inline'}
   >
     {#snippet badge()}
-      <IdeWorkspaceSwitcher onpickfolder={(m) => (folderPickerMode = m)} />
+      {#if !ide.collabIsGuest}<IdeWorkspaceSwitcher onpickfolder={(m) => (folderPickerMode = m)} />{/if}
     {/snippet}
 
     {#snippet actions()}
-      <IdeHeaderActions
+      {#if !ide.collabIsGuest}<IdeHeaderActions
         {stack}
         bind:quickPrefs
         {explorerVisible}
@@ -422,7 +425,7 @@
         onShowPane={showPane}
         onOpenScratches={() => void openScratches()}
         onToggleAgentDock={() => { ideAgent.togglePanel(); if (ideAgent.panelOpen) focusAgentComposer(); }}
-      />
+      />{/if}
     {/snippet}
   </PageHeader>
 
@@ -503,7 +506,7 @@
           <LazyMount lazy={IdeBottomDockLazy} what="bottom tool dock" quiet props={{ stack, stackShowing: stack && pane === 'tools' }} />
         </div>
 
-        {#if ide.buildToolOpen && !stack}
+        {#if ide.buildToolOpen && !stack && !ide.collabIsGuest}
           <PaneDivider bind:width={buildToolW} storageKey={BUILD_TOOL_W_KEY} min={240} max={720} defaultWidth={310} invert label="Resize build tool window" />
           <div class="ide-bt-wrap" style:inline-size="{buildToolW}px">
             <LazyMount lazy={IdeBuildToolWindowLazy} what="build tool window" variant="panel" />

@@ -322,6 +322,9 @@ pub struct IdeCollabRoom {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_debug_id: Option<String>,
     pub created_at: String,
+    /// `GET /ide/collab/rooms` only, for the caller's own rooms: the invite link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

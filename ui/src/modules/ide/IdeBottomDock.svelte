@@ -164,7 +164,8 @@
 
   const dockTabs = $derived(
     (stack ? stackDockOrder(allDockTabs) : allDockTabs).filter(
-      (t) => !ideDockPrefs.isDockTabHidden(t.id) || t.id === activeDockTab,
+      // A live-session guest follows the host's debugger; its other tools have no guest routes.
+      (t) => (!ide.collabIsGuest || t.id === 'debug') && (!ideDockPrefs.isDockTabHidden(t.id) || t.id === activeDockTab),
     ),
   );
 

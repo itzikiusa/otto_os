@@ -38,6 +38,13 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
     assert_ne!(created.invite_token, created.host_peer_secret);
     assert!(created.share_hash.contains(&created.room.id));
     assert!(created.share_hash.contains(&created.invite_token));
+    // After a reload the host's room list carries the invite link again; no other view does.
+    let listed = hub.list_rooms(&host).expect("list rooms");
+    assert_eq!(
+        listed[0].share_hash.as_deref(),
+        Some(created.share_hash.as_str())
+    );
+    assert!(created.room.share_hash.is_none());
     assert_eq!(created.room.peers.len(), 1);
     assert!(created.room.peers[0].is_host);
     assert_eq!(created.room.peers[0].peer_id, created.host_peer_id);

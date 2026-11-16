@@ -458,6 +458,8 @@ export interface IdeCollabRoom {
   created_at: string;
   peers: IdeCollabPeer[];
   active_debug_id?: string | null;
+  /** `GET /ide/collab/rooms` only, for the caller's own rooms: the invite link. */
+  share_hash?: string | null;
 }
 
 export interface IdeCreateCollabRoomReq {

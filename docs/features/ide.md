@@ -369,10 +369,21 @@ capability invite link (`#/ide?collab=<room_id>&token=<invite_token>`):
 - Live colored peer cursors, multi-range selections, active file indicators,
   **Follow peer**, real-time buffer edits, and shared debug session snapshots
   stream over `GET /api/v1/ide/collab/guest/{room_id}/events` (`text/event-stream`).
-- **Viewers** can browse files and follow cursors; any edit or debug action from
+- Guests work in the files the host has open (there is no guest file tree) and
+  follow cursors and the host's debugger; the guest page hides the project
+  tree, switcher, Run/Debug toolbar, agent, terminal and other tool tabs, which
+  have no guest routes. **Viewers** are read-only: any edit or debug action from
   a `viewer` peer is rejected with `403 Forbidden`. Hosts can promote/demote
   individual peers (`POST /ide/collab/rooms/{room_id}/role`) or close the room
   (`DELETE /ide/collab/rooms/{room_id}`, revoking all guest tokens).
+- Concurrent edits: when a peer's edit arrives while your own text is not yet in
+  the room, both are kept if they touch different parts of the file; when they
+  overlap, the peer's version is kept and a notice says so.
+- The invite link is built on the address the IDE page is open at. From the
+  desktop app (or `127.0.0.1`) it only opens on this Mac — the Share dialog says
+  so; open Otto over the network listener to invite someone else. After a reload
+  the host's Share dialog shows the same link again (`GET /ide/collab/rooms`
+  returns `share_hash` for the caller's own rooms).
 
 ### 9. Runtime IDE Plugins
 

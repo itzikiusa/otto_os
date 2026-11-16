@@ -78,3 +78,26 @@ export async function recoverRefusedEdit(
   ideCollabNotices.roomSync = 'failed';
   return false;
 }
+
+/** The one region `next` changed in `base`: common prefix and suffix trimmed. */
+function changeOf(base: string, next: string): { start: number; end: number; text: string } {
+  let p = 0;
+  const max = Math.min(base.length, next.length);
+  while (p < max && base[p] === next[p]) p++;
+  let s = 0;
+  while (s < max - p && base[base.length - 1 - s] === next[next.length - 1 - s]) s++;
+  return { start: p, end: base.length - s, text: next.slice(p, next.length - s) };
+}
+
+/**
+ * Three-way merge of two edits of one shared buffer: `mine` (unsent local text) and `theirs`
+ * (a peer's, now in the room), both made on `base`. Applies both when they touch different
+ * parts of the file; null when they overlap (the caller keeps theirs and says so).
+ */
+export function mergeText(base: string, mine: string, theirs: string): string | null {
+  if (mine === base || mine === theirs) return theirs;
+  if (theirs === base) return mine;
+  const [first, second] = [changeOf(base, mine), changeOf(base, theirs)].sort((x, y) => x.start - y.start);
+  if (first.end > second.start || first.start === second.start) return null;
+  return base.slice(0, first.start) + first.text + base.slice(first.end, second.start) + second.text + base.slice(second.end);
+}
