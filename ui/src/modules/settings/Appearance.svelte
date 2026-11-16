@@ -6,13 +6,8 @@
   import SettingToggle from './SettingToggle.svelte';
   import AppearanceLightMode from './AppearanceLightMode.svelte';
   // Theme (native / pro-dark / warm), scheme (auto / light / dark), accent.
-  import {
-    ui,
-    TERM_FONT_OPTIONS,
-    type SchemePref,
-    type ThemeName,
-    type Direction,
-  } from '../../lib/stores/ui.svelte';
+  import { ui, TERM_FONT_OPTIONS, type SchemePref, type ThemeName, type Direction } from '../../lib/stores/ui.svelte';
+  import { agentEmoji } from '../../lib/stores/agentEmoji.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { radioKey } from '../../lib/radioKey';
   import { AUTO_VERTICAL_ENGINES } from '../../lib/db-view-prefs';
@@ -306,6 +301,11 @@
       reading, so the monospace grid no longer lines up exactly: good for chat-style output,
       imperfect for TUI tables or box art. Toggling reloads open terminals.
     </SettingToggle>
+  </div>
+
+  <div class="section-title">Agent replies</div>
+  <div class="toggle-block">
+    <SettingToggle label="Show emoji in agent replies" hint="Shows :rocket: as 🚀 in agent replies and pull-request comments. Off shows shortcodes exactly as written. Your own messages are unchanged." checked={agentEmoji.on} onchange={(v) => agentEmoji.set(v)} testid="agent-emoji-toggle" />
   </div>
 
   <div class="section-title">Floating bar</div>

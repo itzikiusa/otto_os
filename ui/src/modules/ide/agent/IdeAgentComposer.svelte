@@ -7,6 +7,7 @@
   // `RuntimeAccessChip` + Plan mode — plus smart IDE context pills (`IdeContextBar`).
   import { untrack } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
+  import { EmojiAssistView } from '../../../lib/components/emojiAssistLazy.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import { enterSends } from '../../../lib/enterSends';
@@ -45,6 +46,7 @@
   let agentBtnEl = $state<HTMLButtonElement | null>(null);
   let fileInputEl = $state<HTMLInputElement | null>(null);
   let mentionEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
+  let emojiEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   let pickerOpen = $state(false);
   let cmdIdx = $state(0);
   let cmdDismissed = $state(false);
@@ -171,7 +173,7 @@
   }
 
   function onComposerKeydown(e: KeyboardEvent): void {
-    if (e.isComposing || mentionEl?.onKey(e)) return;
+    if (e.isComposing || mentionEl?.onKey(e) || emojiEl?.onKey(e)) return;
     if (slashSuggestions.length > 0) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
@@ -291,6 +293,7 @@
       />
     {/if}
 
+    {#if EmojiAssistView.component}<EmojiAssistView.component bind:this={emojiEl} textareaEl={composerEl} />{/if}
     <textarea
       bind:this={composerEl}
       bind:value={ideAgent.composerText}

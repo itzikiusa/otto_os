@@ -10,6 +10,7 @@
   import { untrack, type Snippet } from 'svelte';
   import { announceShown } from '../../lib/announce.svelte';
   import type { RuntimeAccessMode } from '../../lib/api/types';
+  import { EmojiAssistView } from '../../lib/components/emojiAssistLazy.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -102,6 +103,7 @@
   let composerEl = $state<HTMLTextAreaElement | null>(null);
   let agentEl = $state<HTMLButtonElement | null>(null);
   let mentionEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
+  let emojiEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
 
   const runtime = $derived(isRuntimeProvider(provider, auth.meta));
   // A runtime thread's attachments, plan mode and effort levels come from what
@@ -352,7 +354,7 @@
   }
 
   function onComposerKeydown(e: KeyboardEvent): void {
-    if (e.isComposing || mentionEl?.onKey(e)) return;
+    if (e.isComposing || mentionEl?.onKey(e) || emojiEl?.onKey(e)) return;
     if (e.key === 'Tab' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !cmdOpen) {
       if (modeSupported) {
         e.preventDefault();
@@ -413,6 +415,7 @@
       ondrilldir={(nextText) => { prompt = nextText; }}
     />
   {/if}
+  {#if EmojiAssistView.component}<EmojiAssistView.component bind:this={emojiEl} textareaEl={composerEl} />{/if}
   <RuntimeContextChips
     context={stageContext}
     onremove={(id) => (stageContext = stageContext.filter((c) => c.id !== id))}

@@ -36,6 +36,7 @@
   import ComposerFooter from './ComposerFooter.svelte';
   import ComposerSendControls from './ComposerSendControls.svelte';
   import ComposerPopups from './ComposerPopups.svelte';
+  import { EmojiAssistView } from '../../../lib/components/emojiAssistLazy.svelte';
   import ComposerStatusCard from './ComposerStatusCard.svelte';
   import { interruptComposerTurn, patchComposerEffort, patchComposerMode, patchComposerModel, runComposerSlashIntent, steerComposerTurn, uploadComposerImages } from './composerSlash';
 
@@ -438,8 +439,9 @@
     }
   }
 
+  let emojiEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   function onKeydown(e: KeyboardEvent): void {
-    if (e.isComposing) return;
+    if (e.isComposing || emojiEl?.onKey(e)) return;
     if (e.key === 'Tab' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !mentionOpen && !cmdOpen) {
       if (supportsInteractionMode(provider)) {
         e.preventDefault();
@@ -550,6 +552,7 @@
       />
     {/if}
     <div class="box-wrap" bind:this={wrapEl}>
+      {#if EmojiAssistView.component}<EmojiAssistView.component bind:this={emojiEl} textareaEl={ta} />{/if}
       <ComposerPopups
         {popId}
         anchorEl={wrapEl}
