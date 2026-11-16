@@ -99,9 +99,8 @@ class IdeStore {
   usages = $state<IdeReferenceLocation[]>([]);
   usagesSymbol = $state('');
   usagesLoading = $state(false);
-  renameState = $state<{ open: boolean; path: string; line: number; column: number; symbol: string; newName: string; edits: IdeRenameEdit[]; loading: boolean; error: string | null }>({
-    open: false, path: '', line: 1, column: 1, symbol: '', newName: '', edits: [], loading: false, error: null,
-  });
+  renameState = $state<{ open: boolean; path: string; line: number; column: number; symbol: string; newName: string; edits: IdeRenameEdit[]; source: 'lsp' | 'text'; previewedName: string; loading: boolean; error: string | null }>({
+    open: false, path: '', line: 1, column: 1, symbol: '', newName: '', edits: [], source: 'text', previewedName: '', loading: false, error: null });
 
   searchScopePath = $state<string | null>(null);
   searchReplaceMode = $state(false);
@@ -571,9 +570,10 @@ class IdeStore {
   findReferences(path: string, line: number, column: number, symbol?: string): Promise<void> { return loadLspMod().then((m) => m.runFindReferences(this, path, line, column, symbol, this.bufPerf)); }
   async openRenameModal(path: string, line: number, column: number, symbol = '', initialNewName?: string): Promise<void> {
     const startName = initialNewName ?? symbol;
-    this.renameState = { open: true, path, line, column, symbol, newName: startName, edits: [], loading: Boolean(startName), error: null };
+    this.renameState = { open: true, path, line, column, symbol, newName: startName, edits: [], source: 'text', previewedName: '', loading: Boolean(startName), error: null };
     if (startName) await this.previewRename(startName);
   }
+  lspRenameEdits(path: string, line: number, column: number, name: string): Promise<IdeTextEdit[] | null> { return this.editorHandleForPath(path)?.lspRenameEdits?.(line, column, name) ?? Promise.resolve(null); }
   previewRename(newName?: string): Promise<void> { return loadLspMod().then((m) => m.runPreviewRename(this, newName, this.bufPerf)); }
   applyRename(): Promise<boolean> { return loadLspMod().then((m) => m.runApplyRename(this, this.bufPerf)); }
   formatActiveFile(): Promise<void> { return loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf)); }

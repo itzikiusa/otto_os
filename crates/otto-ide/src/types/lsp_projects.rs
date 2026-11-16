@@ -108,6 +108,10 @@ pub struct IdeRenameReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     pub new_name: String,
+    /// The edits a language server returned for `textDocument/rename` (1-based
+    /// lines, UTF-16 columns). When present they replace the text-match fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsp_edits: Option<Vec<IdeTextEdit>>,
     #[serde(default)]
     pub apply: bool,
     #[serde(default = "super::default_true", alias = "record_local_history")]
@@ -151,6 +155,9 @@ pub struct IdeRenameResp {
     pub new_name: String,
     pub applied: bool,
     pub edits: Vec<IdeRenameFileEdit>,
+    /// `lsp` (the language server's own rename) or `text` (a whole-word match in
+    /// files of the same language, which can also hit unrelated symbols).
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -281,7 +281,10 @@ Combines live LSP multiplexing with zero-roundtrip editor intelligence:
   over SSH when `connection_id` is set.
 - **Structured IDE intelligence (`/api/v1/ide/lsp/*`):** Provides document
   outline symbols, workspace symbol search, go-to-definition, find usages
-  (feeding the **Usages** bottom dock), cross-file symbol rename, formatting,
+  (feeding the **Usages** bottom dock), cross-file symbol rename (`⇧F6`: the
+  editor's language server answers `textDocument/rename` when one is attached;
+  otherwise a whole-word match in files of the same language, labelled
+  **Text match**; Rename applies only a previewed result), formatting,
   Lombok/`src.zip`/Maven/Gradle-aware Java & polyglot diagnostics
   (`POST /ide/lsp/diagnostics`), compact JetBrains-style **Quick-Doc hover**
   (`POST /ide/lsp/hover`, isolated strictly to the hovered declaration with zero

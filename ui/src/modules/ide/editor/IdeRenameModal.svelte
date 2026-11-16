@@ -6,6 +6,10 @@
   import { ide } from '../ideStore.svelte';
 
   let renameMode = $state<'preview' | 'apply' | null>(null);
+  // Rename applies only a preview the user has seen, for the name now in the box.
+  const previewed = $derived(
+    ide.renameState.edits.length > 0 && ide.renameState.previewedName === ide.renameState.newName.trim(),
+  );
 
   async function runRenameAction(mode: 'preview' | 'apply'): Promise<void> {
     renameMode = mode;
@@ -41,9 +45,9 @@
           placeholder="New identifier name…"
           bind:value={ide.renameState.newName}
           onkeydown={(e) => {
-            if (e.key === 'Enter' && !ide.renameState.loading) {
+            if (e.key === 'Enter' && !ide.renameState.loading && ide.renameState.newName.trim()) {
               e.preventDefault();
-              void runRenameAction('apply');
+              void runRenameAction(previewed ? 'apply' : 'preview');
             }
           }}
         />
@@ -66,6 +70,11 @@
       {#if ide.renameState.edits.length > 0}
         <div class="rename-preview">
           <div class="rename-summary">Updates across {plural(ide.renameState.edits.length, 'file')}</div>
+          {#if ide.renameState.source === 'text'}
+            <div class="rename-source" data-testid="ide-rename-text-match">
+              Text match: no language server answered, so these are whole-word matches in files of the same language. Check each one before renaming.
+            </div>
+          {/if}
           {#each ide.renameState.edits as edit (edit.path)}
             <div class="rename-file" dir="ltr">
               <div class="rename-file-head">
@@ -88,7 +97,8 @@
       <button
         type="button"
         class="btn primary"
-        disabled={!ide.renameState.newName.trim() || ide.renameState.loading}
+        disabled={!previewed || ide.renameState.loading}
+        title={previewed ? undefined : 'Preview the changes first'}
         onclick={() => void runRenameAction('apply')}
       >
         {ide.renameState.loading && renameMode === 'apply' ? 'Renaming…' : 'Rename'}
@@ -112,6 +122,7 @@
     padding: var(--sp-4) 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-s); font-size: var(--fs-xs);
   }
   .rename-summary { font-weight: 600; }
+  .rename-source { color: var(--text-dim); }
   .rename-file { font-family: var(--font-mono); font-size: var(--fs-xs); border-block-start: 1px solid var(--border); padding-block-start: var(--sp-2); }
   .rename-file-head { color: var(--text-dim); }
   .rename-before { color: var(--danger); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

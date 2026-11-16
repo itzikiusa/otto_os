@@ -35,7 +35,7 @@ import {
 } from './cm-ide-keymap.ts';
 import {
   buildPooledLspExtensions, createCmdHoverDiveExtension, createDirectLspExtension,
-  disposePooledLspClients, hasWarmPooledLspClient, lspUriToPath, notifyLspDidSave, requestIdeDiveAtPos,
+  disposePooledLspClients, hasWarmPooledLspClient, lspUriToPath, notifyLspDidSave, queryPooledLspRename, requestIdeDiveAtPos,
   type AttachPooledLspOptions, type DirectLspOptions,
 } from './cm-ide-lsp.ts';
 import {
@@ -60,7 +60,7 @@ export {
   detectInlineRefactorHints, disposePooledLspClients, duplicateLineOrSelection,
   getIdeQuickFixesAtLine, hasWarmPooledLspClient,
   isBpTargetGutterElement, lspUriToPath, moveLineDown, moveLineUp, notifyLspDidSave,
-  openReplaceInFile, previewConcreteEdits, rectangularSelection, requestIdeDiveAtPos,
+  openReplaceInFile, previewConcreteEdits, queryPooledLspRename, rectangularSelection, requestIdeDiveAtPos,
   selectAllOccurrences, selectNextOccurrence, selectionOrCurrentLine,
   setBaselineSourceEffect, setBlameLinesEffect, setDiskSavedContentEffect, setSavedContentEffect, smartExpandSelection,
   splitSelectionIntoLines, startNewLineBelow, toggleLineComment, wordAtCursor,

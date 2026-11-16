@@ -433,9 +433,8 @@
     }
   }
 
-  export function disposeLspClients(rootPath?: string): void {
-    ideMod?.disposePooledLspClients({ rootPath, forceAll: true });
-  }
+  export function disposeLspClients(rootPath?: string): void { ideMod?.disposePooledLspClients({ rootPath, forceAll: true }); }
+  export function lspRenameEdits(line: number, column: number, name: string) { return view && ideMod ? ideMod.queryPooledLspRename(view, line, column, name) : Promise.resolve(null); }
 
   export function reconnectLspClients(rootPath?: string): void {
     ideMod?.disposePooledLspClients({ rootPath, forceAll: true });

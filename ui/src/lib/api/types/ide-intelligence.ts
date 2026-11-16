@@ -69,6 +69,8 @@ export interface IdeRenameReq {
   line: number;
   character: number;
   new_name: string;
+  /** The language server's `textDocument/rename` edits; when set they replace the text match. */
+  lsp_edits?: IdeTextEdit[];
   apply?: boolean;
   project_folders?: string[];
   projectFolders?: string[];
@@ -81,6 +83,8 @@ export interface IdeRenameResp {
   new_name: string;
   applied: boolean;
   edits: IdeRenameFileEdit[];
+  /** `lsp`: the language server's rename; `text`: whole-word matches in same-language files. */
+  source: 'lsp' | 'text';
 }
 
 export interface IdeFormatReq {

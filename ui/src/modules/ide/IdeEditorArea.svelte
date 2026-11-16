@@ -368,6 +368,7 @@
       replaceBufferContent: (nextContent, range) => ref.replaceBufferContent?.(nextContent, range) ?? false,
       applyAgentEdit: (nextContent, range) => ref.applyAgentEdit?.(nextContent, range) ?? false,
       applyQuickFixEdits: (edits) => ref.applyQuickFixEdits?.(edits) ?? false,
+      lspRenameEdits: (line, column, newName) => ref.lspRenameEdits?.(line, column, newName) ?? Promise.resolve(null),
     };
     return h;
   }

@@ -393,6 +393,7 @@ export interface IdeEditorHandle {
   getSelectionRange?: () => IdeEditorSelectionRange | null;
   replaceBufferContent?: (nextContent: string, range?: { from: number; to: number }) => boolean;
   applyAgentEdit?: (nextContent: string, range?: { from: number; to: number }) => boolean;
+  lspRenameEdits?: (line: number, column: number, newName: string) => Promise<IdeTextEdit[] | null>;
 }
 
 export function isReadOnlySdkOrCachePath(p: string): boolean {

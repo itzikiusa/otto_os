@@ -2,6 +2,8 @@
 // API delegates for `IdeStore` so `ideStore.svelte.ts` stays focused and under 800 lines.
 
 import { api } from '../../../lib/api/client';
+import type { IdeRenameResp } from '../../../lib/api/types/ide-intelligence';
+import { renameBody } from './ideRenameRequest';
 import { readIdePreferences } from '../../../lib/components/cm-ide-prefs';
 import { confirmer } from '../../../lib/confirm.svelte';
 import { latestOnly } from '../../../lib/latest';
@@ -53,6 +55,10 @@ export interface IdeLspSearchHost extends IdeBufferHost {
     symbol: string;
     newName: string;
     edits: IdeRenameEdit[];
+    /** Where the previewed edits came from: the language server, or a text match. */
+    source: 'lsp' | 'text';
+    /** The name the shown preview was made for; Rename applies only that preview. */
+    previewedName: string;
     loading: boolean;
     error: string | null;
   };
@@ -74,6 +80,7 @@ export interface IdeLspSearchHost extends IdeBufferHost {
   sharedBuffers: Record<string, { content: string; version: number }>;
   plugins: IdePluginInfo[];
   getBuffer(path?: string): string;
+  lspRenameEdits(path: string, line: number, column: number, newName: string): Promise<IdeTextEdit[] | null>;
   openBottomTab(tab: 'usages'): void;
   applyAgentEdit(path: string, nextContent: string, range?: { from: number; to: number }): Promise<boolean>;
   loadPlugins(): Promise<void>;
@@ -139,19 +146,11 @@ export async function runPreviewRename(
   try {
     await flushDirtyOpenTabsForWorkspaceOp(host, bufPerf, false);
     const content = bufPerf ? bufPerf.flush(host, host.renameState.path) : host.getBuffer(host.renameState.path);
-    const resp = await api.post<{ symbol: string; new_name: string; edits: IdeRenameEdit[] }>('/ide/lsp/rename', {
-      target: host.targetPayload,
-      project_folders: host.targetPayload.project_folders,
-      path: host.renameState.path,
-      line: host.renameState.line,
-      column: host.renameState.column,
-      symbol: host.renameState.symbol || undefined,
-      content: content || undefined,
-      new_name: next,
-      apply: false,
-    });
+    const resp = await api.post<IdeRenameResp>('/ide/lsp/rename', await renameBody(host, next, content, false));
     if (resp.symbol && !host.renameState.symbol) host.renameState.symbol = resp.symbol;
     host.renameState.edits = resp.edits ?? [];
+    host.renameState.source = resp.source === 'lsp' ? 'lsp' : 'text';
+    host.renameState.previewedName = next;
   } catch (e) {
     host.renameState.error = loadErrorText(e);
   } finally {
@@ -178,16 +177,8 @@ export async function runApplyRename(
       return false;
     }
     const content = bufPerf.flush(host, host.renameState.path);
-    const resp = await api.post<{ applied: boolean; edits: IdeRenameEdit[] }>('/ide/lsp/rename', {
-      target: host.targetPayload,
-      project_folders: host.targetPayload.project_folders,
-      path: host.renameState.path,
-      line: host.renameState.line,
-      column: host.renameState.column,
-      symbol: host.renameState.symbol || undefined,
-      content: content || undefined,
-      new_name: next,
-      apply: true,
+    const resp = await api.post<IdeRenameResp>('/ide/lsp/rename', {
+      ...(await renameBody(host, next, content, true)),
       local_history_enabled: prefs.localHistoryEnabled,
       local_history_retention_days: prefs.localHistoryRetentionDays,
     });

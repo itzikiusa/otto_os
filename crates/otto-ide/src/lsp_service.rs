@@ -239,11 +239,21 @@ pub async fn rename_symbol<S: IdeCtx>(
             new_name: new_name.to_string(),
             applied: false,
             edits: Vec::new(),
+            source: "text".into(),
         });
     }
 
-    let mut candidates =
-        collect_candidate_files(ctx, &resolved, &req.target, &symbol, &req.path).await?;
+    let lsp_edits = req.lsp_edits.take().filter(|e| !e.is_empty());
+    let source = if lsp_edits.is_some() { "lsp" } else { "text" };
+    let mut candidates = match &lsp_edits {
+        Some(edits) => edits.iter().fold(Vec::new(), |mut acc, e| {
+            if !acc.contains(&e.path) {
+                acc.push(e.path.clone());
+            }
+            acc
+        }),
+        None => collect_candidate_files(ctx, &resolved, &req.target, &symbol, &req.path).await?,
+    };
     if !candidates
         .iter()
         .any(|c| c == &req.path || c == &origin.path)
@@ -253,6 +263,13 @@ pub async fn rename_symbol<S: IdeCtx>(
     let mut seen_paths = std::collections::HashSet::with_capacity(candidates.len());
     let mut edits = Vec::new();
     let mut writes: Vec<(String, String, String)> = Vec::new();
+    // The text fallback only looks at files of the origin's language: a word match
+    // in a README or another language's source is never the same symbol.
+    let lang_family = |lang: &str| match crate::lsp_host::servers::normalize_lsp_lang(lang) {
+        "javascript" => "typescript".to_string(),
+        other => other.to_string(),
+    };
+    let origin_lang = lang_family(&resolve_language(ctx, &req.path, Some(&origin.language)));
     for path in candidates {
         let Ok(file) = ctx.ide().targets.read_file(&resolved, &path).await else {
             continue;
@@ -260,7 +277,28 @@ pub async fn rename_symbol<S: IdeCtx>(
         if !seen_paths.insert(file.path.clone()) || file.read_only || file.truncated {
             continue;
         }
+        if let Some(all) = &lsp_edits {
+            let unsaved = req.content.as_ref().filter(|_| file.path == origin.path);
+            let content = unsaved.unwrap_or(&file.content);
+            let mine: Vec<_> = all.iter().filter(|e| e.path == path).cloned().collect();
+            if mine.is_empty() {
+                continue;
+            }
+            let Some(updated) = code_actions::apply_edits_to_text(content, &mine) else {
+                return Err(Error::Invalid(format!(
+                    "the language server's rename edits don't fit '{path}'; save it and try again"
+                )));
+            };
+            edits.push(rename_preview(&path, content, &updated, &mine));
+            if req.apply {
+                writes.push((path, updated, file.sha256));
+            }
+            continue;
+        }
         let lang = resolve_language(ctx, &path, Some(&file.language));
+        if file.path != origin.path && lang_family(&lang) != origin_lang {
+            continue;
+        }
         if file.path == origin.path {
             if let Some(ref unsaved) = req.content {
                 if let Some((updated, file_edit)) =
@@ -331,7 +369,34 @@ pub async fn rename_symbol<S: IdeCtx>(
         new_name: new_name.to_string(),
         applied: req.apply && !edits.is_empty(),
         edits,
+        source: source.into(),
     })
+}
+
+/// Preview of a language server's rename in one file: each edited line, before and after.
+fn rename_preview(
+    path: &str,
+    before: &str,
+    after: &str,
+    edits: &[crate::types::IdeTextEdit],
+) -> IdeRenameFileEdit {
+    let mut lines: Vec<u32> = edits.iter().map(|e| e.start_line).collect();
+    lines.sort_unstable();
+    lines.dedup();
+    let line_at = |text: &str, n: u32| text.lines().nth(n as usize - 1).unwrap_or("").to_string();
+    IdeRenameFileEdit {
+        path: path.to_string(),
+        occurrences: edits.len(),
+        preview_lines: lines
+            .into_iter()
+            .take(25)
+            .map(|line| IdeRenameLinePreview {
+                line,
+                before: line_at(before, line),
+                after: line_at(after, line),
+            })
+            .collect(),
+    }
 }
 
 /// `POST /ide/lsp/format` — Language CLI formatter with toolchain PATH + clean fallback.
