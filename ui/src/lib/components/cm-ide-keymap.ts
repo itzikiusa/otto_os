@@ -283,7 +283,9 @@ export function buildIdeKeymapSpecs(
       i.line,
       i.word || undefined,
     );
-    if (dFixes.length) return applyConcreteEditsToView(v, dFixes[0].edits, filePath);
+    // Only a preferred fix applies blind; "Prefix with _" & co. stay in the ⌥⏎ menu.
+    const preferred = dFixes.find((f) => f.isPreferred);
+    if (preferred) return applyConcreteEditsToView(v, preferred.edits, filePath);
     const cb = getCallbacks().onQuickFix;
     if (cb) {
       cb({ line: i.line, column: i.column, symbol: i.word || undefined });

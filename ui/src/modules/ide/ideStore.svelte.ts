@@ -97,7 +97,7 @@ class IdeStore {
   symbolsLoading = $state(false);
   problems = $state<IdeDiagnostic[]>([]);
   usages = $state<IdeReferenceLocation[]>([]);
-  usagesSymbol = $state('');
+  usagesSymbol = $state(''); usagesSource = $state<'lsp' | 'text'>('text');
   usagesLoading = $state(false);
   renameState = $state<{ open: boolean; path: string; line: number; column: number; symbol: string; newName: string; edits: IdeRenameEdit[]; source: 'lsp' | 'text'; previewedName: string; loading: boolean; error: string | null }>({
     open: false, path: '', line: 1, column: 1, symbol: '', newName: '', edits: [], source: 'text', previewedName: '', loading: false, error: null });
@@ -518,7 +518,7 @@ class IdeStore {
   }
 
   async saveFile(path?: string, forceOverwrite = false, opts: { silent?: boolean } = {}): Promise<boolean> {
-    if (this.formatOnSave && !opts.silent && (!path || path === this._activePath)) await this.formatActiveFile();
+    if (this.formatOnSave && !opts.silent && (!path || path === this._activePath)) await this.formatActiveFile(true);
     const ok = await performSaveFile(this, this.bufPerf, path, forceOverwrite, opts);
     this.syncWorkspacePort();
     return ok;
@@ -536,7 +536,7 @@ class IdeStore {
     return tab ? computeFallbackSelection(this.getBuffer(tab.path), this.cursorInfo) : null;
   }
 
-  private editorHandleForPath(resolvedPath: string): IdeEditorHandle | null {
+  editorHandleForPath(resolvedPath: string): IdeEditorHandle | null {
     if (this._activePath === resolvedPath) return this.editorHandles.primary;
     if (this.splitPath === resolvedPath) return this.editorHandles.split;
     return null;
@@ -576,7 +576,7 @@ class IdeStore {
   lspRenameEdits(path: string, line: number, column: number, name: string): Promise<IdeTextEdit[] | null> { return this.editorHandleForPath(path)?.lspRenameEdits?.(line, column, name) ?? Promise.resolve(null); }
   previewRename(newName?: string): Promise<void> { return loadLspMod().then((m) => m.runPreviewRename(this, newName, this.bufPerf)); }
   applyRename(): Promise<boolean> { return loadLspMod().then((m) => m.runApplyRename(this, this.bufPerf)); }
-  formatActiveFile(): Promise<void> { return loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf)); }
+  formatActiveFile(onSave = false): Promise<void> { return loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf, { onSave })); }
   organizeImportsActiveFile(): Promise<void> { return loadLspMod().then((m) => m.runFormatActiveFile(this, this.bufPerf, { organizeImports: true })); }
   fetchCodeActions(path: string, line: number, column: number): Promise<IdeCodeAction[]> { return loadLspMod().then((m) => m.runFetchCodeActions(this, this.bufPerf, path, line, column)); }
   applyCodeAction(path: string, action: IdeCodeAction | IdeQuickFix): Promise<boolean> { return loadLspMod().then((m) => m.runApplyCodeAction(this, this.bufPerf, path, action)); }

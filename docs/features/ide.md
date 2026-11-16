@@ -79,7 +79,10 @@ zero-rebuild **runtime IDE plugins**.
     (OTTO_IDE_TRUST_FORMATTER_CONFIG=1)". Root opts a project in with that
     variable in its project environment (non-root callers never). Ruff,
     black, rustfmt, gofmt, shfmt, buf and biome read data-only configs and
-    are unchanged. On SSH targets root keeps Prettier's own discovery (it
+    are unchanged. With no formatter installed, the builtin fallback keeps
+    brace-language code (TS, JS, Java, Go, Rust, C…) exactly as written and
+    says "No changes" with an install hint; it only tidies whitespace in
+    other text (JSON is re-indented; Markdown keeps trailing double spaces). On SSH targets root keeps Prettier's own discovery (it
     runs on the remote host). Pyright only executes a venv interpreter
     (`pyvenv.cfg` present) that resolves under a known interpreter home
     (system, Xcode/CLT, python.org, Homebrew, pyenv/uv/mise/asdf/rye/conda,
@@ -319,18 +322,39 @@ Combines live LSP multiplexing with zero-roundtrip editor intelligence:
   live `didOpen` / `didChange` diagnostics, hover, and completions per
   `(user, lang, root, ssh_target)`, automatically discovering binaries in
   `<data_dir>/toolchains/**/bin` and active runtime IDE plugins, and spawning
-  over SSH when `connection_id` is set.
+  over SSH when `connection_id` is set. Go, Rust, Java, TypeScript/JavaScript,
+  Python, shell, CSS/SCSS/Less and HTML buffers attach, plus any plugin language
+  `/lsp/capabilities` lists. A dropped socket (deploy, server crash, eviction)
+  re-attaches every open editor with backoff; a server that fails to start says
+  so once per language ("<Lang> language server failed to start", with Retry).
+  A split view of one file syncs it once (the first view owns `didChange`).
+  Diagnostics for files no editor shows (background tabs, files the server
+  checks on its own) still land in **Problems**. The IDE's own writes (save,
+  rename, Replace in Path, file moves) and git checkout / pull / stash send
+  `workspace/didChangeWatchedFiles`, so gopls and pyright see closed files
+  change. A dependency opened by `⌘B` (Go module cache, GOROOT, `site-packages`)
+  is served by the workspace's server, not a new one per module.
 - **Structured IDE intelligence (`/api/v1/ide/lsp/*`):** Provides document
-  outline symbols, workspace symbol search, go-to-definition, find usages
-  (feeding the **Usages** bottom dock), cross-file symbol rename (`⇧F6`: the
+  outline symbols (TS class fields, abstract methods, enum members and typed
+  arrow functions included), workspace symbol search, go-to-definition, find
+  usages (`⌥F7`, feeding the **Usages** bottom dock: the attached language
+  server's `textDocument/references`, else a whole-word match labelled
+  **text match**), cross-file symbol rename (`⇧F6`: the
   editor's language server answers `textDocument/rename` when one is attached;
   otherwise a whole-word match in files of the same language, labelled
   **Text match**; Rename applies only a previewed result), formatting,
   Lombok/`src.zip`/Maven/Gradle-aware Java & polyglot diagnostics
   (`POST /ide/lsp/diagnostics`), compact JetBrains-style **Quick-Doc hover**
   (`POST /ide/lsp/hover`, isolated strictly to the hovered declaration with zero
-  neighbor-comment bleed), and `<10ms` deterministic `⌥⏎` **Quick Fixes**
-  applied as native `⌘Z`-undoable CodeMirror transactions.
+  neighbor-comment bleed), and `⌥⏎` **Quick Fixes** applied as native
+  `⌘Z`-undoable CodeMirror transactions: the language server's own `quickfix`
+  code actions first (also on the hover's Quick Fix line and Problems › Apply
+  Quick Fix), then Otto's `<10ms` deterministic fixes. "Remove unused import"
+  is offered only for an import nothing uses, and "Prefix with `_`" only with an
+  unused-variable diagnostic; `⌥⇧⏎` applies only a fix marked Preferred.
+  Completion filters the server's list by what you typed before capping it, and
+  lists each entry once. Optimize Imports leaves Python files with
+  parenthesised or `\`-continued imports alone.
 - **Settings (`⌘,`), Named Multi-Repo Projects, Build Tools & Dependency Inspector:**
   Two-pane IntelliJ-style Settings & Project Structure modal (`Project` /
   per-module SDKs with auto-detected host SDKs, `Languages & Frameworks`,

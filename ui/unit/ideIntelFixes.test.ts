@@ -12,6 +12,7 @@ import {
   shouldAttachIdeLsp,
   type RawLspCompletionItem,
 } from '../src/lib/components/cm-ide-lsp-completion.ts';
+import { computeDeterministicQuickFixes } from '../src/lib/components/cm-ide-quickfix.ts';
 
 test('completion filters by the typed prefix before the cap, so Prom finds Promise past item 150', () => {
   // tsserver's shape: ~1060 items, locals first, then globals A→Z.
@@ -56,4 +57,28 @@ test('shell, CSS and HTML buffers attach their servers; a plugin language attach
   assert.equal(shouldAttachIdeLsp('/ws/src/Main.kt', 'kotlin', '/ws'), false);
   registerIdeLspPluginLanguage('kotlin');
   assert.equal(shouldAttachIdeLsp('/ws/src/Main.kt', 'kotlin', '/ws'), true);
+});
+
+test('quick fixes: a used import gets no "Remove unused import", and "Prefix with _" needs an unused diagnostic', () => {
+  const ts = "import { Wallet, formatMoney } from './money';\nimport { unused } from './x';\nconst w = new Wallet();\nconsole.log(formatMoney(w), label);\n";
+  const ids = (line: number, symbol?: string, diags?: { line: number; message: string }[]) =>
+    computeDeterministicQuickFixes(ts, '/ws/main.ts', 'typescript', line, symbol, diags);
+  assert.equal(ids(1).some((f) => f.id.startsWith('ts-rm-imp')), false);
+  const rm = ids(2).find((f) => f.id.startsWith('ts-rm-imp'));
+  assert.ok(rm && !rm.isPreferred, 'an unused import is offered, never preferred');
+  // ⌥⇧⏎ applies only a preferred fix: none here, so `label` is never renamed to `_label`.
+  assert.equal(ids(4, 'label').some((f) => f.id.startsWith('ts-underscore')), false);
+  assert.equal(ids(4, 'label').some((f) => f.isPreferred), false);
+  assert.ok(ids(4, 'label', [{ line: 4, message: "'label' is declared but its value is never read." }]).some((f) => f.id.startsWith('ts-underscore')));
+
+  const py = 'import os\nfrom typing import Any, Dict\nimport sys\nprint(os.getcwd(), Dict)\n';
+  const pyIds = (line: number) => computeDeterministicQuickFixes(py, '/ws/a.py', 'python', line).map((f) => f.id);
+  assert.equal(pyIds(1).some((id) => id.startsWith('py-rm-imp')), false);
+  assert.equal(pyIds(2).some((id) => id.startsWith('py-rm-imp')), false);
+  assert.ok(pyIds(3).some((id) => id.startsWith('py-rm-imp')));
+
+  const rs = 'use std::sync::Arc;\nuse std::collections::{HashMap, BTreeMap};\nfn f() -> Arc<HashMap<u8, u8>> { todo!() }\n';
+  const rsIds = (line: number) => computeDeterministicQuickFixes(rs, '/ws/lib.rs', 'rust', line).map((f) => f.id);
+  assert.equal(rsIds(1).some((id) => id.startsWith('rs-rm-use')), false);
+  assert.equal(rsIds(2).some((id) => id.startsWith('rs-rm-use')), false);
 });

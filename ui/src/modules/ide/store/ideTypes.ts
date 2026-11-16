@@ -394,6 +394,9 @@ export interface IdeEditorHandle {
   replaceBufferContent?: (nextContent: string, range?: { from: number; to: number }) => boolean;
   applyAgentEdit?: (nextContent: string, range?: { from: number; to: number }) => boolean;
   lspRenameEdits?: (line: number, column: number, newName: string) => Promise<IdeTextEdit[] | null>;
+  /** The live language server's answers; `null` when none owns the file. */
+  lspReferences?: (line: number, column: number) => Promise<Array<{ path: string; line: number; column: number }> | null>;
+  lspQuickFixes?: (line: number) => Promise<Array<{ title: string; isPreferred: boolean; edits: IdeTextEdit[] }> | null>;
 }
 
 export function isReadOnlySdkOrCachePath(p: string): boolean {

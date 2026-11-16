@@ -232,6 +232,28 @@
       );
     }
 
+    // Server actions first: the language server's own fixes lead the list (runFetchCodeActions ranks them).
+    for (const sa of serverActions) {
+      const sEdits = (sa as IdeCodeAction & { edits?: IdeConcreteTextEdit[] }).edits;
+      if (!sEdits?.length && !sa.replacement_content) continue;
+      if (out.some((r) => r.label === sa.title)) continue;
+      const p = sEdits?.length ? splitPreview(sEdits) : { before: [`Line ${line}`], after: [sa.edit_preview ?? 'Apply server code action'] };
+      out.push({
+        id: `srv-${sa.id}`,
+        label: sa.title,
+        hint: sa.id.startsWith('lsp-') ? (sa.is_preferred ? 'Preferred' : 'Language server') : 'Quick Fix',
+        kind: 'fix',
+        disabled: readOnly,
+        previewMinus: p.before,
+        previewPlus: p.after,
+        run: () => {
+          if (sEdits?.length) onapplyedits(sEdits);
+          else onapplyserveraction(sa);
+          onclose();
+        },
+      });
+    }
+
     for (const [idx, qf] of clientFixes.entries()) {
       if (out.some((r) => r.label === qf.title)) continue;
       const p = clientFixPreview(qf);
@@ -259,27 +281,6 @@
         previewMinus: p.before,
         previewPlus: p.after,
         run: () => { onapplyedits(df.edits); onclose(); },
-      });
-    }
-
-    for (const sa of serverActions) {
-      const sEdits = (sa as IdeCodeAction & { edits?: IdeConcreteTextEdit[] }).edits;
-      if (!sEdits?.length && !sa.replacement_content) continue;
-      if (out.some((r) => r.label === sa.title)) continue;
-      const p = sEdits?.length ? splitPreview(sEdits) : { before: [`Line ${line}`], after: [sa.edit_preview ?? 'Apply server code action'] };
-      out.push({
-        id: `srv-${sa.id}`,
-        label: sa.title,
-        hint: 'LSP Fix',
-        kind: 'fix',
-        disabled: readOnly,
-        previewMinus: p.before,
-        previewPlus: p.after,
-        run: () => {
-          if (sEdits?.length) onapplyedits(sEdits);
-          else onapplyserveraction(sa);
-          onclose();
-        },
       });
     }
 
