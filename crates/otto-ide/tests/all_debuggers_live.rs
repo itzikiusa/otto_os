@@ -21,6 +21,20 @@ use axum::Router;
 use common::{build_test_app, ensure_bins_or_skip, extended_path, find_bin, send_json};
 use serde_json::{json, Value};
 
+/// Variable names only: a failure message must never print values, which
+/// for the shell bridge include the whole process environment (secrets).
+fn var_names<'a>(vars: &[&'a serde_json::Value]) -> Vec<&'a str> {
+    vars.iter().filter_map(|v| v["name"].as_str()).collect()
+}
+
+/// A session snapshot without its variables (see [`var_names`]).
+fn brief(sess: &serde_json::Value) -> String {
+    format!(
+        "state={} paused_line={} title={}",
+        sess["state"], sess["paused_line"], sess["title"]
+    )
+}
+
 fn all_vars(snap: &Value) -> Vec<&Value> {
     snap["scopes"]
         .as_array()
@@ -66,13 +80,14 @@ async fn wait_until_paused(app: &Router, sid: &str, timeout: Duration) -> Value 
         match sess["state"].as_str().unwrap_or("") {
             "paused" => return sess.clone(),
             "terminated" | "error" => {
-                panic!("debug session {sid} exited before pausing: {sess}");
+                panic!("debug session {sid} exited before pausing: {}", brief(sess));
             }
             _ => {}
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for debug session {sid} to pause; snapshot={sess}"
+            "timed out waiting for debug session {sid} to pause; snapshot={}",
+            brief(sess)
         );
         tokio::time::sleep(Duration::from_millis(60)).await;
     }
@@ -94,11 +109,15 @@ async fn wait_until_output_contains(app: &Router, sid: &str, marker: &str, timeo
             return;
         }
         if matches!(sess["state"].as_str(), Some("terminated" | "error")) {
-            panic!("debug session {sid} exited before emitting '{marker}': {sess}");
+            panic!(
+                "debug session {sid} exited before emitting '{marker}': {}",
+                brief(sess)
+            );
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for '{marker}' in debug session {sid}; snapshot={sess}"
+            "timed out waiting for '{marker}' in debug session {sid}; snapshot={}",
+            brief(sess)
         );
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
@@ -121,7 +140,8 @@ async fn wait_until_terminated(app: &Router, sid: &str, timeout: Duration) -> Va
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for debug session {sid} to terminate; snapshot={sess}"
+            "timed out waiting for debug session {sid} to terminate; snapshot={}",
+            brief(sess)
         );
         tokio::time::sleep(Duration::from_millis(60)).await;
     }
@@ -239,15 +259,18 @@ func main() {
     // 1. Pauses at line 11 (`doubled := localdep.Compute(base)`):
     let snap1 = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
     assert_eq!(
-        snap1["paused_line"], 11,
-        "unexpected Go paused_line: {snap1}"
+        snap1["paused_line"],
+        11,
+        "unexpected Go paused_line: {}",
+        brief(&snap1)
     );
     let vars1 = all_vars(&snap1);
     assert!(
         vars1
             .iter()
             .any(|v| v["name"] == "base" && v["value"] == "21"),
-        "expected base=21 in Go locals, got {vars1:?}"
+        "expected base=21 in Go locals, got {:?}",
+        var_names(&vars1)
     );
 
     // 2. `StepInto` jumps into `../localdep/lib.go`:
@@ -366,19 +389,23 @@ public class AppMain {
     // 1. Pauses at line 16 (`int result = Calculator.doubleIt(count);`):
     let snap1 = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
     assert_eq!(
-        snap1["paused_line"], 16,
-        "unexpected Java paused_line: {snap1}"
+        snap1["paused_line"],
+        16,
+        "unexpected Java paused_line: {}",
+        brief(&snap1)
     );
     let vars = all_vars(&snap1);
     assert!(
         vars.iter()
             .any(|v| v["name"] == "count" && v["value"] == "42"),
-        "vars={vars:?}"
+        "vars={:?}",
+        var_names(&vars)
     );
     assert!(
         vars.iter()
             .any(|v| v["name"] == "label" && v["value"].as_str().unwrap_or("").contains("otto")),
-        "vars={vars:?}"
+        "vars={:?}",
+        var_names(&vars)
     );
 
     // Expand `item` object fields (`sku`, `qty`) via `POST /ide/debug/sessions/{id}/variables`:
@@ -389,7 +416,8 @@ public class AppMain {
         .unwrap_or(0);
     assert!(
         item_ref > 0,
-        "expected expandable object reference for item: {vars:?}"
+        "expected expandable object reference for item: {:?}",
+        var_names(&vars)
     );
     let (st_vars, vars_body) = send_json(
         &app,
@@ -510,7 +538,8 @@ if __name__ == "__main__":
         vars1
             .iter()
             .any(|v| v["name"] == "amount" && v["value"] == "42"),
-        "vars1={vars1:?}"
+        "vars1={:?}",
+        var_names(&vars1)
     );
 
     let (st_ev, ev_body) = send_json(
@@ -648,14 +677,17 @@ async fn run_single_node_debug_assertion(
 
     let snap = wait_until_paused(app, &sid, Duration::from_secs(15)).await;
     assert_eq!(
-        snap["paused_line"], bp_line,
-        "{lang} paused_line mismatch: {snap}"
+        snap["paused_line"],
+        bp_line,
+        "{lang} paused_line mismatch: {}",
+        brief(&snap)
     );
     let vars = all_vars(&snap);
     assert!(
         vars.iter()
             .any(|v| v["name"] == "count" && v["value"] == "42"),
-        "vars={vars:?}"
+        "vars={:?}",
+        var_names(&vars)
     );
 
     let (st_ev, ev_body) = send_json(
@@ -726,15 +758,18 @@ async fn live_rust_lldb_bridge_builds_cargo_artifact_hits_breakpoint_reads_local
 
     let snap1 = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
     assert_eq!(
-        snap1["paused_line"], 3,
-        "Rust paused_line mismatch: {snap1}"
+        snap1["paused_line"],
+        3,
+        "Rust paused_line mismatch: {}",
+        brief(&snap1)
     );
     let vars1 = all_vars(&snap1);
     assert!(
         vars1
             .iter()
             .any(|v| v["name"] == "score" && v["value"].as_str().unwrap_or("").contains("42")),
-        "expected score=42 in Rust locals: {vars1:?}"
+        "expected score=42 in Rust locals: {:?}",
+        var_names(&vars1)
     );
 
     send_cmd(&app, &sid, "step_over").await;
@@ -797,12 +832,18 @@ async fn live_shell_bridge_debugs_both_bash_and_zsh_with_midrun_breakpoints() {
         let sid = start["session"]["id"].as_str().unwrap().to_string();
 
         let snap1 = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
-        assert_eq!(snap1["paused_line"], 3, "{fname} wrong bp line: {snap1}");
+        assert_eq!(
+            snap1["paused_line"],
+            3,
+            "{fname} wrong bp line: {}",
+            brief(&snap1)
+        );
         let vars1 = all_vars(&snap1);
         assert!(
             vars1.iter().any(|v| v["name"] == "TARGET_PORT"
                 && v["value"].as_str().unwrap_or("").contains("7700")),
-            "{fname} missing TARGET_PORT in vars: {vars1:?}"
+            "{fname} missing TARGET_PORT in vars: {:?}",
+            var_names(&vars1)
         );
 
         let (st_ev, ev_body) = send_json(
