@@ -343,6 +343,7 @@ fn file_meta(root: &Path, path: &Path, meta: &std::fs::Metadata) -> ScratchFile 
 }
 
 /// Every non-hidden file under `root` (dot files and dot dirs are skipped).
+#[allow(clippy::disallowed_methods)] // only called inside spawn_blocking
 fn walk(root: &Path) -> Vec<ScratchFile> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
