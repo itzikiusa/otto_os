@@ -397,7 +397,7 @@ pub async fn build_and_send_with(
         // Decode only the displayed prefix (+ one char's worth of slack) —
         // not the whole body — then cut on a char boundary.
         let prefix = &bytes[..bytes.len().min(MAX_TEXT_DISPLAY + 4)];
-        let text = String::from_utf8_lossy(prefix);
+        let text = body_text(prefix, content_type.as_deref());
         if bytes.len() > prefix.len() || text.len() > MAX_TEXT_DISPLAY {
             let mut end = MAX_TEXT_DISPLAY.min(text.len());
             while end > 0 && !text.is_char_boundary(end) {
@@ -440,6 +440,26 @@ pub(crate) const INLINE_PREVIEW_MAX: usize = 5 * 1024 * 1024;
 /// binary) is parked in the bounded response cache behind `body_id` — only
 /// when `park` is given (the interactive UI route:
 /// [`ApiClientCtx::park_body`] for the caller's workspace + user).
+/// A response body as text in its Content-Type charset (UTF-8, lossy, when
+/// none is named or the label is unknown). reqwest has already undone any
+/// gzip / br / deflate Content-Encoding.
+fn body_text<'a>(bytes: &'a [u8], content_type: Option<&str>) -> std::borrow::Cow<'a, str> {
+    let charset = content_type.and_then(|ct| {
+        ct.split(';').skip(1).find_map(|param| {
+            let (key, value) = param.split_once('=')?;
+            key.trim()
+                .eq_ignore_ascii_case("charset")
+                .then(|| value.trim().trim_matches('"'))
+        })
+    });
+    match charset.and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes())) {
+        Some(encoding) if encoding != encoding_rs::UTF_8 => {
+            encoding.decode_without_bom_handling(bytes).0
+        }
+        _ => String::from_utf8_lossy(bytes),
+    }
+}
+
 pub fn attach_body(resp: &mut ApiResponse, raw: Vec<u8>, park: Option<BodyParker<'_>>) {
     if resp.too_large || raw.is_empty() {
         return;

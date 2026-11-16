@@ -439,6 +439,10 @@ client, records a history entry, and returns the response.
   key or value** — matches are highlighted and their parents opened;
   right-click a node to copy its JSONPath or value. **Preview** renders HTML in
   a sandboxed frame (no scripts) and shows images.
+- **Encoding** — a `gzip`, `br` or `deflate` response is decompressed (the
+  request offers them in `Accept-Encoding` unless you set that header), and
+  text is decoded in the `charset` its `Content-Type` names (ISO-8859-1,
+  Shift_JIS…), else as UTF-8.
 - **JSONPath filter** — in Pretty view, a `$.a.b[0].c`-style filter narrows the
   view (debounced).
 - **Truncation** — text display is capped at **512 KB**; a notice says "Showing

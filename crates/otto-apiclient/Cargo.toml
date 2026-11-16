@@ -44,6 +44,8 @@ otto-ssh.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
 reqwest_cookie_store.workspace = true
+# A response body's Content-Type charset (latin-1, Shift_JIS…) decoded for display.
+encoding_rs.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 rand.workspace = true
@@ -55,3 +57,5 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 # The gRPC channel-reuse test (perf N5) dials a minimal h2c server. Same
 # version tonic/hyper already resolve.
 h2 = "0.4.20"
+# The compressed-response test gzips its reply body.
+flate2.workspace = true
