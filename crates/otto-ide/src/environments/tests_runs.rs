@@ -393,6 +393,39 @@ async fn subscribe_run_for_user_streams_live_events_and_enforces_owner_rbac() {
 }
 
 #[test]
+fn vitest_runs_list_each_test_unless_a_reporter_is_chosen() {
+    let gutter = IdeRunConfig {
+        runner: IdeRunnerKind::Vitest,
+        command: Some("npx".into()),
+        args: ["--no-install", "vitest", "run", "a.test.ts", "-t", "adds"]
+            .map(String::from)
+            .to_vec(),
+        ..Default::default()
+    };
+    let (_, args) = super::runner_cmd::build_runner_command(
+        &gutter,
+        IdeTargetKind::Local,
+        "/w",
+        &BTreeMap::new(),
+    );
+    assert_eq!(args.last().map(String::as_str), Some("--reporter=verbose"));
+    let chosen = IdeRunConfig {
+        args: vec!["--reporter=dot".into()],
+        ..gutter
+    };
+    let (_, args) = super::runner_cmd::build_runner_command(
+        &chosen,
+        IdeTargetKind::Local,
+        "/w",
+        &BTreeMap::new(),
+    );
+    assert!(
+        !args.iter().any(|a| a == "--reporter=verbose"),
+        "args={args:?}"
+    );
+}
+
+#[test]
 fn build_runner_command_merges_go_tags_and_coverage_flags() {
     let tmp = tempfile::tempdir().unwrap();
     let test_file = tmp.path().join("assign_component_test.go");

@@ -436,10 +436,14 @@ export function detectIdeLanguage(p: string): string {
   return map[ext] ?? 'txt';
 }
 
+/** `selectedConfigId` of the test / main last launched from the gutter (`gutterTarget`):
+ *  the toolbar Run / Debug repeat it, like an IntelliJ temporary configuration. */
+export const GUTTER_TARGET_ID = 'gutter';
+
 export function defaultRunnerForLanguage(lang: string): string {
   const map: Record<string, string> = {
     go: 'go_run', rust: 'cargo_run', java: 'java_main', python: 'python',
-    javascript: 'node', typescript: 'npm', tsx: 'npm', jsx: 'node', shell: 'shell',
+    javascript: 'node', typescript: 'node', tsx: 'npm', jsx: 'node', shell: 'shell',
   };
   return map[lang] ?? 'custom';
 }

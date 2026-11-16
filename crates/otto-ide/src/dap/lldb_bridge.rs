@@ -188,6 +188,20 @@ class _LldbDapBridge:
                         if base:
                             self.target.BreakpointDelete(sbbp.GetID())
                             sbbp = self.target.BreakpointCreateByLocation(base, ln)
+                    # A macro line (`println!`, `assert_eq!`) has several locations in one
+                    # function, so Continue stopped on the same line again. Keep the first
+                    # per function; other functions (generic copies) keep theirs.
+                    first_by_fn = {}
+                    for i in range(sbbp.GetNumLocations()):
+                        loc = sbbp.GetLocationAtIndex(i)
+                        key = loc.GetAddress().GetFunction().GetStartAddress().GetFileAddress()
+                        prev = first_by_fn.get(key)
+                        if prev is None or loc.GetAddress().GetFileAddress() < prev.GetAddress().GetFileAddress():
+                            if prev is not None:
+                                prev.SetEnabled(False)
+                            first_by_fn[key] = loc
+                        else:
+                            loc.SetEnabled(False)
                     bid = sbbp.GetID()
                     new_ids.append(bid)
                     cond = (b.get('condition') or '').strip()
