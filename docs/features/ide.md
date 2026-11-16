@@ -350,6 +350,11 @@ Install an `otto-ide-plugin.json` extension into `<data_dir>/ide-plugins/<slug>/
   `keymaps`, `snippets`, and `panels`.
 - Reference plugins ship under `examples/ide-plugins/kotlin-ide` and
   `examples/ide-plugins/makefile-docker-pack`.
+- A gutter detector's first matched capture group names the item (a pattern may
+  offer alternatives, like the Kotlin pack's ``fun `backticked name`()`` or
+  `fun testXxx()`). Only `kind: "test"` items carry a test filter; a Gradle runner
+  turns a bare method name into `--tests *.<name>`. Leave `command_template` empty
+  for Maven/Gradle so the run uses the build's own wrapper from the module's folder.
 - Enable, disable (`POST /ide/plugins/{slug}/toggle`), or uninstall
   (`DELETE /ide/plugins/{slug}`) at runtime.
 

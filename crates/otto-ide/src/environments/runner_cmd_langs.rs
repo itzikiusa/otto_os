@@ -324,8 +324,14 @@ pub(super) fn build_gradle_cmd(
         args.push("--offline".into());
     }
     if let Some(f) = filter {
-        // Gradle selects a method as `Class.method`, not JUnit/Surefire's `Class#method`.
-        args.extend(["--tests".into(), f.replace('#', ".")]);
+        // Gradle selects a method as `Class.method`, not JUnit/Surefire's `Class#method`. A
+        // bare method name (a plugin item) matches nothing on its own, so match it in any class.
+        let f = f.replace('#', ".");
+        let bare_method = !f.contains(['.', '*']) && f.starts_with(|c: char| !c.is_uppercase());
+        args.extend([
+            "--tests".into(),
+            if bare_method { format!("*.{f}") } else { f },
+        ]);
     }
     if let Some(explicit) = cmd_opt {
         return (explicit.to_string(), args);

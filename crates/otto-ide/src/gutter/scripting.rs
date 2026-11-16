@@ -557,8 +557,12 @@ pub(super) fn apply_plugin_detectors(
             let Some(cap) = re.captures(line) else {
                 continue;
             };
+            // The first group that matched (a pattern may offer alternatives), else the line.
             let name = cap
-                .get(1)
+                .iter()
+                .skip(1)
+                .flatten()
+                .next()
                 .or_else(|| cap.get(0))
                 .map(|m| m.as_str().trim())
                 .unwrap_or("target");
@@ -574,6 +578,8 @@ pub(super) fn apply_plugin_detectors(
                 Some(subst(&det.command_template))
             };
             let args: Vec<String> = det.args_template.iter().map(|a| subst(a)).collect();
+            // Only a test item filters: a runner adds it (`--tests`) to a `run` task too.
+            let filter = (det.kind == IdeGutterKind::Test).then(|| name.to_string());
 
             out.push(IdeGutterItem {
                 line: (idx + 1) as u32,
@@ -586,9 +592,9 @@ pub(super) fn apply_plugin_detectors(
                     args,
                     cwd: Some(dir.to_string()),
                     target_path: Some(path.to_string()),
-                    test_filter: Some(name.to_string()),
+                    test_filter: filter.clone(),
                     debug_program: Some(path.to_string()),
-                    debug_test_name: Some(name.to_string()),
+                    debug_test_name: filter,
                 },
             });
         }

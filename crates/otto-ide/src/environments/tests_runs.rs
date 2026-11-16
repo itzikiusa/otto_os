@@ -827,3 +827,54 @@ fn jvm_build_dir_stays_put_without_a_build_file_or_off_local() {
     let dir = resolve_jvm_build_dir(&mut cfg, &ssh, "/remote/app/svc/src/test".into());
     assert_eq!(dir, "/remote/app/svc/src/test");
 }
+
+#[test]
+#[cfg(unix)]
+fn kotlin_pack_gutter_items_run_gradle_from_the_module_with_the_root_wrapper() {
+    let manifest: crate::types::IdePluginManifest = serde_json::from_str(include_str!(
+        "../../../../examples/ide-plugins/kotlin-ide/otto-ide-plugin.json"
+    ))
+    .unwrap();
+    let detectors = manifest.contributions.gutter_detectors;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_jvm_fixture(
+        root,
+        &[
+            ("settings.gradle.kts", "include(\"core\")"),
+            ("gradlew", "#!/bin/sh\n"),
+            ("core/build.gradle.kts", ""),
+            ("core/src/test/kotlin/CartTest.kt", ""),
+        ],
+    );
+    let file = root.join("core/src/test/kotlin/CartTest.kt");
+    let src = "fun main() {}\nfun `adds two items`() {}\nfun testTotal() {}\n";
+    let items = crate::gutter::detect_gutter_items(&file.to_string_lossy(), src, &detectors);
+    let target = IdeTargetSpec::local(root.to_string_lossy().into_owned());
+    let run = |idx: usize| {
+        let spec = &items[idx].run_spec;
+        let mut cfg = IdeRunConfig {
+            runner: spec.runner,
+            command: spec.command.clone(),
+            args: spec.args.clone(),
+            test_filter: spec.test_filter.clone(),
+            ..Default::default()
+        };
+        let dir = resolve_jvm_build_dir(&mut cfg, &target, spec.cwd.clone().unwrap());
+        let (prog, args) = build_runner_command(&cfg, IdeTargetKind::Local, &dir, &BTreeMap::new());
+        (dir, prog, args)
+    };
+    let wrapper = format!("{}/gradlew", canon(root.to_path_buf()));
+
+    let (dir, prog, args) = run(0);
+    assert_eq!(items[0].run_spec.test_filter, None);
+    assert_eq!(
+        (dir.as_str(), prog.as_str()),
+        (canon(root.join("core")).as_str(), wrapper.as_str())
+    );
+    assert_eq!(args, ["run"]);
+
+    assert_eq!(items[1].label, "Test adds two items");
+    assert_eq!(run(1).2, ["test", "--tests", "*.adds two items"]);
+    assert_eq!(run(2).2, ["test", "--tests", "*.testTotal"]);
+}
