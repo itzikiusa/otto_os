@@ -67,6 +67,8 @@ export class IdeTargetEnvState {
   runConfigs = $state<IdeRunConfig[]>([]);
   detectedConfigs = $state<IdeRunConfig[]>([]);
   selectedConfigId = $state<string | null>(null);
+  /** The test / main last launched from the gutter; selected as `GUTTER_TARGET_ID`. */
+  gutterTarget = $state<IdeGutterItem | null>(null);
   envLoading = $state(false);
   envError = $state<string | null>(null);
   activeRun = $state<IdeRunState | null>(null);
@@ -93,6 +95,7 @@ export class IdeTargetEnvState {
     this.runConfigs = [];
     this.detectedConfigs = [];
     this.selectedConfigId = null;
+    this.gutterTarget = null;
     this.envLoading = false;
     this.envError = null;
     this.activeRun = null;
