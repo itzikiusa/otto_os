@@ -750,12 +750,15 @@ impl ProviderRegistry {
         map
     }
 
-    /// All `(provider_name, update_command)` pairs for providers that have an
-    /// update command set (non-empty). Sorted by name for stable ordering.
+    /// All `(provider_name, update_command)` pairs for enabled providers that
+    /// have an update command set (non-empty). A provider the admin excluded is
+    /// never updated: they may not want that CLI at all. Sorted by name.
     pub fn update_commands(&self) -> Vec<(String, String)> {
         let map = self.map.read().expect("provider registry lock");
+        let disabled = self.disabled.read().expect("provider disabled lock");
         let mut pairs: Vec<(String, String)> = map
             .iter()
+            .filter(|(name, _)| !disabled.contains(name.as_str()))
             .filter_map(|(name, spec)| {
                 spec.update_command
                     .as_deref()

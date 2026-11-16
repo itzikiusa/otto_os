@@ -290,3 +290,23 @@ fn reload_preserves_skip_mode() {
         .iter()
         .any(|a| a.contains("dangerously")));
 }
+
+/// "Update CLIs" (and the auto-update pass) never runs a disabled provider's
+/// update command: the user may not want that CLI installed at all.
+#[test]
+fn update_commands_skip_disabled_providers() {
+    let reg = ProviderRegistry::new(None);
+    let names = |r: &ProviderRegistry| {
+        r.update_commands()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>()
+    };
+    assert!(names(&reg).contains(&"pi".to_string()));
+
+    reg.set_disabled(&["pi", "opencode"]);
+    let left = names(&reg);
+    assert!(!left.contains(&"pi".to_string()));
+    assert!(!left.contains(&"opencode".to_string()));
+    assert!(left.contains(&"claude".to_string()));
+}
