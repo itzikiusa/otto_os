@@ -534,14 +534,14 @@
 
   async function save(): Promise<void> {
     if (!current || savingGraph) return;
-    const workflowId = current.id;
+    const { id: workflowId, version: baseVersion } = current;
     const submitted = JSON.stringify($state.snapshot(graph));
     savingGraph = true;
     try {
       // The saved graph is what the next Slack trigger runs: a broken one is shown, not saved.
       if (!await validateGraph()) { if (current?.id === workflowId) toasts.error('Not saved — resolve the issues above the canvas'); return; }
-      const wf = await patchWorkflow(workflowId, { graph: JSON.parse(submitted) as WorkflowGraph });
-      applySavedWorkflow(wf);
+      const reload = (fresh: Workflow): void => { applySavedWorkflow(fresh); if (current?.id === workflowId) open(fresh); };
+      if (!(await workflowsUi.saveGraph(workflowId, JSON.parse(submitted) as WorkflowGraph, baseVersion, applySavedWorkflow, reload))) return;
       // Editing stays available during Save; only the submitted graph is saved.
       if (current?.id === workflowId && JSON.stringify($state.snapshot(graph)) === submitted) dirty = false;
       toasts.success('Saved');
@@ -943,7 +943,7 @@
     const runId = run.id;
     const name = current?.name ?? 'this workflow';
     const ok = await confirmer.ask(
-      `Stop this run of “${name}”? It finishes the current step, then halts. Completed steps and their output are kept; to continue you start a new run.`,
+      `Stop this run of “${name}”? The running step stops now and the rest are skipped. Completed steps and their output are kept; to continue you start a new run.`,
       { title: 'Stop run', confirmLabel: 'Stop run', cancelLabel: 'Keep running', danger: true },
     );
     if (!ok) return;
@@ -1333,7 +1333,7 @@
       {#if runActive}
         <!-- While the VIEWED run is live its Stop takes the primary's place (same
              verb as the confirm dialog's "Stop run"). -->
-        <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="stop" size={12} /> Stop run…</button>
+        <button class="btn small danger" data-keep data-testid="run-cancel" onclick={stop} title="Stop this run now (the running step is cut short)"><Icon name="stop" size={12} /> Stop run…</button>
       {:else}
         <button
           class="btn small"
@@ -1600,7 +1600,7 @@
             </div>
           {/if}
           <!-- The run on screen: run bar, timeline, steps (RunMonitor). -->
-          <RunMonitor {mon} {nodeName} bind:selectedId bind:runDetailMax onstop={() => void stop()} onOpenSession={openSessionInline} />
+          <RunMonitor {mon} {nodeName} bind:selectedId bind:runDetailMax onOpenSession={openSessionInline} />
 
           {#if selectedNode}
             <div class="insp-h">

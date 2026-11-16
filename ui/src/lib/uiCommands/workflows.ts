@@ -136,7 +136,7 @@ registerUiCommands('workflows', {
 
   async wf_cancel_run(args: { run_id: string }, ctx) {
     const ok = await ctx.confirmWrite({
-      what: `Cancel workflow run ${args.run_id} (it finishes the current step, then halts)`,
+      what: `Cancel workflow run ${args.run_id} (the running step stops now)`,
       where: 'Workflows',
       connId: 'workflows',
       verb: 'Cancel run',

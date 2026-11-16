@@ -37,6 +37,8 @@ export class RunInputForm {
   // is the textarea placeholder; "Suggest" inserts just the `<…>` slots this
   // graph needs. Placeholder values are rejected before the run is sent.
   placeholder = $derived.by(() => runInputExample(this.kinds()));
+  /** The review-mode override only matters when the graph (loops included) has a review step. */
+  hasReview = $derived.by(() => this.kinds().has('review_run'));
   destinations = $derived.by(() => {
     try {
       return resultDestinations(JSON.parse(this.#text));

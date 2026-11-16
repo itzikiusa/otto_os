@@ -489,6 +489,30 @@ pub struct UpdateWorkflowReq {
     /// Restart policy: `"resume"` | `"fail"` (see [`Workflow::on_restart`]).
     #[serde(default)]
     pub on_restart: Option<String>,
+    /// The `version` the editor started from; a newer stored version is a
+    /// `409` instead of silently overwriting edits made elsewhere.
+    #[serde(default)]
+    pub expected_version: Option<i64>,
+}
+
+impl UpdateWorkflowReq {
+    /// Refuse an unknown `on_restart`, or a save based on an older `version`
+    /// than the stored `current` one.
+    pub fn check(&self, current: i64) -> crate::Result<()> {
+        if let Some(v) = self.on_restart.as_deref() {
+            if !matches!(v, "resume" | "fail") {
+                return Err(crate::Error::Invalid(format!(
+                    "on_restart must be 'resume' or 'fail', got '{v}'"
+                )));
+            }
+        }
+        if self.expected_version.is_some_and(|v| v != current) {
+            return Err(crate::Error::Conflict(format!(
+                "workflow changed elsewhere (now version {current})"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// `POST /workflow-runs/{id}/retry-node` — re-enter a finished run in place

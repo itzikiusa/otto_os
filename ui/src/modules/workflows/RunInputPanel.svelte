@@ -43,6 +43,7 @@
     placeholder={form.placeholder}
   ></textarea>
   {#if form.error}<p class="ri-err" id="wf-run-input-err" use:announceShown={{ text: form.error, assertive: true }}>{form.error}</p>{/if}
+  {#if form.hasReview}
   <div class="ri-head">
     <strong>Review mode</strong>
     <span class="ri-hint">Overrides the execution mode of every review step in this run, including steps that set their own.</span>
@@ -57,6 +58,7 @@
     <option value="fan_out">Fan-out</option>
     <option value="orchestrator">Orchestrator</option>
   </select>
+  {/if}
   {#if form.destinations.length}
     <p class="ri-dest" data-testid="run-result-destination">
       <Icon name="send" size={12} /> Results will be posted to {form.destinations.join(' and ')}.

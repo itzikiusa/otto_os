@@ -494,11 +494,11 @@ async fn run_attempts(
                     break Err(e);
                 };
                 attempt_limit = max_eff + 1;
-                states[idx].logs.push(format!(
-                    "↻ retry {}/{} in {}s ({reason})",
+                states[idx].logs.push(otto_workflows::retry::retry_log_line(
                     attempt + 1,
                     max_eff + 1,
-                    sleep_ms / 1000
+                    sleep_ms,
+                    &reason,
                 ));
                 publish_node(cx, states, idx).await;
                 // The failed attempt's agent must not stay alive next to the
