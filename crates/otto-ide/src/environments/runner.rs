@@ -15,7 +15,8 @@ use crate::types::{
 
 pub(super) use super::runner_cmd::{
     apply_runtime_profile_and_module_venv, build_runner_command, compile_go_run_step,
-    compile_java_main_step, has_manual_classpath, is_default_go_command, resolve_run_cwd,
+    compile_java_main_step, has_manual_classpath, is_default_go_command, resolve_jvm_build_dir,
+    resolve_run_cwd,
 };
 use super::runner_parsers::IncrementalTestTracker;
 use super::runner_proc::{
@@ -221,7 +222,7 @@ pub(super) async fn execute_run_task(
         append_run_line(&handle, nb.summary_banner().await);
     }
 
-    for (idx, (cfg, mut env_map)) in steps.into_iter().enumerate() {
+    for (idx, (mut cfg, mut env_map)) in steps.into_iter().enumerate() {
         if *stop_rx.borrow() {
             finish_run(
                 &handle,
@@ -246,6 +247,7 @@ pub(super) async fn execute_run_task(
         }
 
         let cwd = resolve_run_cwd(&target, cfg.cwd.as_deref());
+        let cwd = resolve_jvm_build_dir(&mut cfg, &target, cwd);
         apply_runtime_profile_and_module_venv(&cfg, &target, &cwd, &mut env_map);
         if let Some(ref nb) = netbridge {
             nb.apply_to_env(&mut env_map);

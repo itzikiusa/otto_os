@@ -9,7 +9,7 @@ use super::super::runner::{append_run_line, ActiveRunHandle};
 use super::{csv_list, resolve_program_in_env};
 use crate::go_build_cache::ide_build_cache_root;
 use crate::toolchains::is_executable_file;
-use crate::types::{IdeRunConfig, IdeTargetKind, IdeTargetSpec};
+use crate::types::{IdeRunConfig, IdeRunnerKind, IdeTargetKind, IdeTargetSpec};
 
 pub(in crate::environments) fn apply_runtime_profile_and_module_venv(
     cfg: &IdeRunConfig,
@@ -40,6 +40,52 @@ pub(in crate::environments) fn apply_runtime_profile_and_module_venv(
             }
         }
     }
+}
+
+pub(super) const GRADLE_BUILD_FILES: [&str; 4] = [
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+];
+
+/// Maven/Gradle run from the module that owns `cwd`: the nearest ancestor inside the target
+/// roots with a build file, so a test launched from its source folder still finds its POM.
+/// A JUnit run whose nearest build is Gradle runs Gradle. Local targets only; otherwise `cwd`.
+pub(in crate::environments) fn resolve_jvm_build_dir(
+    cfg: &mut IdeRunConfig,
+    target: &IdeTargetSpec,
+    cwd: String,
+) -> String {
+    let (maven, gradle) = match cfg.runner {
+        IdeRunnerKind::JavaJunit => (true, true),
+        IdeRunnerKind::Maven => (true, false),
+        IdeRunnerKind::Gradle => (false, true),
+        _ => return cwd,
+    };
+    if target.kind != IdeTargetKind::Local {
+        return cwd;
+    }
+    let roots: Vec<PathBuf> = std::iter::once(target.root.clone())
+        .chain(target.merged_extra_roots())
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .collect();
+    let Ok(start) = std::fs::canonicalize(&cwd) else {
+        return cwd;
+    };
+    let mut dir = start.as_path();
+    while roots.iter().any(|r| dir.starts_with(r)) {
+        let has_pom = maven && dir.join("pom.xml").is_file();
+        if has_pom || (gradle && GRADLE_BUILD_FILES.iter().any(|f| dir.join(f).is_file())) {
+            if !has_pom {
+                cfg.runner = IdeRunnerKind::Gradle;
+            }
+            return dir.to_string_lossy().into_owned();
+        }
+        let Some(parent) = dir.parent() else { break };
+        dir = parent;
+    }
+    cwd
 }
 
 pub(in crate::environments) fn has_manual_classpath(cfg: &IdeRunConfig) -> bool {

@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use super::runner_java::GRADLE_BUILD_FILES;
 use super::{csv_list, resolve_program_in_env};
 use crate::toolchains::is_executable_file;
 use crate::types::{IdeRunConfig, IdeRunnerKind, IdeTargetKind};
@@ -235,8 +236,10 @@ pub(super) fn build_maven_cmd(
         args.push("test".into());
     }
     args.extend(build_flags);
+    let pom = read_local_manifest_head(target_kind, cwd, "pom.xml");
     if cfg.coverage
-        && read_local_manifest_head(target_kind, cwd, "pom.xml")
+        && pom
+            .as_deref()
             .is_some_and(|s| s.to_ascii_lowercase().contains("jacoco"))
     {
         if !args.iter().any(|a| a.starts_with("-Djacoco.skip=")) {
@@ -263,6 +266,10 @@ pub(super) fn build_maven_cmd(
     }
     if let Some(f) = filter {
         args.push(format!("-Dtest={f}"));
+        // From a reactor root, modules without the test must not fail the build.
+        if pom.as_deref().is_some_and(|s| s.contains("<modules>")) {
+            args.push("-Dsurefire.failIfNoSpecifiedTests=false".into());
+        }
     }
     if let Some(explicit) = cmd_opt {
         return (explicit.to_string(), args);
@@ -276,13 +283,8 @@ pub(super) fn build_maven_cmd(
         sh_args.extend(args);
         return ("sh".into(), sh_args);
     }
-    let mvnw = Path::new(cwd).join("mvnw");
-    let prog = if is_executable_file(&mvnw) {
-        "./mvnw"
-    } else {
-        "mvn"
-    };
-    (prog.into(), args)
+    let prog = find_build_wrapper(cwd, "mvnw", &["pom.xml"]).unwrap_or_else(|| "mvn".into());
+    (prog, args)
 }
 
 pub(super) fn build_gradle_cmd(
@@ -322,7 +324,8 @@ pub(super) fn build_gradle_cmd(
         args.push("--offline".into());
     }
     if let Some(f) = filter {
-        args.extend(["--tests".into(), f.to_string()]);
+        // Gradle selects a method as `Class.method`, not JUnit/Surefire's `Class#method`.
+        args.extend(["--tests".into(), f.replace('#', ".")]);
     }
     if let Some(explicit) = cmd_opt {
         return (explicit.to_string(), args);
@@ -336,13 +339,29 @@ pub(super) fn build_gradle_cmd(
         sh_args.extend(args);
         return ("sh".into(), sh_args);
     }
-    let gradlew = Path::new(cwd).join("gradlew");
-    let prog = if is_executable_file(&gradlew) {
-        "./gradlew"
-    } else {
-        "gradle"
-    };
-    (prog.into(), args)
+    let prog =
+        find_build_wrapper(cwd, "gradlew", &GRADLE_BUILD_FILES).unwrap_or_else(|| "gradle".into());
+    (prog, args)
+}
+
+/// The build wrapper lives at the top of a multi-module build, above the module the build
+/// runs in: look in `cwd`, then up while the parent still belongs to the build.
+fn find_build_wrapper(cwd: &str, wrapper: &str, build_files: &[&str]) -> Option<String> {
+    let mut dir = Path::new(cwd);
+    loop {
+        let candidate = dir.join(wrapper);
+        if is_executable_file(&candidate) {
+            return Some(if dir == Path::new(cwd) {
+                format!("./{wrapper}")
+            } else {
+                candidate.to_string_lossy().into_owned()
+            });
+        }
+        dir = dir.parent()?;
+        if !build_files.iter().any(|f| dir.join(f).is_file()) {
+            return None;
+        }
+    }
 }
 
 pub(super) fn build_shell_cmd(

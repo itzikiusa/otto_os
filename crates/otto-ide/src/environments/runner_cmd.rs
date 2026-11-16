@@ -14,6 +14,7 @@ use self::runner_cmd_langs::{
 };
 pub(super) use self::runner_java::{
     apply_runtime_profile_and_module_venv, compile_java_main_step, has_manual_classpath,
+    resolve_jvm_build_dir,
 };
 use crate::go_build_cache::{ensure_go_binary, GoBuildMode, GoBuildRequest};
 use crate::go_build_tags::unify_go_build_flags_and_args;

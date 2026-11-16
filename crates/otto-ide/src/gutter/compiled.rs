@@ -219,6 +219,13 @@ pub(super) fn detect_java(path: &str, dir: &str, content: &str, out: &mut Vec<Id
         .unwrap()
     });
 
+    // Run and debug from the module that owns the file (`<module>/src/test/java/...`), as
+    // Maven/Gradle need its build file; the runner refines this on local targets.
+    let dir = path
+        .rfind("/src/")
+        .filter(|&i| i > 0)
+        .map_or(dir, |i| &path[..i]);
+
     let mut package_name = String::new();
     for line in content.lines() {
         if let Some(cap) = re_pkg.captures(line) {

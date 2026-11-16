@@ -16,7 +16,8 @@ use crate::types::{IdeRunConfig, IdeRunStatus, IdeRunnerKind, IdeTargetKind, Ide
 
 use super::runner::{
     append_run_line, build_runner_command, evict_finished_runs, execute_run_task, finish_run,
-    ActiveRunHandle, RunStateInner, MAX_FINISHED_RUNS, MAX_RUN_OUTPUT_BYTES, MAX_RUN_OUTPUT_LINES,
+    resolve_jvm_build_dir, ActiveRunHandle, RunStateInner, MAX_FINISHED_RUNS, MAX_RUN_OUTPUT_BYTES,
+    MAX_RUN_OUTPUT_LINES,
 };
 use super::EnvironmentManager;
 
@@ -655,4 +656,174 @@ async fn before_launch_timeout_fails_the_step_and_kills_the_group() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(gone, "hook child {pid} survived the timeout");
+}
+
+/// Writes `files` under `root`; a `mvnw`/`gradlew` entry is made executable.
+#[cfg(unix)]
+fn write_jvm_fixture(root: &std::path::Path, files: &[(&str, &str)]) {
+    use std::os::unix::fs::PermissionsExt;
+    for (rel, body) in files {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body).unwrap();
+        if rel.ends_with("mvnw") || rel.ends_with("gradlew") {
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+}
+
+/// Resolves the run dir the way `execute_run_task` does and builds the command there.
+fn jvm_run(
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    runner: IdeRunnerKind,
+    filter: &str,
+) -> (IdeRunnerKind, String, String, Vec<String>) {
+    let target = IdeTargetSpec::local(root.to_string_lossy().into_owned());
+    let mut cfg = IdeRunConfig {
+        runner,
+        test_filter: Some(filter.into()),
+        cwd: Some(cwd.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    let dir = resolve_jvm_build_dir(&mut cfg, &target, cwd.to_string_lossy().into_owned());
+    let (prog, args) = build_runner_command(&cfg, IdeTargetKind::Local, &dir, &BTreeMap::new());
+    (cfg.runner, dir, prog, args)
+}
+
+fn canon(p: std::path::PathBuf) -> String {
+    std::fs::canonicalize(p)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+#[cfg(unix)]
+fn jvm_test_runs_from_its_maven_module_not_the_source_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let reactor = "<project><modules><module>svc</module></modules></project>";
+    write_jvm_fixture(
+        root,
+        &[
+            ("pom.xml", reactor),
+            ("svc/pom.xml", "<project/>"),
+            ("svc/src/test/java/com/x/FooTest.java", ""),
+            ("platform/core/pom.xml", "<project/>"),
+            ("platform/core/src/test/java/com/y/BarTest.java", ""),
+            ("src/test/java/com/z/RootTest.java", ""),
+        ],
+    );
+    let src = root.join("svc/src/test/java/com/x");
+
+    // Single class: the module that owns the file, not the package folder.
+    let (runner, dir, prog, args) = jvm_run(root, &src, IdeRunnerKind::JavaJunit, "com.x.FooTest");
+    assert_eq!(runner, IdeRunnerKind::JavaJunit);
+    assert_eq!(dir, canon(root.join("svc")));
+    assert_eq!(prog, "mvn");
+    assert_eq!(args, vec!["test", "-Dtest=com.x.FooTest"]);
+
+    // Single method keeps Surefire's `Class#method` selector.
+    let (_, _, _, args) = jvm_run(root, &src, IdeRunnerKind::JavaJunit, "com.x.FooTest#bar");
+    assert!(args.contains(&"-Dtest=com.x.FooTest#bar".to_string()));
+
+    // A module nested two levels down.
+    let nested = root.join("platform/core/src/test/java/com/y");
+    let (_, dir, _, _) = jvm_run(root, &nested, IdeRunnerKind::Maven, "com.y.BarTest");
+    assert_eq!(dir, canon(root.join("platform/core")));
+
+    // A test in the reactor root itself runs there; other modules must not fail on `-Dtest`.
+    let at_root = root.join("src/test/java/com/z");
+    let (_, dir, _, args) = jvm_run(root, &at_root, IdeRunnerKind::JavaJunit, "com.z.RootTest");
+    assert_eq!(dir, canon(root.to_path_buf()));
+    assert!(args.contains(&"-Dsurefire.failIfNoSpecifiedTests=false".to_string()));
+}
+
+#[test]
+#[cfg(unix)]
+fn jvm_test_uses_the_reactor_root_maven_wrapper_from_a_module() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_jvm_fixture(
+        root,
+        &[
+            (
+                "pom.xml",
+                "<project><modules><module>svc</module></modules></project>",
+            ),
+            ("mvnw", "#!/bin/sh\n"),
+            ("svc/pom.xml", "<project/>"),
+            ("svc/src/test/java/com/x/FooTest.java", ""),
+        ],
+    );
+    let src = root.join("svc/src/test/java/com/x");
+    let (_, dir, prog, _) = jvm_run(root, &src, IdeRunnerKind::JavaJunit, "com.x.FooTest");
+    assert_eq!(dir, canon(root.join("svc")));
+    assert_eq!(prog, format!("{}/mvnw", canon(root.to_path_buf())));
+
+    let (_, _, prog, _) = jvm_run(root, root, IdeRunnerKind::Maven, "com.x.FooTest");
+    assert_eq!(prog, "./mvnw");
+}
+
+#[test]
+#[cfg(unix)]
+fn jvm_test_in_a_gradle_module_runs_gradle_with_a_dotted_method_filter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_jvm_fixture(
+        root,
+        &[
+            ("settings.gradle", "include 'app'"),
+            ("gradlew", "#!/bin/sh\n"),
+            ("app/build.gradle.kts", ""),
+            ("app/src/test/java/com/x/FooTest.java", ""),
+        ],
+    );
+    let src = root.join("app/src/test/java/com/x");
+    let (runner, dir, prog, args) =
+        jvm_run(root, &src, IdeRunnerKind::JavaJunit, "com.x.FooTest#bar");
+    assert_eq!(runner, IdeRunnerKind::Gradle);
+    assert_eq!(dir, canon(root.join("app")));
+    assert_eq!(prog, format!("{}/gradlew", canon(root.to_path_buf())));
+    assert_eq!(args, vec!["test", "--tests", "com.x.FooTest.bar"]);
+}
+
+#[test]
+#[cfg(unix)]
+fn jvm_build_dir_stays_put_without_a_build_file_or_off_local() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_jvm_fixture(root, &[("src/test/java/com/x/FooTest.java", "")]);
+    let src = root
+        .join("src/test/java/com/x")
+        .to_string_lossy()
+        .into_owned();
+    let (_, dir, _, _) = jvm_run(
+        root,
+        std::path::Path::new(&src),
+        IdeRunnerKind::JavaJunit,
+        "X",
+    );
+    assert_eq!(dir, src);
+
+    // Never climbs above the workspace root, even when a parent has a POM.
+    std::fs::write(root.join("pom.xml"), "<project/>").unwrap();
+    let inner = root.join("src");
+    let (_, dir, _, _) = jvm_run(
+        &inner,
+        &inner.join("test/java/com/x"),
+        IdeRunnerKind::Maven,
+        "X",
+    );
+    assert!(dir.ends_with("src/test/java/com/x"), "{dir}");
+
+    let mut cfg = IdeRunConfig {
+        runner: IdeRunnerKind::JavaJunit,
+        ..Default::default()
+    };
+    let mut ssh = IdeTargetSpec::local("/remote/app");
+    ssh.kind = IdeTargetKind::Ssh;
+    let dir = resolve_jvm_build_dir(&mut cfg, &ssh, "/remote/app/svc/src/test".into());
+    assert_eq!(dir, "/remote/app/svc/src/test");
 }

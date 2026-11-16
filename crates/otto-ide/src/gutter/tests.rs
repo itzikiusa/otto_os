@@ -114,6 +114,20 @@ public class InvoiceServiceTest {
         items[3].run_spec.test_filter.as_deref(),
         Some("com.acme.billing.InvoiceServiceTest#validatesQuantities")
     );
+    // Every item runs from the module root, never the package folder Maven can't build in.
+    assert!(items
+        .iter()
+        .all(|i| i.run_spec.cwd.as_deref() == Some("/ws")));
+
+    let nested = detect_gutter_items(
+        "/ws/billing/invoices-services/src/test/java/com/acme/billing/InvoiceServiceTest.java",
+        src,
+        &[],
+    );
+    assert_eq!(
+        nested[2].run_spec.cwd.as_deref(),
+        Some("/ws/billing/invoices-services")
+    );
 }
 
 #[test]
