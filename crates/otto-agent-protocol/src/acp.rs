@@ -102,7 +102,8 @@ pub struct AcpFlavor {
     /// for a mode only a launch flag gives (agy's full access), which the
     /// runtime enters and leaves by respawning.
     pub mode_id: Option<fn(RuntimeAccessMode) -> Option<&'static str>>,
-    /// Environment per access mode (opencode's `OPENCODE_PERMISSION`).
+    /// Environment per access mode (opencode's `OPENCODE_PERMISSION`; Muse's
+    /// launcher switch, the same in every mode).
     pub access_env: Option<AccessEnv>,
     /// When the agent takes its model as a session config option instead of
     /// a launch flag (opencode: `session/set_config_option {configId:
@@ -119,6 +120,14 @@ pub struct AcpFlavor {
     /// `.agents/skills`) to send as `_meta.antigravity.systemPrompt.append`
     /// instead of a workspace root (otto-context `AGY_BUNDLE_ENV`).
     pub bundle_env: Option<&'static str>,
+    /// The flag that turns the agent's own OS sandbox off when Otto's
+    /// Seatbelt already confines it (macOS refuses a nested sandbox).
+    pub own_sandbox_off: Option<&'static str>,
+    /// Never answer `auth_required` with `authenticate`: the agent's only
+    /// method is an interactive browser login the person starts themselves
+    /// (Muse's `muse-login`), so the handshake fails with its own "log in"
+    /// message instead of a daemon opening a browser.
+    pub no_authenticate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -561,6 +570,43 @@ impl AcpDriver {
         )
     }
 
+    /// Meta's Muse Code over ACP (`muse acp`; verified against 1.4.20). Its
+    /// session modes are approval policies, switched live with
+    /// `session/set_mode`: approval-required asks for anything no permission
+    /// rule covers (`promptUnmatched`), auto-accept-edits is Muse's own
+    /// default (`onRequest`: asks only when an action needs it), full access
+    /// runs everything (`allowAll`). No plan mode. The model is `--model`
+    /// (`muse acp` refuses it for the offline `echo` provider only); effort
+    /// rides the `thought_level` config option built from Muse's model
+    /// catalog (tiers `none` … `ultra`). `--trust-workspace` loads the
+    /// folder's skills and rules (Otto pre-trusts every session cwd); Muse's
+    /// own sandbox is off under Otto's Seatbelt. `MUSE_NO_AUTO_UPDATE=1` stops the launcher from checking for
+    /// a new binary on every spawn (Otto's update pass does that), as T3 Code
+    /// launches it. A signed-out Muse refuses `session/new` until the person
+    /// runs `muse login`.
+    pub fn muse(program: &str) -> Self {
+        Self::with_flavor(
+            RuntimeProvider::Muse,
+            AcpFlavor {
+                program: program.into(),
+                head_args: vec!["acp".into(), "--trust-workspace".into()],
+                model_flag: "--model".into(),
+                mode_id: Some(|m| {
+                    Some(match m {
+                        RuntimeAccessMode::ApprovalRequired => "promptUnmatched",
+                        RuntimeAccessMode::AutoAcceptEdits => "onRequest",
+                        RuntimeAccessMode::FullAccess => "allowAll",
+                    })
+                }),
+                access_env: Some(|_| vec![("MUSE_NO_AUTO_UPDATE".into(), "1".into())]),
+                effort_config_id: Some("thought_level"),
+                own_sandbox_off: Some("--disable-sandbox"),
+                no_authenticate: true,
+                ..AcpFlavor::default()
+            },
+        )
+    }
+
     fn acp_mcp_servers(&self) -> Vec<McpServer> {
         self.state
             .mcp_servers
@@ -729,7 +775,13 @@ impl AcpDriver {
                 "{name} does not take a reasoning effort"
             )));
         }
-        let rank = match raw.trim().to_ascii_lowercase().as_str() {
+        let raw = raw.trim().to_ascii_lowercase();
+        // A tier the agent lists by that name goes as is (Muse's `none`,
+        // `minimal`, `ultra`).
+        if options.contains(&raw) {
+            return Ok(raw);
+        }
+        let rank = match raw.as_str() {
             "minimal" | "low" => 0,
             "medium" => 1,
             "high" => 2,
@@ -861,6 +913,9 @@ impl AcpDriver {
     /// method the agent advertised, else the first `agent`-type (or untyped)
     /// one. `terminal` / `env_var` methods are never sent to `authenticate`.
     fn auth_method(&self) -> Option<String> {
+        if self.flavor.no_authenticate {
+            return None;
+        }
         let advertised = |id: &str| self.state.auth_methods.iter().any(|(m, _)| m == id);
         self.flavor
             .auth_preference
@@ -1822,12 +1877,14 @@ impl AcpDriver {
 
 /// Effort names low → high (agents list theirs in either order: grok
 /// advertises `xhigh, high, medium, low`).
-const EFFORT_RANK: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+const EFFORT_RANK: [&str; 8] = [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
 
 /// The agent's levels low → high (what the effort picker lists).
 fn effort_levels(levels: &[String]) -> Vec<String> {
     let mut out = levels.to_vec();
-    out.sort_by_key(|l| EFFORT_RANK.iter().position(|r| r == l).unwrap_or(2));
+    out.sort_by_key(|l| EFFORT_RANK.iter().position(|r| r == l).unwrap_or(3));
     out
 }
 
@@ -1943,6 +2000,9 @@ impl StructuredDriver for AcpDriver {
             .filter(|_| self.flavor.model_config_id.is_none() && !self.flavor.set_model)
         {
             args.extend([self.flavor.model_flag.clone(), m.clone()]);
+        }
+        if let Some(flag) = self.flavor.own_sandbox_off.filter(|_| ctx.sandboxed) {
+            args.push(flag.into());
         }
         LaunchSpec {
             program: self.flavor.program.clone(),
@@ -2544,6 +2604,94 @@ mod tests {
         d2.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
         assert!(d2.prompt("t1", &req).is_err(), "no effort option");
         assert!(d2.capabilities().efforts.is_empty());
+    }
+
+    /// Muse 1.4.20's real handshake frames: `muse acp --trust-workspace`
+    /// with `--model`, its sandbox off under Otto's Seatbelt and the
+    /// launcher's update check off; the approval policy is a live
+    /// `session/set_mode`; effort is the `thought_level` option, sent by the
+    /// tier name Muse lists.
+    #[test]
+    fn muse_launch_modes_and_effort() {
+        let mut d = AcpDriver::muse("muse");
+        let c = LaunchContext {
+            model: Some("muse-spark-1.3".into()),
+            access_mode: RuntimeAccessMode::ApprovalRequired,
+            sandboxed: true,
+            ..ctx(None)
+        };
+        let spec = d.launch(&c);
+        assert_eq!(spec.program, "muse");
+        assert_eq!(
+            spec.args,
+            [
+                "acp",
+                "--trust-workspace",
+                "--model",
+                "muse-spark-1.3",
+                "--disable-sandbox"
+            ]
+        );
+        assert!(spec.tail_args.is_empty());
+        assert_eq!(
+            spec.env,
+            [("MUSE_NO_AUTO_UPDATE".to_string(), "1".to_string())]
+        );
+        let unconfined = d.launch(&LaunchContext {
+            sandboxed: false,
+            ..c.clone()
+        });
+        assert!(!unconfined.args.iter().any(|a| a == "--disable-sandbox"));
+        assert!(!d.switches_model_live());
+
+        d.start(&c);
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":false,"embeddedContext":true}},"authMethods":[{"id":"muse-login","name":"Log in to Muse"}],"agentInfo":{"name":"muse","version":"1.4.20"}}}"#);
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"01a1e323","modes":{"currentModeId":"onRequest","availableModes":[{"id":"allowAll","name":"Allow all"},{"id":"promptUnmatched","name":"Ask before unmatched actions"},{"id":"onRequest","name":"Ask on request"},{"id":"denyUnmatched","name":"Deny unmatched actions"}]},"configOptions":[{"id":"mode","category":"mode","type":"select","currentValue":"onRequest","options":[]},{"id":"thought_level","category":"thought_level","type":"select","currentValue":"high","options":[{"value":"minimal"},{"value":"low"},{"value":"medium"},{"value":"high"},{"value":"xhigh"},{"value":"max"},{"value":"ultra"}]}]}}"#);
+        let w: Vec<Value> = (0..s.writes.len()).map(|i| sent(&s, i)).collect();
+        assert_eq!(w[0]["method"], "session/set_mode");
+        assert_eq!(w[0]["params"]["modeId"], "promptUnmatched");
+        let caps = d.capabilities();
+        assert!(caps.images && caps.files && !caps.plan && !caps.steer);
+        assert_eq!(
+            caps.efforts,
+            ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        for m in [
+            RuntimeAccessMode::AutoAcceptEdits,
+            RuntimeAccessMode::FullAccess,
+        ] {
+            assert!(d.switches_access_live(m), "{m:?}");
+        }
+        let mut req = RuntimePromptReq::of("go");
+        req.effort = Some("ultra".into());
+        let s = d.prompt("t1", &req).unwrap();
+        let w: Vec<Value> = (0..s.writes.len()).map(|i| sent(&s, i)).collect();
+        assert_eq!(
+            (
+                w[0]["params"]["configId"].as_str(),
+                w[0]["params"]["value"].as_str()
+            ),
+            (Some("thought_level"), Some("ultra"))
+        );
+        assert_eq!(w[1]["method"], "session/prompt");
+        assert!(d.prompt("t2", &RuntimePromptReq::of("again")).is_err());
+    }
+
+    /// A signed-out Muse refuses `session/new` (-32000). Its only auth
+    /// method opens a browser device login, so Otto never calls
+    /// `authenticate`: the thread fails with Muse's own message.
+    #[test]
+    fn muse_signed_out_fails_without_starting_a_browser_login() {
+        let mut d = AcpDriver::muse("muse");
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"authMethods":[{"id":"muse-login","name":"Log in to Muse","description":"Sign in with a device code shown in your browser."}]}}"#);
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"log in to Muse before opening a session"}}"#);
+        assert!(s.writes.is_empty(), "no authenticate: {:?}", s.writes);
+        assert!(
+            matches!(&s.events[0], DriverEvent::Fatal(f) if f.class == "handshake_error" && f.message.contains("log in to Muse")),
+            "{:?}",
+            s.events
+        );
     }
 
     /// agy's swarm (live 1.5.8 frames): each `swarm add` is a background

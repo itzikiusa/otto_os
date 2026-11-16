@@ -33,8 +33,9 @@ use crate::Id;
 /// The agent CLIs the structured runtime can drive (distinct from the PTY
 /// provider registry): `claude` over the Agent SDK's stream-json control
 /// protocol, `codex` over `codex app-server`, `gemini` (`gemini --acp`) and
-/// `grok` (`grok agent stdio`) over ACP, `agy` (Antigravity) over its
-/// print-mode stream-json.
+/// `grok` (`grok agent stdio`), `opencode` (`opencode acp`) and `muse`
+/// (Meta's Muse Code, `muse acp`) over ACP, `agy` (Antigravity) over its own
+/// ACP server, `pi` over its RPC mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeProvider {
@@ -45,10 +46,11 @@ pub enum RuntimeProvider {
     Agy,
     Opencode,
     Pi,
+    Muse,
 }
 
 impl RuntimeProvider {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Claude,
         Self::Codex,
         Self::Gemini,
@@ -56,6 +58,7 @@ impl RuntimeProvider {
         Self::Agy,
         Self::Opencode,
         Self::Pi,
+        Self::Muse,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -67,6 +70,7 @@ impl RuntimeProvider {
             Self::Agy => "agy",
             Self::Opencode => "opencode",
             Self::Pi => "pi",
+            Self::Muse => "muse",
         }
     }
 
@@ -79,6 +83,7 @@ impl RuntimeProvider {
             "agy" => Some(Self::Agy),
             "opencode" => Some(Self::Opencode),
             "pi" => Some(Self::Pi),
+            "muse" => Some(Self::Muse),
             _ => None,
         }
     }
@@ -949,6 +954,16 @@ impl RuntimeCapabilities {
                 images: true,
                 files: true,
                 efforts: levels(&["low", "medium", "high"]),
+                plan: false,
+            },
+            // Muse's tiers are `none` … `ultra`; Otto's picker ranks them
+            // on its five-level scale (`ultra` rides `max`). Its modes are
+            // approval policies only — no plan mode.
+            RuntimeProvider::Muse => Self {
+                steer: false,
+                images: true,
+                files: true,
+                efforts: levels(&["low", "medium", "high", "xhigh", "max"]),
                 plan: false,
             },
             RuntimeProvider::Gemini | RuntimeProvider::Opencode => Self {

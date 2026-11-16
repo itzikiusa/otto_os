@@ -164,6 +164,7 @@ fn drivers() -> Arc<dyn DriverFactory> {
             RuntimeProvider::Claude => {
                 Box::new(ClaudeDriver::with_program(fake_bin!("otto-fake-claude")))
             }
+            RuntimeProvider::Muse => Box::new(AcpDriver::muse(&fake_bin!("otto-fake-agent"))),
             _ => Box::new(AcpDriver::new(p, fake_bin!("otto-fake-agent"), Vec::new())),
         })
     })
@@ -761,6 +762,98 @@ async fn acp_model_switch_respawns_and_resumes_and_unsupported_input_is_refused(
             other => panic!("{other:?}"),
         }
     }
+    rt.close(&s.id).await.unwrap();
+}
+
+// ---- Muse Code (`muse acp`) -------------------------------------------
+
+/// The Muse flavor through the real runtime (fake ACP agent): its launch
+/// argv and env reach the safety pipeline, a turn round-trips, an approval
+/// resolves, and effort goes as `thought_level` once the agent lists it.
+#[tokio::test]
+async fn muse_runs_on_acp_through_the_runtime_with_approvals() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Muse).await;
+    host.wait(is_ready).await;
+    let spec = host.prepared.lock().unwrap()[0].clone();
+    assert_eq!(spec.args[..2], ["acp", "--trust-workspace"]);
+    assert!(spec
+        .env
+        .contains(&("MUSE_NO_AUTO_UPDATE".into(), "1".into())));
+    rt.prompt(&s.id, "hello").await.unwrap();
+    host.wait(is_terminal).await;
+    assert_eq!(last_assistant_text(&host), "echo: hello");
+    rt.prompt(&s.id, "ask").await.unwrap();
+    let req = host.wait(is_type("runtime_request.updated")).await;
+    let RuntimeEventBody::RuntimeRequestUpdated { runtime_request } = req.body else {
+        unreachable!()
+    };
+    rt.respond(&s.id, &runtime_request.id, ApprovalDecision::Accept)
+        .await
+        .unwrap();
+    let fin = host.wait_n(is_terminal, 2).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    rt.close(&s.id).await.unwrap();
+}
+
+/// LIVE: the installed `muse` (`muse acp` with its offline `echo` provider,
+/// no login) through the real runtime and Muse flavor — a prompt round-trip
+/// and an image prompt. `cargo test -p otto-agent-protocol --test runtime
+/// muse_live -- --ignored` with `muse` on `PATH`.
+#[tokio::test]
+#[ignore = "needs the real muse CLI"]
+async fn muse_live_echo_round_trip_and_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let wrapper = dir.path().join("muse-echo");
+    std::fs::write(&wrapper, "#!/bin/sh\nexec muse \"$@\" --provider echo\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let program = wrapper.display().to_string();
+    let pool = pool().await;
+    let host = TestHost::new(dir.path().to_str().unwrap(), false);
+    let drivers: Arc<dyn DriverFactory> = Arc::new(
+        move |_p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
+            Some(Box::new(AcpDriver::muse(&program)))
+        },
+    );
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool.clone()),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("attachments"),
+            ..RuntimeConfig::default()
+        },
+    );
+    let s = create_as(&rt, dir.path().to_str().unwrap(), RuntimeProvider::Muse).await;
+    host.wait(is_ready).await;
+    let s = rt.get(&s.id).await.unwrap();
+    assert!(s.native_thread_id.is_some(), "Muse named its session");
+    rt.prompt(&s.id, "hello there").await.unwrap();
+    let fin = host.wait(is_terminal).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    assert_eq!(last_assistant_text(&host), "echo: hello there");
+    let image = RuntimePromptReq {
+        images: vec![PromptImage {
+            mime: "image/png".into(),
+            data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".into(),
+            name: None,
+        }],
+        ..RuntimePromptReq::of("look")
+    };
+    rt.prompt_with(&s.id, &image).await.unwrap();
+    let fin = host.wait_n(is_terminal, 2).await;
+    assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Completed));
+    assert!(
+        last_assistant_text(&host).starts_with("echo: "),
+        "{}",
+        last_assistant_text(&host)
+    );
     rt.close(&s.id).await.unwrap();
 }
 
