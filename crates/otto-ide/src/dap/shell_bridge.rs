@@ -160,6 +160,8 @@ pub(crate) async fn spawn_shell_dap_bridge(
     );
     env.insert("OTTO_SH_DAP_TARGET".into(), spec.program.clone());
 
+    let mut launch_env = crate::environments::shell_env::collect_safe_non_root_base_env();
+    launch_env.extend(env);
     let mut cmd = Command::new(&spec.shell_bin);
     if spec.flavor == ShellFlavor::Zsh {
         cmd.arg("--no-rcs");
@@ -168,8 +170,7 @@ pub(crate) async fn spawn_shell_dap_bridge(
         .args(&spec.args)
         .current_dir(&spec.cwd)
         .env_clear()
-        .envs(crate::environments::shell_env::collect_safe_non_root_base_env())
-        .envs(&env)
+        .envs(&launch_env)
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -196,6 +197,7 @@ pub(crate) async fn spawn_shell_dap_bridge(
         stdout,
         stderr,
         ipc_dir,
+        launch_env,
     ));
 
     Ok((client_end, guard))
@@ -259,6 +261,7 @@ async fn run_shell_bridge_loop(
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
     ipc_dir: PathBuf,
+    launch_env: BTreeMap<String, String>,
 ) {
     let (r_half, w_half) = tokio::io::split(bridge_io);
     let mut dap_in = DapReader::new(r_half);
@@ -363,7 +366,11 @@ async fn run_shell_bridge_loop(
                     }
                     "variables" => {
                         let vars: Vec<Value> = paused.as_ref().map(|st| {
-                            st.vars.iter().take(150).map(|(k, v)| {
+                            // The script's own variables first: a large inherited env
+                            // (CI has ~150 vars) would otherwise push them past the cap.
+                            let inherited = |(k, v): &&(String, String)| launch_env.get(k) == Some(v);
+                            let (env_vars, own): (Vec<_>, Vec<_>) = st.vars.iter().partition(inherited);
+                            own.into_iter().chain(env_vars).take(150).map(|(k, v)| {
                                 json!({
                                     "name": k,
                                     "value": v,

@@ -403,8 +403,8 @@ module.exports = deepFreeze({
     "text-dim": "#444444"
   },
   "scale": {
-    "font-ui": "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif",
-    "font-mono": "ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace",
+    "font-ui": "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif",
+    "font-mono": "ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', monospace",
     "fs-xs": "11px",
     "fs-s": "12px",
     "fs-m": "13px",

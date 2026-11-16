@@ -286,9 +286,10 @@ def pump(a, b):
     except Exception:
         pass
     finally:
-        try: a.close()
-        except Exception: pass
-        try: b.close()
+        # Half-close, never close(): on Linux a close() while the other pump
+        # thread is blocked in recv() on the same socket sends no FIN, so the
+        # client would wait for EOF forever.
+        try: b.shutdown(socket.SHUT_WR)
         except Exception: pass
 while True:
     c, _ = srv.accept()
