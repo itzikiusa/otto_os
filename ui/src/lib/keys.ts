@@ -253,10 +253,10 @@ export function dismissTopDialog(): void {
 
 /** Whether the mounted page claims the ⌘`key` chord a browser-tab alias
  *  (⌃⇧T / ⌃⇧W) stands for: the claim sees a plain ⌘`key` keydown, so a page
- *  handles the alias exactly like the chord. */
+ *  handles the alias exactly like the chord (digit chords match on `code`). */
 export function pageClaimsAlias(key: string): boolean {
   const claim = keyContext.pageChords;
-  return !!claim && claim(new KeyboardEvent('keydown', { key, metaKey: true, cancelable: true }));
+  return !!claim && claim(new KeyboardEvent('keydown', { key, code: /^\d$/.test(key) ? `Digit${key}` : '', metaKey: true, cancelable: true }));
 }
 
 /** `index` is the 1-based session number for the `jumpSession` action. */
