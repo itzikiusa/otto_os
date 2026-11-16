@@ -732,6 +732,15 @@ impl AgentRuntime {
         }
     }
 
+    /// Whether any loaded session has a turn running or starting (the
+    /// daemon's keep-awake hold reads this).
+    pub fn any_turn_running(&self) -> bool {
+        self.inner.live.iter().any(|e| {
+            let st = e.value().lock();
+            st.turn.is_some() || st.starting > 0
+        })
+    }
+
     /// Evict all cached in-memory [`Live`] sessions (stopping any live child
     /// processes first) and reconcile the persisted projection after a
     /// portable state-archive restore.

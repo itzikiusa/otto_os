@@ -419,12 +419,15 @@ async fn interrupt_ends_the_turn_and_cancels_pending_requests() {
     let rt = runtime(&pool, &host, RuntimeConfig::default());
     let s = create(&rt, dir.path().to_str().unwrap()).await;
 
+    assert!(!rt.any_turn_running(), "idle before the prompt");
     rt.prompt(&s.id, "hang").await.unwrap();
     host.wait(is_type("turn_item.updated")).await;
     host.wait_n(is_type("turn_item.updated"), 2).await; // user + streaming chunk
+    assert!(rt.any_turn_running(), "the keep-awake hold sees the turn");
     assert!(rt.interrupt(&s.id).await.unwrap());
     let fin = host.wait(is_terminal).await;
     assert_eq!(terminal(&fin), Some(TurnTerminalStatus::Interrupted));
+    assert!(!rt.any_turn_running(), "released once the turn ends");
     assert!(
         !rt.interrupt(&s.id).await.unwrap(),
         "nothing left to interrupt"

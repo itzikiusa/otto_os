@@ -17,7 +17,8 @@ write is retried), #33604 (a resumed ACP message keeps its text), #34867
 (an ACP choice and its `__other` field are one question) and the open
 #31370 (Claude's context meter uses the window Claude enforces). Ported
 from T3 Code main on 2026-11-16 (behaviour only): #28797 (an ACP refusal or
-limit stop fails the turn). Threads
+limit stop fails the turn), #34128 (the Mac stays awake while a turn runs).
+Threads
 inside a thread (`src/runtime/children.rs` and Otto's Threads UI) follow
 `apps/web/src/components/chat/V2LifecycleRow.tsx` (`SubagentTimelineLink`,
 `SubagentNotificationLink`), `ThreadLineageWorkflowRow.tsx`,
