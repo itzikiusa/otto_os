@@ -385,8 +385,17 @@ pub(crate) fn analyze_java_diagnostics(
     let mut unresolved_imported_simples: HashMap<String, String> = HashMap::new();
     let mut wildcard_packages = Vec::new();
 
+    // Under Maven/Gradle the classpath is transitive (parents, BOMs, starters),
+    // which this index can't see: an import it doesn't know is trusted, not an error.
+    let build_managed = has_build_file_above(path, project_roots);
+    // A wildcard from such a package may supply any simple name, so step 5 can't judge.
+    let unknown_wildcard = build_managed
+        && imports.iter().any(|i| {
+            i.is_wildcard && !resolve_java_import_exists(i, ws, jdk, ext_classes, ext_packages)
+        });
     for imp in &imports {
-        let exists = resolve_java_import_exists(imp, ws, jdk, ext_classes, ext_packages);
+        let exists =
+            build_managed || resolve_java_import_exists(imp, ws, jdk, ext_classes, ext_packages);
         if !exists {
             if !imp.is_wildcard && !imp.is_static {
                 unresolved_imported_simples.insert(imp.simple_or_member.clone(), imp.fqn.clone());
@@ -509,7 +518,7 @@ pub(crate) fn analyze_java_diagnostics(
 
     for (idx, code_ln) in code_lines.iter().enumerate() {
         let ln = (idx + 1) as u32;
-        if ln == pkg_line_num || import_line_nums.contains(&ln) {
+        if unknown_wildcard || ln == pkg_line_num || import_line_nums.contains(&ln) {
             continue;
         }
         for m in ident_re.find_iter(code_ln) {
@@ -584,6 +593,21 @@ pub(crate) fn analyze_java_diagnostics(
     }
 
     diagnostics
+}
+
+/// Whether a `pom.xml` / `build.gradle*` sits in the file's dir or above it
+/// (inside the project roots when there are any).
+fn has_build_file_above(path: &str, project_roots: &[PathBuf]) -> bool {
+    Path::new(path)
+        .ancestors()
+        .skip(1)
+        .take(16)
+        .take_while(|d| project_roots.is_empty() || project_roots.iter().any(|r| d.starts_with(r)))
+        .any(|d| {
+            ["pom.xml", "build.gradle", "build.gradle.kts"]
+                .iter()
+                .any(|f| d.join(f).is_file())
+        })
 }
 
 fn parse_java_import_line(raw: &str, trimmed: &str, line_num: u32) -> Option<ParsedJavaImport> {

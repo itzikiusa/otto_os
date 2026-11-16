@@ -187,13 +187,16 @@ export function computeDeterministicQuickFixes(
 
   if (lang === 'java') {
     const mImp = /^\s*import\s+(?:static\s+)?([\w.*$]+)\s*;\s*$/.exec(curLine);
-    if (mImp) {
+    const impName = mImp?.[1].split('.').pop() ?? '';
+    const javaBody = lines.filter((l) => !/^\s*(?:import|package)\s/.test(l)).join('\n');
+    // Only an import whose simple name the file never mentions; a wildcard can't be judged.
+    if (mImp && impName !== '*' && !new RegExp(`\\b${impName.replace(/\$/g, '\\$')}\\b`).test(javaBody)) {
       const impPath = mImp[1];
       out.push({
         id: `java-remove-import-${line}`,
         title: `Remove import '${impPath}'`,
         kind: 'quickfix',
-        isPreferred: true,
+        isPreferred: false,
         edits: [makeDeleteLineEdit(lines, line, filePath)],
         previewBefore: curLine,
         previewAfter: '// (import removed)',
