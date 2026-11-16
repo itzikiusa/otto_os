@@ -259,7 +259,7 @@ Install an `otto-ide-plugin.json` extension into `<data_dir>/ide-plugins/<slug>/
 `IdeAgentPanel.svelte` and `IdeInlinePromptBar.svelte` share the **exact same
 Otto Threads pool** as `#/threads` (`threadsSessionStore`), uniting structured
 runtime sessions (`/api/v1/workspaces/{id}/runtime-sessions` across `claude`,
-`codex`, `gemini`, `agy`, `grok`, `opencode`, and `pi`) with 1:1 attachment and
+`codex`, `gemini`, `agy`, `grok`, `opencode`, `pi` and `muse`) with 1:1 attachment and
 composer capability parity, the shared `ModelPicker`, and the thread switcher:
 
 - **6-source context marking (`ideAgentController.svelte.ts`):**

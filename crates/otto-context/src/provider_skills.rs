@@ -1,6 +1,7 @@
 //! Read-only access to on-disk **provider-global** skills — the ones the coding
 //! CLIs discover from `~/.claude/skills`, `~/.codex/skills`, `~/.gemini/skills`
-//! (agy's home is `~/.gemini` — see [`crate::user_skills`]).
+//! (agy's home is `~/.gemini` — see [`crate::user_skills`]) and Muse Code's
+//! `$XDG_CONFIG_HOME/muse/skills` (default `~/.config/muse/skills`).
 //!
 //! The Skills Lab surfaces these alongside the Otto library + bundled catalog so
 //! a user can view and review a skill that lives in a provider's dir (installed
@@ -19,7 +20,7 @@ use crate::library::{
 const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 
 /// The providers whose skills dir we enumerate (see [`provider_root`]).
-pub const PROVIDERS: [&str; 3] = ["claude", "codex", "agy"];
+pub const PROVIDERS: [&str; 4] = ["claude", "codex", "agy", "muse"];
 
 /// The provider's skills dir, only for a recognized provider: `~/.claude/skills`,
 /// `$CODEX_HOME/skills` (default `~/.codex`), and `~/.gemini/skills` for agy —
@@ -43,6 +44,16 @@ pub fn provider_root(provider: &str) -> Option<PathBuf> {
         Some(base.join("skills"))
     } else if provider == "agy" {
         Some(home.join(".gemini").join("skills"))
+    } else if provider == "muse" {
+        // Where `muse skills install` puts a user skill. (Muse also reads
+        // ~/.claude/skills and ~/.codex/skills, so Otto installs nothing
+        // here — see `user_skills`.)
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        Some(base.join("muse").join("skills"))
     } else {
         Some(home.join(format!(".{provider}")).join("skills"))
     }
@@ -153,6 +164,9 @@ mod tests {
         // agy lives under ~/.gemini (where user_skills installs it).
         if let Some(root) = provider_root("agy") {
             assert!(root.ends_with(".gemini/skills"), "{root:?}");
+        }
+        if let Some(root) = provider_root("muse") {
+            assert!(root.ends_with("muse/skills"), "{root:?}");
         }
     }
 

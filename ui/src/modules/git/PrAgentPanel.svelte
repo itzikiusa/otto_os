@@ -279,7 +279,7 @@
           body="The agent reads the code from your clone. Add the repository’s folder in Git, then ask again." />
       {:else if !provider}
         <EmptyState icon="sparkle" title="No agent can run here yet"
-          body="A pull request’s thread runs on Claude Code, Codex, Gemini, Grok, opencode or pi. Install one, or set it up in Settings › Providers."
+          body="A pull request’s thread runs on Claude Code, Codex, Gemini, Grok, opencode, pi or Muse. Install one, or set it up in Settings › Providers."
           actionLabel="Open Providers" actionKind="secondary" onaction={() => router.go('settings/providers')} />
       {:else}
         <div class="pra-intro">

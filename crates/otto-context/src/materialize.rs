@@ -52,8 +52,9 @@ const OPENCODE_CONFIG_FILE: &str = "opencode.json";
 /// Whether Otto can hand `provider`'s CLI a context file for one launch
 /// without touching the working tree. `gemini` (only a system-prompt
 /// REPLACEMENT via `GEMINI_SYSTEM_MD`, or `GEMINI.md` in the tree) has no
-/// such mechanism, so a caller whose session must carry a persona refuses
-/// it instead of running without it. pi takes `--append-system-prompt
+/// such mechanism, nor does Muse (no system-prompt flag or setting; it reads
+/// only the tree's and the user's own rules), so a caller whose session must
+/// carry a persona refuses it instead of running without it. pi takes `--append-system-prompt
 /// <file>` and `--skill <dir>`.
 pub fn delivers_context(provider: &str) -> bool {
     matches!(

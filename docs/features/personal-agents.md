@@ -89,7 +89,7 @@ routine's times are in its timezone; omitted, that is this Mac's timezone
 The scheduler (60s tick, `crates/otto-assistant/src/personal_agents_scheduler.rs`)
 fires due schedules; the engine (`personal_agents_engine.rs`) runs each as a
 **fresh Threads thread** on the structured runtime when the agent's provider is
-one Threads drives (`claude`, `codex`, `gemini`, `grok`, `opencode`, `pi` —
+one Threads drives (`claude`, `codex`, `gemini`, `grok`, `opencode`, `pi`, `muse` —
 `personal_agent_threads.rs`): the thread is created in the agent's cwd with the
 pinned model and the run's server-owned meta (`personal_agent = <id>`,
 `run_id`, `read_only`, `browser`, `agent_mode` — the same confinement a
@@ -550,7 +550,7 @@ the agent's Runs tab. A clean run ends the streak.
   ALREADY posts outside the chat is judged against its stored destination:
   any change other than a pause needs the owner's approval card.
 - **400 "gemini can't load a persona for one launch …"** — a personal agent
-  runs on Claude, Codex, agy, Grok or opencode only: Gemini, Pi and custom CLIs
+  runs on Claude, Codex, agy, Grok, opencode or pi only: Gemini, Muse and custom CLIs
   have no per-launch context file, so they would run without the persona. The
   editor only offers the supported providers and explains a saved other one.
 - **403 "This agent runs as its owner; only the owner or a workspace admin can

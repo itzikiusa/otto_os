@@ -242,6 +242,10 @@ const HOME_DENY_WRITE_LITERAL: &[&str] = &[
     ".codex/AGENTS.md",
     ".codex/AGENTS.override.md",
     ".gemini/GEMINI.md",
+    // Muse Code: its settings (`mcpServers`, permission profiles, hooks) and
+    // its user rules. `auth.json` beside them stays writable (token refresh).
+    ".config/muse/settings.json",
+    ".config/muse/AGENTS.md",
 ];
 const HOME_DENY_WRITE_SUBPATH: &[&str] = &[
     ".config/git",
@@ -267,6 +271,13 @@ const HOME_DENY_WRITE_SUBPATH: &[&str] = &[
     // Gemini CLI extensions declare `mcpServers` that every gemini/agy starts.
     ".gemini/extensions",
     ".gemini/skills",
+    // Muse Code's user skills, plugins and hooks.
+    ".config/muse/skills",
+    ".config/muse/plugins",
+    ".config/muse/hooks",
+    ".config/muse/rules",
+    ".local/share/muse/plugins",
+    ".local/share/muse/skills",
     // Otto's own context bundles: every claude session is launched with
     // `--settings ~/.otto/context/claude/<cwd>/settings.json` (hooks).
     ".otto/context",
@@ -342,6 +353,17 @@ const CLI_STATE_DIRS: &[(&str, &[&str])] = &[
             // `mcp_config.json`, whose `mcpServers` every gemini/agy starts.
             "config/projects",
         ],
+    ),
+    // Muse Code keeps its config (`settings.json`, `auth.json`, `skills/`)
+    // under `$XDG_CONFIG_HOME/muse` and its state under `$XDG_DATA_HOME/muse`.
+    // The config home grants only its top-level files (a login's token
+    // refresh), minus the denied settings; the data home its session logs,
+    // index and runtime sockets — NOT `plugins/` or `skills/` (code every
+    // later session loads).
+    (".config/muse", &[]),
+    (
+        ".local/share/muse",
+        &["sessions", "session-server", "runtime", "local-tracing"],
     ),
 ];
 
@@ -1698,13 +1720,45 @@ mod tests {
                 "{rel} must not be a writable root"
             );
         }
-        for rel in [".codex/sessions", ".codex/tmp", ".gemini/antigravity-cli"] {
+        for rel in [
+            ".codex/sessions",
+            ".codex/tmp",
+            ".gemini/antigravity-cli",
+            ".local/share/muse/sessions",
+            ".local/share/muse/runtime",
+        ] {
             assert!(
                 pol.writable_roots.iter().any(|r| r == &h.join(rel)),
                 "{rel}"
             );
         }
+        for rel in [
+            ".config/muse",
+            ".local/share/muse",
+            ".local/share/muse/plugins",
+        ] {
+            assert!(
+                !pol.writable_roots.iter().any(|r| r == &h.join(rel)),
+                "{rel} must not be a writable root"
+            );
+        }
         let sbpl = pol.to_sbpl();
+        // Muse: its top-level files (auth.json) yes, its settings, skills and
+        // plugins never.
+        let muse_top = at(
+            &sbpl,
+            "(regex #\"^/nonexistent-otto-home/u/\\.config/muse/[^/]+$\")",
+        );
+        for deny in [
+            "(literal \"/nonexistent-otto-home/u/.config/muse/settings.json\")",
+            "(subpath \"/nonexistent-otto-home/u/.config/muse/skills\")",
+            "(subpath \"/nonexistent-otto-home/u/.local/share/muse/plugins\")",
+        ] {
+            assert!(
+                at(&sbpl, deny) > muse_top,
+                "{deny} must follow the top-level allow"
+            );
+        }
         let top = at(
             &sbpl,
             "(regex #\"^/nonexistent-otto-home/u/\\.codex/[^/]+$\")",

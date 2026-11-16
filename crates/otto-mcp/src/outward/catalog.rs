@@ -1418,7 +1418,7 @@ fn thread_tool_specs() -> [Value; 8] {
         json!({"name":"otto.thread_open","mutating":false,"category":"Sessions",
             "description":"Open a linked agent thread from this Threads thread (same workspace, folder, access mode); shown beside yours. `prompt` = its first message (your role + task). Model/effort default when omitted. Returns its `id`.",
             "inputSchema":{"type":"object","required":["provider"],"properties":{
-                "provider":{"type":"string","description":"claude|codex|gemini|grok|opencode|pi"},
+                "provider":{"type":"string","description":"claude|codex|gemini|grok|opencode|pi|muse"},
                 "prompt":{"type":"string"},"title":{"type":"string"},"model":{"type":"string"},
                 "effort":{"type":"string","description":"low|medium|high|xhigh|max"},
                 "session_id":{"type":"string","description":"caller (auto)"}}}}),
@@ -1455,7 +1455,7 @@ fn team_tool_specs() -> [Value; 3] {
             "description":"Main agent only: create a personal agent (name + instructions = its persona). Shown in Personal Agents, attributed to you. Returns it.",
             "inputSchema":{"type":"object","required":["name","instructions"],"properties":{
                 "name":{"type":"string"},"instructions":{"type":"string"},
-                "provider":{"type":"string","description":"claude|codex|gemini|grok|opencode|pi (default: yours)"},
+                "provider":{"type":"string","description":"claude|codex|gemini|grok|opencode|pi|muse (default: yours)"},
                 "model":{"type":"string"},"session_id":{"type":"string","description":"caller (auto)"}}}}),
         json!({"name":"otto.personal_agent_delegate","mutating":false,"category":"Sessions",
             "description":"Main agent only, from its Threads chat: hand `task` to one of your agents (name or id). Opens it beside you as a linked thread; its report arrives back here as a message when it finishes. Returns the thread.",

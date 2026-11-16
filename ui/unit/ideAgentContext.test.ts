@@ -322,7 +322,7 @@ test('offsetsForLineRange, lineRangeFromOffsets, and spliceCodeRange preserve su
 
 test('resolveIdeHarnesses supports all enabled Threads providers + custom CLIs while respecting disabled_providers', () => {
   const harnesses = resolveIdeHarnesses(
-    ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi', 'custom-qwen', 'shell'],
+    ['claude', 'codex', 'agy', 'gemini', 'grok', 'opencode', 'pi', 'muse', 'custom-qwen', 'shell'],
     ['custom-deepseek', 'shell', null, '  '],
   );
 
@@ -539,8 +539,8 @@ test('resolveIdeHarnesses and resolveIdeInlineProviders honor empty provider lis
   assert.deepEqual(resolveIdeHarnesses([]), []);
   assert.deepEqual(resolveIdeHarnesses(['shell']), []);
   assert.deepEqual(
-    resolveIdeHarnesses(['grok', 'gemini', 'pi', 'opencode', 'agy', 'codex', 'claude', 'shell']),
-    ['claude', 'codex', 'agy', 'opencode', 'pi', 'gemini', 'grok'],
+    resolveIdeHarnesses(['muse', 'grok', 'gemini', 'pi', 'opencode', 'agy', 'codex', 'claude', 'shell']),
+    ['claude', 'codex', 'agy', 'opencode', 'pi', 'gemini', 'grok', 'muse'],
   );
   assert.deepEqual(IDE_RUNTIME_PROVIDERS, [
     'claude',
@@ -550,6 +550,7 @@ test('resolveIdeHarnesses and resolveIdeInlineProviders honor empty provider lis
     'pi',
     'gemini',
     'grok',
+    'muse',
   ]);
 
   assert.deepEqual(resolveIdeInlineProviders(['claude', 'codex'], []), []);

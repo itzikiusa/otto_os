@@ -112,6 +112,7 @@ fn provider_label(p: RuntimeProvider) -> &'static str {
         RuntimeProvider::Agy => "Antigravity",
         RuntimeProvider::Opencode => "opencode",
         RuntimeProvider::Pi => "pi",
+        RuntimeProvider::Muse => "Muse",
     }
 }
 

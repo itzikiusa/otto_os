@@ -34,8 +34,9 @@ use crate::AssistantCtx;
 /// Providers whose personal-agent runs and chats are Threads threads — the
 /// ones Threads starts on the structured runtime (`isRuntimeProvider` in
 /// `ui/src/modules/threads/runtime/runtimeThreads.svelte.ts`).
-pub const THREAD_PROVIDERS: &[&str] =
-    &["claude", "codex", "gemini", "grok", "agy", "opencode", "pi"];
+pub const THREAD_PROVIDERS: &[&str] = &[
+    "claude", "codex", "gemini", "grok", "agy", "opencode", "pi", "muse",
+];
 
 /// How long one wait for the run's turn lasts before the progress check.
 const POLL: Duration = Duration::from_secs(20);
@@ -623,7 +624,7 @@ mod tests {
     fn thread_providers_are_the_runtime_ones() {
         assert_eq!(thread_provider(""), Some(RuntimeProvider::Claude));
         assert_eq!(thread_provider(" codex "), Some(RuntimeProvider::Codex));
-        for p in ["gemini", "grok", "agy", "opencode", "pi"] {
+        for p in ["gemini", "grok", "agy", "opencode", "pi", "muse"] {
             assert!(thread_provider(p).is_some(), "{p}");
         }
         // Custom providers keep a terminal session.

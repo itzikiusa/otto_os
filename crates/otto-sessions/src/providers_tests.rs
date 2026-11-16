@@ -310,3 +310,42 @@ fn update_commands_skip_disabled_providers() {
     assert!(!left.contains(&"opencode".to_string()));
     assert!(left.contains(&"claude".to_string()));
 }
+
+/// Muse Code is built in: `--trust-workspace` always, `--yolo` only while
+/// permission prompts are skipped, no resume argv (Threads resumes it over
+/// ACP), the launcher's update check off, the launcher's own refresh as its
+/// update command, and the Muse runtime driver.
+#[test]
+fn muse_is_a_builtin_terminal_and_runtime_provider() {
+    let reg = ProviderRegistry::new(None);
+    assert_eq!(
+        args_for(&reg, "muse", false),
+        ["--trust-workspace", "--yolo"]
+    );
+    let spec = reg.build_spec("muse", "SID", "/tmp/cwd", false).unwrap();
+    assert_eq!(spec.program, "muse");
+    assert!(spec
+        .env
+        .contains(&("MUSE_NO_AUTO_UPDATE".to_string(), "1".to_string())));
+    assert!(reg.build_spec("muse", "SID", "/tmp/cwd", true).is_err());
+    assert_eq!(
+        reg.model_args_template("muse"),
+        Some(vec!["--model".to_string(), "{model}".to_string()])
+    );
+    assert!(reg
+        .update_commands()
+        .contains(&("muse".to_string(), MUSE_UPDATE_COMMAND.to_string())));
+    assert_eq!(
+        reg.runtime_provider_for("muse"),
+        Some(RuntimeProvider::Muse)
+    );
+    let fams: HashMap<_, _> = reg.model_families().into_iter().collect();
+    assert_eq!(fams["muse"], "muse");
+    reg.set_skip_permissions(false, None);
+    assert_eq!(args_for(&reg, "muse", false), ["--trust-workspace"]);
+    // A custom wrapper of the `muse` command rides the Muse family.
+    assert_eq!(
+        infer_model_family(None, "/opt/muse/bin/muse", "metamuse"),
+        Some("muse".into())
+    );
+}

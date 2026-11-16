@@ -26,7 +26,7 @@ import { DIAGNOSE_SOURCE, diagnosePrompt, originLabel, pickDiagnoseThread, type 
 export type DiagnosePhase = 'starting' | 'running' | 'finished' | 'failed';
 
 /** Providers the structured runtime runs (RuntimeProvider). */
-const RUNTIME_PROVIDERS = new Set(['claude', 'codex', 'gemini', 'grok', 'agy', 'opencode', 'pi']);
+const RUNTIME_PROVIDERS = new Set(['claude', 'codex', 'gemini', 'grok', 'agy', 'opencode', 'pi', 'muse']);
 const POLL_MS = 3000;
 
 interface Active {

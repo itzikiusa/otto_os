@@ -84,8 +84,8 @@ including behaviour changes to know before upgrading.
 
 ### What's new in 0.2.1
 
-- **Threads on structured agent protocols.** Codex, Claude, Antigravity, pi and
-  opencode run as structured sessions instead of terminals: plans, commands,
+- **Threads on structured agent protocols.** Codex, Claude, Antigravity, pi,
+  opencode and Muse Code run as structured sessions instead of terminals: plans, commands,
   file edits and test runs stream into the thread, approvals appear inline
   where the agent asks, and threads can open, message and close **linked
   threads**. Thread agents get the Otto MCP tools, can make changes, and can
@@ -157,7 +157,7 @@ including behaviour changes to know before upgrading.
 
 - **Threads** — an inbox-first conversational workspace (`#/threads`)
   inspired by modern agentic IDEs while keeping Otto's multi-session power:
-  - **Structured runtime:** Codex, Claude, Antigravity, pi and opencode run
+  - **Structured runtime:** Codex, Claude, Antigravity, pi, opencode and Muse run
     over their structured protocols (`otto-agent-protocol`), so plans,
     commands, file changes and tool calls are real items, approvals answer
     inline, and threads link into teams (`otto.thread_open` / `_message` /

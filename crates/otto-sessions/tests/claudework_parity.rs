@@ -297,6 +297,7 @@ async fn custom_command_probe_strips_templates_and_checks_login_shell() {
 async fn wrapper_claude_config_dir_cli_family_non_claude_resume_and_seatbelt_writable_root() {
     assert!(DETECTED_TOOLS.contains(&"opencode"));
     assert!(DETECTED_TOOLS.contains(&"pi"));
+    assert!(DETECTED_TOOLS.contains(&"muse"));
 
     let dir = tempfile::tempdir().unwrap();
     let fake_home = dir.path().join("fake-home");

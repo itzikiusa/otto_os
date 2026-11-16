@@ -66,8 +66,8 @@ pub fn api_router<S: RuntimeCtx>() -> Router<S> {
 
 /// The production driver set — the providers T3 Code drives over a
 /// structured protocol: Claude (Agent SDK transport), Codex (app-server),
-/// Gemini, Grok, Antigravity (`agy acp`) and opencode (ACP), pi (its RPC
-/// mode). A missing CLI fails the spawn, not the create.
+/// Gemini, Grok, Antigravity (`agy acp`), opencode and Muse (ACP), pi (its
+/// RPC mode). A missing CLI fails the spawn, not the create.
 pub fn default_drivers() -> Arc<dyn DriverFactory> {
     use otto_core::agent_runtime::RuntimeProvider;
     Arc::new(
@@ -80,6 +80,7 @@ pub fn default_drivers() -> Arc<dyn DriverFactory> {
                 RuntimeProvider::Agy => Box::new(acp::AcpDriver::agy("agy")),
                 RuntimeProvider::Opencode => Box::new(acp::AcpDriver::opencode()),
                 RuntimeProvider::Pi => Box::new(pi::PiDriver::with_program("pi")),
+                RuntimeProvider::Muse => Box::new(acp::AcpDriver::muse("muse")),
             })
         },
     )

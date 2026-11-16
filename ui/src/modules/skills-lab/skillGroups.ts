@@ -12,7 +12,7 @@
 //   single   — it only exists in one place
 //   unknown  — several copies, but some bodies haven't been compared yet
 
-export type VariantSource = 'library' | 'bundled' | 'claude' | 'codex' | 'agy' | (string & {});
+export type VariantSource = 'library' | 'bundled' | 'claude' | 'codex' | 'agy' | 'muse' | (string & {});
 
 export interface SkillVariant {
   source: VariantSource;
@@ -62,7 +62,7 @@ export interface ProviderLike {
 }
 
 /** Display order of variant badges. */
-export const SOURCE_ORDER: VariantSource[] = ['library', 'claude', 'codex', 'agy', 'bundled'];
+export const SOURCE_ORDER: VariantSource[] = ['library', 'claude', 'codex', 'agy', 'muse', 'bundled'];
 
 export function sourceLabel(s: VariantSource): string {
   switch (s) {
@@ -76,6 +76,8 @@ export function sourceLabel(s: VariantSource): string {
       return 'Codex';
     case 'agy':
       return 'Antigravity';
+    case 'muse':
+      return 'Muse';
     default:
       return s ? s[0].toUpperCase() + s.slice(1) : '';
   }

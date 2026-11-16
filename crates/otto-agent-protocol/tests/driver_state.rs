@@ -41,6 +41,7 @@ fn all() -> Vec<(&'static str, Make)> {
         ("agy", || Box::new(AcpDriver::agy("agy"))),
         ("grok", || Box::new(AcpDriver::grok())),
         ("opencode", || Box::new(AcpDriver::opencode())),
+        ("muse", || Box::new(AcpDriver::muse("muse"))),
         ("pi", || Box::new(PiDriver::with_program("pi"))),
     ]
 }

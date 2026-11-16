@@ -500,7 +500,7 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
 
 /// The provider a persona is provisioned for (empty = Claude, the default),
 /// refused when its CLI cannot be handed a context file for one launch
-/// (`otto_context::materialize::delivers_context`: gemini, pi, a custom CLI):
+/// (`otto_context::materialize::delivers_context`: gemini, Muse, a custom CLI):
 /// the agent would otherwise run with none of its instructions, rules or team.
 pub fn persona_provider(provider: &str) -> Result<&str> {
     let p = match provider.trim() {
@@ -1908,7 +1908,7 @@ mod cwd_tests {
         for p in ["claude", "codex", "agy", "grok", "opencode", "pi"] {
             assert_eq!(persona_provider(p).unwrap(), p);
         }
-        for p in ["gemini", "my-cli"] {
+        for p in ["gemini", "muse", "my-cli"] {
             match persona_provider(p) {
                 Err(Error::Invalid(m)) => {
                     assert!(m.starts_with(p) && m.contains("pick Claude"), "{m}")

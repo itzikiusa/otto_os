@@ -19,7 +19,7 @@ export interface ProviderDef {
   /** Model-flag template, `{model}` substituted at spawn (e.g. `--model {model}`).
    *  Unset = default/no model flag; `[]` = explicitly opt out of inherited model flags. */
   model_args?: string[] | null;
-  /** Canonical CLI model family (`claude`, `codex`, `agy`, `gemini`, `grok`, `opencode`, `pi`). */
+  /** Canonical CLI model family (`claude`, `codex`, `agy`, `gemini`, `grok`, `opencode`, `pi`, `muse`). */
   model_family?: string | null;
 }
 

@@ -5,12 +5,14 @@ import {
   supportsModelSelection,
 } from '../src/lib/providerModels.ts';
 import {
+  harnessLabel,
+  inferProviderFamily,
   isRuntimeProvider,
   runtimeBaselineCaps,
   RUNTIME_PROVIDERS,
 } from '../src/lib/providerRegistry.ts';
 
-test('RUNTIME_PROVIDERS enumerates all 7 structured runtime providers from canonical registry', () => {
+test('RUNTIME_PROVIDERS enumerates all 8 structured runtime providers from canonical registry', () => {
   assert.deepEqual(RUNTIME_PROVIDERS, [
     'claude',
     'codex',
@@ -19,11 +21,17 @@ test('RUNTIME_PROVIDERS enumerates all 7 structured runtime providers from canon
     'grok',
     'opencode',
     'pi',
+    'muse',
   ]);
   for (const p of RUNTIME_PROVIDERS) {
     assert.equal(isRuntimeProvider(p), true);
   }
   assert.equal(isRuntimeProvider('shell'), false);
+  // A custom Muse wrapper rides the Muse driver; its catalog (muse-*) names it.
+  assert.equal(inferProviderFamily('muse-work'), 'muse');
+  assert.equal(inferProviderFamily('mymuse', { provider_models: { mymuse: [{ id: 'muse-spark-1.3', label: 'Muse Spark 1.3', description: '', default_effort: null, supported_efforts: [] }] } }), 'muse');
+  assert.equal(inferProviderFamily('museum'), 'museum');
+  assert.equal(harnessLabel('muse'), 'Muse');
 });
 
 test('runtimeBaselineCaps reads the daemon baseline, by family for a custom slug', () => {

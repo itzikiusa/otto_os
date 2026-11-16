@@ -105,6 +105,7 @@ export function providerName(provider: string): string {
   if (p === 'agy' || p === 'antigravity') return 'Antigravity';
   if (p === 'gemini') return 'Gemini CLI';
   if (p === 'opencode') return 'OpenCode';
+  if (p === 'muse') return 'Muse';
   return provider.trim()[0].toUpperCase() + provider.trim().slice(1);
 }
 

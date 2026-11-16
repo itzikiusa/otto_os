@@ -415,7 +415,7 @@ fn active_limit_providers(
 ) -> otto_usage::limits::ActiveLimitProviders {
     let reg = manager.providers();
     let specs = reg.enabled_specs();
-    let installed = ["claude", "codex", "agy", "grok"]
+    let installed = ["claude", "codex", "agy", "grok", "muse"]
         .into_iter()
         .filter(|fam| reg.resolved_family_program(fam).is_some());
     otto_usage::limits::ActiveLimitProviders::from_specs_with_env(specs.iter().map(
@@ -443,7 +443,8 @@ pub async fn limits(
 ) -> ApiResult<Json<otto_usage::limits::LimitsResp>> {
     if user.is_root {
         let program = |p| enabled_provider_program(&ctx.manager, p);
-        otto_usage::limits::refresh_cli_limits(program("agy"), program("grok")).await;
+        otto_usage::limits::refresh_cli_limits(program("agy"), program("grok"), program("muse"))
+            .await;
     }
     let active = active_limit_providers(&ctx.manager);
     let l = otto_usage::limits::remaining_limits_filtered(
