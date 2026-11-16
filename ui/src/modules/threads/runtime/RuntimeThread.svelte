@@ -418,7 +418,9 @@
             onresend={async (t, atts) => {
               try {
                 const r = await buildFailedTurnResendDraft({ sessionId, draft, text: t, attachments: atts, transformText: transformRestoredQueuedText });
-                await send(r.text, undefined, r.sent);
+                // A dormant thread revives first (like a normal submit); restored IDE context chips are consumed by the resend.
+                if (!(await reopen())) return;
+                await send(r.text, undefined, r.sent, typeof transformRestoredQueuedText === 'function');
               } catch (e) { toastError('Couldn’t resend message', e); }
             }}
           />
