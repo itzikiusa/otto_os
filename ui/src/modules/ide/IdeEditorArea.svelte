@@ -221,7 +221,7 @@
             isCopy ? `Create a copy of ${ide.relativePath(targetPath)} at:` : `Move or rename ${ide.relativePath(targetPath)} to:`,
             { title: isCopy ? 'Copy file' : 'Move file', confirmLabel: isCopy ? 'Copy' : 'Move', initial },
           );
-          if (dest && dest !== targetPath) await ide.mutateFs(isCopy ? 'duplicate' : 'rename', targetPath, dest);
+          if (dest?.trim() && ide.resolvePath(dest.trim()) !== targetPath) await ide.mutateFs(isCopy ? 'duplicate' : 'rename', targetPath, dest.trim());
         } else if (det.op === 'safe-delete') {
           const baseSym = (targetPath.split('/').pop() ?? '').replace(/\.[^.]+$/, '');
           if (baseSym && /^[A-Za-z_]\w*$/.test(baseSym)) {
