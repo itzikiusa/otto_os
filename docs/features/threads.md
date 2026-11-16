@@ -203,6 +203,12 @@ to the thumbnail. Unsupported, malformed, remote-only or over-limit images
 produce an omission notice. Otto does not fetch tool image URLs or render
 HTML/SVG as previews. Images remain available in stored runtime history.
 
+Select text in an agent's answer and a **Quote** button appears above it:
+it adds the passage to the composer as a markdown quote (`> …`) below what
+you already typed, caret on a free line under it (T3 Code #33124, #34181).
+It is UI-only, so every provider has it. The button is
+`lib/components/SelectionQuote.svelte`, the text `lib/quote/quote.ts`.
+
 ## API & WebSocket Surface
 
 - `GET /api/v1/sessions/{id}/transcript` (`?sub=<subagentId>` supported for

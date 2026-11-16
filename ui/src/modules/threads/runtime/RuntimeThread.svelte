@@ -1,6 +1,6 @@
 <script lang="ts">
   // Structured agent runtime thread view shared between Threads and IDE Agent dock.
-  import { setContext, untrack, type Snippet } from 'svelte';
+  import { setContext, tick, untrack, type Snippet } from 'svelte';
   import { announceShown } from '../../../lib/announce.svelte';
   import { ApiError } from '../../../lib/api/client';
   import type { ApprovalDecision, PromptDelivery, RuntimeAccessMode, RuntimeDraftContent, TurnItem } from '../../../lib/api/types';
@@ -45,6 +45,8 @@
   import RuntimeContextChips from './RuntimeContextChips.svelte';
   import RuntimeDraftStatus from './RuntimeDraftStatus.svelte';
   import RuntimeFollow from './RuntimeFollow.svelte';
+  import SelectionQuote from '../../../lib/components/SelectionQuote.svelte';
+  import { withQuote } from '../../../lib/quote/quote';
   import RuntimeHistoryBar from './RuntimeHistoryBar.svelte';
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimePlan from './RuntimePlan.svelte';
@@ -364,6 +366,15 @@
     composerEl?.focus({ preventScroll: true });
   };
 
+  // Quote a passage of an answer: it lands in the composer, caret below it.
+  function quoteIntoComposer(text: string): void {
+    draft.text = withQuote(draft.text, text);
+    void tick().then(() => {
+      focusComposer();
+      composerEl?.setSelectionRange(draft.text.length, draft.text.length);
+    });
+  }
+
   $effect(() => {
     const el = composerEl;
     if (focused && el) untrack(() => el.focus({ preventScroll: true }));
@@ -430,6 +441,7 @@
     </div>
   </div>
   <RuntimeFollow bind:this={followRef} {scroller} seq={p?.lastSequence} {messageIds} />
+  <SelectionQuote root={streamEl} within=".rt-assistant" onquote={quoteIntoComposer} />
 
   <div class="rt-dock">
     <RuntimeBannerStack blocks={banners}>
