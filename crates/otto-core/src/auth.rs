@@ -233,7 +233,7 @@ pub trait RoleChecker: Send + Sync {
     ) -> BoxFuture<'a, Result<()>>;
 }
 
-/// Called by [`otto_state::GrantsRepo::set_grants`] after writing new grants so
+/// Called by `otto_state::GrantsRepo::set_grants` after writing new grants so
 /// any auth-lookup cache can evict stale entries for `user_id`.
 ///
 /// The no-op implementation is used wherever no cache is wired in (tests,

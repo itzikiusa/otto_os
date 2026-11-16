@@ -906,7 +906,7 @@ fn filter_session_totals(
 /// `GET /workspaces/{wid}/sessions/usage?days=30` — tokens + cost per session
 /// of this workspace (the Agents sidebar's tokens sort / row tooltip). Same
 /// visibility as the session list: a workspace admin (or root) sees every
-/// session, anyone else only their own. Backed by [`UsageEngine::sidebar_session_totals`].
+/// session, anyone else only their own. Backed by `UsageEngine::sidebar_session_totals`.
 /// `Usage:View` (policy) + workspace viewer (here).
 pub async fn workspace_sessions_usage(
     axum::extract::Path(wid): axum::extract::Path<Id>,

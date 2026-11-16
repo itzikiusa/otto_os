@@ -8,7 +8,7 @@
 //! A root scan that finds nothing is remembered (`sessions.transcript_missing_at`,
 //! 0191) so History does not re-scan an ended session whose transcript the
 //! provider pruned on every page, filter change and search; see
-//! [`fresh_missing_marks`].
+//! `fresh_missing_marks`.
 
 use std::path::{Path, PathBuf};
 

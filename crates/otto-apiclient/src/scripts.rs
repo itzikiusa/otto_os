@@ -262,7 +262,7 @@ pub fn run_post_response(
     run("post", code, &ctx)
 }
 
-/// argv[1] that makes `ottod` run ONE script from stdin ([`child_main`]).
+/// `argv[1]` that makes `ottod` run ONE script from stdin (`child_main`).
 pub const CHILD_ARG: &str = "apiclient-script";
 /// Wall clock a script may run before its child process is killed.
 pub const SCRIPT_TIMEOUT: Duration = Duration::from_secs(10);

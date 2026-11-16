@@ -288,7 +288,7 @@ impl GoalLoopsRepo {
         Ok(())
     }
 
-    /// [`update_runtime`] for the CONTROLLER's own progress writes: it applies
+    /// `update_runtime` for the CONTROLLER's own progress writes: it applies
     /// only while the loop is still `running`. A pause/stop that lands after
     /// the controller's last stop check wrote `paused`; the controller's
     /// unconditional `running` write then flipped it back, leaving a loop that
@@ -597,8 +597,8 @@ impl GoalLoopsRepo {
     }
 
     /// Atomically replace one executor's live state (element `index` of
-    /// `agents_json`) without clobbering siblings — see [`ReviewsRepo::set_agent_at`].
-    /// Requires the index to already exist (seeded by [`add_iteration`]).
+    /// `agents_json`) without clobbering siblings — see `ReviewsRepo::set_agent_at`.
+    /// Requires the index to already exist (seeded by `add_iteration`).
     pub async fn set_iter_agent_at(
         &self,
         iter_id: &Id,

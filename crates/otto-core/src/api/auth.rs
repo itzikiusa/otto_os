@@ -149,7 +149,7 @@ pub struct CreateApiTokenResp {
 /// transport (or the legacy stdio bridge). NEVER carries the secret (only its
 /// prefix); the raw token is returned exactly once at mint time. Unlike
 /// [`ApiTokenInfo`] it also surfaces the owning user and the per-token
-/// [`McpScope`] so an admin can see, at a glance, who holds which access.
+/// `McpScope` so an admin can see, at a glance, who holds which access.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTokenInfo {
     pub id: Id,

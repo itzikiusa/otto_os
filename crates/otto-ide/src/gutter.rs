@@ -3,7 +3,7 @@
 //! Scans source files in Go, Java, Rust, Python, JavaScript/TypeScript
 //! (including `package.json` scripts), plus runtime [`PluginGutterDetector`]
 //! rules, returning 1-based [`IdeGutterItem`] entries with ready-to-launch
-//! [`IdeQuickRunSpec`] configurations for both test runners and DAP debugging.
+//! `IdeQuickRunSpec` configurations for both test runners and DAP debugging.
 
 mod compiled;
 mod scripting;

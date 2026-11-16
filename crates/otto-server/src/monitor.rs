@@ -847,7 +847,7 @@ const REAUTH_NEEDLES: &[&str] = &[
 /// notice, debounced once per session. Wired into the `SessionManager` via
 /// [`otto_sessions::SessionManager::with_output_scanner`].
 ///
-/// Holds a [`NotificationService`] (not the full `ServerCtx`) so it can be
+/// Holds a `NotificationService` (not the full `ServerCtx`) so it can be
 /// attached to the `SessionManager` *before* `ServerCtx` is assembled.
 pub struct AuthScanner {
     notifications: crate::state::NotificationService,

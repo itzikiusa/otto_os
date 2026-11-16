@@ -356,7 +356,7 @@ pub fn run_api_script_helper() -> bool {
     otto_apiclient::scripts::child_main()
 }
 
-/// argv[1] that dispatches `ottod` to [`run_api_script_helper`].
+/// `argv[1]` that dispatches `ottod` to `run_api_script_helper`.
 pub const API_SCRIPT_HELPER_ARG: &str = otto_apiclient::scripts::CHILD_ARG;
 
 /// Register the daemon binary as the out-of-process API-client script host.

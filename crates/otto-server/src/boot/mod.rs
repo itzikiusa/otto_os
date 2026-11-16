@@ -7,8 +7,8 @@
 //! 1. [`open_state`] — offline compaction, open + migrate the state DB,
 //!    interrupted-change recovery, boot maintenance.
 //! 2. [`build_ctx`] — construct every module (providers, ClickHouse usage
-//!    engine, session manager, …) and assemble the [`ServerCtx`] through
-//!    [`ServerCtx::from_parts`], the literal the test fixture shares.
+//!    engine, session manager, …) and assemble the `ServerCtx` through
+//!    `ServerCtx::from_parts`, the literal the test fixture shares.
 //! 3. [`recover_before_serve`] → [`spawn_post_listen_work`] — settle what the previous daemon life left
 //!    behind (sessions, reviews, evals, API runs, workflows, goal loops).
 //! 4. [`spawn_background`] — sweeps, retention and every scheduler; the

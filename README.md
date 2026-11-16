@@ -512,8 +512,8 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
 
 ## Download (prebuilt DMG)
 
-**Versioned releases:** [Otto 0.2.2](../../releases/tag/v0.2.2) ships
-`Otto_0.2.2_aarch64.dmg` with its `.sha256` and the tour film.
+**Versioned releases:** [Otto 0.3.0](../../releases/tag/v0.3.0) ships
+`Otto_0.3.0_aarch64.dmg` with its `.sha256` and the tour film.
 
 A GitHub Actions workflow builds the Apple-Silicon `.dmg` **monthly** (on the
 1st, 05:00 UTC; maintainers can also run it on demand via `workflow_dispatch`)

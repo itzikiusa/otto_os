@@ -2800,7 +2800,7 @@ impl DbViewerService {
     }
 
     /// Export a (potentially huge) **uncapped** read result to a local file, in
-    /// the chosen [`ExportFormat`], **streaming** through the driver's native
+    /// the chosen `ExportFormat`, **streaming** through the driver's native
     /// cursor/stream so daemon memory stays bounded regardless of result size.
     ///
     /// Resolves the connection + SSH tunnel exactly like [`Self::run`] (the

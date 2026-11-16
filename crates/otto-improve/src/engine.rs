@@ -306,7 +306,7 @@ impl ImprovementEngine {
     /// Execute an already-created run row as a per-session live evolve. Used by
     /// the `POST /sessions/{id}/evolve` HTTP handler which creates the run row
     /// first (to return the id immediately) then spawns this in the background.
-    /// Mirrors the body of [`evolve_session`] but accepts the pre-created run id.
+    /// Mirrors the body of `evolve_session` but accepts the pre-created run id.
     pub async fn execute_evolve_session(
         &self,
         run_id: &Id,

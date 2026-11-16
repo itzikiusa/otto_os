@@ -99,7 +99,7 @@ pub struct ModuleCapability {
 pub struct SupportBundle {
     /// Daemon version (CARGO_PKG_VERSION).
     pub version: String,
-    /// All settings with secrets replaced by "[redacted]".
+    /// All settings with secrets replaced by `"[redacted]"`.
     pub settings: serde_json::Value,
     /// The capability snapshot (same as GET /capabilities).
     pub capabilities: Vec<ModuleCapability>,

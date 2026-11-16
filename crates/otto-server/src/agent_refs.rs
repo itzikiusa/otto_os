@@ -10,7 +10,7 @@
 //! could not recover from. This module is the one place that answers "which
 //! object does this caller mean?" for those kinds:
 //!
-//! - [`directory`] — every object of a kind across EVERY workspace the caller
+//! - `directory` — every object of a kind across EVERY workspace the caller
 //!   can read, each row annotated with `workspace_id` + `workspace_name` (the
 //!   caller's current workspace first), narrowed to an MCP token's pin.
 //! - [`match_ref`] — pure matching of a reference (id, then each human field —

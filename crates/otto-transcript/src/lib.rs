@@ -4,7 +4,7 @@
 //!   * the usage store (`otto-usage`, `otto-usage/src/tailer/driver.rs`) — the
 //!     per-line token parsers + cursor/seen stores in [`usage`], extracted from
 //!     `otto-usage` verbatim (frozen on-disk formats);
-//!   * the conversation view — [`fold`] turns a whole file into the normalized
+//!   * the conversation view — `fold` turns a whole file into the normalized
 //!     [`model::Transcript`] (turns, blocks, tool calls with results, system
 //!     notes, tasks, artifacts, stats), paged by record index.
 //!
@@ -207,7 +207,7 @@ impl<'a> Folder<'a> {
     }
 }
 
-/// Fold a transcript from its raw bytes — [`fold`] over
+/// Fold a transcript from its raw bytes — `fold` over
 /// [`parse_records`], but Claude and Agy files are streamed (see
 /// [`Folder::seed_bytes`]).
 pub fn fold_bytes(provider: Provider, bytes: &[u8], opts: FoldOpts<'_>) -> Folded {

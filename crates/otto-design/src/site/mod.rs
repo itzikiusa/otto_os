@@ -3,9 +3,9 @@
 //! Studio; docs/contracts/api.md § Site Studio):
 //!
 //! - [`schema`] — the lenient typed model + the block catalog (names only);
-//! - [`validate`] — the structural validator every save runs through
+//! - `validate` — the structural validator every save runs through
 //!   (`format::validate`), so an agent's invalid edit is refused with a path;
-//! - [`extract`] — links (`otto://design/…` by key: `src`/`image`/`poster`
+//! - `extract` — links (`otto://design/…` by key: `src`/`image`/`poster`
 //!   embed, `brand` uses_tokens, `derived_from` …) + searchable copy;
 //! - [`theme`] — a brand kit (`otto-brand/1`, via [`crate::brand::BrandModel`])
 //!   → `--brand-<group>-<name>` custom properties bound to theme slots;

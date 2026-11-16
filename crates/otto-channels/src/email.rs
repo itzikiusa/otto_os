@@ -125,7 +125,7 @@ impl GmailSender {
     }
 
     /// Send a text email with one file attachment (used to deliver a scheduled-task
-    /// report `.md`). Body + attachment are otherwise identical transport to [`send`].
+    /// report `.md`). Body + attachment are otherwise identical transport to `send`.
     pub async fn send_with_attachment(
         &self,
         to: &str,

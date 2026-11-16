@@ -1,5 +1,5 @@
 //! The `otto-site` v1 document, typed leniently (every field defaults) for the
-//! renderer and exporter. Saves are gated by [`super::validate`] on the raw
+//! renderer and exporter. Saves are gated by `super::validate` on the raw
 //! JSON first, so a stored version always deserializes. Mirrored by
 //! `ui/src/modules/design-hall/site/engine/types.ts` + `catalog.ts`.
 

@@ -92,7 +92,7 @@ async fn read_secret_blob(secrets: &Arc<dyn SecretStore>, id: &str) -> Result<Va
     )
 }
 
-/// `PATCH /mcp-servers/{id}` error: an ordinary [`ApiError`], or the Keychain
+/// `PATCH /mcp-servers/{id}` error: an ordinary `ApiError`, or the Keychain
 /// refusing to read the server's stored secrets — 503 "Keychain unavailable"
 /// with NOTHING written (PC-6), since the "KEY= keeps it" sentinels can't be
 /// resolved without the stored values.

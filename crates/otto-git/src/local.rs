@@ -1935,7 +1935,7 @@ impl LocalGit {
     ///
     /// DESTRUCTIVE: because `-B` resets `branch` to `base`, calling this on an
     /// existing worktree throws away any commits the branch had accumulated.
-    /// For multi-turn swarm work use [`worktree_add_if_absent`] instead, which
+    /// For multi-turn swarm work use `worktree_add_if_absent` instead, which
     /// only creates on first use and otherwise reuses the existing tree.
     pub async fn worktree_add(&self, path: &str, branch: &str, base: &str) -> Result<()> {
         Self::guard_ref(path)?;
@@ -1986,7 +1986,7 @@ impl LocalGit {
     /// 2. The worktree is absent but the `branch` already exists (e.g. its
     ///    worktree was pruned by idle cleanup or a restart, but `worktree_remove`
     ///    keeps the branch) → RE-ATTACH the surviving branch with
-    ///    [`worktree_attach`] (no `-B`, `base` ignored), preserving every commit.
+    ///    `worktree_attach` (no `-B`, `base` ignored), preserving every commit.
     /// 3. Neither exists → create a new branch from `base` with `-b`.
     ///
     /// Returns `true` when it (re)created the worktree directory, `false` when it
