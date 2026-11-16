@@ -353,7 +353,7 @@ export interface IdeDebugOutputEntry { category: 'stdout' | 'stderr' | 'console'
 export interface IdeDebugSessionSnapshot {
   id: string; revision?: number; title: string; language: string; adapter: string;
   config_id?: string | null; launch?: IdeDebugLaunch | null;
-  state: 'starting' | 'running' | 'paused' | 'terminated' | 'error'; stopped_reason?: string | null;
+  state: 'starting' | 'running' | 'paused' | 'terminated' | 'error'; stop_seq?: number; stopped_reason?: string | null;
   active_thread_id?: number | null; active_frame_id?: number | null;
   paused_file?: string | null; paused_line?: number | null;
   stopped_file?: string | null; stopped_line?: number | null;

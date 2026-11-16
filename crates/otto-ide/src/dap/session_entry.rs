@@ -243,6 +243,7 @@ impl SessionEntry {
             config_id: req.config_id.clone(),
             launch: Some(req.launch.clone()),
             state: IdeDebugState::Starting,
+            stop_seq: 0,
             stopped_reason: None,
             active_thread_id: None,
             active_frame_id: None,

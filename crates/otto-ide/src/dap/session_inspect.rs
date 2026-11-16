@@ -374,6 +374,7 @@ pub(super) async fn handle_stopped_event(
             return;
         }
         snap.state = IdeDebugState::Paused;
+        snap.stop_seq += 1;
         snap.stopped_reason = Some(reason);
         snap.active_thread_id = Some(active_tid);
         snap.active_frame_id = active_fid;

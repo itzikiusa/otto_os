@@ -16,8 +16,8 @@ describe('IDE debug stop variables', () => {
     {},
     { relative: true },
   );
-  const stop = (line: number, names: string[]): any => ({
-    id: 's', state: 'paused', active_thread_id: 6, active_frame_id: 1000, paused_file: '/x_test.go', paused_line: line,
+  const stop = (line: number, names: string[], seq = line): any => ({
+    id: 's', state: 'paused', stop_seq: seq, active_thread_id: 6, active_frame_id: 1000, paused_file: '/x_test.go', paused_line: line,
     scopes: [{ name: 'Locals', variables_reference: 1000, variables: names.map((name) => ({ name, value: '', variables_reference: 0 })) }],
   });
 
@@ -30,6 +30,15 @@ describe('IDE debug stop variables', () => {
     assert.ok(host.expandedVariables[2000], 'same stop keeps expansions');
     mod.syncStopVariables(host, first, stop(16, ['t', 'table', 'id', 'query']));
     assert.deepEqual(host.expandedVariables[1000].map((v: any) => v.name), ['t', 'table', 'id', 'query']);
+    assert.equal(host.expandedVariables[2000], undefined);
+  });
+
+  it('a loop stopping on the same line again drops the expanded children', () => {
+    const host: any = { expandedVariables: {} };
+    const pass1 = stop(16, ['item'], 1);
+    mod.syncStopVariables(host, null, pass1);
+    host.expandedVariables[2000] = [{ name: 'old-child' }];
+    mod.syncStopVariables(host, pass1, stop(16, ['item'], 2));
     assert.equal(host.expandedVariables[2000], undefined);
   });
 });
