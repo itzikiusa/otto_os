@@ -177,6 +177,29 @@ test('after a gutter Run, the toolbar Debug debugs that test', async ({ page }) 
   await expect(page.getByTestId('ide-run-config-select')).toContainText('TestDeleteSuccess');
 });
 
+test('after a gutter Run, ⌃D, the Debug panel button and the editor right-click Debug all debug that test', async ({ page }) => {
+  test.skip(!haveDlv, 'dlv is not installed');
+  test.setTimeout(240_000);
+  const runs: string[] = [];
+  await openTestWithBreakpoints(page, runs);
+  await gutterMenu(page, /^Run 'Run TestDeleteSuccess'$/);
+  await expect.poll(() => runs.length).toBe(1);
+  await expectPausesOnBothBreakpoints(page, async () => {
+    await page.getByTestId('ide-project-tree').click({ position: { x: 5, y: 5 } });
+    await page.keyboard.press('Control+d');
+  }, 'go-ctrl-d-after-gutter-run');
+  await expectPausesOnBothBreakpoints(
+    page,
+    () => page.getByTestId('ide-debugger-panel').locator('.dbg-launch-btn').click(),
+    'go-debug-panel-button-after-gutter-run',
+  );
+  await expectPausesOnBothBreakpoints(page, async () => {
+    await page.locator('.cm-editor:visible .cm-line').filter({ hasText: 'query := buildDelete' }).first().click({ button: 'right' });
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: /^Debug 'Run TestDeleteSuccess'/ }).click();
+  }, 'go-editor-right-click-debug');
+  expect(runs).toHaveLength(1);
+});
+
 test('gutter Debug pauses in a module-root, nested, build-tagged and second-root Go test', async ({ page }) => {
   test.skip(!haveDlv, 'dlv is not installed');
   test.setTimeout(300_000);
