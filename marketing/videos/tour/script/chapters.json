@@ -1,6 +1,6 @@
 {
   "title": "Otto — product tour",
-  "edition": "20261113",
+  "edition": "20261116",
   "bpm": 120,
   "fps": 30,
   "chapters": [
@@ -52,8 +52,8 @@
       "title": "Threads",
       "bars": 6,
       "captions": [
-        "Threads run your agents on the structured runtime: plans, commands and diffs stream live.",
-        "Approve inline, or ask another agent from inside the thread: its answer arrives as a live card."
+        "Threads run every structured agent: Claude, Codex, Gemini, Grok, OpenCode, pi, Muse and more.",
+        "Plans, commands and diffs stream live. Approve inline, or ask another agent from inside the thread."
       ]
     },
     {
@@ -98,11 +98,29 @@
       ]
     },
     {
+      "id": "ide",
+      "section": "ide",
+      "title": "IDE (Beta)",
+      "bars": 8,
+      "music": "chorus",
+      "captionBeats": [
+        10,
+        10,
+        6,
+        6
+      ],
+      "captions": [
+        "The IDE (Beta) opens your multi-language project. The git gutter marks your changes; the language server adds docs.",
+        "Type errors show as you read. Run configurations stream their output and a test tree.",
+        "Set a breakpoint and debug: frames, variables, evaluate.",
+        "Ask the agent beside your code, then apply its diff or undo it."
+      ]
+    },
+    {
       "id": "git",
       "section": "git",
       "title": "Git and AI review",
       "bars": 4,
-      "music": "chorus",
       "captions": [
         "A commit graph with your work in progress and pull requests.",
         "Multi-agent code review turns findings into tracked fixes."

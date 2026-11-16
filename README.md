@@ -10,7 +10,7 @@ bridges so an agent can work a ticket from a chat thread.
 **Version 0.3.0** · macOS (Apple Silicon; Intel from source) · actively developed, so
 expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
-🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.2.2/otto-tour-20261113.mp4)**
+🎬 **[Watch the product tour](https://github.com/itzikiusa/otto_os/releases/download/v0.3.0/otto-tour-20261116.mp4)**
 (also in the app under **Help → Walkthroughs**).
 
 ### What's new in 0.3.0
@@ -32,6 +32,8 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 - **Safer by default.** Sandboxed sessions can't reach other sessions'
   agents, shared-editing guests can't write git or agent config, and local
   language servers run only for the Mac's owner.
+
+![The IDE (Beta) paused at a breakpoint in a Python project, with the git gutter, frames, variables and an evaluated expression](docs/screenshots/ide.jpg)
 
 ### What's new in 0.2.2
 
@@ -214,6 +216,11 @@ including behaviour changes to know before upgrading.
   screen share, draw annotations directly on the shared screen (with permission),
   hand over and reclaim terminal control at any moment, and generate a local
   structured recap (decisions, actions, open questions) once participants consent.
+- **IDE (Beta)** — a multi-language IDE (`#/ide`) on your local or SSH
+  projects: language servers (hover, diagnostics, rename), a git gutter, run
+  configurations with live output and test trees, a DAP debugger with
+  breakpoints, and an agent dock that proposes diffs you apply or undo. See
+  `docs/features/ide.md`.
 - **Git & Pull Requests** — a GitKraken-style **commit graph** with a WIP row +
   staging panel, per-file diffs, folder-level stage/discard, an interactive
   **conflict resolver** (A/B line picking with live output) that covers merge,

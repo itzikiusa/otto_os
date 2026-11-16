@@ -86,6 +86,16 @@ async function followUp() {
   done(7200, 260);
 }
 
+// The IDE's agent dock: a proposal for the selected function, as a fenced
+// block the IDE turns into a diff card (Apply / Undo).
+async function ideFee() {
+  await tool('Read', { file_path: 'tests/test_settlement.py' }, '17 lines');
+  await say(
+    'Round half up instead of flooring: add half the divisor before the integer division. The minimum fee still applies, and all four tests keep passing.\n\n```python path=pyapp/settlement.py:L17-L19\ndef platform_fee(gross_cents: int) -> int:\n    """The platform\'s cut of a payout, in cents (rounded half up)."""\n    return (gross_cents * PLATFORM_FEE_BPS + 5_000) // 10_000\n```',
+  );
+  done(11800, 290);
+}
+
 async function generic() {
   await say('Done. Nothing else needs changing here.');
   done(900, 20);
@@ -93,6 +103,7 @@ async function generic() {
 
 function pick(text) {
   const s = text.toLowerCase();
+  if (s.includes('nearest cent')) return ideFee;
   if (s.includes('you are the judge of a council')) return synthesis;
   if (s.includes('customer see')) return followUp;
   if (s.includes('retries') || s.includes('backoff')) return seat;
