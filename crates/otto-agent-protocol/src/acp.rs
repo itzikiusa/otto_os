@@ -1763,11 +1763,13 @@ impl StructuredDriver for AcpDriver {
             let opts = next_opts.as_deref().unwrap_or(&self.state.effort_options);
             self.resolve_effort_with(opts, raw)?;
         }
+        // Capabilities are only known once `initialize` answered; before that a
+        // queued attachment goes out and the agent itself refuses it if it must.
         let ready = self.state.phase == Phase::Ready;
-        if !req.images.is_empty() && !self.state.images {
+        if ready && !req.images.is_empty() && !self.state.images {
             return Err(DriverError(format!("{name} does not accept images")));
         }
-        if !req.files.is_empty() && !self.state.embedded {
+        if ready && !req.files.is_empty() && !self.state.embedded {
             return Err(DriverError(format!(
                 "{name} does not accept file attachments"
             )));
