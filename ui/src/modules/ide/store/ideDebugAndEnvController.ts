@@ -518,7 +518,9 @@ export function launchGutterAction(
       language: lang,
       launch: {
         program: spec.debug_program || filePath,
-        args: spec.args ?? [],
+        // `spec.args` is the Run command line (`cargo run`, a pytest node id…);
+        // each debug adapter builds its own argv from program / test_name.
+        args: [],
         ...(goFlags.length > 0 ? { build_flags: goFlags } : {}),
         cwd: spec.cwd || repoInfo.path || host.target.root,
         test_name: spec.debug_test_name || spec.test_name || spec.test_filter || (item.kind === 'test' ? item.label : undefined),
