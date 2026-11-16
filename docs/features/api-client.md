@@ -262,7 +262,7 @@ key, value, and remove. Disabled or empty-key rows are dropped before sending.
 | Body type (stored mode) | Wire format | Notes |
 |---|---|---|
 | **No body** (`none`) | — | no body |
-| **JSON** (`json`) | `application/json` | code editor; **Format JSON** pretty-prints. |
+| **JSON** (`json`) | `application/json` | code editor; **Format JSON** pretty-prints by re-indenting only — numbers and strings stay byte-for-byte (`1.10`, big ids). |
 | **Text / XML / HTML** (`raw`) | text | a **Format** picker: **Plain text / JavaScript / HTML / XML** — drives the editor language and the auto Content-Type. |
 | **Form (URL-encoded)** (`form`) | `application/x-www-form-urlencoded` | key/value rows encoded as `k=v&…`. |
 | **Multipart form (files)** (`multipart`) | `multipart/form-data` | key/value rows; each row can be **Text** or **File**. Files are read to base64 in the browser and reassembled server-side; the daemon sets the boundary. |
@@ -434,7 +434,10 @@ client, records a history entry, and returns the response.
 ### Body tab
 
 - **Pretty · Raw · Tree · Preview**. JSON is pretty-printed (memoized,
-  size-gated: bodies over **256 KB** are shown raw to avoid blocking the UI).
+  size-gated: bodies over **256 KB** are shown raw to avoid blocking the UI)
+  by re-indenting the text, so numbers read exactly as sent
+  (`12345678901234567890`, `1.10`); Tree and a JSONPath result parse it, so
+  there an integer beyond 2⁵³ is rounded.
   **Tree** is a collapsible JSON tree (first two levels open) with **Find a
   key or value** — matches are highlighted and their parents opened;
   right-click a node to copy its JSONPath or value. **Preview** renders HTML in
