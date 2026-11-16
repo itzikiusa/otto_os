@@ -657,3 +657,14 @@ async fn holder_disconnect_settles_and_respawns_plus_wire_skew_and_persistence_t
     rt.shutdown().await;
     let _ = std::fs::remove_dir_all(&holders_dir);
 }
+
+#[test]
+fn archived_queue_is_emptied_so_imported_prompts_never_send_themselves() {
+    let settled =
+        otto_agent_protocol::settle_archived_entity_json("queue", r#"[{"text":"deploy"}]"#);
+    assert_eq!(settled.as_deref(), Some("[]"));
+    assert_eq!(
+        otto_agent_protocol::settle_archived_entity_json("queue", "[]"),
+        None
+    );
+}

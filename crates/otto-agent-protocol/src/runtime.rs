@@ -1205,7 +1205,16 @@ impl AgentRuntime {
                 bad.name, bad.mime
             )));
         }
+        // Same caps as a saved draft (`http::drafts`): 20 attachments, 1 KiB names.
+        if req.images.len() + req.files.len() > 20 {
+            return Err(Error::PayloadTooLarge(
+                "at most 20 attachments per prompt".into(),
+            ));
+        }
         for img in &req.images {
+            if img.name.as_ref().is_some_and(|n| n.len() > 1024) {
+                return Err(Error::Invalid("attachment filename is too long".into()));
+            }
             crate::http::drafts::validate_attachment_bytes(&img.mime, &img.data_base64)?;
         }
         for file in &req.files {
@@ -2842,6 +2851,12 @@ pub fn settle_archived_entity_json(kind: &str, payload_json: &str) -> Option<Str
                 s.updated_at = now;
                 serde_json::to_value(s).ok()
             }),
+        // Imported prompts never send themselves: boot recovery would dispatch a
+        // person's queued message on the next start.
+        K_QUEUE => raw
+            .as_array()
+            .filter(|q| !q.is_empty())
+            .map(|_| serde_json::json!([])),
         _ => None,
     }?;
     serde_json::to_string(&updated).ok()
