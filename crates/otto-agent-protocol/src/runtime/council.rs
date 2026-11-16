@@ -23,11 +23,6 @@ use otto_core::agent_runtime::{
 
 use super::*;
 
-mod rounds;
-pub use rounds::{
-    CouncilFollowUpReq, CouncilRound, CouncilRoundsResp, CouncilSeatRefusal, COUNCIL_MAX_ROUNDS,
-};
-
 /// Characters of one seat's answer the synthesis prompt carries.
 const ANSWER_MAX_CHARS: usize = 24_000;
 /// Characters of the prompt a council's default title takes.
@@ -121,62 +116,51 @@ fn seat_error(n: usize, label: &str, e: Error) -> Error {
     }
 }
 
-/// One seat's answer as the judge reads it.
+/// One seat's latest exchange as the judge reads it: the last message a
+/// person sent it and the answer to that message.
 struct SeatAnswer {
     seat: u32,
     provider: String,
     model: Option<String>,
+    question: String,
     text: String,
+    /// How its last turn ended (`completed`, `interrupted`, …).
     turn_status: Option<String>,
-    /// Why the seat has no answer in this round at all (the question never
-    /// reached it, or is still queued there).
-    missing: Option<String>,
 }
 
 impl SeatAnswer {
     /// "seat 2 (interrupted)" — how the judge's missing list names it.
     fn missing_label(&self) -> Option<String> {
-        if let Some(why) = &self.missing {
-            return Some(format!("seat {} ({why})", self.seat));
-        }
-        if self.text.trim().is_empty() {
+        self.text.trim().is_empty().then(|| {
             let how = self.turn_status.as_deref().unwrap_or("no reply");
-            return Some(format!("seat {} ({how})", self.seat));
-        }
-        None
+            format!("seat {} ({how})", self.seat)
+        })
     }
 }
 
-/// Which round the judge reads: its number, its text and (after round 1)
-/// the council's first question, which a follow-up builds on.
-struct RoundAsked<'a> {
-    n: u32,
-    first: &'a str,
-    question: &'a str,
-}
-
-/// The judge's prompt: the question, each seat's answer in this round, the
-/// seats without one (named, never dropped), the task.
-fn synthesis_prompt(round: &RoundAsked<'_>, answers: &[SeatAnswer]) -> String {
+/// The judge's prompt: the question (one, or each seat's own when they
+/// differ), each seat's latest answer, the seats without one (named, never
+/// dropped), the task.
+fn synthesis_prompt(answers: &[SeatAnswer]) -> String {
     let mut p = format!(
-        "You are the judge of a council: the same question went to {} agents, \
-         and their answers are below. Do not redo the work and do not change any \
-         file. Compare the answers:\n\
+        "You are the judge of a council: {} agents were asked the same question, \
+         and their latest answers are below. Do not redo the work and do not change \
+         any file. Compare the answers:\n\
          1. Where do they agree?\n\
          2. Where do they disagree, and which side is right (say why)?\n\
          3. Pick the best answer, or merge them into one better answer.\n\
          4. List the open questions none of them settled.\n\n",
         answers.len(),
     );
-    if round.n > 1 {
-        p.push_str(&format!(
-            "## The council's first question\n\n{}\n\n## The question (round {})\n\n{}\n",
-            round.first.trim(),
-            round.n,
-            round.question.trim()
-        ));
+    let first = answers.first().map_or("", |a| a.question.trim());
+    let same = answers.iter().all(|a| a.question.trim() == first);
+    if same {
+        p.push_str(&format!("## The question\n\n{first}\n"));
     } else {
-        p.push_str(&format!("## The question\n\n{}\n", round.question.trim()));
+        p.push_str(
+            "Each seat was last asked something of its own; its question is shown \
+             with its answer.\n",
+        );
     }
     let missing: Vec<String> = answers
         .iter()
@@ -184,8 +168,8 @@ fn synthesis_prompt(round: &RoundAsked<'_>, answers: &[SeatAnswer]) -> String {
         .collect();
     if !missing.is_empty() {
         p.push_str(&format!(
-            "\nNo answer in this round from: {}. Name them as missing; do not guess \
-             what they would have said.\n",
+            "\nNo answer from: {}. Name them as missing; do not guess what they \
+             would have said.\n",
             missing.join(", ")
         ));
     }
@@ -195,9 +179,10 @@ fn synthesis_prompt(round: &RoundAsked<'_>, answers: &[SeatAnswer]) -> String {
             None => a.provider.to_string(),
         };
         p.push_str(&format!("\n## Seat {} — {who}\n\n", a.seat));
-        if let Some(why) = &a.missing {
-            p.push_str(&format!("(no answer: {why})\n"));
-        } else if a.text.trim().is_empty() {
+        if !same {
+            p.push_str(&format!("Asked: {}\n\n", a.question.trim()));
+        }
+        if a.text.trim().is_empty() {
             let how = a.turn_status.as_deref().unwrap_or("without a reply");
             p.push_str(&format!("(no answer: its turn ended {how})\n"));
         } else {
@@ -213,6 +198,41 @@ fn synthesis_prompt(round: &RoundAsked<'_>, answers: &[SeatAnswer]) -> String {
         }
     }
     p
+}
+
+/// The answer in a timeline stretch (a user message up to the next one):
+/// its assistant messages, and how its last turn ended. THE rule for
+/// "answered": any assistant text on record, whole or cut off (a Stop keeps
+/// the partial text; the judge is told it may be incomplete). Text still
+/// streaming when the daemon stopped was never persisted
+/// (`Projection::apply`), so a seat a restart cut mid-answer has none.
+fn reply_of(items: &[&TurnItem], turns: &HashMap<Id, ProviderTurn>) -> (String, Option<String>) {
+    let text = items
+        .iter()
+        .filter_map(|i| match &i.kind {
+            TurnItemKind::AssistantMessage { text, .. } if !text.trim().is_empty() => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let status = items
+        .iter()
+        .filter_map(|i| i.turn_id.as_ref().and_then(|t| turns.get(t)))
+        .max_by_key(|t| t.ordinal)
+        .filter(|t| t.status.is_terminal())
+        .and_then(|t| serde_json::to_value(t.status).ok())
+        .and_then(|v| v.as_str().map(str::to_string));
+    (text, status)
+}
+
+/// A council: its meta, seat 1, every seat by number, every member.
+struct Council {
+    meta: CouncilMeta,
+    root: RuntimeSession,
+    seats: Vec<(u32, RuntimeSession)>,
+    members: Vec<RuntimeSession>,
 }
 
 impl AgentRuntime {
@@ -306,15 +326,6 @@ impl AgentRuntime {
             self.discard_seats(&seats).await;
             return Err(e);
         }
-        // Round 1 on record (a failed write leaves the fallback: the first
-        // question to every seat, which is the same round).
-        let round = rounds::first_round(prompt.to_string(), (1..=n as u32).collect(), Utc::now());
-        if let Err(e) = self
-            .save_rounds(&seats[0].id, std::slice::from_ref(&round), 0)
-            .await
-        {
-            tracing::warn!(council = %council, "could not record the council's first round: {e}");
-        }
         let mut out = Vec::with_capacity(n);
         for s in &seats {
             out.push(self.get(&s.id).await?);
@@ -353,56 +364,78 @@ impl AgentRuntime {
         Ok((council, members))
     }
 
-    /// The first message a person sent to `id` (a council's question).
-    async fn first_user_text(&self, id: &Id) -> Result<String> {
-        let live = self.live(id).await?;
+    /// The council `id` sits on.
+    async fn council_of(&self, id: &Id) -> Result<Council> {
+        let me = self.get(id).await?;
+        let (meta, members) = self.council_members(&me).await?;
+        let mut seats: Vec<(u32, RuntimeSession)> = members
+            .iter()
+            .filter_map(|s| {
+                s.council()
+                    .filter(|c| c.role == CouncilRole::Seat)
+                    .map(|c| (c.seat, s.clone()))
+            })
+            .collect();
+        seats.sort_by_key(|(n, _)| *n);
+        let root = seats
+            .iter()
+            .find(|(_, s)| s.parent_id.is_none())
+            .map(|(_, s)| s.clone())
+            .ok_or_else(|| Error::NotFound("the council's first seat is gone".into()))?;
+        Ok(Council {
+            meta,
+            root,
+            seats,
+            members,
+        })
+    }
+
+    /// `seat`'s latest exchange: the last top-level message a person sent
+    /// it, and the answer after it (see `reply_of`). A follow-up typed in the
+    /// seat's own composer counts like any other message.
+    async fn last_exchange(&self, seat: &Id) -> Result<(String, String, Option<String>)> {
+        let live = self.live(seat).await?;
         let st = live.lock();
-        let text = st
+        let mut items: Vec<&TurnItem> = st
             .proj
             .items
             .values()
             .filter(|i| i.parent_item_id.is_none())
-            .filter_map(|i| match &i.kind {
-                TurnItemKind::UserMessage { text, .. } => Some((i.ordinal, text)),
-                _ => None,
-            })
-            .min_by_key(|(ordinal, _)| *ordinal)
-            .map(|(_, t)| t.clone())
-            .unwrap_or_default();
-        Ok(text)
+            .collect();
+        items.sort_by_key(|i| i.ordinal);
+        let last = items
+            .iter()
+            .rposition(|i| matches!(i.kind, TurnItemKind::UserMessage { .. }));
+        let Some(at) = last else {
+            return Ok((String::new(), String::new(), None));
+        };
+        let question = match &items[at].kind {
+            TurnItemKind::UserMessage { text, .. } => text.clone(),
+            _ => String::new(),
+        };
+        let (text, status) = reply_of(&items[at..], &st.proj.turns);
+        Ok((question, text, status))
     }
 
-    /// Open the council's judge on its CURRENT round: a thread linked to
-    /// seat 1 whose prompt is that round's question plus each of its seats'
-    /// answers in that round (a seat without one is named as missing).
-    /// Refused (409), in this order: a seat of the round or an earlier
-    /// synthesis is still working, seat 1 is closed, the linked group is
-    /// full, no seat of the round has an answer in it (see `reply_of` for
-    /// what counts). The judge is recorded under the round.
+    /// Open the council's judge: a thread linked to seat 1 whose prompt is
+    /// each seat's LATEST exchange (its last question and the answer to it;
+    /// a seat without one is named as missing). Refused (409), in this
+    /// order: a seat or an earlier synthesis is still working, seat 1 is
+    /// closed, the linked group is full, no seat has an answer (see
+    /// `reply_of` for what counts).
     pub async fn synthesize_council(
         &self,
         id: &Id,
         req: SynthesizeCouncilReq,
     ) -> Result<RuntimeSession> {
-        let _rounds = rounds::rounds_lock().await;
         let c = self.council_of(id).await?;
-        let (rounds, seq) = self.load_rounds(&c).await?;
-        let round = rounds
-            .last()
-            .cloned()
-            .ok_or_else(|| Error::Internal("the council has no rounds".into()))?;
         for s in c
             .members
             .iter()
             .filter(|s| s.status != RuntimeSessionStatus::Closed)
         {
             let what = match s.council() {
-                Some(m) if m.role == CouncilRole::Seat => {
-                    if !round.seats.contains(&m.seat) {
-                        continue;
-                    }
-                    format!("seat {}", m.seat)
-                }
+                Some(m) if m.role == CouncilRole::Seat => format!("seat {}", m.seat),
                 _ => "the last synthesis".to_string(),
             };
             let busy = self
@@ -434,81 +467,50 @@ impl AgentRuntime {
                     .unwrap_or_else(|| judge_provider.as_str())
             )));
         }
-        let mut answers = Vec::with_capacity(round.seats.len());
-        for (n, s) in c.seats.iter().filter(|(n, _)| round.seats.contains(n)) {
-            let mut a = SeatAnswer {
+        let mut answers = Vec::with_capacity(c.seats.len());
+        for (n, s) in &c.seats {
+            let (question, text, turn_status) = self.last_exchange(&s.id).await?;
+            answers.push(SeatAnswer {
                 seat: *n,
                 provider: s.provider_slug().to_string(),
                 model: s.model.clone(),
-                text: String::new(),
-                turn_status: None,
-                missing: None,
-            };
-            if let Some(r) = round.refused.iter().find(|r| r.seat == *n) {
-                a.missing = Some(format!("the question never reached it: {}", r.reason));
-            } else {
-                let asked = rounds::asked_of(&rounds, *n);
-                match self.round_replies(&s.id, &asked).await?.pop().flatten() {
-                    Some(r) => {
-                        a.text = r.text;
-                        a.turn_status = r.turn_status;
-                    }
-                    None => a.missing = Some("the question has not reached it yet".into()),
-                }
-            }
-            answers.push(a);
+                question,
+                text,
+                turn_status,
+            });
         }
         if answers.iter().all(|a| a.text.trim().is_empty()) {
-            return Err(Error::Conflict(format!(
-                "no seat has answered round {} yet — nothing to synthesize",
-                round.n
-            )));
+            return Err(Error::Conflict(
+                "no seat has answered yet — nothing to synthesize".into(),
+            ));
         }
         let base = c
             .root
             .title
             .rsplit_once(" · ")
-            .map_or(c.root.title.as_str(), |(b, _)| b)
-            .to_string();
-        let title = if round.n > 1 {
-            format!("{base} · synthesis of round {}", round.n)
-        } else {
-            format!("{base} · synthesis")
-        };
-        let first = rounds.first().map_or("", |r| r.text.as_str()).to_string();
-        let prompt = synthesis_prompt(
-            &RoundAsked {
-                n: round.n,
-                first: &first,
-                question: &round.text,
-            },
-            &answers,
-        );
+            .map_or(c.root.title.as_str(), |(b, _)| b);
+        let title = format!("{base} · synthesis");
         let effort = req.effort.filter(|e| !e.trim().is_empty());
-        let judge = self
-            .open_linked(
-                &c.root.id,
-                OpenPeerReq {
-                    provider: judge_provider,
-                    prompt: Some(prompt),
-                    title: Some(title),
-                    model: req.model,
-                    effort: effort.clone(),
-                    cwd: None,
-                    meta: Some(council_meta(
-                        &c.meta.id,
-                        0,
-                        CouncilRole::Synthesis,
-                        effort,
-                        judge_slug.as_deref(),
-                    )),
-                },
-                false,
-            )
-            .await?;
-        self.note_synthesis(&c.root.id, rounds, seq, &judge.id)
-            .await;
-        Ok(judge)
+        self.open_linked(
+            &c.root.id,
+            OpenPeerReq {
+                provider: judge_provider,
+                prompt: Some(synthesis_prompt(&answers)),
+                title: Some(title),
+                model: req.model,
+                effort: effort.clone(),
+                cwd: None,
+                meta: Some(council_meta(
+                    &c.meta.id,
+                    0,
+                    CouncilRole::Synthesis,
+                    effort,
+                    judge_slug.as_deref(),
+                )),
+            },
+            false,
+        )
+        .await
     }
 }
 
@@ -542,57 +544,37 @@ mod tests {
         assert!(matches!(e, Error::Conflict(m) if m == "seat 2 (codex): busy"));
     }
 
+    fn answer(seat: u32, question: &str, text: &str, status: &str) -> SeatAnswer {
+        SeatAnswer {
+            seat,
+            provider: if seat == 1 { "claude" } else { "codex" }.into(),
+            model: (seat == 1).then(|| "opus".into()),
+            question: question.into(),
+            text: text.into(),
+            turn_status: Some(status.into()),
+        }
+    }
+
     #[test]
     fn the_judge_prompt_carries_the_question_every_answer_and_the_task() {
-        let one = RoundAsked {
-            n: 1,
-            first: "Which cache?",
-            question: "Which cache?",
-        };
-        let p = synthesis_prompt(
-            &one,
-            &[
-                SeatAnswer {
-                    seat: 1,
-                    provider: "claude".into(),
-                    model: Some("opus".into()),
-                    text: "Redis".into(),
-                    turn_status: Some("completed".into()),
-                    missing: None,
-                },
-                SeatAnswer {
-                    seat: 2,
-                    provider: "codex".into(),
-                    model: None,
-                    text: String::new(),
-                    turn_status: Some("failed".into()),
-                    missing: None,
-                },
-            ],
-        );
-        assert!(p.contains("same question went to 2 agents"));
+        let p = synthesis_prompt(&[
+            answer(1, "Which cache?", "Redis", "completed"),
+            answer(2, "Which cache?", "", "failed"),
+        ]);
+        assert!(p.contains("2 agents were asked the same question"));
         assert!(p.contains("## The question\n\nWhich cache?"));
         assert!(p.contains("## Seat 1 — claude (opus)\n\nRedis"));
         assert!(p.contains("## Seat 2 — codex\n\n(no answer: its turn ended failed)"));
+        assert!(!p.contains("Asked:"), "one shared question is not repeated");
         assert!(
             !p.contains("may be incomplete"),
             "a completed answer is whole"
         );
         assert!(
-            p.contains("No answer in this round from: seat 2 (failed)."),
+            p.contains("No answer from: seat 2 (failed)."),
             "a seat without an answer is named: {p}"
         );
-        let cut = synthesis_prompt(
-            &one,
-            &[SeatAnswer {
-                seat: 1,
-                provider: "claude".into(),
-                model: None,
-                text: "Redis, beca".into(),
-                turn_status: Some("interrupted".into()),
-                missing: None,
-            }],
-        );
+        let cut = synthesis_prompt(&[answer(1, "q", "Redis, beca", "interrupted")]);
         assert!(cut.contains(
             "Redis, beca\n(its last turn ended interrupted: this answer may be incomplete)"
         ));
@@ -610,41 +592,16 @@ mod tests {
         assert_eq!(meta["provider_slug"], "claudework");
     }
 
-    /// A follow-up round's judge reads that round's question with the
-    /// council's first one, and a seat the round never reached is named.
+    /// A seat followed up in its own composer was last asked something
+    /// else: the judge reads each seat's own question with its answer.
     #[test]
-    fn a_later_round_s_judge_reads_its_question_and_names_the_missing_seat() {
-        let p = synthesis_prompt(
-            &RoundAsked {
-                n: 3,
-                first: "Which cache?",
-                question: "Where do you disagree?",
-            },
-            &[
-                SeatAnswer {
-                    seat: 1,
-                    provider: "claude".into(),
-                    model: None,
-                    text: "On TTLs".into(),
-                    turn_status: Some("completed".into()),
-                    missing: None,
-                },
-                SeatAnswer {
-                    seat: 3,
-                    provider: "codex".into(),
-                    model: None,
-                    text: String::new(),
-                    turn_status: None,
-                    missing: Some("the question has not reached it yet".into()),
-                },
-            ],
-        );
-        assert!(p.contains("## The council's first question\n\nWhich cache?"));
-        assert!(p.contains("## The question (round 3)\n\nWhere do you disagree?"));
-        assert!(p.contains(
-            "No answer in this round from: seat 3 (the question has not reached it yet)."
-        ));
-        assert!(p.contains("## Seat 3 — codex\n\n(no answer: the question has not reached it yet)"));
-        assert!(!p.contains("## The question\n\n"), "round 3 is labelled");
+    fn seats_asked_different_follow_ups_show_each_question() {
+        let p = synthesis_prompt(&[
+            answer(1, "Which cache?", "Redis", "completed"),
+            answer(2, "Why not Memcached?", "Fewer types", "completed"),
+        ]);
+        assert!(!p.contains("## The question\n"), "{p}");
+        assert!(p.contains("## Seat 1 — claude (opus)\n\nAsked: Which cache?\n\nRedis"));
+        assert!(p.contains("## Seat 2 — codex\n\nAsked: Why not Memcached?\n\nFewer types"));
     }
 }
