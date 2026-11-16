@@ -40,7 +40,7 @@ const MAX_UNDO_SNAPSHOTS = 16;
 export function readIdeFileBuffer(fullPath: string): string {
   const viaStore = ide.getBuffer?.(fullPath);
   return (
-    (typeof viaStore === 'string' && viaStore.length > 0
+    (typeof viaStore === 'string' // an emptied live buffer is "", not "missing"
       ? viaStore
       : ide.tabs.find((t) => t.path === fullPath)?.content) ?? ''
   );
