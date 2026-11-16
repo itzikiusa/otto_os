@@ -51,8 +51,6 @@ pub fn user_root(home: &Path, user_id: &str) -> PathBuf {
 }
 
 /// The caller's folder, created on first use, with any not-yet-copied
-
-/// The caller's folder, created on first use, with any not-yet-copied
 /// Workbench docs exported into it. Returns its canonical path.
 pub async fn ensure_root(pool: &DbPool, home: &Path, user_id: &str) -> Result<PathBuf> {
     let root = user_root(home, user_id);
