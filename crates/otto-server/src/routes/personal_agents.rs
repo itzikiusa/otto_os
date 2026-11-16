@@ -349,6 +349,9 @@ async fn update(
     if let Some(c) = req.cwd.as_deref() {
         personal_agents_engine::validate_agent_cwd(c).map_err(ApiError)?;
     }
+    if let Some(n) = req.name.as_deref() {
+        otto_assistant::personal_agent_admin::check_rename(&repo, &agent, n).await?;
+    }
     // Resuming the agent resumes all its schedules: re-arm them so what they
     // missed while it was paused is not fired (and delivered) at once.
     let resumed = !agent.enabled && req.enabled == Some(true);
