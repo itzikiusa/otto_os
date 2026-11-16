@@ -164,8 +164,24 @@ const PROVIDER_ROOT_DENY_WRITE_LITERAL: &[&str] = &[
     "CLAUDE.md",
     "AGENTS.md",
     "AGENTS.override.md",
+    "GEMINI.md",
+    "instructions.md",
+    // `mcpServers` every later gemini/agy starts.
+    "mcp_config.json",
+    "config/mcp_config.json",
+    "antigravity/mcp_config.json",
 ];
 const PROVIDER_ROOT_DENY_WRITE_SUBPATH: &[&str] = &[
+    // Code every later session runs: claude's staged installer binaries,
+    // codex's standalone packages / Computer Use bundle, gemini extensions
+    // (their `mcpServers`) and policies — the default homes' allowlist never
+    // opens these either.
+    "downloads",
+    "local",
+    "packages",
+    "computer-use",
+    "extensions",
+    "policies",
     "plugins",
     "hooks",
     "agents",
@@ -687,6 +703,13 @@ impl SandboxPolicy {
             "(deny file-read* file-write* {})",
             secrets.join(" ")
         ));
+        // Live OpenSSH ControlMaster sockets (IDE `/tmp/oi-<pid>-<n>/c.s`, SFTP
+        // `$TMPDIR/otto-sftp-*/ctl.sock`) would hand this session a logged-in
+        // shell on the remote host without the `~/.ssh` it is denied above.
+        pol.trailing_rules.push(
+            r#"(deny network-outbound (remote unix-socket (path-regex #"/(oi-[0-9]+-[0-9]+|otto-sftp-[^/]+)/[^/]+$")))"#
+                .to_string(),
+        );
         pol
     }
 
@@ -738,7 +761,12 @@ impl SandboxPolicy {
                 return self;
             }
         }
-        if !home.as_os_str().is_empty() && canon_root == canonicalize_lenient(&home.join(".claude"))
+        // The default homes keep their stricter `for_agent` allowlist even when
+        // `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GEMINI_CLI_HOME` names them.
+        if !home.as_os_str().is_empty()
+            && [".claude", ".codex", ".gemini"]
+                .iter()
+                .any(|d| canon_root == canonicalize_lenient(&home.join(d)))
         {
             return self;
         }
@@ -1755,6 +1783,10 @@ mod tests {
             "(deny file-read* file-write* (subpath \"/nonexistent-otto-home/u/.ssh\")",
         );
         assert!(deny > read_all);
+        assert!(
+            at(&sbpl, "(deny network-outbound (remote unix-socket") > read_all,
+            "read-only sessions must not reach live SSH mux sockets"
+        );
         for rel in [".aws", ".gnupg", ".config/gh", ".kube", ".netrc"] {
             assert!(
                 sbpl[deny..].contains(&format!("(subpath \"/nonexistent-otto-home/u/{rel}\")")),
@@ -1797,9 +1829,29 @@ mod tests {
             "(subpath \"{s}/skills\")",
             "(literal \"{s}/AGENTS.md\")",
             "(subpath \"{s}/prompts\")",
+            "(subpath \"{s}/packages\")",
+            "(subpath \"{s}/extensions\")",
+            "(literal \"{s}/config/mcp_config.json\")",
         ] {
             let f = f.replace("{s}", shadow);
             assert!(sbpl[reopen..].contains(&f), "{f}");
+        }
+    }
+
+    #[test]
+    fn explicit_default_cli_home_keeps_its_allowlist() {
+        let home = Path::new("/nonexistent-otto-home/u");
+        let base = agent_policy("/nonexistent-otto-test/Otto").to_sbpl();
+        for d in [".claude", ".codex", ".gemini"] {
+            let sbpl = agent_policy("/nonexistent-otto-test/Otto")
+                .allow_provider_home_safe(
+                    &home.join(d),
+                    home,
+                    Path::new("/nonexistent-otto-test/Otto"),
+                    false,
+                )
+                .to_sbpl();
+            assert_eq!(sbpl, base, "{d} must not be re-opened wholesale");
         }
     }
 }
