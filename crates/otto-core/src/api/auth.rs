@@ -33,6 +33,11 @@ pub struct MetaResp {
     /// curated fallbacks). Empty when unauthenticated after onboarding.
     #[serde(default)]
     pub provider_models: std::collections::HashMap<String, Vec<ProviderModelOption>>,
+    /// `true` while some provider's live model discovery is still running
+    /// (or fell back before its CLI answered), so `provider_models` may lack
+    /// models that a later `/meta` read will have.
+    #[serde(default)]
+    pub provider_models_provisional: bool,
     /// Per runtime provider: what a new thread's agent takes (steer, images,
     /// PDFs, efforts) before a session reports its own — the composer of a
     /// thread not started yet gates on it.
