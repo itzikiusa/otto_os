@@ -15,7 +15,7 @@
   import { personalAgentOf } from '../../../lib/personalAgentBadges';
   import { formatEffortShort, formatModelLabel, supportsEffortSelection } from '../../../lib/providerModels';
   import { harnessLabel, runtimeBaselineCaps, sessionProviderSlug } from '../../../lib/providers';
-  import type { RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
+  import type { RuntimeComposerTestIds, RuntimeHostCommands } from '../../../lib/runtimeThreadPort';
   import { INTERACTIVE_SLASH_COMMANDS, isImmediateSlashCommand, parseInteractiveSlashInput, type ComposerSlashCommand } from '../../../lib/slashActions';
   import { auth } from '../../../lib/stores/auth.svelte';
   import { now } from '../../../lib/stores/now.svelte';
@@ -68,7 +68,6 @@
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
 
   export type { RuntimeComposerTestIds } from '../../../lib/runtimeThreadPort';
-  import type { RuntimeComposerTestIds } from '../../../lib/runtimeThreadPort';
 
   interface Props {
     sessionId: string;
@@ -141,20 +140,13 @@
   const plan = $derived(deriveActivePlan(p, turn));
   const uiAsk = $derived(!!session && !closed && !auth.isImpersonating && session.created_by === auth.me?.id && !!uiControl.promptFor(sessionId));
   // The owner's own sign-in answers a private secret request.
-  const secretAsk = $derived(
-    session && !auth.isImpersonating && session.created_by === auth.me?.id ? (secretRequests.bySession[sessionId] ?? null) : null,
-  );
+  const secretAsk = $derived(session && !auth.isImpersonating && session.created_by === auth.me?.id ? (secretRequests.bySession[sessionId] ?? null) : null);
   $effect(() => void secretRequests.load());
   const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || needsRevive);
   const banners = $derived(buildRuntimeBanners({
-    sessionError,
-    uiAsk,
-    secretAsk: !!secretAsk,
+    sessionError, uiAsk, secretAsk: !!secretAsk, queueShown, needsRevive, freshContext: draft.freshContext,
     hasQuestions: Boolean(p?.requests.some((r) => r.kind === 'question')),
     hasPlan: Boolean(plan),
-    queueShown,
-    needsRevive,
-    freshContext: draft.freshContext,
   }));
 
   let scroller = $state<HTMLDivElement | null>(null);

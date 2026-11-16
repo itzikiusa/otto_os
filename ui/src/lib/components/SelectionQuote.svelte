@@ -77,11 +77,11 @@
 <style>
   .sq {
     position: fixed;
-    z-index: 50;
+    z-index: var(--z-floating-bar);
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding-block: 3px;
+    padding-block: 4px;
     padding-inline: 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
