@@ -46,6 +46,11 @@ fn joined_output(snap: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// Budget for a session's FIRST pause: it includes the build (javac, cargo,
+/// go) and the debuggee's cold start, which took over 20 s on a loaded CI
+/// runner. A liveness bound, not a speed bound.
+const FIRST_PAUSE: Duration = Duration::from_secs(90);
+
 async fn wait_until_paused(app: &Router, sid: &str, timeout: Duration) -> Value {
     let deadline = Instant::now() + timeout;
     loop {
@@ -232,7 +237,7 @@ func main() {
     let sid = start["session"]["id"].as_str().unwrap().to_string();
 
     // 1. Pauses at line 11 (`doubled := localdep.Compute(base)`):
-    let snap1 = wait_until_paused(&app, &sid, Duration::from_secs(25)).await;
+    let snap1 = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
     assert_eq!(
         snap1["paused_line"], 11,
         "unexpected Go paused_line: {snap1}"
@@ -359,7 +364,7 @@ public class AppMain {
     let sid = start["session"]["id"].as_str().unwrap().to_string();
 
     // 1. Pauses at line 16 (`int result = Calculator.doubleIt(count);`):
-    let snap1 = wait_until_paused(&app, &sid, Duration::from_secs(20)).await;
+    let snap1 = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
     assert_eq!(
         snap1["paused_line"], 16,
         "unexpected Java paused_line: {snap1}"
@@ -498,7 +503,7 @@ if __name__ == "__main__":
     assert_eq!(st, StatusCode::OK, "Python start_debug failed: {start}");
     let sid = start["session"]["id"].as_str().unwrap().to_string();
 
-    let snap1 = wait_until_paused(&app, &sid, Duration::from_secs(15)).await;
+    let snap1 = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
     assert_eq!(snap1["paused_line"], 6);
     let vars1 = all_vars(&snap1);
     assert!(
@@ -719,7 +724,7 @@ async fn live_rust_lldb_bridge_builds_cargo_artifact_hits_breakpoint_reads_local
     assert_eq!(st, StatusCode::OK, "Rust start_debug failed: {start}");
     let sid = start["session"]["id"].as_str().unwrap().to_string();
 
-    let snap1 = wait_until_paused(&app, &sid, Duration::from_secs(30)).await;
+    let snap1 = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
     assert_eq!(
         snap1["paused_line"], 3,
         "Rust paused_line mismatch: {snap1}"
@@ -791,7 +796,7 @@ async fn live_shell_bridge_debugs_both_bash_and_zsh_with_midrun_breakpoints() {
         assert_eq!(st, StatusCode::OK, "{fname} start_debug failed: {start}");
         let sid = start["session"]["id"].as_str().unwrap().to_string();
 
-        let snap1 = wait_until_paused(&app, &sid, Duration::from_secs(10)).await;
+        let snap1 = wait_until_paused(&app, &sid, FIRST_PAUSE).await;
         assert_eq!(snap1["paused_line"], 3, "{fname} wrong bp line: {snap1}");
         let vars1 = all_vars(&snap1);
         assert!(
