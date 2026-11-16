@@ -15,16 +15,21 @@
   import { plural } from '../../lib/plural';
   import { router } from '../../lib/router.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { pageChrome } from '../../lib/stores/pageChrome.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { idePreferences } from '../../lib/idePreferences.svelte';
   import { ideWorkspacePort } from '../../lib/ideWorkspacePort.svelte';
   import type { IdeCompareMode } from './history/ideComparisonLoader';
   import IdeEditorArea from './IdeEditorArea.svelte';
+  import { hintExplorerYield, IdeExplorerRoom } from './ideExplorerRoom';
+  import { ideBreakpointsNav } from './debug/ideBreakpointsNav.svelte';
   import { ide } from './ideStore.svelte';
   import IdeWorkspaceSwitcher from './shell/IdeWorkspaceSwitcher.svelte';
   import { loadScratchesRoot, newScratchFile, openScratches } from './shell/ideScratches.svelte';
   import IdeHeaderActions from './shell/IdeHeaderActions.svelte';
   import IdeStackSwitcher from './shell/IdeStackSwitcher.svelte';
+  import IdePhoneTabRow from './editor/IdePhoneTabRow.svelte';
+  import { IDE_TYPING_SELECTOR, idePhoneChrome } from './editor/idePhoneChrome.svelte';
   import { ideLayout, paneAfterFileOpen, STACK_MAX_H, type IdeStackPane } from './shell/ideLayout.svelte';
   import {
     handleIdeChord,
@@ -39,6 +44,7 @@
   const IdeProjectTreeLazy = lazyComponent(() => import('./IdeProjectTree.svelte'));
   const FolderPickerLazy = lazyComponent(() => import('../../lib/components/FolderPicker.svelte'));
   const IdeBottomDockLazy = lazyComponent(() => import('./IdeBottomDock.svelte'));
+  const IdeStatusStripLazy = lazyComponent(() => import('./editor/IdeStatusStrip.svelte'));
   const IdeAgentPanelLazy = lazyComponent(() => import('./IdeAgentPanel.svelte'));
   const IdeBuildToolWindowLazy = lazyComponent(() => import('./buildtools/IdeBuildToolWindow.svelte'));
   const IdeSettingsModalLazy = lazyComponent(() => import('./settings/IdeSettingsModal.svelte'));
@@ -64,16 +70,32 @@
   // time, decided by this page's own size (shell/ideLayout.svelte.ts).
   const stack = $derived(ideLayout.stack);
   const pane = $derived(ideLayout.pane);
-  // Workbench below 1000 px wide: at most ONE side panel next to the editor —
-  // an open agent / build-tool dock hides the explorer rail instead of
-  // squeezing the editor to a sliver.
-  const treeShown = $derived(
-    stack ? pane === 'files' : explorerVisible && !(ideLayout.width < 1000 && (ideAgent.panelOpen || ide.buildToolOpen)),
-  );
+  // One owner for the page's chrome: a tablet folds Otto's navigator to its icon rail (an iPad
+  // portrait then has room for the workbench, I4-24); the workbench's status strip replaces the shell's.
+  $effect(() => pageChrome.set({ foldNav: true, hideStatusBar: !stack }));
+  // Opening the agent / build-tool window hides the explorer rail when the editor would
+  // drop under ~720 px, and brings it back when that window closes (ideExplorerRoom.ts).
+  const treeShown = $derived(stack ? pane === 'files' : explorerVisible);
+  // "Breakpoints (n)…" in the debugger opens the tree's Breakpoints tab: a hidden explorer comes back for it.
+  let bpNavSeen = ideBreakpointsNav.seq;
+  $effect(() => {
+    const seq = ideBreakpointsNav.seq;
+    if (seq === bpNavSeen) return;
+    bpNavSeen = seq;
+    if (!stack) explorerVisible = true;
+  });
+  const explorerRoom = new IdeExplorerRoom();
+  $effect(() => {
+    if (stack) return;
+    const sideW = (ideAgent.panelOpen ? agentW : 0) + (ide.buildToolOpen ? buildToolW : 0);
+    const next = explorerRoom.step(explorerVisible, { width: ideLayout.width, treeW, sideW, sideOpen: sideW > 0 });
+    if (next.hid) hintExplorerYield(ide.keymapPreset);
+    if (next.visible !== explorerVisible) explorerVisible = next.visible;
+  });
   const agentShown = $derived(stack ? pane === 'agent' : ideAgent.panelOpen);
-  // Typing in a stacked editor squeezed by the on-screen keyboard: the page
-  // header steps aside so the code keeps its lines (class:typing below).
-  let typing = $state(false);
+  // Typing (code or agent composer) with the on-screen keyboard up: the page header
+  // steps aside so the code keeps its lines (editor/idePhoneChrome.svelte.ts).
+  const phone = $derived(idePhoneChrome.current);
   let folderPickerMode = $state<'open' | 'attach' | null>(null);
   let compareTarget = $state<{
     mode: IdeCompareMode;
@@ -83,7 +105,7 @@
     isDir: boolean;
     initialFilter: 'all' | 'deleted';
     initialRef: string | null;
-    initialClipboardText?: string;
+    initialClipboardText?: string; sourceLabel?: string | null;
   } | null>(null);
 
   function resolveRootForPath(p: string): string {
@@ -103,7 +125,7 @@
     isDir?: boolean;
     filter?: 'all' | 'deleted';
     ref?: string | null;
-    clipboardText?: string;
+    clipboardText?: string; leftLabel?: string;
   }): void {
     const p = opts.path || ide.activePath || ide.target.root;
     if (!p) return;
@@ -115,7 +137,7 @@
       isDir: opts.isDir ?? false,
       initialFilter: opts.filter ?? 'all',
       initialRef: opts.ref ?? null,
-      initialClipboardText: opts.clipboardText,
+      initialClipboardText: opts.clipboardText, sourceLabel: opts.leftLabel ?? null,
     };
   }
 
@@ -141,8 +163,8 @@
       openCompareModal({ mode: 'local-history', path: p, isDir: d?.isDir ?? p === ide.target.root, filter: d?.filter ?? 'all' });
     };
     const onCompare = (ev: Event): void => {
-      const d = (ev as CustomEvent<{ mode?: IdeCompareMode; path?: string; secondPath?: string; isDir?: boolean; filter?: 'all' | 'deleted'; ref?: string; clipboardText?: string } | undefined>).detail;
-      openCompareModal({ mode: d?.mode ?? 'local-history', path: d?.path, secondPath: d?.secondPath, isDir: d?.isDir, filter: d?.filter, ref: d?.ref, clipboardText: d?.clipboardText });
+      const d = (ev as CustomEvent<{ mode?: IdeCompareMode; path?: string; secondPath?: string; isDir?: boolean; filter?: 'all' | 'deleted'; ref?: string; clipboardText?: string; leftLabel?: string } | undefined>).detail;
+      openCompareModal({ mode: d?.mode ?? 'local-history', path: d?.path, secondPath: d?.secondPath, isDir: d?.isDir, filter: d?.filter, ref: d?.ref, clipboardText: d?.clipboardText, leftLabel: d?.leftLabel });
     };
     const onGitAction = (ev: Event): void => {
       const detail = (ev as CustomEvent<{ action?: string; path?: string } | undefined>).detail;
@@ -211,6 +233,7 @@
     const isStack = stack;
     untrack(() => {
       if (isStack && deskAgentOpen === null) {
+        IdeAgentPanelLazy.prefetch(); // the Agent pane opens on its content, not a skeleton
         deskAgentOpen = ideAgent.panelOpen;
         ideAgent.togglePanel(ideLayout.pane === 'agent');
       } else if (!isStack && deskAgentOpen !== null) {
@@ -387,9 +410,9 @@
   class="ide-page"
   class:stack
   class:short-stack={stack && ideLayout.height > 0 && ideLayout.height < STACK_MAX_H}
-  class:typing={stack && typing && ideLayout.height > 0 && ideLayout.height < 360}
-  onfocusin={(e) => (typing = e.target instanceof Element && !!e.target.closest('.cm-editor'))}
-  onfocusout={() => (typing = false)}
+  class:typing={phone.typingMode}
+  onfocusin={(e) => (idePhoneChrome.typing = e.target instanceof Element && !!e.target.closest(IDE_TYPING_SELECTOR))}
+  onfocusout={() => (idePhoneChrome.typing = false)}
   data-pane={stack ? pane : undefined}
   data-testid="ide-page"
   data-ide-density={idePreferences.current.uiDensity}
@@ -398,7 +421,7 @@
 >
   <!-- One toolbar row (G13). Stacked: the pane switcher takes the tabs slot
        (below the bar when the page is tall, inline when it is short). -->
-  {#snippet stackTabs()}<IdeStackSwitcher onshow={showPane} />{/snippet}
+  {#snippet stackTabs()}<IdeStackSwitcher onshow={showPane} />{#if phone.fileRowInHeader && pane === 'editor'}<IdePhoneTabRow inHeader />{/if}{/snippet}
   <PageHeader
     title={stack ? 'IDE' : 'IDE (Beta)'}
     tabs={stack && ide.hasTarget ? stackTabs : undefined}
@@ -498,6 +521,7 @@
         <div class="ide-center-col" class:pane-off={stack && pane !== 'editor' && pane !== 'tools'} class:tools-only={stack && pane === 'tools'}>
           <IdeEditorArea />
           <LazyMount lazy={IdeBottomDockLazy} what="bottom tool dock" quiet props={{ stack, stackShowing: stack && pane === 'tools' }} />
+          {#if !stack}<LazyMount lazy={IdeStatusStripLazy} what="status bar" quiet />{/if}
         </div>
 
         {#if ide.buildToolOpen && !stack}
@@ -613,13 +637,12 @@
   .ide-workbench.stack > .ide-rail-wrap, .ide-workbench.stack > .ide-agent-wrap { flex: 1; min-inline-size: 0; }
   .ide-center-col.pane-off { display: none; }
   .ide-center-col.tools-only :global(.ide-editor-area) { display: none; }
-  /* Stacked chrome: no second breadcrumb under the code, no fold column; on a
-     short page (phone on its side) no sub-bar. */
+  /* Stacked chrome: no fold column, no status strip; on a short page (phone on
+     its side) no sub-bar. */
   /* CodeMirror's base theme declares `.cm-gutter { display: flex !important }`. */
-  .ide-page.stack :global(.ide-breadcrumbs-bar) { display: none; }
   .ide-page.stack :global(.cm-gutter.cm-foldGutter) { display: none !important; }
   .ide-page.short-stack :global(.ide-subbar) { display: none; }
-  .ide-page.typing :global(.page-header-bar) { display: none; }
+  .ide-page.typing :global(.page-header-bar), .ide-page.typing :global(.ide-subbar) { display: none; }
   @media (max-width: 1024px) {
     .ide-workbench:not(.stack) > .ide-rail-wrap { max-inline-size: 32%; }
     .ide-bt-wrap, .ide-workbench:not(.stack) > .ide-agent-wrap { max-inline-size: 38%; }

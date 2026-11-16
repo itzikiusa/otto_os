@@ -116,7 +116,7 @@ test('a full group is refused in words above the composer', async ({ page }) => 
   });
   const thread = page.getByTestId('runtime-thread-rt_lead');
   const composer = thread.getByTestId('runtime-composer');
-  await composer.fill('one more @gem');
+  await composer.fill('one more @cod');
   await composer.press('Enter');
   await composer.fill('Another look please');
   await thread.getByTestId('runtime-send').click();

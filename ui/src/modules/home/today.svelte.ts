@@ -2,7 +2,7 @@
 // you, what is running, what is next, what you touched recently. Built from
 // data Otto already has (no new endpoints):
 //
-//   Needs you  pending MCP approvals · sessions and threads waiting on input · unread warnings
+//   Needs you  pending MCP approvals · sessions and threads waiting on input (one row each) · unread warnings
 //   Running    working agent sessions and threads · in-flight workflow runs
 //   Up next    scheduled-task runs due in the next 24 h — forward-looking only.
 //              Past notices live in the bell (warnings already surface under Needs you).
@@ -22,6 +22,7 @@ import { auth } from '../../lib/stores/auth.svelte';
 import { notifications } from '../../lib/stores/notifications.svelte';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { plural } from '../../lib/plural';
+import { runtimeWaiting } from '../../lib/stores/runtimeAttention.svelte';
 import { threadRoute, threadSessions, unlistedWaiting } from './homeThreads';
 import { livePoll, type Poller } from './boxes/poll';
 
@@ -47,6 +48,8 @@ function timeOfDay(iso: string): string {
 
 function sessionIdOf(n: Notice): string | null {
   if (n.action?.type === 'open_session') return n.action.session_id;
+  // A structured thread's waiting notice opens its route (`threads/<id>`).
+  if (n.action?.type === 'open_route' && n.action.route.startsWith('threads/')) return n.action.route.slice('threads/'.length).split('/')[0] || null;
   const key = n.source_key ?? '';
   return key.startsWith('session:') ? (key.split(':')[1] ?? null) : null;
 }
@@ -119,8 +122,23 @@ class TodayStore {
         open: () => router.go(threadRoute(s.id)),
       });
     }
-    // Runtime threads are only counted (not listed): one row opens Threads.
-    const more = unlistedWaiting(ws.threadsNeedsYouCount, this.waitingThreads.length);
+    // Runtime threads (not in the session list): one row per waiting thread,
+    // named from its row, opening THAT thread (lib/stores/runtimeAttention).
+    const listed = new Set(this.waitingThreads.map((s) => s.id));
+    const runtime = runtimeWaiting().filter((w) => !listed.has(w.id));
+    for (const w of runtime) {
+      rows.push({
+        id: `thread:${w.id}`,
+        title: w.title || 'A thread',
+        detail: 'Thread · waiting for your approval or answer',
+        icon: 'threads',
+        tone: 'warning',
+        ...(w.at ? { at: new Date(w.at).toISOString() } : {}),
+        open: () => router.go(threadRoute(w.id)),
+      });
+    }
+    // Anything still only counted: one row opens Threads.
+    const more = unlistedWaiting(ws.threadsNeedsYouCount, this.waitingThreads.length + runtime.length);
     if (more > 0) {
       rows.push({
         id: 'threads:waiting',
@@ -131,7 +149,7 @@ class TodayStore {
         open: () => router.go('threads'),
       });
     }
-    const waitingIds = new Set([...this.waiting, ...this.waitingThreads].map((s) => s.id));
+    const waitingIds = new Set([...this.waiting, ...this.waitingThreads, ...runtime].map((s) => s.id));
     for (const n of notifications.notices) {
       if (n.read || n.severity === 'info') continue;
       const sid = sessionIdOf(n);

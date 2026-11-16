@@ -12,6 +12,8 @@
 //! * `hang`  — one delta, then waits for `turn/interrupt` → `interrupted`.
 //! * `crash` — exit 3 at once (mid-turn).
 //! * `fail`  — a `commandExecution` that fails (exit 1, output `boom`).
+//! * `limit` — the turn fails with Codex's usage-limit error
+//!   (`codexErrorInfo: "usageLimitExceeded"`).
 //! * anything else — `echo: <text>` as `item/agentMessage/delta`s, plus
 //!   ` [<model> <effort> <image count>]` when the turn sets any of them.
 //!
@@ -310,6 +312,13 @@ fn main() {
                             "turn/completed",
                             json!({"threadId": thread, "turn": turn(&tid, "completed")}),
                         );
+                        current = None;
+                    }
+                    "limit" => {
+                        let mut t = turn(&tid, "failed");
+                        t["error"] = json!({"message": "You've hit your usage limit. Try again later.",
+                                            "codexErrorInfo": "usageLimitExceeded"});
+                        notify("turn/completed", json!({"threadId": thread, "turn": t}));
                         current = None;
                     }
                     "hang" => {

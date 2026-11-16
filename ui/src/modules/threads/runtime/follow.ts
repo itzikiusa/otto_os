@@ -10,8 +10,11 @@ export function unreadSince(ids: readonly string[], lastSeenId: string | null): 
   return at < 0 ? 0 : ids.length - 1 - at;
 }
 
-/** The pill's words while scrolled up, or null when it should not show. */
-export function followPillText(unread: number, unseen: number, farUp: boolean): string | null {
+/** The pill's words while scrolled up, or null when it should not show. A
+ *  request waiting on the person (`needs`: "Approval needed", attentionDock.ts)
+ *  outranks a message count — it is why they should come back down. */
+export function followPillText(unread: number, unseen: number, farUp: boolean, needs: string | null = null): string | null {
+  if (needs) return needs;
   if (unread > 0) return `${unread} new ${unread === 1 ? 'message' : 'messages'}`;
   if (unseen > 0) return 'New activity';
   return farUp ? 'Jump to latest' : null;

@@ -39,6 +39,7 @@ export type SessionStateKey =
   | 'suspended'
   | 'ended'
   | 'failed'
+  | 'stopped'
   | 'stale';
 
 /** What `StatusDot` draws for a session state. */
@@ -56,6 +57,36 @@ export interface SessionLike {
   kind?: string | null;
   provider_session_id?: string | null;
   status?: RawSessionStatus | string | null;
+  /** A structured Threads row carries its runtime attention here
+   *  (`runtimeThreads.asThreadSession`): `runtime_waiting` (an approval,
+   *  question or secret is pending), `last_turn_status` / `last_error_class`
+   *  (how the latest turn ended). Read by {@link sessionState}, so every
+   *  surface that already derives a thread's state gets them for free. */
+  meta?: Record<string, unknown> | null;
+}
+
+/** How the latest turn of a structured thread ended, as a state — null when
+ *  it completed (or nothing is known: an older daemon leaves the fields out).
+ *  `errorClass` names the failure: `usage_limit`, `auth`, anything else is a
+ *  provider failure. */
+export function turnOutcomeState(
+  outcome: string | null | undefined,
+  errorClass?: string | null,
+): SessionStateInfo | null {
+  const base = { resumable: false, inactive: false };
+  if (outcome === 'failed') {
+    if (errorClass === 'usage_limit') {
+      return { ...base, key: 'failed', label: 'Usage limit', tone: 'danger', hint: 'The last turn hit the agent’s usage limit' };
+    }
+    if (errorClass === 'auth') {
+      return { ...base, key: 'failed', label: 'Not signed in', tone: 'danger', hint: 'The last turn failed: the agent isn’t signed in' };
+    }
+    return { ...base, key: 'failed', label: 'Failed', tone: 'danger', hint: 'The last turn failed — open the thread to see why' };
+  }
+  if (outcome === 'interrupted' || outcome === 'cancelled') {
+    return { ...base, key: 'stopped', label: 'Stopped', tone: 'neutral', hint: 'The last turn was stopped before it finished' };
+  }
+  return null;
 }
 
 export interface SessionStateOpts {
@@ -102,6 +133,10 @@ export function exitState(exitCode: number | null | undefined, resumable: boolea
  *   session with no process left reads as suspended/ended, not "needs you".
  * - `stale`: while the events socket is down a "working"/"running" claim may
  *   be minutes old — say "Reconnecting…" and stop pulsing (patterns.md §1).
+ * - A structured thread's `meta` (see {@link SessionLike}): a pending request
+ *   is needs-you; an idle thread whose last turn failed reads Failed (Usage
+ *   limit / Not signed in), one stopped mid-turn reads Stopped. Working and
+ *   needs-you outrank how the last turn ended.
  */
 export function sessionState(
   session: SessionLike | null | undefined,
@@ -112,10 +147,13 @@ export function sessionState(
   const status = liveStatus ?? session?.status ?? 'idle';
   const resumable = isResumable(session, status);
   const base = { resumable, inactive: false };
+  const meta = session?.meta ?? null;
 
   if (status === 'exited' || status === 'reconnectable') return exitState(opts.exitCode, resumable);
 
-  if (needsYou) {
+  // A pending request on the row itself is "needs you" after a reload too,
+  // without the live event that raises the sticky flag.
+  if (needsYou || meta?.runtime_waiting === true) {
     return {
       ...base,
       key: 'needs-you',
@@ -141,8 +179,13 @@ export function sessionState(
       return { ...base, key: 'working', label: 'Working', tone: 'success', live: true, hint: 'Working' };
     case 'running':
       return { ...base, key: 'running', label: 'Running', tone: 'info', hint: 'Running — alive, not producing output' };
-    default:
-      return { ...base, key: 'idle', label: 'Idle', tone: 'neutral', hint: 'Idle' };
+    default: {
+      const ended = turnOutcomeState(
+        typeof meta?.last_turn_status === 'string' ? meta.last_turn_status : null,
+        typeof meta?.last_error_class === 'string' ? meta.last_error_class : null,
+      );
+      return ended ?? { ...base, key: 'idle', label: 'Idle', tone: 'neutral', hint: 'Idle' };
+    }
   }
 }
 

@@ -699,6 +699,11 @@ pub use questions::{
     validate_question_answers, QuestionAnswer, QuestionKind, QuestionOption, RuntimeQuestion,
 };
 
+mod outcome;
+pub use outcome::{
+    error_class, TurnOutcome, ERROR_CLASS_AUTH, ERROR_CLASS_PROVIDER, ERROR_CLASS_USAGE_LIMIT,
+};
+
 /// An approval or structured question the agent is blocked on (`OrchestrationV2RuntimeRequest`).
 /// Its options ride the matching `approval_request` turn item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1073,6 +1078,15 @@ pub struct RuntimeSession {
     /// own name for the conversation replaces it. A rename clears it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub title_auto: bool,
+    /// How the latest turn ended; `None` before the first turn ends and
+    /// while a turn runs (see [`Self::set_outcome`]). Survives a restart:
+    /// the store derives it from the persisted latest `turn` entity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_status: Option<TurnOutcome>,
+    /// With `last_turn_status: failed`: [`error_class`] of its failure
+    /// (`usage_limit` / `auth` / `provider`); `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error_class: Option<String>,
 }
 
 /// Server-owned `RuntimeSession::meta` key storing a custom provider slug from
@@ -1793,6 +1807,13 @@ pub struct CouncilMeta {
     /// The effort the seat's (or the judge's) turn asked for, shown in its header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The seat's provider as picked (a custom slug such as `claudework`, else
+    /// the built-in id) — two seats of one provider differ by model / effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The model the seat was started on; `None` = the provider's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl RuntimeSession {
@@ -2423,6 +2444,8 @@ mod tests {
                 seat: 2,
                 role: CouncilRole::Seat,
                 effort: None,
+                provider: None,
+                model: None,
             })
         );
         let j = session(json!({"council": {"id": "c1", "seat": 0, "role": "synthesis"}}));

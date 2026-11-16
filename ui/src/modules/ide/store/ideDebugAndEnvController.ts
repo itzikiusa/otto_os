@@ -9,10 +9,16 @@ import { auth } from '../../../lib/stores/auth.svelte';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { ideCollabNotices } from './ideCollabNotices.svelte';
+import { debugActionVerb, debugStartErrorFrom, ideDebugLaunch } from './ideDebugLaunch.svelte';
+import {
+  CURRENT_FILE_CONFIG_ID, loadLaunchMemory, planLaunch, resolveLaunchSelection, saveLaunchMemory, type LaunchPlan,
+} from './ideLaunchTarget';
 import {
   attachDebugSessionStream,
+  debugRevealTarget,
   normalizeIncomingDebugSnapshot,
   refreshWatchValues,
+  resetForNewDebugSession,
   syncSnapshotBreakpointsToStore,
 } from './ideDebugSnapshotSync';
 import {
@@ -22,10 +28,13 @@ import {
 } from './ideRepoTestAndBuildTags';
 export {
   attachDebugSessionStream,
+  debugRevealTarget,
   normalizeIncomingDebugSnapshot,
   refreshWatchValues,
+  resetForNewDebugSession,
   syncSnapshotBreakpointsToStore,
 };
+export { guardDebugRelaunch } from './ideDebugLaunch.svelte';
 import {
   collabGuestPost, defaultRunnerForLanguage, IdeCollabHttpError, ideTargetKey, streamIdeSse, type IdeBottomTab,
   type IdeBreakpoint, type IdeCollabRoom, type IdeDebugSessionSnapshot, type IdeDetectedSdk,
@@ -295,11 +304,9 @@ export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
     host.detectedConfigs = backendDetected.length > 0 ? backendDetected : host.detectedConfigs;
     const combined = mergeRunConfigs(resp.configs ?? [], host.detectedConfigs);
     host.runConfigs = combined;
-    const explicitFirst = combined.find((c) => !c.auto_detected);
-    const hasCurrent = host.selectedConfigId && combined.some((c) => c.id === host.selectedConfigId);
-    if (!hasCurrent || (host.selectedConfigId?.startsWith('auto:') && explicitFirst)) {
-      host.selectedConfigId = explicitFirst?.id ?? combined[0]?.id ?? null;
-    }
+    // "Current file" unless the person picked a configuration for this project
+    // (never the first config by position: that launched the wrong file).
+    host.selectedConfigId = resolveLaunchSelection(loadLaunchMemory(host.target), combined, host.selectedConfigId);
   } catch (e) { if (!stale()) host.envError = loadErrorText(e); }
   finally { if (!stale()) host.envLoading = false; }
 }
@@ -356,6 +363,7 @@ export async function upsertRunConfig(host: DebugAndEnvHost, cfg: Partial<IdeRun
       coverage: cfg.coverage ?? existing?.coverage ?? false,
     });
     const saved = (resp.config ?? resp) as IdeRunConfig;
+    if (saved?.id) saveLaunchMemory(host.target, { selected: saved.id });
     await fetchEnvironments(host);
     if (saved?.id) host.selectedConfigId = saved.id;
     return saved;
@@ -391,9 +399,14 @@ export async function launchIdeRun(
   prevSseCtl: AbortController | null = null,
 ): Promise<{ poller: Poller | null; sseCtl: AbortController | null }> {
   if (!host.target.root) return { poller: prevPoller, sseCtl: prevSseCtl };
+  const plan = toolbarLaunchPlan(host, opts);
+  if (plan?.kind === 'none') {
+    toasts.info('Nothing to run', plan.reason);
+    return { poller: prevPoller, sseCtl: prevSseCtl };
+  }
   const keepTc = Boolean(opts.keepTestcontainers || host.keepTestcontainersAlive);
   const wantCoverage = Boolean(opts.coverage || opts.adhoc?.coverage);
-  const rawId = opts.configId ?? (opts.adhoc ? undefined : host.selectedConfigId ?? undefined);
+  const rawId = opts.configId ?? (plan?.kind === 'config' ? plan.configId : undefined);
   const selectedCfg = rawId ? host.runConfigs.find((c) => c.id === rawId) : undefined;
   const isClientAuto = Boolean(rawId?.startsWith('auto:') || selectedCfg?.auto_detected);
   const cfgId = isClientAuto || keepTc || wantCoverage ? undefined : rawId;
@@ -440,6 +453,7 @@ export async function launchIdeRun(
       ...(opts.confirmProdTargets ? { confirm_prod_targets: true } : {}),
     });
     host.activeRun = resp.run;
+    rememberLaunchedConfig(host, rawId);
     host.recordRunLaunch?.(resp.run.id, {
       configId: cfgId,
       adhoc,
@@ -498,6 +512,18 @@ export async function launchIdeRun(
   }
 }
 
+/** The toolbar/shortcut target when the caller named none (`null` = the caller did). */
+function toolbarLaunchPlan(host: DebugAndEnvHost, opts: { configId?: string; adhoc?: unknown; launch?: unknown }): LaunchPlan | null {
+  if (opts.configId || opts.adhoc || opts.launch) return null;
+  return planLaunch(host.selectedConfigId, host.activeTab, loadLaunchMemory(host.target), host.runConfigs);
+}
+
+/** Remember the configuration the person launched: Run falls back to it when the
+ *  active tab can't run (a README), instead of to an arbitrary config. */
+function rememberLaunchedConfig(host: DebugAndEnvHost, id: string | undefined): void {
+  if (id && id !== CURRENT_FILE_CONFIG_ID && host.runConfigs.some((c) => c.id === id)) saveLaunchMemory(host.target, { lastUsed: id });
+}
+
 export function launchGutterAction(
   host: DebugAndEnvHost,
   item: IdeGutterItem,
@@ -553,7 +579,14 @@ export async function launchDebugSession(
   onSnapshot: (snap: IdeDebugSessionSnapshot) => void,
 ): Promise<AbortController | null> {
   if (!host.target.root) return prevCtl;
-  const rawCfgId = opts.configId ?? host.selectedConfigId ?? undefined;
+  ideDebugLaunch.startError = null;
+  const plan = toolbarLaunchPlan(host, opts);
+  if (plan?.kind === 'none') {
+    host.openBottomTab('debug');
+    ideDebugLaunch.startError = { message: plan.reason, kind: null, ecosystem: null };
+    return prevCtl;
+  }
+  const rawCfgId = opts.configId ?? (plan?.kind === 'config' ? plan.configId : undefined);
   const cfg = rawCfgId ? host.runConfigs.find((c) => c.id === rawCfgId) : undefined;
   const fallbackLang = host.activeTab?.language || 'go';
   const language = opts.language || languageFromRunner(cfg?.runner, fallbackLang);
@@ -607,11 +640,14 @@ export async function launchDebugSession(
       ...(opts.confirmProdTargets ? { confirm_prod_targets: true } : {}),
     });
     host.lastDebugLaunch = { configId: persistedConfigId, language, launch: effectiveLaunch };
+    rememberLaunchedConfig(host, rawCfgId);
     host.expandedVariables = {};
     onSnapshot(resp.session);
     return attachDebugSessionStream(host, resp.session.id, prevCtl, onSnapshot);
   } catch (e) {
-    toastError('Couldn’t start debugger', e);
+    // No session exists: the debugger panel shows this inline (with the
+    // snapshot's own `error` once a session does exist), not as a toast.
+    ideDebugLaunch.startError = debugStartErrorFrom(e);
     return prevCtl;
   } finally {
     host.debugLoading = false;
@@ -639,7 +675,10 @@ export async function sendDebugAction(
       `/ide/debug/sessions/${encodeURIComponent(host.activeDebug.id)}/command`,
       {
         action, thread_id: extra.thread_id ?? host.activeDebug.active_thread_id ?? undefined,
-        frame_id: extra.frame_id ?? host.activeDebug.active_frame_id ?? undefined, path: extra.path, line: extra.line,
+        // Switching thread: the current frame id belongs to the old thread (the daemon would 404);
+        // without one it picks the new thread's top frame.
+        frame_id: extra.frame_id ?? (action === 'select_frame' && extra.thread_id != null ? undefined : host.activeDebug.active_frame_id ?? undefined),
+        path: extra.path, line: extra.line,
       },
     );
     onSnapshot(resp.session);
@@ -650,7 +689,7 @@ export async function sendDebugAction(
       ideCollabNotices.debug = e.message ? `${e.message.charAt(0).toUpperCase()}${e.message.slice(1)}` : 'Only the host can do that.';
       return;
     }
-    toastError(`Couldn’t run debugger ${action.replace('_', ' ')}`, e);
+    toastError(`Couldn’t ${debugActionVerb(action)}`, e);
   }
 }
 
@@ -711,7 +750,10 @@ export async function removeSavedRunConfig(
   try {
     await api.del(`/ide/run-configs/${encodeURIComponent(id)}?${host.targetQuery()}`);
     host.runConfigs = host.runConfigs.filter((c) => c.id !== id);
-    if (host.selectedConfigId === id) host.selectedConfigId = host.runConfigs[0]?.id ?? null;
+    if (host.selectedConfigId === id) {
+      host.selectedConfigId = CURRENT_FILE_CONFIG_ID;
+      saveLaunchMemory(host.target, { selected: CURRENT_FILE_CONFIG_ID });
+    }
   } catch (e) {
     toastError('Couldn’t delete run configuration', e);
   }

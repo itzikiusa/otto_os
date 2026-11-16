@@ -27,6 +27,7 @@ import {
   revealInIdeProjectTree,
   toggleIdeTabPinned,
 } from './ideEditorStoreBridge.svelte';
+import { ideParentFolderHint } from './ideCrumbs';
 import { resolveLocalFastDive } from './ideLangAnalyzer';
 
 export function openIdeTabContextMenu(
@@ -80,15 +81,17 @@ export function openIdeOverflowTabsMenu(anchor: HTMLElement | null): void {
     return {
       label: `${formatIdeTabDisplayName(t, ide.tabs, 34)}${dirty ? ' •' : ''}`,
       icon: t.path === ide.activePath ? 'check' : isIdeTabPinned(t) ? 'pin' : t.readOnly ? 'lock' : 'file',
-      hint: ide.relativePath(t.path),
+      // The parent folder, not the whole relative path (which squeezed the name to a stub).
+      hint: ideParentFolderHint(ide.relativePath(t.path)),
       action: () => {
         if (ide.activePath && ide.activePath !== t.path) flushAutoLocalHistorySnapshot(ide.activePath);
         ide.activePath = t.path;
       },
     };
   });
-  // The tab strip's Editor | Preview control, again here (a menu row is easier to hit on a phone).
-  const pvModes = idePreviewMode.available(ide.activePath);
+  // The tab strip's Editor | Preview control, again here only on a phone (a menu row is
+  // easier to hit there); on a desktop it already sits next to this menu's button.
+  const pvModes = ideLayout.stack ? idePreviewMode.available(ide.activePath) : [];
   const pvCur = idePreviewMode.modeFor(ide.activePath);
   const pvLabel = { source: 'Editor', split: 'Editor and preview', preview: 'Preview' } as const;
   const pvIcon = { source: 'editorLines', split: 'editorSplit', preview: 'image' } as const;

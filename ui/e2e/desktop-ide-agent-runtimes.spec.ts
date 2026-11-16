@@ -396,7 +396,8 @@ test.describe('Desktop IDE — Agent Dock, Inline Edit, Multi-Language Debug & L
     await expect(dbgPanel).toContainText('run_pipeline', { timeout: 15_000 });
     await expect(dbgPanel).toContainText('42', { timeout: 15_000 });
 
-    const askAgentBtn = page.getByTestId('ide-debug-ask-agent');
+    await dbgPanel.getByTestId('ide-debug-more').click(); // Ask Agent lives in the debugger bar's ⋯ menu
+    const askAgentBtn = page.getByRole('menuitem', { name: 'Ask Agent about this stop' });
     await expect(askAgentBtn).toBeEnabled();
     await askAgentBtn.click();
 
@@ -503,7 +504,8 @@ test.describe('Desktop IDE — Agent Dock, Inline Edit, Multi-Language Debug & L
     await expect(undoBtn).toBeVisible();
 
     // G) Press native `⌘Z` inside CodeMirror -> restores original buffer cleanly!
-    await activeEditor(page).click();
+    // A line of code, not the pane's centre: an inline "N usages" button can sit there.
+    await activeEditor(page).locator('.cm-line').first().click();
     await page.keyboard.press('Meta+z');
     await expect(activeEditor(page)).toContainText('sum := a + b');
     await expect(activeEditor(page)).not.toContainText('ClampNonNegative');
@@ -639,7 +641,8 @@ test.describe('Desktop IDE — Agent Dock, Inline Edit, Multi-Language Debug & L
       await dbgPanel.getByRole('button', { name: 'Step over' }).click();
       await expect(dbgPanel).toContainText('calc_run.py:8', { timeout: 10_000 });
       await expect(dbgPanel).toContainText('scaled');
-      await page.getByTestId('ide-debug-ask-agent').click();
+      await dbgPanel.getByTestId('ide-debug-more').click();
+      await page.getByRole('menuitem', { name: 'Ask Agent about this stop' }).click();
       await expect(page.getByTestId('ide-agent-context-tray')).toContainText('⏸ run_pipeline @ calc_run.py:8');
       await page.getByTestId('ide-agent-close').click();
 

@@ -23,6 +23,8 @@
     rightExists?: boolean;
     canEditRight?: boolean;
     onApplyRight?: (nextText: string, reason: string) => void | Promise<void>;
+    /** The stacked (phone) sheet: side by side cannot fit, so unified only, no layout toggle. */
+    unifiedOnly?: boolean;
   }
 
   let {
@@ -34,9 +36,14 @@
     rightExists = true,
     canEditRight = true,
     onApplyRight,
+    unifiedOnly = false,
   }: Props = $props();
 
-  let viewMode = $state<'split' | 'unified'>('split');
+  let chosenMode = $state<'split' | 'unified'>('split');
+  const viewMode = $derived<'split' | 'unified'>(unifiedOnly ? 'unified' : chosenMode);
+  // Touch devices have no keys to press: no "(F7)" hints in the titles there.
+  const coarsePointer = typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)').matches);
+  const kh = (keys: string): string => (coarsePointer ? '' : ` (${keys})`);
   let activeHunkIdx = $state(0);
   let editingRight = $state(false);
   let editDraft = $state('');
@@ -151,7 +158,7 @@
       type="button"
       class="cmp-icon-btn"
       aria-label="Previous difference"
-      title="Previous difference (⇧F7)"
+      title={`Previous difference${kh('⇧F7')}`}
       disabled={cmp.hunks.length === 0}
       onclick={() => scrollToHunk(activeHunkIdx - 1)}
       data-testid="ide-compare-prev-diff"
@@ -162,7 +169,7 @@
       type="button"
       class="cmp-icon-btn"
       aria-label="Next difference"
-      title="Next difference (F7)"
+      title={`Next difference${kh('F7')}`}
       disabled={cmp.hunks.length === 0}
       onclick={() => scrollToHunk(activeHunkIdx + 1)}
       data-testid="ide-compare-next-diff"
@@ -204,22 +211,24 @@
       </button>
     {/if}
 
+    {#if !unifiedOnly}
     <div class="segmented cmp-seg" role="group" aria-label="Diff layout">
       <button
         type="button"
         class:active={viewMode === 'split'}
         aria-pressed={viewMode === 'split'}
-        onclick={() => (viewMode = 'split')}
+        onclick={() => (chosenMode = 'split')}
         data-testid="ide-compare-mode-split"
       >Side-by-side</button>
       <button
         type="button"
         class:active={viewMode === 'unified'}
         aria-pressed={viewMode === 'unified'}
-        onclick={() => (viewMode = 'unified')}
+        onclick={() => (chosenMode = 'unified')}
         data-testid="ide-compare-mode-unified"
       >Unified</button>
     </div>
+    {/if}
   </header>
 
   {#if cmp.identical && rightExists && !dismissedIdentical}
@@ -270,7 +279,7 @@
               type="button"
               class="cmp-chevron-btn"
               aria-label="Revert active hunk into Current"
-              title="Revert hunk (⌃⌘→)"
+              title={`Revert hunk${kh('⌃⌘→')}`}
               onclick={() => revertHunk(activeHunkIdx)}
               data-testid="ide-compare-revert-hunk"
             >&gt;&gt;</button>
@@ -308,7 +317,7 @@
                   type="button"
                   class="cmp-chevron-btn"
                   aria-label="Revert hunk {hIdx + 1} into Current"
-                  title="Revert (⌃⌘→)"
+                  title={`Revert${kh('⌃⌘→')}`}
                   onclick={() => {
                     activeHunkIdx = hIdx;
                     revertHunk(hIdx);

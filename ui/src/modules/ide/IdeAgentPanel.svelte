@@ -34,9 +34,23 @@
     stripIdeContextBlocks,
     type IdeCodeProposal,
   } from './agent/ideAgentEngine.svelte';
-  import { ide } from './ideStore.svelte';
+  import { ide, ideBasename } from './ideStore.svelte';
 
   const EmbeddedRuntimeView = lazyComponent(loadRuntimeThreadView);
+
+  // Empty state: one-tap prompts that fill the composer's draft (the chips carry the context);
+  // the person sends it, so the agent never starts on a tap.
+  const agentSuggestions = $derived([
+    { label: 'Explain this file', prompt: 'Explain what this file does and how it fits the project.' },
+    ...(ideAgent.contexts.some((c) => c.kind === 'selection')
+      ? [{ label: 'Find bugs in the selection', prompt: 'Find bugs in the selected code and explain each one.' }]
+      : []),
+    { label: 'Write tests', prompt: 'Write tests for this file, following the project’s existing test style.' },
+  ]);
+  function useSuggestion(prompt: string): void {
+    ideAgent.composerText = prompt;
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('[data-testid="ide-agent-composer"] textarea')?.focus());
+  }
   const PtyConversationView = lazyComponent(loadPtyConversationView);
 
   EmbeddedRuntimeView.prefetch();
@@ -365,35 +379,13 @@
           <EmptyState
             variant="panel"
             icon="threads"
-            title="Threads in IDE"
-            body="Same Threads composer, @file & @agent mentions, slash commands, and workspace sessions."
+            title={ide.activePath ? `Ask about ${ideBasename(ide.activePath)}` : 'Ask about this project'}
+            body="The agent sees the open file and your selection. It can explain, fix or change code; you review every edit before it’s kept."
           />
-          <div class="ia-quick-actions" role="group" aria-label="Quick context actions">
-            <button
-              type="button"
-              class="btn small"
-              disabled={!ide.activeTab}
-              onclick={() => ideAgent.markSelectionFromEditor({ openPanel: true })}
-            >
-              <Icon name="cursor" size={12} /> Mark selection{touchOnly ? '' : ' (⌘L)'}
-            </button>
-            <button
-              type="button"
-              class="btn small"
-              disabled={!ide.activePath}
-              onclick={() => ide.activePath && void ideAgent.attachFile(ide.activePath)}
-            >
-              <Icon name="file" size={12} /> Attach active file
-            </button>
-            {#if ide.problems.length > 0}
-              <button
-                type="button"
-                class="btn small"
-                onclick={() => ideAgent.attachDiagnostic(ide.problems[0], { openPanel: true })}
-              >
-                <Icon name="warning" size={12} /> Attach problem ({ide.problems.length})
-              </button>
-            {/if}
+          <div class="ia-quick-actions" role="group" aria-label="Suggested prompts" data-testid="ide-agent-suggestions">
+            {#each agentSuggestions as s (s.label)}
+              <button type="button" class="btn small" onclick={() => useSuggestion(s.prompt)}>{s.label}</button>
+            {/each}
           </div>
 
           {#if ideAgent.threads.length > 0}
@@ -426,6 +418,10 @@
 </aside>
 
 <style>
+  /* Phone, typing to the agent with the keyboard up (IdePage's typing mode): the thread
+     header and the context chips step aside so the last messages and the whole input
+     stay on screen. The chips come back when the keyboard closes. */
+  :global(.ide-page.typing) .ia-head, :global(.ide-page.typing) .ia-embed-ctx { display: none; }
   .ia-panel {
     display: flex;
     flex-direction: column;

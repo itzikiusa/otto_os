@@ -13,9 +13,11 @@
     id: string;
     entries: WorkEntry[];
     fold: boolean;
+    /** The turn's token use ("12.4k tokens") on its last stretch, or ''. */
+    tokens?: string;
     children: Snippet;
   }
-  let { id, entries, fold, children }: Props = $props();
+  let { id, entries, fold, tokens = '', children }: Props = $props();
 
   let anchorEl = $state<HTMLDivElement | null>(null);
   let userOpen = $state(false);
@@ -56,7 +58,7 @@
     <details class="rf" bind:open={userOpen} data-testid="runtime-fold-{id}">
       <summary>
         <Icon name="check" size={12} />
-        <span class="ellipsis">{workedFor(entries)} · {entries.length} steps</span>
+        <span class="ellipsis">{workedFor(entries)} · {entries.length} steps{tokens ? ` · ${tokens}` : ''}</span>
         <Icon name="chevronRight" size={12} />
       </summary>
       {#if userOpen}

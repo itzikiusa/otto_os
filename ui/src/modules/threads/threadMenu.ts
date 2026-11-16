@@ -94,7 +94,7 @@ export function buildThreadMenu(s: Session): MenuItem[] {
     ...legacyReviveItem(s),
     { separator: true },
     {
-      label: threads.isSettled(id) ? 'Move back to Active' : 'Settle to History',
+      label: threads.isSettled(id) ? 'Move back to Active' : 'Move to History',
       icon: 'check',
       action: () => threads.toggleSettle(id),
     },
@@ -161,14 +161,14 @@ export function buildSidebarLegacyThreadMenu(
             action: () => opts.onstartroom(s.id),
           },
           {
-            label: settled ? 'Move back to Active' : 'Settle to History',
+            label: settled ? 'Move back to Active' : 'Move to History',
             icon: 'check' as const,
             action: () => threads.toggleSettle(s.id),
           },
         ]
       : [
           {
-            label: 'Revive thread',
+            label: 'Reopen thread',
             icon: 'refresh' as const,
             action: () => opts.onreopen(s, false),
           },

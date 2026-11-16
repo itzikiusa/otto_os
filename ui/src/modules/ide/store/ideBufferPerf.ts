@@ -82,6 +82,14 @@ export function subscribeIdeFileSaved(fn: FileSavedListener): () => void {
   return () => fileSavedListeners.delete(fn);
 }
 
+const diskConflictListeners = new Set<(path: string) => void>();
+/** An autosave found the disk copy changed (409): the editor's "changed on disk" banner
+ *  takes it from there (re-reads, offers Compare / Reload / Keep mine) instead of a toast. */
+export function subscribeIdeDiskConflict(fn: (path: string) => void): () => void {
+  diskConflictListeners.add(fn);
+  return () => diskConflictListeners.delete(fn);
+}
+
 function notifyEvicted(paths: ReadonlySet<string> | 'all'): void {
   for (const fn of evictionListeners) fn(paths);
 }
@@ -605,7 +613,8 @@ async function saveFileNow(
     if (e instanceof ApiError && e.status === 409) {
       perf.conflictedPaths.add(targetPath);
       if (opts.silent) {
-        toasts.error(`Conflict on disk for ${tab.name}`, 'Save manually to overwrite or reload from disk.');
+        if (diskConflictListeners.size) for (const fn of diskConflictListeners) fn(targetPath);
+        else toasts.error(`Conflict on disk for ${tab.name}`, 'Save manually to overwrite or reload from disk.');
         return false;
       }
       const choice = await confirmer.choose(`“${tab.name}” changed on disk since you opened it.`, {

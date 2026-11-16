@@ -427,7 +427,7 @@ impl DapManager {
         )
         .await
         {
-            entry.fail_and_evict(&self.sessions, err.to_string());
+            entry.fail_start(&self.sessions, &err);
             return Err(err);
         }
         Ok(entry.read_snapshot())
@@ -501,7 +501,7 @@ impl DapManager {
                     if entry.boot_generation.load(Ordering::SeqCst) == my_gen
                         && !entry.is_terminal()
                     {
-                        entry.fail_and_evict(&sessions, err.to_string());
+                        entry.fail_start(&sessions, &err);
                     }
                     return;
                 }
@@ -525,7 +525,7 @@ impl DapManager {
             );
             if let Some(Err(err)) = entry.unless_superseded(my_gen, boot).await {
                 if entry.boot_generation.load(Ordering::SeqCst) == my_gen && !entry.is_terminal() {
-                    entry.fail_and_evict(&sessions, err.to_string());
+                    entry.fail_start(&sessions, &err);
                 }
             }
         });
@@ -710,3 +710,7 @@ mod security_tests;
 #[cfg(test)]
 #[path = "session_round5_tests.rs"]
 mod round5_tests;
+
+#[cfg(test)]
+#[path = "session_round6_tests.rs"]
+mod round6_tests;

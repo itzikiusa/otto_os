@@ -424,6 +424,7 @@ async fn compile_rust_debug_artifact(
         initial_output.push(IdeDebugOutputEntry {
             category: "console".into(),
             text: stderr_txt.clone(),
+            seq: 0,
         });
     }
     if !out.status.success() {

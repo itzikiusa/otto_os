@@ -131,7 +131,14 @@ test.describe('Desktop IDE edit safety', () => {
     page.on('request', (r) => { if (r.method() === 'POST' && /\/ide\/(debug\/sessions|runs)(\?|$)/.test(r.url())) launched.push(r.url()); });
     await bootIde(page, `root=${encodeURIComponent(rootA)}`);
     await expect(page.getByTestId('ide-project-tree')).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByText('Safety no-op').first()).toBeAttached({ timeout: 20_000 });
+    // "Current file" is the default run target, so the saved config is picked on purpose:
+    // from here ⌃R / ⌃D really would launch it if the guard let them through.
+    const selector = page.getByTestId('ide-run-config-select');
+    await expect(async () => {
+      if (!(await page.getByTestId('ide-run-config-popover').isVisible())) await selector.click();
+      await page.getByTestId('ide-run-config-popover').getByText('Safety no-op').first().click({ timeout: 2_000 });
+    }).toPass({ timeout: 20_000 });
+    await expect(selector).toContainText('Safety no-op', { timeout: 10_000 });
     // The same guard covers every text field outside the code editor (agent composer,
     // commit box, find fields); the tree filter is the one always on screen.
     const box = page.getByTestId('ide-tree-filter');

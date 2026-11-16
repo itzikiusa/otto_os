@@ -43,16 +43,16 @@
   import { StageAttachments } from './runtime/stageAttachments.svelte';
   import { capsOf } from './runtime/attachmentSupport';
   import { initialProvider, readStartPick, startHarnesses, writeStartPick, type StartLaunch, type StartMeta } from './startComposer';
-  import { FolderPickerModal, MentionMenuView, StageSlashView } from './threadLazy.svelte';
+  import { MentionMenuView, StageSlashView } from './threadLazy.svelte';
   import { buildModeMenu } from './threadPickerMenus';
-  import { harnessLabel, relToRoot } from './threadsHelpers';
+  import { harnessLabel } from './threadsHelpers';
 
   const ModelPicker = lazyComponent(() => import('../../lib/components/ModelPickerPopover.svelte'));
 
   interface Props {
     /** The folder the thread works in ('' = none yet): `@` completion and the file picker. */
     cwd: string;
-    /** Where the file picker opens when `cwd` is empty. */
+    /** The folder a full-access confirm names when `cwd` is empty. */
     pickerStart?: string;
     /** The unsent text survives a reload under this key. */
     draftKey: string;
@@ -67,7 +67,8 @@
     /** Remember the last agent · model · effort under this scope (Threads:
      *  per workspace; an embed: per host kind). Access is never remembered. */
     rememberScope?: string;
-    /** The access chip's mode; null hides the chip (Threads starts in the daemon's default). */
+    /** The access chip's mode (Threads: the person's pick, else the saved
+     *  default); null hides the chip. Shown for a structured agent only. */
     accessMode?: RuntimeAccessMode | null;
     onaccess?: (mode: RuntimeAccessMode) => void;
     placeholder?: string;
@@ -78,10 +79,13 @@
     /** Escape in an empty box; true = the host handled it. */
     onescape?: () => boolean;
     below?: Snippet<[StartMeta]>;
+    /** Text to open with, replacing the box ("Continue with this answer"); `onprefilled` takes it. */
+    prefill?: string | null;
+    onprefilled?: () => void;
   }
   let {
     cwd, pickerStart = '', draftKey, compact = false, runtimeOnly = false, allowCouncil = true, defaultProvider, rememberScope,
-    accessMode = null, onaccess, placeholder, inputLabel = 'Opening prompt for new thread', error = '', onlaunch, onescape, below,
+    accessMode = null, onaccess, placeholder, inputLabel = 'Opening prompt for new thread', error = '', onlaunch, onescape, below, prefill = null, onprefilled,
   }: Props = $props();
 
   const ready = (p: string): boolean => providerReadiness(p).available;
@@ -97,7 +101,6 @@
   let stageContext = $state<ComposerContext[]>([]);
   let ownError = $state('');
   let busy = $state(false);
-  let filePicker = $state(false);
   let composerBoxEl = $state<HTMLDivElement | null>(null);
   let composerEl = $state<HTMLTextAreaElement | null>(null);
   let agentEl = $state<HTMLButtonElement | null>(null);
@@ -195,6 +198,17 @@
     });
   }
 
+  // A prefilled draft lands once, the caret after it; nothing is sent.
+  $effect(() => {
+    const t = prefill;
+    if (t == null) return;
+    untrack(() => {
+      prompt = t;
+      focus(true);
+      onprefilled?.();
+    });
+  });
+
   let pickerOpen = $state(false);
   function openModelMenu(): void {
     if (agentEl) pickerOpen = true;
@@ -237,7 +251,7 @@
         message: o.message,
         titleSeed: o.titleSeed,
         attachments: o.withPrompt ? files.list : [],
-        accessMode: o.access ?? accessMode,
+        accessMode: o.access ?? (runtime ? accessMode : null),
         raw: o.raw,
       });
       if (ok && !o.raw) {
@@ -378,15 +392,26 @@
     }
   }
 
-  function attachPath(path: string): void {
-    const rel = relToRoot(path, cwd);
-    const token = `@${/\s/.test(rel) ? `"${rel}"` : rel} `;
-    prompt = prompt && !/\s$/.test(prompt) ? `${prompt} ${token}` : `${prompt}${token}`;
-    stageContext = addComposerContext(stageContext, fileMentionContext({ path, label: rel, isDir: false }));
+  let picker = $state<{ open(): void } | null>(null);
+  /** A file or folder: `@` at the end, and the mention typeahead takes over. */
+  function insertMention(): void {
+    prompt = prompt && !/\s$/.test(prompt) ? `${prompt} @` : `${prompt}@`;
+    MentionMenuView.prefetch();
     focus(true);
+  }
+  function openAttach(e: MouseEvent): void {
+    const can = files.can;
+    if (!can.images) return insertMention();
+    ctxMenu.showAt(e.currentTarget as HTMLElement, [
+      { label: 'File or folder', icon: 'file', hint: '@', action: insertMention },
+      { label: can.files ? 'Image or PDF…' : 'Image…', icon: 'image', action: () => picker?.open() },
+    ]);
   }
 
   const shownError = $derived(ownError || error);
+  // A council's seats are read-only by design, and a terminal agent takes the
+  // meta row's mode menu instead.
+  const accessShown = $derived(!!accessMode && runtime && !councilOn);
 </script>
 
 <div class="nt-composer" class:compact class:plan={planShown} bind:this={composerBoxEl} data-testid="start-composer">
@@ -456,18 +481,21 @@
     <CouncilStagePicker part="seats" {provider} model={selectedModel} effort={selectedEffort} />
   {/if}
   <div class="nt-foot">
+    <!-- One attach control: a file or folder goes in as an @ mention (the
+         typeahead browses folders too); images / PDFs where the agent takes them. -->
     <button
       type="button"
       class="icon-btn"
-      aria-label="Attach a file from the project"
-      title="Attach a file (@ mention)"
+      aria-haspopup={files.can.images ? 'menu' : undefined}
+      aria-label="Attach"
+      title={files.can.images ? 'Attach a file (@), an image or a PDF' : 'Attach a file (@)'}
       data-testid="new-thread-attach"
       disabled={busy}
-      onclick={() => (filePicker = true)}
+      onclick={openAttach}
     >
-      <Icon name="link" size={16} />
+      <Icon name="plus" size={16} />
     </button>
-    <StageAttach part="button" {files} disabled={busy} />
+    <StageAttach bind:this={picker} part="picker" {files} />
     <span class="nt-spacer"></span>
     {#if allowCouncil}
       <CouncilStagePicker part="toggle" {provider} model={selectedModel} effort={selectedEffort} disabled={busy} />
@@ -492,9 +520,9 @@
       {/if}
       <span class="ellipsis">{agentLabel}</span>
     </button>
-    {#if accessMode}
+    {#if accessShown}
       <span class="nt-access">
-        <RuntimeAccessChip mode={accessMode} agent={harnessLabel(provider)} cwd={cwd || pickerStart} disabled={busy} onpick={(m) => onaccess?.(m)} />
+        <RuntimeAccessChip mode={accessMode!} agent={harnessLabel(provider)} cwd={cwd || pickerStart} disabled={busy} onpick={(m) => onaccess?.(m)} />
       </span>
     {/if}
     <button
@@ -520,6 +548,7 @@
 
 {@render below?.({
   modeSupported,
+  accessShown,
   planSupported,
   interactionMode,
   setMode: (m) => (interactionMode = m),
@@ -540,19 +569,6 @@
     effortLevels={runtime ? (stageCaps.efforts ?? []) : undefined}
     onmode={modeSupported ? (m) => (interactionMode = m) : undefined}
     onclose={() => (pickerOpen = false)}
-  />
-{/if}
-
-{#if filePicker && FolderPickerModal.component}
-  <FolderPickerModal.component
-    title="Attach a file"
-    files={true}
-    start={cwd || pickerStart}
-    onpick={(picked) => {
-      attachPath(picked);
-      filePicker = false;
-    }}
-    onclose={() => (filePicker = false)}
   />
 {/if}
 

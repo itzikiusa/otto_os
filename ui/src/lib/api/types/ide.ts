@@ -615,6 +615,8 @@ export interface IdeInlineValue {
 export interface IdeDebugOutput {
   category: 'stdout' | 'stderr' | 'console' | string;
   text: string;
+  /** Monotonic per-session position (1-based, never reused); absent on older daemons. */
+  seq?: number;
 }
 
 export interface IdeDebugSessionSnapshot {
@@ -629,8 +631,12 @@ export interface IdeDebugSessionSnapshot {
   stopped_reason?: IdeDebugStoppedReason | null;
   active_thread_id?: number | null;
   active_frame_id?: number | null;
+  /** Where execution is stopped (the active thread's top frame with source). */
   paused_file?: string | null;
   paused_line?: number | null;
+  /** The frame the person selected; equals the paused location right after a stop. */
+  selected_frame_file?: string | null;
+  selected_frame_line?: number | null;
   threads: IdeDebugThread[];
   stack_frames: IdeStackFrame[];
   scopes: IdeScope[];
@@ -638,6 +644,12 @@ export interface IdeDebugSessionSnapshot {
   breakpoints: IdeBreakpoint[];
   output: IdeDebugOutput[];
   error?: string | null;
+  /** Next-step class of a start failure next to `error`. */
+  error_kind?: 'adapter_missing' | 'toolchain_missing' | 'build_failed' | null;
+  /** Toolchain ecosystem of that failure (`go`, `python`, `rust`, `java`, `node`, `shell`). */
+  error_ecosystem?: string | null;
+  /** Root of the IDE target the session was launched from. */
+  target_root?: string | null;
 }
 
 export type IdeDebugAction =

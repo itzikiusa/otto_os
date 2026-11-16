@@ -335,7 +335,7 @@ test('strict Threads vs Agents isolation, single pane header, interactive slash 
   await ta.fill('/diff');
   await ta.press('Enter');
   await expect(
-    page.getByTestId('threads-inspector').getByRole('tab', { name: 'Diff' }),
+    page.getByTestId('threads-inspector').getByRole('tab', { name: 'Changes' }),
   ).toHaveAttribute('aria-selected', 'true');
 
   // 5. Plan-mode thread displays the Plan approval bar with both implementation actions.

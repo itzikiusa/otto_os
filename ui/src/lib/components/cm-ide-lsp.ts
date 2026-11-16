@@ -58,7 +58,7 @@ import {
   type IdeLspJumpTarget,
 } from './cm-ide-lsp-dive.ts';
 import { appLive } from '../live.ts';
-import { cancelLspReconnects, isLspReconnecting, noteLspDaemonShutdown, noteLspSessionReady, noteLspSocketClosed } from './cm-ide-lsp-reconnect.ts';
+import { cancelLspReconnects, isLspReconnecting, noteLspDaemonShutdown, noteLspSessionReady, noteLspSocketClosed, noteLspStatus } from './cm-ide-lsp-reconnect.ts';
 
 export {
   buildLspCompletionChangeSpec,
@@ -345,7 +345,7 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
       try {
         await super.initialize();
         unavailableLangUntil.delete(langProbeKey);
-        if (this.ready) noteLspSessionReady(resolvedRoot);
+        if (this.ready) { noteLspSessionReady(resolvedRoot); noteLspStatus(resolvedRoot, 'ready', serverLang); }
       } catch {
         const self = this as unknown as { isClosed?: boolean };
         self.isClosed = true;
@@ -452,7 +452,11 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
   const onSocketGone = (handshakeFailed: boolean, daemonShutdown = false): void => {
     if (entry.disposed) return;
     const hadSession = !handshakeFailed && Boolean(client.ready) && entry.refCount > 0;
-    if (!hadSession && !daemonShutdown && !isLspReconnecting(entry.rootPath)) unavailableLangUntil.set(langProbeKey, Date.now() + 30_000);
+    if (!hadSession && !daemonShutdown && !isLspReconnecting(entry.rootPath)) {
+      unavailableLangUntil.set(langProbeKey, Date.now() + 30_000);
+      // Closed before any session (no binary: 503, or refused): say so instead of going silent.
+      if (handshakeFailed || !client.ready) noteLspStatus(entry.rootPath, 'unavailable', serverLang, 'no_session');
+    }
     const root = entry.rootPath;
     entry.evictFn();
     if (daemonShutdown) noteLspDaemonShutdown(root, hadSession, (resume) => appLive.onConnection((up) => { if (up) resume(); }));
@@ -517,6 +521,7 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
 
   clientPool.set(key, entry);
   scheduleIdleDispose(entry, IDLE_CLOSE_MS);
+  noteLspStatus(resolvedRoot, 'starting', serverLang);
   return entry;
 }
 

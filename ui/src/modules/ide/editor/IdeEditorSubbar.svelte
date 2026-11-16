@@ -1,31 +1,36 @@
 <script lang="ts">
-  // Locked 30px Editor Subbar (CLS = 0): path & symbol crumbs, JSON tools (CSV/TSV/JSONL
-  // Table | Text is the tab strip's Editor | Preview control, IdePreviewModeToggle),
-  // compact Selection Agent bar, Inspection Pill, Color Scheme Quick Picker, and Prefix/Suffix bar.
+  // Locked 30px crumbs row (CLS = 0): path › symbol crumbs, then only what applies to THIS
+  // file — Go build tags when it has some, JSON tools for JSON, notices, the selection's
+  // Agent / Edit / Wrap — and ONE ⋯ with the rest (ideEditorMoreMenu). Line/column,
+  // problems, language and the language server live in the status strip under the dock.
   import { copyWithToast } from '../../../lib/clipboard';
   import Badge from '../../../lib/components/Badge.svelte';
   import { exceedsIdeDraftLimit } from '../../../lib/components/cm-ide-drafts';
   import { IDE_LSP_LINK_EVENT, retryLspNow, type IdeLspLinkDetail } from '../../../lib/components/cm-ide-lsp-reconnect';
+  import { IDE_PREFS_EVENT, readIdePreferences } from '../../../lib/components/cm-ide-prefs';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { extractGoBuildTagsFromSource } from '../../../lib/goBuildTags';
-  import { plural } from '../../../lib/plural';
+  import type { Session } from '../../../lib/api/types';
+  import { ws as wsStore } from '../../../lib/stores/workspace.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { ide, type IdeOpenTab, type IdeSymbolNode } from '../ideStore.svelte';
   import { ideAgent } from '../store/ideAgentController.svelte';
   import { ideLayout } from '../shell/ideLayout.svelte';
   import { ideCollabNotices } from '../store/ideCollabNotices.svelte';
   import { ideEditorChrome } from './ideEditorChrome.svelte';
-  import { pushIdeNavLocation, revealInIdeProjectTree, toggleFormatOnSave } from './ideEditorStoreBridge.svelte';
+  import { pushIdeNavLocation, revealInIdeProjectTree } from './ideEditorStoreBridge.svelte';
   import type { IdeOutlineNode } from './ideLangAnalyzer';
-  import SendToButton from '../filetools/send/SendToButton.svelte';
+  import { collapseIdeCrumbs, ideCrumbAbsPath, ideSymbolChainAt, ideSymbolSiblings } from './ideCrumbs';
+  import { openIdeEditorMoreMenu } from './ideEditorMoreMenu';
+  import { isMultiLine } from '../filetools/send/pasteSafety';
+  import SessionPickerModal from '../filetools/send/SessionPickerModal.svelte';
 
   interface Props {
     activeTab: IdeOpenTab;
     pathSegments: string[];
-    enclosingSymbol: IdeSymbolNode | null;
     effectiveSymbols: IdeSymbolNode[];
     activeJsonPath: string | null;
     sdkLabel: string | null;
@@ -33,23 +38,20 @@
     effectiveViewMode: 'table' | 'text';
     hasNonEmptySelection: boolean;
     blameActive: boolean;
-    errorCount: number;
-    warnCount: number;
     onapplyjson: (nextText: string) => void;
     onjumpsymbol: (delta: -1 | 1) => void;
     ongotoline: (line: number, col: number) => void;
     onopenstructure: () => void;
     ontoggleblame: () => void;
     onopenquickfix: (e: MouseEvent) => void;
-    oncyclediag: (e: MouseEvent) => void;
     onfocusagent: () => void;
   }
 
   let {
-    activeTab, pathSegments, enclosingSymbol, effectiveSymbols, activeJsonPath, sdkLabel,
-    activeDocKind, effectiveViewMode, hasNonEmptySelection, blameActive, errorCount, warnCount,
+    activeTab, pathSegments, effectiveSymbols, activeJsonPath, sdkLabel,
+    activeDocKind, effectiveViewMode, hasNonEmptySelection, blameActive,
     onapplyjson, onjumpsymbol, ongotoline, onopenstructure, ontoggleblame,
-    onopenquickfix, oncyclediag, onfocusagent,
+    onopenquickfix, onfocusagent,
   }: Props = $props();
 
   // Touch devices have no keyboard shortcuts to show: no "(⌘…)" hints there.
@@ -58,7 +60,17 @@
 
   let linePrefix = $state('');
   let lineSuffix = $state('');
+  let sendPicking = $state(false);
+  // "Path crumbs" (Settings › Editor, ⋯ › Appearance): off hides the path and symbol trail.
+  let showCrumbs = $state(readIdePreferences().showBreadcrumbs);
+  $effect(() => {
+    const onPrefs = (): void => { showCrumbs = readIdePreferences().showBreadcrumbs; };
+    window.addEventListener(IDE_PREFS_EVENT, onPrefs);
+    return () => window.removeEventListener(IDE_PREFS_EVENT, onPrefs);
+  });
 
+  const crumbs = $derived(collapseIdeCrumbs(pathSegments));
+  const symbolChain = $derived(ideSymbolChainAt(effectiveSymbols, ide.cursorInfo.line).slice(-3));
   const isGoTab = $derived(activeTab.language === 'go' || activeTab.path.toLowerCase().endsWith('.go'));
   const repoGoTags = $derived(isGoTab ? ide.getRepoGoBuildTags(activeTab.path) : []);
   const fileGoTags = $derived(isGoTab ? extractGoBuildTagsFromSource(activeTab.content) : []);
@@ -70,8 +82,8 @@
     const onLink = (e: Event): void => {
       const d = (e as CustomEvent<IdeLspLinkDetail>).detail;
       if (!d?.rootPath) return;
-      if (d.state !== 'connected') lspLink = d;
-      else if (lspLink?.rootPath === d.rootPath) lspLink = null;
+      if (d.state === 'reconnecting' || d.state === 'waiting' || d.state === 'lost') lspLink = d;
+      else if ((d.state === 'connected' || d.state === 'ready') && lspLink?.rootPath === d.rootPath) lspLink = null;
     };
     window.addEventListener(IDE_LSP_LINK_EVENT, onLink);
     return () => window.removeEventListener(IDE_LSP_LINK_EVENT, onLink);
@@ -133,48 +145,62 @@
     ctxMenu.showAt(anchor, items, { align: 'end' });
   }
 
-  function openSymbolBreadcrumbMenu(e: MouseEvent): void {
+  function jumpTo(s: IdeSymbolNode): void {
+    pushIdeNavLocation(activeTab.path, ide.cursorInfo.line, ide.cursorInfo.col);
+    ongotoline(s.line, (s as IdeOutlineNode).column || 1);
+  }
+
+  /** A symbol crumb opens its siblings (the level it sits in), then "Search file structure…". */
+  function openSiblingMenu(e: MouseEvent, levelIdx: number): void {
     const anchor = e.currentTarget as HTMLElement | null;
-    if (!effectiveSymbols.length) { onopenstructure(); return; }
-    const items: MenuItem[] = effectiveSymbols.slice(0, 50).map((s) => ({
+    const full = ideSymbolChainAt(effectiveSymbols, ide.cursorInfo.line);
+    const offset = full.length - symbolChain.length;
+    const siblings = ideSymbolSiblings(effectiveSymbols, full, levelIdx + offset);
+    if (!siblings.length) { onopenstructure(); return; }
+    const activeSym = full[levelIdx + offset];
+    const items: MenuItem[] = siblings.slice(0, 50).map((s) => ({
       label: s.name,
-      icon: s.line === enclosingSymbol?.line ? 'check' : 'function',
+      icon: s.line === activeSym?.line ? 'check' : 'function',
       hint: `L${s.line}`,
-      action: () => {
-        pushIdeNavLocation(activeTab.path, ide.cursorInfo.line, ide.cursorInfo.col);
-        ongotoline(s.line, (s as IdeOutlineNode).column || 1);
-      },
+      action: () => jumpTo(s),
     }));
     items.push({ separator: true }, { label: 'Search file structure…', icon: 'search', hint: coarsePointer ? undefined : '⌘F12', action: onopenstructure });
     ctxMenu.showAt(anchor, items, { align: 'start' });
   }
 
-  async function openSchemePickerMenu(e: MouseEvent): Promise<void> {
+  function openHiddenFoldersMenu(e: MouseEvent, hidden: { label: string; index: number }[]): void {
     const anchor = e.currentTarget as HTMLElement | null;
-    const {
-      IDE_COLOR_SCHEME_OPTIONS,
-      readIdeEditorPreferences,
-      writeIdeEditorPreferences,
-    } = await import('../../../lib/components/cm-ide-theme');
-    const cur = readIdeEditorPreferences();
-    const items: MenuItem[] = IDE_COLOR_SCHEME_OPTIONS.map((opt) => ({
-      label: opt.label,
-      icon: cur.colorScheme === opt.id ? 'check' : 'palette',
-      action: () => { writeIdeEditorPreferences({ colorScheme: opt.id }); },
+    const items: MenuItem[] = hidden.map((h) => ({
+      label: h.label,
+      icon: 'folder',
+      action: () => void revealInIdeProjectTree(ideCrumbAbsPath(activeTab.path, pathSegments.length, h.index)),
     }));
-    items.push(
-      { separator: true },
-      { label: `Rainbow Brackets: ${cur.rainbowBrackets ? 'On' : 'Off'}`, checked: cur.rainbowBrackets, action: () => { writeIdeEditorPreferences({ rainbowBrackets: !cur.rainbowBrackets }); } },
-      { label: `Inlay Parameter Hints: ${cur.inlayHints ? 'On' : 'Off'}`, checked: cur.inlayHints, action: () => { writeIdeEditorPreferences({ inlayHints: !cur.inlayHints }); } },
-      { label: `CodeVision Usages: ${cur.codeVision ? 'On' : 'Off'}`, checked: cur.codeVision, action: () => { writeIdeEditorPreferences({ codeVision: !cur.codeVision }); } },
-      { label: `Auto-fold Imports: ${cur.autoFoldImports ? 'On' : 'Off'}`, checked: cur.autoFoldImports, action: () => { writeIdeEditorPreferences({ autoFoldImports: !cur.autoFoldImports }); } },
-      { label: `Breadcrumbs Bar: ${cur.showBreadcrumbs ? 'On' : 'Off'}`, checked: cur.showBreadcrumbs, action: () => { writeIdeEditorPreferences({ showBreadcrumbs: !cur.showBreadcrumbs }); } },
-      { label: `Auto-Save: ${cur.autoSave ? 'On' : 'Off'}`, checked: cur.autoSave, action: () => { writeIdeEditorPreferences({ autoSave: !cur.autoSave }); } },
-      { label: `Format on Save: ${cur.formatOnSave ? 'On' : 'Off'}`, checked: cur.formatOnSave, action: () => { toggleFormatOnSave(); writeIdeEditorPreferences({ formatOnSave: !cur.formatOnSave }); } },
-      { separator: true },
-      { label: 'Optimize Imports', icon: 'sparkle', hint: '⌃⌥O', disabled: activeTab.readOnly, action: () => void ide.organizeImportsActiveFile() },
-    );
-    ctxMenu.showAt(anchor, items, { align: 'end' });
+    ctxMenu.showAt(anchor, items, { align: 'start' });
+  }
+
+  function openMoreMenu(e: MouseEvent): void {
+    const anchor = e.currentTarget as HTMLElement | null;
+    const r = anchor?.getBoundingClientRect();
+    void openIdeEditorMoreMenu(anchor, {
+      tab: activeTab,
+      hasSymbols: effectiveSymbols.length > 0,
+      hasSelection: hasNonEmptySelection && effectiveViewMode === 'text',
+      blameActive,
+      coarse: coarsePointer,
+      isGo: isGoTab,
+      onjumpsymbol,
+      onopenstructure,
+      ontoggleblame,
+      onquickfix: () => onopenquickfix(new MouseEvent('click', { clientX: (r?.right ?? 480) - 20, clientY: r?.bottom ?? 120 })),
+      onsetgotags: () => void promptAddGoBuildTag(),
+      onsendsession: () => (sendPicking = true),
+    });
+  }
+
+  async function pasteToSession(s: Session): Promise<void> {
+    sendPicking = false;
+    const ctx = { name: activeTab.name, content: activeTab.content, lang: activeTab.path.split('.').pop()?.toLowerCase() ?? '' };
+    await (await import('../filetools/send/sendTo')).pasteIntoSession(ctx, s);
   }
 
   async function applyJsonTransform(mode: 'pretty' | 'minify' | 'sort'): Promise<void> {
@@ -192,20 +218,26 @@
 </script>
 
 <div class="ide-subbar" class:stack-collapsed={stackCollapsed} data-testid="ide-editor-subbar">
-  <div class="ide-crumbs" dir="ltr">
-    {#each pathSegments as seg, idx (`${seg}:${idx}`)}
-      {#if idx > 0}<span class="crumb-sep" aria-hidden="true"><Icon name="chevronRight" size={12} noflip /></span>{/if}
-      <button type="button" class="crumb-btn" class:last={idx === pathSegments.length - 1} onclick={() => void revealInIdeProjectTree(activeTab.path)} title="Reveal in project tree">{seg}</button>
-    {/each}
-    {#if enclosingSymbol}
-      <span class="crumb-sep" aria-hidden="true"><Icon name="chevronRight" size={12} noflip /></span>
-      <button type="button" class="crumb-sym-btn" onclick={openSymbolBreadcrumbMenu} title={`Jump to symbol in file${kh('⌘F12')}`}>
-        <Icon name="function" size={12} /><span>{enclosingSymbol.name}</span>
-      </button>
-    {/if}
-    {#if activeJsonPath && activeJsonPath !== '$'}
-      <span class="crumb-sep" aria-hidden="true"><Icon name="chevronRight" size={12} noflip /></span>
-      <button type="button" class="crumb-sym-btn mono" onclick={() => void copyWithToast(activeJsonPath, 'JSONPath')} title="Click to copy JSONPath" data-testid="ide-jsonpath-crumb">{activeJsonPath}</button>
+  <div class="ide-crumbs" dir="ltr" data-testid="ide-path-crumbs">
+    {#if showCrumbs}
+      {#each crumbs as c, idx (c.kind === 'seg' ? `s${c.index}` : 'more')}
+        {#if idx > 0}<span class="crumb-sep" aria-hidden="true"><Icon name="chevronRight" size={12} noflip /></span>{/if}
+        {#if c.kind === 'more'}
+          <button type="button" class="crumb-btn crumb-more" aria-label={`${c.hidden.length} more folders`} title={c.hidden.map((h) => h.label).join(' / ')} onclick={(e) => openHiddenFoldersMenu(e, c.hidden)} data-testid="ide-crumb-more">…</button>
+        {:else}
+          <button type="button" class="crumb-btn" class:last={c.last} onclick={() => void revealInIdeProjectTree(activeTab.path)} title="Reveal in project tree" data-testid={c.last ? 'ide-crumb-file' : undefined}>{c.label}</button>
+        {/if}
+      {/each}
+      {#each symbolChain as sym, idx (`${sym.name}:${sym.line}`)}
+        <span class="crumb-sep" aria-hidden="true"><Icon name="chevronRight" size={12} noflip /></span>
+        <button type="button" class="crumb-sym-btn" onclick={(e) => openSiblingMenu(e, idx)} title={`Jump to symbol${kh('⌘F12')}`} data-testid="ide-crumb-symbol">
+          <Icon name="function" size={12} /><span>{sym.name}</span>
+        </button>
+      {/each}
+      {#if activeJsonPath && activeJsonPath !== '$'}
+        <span class="crumb-sep" aria-hidden="true"><Icon name="chevronRight" size={12} noflip /></span>
+        <button type="button" class="crumb-sym-btn mono" onclick={() => void copyWithToast(activeJsonPath, 'JSONPath')} title="Click to copy JSONPath" data-testid="ide-jsonpath-crumb">{activeJsonPath}</button>
+      {/if}
     {/if}
     {#if sdkLabel}<Badge variant="outline" tone="info" label={sdkLabel} />{/if}
     {#if activeTab.readOnly}<Badge variant="outline" tone="neutral" label="Read-only" />{/if}
@@ -232,7 +264,7 @@
         <span>Enable tag: {missingGoTags.join(', ')}</span>
       </button>
     {/if}
-    {#if isGoTab}
+    {#if isGoTab && (repoGoTags.length > 0 || fileGoTags.length > 0)}
       <button
         type="button"
         class="btn small ghost ide-go-tags-pill"
@@ -254,65 +286,26 @@
     {#if hasNonEmptySelection && effectiveViewMode === 'text'}
       <div class="ide-sel-bar" role="group" aria-label="Selection actions" data-testid="ide-selection-agent-bar">
         <button type="button" class="btn small ghost ide-sel-accent" title={`Add selection to AI Agent context${kh('⌘L')}`} onclick={() => { ideAgent.markSelectionFromEditor({ openPanel: true }); onfocusagent(); }} data-testid="ide-selection-add-agent">
-          <Icon name="assistant" size={12} />Agent{kh('⌘L', ' ')}
+          <Icon name="assistant" size={12} />Agent
         </button>
         <button type="button" class="btn small ghost" disabled={activeTab.readOnly || !ide.canEditCollab} title={`Inline AI edit on selection${kh('⌘I')}`} onclick={() => ideAgent.openInlineEdit()} data-testid="ide-selection-inline-edit">
-          <Icon name="sparkle" size={12} />Edit{kh('⌘I', ' ')}
+          <Icon name="sparkle" size={12} />Edit
         </button>
         <button type="button" class="btn small ghost" aria-pressed={ide.prefixSuffixOpen} title="Add prefix or suffix to every selected line" onclick={() => (ide.prefixSuffixOpen = true)} data-testid="ide-prefix-suffix-toggle">
           Wrap
         </button>
-        <button type="button" class="icon-btn" aria-label={`Split selection into multiple cursors${kh('⌥⇧I')}`} title={`Split selection into multiple cursors${kh('⌥⇧I')}`} onclick={() => ide.splitSelectionToLines()}>
-          <Icon name="layers" size={12} />
-        </button>
       </div>
     {/if}
 
-    <span class="ide-cursor-meta" dir="ltr">Ln {ide.cursorInfo.line}, Col {ide.cursorInfo.col}</span>
-    {#if ide.cursorInfo.cursors > 1}<Badge variant="outline" tone="accent" label={plural(ide.cursorInfo.cursors, 'cursor')} />{/if}
-
-    <button
-      type="button"
-      class="ide-inspect-btn"
-      class:has-err={errorCount > 0}
-      class:has-warn={errorCount === 0 && warnCount > 0}
-      onclick={oncyclediag}
-      title={errorCount || warnCount ? `${errorCount} errors, ${warnCount} warnings — click for next issue (Shift+click for Problems)` : 'No problems found'}
-      aria-label={errorCount || warnCount ? `${errorCount} errors, ${warnCount} warnings` : 'No problems found'}
-      data-testid="ide-inspection-pill"
-    >
-      {#if errorCount > 0 || warnCount > 0}
-        {#if errorCount > 0}<span class="ide-ins-err"><Icon name="x" size={12} /> {errorCount}</span>{/if}
-        {#if warnCount > 0}<span class="ide-ins-warn"><Icon name="warning" size={12} /> {warnCount}</span>{/if}
-      {:else}
-        <Icon name="check" size={12} />
-      {/if}
-    </button>
-
-    <SendToButton name={activeTab.name} content={activeTab.content} lang={activeTab.path.split('.').pop()?.toLowerCase() ?? ''} />
-    <button type="button" class="icon-btn" aria-label="Color Scheme & Editor Appearance" title="Color Scheme & Editor Appearance" onclick={openSchemePickerMenu} data-testid="ide-scheme-picker-btn">
-      <Icon name="palette" size={13} />
-    </button>
-    <button type="button" class="icon-btn" aria-label={`Previous function${kh('⌃↑')}`} title={`Previous function${kh('⌃↑')}`} disabled={effectiveSymbols.length === 0} onclick={() => onjumpsymbol(-1)}>
-      <Icon name="arrowUp" size={13} />
-    </button>
-    <button type="button" class="icon-btn" aria-label={`Next function${kh('⌃↓')}`} title={`Next function${kh('⌃↓')}`} disabled={effectiveSymbols.length === 0} onclick={() => onjumpsymbol(1)}>
-      <Icon name="arrowDown" size={13} />
-    </button>
-    <button type="button" class="icon-btn" aria-label={`File structure${kh('⌘F12')}`} title={`File structure${kh('⌘F12')}`} onclick={onopenstructure} data-testid="ide-structure-btn">
-      <Icon name="layers" size={13} />
-    </button>
-    <button type="button" class="icon-btn" aria-label="Toggle git blame annotations" title="Toggle git blame annotations" aria-pressed={blameActive} onclick={ontoggleblame} data-testid="ide-blame-btn">
-      <Icon name="commit" size={13} />
-    </button>
-    <button type="button" class="icon-btn" aria-label={`Show quick fixes and refactorings${kh('⌥⏎')}`} title={`Show quick fixes and refactorings${kh('⌥⏎')}`} onclick={onopenquickfix} data-testid="ide-quickfix-btn">
-      <Icon name="bulb" size={13} />
-    </button>
-    <button type="button" class="icon-btn" aria-label={`Reformat code${kh('⌘⌥L')}`} title={`Reformat code${kh('⌘⌥L')}`} disabled={activeTab.readOnly} onclick={() => void ide.formatActiveFile()}>
-      <Icon name="format" size={13} />
+    <button type="button" class="icon-btn" aria-label="Editor actions" title="Editor actions: structure, functions, reformat, blame, send to, appearance" aria-haspopup="menu" onclick={openMoreMenu} data-testid="ide-editor-more-btn">
+      <Icon name="more" size={14} />
     </button>
   </div>
 </div>
+
+{#if sendPicking}
+  <SessionPickerModal ws={wsStore.currentId ?? ''} multiLine={isMultiLine(activeTab.content)} onpick={(s) => void pasteToSession(s)} onclose={() => (sendPicking = false)} />
+{/if}
 
 {#if ide.prefixSuffixOpen}
   <div class="ide-ps-bar" role="region" aria-label="Multi-line prefix and suffix editor">
@@ -333,9 +326,12 @@
   }
   .ide-crumbs { display: flex; align-items: center; gap: var(--sp-2); flex: 1; min-inline-size: 0; overflow: hidden; font-size: var(--fs-xs); color: var(--text-dim); }
   .crumb-sep { display: inline-flex; opacity: var(--disabled-opacity); flex-shrink: 0; }
-  .crumb-btn { background: transparent; border: none; padding: 0; color: var(--text-dim); font-size: var(--fs-xs); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .crumb-btn { background: transparent; border: none; padding: 0; color: var(--text-dim); font-size: var(--fs-xs); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 2ch; }
   .crumb-btn:hover { color: var(--accent-text); }
-  .crumb-btn.last { color: var(--text); font-weight: 500; }
+  /* The file name never shrinks below its full name; the folders before it give way. */
+  .crumb-btn.last { color: var(--text); font-weight: 500; flex-shrink: 0; }
+  .crumb-more { flex-shrink: 0; padding-inline: var(--sp-1); border-radius: var(--radius-s); }
+  .crumb-more:hover { background: var(--hover); }
   .crumb-sym-btn {
     display: inline-flex; align-items: center; gap: var(--sp-1); padding: 2px var(--sp-2);
     border-radius: var(--radius-s); border: 1px solid var(--border); background: var(--surface-2);
@@ -349,17 +345,7 @@
     min-block-size: 22px;
     padding-block: 0;
   }
-  .ide-cursor-meta { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); padding-inline: var(--sp-1); white-space: nowrap; }
-  .ide-inspect-btn {
-    display: inline-flex; align-items: center; gap: var(--sp-2); block-size: 22px; padding-inline: var(--sp-2);
-    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-s);
-    color: var(--success); font-family: var(--font-mono); font-size: var(--fs-xs); cursor: pointer; white-space: nowrap;
-  }
-  .ide-inspect-btn.has-err { border-color: var(--danger); background: var(--danger-soft); }
-  .ide-inspect-btn.has-warn { border-color: var(--warning); background: var(--warning-soft); }
-  .ide-ins-err { color: var(--danger); font-weight: 600; }
-  .ide-ins-warn { color: var(--warning); font-weight: 600; }
-  .ide-sel-bar {
+    .ide-sel-bar {
     display: inline-flex; align-items: center; flex-wrap: nowrap; gap: 2px; padding-inline: 2px;
     block-size: 24px; background: var(--surface-2); border: 1px solid var(--accent-line); border-radius: var(--radius-s);
   }
@@ -385,5 +371,5 @@
     border: 1px solid var(--control-border); border-radius: var(--radius-s);
   }
   .ide-ps-tip { font-size: var(--fs-xs); color: var(--text-dim); margin-inline-start: auto; }
-  @media (max-width: 640px) { .ide-ps-tip, .ide-cursor-meta { display: none; } }
+  @media (max-width: 640px) { .ide-ps-tip { display: none; } }
 </style>

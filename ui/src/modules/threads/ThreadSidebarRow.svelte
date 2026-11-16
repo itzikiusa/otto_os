@@ -4,9 +4,7 @@
   // needs you gets a warning dot and a soft tint; nothing else shouts.
   import Icon from '../../lib/components/Icon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
-  import { events } from '../../lib/events.svelte';
   import { rowMenu } from '../../lib/rowMenu';
-  import { sessionState } from '../../lib/status';
   import { git } from '../../lib/stores/git.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -17,7 +15,8 @@
   import { runtimeThreads } from './runtime/runtimeThreads.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import { councilOf } from './runtime/council';
-  import { withBackgroundState } from './runtime/taskStop';
+  import { mostUrgent } from './threadAttention';
+  import { threadRowState, threadStateById } from './threadNav.svelte';
 
   interface Props {
     session: Session;
@@ -33,13 +32,10 @@
 
   let { session: s, variant, child = false, onrowclick, onreopen, onmenu, onselect, family }: Props = $props();
 
-  const needs = $derived(ws.needsYou[s.id] === true);
-  const st = $derived(
-    withBackgroundState(
-      sessionState(s, ws.statusMap[s.id] ?? s.status, needs, { stale: events.state !== 'connected' }),
-      runtimeThreads.get(s.id)?.background_tasks?.length ?? 0,
-    ),
-  );
+  // One state per row (threadNav.svelte.ts): a runtime thread's pending
+  // request, failed / stopped last turn and background work included.
+  const st = $derived(threadRowState(s));
+  const needs = $derived(st.key === 'needs-you');
   const pinned = $derived(threads.isPinned(s.id));
   const selected = $derived(threads.focusedSessionId === s.id && !threads.newDraftMode);
   const inPane = $derived(threads.paneIds.includes(s.id) && !threads.newDraftMode);
@@ -53,7 +49,7 @@
   const tip = $derived.by(() => {
     if (!hot) return s.title;
     const br = sessionBranch(s, git.repos, git.statusById);
-    return [s.title, harnessLabel(s.provider), br ? `on ${br}` : null, needs ? 'needs your approval' : null]
+    return [s.title, harnessLabel(s.provider), br ? `on ${br}` : null, famState.key !== 'idle' ? famState.label : null]
       .filter(Boolean)
       .join(' · ');
   });
@@ -66,13 +62,15 @@
   const label = $derived(child && councilOf(runtimeThreads.get(s.id)) ? s.title.replace(/^.* · /, '') : s.title);
 
   const kids = $derived(family ? family.kids : []);
-  /** A parent's dot speaks for its children too: one needs you → needs you; one works → working. */
+  /** A parent's dot speaks for its children too: the most urgent of the
+   *  family (needs you › working › failed › the rest), saying when it is a child's. */
   const famState = $derived.by(() => {
     if (kids.length === 0) return st;
-    const anyNeeds = needs || kids.some((id) => ws.needsYou[id] === true);
-    const working = kids.some((id) => ['working', 'starting'].includes(runtimeThreads.get(id)?.status ?? ws.statusMap[id] ?? ''));
-    return anyNeeds || working ? sessionState(s, working ? 'working' : (ws.statusMap[s.id] ?? s.status), anyNeeds, { stale: events.state !== 'connected' }) : st;
+    const top = mostUrgent([st, ...kids.map(threadStateById)]);
+    return !top || top === st || top.key === st.key ? st : { ...top, hint: `${top.label} — a thread opened from this one` };
   });
+  /** Under the title on touch: what it is doing, and which agent. */
+  const subline = $derived([famState.key === 'idle' ? null : famState.label, harnessLabel(s.provider)].filter(Boolean).join(' · '));
 
   const testid = $derived(
     variant === 'pinned' ? `thread-pinned-${s.id}` : variant === 'history' ? `thread-history-${s.id}` : `thread-row-${s.id}`,
@@ -91,6 +89,7 @@
   class:selected
   class:in-pane={inPane && !selected}
   data-testid={testid}
+  data-state={history ? 'history' : famState.key}
 >
   {#if kids.length > 0 && family}
     <button type="button" class="icon-btn tr-fold" aria-expanded={!family.folded} aria-label="{family.folded ? 'Show' : 'Fold'} the threads opened from {s.title}" title={family.folded ? 'Show its threads' : 'Fold its threads'} data-testid="thread-family-fold-{s.id}" onclick={family.ontoggle}>
@@ -115,13 +114,14 @@
     {:else}
       <StatusDot state={famState} />
     {/if}
-    {#if nested && hasProviderIcon(s.provider)}<ProviderIcon provider={s.provider} size={12} />{/if}
+    {#if hasProviderIcon(s.provider)}<span class="tr-prov" title={harnessLabel(s.provider)}><ProviderIcon provider={s.provider} size={12} /></span>{/if}
     <span class="tr-title ellipsis" dir="auto">{label}</span>
     {#if kids.length > 0}<span class="tr-kids" title="{kids.length} threads opened from this one" data-testid="thread-family-count-{s.id}">· {kids.length}</span>{/if}
     {#if family?.detached}<span class="tr-badge" title="Opened from a thread that is closed or archived" data-testid="thread-detached-{s.id}">detached</span>{/if}
     {#if badge}<span class="tr-badge tr-badge-{badge.kind} ellipsis" title={badge.title} data-testid="thread-badge-{s.id}">{badge.label}</span>{/if}
     {#if unread}<span class="tr-unread" role="img" aria-label="Unread" title="New since you last looked" data-testid="thread-unread-{s.id}"></span>{/if}
     <span class="tr-time">{rel(s.last_active_at)}</span>
+    <span class="tr-sub ellipsis" data-testid="thread-sub-{s.id}">{history ? `Closed · ${harnessLabel(s.provider)}` : subline}</span>
   </button>
   <div class="tr-actions reveal-on-hover">
     {#if variant !== 'pinned'}
@@ -280,12 +280,47 @@
   .tr-row:focus-within .tr-main {
     padding-inline-end: 80px;
   }
-  @media (hover: none) {
-    .tr-time {
-      display: none;
+  .tr-prov {
+    display: inline-flex;
+    flex-shrink: 0;
+  }
+  .tr-sub {
+    display: none;
+  }
+  /* Touch: one clear tap target per row, two lines — title and time, then
+     what the agent is doing and which agent. Pin / beside / ⋯ live in the
+     row's long-press menu (use:rowMenu). */
+  @media (hover: none), (pointer: coarse) {
+    .tr-main,
+    .tr-row:hover .tr-main,
+    .tr-row:focus-within .tr-main {
+      flex-wrap: wrap;
+      row-gap: 2px;
+      block-size: auto;
+      min-block-size: 52px;
+      padding-block: 6px;
+      padding-inline-end: 8px;
     }
-    .tr-main {
-      padding-inline-end: 80px;
+    .tr-row .tr-time,
+    .tr-row:hover .tr-time,
+    .tr-row:focus-within .tr-time {
+      display: inline;
+    }
+    .tr-sub {
+      display: block;
+      flex-basis: 100%;
+      padding-inline-start: 16px;
+      font-size: var(--fs-s);
+      color: var(--text-dim);
+    }
+    .tr-row.needs-you .tr-sub {
+      color: var(--warning);
+    }
+    .tr-row[data-state='failed'] .tr-sub {
+      color: var(--danger);
+    }
+    .tr-actions {
+      display: none;
     }
   }
   .tr-fold {

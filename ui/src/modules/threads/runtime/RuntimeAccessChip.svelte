@@ -15,9 +15,12 @@
     agent: string;
     cwd: string;
     disabled?: boolean;
+    /** A read-only thread (council seats and their judges, `meta.read_only`):
+     *  a static "Read-only" chip — no menu, the mode cannot change what it does. */
+    readOnly?: boolean;
     onpick: (mode: RuntimeAccessMode) => void;
   }
-  let { mode, agent, cwd, disabled = false, onpick }: Props = $props();
+  let { mode, agent, cwd, disabled = false, readOnly = false, onpick }: Props = $props();
 
   const ACCESS: Record<RuntimeAccessMode, { label: string; description: string; icon: IconName }> = {
     'approval-required': { label: 'Supervised', description: 'Ask before commands and file changes.', icon: 'lock' },
@@ -63,6 +66,19 @@
   }
 </script>
 
+{#if readOnly}
+  <span
+    class="ac static"
+    role="note"
+    aria-label="Read-only thread"
+    title="Council seats and their judges only read. Start a new thread to change files."
+    data-testid="runtime-access"
+    data-readonly="true"
+  >
+    <Icon name="lock" size={13} />
+    <span class="ellipsis">Read-only</span>
+  </span>
+{:else}
 <button
   type="button"
   class="ac"
@@ -77,6 +93,7 @@
   <Icon name={cur.icon} size={13} />
   <span class="ellipsis">{cur.label}</span>
 </button>
+{/if}
 
 <style>
   .ac {
@@ -94,7 +111,10 @@
     font-size: var(--fs-s);
     cursor: pointer;
   }
-  .ac:hover:not(:disabled) {
+  .ac.static {
+    cursor: default;
+  }
+  .ac:not(.static):hover:not(:disabled) {
     background: var(--hover);
     color: var(--text);
   }
@@ -102,5 +122,14 @@
   .ac.full:hover:not(:disabled) {
     background: var(--warning-soft);
     color: var(--warning);
+  }
+  .ac:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
+  }
+  @media (pointer: coarse) {
+    .ac {
+      block-size: var(--hit-min);
+    }
   }
 </style>

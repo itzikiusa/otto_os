@@ -19,6 +19,9 @@
   import IdeRunConfigEditor, { type ConfigDraft, emptyConfigDraft } from './shell/IdeRunConfigEditor.svelte';
   import IdeShellEnvCard from './shell/IdeShellEnvCard.svelte';
   import { confirmProdNetworkBridge } from './shell/networkBridgeGuard.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ideLayout } from './shell/ideLayout.svelte';
+  import { runConfigFooterMenu } from './shell/ideRunConfigFooterMenu';
   import {
     emptyNetworkBridgeDraft,
     normalizeBridgeDraftSnapshot,
@@ -647,7 +650,16 @@
     </div>
 
     {#snippet footer()}
-      {#if activeTab === 'configs' && ide.hasTarget}
+      {#if activeTab === 'configs' && ide.hasTarget && ideLayout.stack}
+        <!-- Phone: one row — ⋯ (run, debug, duplicate, delete) + Save; the ✕ closes. -->
+        <button type="button" class="icon-btn env-foot-more" aria-label="More configuration actions" title="More configuration actions" data-testid="ide-cfg-more"
+          onclick={(e) => ctxMenu.showAt(e.currentTarget, runConfigFooterMenu({ busy: savingCfg || savingEnv, deletable: !isNewDraft && Boolean(cfgDraft.id) && !cfgDraft.autoDetected, canDuplicate: Boolean(cfgDraft.name), onSave: (a) => void saveCurrentConfig(a), onDuplicate: duplicateConfig, onDelete: () => void confirmDeleteConfig() }), { align: 'end' })}>
+          <Icon name="more" size={16} />
+        </button>
+        <button type="button" class="btn primary" disabled={savingCfg || savingEnv} onclick={() => void saveCurrentConfig('none')} data-testid="ide-cfg-save">
+          {savingCfg || savingEnv ? 'Saving…' : 'Save'}
+        </button>
+      {:else if activeTab === 'configs' && ide.hasTarget}
         <div class="env-footer-bar">
           <div>
             {#if !isNewDraft && cfgDraft.id && !cfgDraft.autoDetected}
@@ -715,6 +727,7 @@
   .env-err { font-size: var(--fs-xs); color: var(--danger); }
   .env-footer-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; inline-size: 100%; }
   .env-footer-end { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .env-foot-more { min-inline-size: 36px; min-block-size: 36px; }
 
   @media (max-width: 640px) {
     .env-sdk-grid { grid-template-columns: 1fr; }

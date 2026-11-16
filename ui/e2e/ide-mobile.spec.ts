@@ -175,7 +175,7 @@ test.describe('IDE on phones and tablets', () => {
 
     await openFileByTap(page);
     await expectPane(page, 'editor');
-    await expect(page.locator('.ide-editor-area [aria-label="Open files"]').getByText('main.go').first()).toBeVisible();
+    await expect(page.locator('[aria-label="Open files"]').getByText('main.go').first()).toBeVisible();
     const vh = page.viewportSize()!.height;
     const editorH = await heightOf(page, '.ide-editor-area .cm-editor');
     expect(editorH, `${p}: editor height`).toBeGreaterThanOrEqual(vh < 520 ? Math.min(200, vh * 0.5) : vh * 0.5);
@@ -186,6 +186,17 @@ test.describe('IDE on phones and tablets', () => {
     );
     expect(gutterW, `${p}: gutter width (${gutters})`).toBeLessThanOrEqual(60);
     await shot(page, `${p}--03-editor-dark`);
+    // The desktop status strip never costs a phone a row; asked for from the tab ▾, the
+    // crumbs row (short page: still hidden) fits with its one ⋯ on screen.
+    await expect(page.getByTestId('ide-status-strip')).toHaveCount(0);
+    if (vh >= 520) {
+      await page.getByTestId('ide-tabs-overflow-btn').click();
+      await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Show editor toolbar' }).click();
+      await expectFullyInViewport(page, page.getByTestId('ide-editor-more-btn'), `${p}: editor ⋯`);
+      await expectFullyInViewport(page, page.getByTestId('ide-crumb-file'), `${p}: file crumb`);
+      await expectNoHorizontalOverflow(page);
+      await shot(page, `${p}--04-editor-crumbs-dark`);
+    }
 
     await showPane(page, 'files');
     await shot(page, `${p}--02-files-dark`);
@@ -211,7 +222,7 @@ test.describe('IDE on phones and tablets', () => {
     await expect(menu.getByRole('menuitem', { name: /^Debug/ })).toBeVisible();
     await expect(menu.getByRole('menuitem', { name: /Hide project explorer|bottom tool dock/ })).toHaveCount(0);
     await shot(page, `${p}--08-more-menu-dark`);
-    await menu.getByRole('menuitem', { name: /Project SDKs & Toolchains/ }).click();
+    await menu.getByRole('menuitem', { name: /^Open settings/ }).click();
     const modal = page.getByTestId('ide-settings-modal');
     await expect(modal).toBeVisible();
     // The settings page gets most of the modal (narrow: all of it, the
@@ -272,7 +283,7 @@ test.describe('IDE on phones and tablets', () => {
       await shot(page, `rotate--${pane}-3-back-portrait`);
     }
     await showPane(page, 'editor');
-    await expect(page.locator('.ide-editor-area [aria-label="Open files"]').getByText('main.go').first()).toBeVisible();
+    await expect(page.locator('[aria-label="Open files"]').getByText('main.go').first()).toBeVisible();
     expect(await dockOpenPref(page), 'no pane or rotation wrote the desktop dock preference').toBe(dockPrefBefore);
 
     // The navigator drawer: rotation closes it; on its side it opens, carries

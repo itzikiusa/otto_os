@@ -47,13 +47,14 @@
 
   const totalThreads = $derived(groups.reduce((acc, g) => acc + g.items.length, 0));
 
-  function showIdeProjectMenu(e: MouseEvent, project: IdeSidebarProject, firstThreadId: string | null): void {
+  function showIdeProjectMenu(e: MouseEvent, project: IdeSidebarProject): void {
     e.preventDefault();
     ctxMenu.show(e, [
       {
         label: 'Open in IDE',
         icon: 'ide',
-        action: () => openProjectInIde(project.primaryRoot, firstThreadId),
+        // The project and nothing else (I3-18): a thread opens from its own row's menu.
+        action: () => openProjectInIde(project.primaryRoot, null),
       },
       {
         label: 'New thread here',
@@ -97,7 +98,6 @@
       <div class="th-ide-projects">
         {#each groups as grp (grp.project.id)}
           {@const open = !closedProjects[grp.project.id]}
-          {@const firstThreadId = grp.ordered[0]?.session.id ?? null}
           <div class="th-ide-proj" data-testid="threads-ide-project-{grp.project.id}">
             <div class="th-ide-row reveal-host" data-testid="threads-ide-project-row">
               <button
@@ -106,7 +106,7 @@
                 use:rowMenu
                 aria-expanded={open}
                 title={grp.project.folders.join('\n')}
-                oncontextmenu={(e) => showIdeProjectMenu(e, grp.project, firstThreadId)}
+                oncontextmenu={(e) => showIdeProjectMenu(e, grp.project)}
                 onclick={() => (closedProjects = { ...closedProjects, [grp.project.id]: open })}
               >
                 <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
@@ -136,7 +136,7 @@
                 class="icon-btn th-ide-open-btn"
                 aria-label="Open {grp.project.name} in IDE"
                 title="Open {grp.project.name} in IDE"
-                onclick={() => openProjectInIde(grp.project.primaryRoot, firstThreadId)}
+                onclick={() => openProjectInIde(grp.project.primaryRoot, null)}
                 data-testid="threads-open-in-ide"
               >
                 <Icon name="ide" size={12} />

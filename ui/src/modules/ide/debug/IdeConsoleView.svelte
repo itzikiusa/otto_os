@@ -1,6 +1,8 @@
 <script lang="ts">
   // Shared crisp Console + Structured JSON Log Formatter + stacktrace file:line
-  // linkifier used across both `IdeDebuggerPanel` and `IdeRunPanel`.
+  // linkifier used across both `IdeDebuggerPanel` and `IdeRunPanel`. Rows are
+  // keyed and cleared by sequence number (never by array index, which slides
+  // once the buffer is capped), and evaluations sit where they were made.
   import type { Snippet } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { api } from '../../../lib/api/client';
@@ -14,6 +16,8 @@
   } from '../ideStore.svelte';
   import { pushIdeNavLocation } from '../editor/ideEditorStoreBridge.svelte';
   import { ideDockPrefs } from './ideDockPrefs.svelte';
+  import IdeVarRows from './IdeVarRows.svelte';
+  import { interleaveRepl } from './ideConsoleModel';
   import {
     isPlainErrorLine,
     parsePlainTextSegments,
@@ -26,6 +30,12 @@
   export interface ConsoleLineInput {
     text: string;
     isError?: boolean;
+    /** Monotonic sequence number (default: position + 1). */
+    seq?: number;
+    /** Last sequence number that wrote to this line (a stitched line). */
+    endSeq?: number;
+    /** Stable row key (default: `seq`). */
+    key?: string;
   }
 
   interface Props {
@@ -54,45 +64,61 @@
 
   let filterQuery = $state('');
   let showAll = $state(false);
-  let clearedLineIdx = $state(0);
-  let expandedJsonRows = $state<Record<number, boolean>>({});
+  /** Lines up to this sequence number were cleared. */
+  let clearedSeq = $state(0);
+  let expandedJsonRows = $state<Record<string, boolean>>({});
+  let replOpen = $state<Record<string, boolean>>({});
+  let replPaths = $state<Record<string, boolean>>({});
   let scrollEl = $state<HTMLDivElement>();
   let stickBottom = $state(true);
+
+  const seqOf = (l: ConsoleLineInput, i: number): number => l.seq ?? i + 1;
+  const lastSeq = $derived(lines.length > 0 ? (lines[lines.length - 1].endSeq ?? seqOf(lines[lines.length - 1], lines.length - 1)) : 0);
 
   let lastSessionKey = '';
   $effect(() => {
     const k = sessionKey;
     if (k !== lastSessionKey) {
       lastSessionKey = k;
-      clearedLineIdx = 0;
+      clearedSeq = 0;
       expandedJsonRows = {};
+      replOpen = {};
+      replPaths = {};
       showAll = false;
       stickBottom = true;
-    } else if (lines.length < clearedLineIdx) {
-      clearedLineIdx = 0;
+    } else if (lastSeq < clearedSeq) {
+      clearedSeq = 0; // the counter restarted (a restarted session)
     }
   });
 
   interface PreparedRow {
-    index: number;
+    key: string;
+    seq: number;
     clean: string;
     isError: boolean;
     json: ParsedJsonLog | null;
   }
 
-  const activeSlice = $derived(clearedLineIdx > 0 ? lines.slice(clearedLineIdx) : lines);
+  const activeSlice = $derived.by((): { line: ConsoleLineInput; seq: number }[] => {
+    const out: { line: ConsoleLineInput; seq: number }[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const seq = seqOf(lines[i], i);
+      if ((lines[i].endSeq ?? seq) > clearedSeq) out.push({ line: lines[i], seq });
+    }
+    return out;
+  });
 
   const filteredRows = $derived.by((): PreparedRow[] => {
     const q = filterQuery.trim().toLowerCase();
     const pretty = ideDockPrefs.consolePrettyJson;
     const out: PreparedRow[] = [];
-    for (let i = 0; i < activeSlice.length; i++) {
-      const src = activeSlice[i];
+    for (const { line: src, seq } of activeSlice) {
       const clean = stripAnsiCodes(src.text).replace(/\r?\n$/, '');
       if (q && !clean.toLowerCase().includes(q)) continue;
       const json = pretty ? parseStructuredJsonLog(clean) : null;
       out.push({
-        index: clearedLineIdx + i,
+        key: src.key ?? String(seq),
+        seq,
         clean,
         isError: Boolean(src.isError) || (json ? json.tone === 'error' : isPlainErrorLine(clean)),
         json,
@@ -112,6 +138,13 @@
   const hiddenCount = $derived(!showAll && filteredRows.length > LOG_CAP ? filteredRows.length - LOG_CAP : 0);
   const visibleRows = $derived(hiddenCount > 0 ? filteredRows.slice(-LOG_CAP) : filteredRows);
   const hasAnyContent = $derived(activeSlice.length > 0 || replEntries.length > 0);
+  // Evaluations hidden with the capped lines stay hidden with them.
+  const visibleRepl = $derived(
+    hiddenCount > 0 && visibleRows.length > 0
+      ? filteredRepl.filter((r) => typeof r.afterSeq !== 'number' || r.afterSeq >= visibleRows[0].seq - 1)
+      : filteredRepl,
+  );
+  const items = $derived(interleaveRepl(visibleRows, visibleRepl));
 
   $effect(() => {
     void activeSlice.length;
@@ -136,20 +169,29 @@
     el.scrollTo({ top: el.scrollHeight, behavior: scrollBehavior() });
   }
 
-  function toggleRowExpand(index: number): void {
-    expandedJsonRows = { ...expandedJsonRows, [index]: !expandedJsonRows[index] };
+  function toggleRowExpand(key: string): void {
+    expandedJsonRows = { ...expandedJsonRows, [key]: !expandedJsonRows[key] };
+  }
+
+  async function toggleRepl(entry: IdeReplEntry): Promise<void> {
+    const ref = entry.variables_reference ?? 0;
+    const next = !replOpen[entry.id];
+    replOpen = { ...replOpen, [entry.id]: next };
+    if (next && ref > 0 && !ide.expandedVariables[ref]) await ide.expandVariables(ref);
   }
 
   function clearConsole(): void {
-    clearedLineIdx = lines.length;
+    clearedSeq = lastSeq;
     expandedJsonRows = {};
+    replOpen = {};
     onclear?.();
   }
 
   function copyAll(): void {
-    const outLines = filteredRows.map((r) => r.clean.trimEnd());
-    const replLines = filteredRepl.map((r) => `> ${r.expression}\n${r.result}`);
-    const text = [...outLines, ...replLines].filter(Boolean).join('\n');
+    const text = interleaveRepl(filteredRows, filteredRepl)
+      .map((it) => (it.kind === 'line' ? it.line.clean.trimEnd() : `> ${it.entry.expression}\n${it.entry.result}`))
+      .filter(Boolean)
+      .join('\n');
     if (text) void copyWithToast(text, 'console output');
   }
 
@@ -255,10 +297,41 @@
           </div>
         {/if}
 
-        {#each visibleRows as row (row.index)}
-          {#if row.json}
-            {@const j = row.json}
-            {@const isOpen = Boolean(expandedJsonRows[row.index])}
+        {#each items as item (item.kind === 'line' ? `l:${item.line.key}` : `r:${item.entry.id}`)}
+          {#if item.kind === 'repl'}
+            {@const entry = item.entry}
+            {@const ref = entry.variables_reference ?? 0}
+            {@const open = Boolean(replOpen[entry.id])}
+            <div class="dbg-repl-item reveal-host" data-testid="ide-console-repl-entry">
+              <div class="dbg-repl-expr mono">&gt; {entry.expression}</div>
+              <div class="dbg-repl-res mono" class:is-err={entry.isError}>
+                {#if ref > 0 && !entry.isError}
+                  <button type="button" class="icon-btn con-repl-twisty" aria-expanded={open} aria-label={open ? `Collapse ${entry.expression}` : `Expand ${entry.expression}`} title={open ? `Collapse ${entry.expression}` : `Expand ${entry.expression}`} onclick={() => void toggleRepl(entry)}>
+                    <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
+                  </button>
+                {/if}
+                <span class="dbg-repl-val">{entry.result}</span>
+                {#if entry.var_type}<span class="con-repl-type">{entry.var_type}</span>{/if}
+                <button type="button" class="icon-btn reveal-on-hover" aria-label={`Copy result for ${entry.expression}`} title={`Copy result for ${entry.expression}`} onclick={() => void copyWithToast(entry.result, entry.expression)}>
+                  <Icon name="copy" size={12} />
+                </button>
+              </div>
+              {#if open && ref > 0}
+                <div class="con-repl-children" role="list" aria-label={`Fields of ${entry.expression}`}>
+                  <IdeVarRows
+                    vars={ide.expandedVariables[ref] ?? []}
+                    root={`repl:${entry.id}`}
+                    chain={[{ name: entry.expression, value: entry.result, var_type: entry.var_type, variables_reference: ref }]}
+                    openPaths={replPaths}
+                    onsetopen={(p, o) => (replPaths = { ...replPaths, [p]: o })}
+                  />
+                </div>
+              {/if}
+            </div>
+          {:else if item.line.json}
+            {@const row = item.line}
+            {@const j = item.line.json}
+            {@const isOpen = Boolean(expandedJsonRows[row.key])}
             <div class="con-json-row" class:is-open={isOpen} data-testid="ide-console-json-line">
               <div class="con-json-main">
                 {#if j.timestamp}<span class="con-ts mono">{j.timestamp}</span>{/if}
@@ -281,7 +354,7 @@
                     aria-expanded={isOpen}
                     aria-label={isOpen ? 'Collapse JSON log fields' : `Expand ${j.extraEntries.length} JSON log fields`}
                     title={isOpen ? 'Collapse JSON log fields' : 'Inspect raw JSON fields'}
-                    onclick={() => toggleRowExpand(row.index)}
+                    onclick={() => toggleRowExpand(row.key)}
                   >
                     <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
                     <span>{j.extraEntries.length === 1 ? '1 field' : `${j.extraEntries.length} fields`}</span>
@@ -304,8 +377,9 @@
               {/if}
             </div>
           {:else}
+            {@const row = item.line}
             {@const segs = parsePlainTextSegments(row.clean)}
-            <div class="con-plain-line mono" class:is-err={row.isError}>
+            <div class="con-plain-line mono" class:is-err={row.isError} data-testid="ide-console-line">
               {#if row.clean.length === 0}
                 {'\u00a0'}
               {:else}
@@ -319,19 +393,6 @@
               {/if}
             </div>
           {/if}
-        {/each}
-
-        {#each filteredRepl as entry (entry.id)}
-          <div class="dbg-repl-item reveal-host">
-            <div class="dbg-repl-expr mono">&gt; {entry.expression}</div>
-            <div class="dbg-repl-res mono" class:is-err={entry.isError}>
-              <span class="dbg-repl-val">{entry.result}</span>
-              {#if entry.var_type}<span class="con-repl-type">{entry.var_type}</span>{/if}
-              <button type="button" class="icon-btn reveal-on-hover" aria-label={`Copy result for ${entry.expression}`} title={`Copy result for ${entry.expression}`} onclick={() => void copyWithToast(entry.result, entry.expression)}>
-                <Icon name="copy" size={12} />
-              </button>
-            </div>
-          </div>
         {/each}
       {/if}
     </div>
@@ -396,6 +457,8 @@
   .dbg-repl-expr { color: var(--text-dim); font-size: var(--fs-xs); overflow-wrap: anywhere; }
   .dbg-repl-res { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: var(--fs-xs); overflow-wrap: anywhere; }
   .dbg-repl-val { flex: 1; min-inline-size: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .con-repl-twisty { inline-size: 18px; block-size: 18px; flex-shrink: 0; }
+  .con-repl-children { margin-inline-start: -10px; }
   .con-repl-type { color: var(--text-dim); font-size: var(--fs-xs); max-inline-size: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .con-tail-cta { position: absolute; inset-block-end: 8px; inset-inline-end: 12px; z-index: var(--z-sticky); }
 </style>

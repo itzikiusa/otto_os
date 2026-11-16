@@ -176,6 +176,11 @@ pub struct IdeDebugOutputEntry {
     /// `"stdout"` | `"stderr"` | `"console"`.
     pub category: String,
     pub text: String,
+    /// Monotonic per-session position (1-based, never reused, survives the
+    /// output ring dropping old entries) so a console can clear or key rows
+    /// by sequence instead of by array index.
+    #[serde(default)]
+    pub seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,8 +199,15 @@ pub struct IdeDebugSessionSnapshot {
     pub stopped_reason: Option<String>,
     pub active_thread_id: Option<i64>,
     pub active_frame_id: Option<i64>,
+    /// Where execution is stopped: the active thread's top frame with source.
+    /// Selecting a caller frame never moves it.
     pub paused_file: Option<String>,
     pub paused_line: Option<u32>,
+    /// The frame the person selected (equals the paused location right after a stop).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_frame_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_frame_line: Option<u32>,
     pub threads: Vec<IdeThreadInfo>,
     pub stack_frames: Vec<IdeStackFrame>,
     pub scopes: Vec<IdeScope>,
@@ -203,6 +215,17 @@ pub struct IdeDebugSessionSnapshot {
     pub breakpoints: Vec<IdeBreakpoint>,
     pub output: Vec<IdeDebugOutputEntry>,
     pub error: Option<String>,
+    /// Machine-readable class of a start failure next to `error`:
+    /// `adapter_missing` | `toolchain_missing` | `build_failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    /// Toolchain ecosystem the failure is about (`go`, `python`, `rust`, `java`, `node`, `shell`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_ecosystem: Option<String>,
+    /// Root of the IDE target the session was launched from, so a client can
+    /// re-attach only to its own project's sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_root: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,7 +488,8 @@ pub enum IdeCollabEvent {
         sha256: Option<String>,
     },
     DebugUpdated {
-        session: IdeDebugSessionSnapshot,
+        // Boxed: the snapshot is far larger than every other variant (same JSON on the wire).
+        session: Box<IdeDebugSessionSnapshot>,
     },
     RoomClosed {
         room_id: String,

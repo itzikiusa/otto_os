@@ -33,6 +33,7 @@ pub(crate) mod shell_bridge;
 #[cfg(unix)]
 mod shell_bridge_eval;
 mod shell_prelude;
+pub(crate) mod start_error;
 pub mod wire;
 
 use std::collections::BTreeMap;

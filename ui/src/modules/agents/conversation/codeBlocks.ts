@@ -91,6 +91,20 @@ export function codeText(block: Element): string {
   return Array.from(lines, (l) => l.textContent ?? '').join('\n');
 }
 
+/** Fence languages that keep one screen line per code line on a phone too:
+ *  a diff's +/− column and hunk alignment are its meaning, so it scrolls
+ *  sideways instead of wrapping (Wrap still turns wrapping on). */
+export const NO_PHONE_WRAP = new Set(['diff', 'patch']);
+
+/** Does this block wrap long lines without the person asking (a phone)? */
+export function wrapsByDefault(block: { dataset: { lang?: string } }, phone: boolean): boolean {
+  return phone && !NO_PHONE_WRAP.has((block.dataset.lang ?? '').toLowerCase());
+}
+
+// A phone, upright or on its side (app.css uses the same query).
+const phoneWidth = (): boolean =>
+  typeof matchMedia === 'function' && matchMedia('(max-width: 640px), (max-height: 500px) and (pointer: coarse)').matches;
+
 /** What a code block asks its host for (the chat opens the side panel). */
 export interface CodeActionHost {
   copy?: (text: string) => Promise<void>;
@@ -115,7 +129,9 @@ export function runCodeAction(target: EventTarget | null, host: CodeActionHost =
       () => flash(btn, 'Copy failed'),
     );
   } else if (act === 'wrap') {
-    const on = block.classList.toggle('wrap');
+    // On a phone code wraps by default (app.css), so there the button turns
+    // wrapping OFF (`.nowrap`); elsewhere it turns it on (`.wrap`).
+    const on = wrapsByDefault(block, phoneWidth()) ? !block.classList.toggle('nowrap') : block.classList.toggle('wrap');
     btn.setAttribute('aria-pressed', String(on));
   } else if (act === 'expand') {
     const open = block.classList.toggle('expanded');

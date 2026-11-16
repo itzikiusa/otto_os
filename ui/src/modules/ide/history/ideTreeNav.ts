@@ -95,3 +95,12 @@ export function treeFilterMatches(
   for (const list of roots) for (let i = 0; i < list.length; i++) visit(list[i]);
   return hits;
 }
+
+/** Revealing a row (the active file, "Select in tree"): null when it is already fully in
+ *  view — the tree never jumps under the person's eyes — else the scrollTop that puts it a
+ *  third of the way down. */
+export function treeRevealScrollTop(rowTop: number, rowH: number, scrollTop: number, viewH: number): number | null {
+  if (rowTop >= scrollTop && rowTop + rowH <= scrollTop + viewH) return null;
+  return Math.max(0, Math.round(rowTop - viewH / 3));
+}
+

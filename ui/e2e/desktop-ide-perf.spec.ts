@@ -264,7 +264,10 @@ test.describe('Desktop IDE — Perf, Virtualization, Retention & Parallel Load',
     const fatal = watchFatalUiErrors(page);
     await bootIde(page);
 
-    // Open Bottom Dock on Debug AND open the AI Agent dock.
+    // Open Bottom Dock on Debug AND open the AI Agent dock. Debug is hidden until used:
+    // put it on the strip from the dock's ⋯ first.
+    await page.getByTestId('ide-dock-view-menu').click();
+    await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: 'Debug' }).click();
     await page.getByTestId('ide-tab-debug').click();
     await expect(page.getByTestId('ide-debugger-panel')).toBeVisible({ timeout: 10_000 });
 
@@ -1069,14 +1072,15 @@ test.describe('Desktop IDE — Perf, Virtualization, Retention & Parallel Load',
         await expect(page.locator('.ide-dirty-dot')).toHaveCount(0, { timeout: 5_000 });
 
         // Cmd+F12 Move-to-Function / File Structure modal open + close.
-        await page.getByTestId('ide-structure-btn').click();
+        await page.getByTestId('ide-editor-more-btn').click();
+        await page.locator('.ctx-menu').getByRole('menuitem', { name: /File structure/ }).click();
         await expect(page.getByTestId('ide-file-structure-modal')).toBeVisible({ timeout: 8_000 });
         await page.keyboard.press('Escape');
         await expect(page.getByTestId('ide-file-structure-modal')).toBeHidden({ timeout: 8_000 });
 
         // Find in Path / Search Everywhere modal open + close.
         await page.keyboard.press('Meta+Shift+f');
-        const seModal = page.locator('.sheet[role="dialog"]').last();
+        const seModal = page.getByTestId('ide-quick-open');
         await expect(seModal).toBeVisible({ timeout: 8_000 });
         await page.keyboard.press('Escape');
         await expect(seModal).toBeHidden({ timeout: 8_000 });
@@ -1085,6 +1089,7 @@ test.describe('Desktop IDE — Perf, Virtualization, Retention & Parallel Load',
         await page.getByTestId('ide-edit-configs-btn').click();
         const envModal = page.locator('.sheet[role="dialog"]').last();
         await expect(envModal).toBeVisible({ timeout: 8_000 });
+        { const adv = envModal.getByTestId('ide-cfg-advanced-toggle'); if ((await adv.getAttribute('aria-expanded')) !== 'true') await adv.click(); } // SDK / .env live under Advanced
         await envModal.getByTestId('ide-cfg-open-toolchains').click();
         const tcModal = page.locator('.sheet[role="dialog"]').last();
         await expect(tcModal).toContainText(/SDKs, toolchains/i, { timeout: 8_000 });

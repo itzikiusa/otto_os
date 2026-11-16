@@ -454,7 +454,19 @@ export interface RuntimeSession {
   /** The title is still the placeholder it was created with; the agent's own
    *  name for the conversation replaces it. */
   title_auto?: boolean;
+  /** How the latest turn ended; absent / null before any turn ended and while
+   *  a turn runs — a failure stays on the row until the next turn starts.
+   *  Survives a daemon restart. */
+  last_turn_status?: RuntimeTurnOutcome | null;
+  /** Only with `last_turn_status: 'failed'`: `usage_limit`, `auth` or
+   *  `provider` (absent when the failure was not recorded). */
+  last_error_class?: RuntimeErrorClass | null;
 }
+
+/** `RuntimeSession.last_turn_status` (`cancelled` reads `interrupted`). */
+export type RuntimeTurnOutcome = 'completed' | 'failed' | 'interrupted';
+/** `RuntimeSession.last_error_class` — open-ended: treat an unknown value as `provider`. */
+export type RuntimeErrorClass = 'usage_limit' | 'auth' | 'provider' | (string & {});
 
 /** Effective provider slug of a runtime session (`meta.provider_slug` for custom
  *  providers such as `'claudework'`, or `session.provider` for built-ins). */
@@ -483,6 +495,11 @@ export interface CouncilMeta {
   role: 'seat' | 'synthesis';
   /** The effort the seat's (or the judge's) turn asked for. */
   effort?: string;
+  /** The provider picked: a custom slug (`claudework`), else the built-in id.
+   *  Absent on councils started before it was recorded. */
+  provider?: string;
+  /** The model picked; absent = the provider's default. */
+  model?: string;
 }
 
 /** One seat of a council; the same provider may sit more than once. */

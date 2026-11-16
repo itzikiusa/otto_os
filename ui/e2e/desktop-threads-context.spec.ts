@@ -65,7 +65,8 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
   await beta.getByTestId('runtime-send').click();
   await expect.poll(() => sent.length).toBe(1);
   expect(sent[0].id).toBe(ids[1]);
-  expect(sent[0].body).toEqual({ text: 'Beta message' });
+  // A plain send queues behind a running turn instead of steering it (the composer's default).
+  expect(sent[0].body).toEqual({ text: 'Beta message', delivery: 'queue' });
 
   await page.getByTestId('threads-sidebar').getByText('Alpha thread', { exact: true }).click();
   await expect(alpha).toBeVisible();
@@ -83,6 +84,8 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
   });
   for (const width of [1024, 390]) {
     await page.setViewportSize({ width, height: 844 });
+    // The page switches to its compact layout (details as a drawer) a frame after the resize.
+    await expect(page.locator('.th-workspace.compact')).toHaveCount(1);
     await expect(page.getByRole('dialog', { name: 'Thread details', exact: true })).toHaveCount(0);
     const composer = alpha.getByTestId('runtime-composer');
     await composer.fill('/files');
@@ -94,12 +97,24 @@ test('thread drafts, attachments and permissions stay with their owner; mobile c
     await page.keyboard.press('Escape');
     await expect(details).toHaveCount(0);
     await expect(composer).toBeFocused();
-    await page.getByTestId('threads-toggle-sidebar').click();
     const sidebar = page.getByRole('dialog', { name: 'Threads', exact: true });
-    await expect(sidebar).toBeVisible();
-    await expectFullyInViewport(page, sidebar);
-    await page.keyboard.press('Escape');
-    await expect(sidebar).toHaveCount(0);
+    if (width >= 760) {
+      // Tablet width: the thread list is a column beside the conversation, not a drawer;
+      // its toggle hides and shows that column.
+      const column = page.getByTestId('threads-sidebar');
+      await expect(column).toBeVisible();
+      await page.getByTestId('threads-toggle-sidebar').click();
+      await expect(column).toHaveCount(0);
+      await expect(sidebar).toHaveCount(0);
+      await page.getByTestId('threads-toggle-sidebar').click();
+      await expect(column).toBeVisible();
+    } else {
+      await page.getByTestId('threads-toggle-sidebar').click();
+      await expect(sidebar).toBeVisible();
+      await expectFullyInViewport(page, sidebar);
+      await page.keyboard.press('Escape');
+      await expect(sidebar).toHaveCount(0);
+    }
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: info.outputPath(`threads-context-${width}.png`) });
   }

@@ -19,7 +19,6 @@ use crate::IdeCtx;
 pub(super) struct StoredProject {
     pub(super) owner_user_id: String,
     pub(super) raw_primary_root: String,
-    pub(super) raw_folders: Vec<String>,
     pub(super) project: IdeNamedProject,
     pub(super) non_root_project: Option<IdeNamedProject>,
 }
@@ -163,18 +162,11 @@ pub(super) fn build_stored_project(
     let raw_primary_root = trim_trailing_slash(&otto_core::paths::expand_tilde(
         raw_proj.primary_root.trim(),
     ));
-    let raw_folders: Vec<String> = raw_proj
-        .folders
-        .iter()
-        .map(|f| trim_trailing_slash(&otto_core::paths::expand_tilde(f.trim())))
-        .filter(|s| !s.is_empty())
-        .collect();
     let root_proj = revalidate_project_paths(raw_proj.clone(), true).unwrap_or(raw_proj.clone());
     let non_root_project = revalidate_project_paths(raw_proj, false);
     StoredProject {
         owner_user_id,
         raw_primary_root,
-        raw_folders,
         project: root_proj,
         non_root_project,
     }
@@ -284,16 +276,17 @@ pub(super) fn normalize_lookup_fast(root: &str) -> Option<String> {
     (!norm.is_empty()).then_some(norm)
 }
 
-pub(super) fn stored_project_matches(entry: &StoredProject, lookup: &str) -> bool {
+/// Whether `lookup` is the project's PRIMARY root (either spelling). Opening a folder
+/// opens that folder: a repo that is merely a member of a multi-repo project must not
+/// pull the project's other folders in (review I3-02) — those are attached only when
+/// the person opens the project itself (its primary root, or by id).
+pub(super) fn stored_project_primary_matches(entry: &StoredProject, lookup: &str) -> bool {
     let lookup_key = crate::types::root_equiv_key(crate::types::IdeTargetKind::Local, lookup);
-    let eq_any = |cand: &str| {
+    let eq = |cand: &str| {
         cand == lookup
             || crate::types::root_equiv_key(crate::types::IdeTargetKind::Local, cand) == lookup_key
     };
-    eq_any(&entry.project.primary_root)
-        || eq_any(&entry.raw_primary_root)
-        || entry.project.folders.iter().any(|f| eq_any(f))
-        || entry.raw_folders.iter().any(|f| eq_any(f))
+    eq(&entry.project.primary_root) || eq(&entry.raw_primary_root)
 }
 
 const MAX_SCAN_REPOS_ENTRIES: usize = 200;

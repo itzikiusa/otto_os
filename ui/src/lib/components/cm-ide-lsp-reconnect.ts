@@ -14,9 +14,11 @@ export const LSP_RECONNECT_DELAYS_MS: readonly number[] = [1000, 2000, 5000, 10_
 export const IDE_RECONNECT_LSP_EVENT = 'otto:ide-reconnect-lsp';
 export const IDE_LSP_LINK_EVENT = 'otto:ide-lsp-link';
 
-/** `waiting`: the daemon said it is shutting down; reattach once the app is connected again. */
-export type IdeLspLinkState = 'reconnecting' | 'waiting' | 'connected' | 'lost';
-export interface IdeLspLinkDetail { rootPath: string; state: IdeLspLinkState; attempt: number }
+/** `waiting`: the daemon said it is shutting down; reattach once the app is connected again.
+ *  `starting` / `ready` / `unavailable` describe a server's own life (with `lang`): a socket
+ *  dialled, its handshake done, or it closed before any session (no binary, refused). */
+export type IdeLspLinkState = 'reconnecting' | 'waiting' | 'connected' | 'lost' | 'starting' | 'ready' | 'unavailable';
+export interface IdeLspLinkDetail { rootPath: string; state: IdeLspLinkState; attempt: number; lang?: string; reason?: string }
 
 interface ReconnectSeq { root: string; attempt: number; timer: ReturnType<typeof setTimeout> | null }
 
@@ -44,8 +46,29 @@ function emit(type: string, detail: unknown): void {
   try { window.dispatchEvent(new CustomEvent(type, { detail })); } catch { /* ignore */ }
 }
 
+/** The last link events, so a status item mounted after a server started still knows it. */
+const recent: IdeLspLinkDetail[] = [];
+const RECENT_MAX = 40;
+
+function emitDetail(detail: IdeLspLinkDetail): void {
+  recent.push(detail);
+  if (recent.length > RECENT_MAX) recent.splice(0, recent.length - RECENT_MAX);
+  emit(IDE_LSP_LINK_EVENT, detail);
+}
+
 function emitLink(root: string, state: IdeLspLinkState, attempt: number): void {
-  emit(IDE_LSP_LINK_EVENT, { rootPath: root, state, attempt } satisfies IdeLspLinkDetail);
+  emitDetail({ rootPath: root, state, attempt });
+}
+
+/** Link events seen so far (oldest first), for a listener that mounts late. */
+export function recentLspLinks(): readonly IdeLspLinkDetail[] {
+  return recent.slice();
+}
+
+/** A pooled server for `lang` at `rootPath` is dialling, finished its handshake, or closed
+ *  before any session (`unavailable`, with a short `reason`). */
+export function noteLspStatus(rootPath: string, state: 'starting' | 'ready' | 'unavailable', lang: string, reason?: string): void {
+  emitDetail({ rootPath: normRoot(rootPath), state, attempt: 0, lang, ...(reason ? { reason } : {}) });
 }
 
 /** True while a reattach sequence runs for `rootPath`: a failed attempt then must not put

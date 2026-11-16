@@ -18,7 +18,7 @@
   import { collectRelated } from './relatedCollect';
   import { RELATED_KIND_LABEL, relatedStatus, type RelatedRow } from './relatedThreads';
   import { messageThread } from './relatedMessage';
-  import { relayTargets } from './threadRelay';
+  import { broadcastTargets, relayTargets } from './threadRelay';
   import { threads } from './threadsStore.svelte';
 
   interface Props {
@@ -52,7 +52,15 @@
 
   function pickTarget(e: MouseEvent): void {
     const items: MenuItem[] = [
-      { label: 'All active threads', icon: 'send', pinned: true, action: () => void messageThread(threadId, 'broadcast') },
+      {
+        label: 'All open threads in this project',
+        icon: 'send',
+        pinned: true,
+        hint: String(broadcastTargets(threadId).length),
+        disabled: broadcastTargets(threadId).length === 0,
+        title: broadcastTargets(threadId).length ? undefined : 'No other open thread in this folder',
+        action: () => void messageThread(threadId, 'broadcast'),
+      },
       { separator: true, pinned: true },
       ...relayTargets(threadId).map((t) => ({ label: t.title, action: () => void messageThread(threadId, t.id) })),
     ];

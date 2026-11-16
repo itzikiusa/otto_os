@@ -89,6 +89,13 @@
     };
   });
 
+  // A right-click opens this editor for a line without a breakpoint: only Done (or Enter)
+  // creates it, so Escape, × or a click outside leaves nothing behind.
+  function dismiss(): void {
+    if (existing) saveAndClose();
+    else closePopover();
+  }
+
   function saveAndClose(e?: SubmitEvent): void {
     e?.preventDefault();
     ide.updateBreakpoint(path, line, {
@@ -112,7 +119,7 @@
   class="bp-pop-backdrop"
   role="presentation"
   onclick={(e) => {
-    if (e.target === e.currentTarget) saveAndClose();
+    if (e.target === e.currentTarget) dismiss();
   }}
 >
   <div
@@ -141,21 +148,28 @@
           <Badge tone="warn" variant="outline" label="Muted" />
         {:else if logMessage.trim()}
           <Badge tone="warn" variant="outline" label="Logpoint" />
+        {:else if existing?.verified === false}
+          <Badge tone="neutral" variant="outline" label="Not bound" />
         {:else if existing?.verified}
-          <Badge tone="ok" variant="outline" label="Verified" />
+          <Badge tone="ok" variant="outline" label="Bound" />
         {/if}
         <button
           type="button"
           class="icon-btn"
           aria-label="Close breakpoint editor"
           title="Close breakpoint editor"
-          onclick={() => saveAndClose()}
+          onclick={dismiss}
         >
           <Icon name="x" size={12} />
         </button>
       </div>
     </header>
 
+    {#if existing?.verified === false && !areIdeBreakpointsMuted()}
+      <p class="bp-pop-unbound" data-testid="ide-bp-unbound-message">
+        Not bound: {existing.message?.trim() || 'the debugger could not place a breakpoint on this line'}
+      </p>
+    {/if}
     <form class="bp-pop-form" onsubmit={saveAndClose}>
       <label class="bp-field">
         <span>Condition (pause when true)</span>
@@ -264,6 +278,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .bp-pop-unbound {
+    margin: 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .bp-pop-form {
     display: flex;

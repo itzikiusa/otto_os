@@ -12,7 +12,7 @@ import { lsGet, lsSet } from '../../lib/storage';
 import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
 import { toastError } from '../../lib/toastError';
 import {
-  attachProjectFolder, canonicalizeLocalProjectPath, createTemplatedFile, detachProjectFolder,
+  attachProjectFolder, canonicalizeLocalProjectPath, canonicalRootKey, createTemplatedFile, detachProjectFolder,
   detectBuildToolFromState, formatRelativeToRoots, loadActiveProjectIdLocal, loadNamedProjectsLocal,
   confirmDiscardOnSwitch, mutatePathBreakpoints, normalizeRootPath, performCloseAllTabs, pushNavigationHistory,
   restoreWorkspaceTabsOrInitial, revealPathInTree, saveActiveProjectIdLocal, saveBuildToolPrefsLocal, saveLastIdeRoot,
@@ -314,9 +314,9 @@ class IdeStore {
   ): Promise<boolean> {
     const clean = normalizeRootPath(root);
     if (!clean) return false;
-    if (opts.projectId === undefined && this.target.kind === 'local' && normalizeRootPath(this.target.root) === clean && !opts.additionalRoots) return true;
+    if (opts.projectId === undefined && this.target.kind === 'local' && canonicalRootKey(this.target.root) === canonicalRootKey(clean) && !opts.additionalRoots) return true;
     if (!opts.discardConfirmed && !(await this.confirmDiscardUnsaved())) return false;
-    const matchedProj = opts.projectId !== undefined ? opts.projectId : (this.namedProjects.find((p) => p.primary_root === clean)?.id ?? null);
+    const matchedProj = opts.projectId !== undefined ? opts.projectId : (this.namedProjects.find((p) => canonicalRootKey(p.primary_root) === canonicalRootKey(clean))?.id ?? null); // `/var` ≡ `/private/var` (I3-21)
     this.activeProjectId = matchedProj;
     saveLastIdeRoot(clean);
     saveActiveProjectIdLocal(matchedProj, this.namedProjects, clean);
@@ -689,7 +689,7 @@ class IdeStore {
   }
   async startDebug(opts: { configId?: string; language?: string; skipProdConfirm?: boolean; launch?: IdeDebugLaunchMemo['launch'] } = {}): Promise<void> {
     const gate = await (await loadRepoActionsMod()).confirmIdeTargetProdLaunch(this.target, this.projectEnv, opts.skipProdConfirm);
-    if (!gate.allowed) return;
+    if (!gate.allowed || !(await (await loadDebugEnvMod()).guardDebugRelaunch(this, (s) => this.applyDebugSnapshot(s)))) return; // one live session, never an orphan
     if (idePreferences.current.autoSave) await this.flushAutoSave();
     this.debugSseCtl = await (await loadDebugEnvMod()).launchDebugSession(this, { ...opts, confirmProdTargets: gate.confirmProdTargets }, this.debugSseCtl, (s) => this.applyDebugSnapshot(s));
   }
@@ -697,18 +697,17 @@ class IdeStore {
     const apply = (m: typeof DebugEnvMod): void => {
       const cur = this.activeDebug;
       if (cur && cur.id === raw.id && typeof raw.revision === 'number' && typeof cur.revision === 'number' && raw.revision < cur.revision) return;
-      const prevPaused = `${cur?.paused_file ?? ''}:${cur?.paused_line ?? 0}`;
-      const { snap, paused } = m.normalizeIncomingDebugSnapshot(this, raw);
-      this.activeDebug = snap;
+      const prevReveal = m.debugRevealTarget(cur)?.key ?? '';
+      const { snap } = m.normalizeIncomingDebugSnapshot(this, raw);
+      m.resetForNewDebugSession(this, cur, snap); this.activeDebug = snap;
       const sl = snap.launch;
       if (!this.debugState.lastDebugLaunch && (sl?.program || sl?.attach_port)) {
         this.debugState.lastDebugLaunch = { configId: snap.config_id ?? undefined, language: snap.language, launch: { program: sl.program, args: sl.args, build_flags: sl.build_flags, cwd: sl.cwd ?? undefined, test_name: sl.test_name ?? undefined, attach_port: sl.attach_port ?? undefined, env: sl.env, env_file: sl.env_file, inherit_shell_env: sl.inherit_shell_env, sdk_path: sl.sdk_path } };
       }
       m.syncSnapshotBreakpointsToStore(this, snap);
-      if (snap.state === 'paused' && paused && snap.paused_line) {
-        if (`${paused}:${snap.paused_line}` !== prevPaused) void this.openFile(paused, { line: snap.paused_line, preview: false });
-        void this.refreshWatches();
-      }
+      const reveal = m.debugRevealTarget(snap); // the selected frame, else the stop
+      if (reveal && reveal.key !== prevReveal) void this.openFile(reveal.path, { line: reveal.line, preview: false });
+      if (reveal) void this.refreshWatches();
       if (snap.state === 'terminated' || snap.state === 'error') {
         this.debugSseCtl?.abort(); this.debugSseCtl = null; this.debugStreamActive = false;
       } else if (!this.debugSseCtl && !this.collabIsGuest) {

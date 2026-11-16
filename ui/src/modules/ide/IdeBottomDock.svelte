@@ -1,6 +1,7 @@
 <script lang="ts">
   // Collapsible, height-resizable (120px..85vh), maximizable IDE Bottom Tool Dock
-  // hosting Debug, Run & tests, Git, Problems, Usages, and Terminal.
+  // hosting Terminal, Problems, Git and Run, plus Debug, Usages and DB Watch while they
+  // are in use (`ideDockTabs.svelte.ts`).
   // `stack` (the phone layout's Tools pane): always open, fills the pane, no
   // resizer, Terminal first, and picking a tab never writes the workbench's
   // persisted "dock open" preference.
@@ -20,8 +21,9 @@
   import { ideDockPrefs } from './debug/ideDockPrefs.svelte';
   import { ideDbWatch } from './dbwatch/ideDbWatchState.svelte';
   import { ideGit } from './git/ideGitController.svelte';
+  import { IDE_DOCK_ON_DEMAND, ideDockOrder, ideDockTabMemory, ideDockTabVisible } from './ideDockTabs.svelte';
   import { ide, type IdeBottomTab } from './ideStore.svelte';
-  import { dockMaxFor, stackDockOrder } from './shell/ideLayout.svelte';
+  import { dockMaxFor } from './shell/ideLayout.svelte';
 
   type DockTab = IdeBottomTab | 'git';
 
@@ -80,6 +82,8 @@
     if (ideDockPrefs.isDockTabHidden(cur)) {
       ideDockPrefs.ensureDockTabVisible(cur);
     }
+    // Opened from ⌘K, ⋯, a shortcut or a debug run: an on-demand tab stays for the session.
+    untrack(() => ideDockTabMemory.markUsed(cur));
   });
 
   function setDockHeight(next: number): void {
@@ -128,9 +132,9 @@
     return r.status;
   });
 
-  const allDockTabs = $derived<readonly TabItem<DockTab>[]>([
+  const allDockTabs = $derived<readonly TabItem<DockTab>[]>(ideDockOrder<TabItem<DockTab>>([
     { id: 'debug', label: 'Debug', icon: 'bug', count: debugCount, testid: 'ide-tab-debug' },
-    { id: 'run', label: 'Run & tests', icon: 'play', count: runCount, testid: 'ide-tab-run' },
+    { id: 'run', label: stack ? 'Run' : 'Run & tests', icon: 'play', count: runCount, testid: 'ide-tab-run' },
     {
       id: 'git',
       label: 'Git',
@@ -160,13 +164,27 @@
       testid: 'ide-tab-dbwatch',
     },
     { id: 'terminal', label: 'Terminal', icon: 'terminal', testid: 'ide-tab-terminal' },
-  ]);
+  ]));
 
-  const dockTabs = $derived(
-    (stack ? stackDockOrder(allDockTabs) : allDockTabs).filter(
-      (t) => !ideDockPrefs.isDockTabHidden(t.id) || t.id === activeDockTab,
-    ),
-  );
+  /** Does an on-demand tool hold something right now (a session, a result, an armed watch)? */
+  function tabHasContent(id: DockTab): boolean {
+    if (id === 'debug') return Boolean(ide.activeDebug);
+    if (id === 'usages') return ide.usages.length > 0 || ide.usagesLoading;
+    if (id === 'dbwatch') return Boolean(ideDbWatch.baselineSnapshot || ideDbWatch.liveWatch);
+    return true;
+  }
+
+  function isTabShown(id: DockTab): boolean {
+    return ideDockTabVisible(id, {
+      hidden: ideDockPrefs.hiddenDockTabs,
+      shown: ideDockTabMemory.shown,
+      used: ideDockTabMemory.used,
+      hasContent: tabHasContent(id),
+      active: false,
+    });
+  }
+
+  const dockTabs = $derived(allDockTabs.filter((t) => t.id === activeDockTab || isTabShown(t.id)));
 
   function onTabSelect(tab: DockTab): void {
     if (stack) ide.activeBottomTab = tab as IdeBottomTab;
@@ -184,40 +202,51 @@
     });
   });
 
+  /** The dock's one ⋯: which tools sit on the strip, plus height. An on-demand tool ticked
+   *  here stays; unticking any tool hides it until it is opened again. */
   function openDockViewMenu(e: MouseEvent): void {
     const allIds = allDockTabs.map((t) => t.id);
     const items: MenuItem[] = allDockTabs.map((t) => {
-      const visible = !ideDockPrefs.isDockTabHidden(t.id);
+      const visible = t.id === activeDockTab || isTabShown(t.id);
       return {
         label: t.label,
         checked: visible,
         action: () => {
-          const wasActive = activeDockTab === t.id;
-          ideDockPrefs.toggleDockTabHidden(t.id, allIds);
-          if (wasActive && ideDockPrefs.isDockTabHidden(t.id)) {
-            const next = allDockTabs.find((x) => !ideDockPrefs.isDockTabHidden(x.id));
-            if (next) onTabSelect(next.id);
+          const onDemand = IDE_DOCK_ON_DEMAND.includes(t.id);
+          if (visible) {
+            if (onDemand) ideDockTabMemory.setShown(t.id, false);
+            if (!ideDockPrefs.isDockTabHidden(t.id)) ideDockPrefs.toggleDockTabHidden(t.id, allIds);
+            if (activeDockTab === t.id && ideDockPrefs.isDockTabHidden(t.id)) {
+              const next = allDockTabs.find((x) => x.id !== t.id && isTabShown(x.id));
+              if (next) onTabSelect(next.id);
+            }
+          } else {
+            ideDockPrefs.ensureDockTabVisible(t.id);
+            if (onDemand) ideDockTabMemory.setShown(t.id, true);
           }
         },
       };
     });
-    items.push(
-      { separator: true },
-      {
-        label: maximized ? 'Restore dock height' : 'Maximize dock height (78%)',
+    items.push({ separator: true });
+    if (!stack) {
+      items.push({
+        label: maximized ? 'Restore dock height' : 'Maximize dock height',
         icon: maximized ? 'minimize' : 'maximize',
         action: () => {
           ide.toggleBottomDock(true);
           maximized = !maximized;
         },
+      });
+    }
+    items.push({
+      label: 'Reset visible tabs',
+      icon: 'refresh',
+      disabled: ideDockPrefs.hiddenDockTabs.length === 0 && ideDockTabMemory.shown.length === 0,
+      action: () => {
+        ideDockPrefs.resetDockTabs();
+        ideDockTabMemory.reset();
       },
-      {
-        label: 'Reset visible tabs',
-        icon: 'refresh',
-        disabled: ideDockPrefs.hiddenDockTabs.length === 0,
-        action: () => ideDockPrefs.resetDockTabs(),
-      },
-    );
+    });
     ctxMenu.show(e, items);
   }
 
@@ -275,25 +304,13 @@
         <button
           type="button"
           class="icon-btn dock-act"
-          aria-label="Dock view options"
-          title="Show or hide dock tabs"
+          aria-label="Dock options"
+          title="Tool windows and dock height"
           onclick={openDockViewMenu}
           data-testid="ide-dock-view-menu"
         >
           <Icon name="more" size={12} />
         </button>
-        {#if open && !stack}
-          <button
-            type="button"
-            class="icon-btn dock-act"
-            aria-label={maximized ? 'Restore dock height' : 'Maximize dock height'}
-            title={maximized ? 'Restore dock height' : 'Maximize dock height (78%)'}
-            onclick={() => (maximized = !maximized)}
-            data-testid="ide-dock-maximize"
-          >
-            <Icon name={maximized ? 'minimize' : 'maximize'} size={12} />
-          </button>
-        {/if}
         {#if !stack}
           <button
             type="button"
@@ -352,5 +369,11 @@
   /* Stacked Tools pane: the dock IS the pane (hidden, still mounted, on the others). */
   .dock-shell.stack-hidden { display: none; }
   .dock-shell.stack.is-open { flex: 1; block-size: 100%; max-block-size: none; }
-  .dock-shell.stack .dock-header, .dock-shell.stack .dock-header :global(.otabs) { block-size: 44px; min-block-size: 44px; max-block-size: 44px; }
+  /* Stacked: 44 px touch tabs whose underline is the row's bottom edge (no dead band under
+     it); the header grows instead of clipping when the ⋯ wraps under a strip that overflows
+     (the strip itself fades at the edge that hides a tab). */
+  .dock-shell.stack .dock-header { block-size: auto; min-block-size: 44px; max-block-size: none; }
+  .dock-shell.stack .dock-header :global(.otabs) { block-size: auto; min-block-size: 44px; }
+  .dock-shell.stack .dock-header :global(.otab) { min-block-size: 44px; }
+  .dock-shell.stack .dock-act { block-size: 36px; inline-size: 36px; }
 </style>

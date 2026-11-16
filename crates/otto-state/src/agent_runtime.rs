@@ -8,7 +8,8 @@ mod drafts;
 
 use chrono::{DateTime, Utc};
 use otto_core::agent_runtime::{
-    RuntimeAccessMode, RuntimeCapabilities, RuntimeProvider, RuntimeSession, RuntimeSessionStatus,
+    ProviderFailure, ProviderTurn, RuntimeAccessMode, RuntimeCapabilities, RuntimeProvider,
+    RuntimeSession, RuntimeSessionStatus, TurnItem, TurnItemKind,
 };
 use otto_core::{Error, Id, Result};
 use sqlx::Row;
@@ -67,12 +68,38 @@ pub struct RawRuntimeEntityRow {
 }
 
 /// Column list (a macro so the queries stay `&'static str`, as sqlx requires).
+/// The last two read the latest `turn` entity (by sequence: one turn runs at a
+/// time, so the last one written is the latest) and its `<turn>:error` item —
+/// `RuntimeSession::last_turn_status` / `last_error_class` of a cold thread.
 macro_rules! session_cols {
     () => {
         "id, workspace_id, provider, title, cwd, model, native_thread_id, closed, \
          created_by, created_at, last_active_at, last_seq, seq_reserved, access_mode, parent_id, ui_control, meta, \
-         title_auto, effort"
+         title_auto, effort, \
+         (SELECT t.payload_json FROM agent_runtime_entities t \
+           WHERE t.session_id = agent_runtime_sessions.id AND t.kind = 'turn' \
+           ORDER BY t.sequence DESC LIMIT 1) AS last_turn_json, \
+         (SELECT e.payload_json FROM agent_runtime_entities e \
+           WHERE e.session_id = agent_runtime_sessions.id AND e.kind = 'turn_item' \
+             AND e.entity_id = (SELECT t.entity_id FROM agent_runtime_entities t \
+               WHERE t.session_id = agent_runtime_sessions.id AND t.kind = 'turn' \
+               ORDER BY t.sequence DESC LIMIT 1) || ':error') AS last_error_json"
     };
+}
+
+/// The latest turn and its failure, from [`session_cols`]' last two columns.
+fn outcome_of(r: &sqlx::sqlite::SqliteRow) -> (Option<ProviderTurn>, Option<ProviderFailure>) {
+    let turn = r
+        .get::<Option<String>, _>("last_turn_json")
+        .and_then(|j| serde_json::from_str::<ProviderTurn>(&j).ok());
+    let failure = r
+        .get::<Option<String>, _>("last_error_json")
+        .and_then(|j| serde_json::from_str::<TurnItem>(&j).ok())
+        .and_then(|i| match i.kind {
+            TurnItemKind::Error { failure } => Some(failure),
+            _ => None,
+        });
+    (turn, failure)
 }
 
 fn u(v: i64) -> u64 {
@@ -88,38 +115,43 @@ fn row_to_session(r: &sqlx::sqlite::SqliteRow) -> Result<RuntimeSessionRecord> {
     let provider = RuntimeProvider::parse(&provider)
         .ok_or_else(|| Error::Internal(format!("bad runtime provider '{provider}'")))?;
     let closed = r.get::<i64, _>("closed") != 0;
-    Ok(RuntimeSessionRecord {
-        session: RuntimeSession {
-            id: r.get("id"),
-            workspace_id: r.get("workspace_id"),
-            provider,
-            title: r.get("title"),
-            cwd: r.get("cwd"),
-            model: r.get("model"),
-            effort: r.get("effort"),
-            native_thread_id: r.get("native_thread_id"),
-            status: if closed {
-                RuntimeSessionStatus::Closed
-            } else {
-                RuntimeSessionStatus::Dormant
-            },
-            access_mode: RuntimeAccessMode::parse(&r.get::<String, _>("access_mode"))
-                .unwrap_or_default(),
-            created_by: r.get("created_by"),
-            created_at: ts(&r.get::<String, _>("created_at"))?,
-            last_active_at: ts(&r.get::<String, _>("last_active_at"))?,
-            last_sequence: u(r.get("last_seq")),
-            parent_id: r.get("parent_id"),
-            ui_control: r
-                .get::<Option<String>, _>("ui_control")
-                .and_then(|j| serde_json::from_str(&j).ok()),
-            background_tasks: Vec::new(),
-            capabilities: RuntimeCapabilities::for_provider(provider),
-            title_auto: r.get::<i64, _>("title_auto") != 0,
-            meta: r
-                .get::<Option<String>, _>("meta")
-                .and_then(|j| serde_json::from_str(&j).ok()),
+    let mut session = RuntimeSession {
+        id: r.get("id"),
+        workspace_id: r.get("workspace_id"),
+        provider,
+        title: r.get("title"),
+        cwd: r.get("cwd"),
+        model: r.get("model"),
+        effort: r.get("effort"),
+        native_thread_id: r.get("native_thread_id"),
+        status: if closed {
+            RuntimeSessionStatus::Closed
+        } else {
+            RuntimeSessionStatus::Dormant
         },
+        access_mode: RuntimeAccessMode::parse(&r.get::<String, _>("access_mode"))
+            .unwrap_or_default(),
+        created_by: r.get("created_by"),
+        created_at: ts(&r.get::<String, _>("created_at"))?,
+        last_active_at: ts(&r.get::<String, _>("last_active_at"))?,
+        last_sequence: u(r.get("last_seq")),
+        parent_id: r.get("parent_id"),
+        ui_control: r
+            .get::<Option<String>, _>("ui_control")
+            .and_then(|j| serde_json::from_str(&j).ok()),
+        background_tasks: Vec::new(),
+        capabilities: RuntimeCapabilities::for_provider(provider),
+        title_auto: r.get::<i64, _>("title_auto") != 0,
+        meta: r
+            .get::<Option<String>, _>("meta")
+            .and_then(|j| serde_json::from_str(&j).ok()),
+        last_turn_status: None,
+        last_error_class: None,
+    };
+    let (turn, failure) = outcome_of(r);
+    session.set_outcome(turn.as_ref(), failure.as_ref());
+    Ok(RuntimeSessionRecord {
+        session,
         closed,
         seq_reserved: u(r.get("seq_reserved")),
     })

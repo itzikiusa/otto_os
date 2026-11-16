@@ -1,12 +1,11 @@
 import { api } from '../../lib/api/client';
 import { onLive } from '../../lib/live';
-import { plural } from '../../lib/plural';
 import { router } from '../../lib/router.svelte';
 import { openFile } from '../../lib/stores/openfile.svelte';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
 import { toastError } from '../../lib/toastError';
-import type { BroadcastResp, TrailEvent } from '../../lib/api/types';
+import type { TrailEvent } from '../../lib/api/types';
 import { threadsChrome } from './threadsChrome.svelte';
 
 export type ThreadsLayoutMode = 'single' | 'split' | 'grid';
@@ -105,6 +104,8 @@ class ThreadsStore {
   newDraftMode = $state(false);
   draftWorkspaceId = $state<string | null>(null);
   draftCwd = $state<string | null>(null);
+  /** Text the stage's composer opens with ("Continue with this answer"), taken once. */
+  draftText = $state<string | null>(null);
   sidebarOpen = $state(true);
   inspectorOpen = $state(false);
   /** Desktop preference stays separate from a phone/tablet's temporary sheet. */
@@ -495,8 +496,9 @@ class ThreadsStore {
     this.save();
   }
 
-  startNewThread(opts: { workspaceId?: string | null; cwd?: string | null } = {}): void {
+  startNewThread(opts: { workspaceId?: string | null; cwd?: string | null; draft?: string } = {}): void {
     threadsChrome.stageView = null;
+    this.draftText = opts.draft ?? null;
     this.draftWorkspaceId = opts.workspaceId ?? null;
     this.draftCwd = opts.cwd ?? null;
     this.newDraftMode = true;
@@ -722,31 +724,6 @@ class ThreadsStore {
     const fromSession = opts.fromSessionId ? ws.getSession(opts.fromSessionId) : null;
     const fromTitle = fromSession?.title ?? opts.fromTitle ?? 'Operator';
     try {
-      if (opts.target === 'broadcast') {
-        const wid = opts.workspaceId ?? ws.currentId;
-        if (!wid) {
-          toasts.warn('Pick a workspace first', 'Broadcast sends to active threads in a workspace.');
-          return false;
-        }
-        const resp = await api.post<BroadcastResp>(`/workspaces/${wid}/broadcast`, {
-          text: fromSession ? `[From ${fromTitle}] ${msg}` : msg,
-        });
-        const count = resp.session_ids.length;
-        if (count === 0) {
-          toasts.warn('No live threads received it', 'Start or resume a thread first.');
-          return false;
-        }
-        toasts.success('Broadcast delivered', `Sent to ${plural(count, 'thread')}`);
-        this.recordLocalPeerEvent({
-          kind: 'broadcast',
-          fromSessionId: opts.fromSessionId,
-          fromTitle,
-          toSessionId: null,
-          toTitle: 'All active threads',
-          summary: msg,
-        });
-        return true;
-      }
       const targetTitle = ws.getSession(opts.target)?.title ?? opts.targetTitle;
       const named = fromSession || opts.fromTitle ? fromTitle : null;
       if (opts.via) await opts.via(msg, named);
@@ -771,7 +748,8 @@ class ThreadsStore {
     }
   }
 
-  private recordLocalPeerEvent(p: Omit<PeerTimelineItem, 'id' | 'ts'>): void {
+  /** Also the fan-outs' record (threadRelay.ts). */
+  recordLocalPeerEvent(p: Omit<PeerTimelineItem, 'id' | 'ts'>): void {
     const existingIdx = this.peerEvents.findIndex(
       (x) =>
         x.id.startsWith('trail-') &&

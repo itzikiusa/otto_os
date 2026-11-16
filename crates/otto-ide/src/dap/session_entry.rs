@@ -13,6 +13,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 
 use super::session::{DapStartContext, MAX_DEBUG_OUTPUT, MAX_DEBUG_OUTPUT_BYTES};
 use super::session_transport::evict_terminated_sessions;
+use super::start_error::classify_start_error;
 use super::wire::{DapEvent, DapMessage, DapReadItem, DapReader, DapResponse, DapWriter};
 use super::BridgeGuard;
 use crate::types::{IdeDebugOutputEntry, IdeDebugSessionSnapshot, IdeDebugState, IdeStartDebugReq};
@@ -211,6 +212,8 @@ pub(super) struct SessionEntry {
     pub(super) lifecycle_lock: tokio::sync::Mutex<()>,
     /// A coalesced output snapshot is scheduled for watchers.
     output_flush_pending: AtomicBool,
+    /// Last `seq` handed to an output entry (monotonic for the session's life).
+    output_seq: AtomicU64,
 }
 
 impl SessionEntry {
@@ -224,10 +227,13 @@ impl SessionEntry {
         let owner_user_id = ctx.owner_user_id.clone();
         let (events_tx, _) = broadcast::channel(128);
         let mut output_buf = VecDeque::with_capacity(initial_output.len().min(MAX_DEBUG_OUTPUT));
-        for item in initial_output {
+        let mut last_seq = 0u64;
+        for mut item in initial_output {
             if output_buf.len() >= MAX_DEBUG_OUTPUT {
                 output_buf.pop_front();
             }
+            last_seq += 1;
+            item.seq = last_seq;
             output_buf.push_back(item);
         }
         let initial_snap = IdeDebugSessionSnapshot {
@@ -244,6 +250,8 @@ impl SessionEntry {
             active_frame_id: None,
             paused_file: None,
             paused_line: None,
+            selected_frame_file: None,
+            selected_frame_line: None,
             threads: Vec::new(),
             stack_frames: Vec::new(),
             scopes: Vec::new(),
@@ -251,6 +259,9 @@ impl SessionEntry {
             breakpoints: req.breakpoints.clone(),
             output: Vec::new(),
             error: None,
+            error_kind: None,
+            error_ecosystem: None,
+            target_root: Some(req.target.root.clone()).filter(|r| !r.is_empty()),
         };
         let initial_break_exc = req.break_on_exceptions;
         Arc::new(Self {
@@ -273,6 +284,7 @@ impl SessionEntry {
             boot_gen_tx: watch::channel(1).0,
             lifecycle_lock: tokio::sync::Mutex::new(()),
             output_flush_pending: AtomicBool::new(false),
+            output_seq: AtomicU64::new(last_seq),
         })
     }
 
@@ -356,6 +368,8 @@ impl SessionEntry {
             }
             snap.stopped_reason = None;
             snap.paused_line = None;
+            snap.selected_frame_file = None;
+            snap.selected_frame_line = None;
             snap.threads.clear();
             snap.stack_frames.clear();
             snap.scopes.clear();
@@ -367,6 +381,35 @@ impl SessionEntry {
         &self,
         sessions: &DashMap<String, Arc<SessionEntry>>,
         msg: String,
+    ) {
+        self.fail_with(sessions, msg, None, None);
+    }
+
+    /// Fail a session whose start (adapter lookup, build, handshake) errored,
+    /// with a machine-readable `error_kind` next to the message so the UI can
+    /// offer the next step (install the debugger, open SDKs, show the build).
+    pub(super) fn fail_start(&self, sessions: &DashMap<String, Arc<SessionEntry>>, err: &Error) {
+        let language = self
+            .snapshot
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .language
+            .clone();
+        let failure = classify_start_error(err, &language);
+        self.fail_with(
+            sessions,
+            failure.message,
+            failure.kind.map(String::from),
+            failure.ecosystem.map(String::from),
+        );
+    }
+
+    fn fail_with(
+        &self,
+        sessions: &DashMap<String, Arc<SessionEntry>>,
+        msg: String,
+        kind: Option<String>,
+        ecosystem: Option<String>,
     ) {
         let session_id = self
             .snapshot
@@ -387,6 +430,8 @@ impl SessionEntry {
             snap.scopes.clear();
             snap.inline_values.clear();
             snap.error = Some(msg);
+            snap.error_kind = kind;
+            snap.error_ecosystem = ecosystem;
         });
         evict_terminated_sessions(sessions);
     }
@@ -434,9 +479,12 @@ impl SessionEntry {
             if buf.len() >= MAX_DEBUG_OUTPUT {
                 buf.pop_front();
             }
+            // Assigned under the buffer lock so ring order and `seq` order agree.
+            let seq = self.output_seq.fetch_add(1, Ordering::SeqCst) + 1;
             buf.push_back(IdeDebugOutputEntry {
                 category: category.to_string(),
                 text: clipped,
+                seq,
             });
             let mut total_bytes: usize = buf.iter().map(|e| e.text.len()).sum();
             while total_bytes > MAX_DEBUG_OUTPUT_BYTES && buf.len() > 1 {

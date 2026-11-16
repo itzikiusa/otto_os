@@ -129,9 +129,13 @@ test('scrolled up, new messages raise a pill that jumps to the latest', async ({
 
   // The timeline learns the reader left the bottom from the scroll event, which
   // arrives a frame later (and a follow may still be in flight): wait until
-  // the scroll has settled at the top before more messages arrive.
+  // the scroll has settled at the top before more messages arrive. Only the
+  // READER lets go of the end (follow.ts `followAfterScroll`, since 7b2315ae2):
+  // a bare `scrollTop = 0` reads as the page scrolling itself, so the scroll
+  // follows a wheel gesture, as a person's would.
   await expect(async () => {
     await scroller.evaluate((el) => new Promise<void>((done) => {
+      el.dispatchEvent(new WheelEvent('wheel', { deltaY: -400, bubbles: true }));
       el.scrollTop = 0;
       requestAnimationFrame(() => requestAnimationFrame(() => done()));
     }));
@@ -151,6 +155,9 @@ test('Edit on a queued message keeps what is being typed', async ({ page }) => {
   const thread = page.getByTestId('runtime-thread-rt_a');
   await expect(thread).toBeVisible({ timeout: 15_000 });
   const composer = thread.getByTestId('runtime-composer');
+  // Type only once the saved draft has loaded: under load the recovered
+  // (empty) draft used to land after the fill and replace it.
+  await expect(thread.getByTestId('runtime-draft-status')).toHaveAttribute('data-state', 'saved');
   await composer.fill('half a thought');
 
   await hooks(page, 'queue', 'rt_a', 'queued one');

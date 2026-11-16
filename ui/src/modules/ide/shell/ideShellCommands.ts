@@ -1,16 +1,19 @@
 // Synchronous IDE keyboard shortcuts and Color Scheme preference helpers
 // for `IdePage.svelte`. Command palette & menus live in `./ideShellMenus.ts`.
+//
+// WHICH key does WHAT comes from one table, `./ideShortcuts.ts` (per keymap preset);
+// this file only says how each command runs and when it may (`WINDOW_COMMANDS`).
 
-import { confirmer } from '../../../lib/confirm.svelte';
-import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
 import {
   readIdePreferences,
   writeIdePreferences,
   type ConcreteIdeColorSchemeId,
   type IdeColorSchemeId,
 } from '../../../lib/idePreferences.svelte';
-import { ide, ideBasename } from '../ideStore.svelte';
+import { ide } from '../ideStore.svelte';
+import { openGoToFile, openGoToLine, openGoToSymbol, openRecentFiles } from '../search/ideQuickOpen.svelte';
 import { ideAgent } from '../store/ideAgentController.svelte';
+import { ideKeymapPresetOf, matchIdeShortcuts, type IdeChord, type IdeShortcutId } from './ideShortcuts';
 
 export type IdeQuickSchemeId = IdeColorSchemeId;
 export type IdeDarkSchemeId = Extract<
@@ -52,40 +55,10 @@ export function dispatchOpenLocalHistory(): void {
   window.dispatchEvent(new CustomEvent('otto:ide-open-local-history', { detail: { path: ide.activePath ?? ide.target.root } }));
 }
 
-export async function promptIdeGoToLine(): Promise<void> {
-  if (!ide.activePath) return;
-  ide.goToLineOpen = true;
-  try {
-    const raw = await confirmer.promptText('Go to line[:column]:', {
-      title: 'Go to Line / Column',
-      placeholder: `${ide.cursorInfo.line}:${ide.cursorInfo.col}`,
-      confirmLabel: 'Go',
-    });
-    if (!raw?.trim() || !ide.activePath) return;
-    const [lStr, cStr] = raw.trim().split(':');
-    ide.jumpTo(
-      ide.activePath,
-      Math.max(1, Number.parseInt(lStr ?? '1', 10) || 1),
-      Math.max(1, Number.parseInt(cStr ?? '1', 10) || 1),
-    );
-  } finally {
-    ide.goToLineOpen = false;
-  }
-}
-
-export function openIdeRecentFilesMenu(): void {
-  const anchor = document.querySelector<HTMLElement>('[data-testid="ide-more-btn"]');
-  if (!anchor) return;
-  const items: MenuItem[] =
-    ide.recentPaths.length > 0
-      ? ide.recentPaths.map((p) => ({
-          label: ideBasename(p),
-          hint: ide.relativePath(p),
-          icon: 'file',
-          action: () => void ide.openFile(p, { preview: false }),
-        }))
-      : [{ label: 'No recent files yet', disabled: true }];
-  ctxMenu.showAt(anchor, items, { align: 'end' });
+/** Go to Line is the quick-open's `:` mode now (`search/ideQuickOpen.svelte.ts`
+ *  `openGoToLine`); this name stays for IdePage's existing import. */
+export function promptIdeGoToLine(): void {
+  openGoToLine();
 }
 
 const inXterm = (t: EventTarget | null): boolean => t instanceof Element && Boolean(t.closest('.xterm'));
@@ -105,16 +78,6 @@ function inEditorWithFindPanel(t: EventTarget | null): boolean {
   return t instanceof Element && Boolean(t.closest('.cm-editor')?.querySelector('.cm-search'));
 }
 
-/** ⌘L: add the editor selection (or the current line) to the agent, as the editor's
- *  context menu and the docs say. ⇧⌘L toggles the agent dock; Go to Line is ⌘G. */
-function addSelectionToAgent(): void {
-  ideAgent.markSelectionFromEditor({ openPanel: true });
-}
-
-function matchesKey(e: KeyboardEvent, code: string, letter: string): boolean {
-  return e.code === code || e.key.toLowerCase() === letter;
-}
-
 function hasActiveDebugSession(): boolean {
   return Boolean(ide.activeDebug && ide.activeDebug.state !== 'terminated');
 }
@@ -132,145 +95,138 @@ function closeOpenIdeOverlays(): boolean {
   return closed;
 }
 
+interface ShellKeyCtx {
+  e: KeyboardEvent;
+  toggleExplorer?: () => void;
+  triggerAgent?: () => void;
+}
+
+interface WindowCommand {
+  /** false = not handled after all (the key goes on to the editor / the app). */
+  run: (ctx: ShellKeyCtx) => boolean | void;
+  /** Only while a debug session is live; tried before a command sharing its key (Standard F5). */
+  session?: boolean;
+  /** Needs an active file. */
+  file?: boolean;
+  /** Never from a focused terminal. */
+  noTerm?: boolean;
+  /** Its ⌘ chord also runs in the window phase (focus in a terminal included), as it always did. */
+  window?: boolean;
+  /** Still runs while the quick-open is the open overlay — it retargets the picker. */
+  overSearch?: boolean;
+  when?: (e: KeyboardEvent) => boolean;
+}
+
+const pos = (): { path: string; line: number; col: number } | null =>
+  ide.activePath ? { path: ide.activePath, line: ide.cursorInfo.line, col: ide.cursorInfo.col } : null;
+
+/** How each window-scope row of `IDE_SHORTCUTS` runs. A row without an entry here
+ *  fails `unit/ideActionsShortcuts.test.ts`. */
+export const WINDOW_COMMANDS: Record<IdeShortcutId, WindowCommand | undefined> = {
+  settings: { window: true, run: () => ide.openSettings() },
+  hardReload: { run: () => window.location.reload() },
+  searchEverywhere: undefined,
+  goToFile: { overSearch: true, run: () => openGoToFile() },
+  goToSymbol: { overSearch: true, run: () => openGoToSymbol() },
+  goToLine: { overSearch: true, file: true, when: (e) => !inEditorWithFindPanel(e.target), run: () => openGoToLine() },
+  recentFiles: { overSearch: true, noTerm: true, run: () => openRecentFiles() },
+  findInPath: { overSearch: true, run: () => ide.openSearchEverywhere('text', { replace: false }) },
+  replaceInPath: { overSearch: true, window: true, run: () => ide.openSearchEverywhere('text', { replace: true }) },
+  navigateBack: { run: () => (ide.canNavigateBack ? void ide.navigateBack() : false) },
+  navigateForward: { run: () => (ide.canNavigateForward ? void ide.navigateForward() : false) },
+  fileStructure: undefined,
+  goToDefinition: undefined,
+  findUsages: { file: true, run: () => { const p = pos(); if (p) void ide.findReferences(p.path, p.line, p.col); } },
+  rename: { file: true, run: () => { const p = pos(); if (p) void ide.openRenameModal(p.path, p.line, p.col); } },
+  quickFix: undefined,
+  reformat: { window: true, noTerm: true, run: () => void ide.formatActiveFile() },
+  optimizeImports: { window: true, noTerm: true, run: () => void ide.organizeImportsActiveFile() },
+  toggleComment: undefined,
+  duplicateLine: undefined,
+  deleteLine: undefined,
+  splitSelection: undefined,
+  pasteHistory: undefined,
+  save: { run: () => void ide.saveFile() },
+  saveAll: { run: () => void ide.saveAll() },
+  closeTab: { file: true, run: () => { if (ide.activePath) void ide.closeTab(ide.activePath); } },
+  reopenTab: { run: () => void ide.reopenClosedTab() },
+  toggleExplorer: { run: (c) => (c.toggleExplorer ? c.toggleExplorer() : false) },
+  toggleDock: { run: () => ide.toggleBottomDock() },
+  runPanel: { run: () => ide.openBottomTab('run') },
+  debugPanel: { run: () => ide.openBottomTab('debug') },
+  problemsPanel: { run: () => ide.openBottomTab('problems') },
+  gitPanel: { run: () => ide.openBottomTab('git') },
+  terminal: { run: () => ide.openBottomTab('terminal') },
+  // ⌘L: add the editor selection (or the current line) to the agent, as the editor's
+  // context menu and the docs say. ⇧⌘L toggles the agent dock; Go to Line is ⌘G.
+  addSelectionToAgent: { window: true, run: () => void ideAgent.markSelectionFromEditor({ openPanel: true }) },
+  toggleAgent: { window: true, run: (c) => (c.triggerAgent ? c.triggerAgent() : false) },
+  inlineEdit: { window: true, run: () => ideAgent.openInlineEdit() },
+  run: { noTerm: true, run: () => void ide.startRun() },
+  debug: { noTerm: true, run: () => void ide.startDebug() },
+  stop: { window: true, run: () => void ide.stopActiveExecution() },
+  restartDebug: { session: true, run: () => void ide.restartDebug() },
+  toggleBreakpoint: { window: true, file: true, run: () => { if (ide.activePath) ide.toggleBreakpoint(ide.activePath, ide.cursorInfo.line); } },
+  resume: { session: true, window: true, run: () => void ide.debugCommand('continue') },
+  stepOver: { session: true, run: () => void ide.stepOver() },
+  stepInto: { session: true, run: () => void ide.stepInto() },
+  stepOut: { session: true, run: () => void ide.stepOut() },
+  runToCursor: { session: true, run: () => void ide.runToCursor() },
+};
+
+/** ⌘ chords are the chord phase's (keys.ts → `keyContext.pageChords`, never from a
+ *  terminal); every other chord is the window phase's. */
+const isCmdChord = (c: IdeChord): boolean => Boolean(c.mod || c.meta);
+/** A bare F-key or a literal ⌃ chord: text editing inside a text field. */
+const isBareChord = (c: IdeChord): boolean => !c.mod && !c.meta && !c.alt;
+
+function dispatchIdeShortcut(ctx: ShellKeyCtx, phase: 'chord' | 'window', overlayOpen: boolean): boolean {
+  const { e } = ctx;
+  const term = inXterm(e.target);
+  // A terminal owns its ⌃ keys (⌃L clears, ⌃R searches history, ⌃` …).
+  if (phase === 'window' && term && e.ctrlKey && !e.metaKey) return false;
+  const preset = ideKeymapPresetOf(ide.keymapPreset);
+  const hits = matchIdeShortcuts(e, preset, 'window')
+    .map((h) => ({ ...h, cmd: WINDOW_COMMANDS[h.id] }))
+    // A live-session command first: Standard F5 resumes a paused program, else starts Debug.
+    .sort((a, b) => Number(Boolean(b.cmd?.session)) - Number(Boolean(a.cmd?.session)));
+  for (const { chord, cmd } of hits) {
+    if (!cmd) continue;
+    const cmdChord = isCmdChord(chord);
+    if (phase === 'chord' ? !cmdChord : cmdChord && !cmd.window) continue;
+    if (overlayOpen && !(cmd.overSearch && ide.searchEverywhereOpen) && !(chord.meta && chord.ctrl)) continue;
+    if (cmd.session && !hasActiveDebugSession()) continue;
+    if (cmd.file && !ide.activePath) continue;
+    if (cmd.noTerm && term) continue;
+    if (isBareChord(chord) && inTextField(e.target)) continue;
+    if (cmd.when && !cmd.when(e)) continue;
+    if (cmd.run(ctx) === false) continue;
+    e.preventDefault();
+    return true;
+  }
+  return false;
+}
+
+/** The ⌘ chords, claimed through `keyContext.pageChords` before the app's own map. */
 export function handleIdeChord(
   e: KeyboardEvent,
   overlayOpen: boolean,
   toggleExplorer: () => void,
   triggerAgent?: () => void,
 ): boolean {
-  if (e.metaKey && e.ctrlKey && e.shiftKey && !e.altKey && matchesKey(e, 'KeyR', 'r')) {
-    e.preventDefault();
-    window.location.reload();
-    return true;
-  }
-  const mod = e.metaKey || e.ctrlKey;
-  const pureMod = mod && !(e.metaKey && e.ctrlKey);
-  if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyR', 'r')) {
-    if (!overlayOpen || ide.searchEverywhereOpen) {
-      e.preventDefault();
-      ide.openSearchEverywhere('text', { replace: true });
-      return true;
-    }
-  }
-  if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyF', 'f')) {
-    if (!overlayOpen || ide.searchEverywhereOpen) {
-      e.preventDefault();
-      ide.openSearchEverywhere('text', { replace: false });
-      return true;
-    }
-  }
-  if (overlayOpen) return false;
-  if (e.altKey && (e.ctrlKey || e.metaKey) && !e.shiftKey && matchesKey(e, 'KeyO', 'o')) {
-    e.preventDefault();
-    void ide.organizeImportsActiveFile();
-    return true;
-  }
-  if (e.metaKey && e.altKey && !e.ctrlKey && !e.shiftKey && matchesKey(e, 'KeyR', 'r') && hasActiveDebugSession()) {
-    e.preventDefault();
-    void ide.debugCommand('continue');
-    return true;
-  }
-  if ((e.metaKey || e.ctrlKey) && e.altKey && !e.shiftKey && matchesKey(e, 'KeyL', 'l')) {
-    e.preventDefault();
-    void ide.formatActiveFile();
-    return true;
-  }
-  if (pureMod && !e.shiftKey && !e.altKey && (e.code === 'Comma' || e.key === ',')) { e.preventDefault(); ide.openSettings(); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyS', 's')) { e.preventDefault(); void ide.saveFile(); return true; }
-  if (mod && !e.shiftKey && e.altKey && matchesKey(e, 'KeyS', 's')) { e.preventDefault(); void ide.saveAll(); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyW', 'w') && ide.activePath) { e.preventDefault(); void ide.closeTab(ide.activePath); return true; }
-  if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyT', 't')) { e.preventDefault(); void ide.reopenClosedTab(); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyE', 'e')) { e.preventDefault(); openIdeRecentFilesMenu(); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyG', 'g') && !inEditorWithFindPanel(e.target)) { e.preventDefault(); void promptIdeGoToLine(); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyL', 'l')) { e.preventDefault(); addSelectionToAgent(); return true; }
-  if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyL', 'l') && triggerAgent) { e.preventDefault(); triggerAgent(); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'Digit1') { e.preventDefault(); toggleExplorer(); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'Digit4') { e.preventDefault(); ide.openBottomTab('run'); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'Digit5') { e.preventDefault(); ide.openBottomTab('debug'); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'Digit6') { e.preventDefault(); ide.openBottomTab('problems'); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'Digit9') { e.preventDefault(); ide.openBottomTab('git'); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'BracketLeft' && ide.canNavigateBack) { e.preventDefault(); void ide.navigateBack(); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && e.code === 'BracketRight' && ide.canNavigateForward) { e.preventDefault(); void ide.navigateForward(); return true; }
-  if (pureMod && e.shiftKey && !e.altKey && matchesKey(e, 'KeyO', 'o')) {
-    e.preventDefault(); ide.openSearchEverywhere('files'); return true;
-  }
-  if (pureMod && !e.shiftKey && !e.altKey && (matchesKey(e, 'KeyO', 'o') || e.key === 'F12')) {
-    e.preventDefault(); ide.openSearchEverywhere('symbols'); return true;
-  }
-  if (pureMod && !e.shiftKey && !e.altKey && matchesKey(e, 'KeyI', 'i') && !(e.ctrlKey && !e.metaKey && inXterm(e.target))) {
-    e.preventDefault(); ideAgent.openInlineEdit(); return true;
-  }
-  if (pureMod && !e.shiftKey && !e.altKey && e.key === 'F8' && ide.activePath) { e.preventDefault(); ide.toggleBreakpoint(ide.activePath, ide.cursorInfo.line); return true; }
-  if (pureMod && !e.shiftKey && !e.altKey && e.key === 'F2') { e.preventDefault(); void ide.stopActiveExecution(); return true; }
-  return false;
+  return dispatchIdeShortcut({ e, toggleExplorer, triggerAgent }, 'chord', overlayOpen);
 }
 
 export function handleIdeWindowKeyDown(e: KeyboardEvent, overlayOpen: boolean, triggerAgent: () => void): void {
-  if (!e.defaultPrevented && e.metaKey && e.ctrlKey && e.shiftKey && !e.altKey && matchesKey(e, 'KeyR', 'r')) {
-    e.preventDefault();
-    window.location.reload();
+  if (e.defaultPrevented) return;
+  if (e.key === 'Escape' && !overlayOpen) {
+    if (closeOpenIdeOverlays()) e.preventDefault();
     return;
   }
-  if (!e.defaultPrevented && e.key === 'Escape' && !overlayOpen) {
-    if (closeOpenIdeOverlays()) {
-      e.preventDefault();
-      return;
-    }
-  }
-  if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey) && e.shiftKey && !e.altKey && matchesKey(e, 'KeyR', 'r')) {
-    if (!overlayOpen || ide.searchEverywhereOpen) {
-      e.preventDefault();
-      ide.openSearchEverywhere('text', { replace: true });
-      return;
-    }
-  }
-  if (overlayOpen) return;
-  const term = inXterm(e.target);
-
-  if (!e.defaultPrevented && !term && e.altKey && (e.ctrlKey || e.metaKey) && !e.shiftKey && matchesKey(e, 'KeyO', 'o')) {
-    e.preventDefault();
-    void ide.organizeImportsActiveFile();
-    return;
-  }
-  if (!e.defaultPrevented && e.metaKey && e.altKey && !e.ctrlKey && !e.shiftKey && matchesKey(e, 'KeyR', 'r') && hasActiveDebugSession()) {
-    e.preventDefault();
-    void ide.debugCommand('continue');
-    return;
-  }
-  if (!e.defaultPrevented && !term && (e.metaKey || e.ctrlKey) && e.altKey && !e.shiftKey && matchesKey(e, 'KeyL', 'l')) {
-    e.preventDefault();
-    void ide.formatActiveFile();
-    return;
-  }
-  if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey) && !e.altKey && !(e.ctrlKey && !e.metaKey && term)) {
-    if (!e.shiftKey && matchesKey(e, 'KeyL', 'l')) { e.preventDefault(); addSelectionToAgent(); return; }
-    if (e.shiftKey && matchesKey(e, 'KeyL', 'l')) { e.preventDefault(); triggerAgent(); return; }
-    if (!e.shiftKey && matchesKey(e, 'KeyI', 'i')) { e.preventDefault(); ideAgent.openInlineEdit(); return; }
-    if (!e.shiftKey && (e.code === 'Comma' || e.key === ',')) { e.preventDefault(); ide.openSettings(); return; }
-    if (!e.shiftKey && e.key === 'F8' && ide.activePath) { e.preventDefault(); ide.toggleBreakpoint(ide.activePath, ide.cursorInfo.line); return; }
-    if (!e.shiftKey && e.key === 'F2') { e.preventDefault(); void ide.stopActiveExecution(); return; }
-  }
-  if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && matchesKey(e, 'KeyV', 'v') && e.target instanceof Element && Boolean(e.target.closest('.ide-editor-area'))) {
+  if (!overlayOpen && (e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && (e.code === 'KeyV' || e.key.toLowerCase() === 'v') && e.target instanceof Element && Boolean(e.target.closest('.ide-editor-area'))) {
     e.preventDefault();
     window.dispatchEvent(new CustomEvent('otto:ide-paste-history'));
     return;
   }
-  if (!e.defaultPrevented && e.ctrlKey && e.altKey && !e.metaKey && !e.shiftKey && hasActiveDebugSession()) {
-    if (e.code === 'ArrowDown' || e.key === 'ArrowDown') { e.preventDefault(); void ide.stepOver(); return; }
-    if (e.code === 'ArrowRight' || e.key === 'ArrowRight') { e.preventDefault(); void ide.stepInto(); return; }
-    if (e.code === 'ArrowUp' || e.key === 'ArrowUp') { e.preventDefault(); void ide.stepOut(); return; }
-  }
-  if (e.defaultPrevented) return;
-  // Bare ⌃ letters and F-keys belong to the text field the person is typing in.
-  if (inTextField(e.target) && !e.metaKey && !e.altKey && (e.ctrlKey || /^F\d+$/.test(e.key))) return;
-  if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'F12') { e.preventDefault(); ide.openBottomTab('terminal'); }
-  else if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'F7' && ide.activePath) { e.preventDefault(); void ide.findReferences(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col); }
-  else if (!term && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && matchesKey(e, 'KeyR', 'r')) { e.preventDefault(); void ide.startRun(); }
-  else if (!term && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && matchesKey(e, 'KeyD', 'd')) { e.preventDefault(); void ide.startDebug(); }
-  else if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'F6' && ide.activePath) { e.preventDefault(); void ide.openRenameModal(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col); }
-  else if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === 'F8' && hasActiveDebugSession()) { e.preventDefault(); void ide.stepOver(); }
-  else if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === 'F7' && hasActiveDebugSession()) { e.preventDefault(); void ide.stepInto(); }
-  else if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'F8' && hasActiveDebugSession()) { e.preventDefault(); void ide.stepOut(); }
-  else if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === 'F9' && hasActiveDebugSession()) { e.preventDefault(); void ide.debugCommand('continue'); }
-  else if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'F9' && hasActiveDebugSession()) { e.preventDefault(); void ide.runToCursor(); }
+  dispatchIdeShortcut({ e, triggerAgent }, 'window', overlayOpen);
 }

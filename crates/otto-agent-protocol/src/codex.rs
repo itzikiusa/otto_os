@@ -485,7 +485,7 @@ impl CodexDriver {
                 .map(|m| ProviderFailure {
                     class: "provider_error".into(),
                     message: m.to_string(),
-                    code: None,
+                    code: codex_error_code(turn.get("error")),
                     retryable: None,
                 })
                 .or_else(|| self.failure.clone())
@@ -1037,6 +1037,17 @@ fn thread_in_use(e: &Value) -> bool {
             .is_some_and(|m| m.contains("active writer"))
 }
 
+/// Codex's `TurnError.codexErrorInfo` variant (`"usageLimitExceeded"`,
+/// `"unauthorized"`, or the key of `{"httpConnectionFailed": {…}}`): the
+/// failure's structured code, which `error_class` reads before any text.
+fn codex_error_code(e: Option<&Value>) -> Option<String> {
+    match e?.get("codexErrorInfo")? {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(o) => o.keys().next().cloned(),
+        _ => None,
+    }
+}
+
 impl StructuredDriver for CodexDriver {
     fn provider(&self) -> RuntimeProvider {
         RuntimeProvider::Codex
@@ -1417,7 +1428,9 @@ impl StructuredDriver for CodexDriver {
                     "error" => {
                         if params.get("willRetry").and_then(Value::as_bool) != Some(true) {
                             if let Some(e) = params.get("error") {
-                                self.failure = Some(rpc_failure("provider_error", e));
+                                let mut f = rpc_failure("provider_error", e);
+                                f.code = f.code.or_else(|| codex_error_code(Some(e)));
+                                self.failure = Some(f);
                             }
                         } else if self.turn_id.is_some() {
                             // T3 Code #29208: a retry shows as the turn's retry row.
