@@ -477,7 +477,7 @@ pub(super) struct Inner {
     drivers: Arc<dyn DriverFactory>,
     config: RuntimeConfig,
     live: DashMap<Id, Arc<Live>>,
-    loading: DashMap<Id, Arc<tokio::sync::Mutex<()>>>,
+    loading: otto_core::keyed_lock::KeyedLocks<Id>,
 }
 
 /// Cheap to clone.
@@ -501,7 +501,7 @@ impl AgentRuntime {
                 drivers,
                 config,
                 live: DashMap::new(),
-                loading: DashMap::new(),
+                loading: otto_core::keyed_lock::KeyedLocks::new(),
             }),
         }
     }
@@ -951,31 +951,13 @@ impl AgentRuntime {
         if let Some(l) = self.inner.live.get(id) {
             return Ok(Arc::clone(l.value()));
         }
-        let load_gate = self
-            .inner
-            .loading
-            .entry(id.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let _guard = load_gate.lock().await;
+        let _guard = self.inner.loading.lock(id).await;
         if let Some(l) = self.inner.live.get(id) {
             return Ok(Arc::clone(l.value()));
         }
         otto_telemetry::context::measure_result("threads.hydrate_db", async {
-            let rec = match self.inner.repo.get(id).await {
-                Ok(r) => r,
-                Err(e) => {
-                    self.inner.loading.remove(id);
-                    return Err(e);
-                }
-            };
-            let raw_rows = match self.inner.repo.raw_entities(id).await {
-                Ok(r) => r,
-                Err(e) => {
-                    self.inner.loading.remove(id);
-                    return Err(e);
-                }
-            };
+            let rec = self.inner.repo.get(id).await?;
+            let raw_rows = self.inner.repo.raw_entities(id).await?;
             let proj = tokio::task::spawn_blocking(move || Projection::load_raw(raw_rows))
                 .await
                 .map_err(|e| Error::Internal(format!("projection load join error: {e}")))?;
@@ -1012,7 +994,6 @@ impl AgentRuntime {
             });
             let out = Arc::clone(entry.value());
             drop(entry);
-            self.inner.loading.remove(id);
             Ok(out)
         })
         .await

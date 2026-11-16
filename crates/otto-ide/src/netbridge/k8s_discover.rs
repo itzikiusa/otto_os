@@ -171,7 +171,7 @@ impl Drop for BgRefreshGuard {
 #[derive(Clone, Default)]
 pub struct DiscoveryCache {
     entries: Arc<DashMap<CacheKey, (Instant, Arc<K8sDiscoverySnapshot>)>>,
-    inflight: Arc<DashMap<CacheKey, Arc<tokio::sync::Mutex<()>>>>,
+    inflight: Arc<otto_core::keyed_lock::KeyedLocks<CacheKey>>,
     bg_refreshing: Arc<DashMap<CacheKey, ()>>,
 }
 
@@ -198,13 +198,7 @@ impl DiscoveryCache {
             }
         }
 
-        let lock = self
-            .inflight
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .value()
-            .clone();
-        let _lk = lock.lock().await;
+        let _lk = self.inflight.lock(&key).await;
         if !force_refresh {
             if let Some(hit) = self.entries.get(&key) {
                 if hit.value().0.elapsed() < FRESH_TTL {
@@ -229,13 +223,7 @@ impl DiscoveryCache {
                 map: Arc::clone(&cache.bg_refreshing),
                 key: key.clone(),
             };
-            let lock = cache
-                .inflight
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .value()
-                .clone();
-            let _lk = lock.lock().await;
+            let _lk = cache.inflight.lock(&key).await;
             if let Ok(fresh) = fetch_k8s_discovery(&spec_bg).await {
                 cache.entries.insert(key, (Instant::now(), Arc::new(fresh)));
             }

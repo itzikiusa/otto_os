@@ -12,14 +12,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, OnceLock};
 use std::time::UNIX_EPOCH;
 
-use dashmap::DashMap;
 use otto_core::{Error, Result};
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const MAX_CACHED_GO_BINARIES: usize = 64;
@@ -71,10 +68,8 @@ pub struct GoCachedArtifact {
     pub cache_hit: bool,
 }
 
-fn build_locks() -> &'static DashMap<String, Arc<Mutex<()>>> {
-    static LOCKS: OnceLock<DashMap<String, Arc<Mutex<()>>>> = OnceLock::new();
-    LOCKS.get_or_init(DashMap::new)
-}
+static BUILD_LOCKS: otto_core::keyed_lock::KeyedLocks<String> =
+    otto_core::keyed_lock::KeyedLocks::new();
 
 /// Root directory for external IDE build caches (shared by Go and Java builders).
 pub fn ide_build_cache_root() -> PathBuf {
@@ -156,12 +151,7 @@ pub async fn ensure_go_binary(req: GoBuildRequest<'_>) -> Result<GoCachedArtifac
         &env_fp,
     );
 
-    let key_lock = build_locks()
-        .entry(cache_key.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .value()
-        .clone();
-    let _guard = key_lock.lock().await;
+    let _guard = BUILD_LOCKS.lock(&cache_key).await;
 
     let mut scan_roots = vec![module_root.clone()];
     for extra in req.allowed_roots {
