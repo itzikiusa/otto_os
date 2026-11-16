@@ -2,7 +2,7 @@
   // Search Everywhere (⇧⇧ All, ⌘⇧O Files, ⌘O Symbols, Actions) +
   // Find & Replace in Path (⌘⇧F / ⌘⇧R: Match Case, Whole Word, Regex, File Mask,
   // Scope Directory, grouped match preview, per-file Replace, and Replace All).
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy } from 'svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
@@ -120,12 +120,6 @@
 
   onDestroy(() => {
     if (debounceTimer) clearTimeout(debounceTimer);
-  });
-
-  // A preview counts only for the query, replacement and options it was made with.
-  $effect(() => {
-    void [query, replacement, caseSensitive, wholeWord, regex, scopeMode, customScopePath, fileGlob];
-    untrack(() => { ide.replacePreview = null; });
   });
 
   const ACTIONS = $derived<IdeQuickAction[]>([
@@ -332,8 +326,9 @@
     if (query.length === 0) return;
     replaceMode = 'apply';
     try {
-      // Always a fresh dry run: the confirmation states what Replace all will really do.
-      const preview = await ide.replaceInWorkspace(query, replacement, true, buildSearchOpts());
+      const preview =
+        ide.replacePreview ??
+        (await ide.replaceInWorkspace(query, replacement, true, buildSearchOpts()));
       if (!preview || preview.replacements === 0) return;
       const ok = await confirmer.ask(
         `Replace ${plural(preview.replacements, 'occurrence')} across ${plural(preview.files_changed, 'file')}?`,
@@ -513,7 +508,7 @@
             {#each ide.replacePreview.previews.slice(0, 12) as p (p.path)}
               <div class="se-preview-item" dir="ltr">
                 <div class="se-preview-top">
-                  <span class="se-preview-file">{ide.relativePath(ide.resolvePath(p.path))} ({plural(p.count, 'match', 'matches')})</span>
+                  <span class="se-preview-file">{ide.relativePath(ide.resolvePath(p.path))} ({plural(p.count, 'match')})</span>
                   <button
                     type="button"
                     class="btn small ghost"
@@ -594,9 +589,6 @@
                 Show all {rows.length} matches ({rows.length - ROW_CAP} more)
               </button>
             {/if}
-            {#if ide.searchTruncated && tab !== 'actions'}
-              <p class="se-truncated dim" data-testid="ide-search-truncated">Showing the first {ide.searchResults.length} matches. Narrow the query or the file mask to see the rest.</p>
-            {/if}
           </div>
         </LoadState>
       </div>
@@ -605,7 +597,6 @@
 {/if}
 
 <style>
-  .se-truncated { margin: var(--sp-2) var(--sp-3); font-size: var(--fs-s); }
   .se-wrap { display: flex; flex-direction: column; gap: var(--sp-3); min-inline-size: 0; }
   .se-input-row, .se-replace-row, .se-filter-row { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
   .se-lead-icon { display: inline-flex; color: var(--text-dim); padding-inline-start: var(--sp-2); }
