@@ -351,15 +351,7 @@ fn format_builtin_fallback_inner(lang: &str, content: &str) -> String {
     // more than it fixed. A real formatter (prettier, gofmt, rustfmt, …) runs before this.
     if matches!(
         lang,
-        "java"
-            | "kotlin"
-            | "javascript"
-            | "typescript"
-            | "rust"
-            | "go"
-            | "c"
-            | "cpp"
-            | "protobuf"
+        "java" | "kotlin" | "javascript" | "typescript" | "rust" | "go" | "c" | "cpp" | "protobuf"
     ) {
         return content.to_string();
     }
@@ -374,7 +366,11 @@ fn format_builtin_fallback_inner(lang: &str, content: &str) -> String {
 
     for raw in normalized.lines() {
         // Two trailing spaces are a Markdown hard line break.
-        let trimmed_end = if lang == "markdown" { raw } else { raw.trim_end() };
+        let trimmed_end = if lang == "markdown" {
+            raw
+        } else {
+            raw.trim_end()
+        };
         if trimmed_end.trim().is_empty() {
             blanks += 1;
             if blanks <= 2 {

@@ -1044,7 +1044,8 @@ async fn idle_change_snapshot_of_just_saved_bytes_is_not_a_second_entry() {
     let ws = tmp.path().join("workspace");
     std::fs::create_dir_all(&ws).unwrap();
     let ws_str = ws.to_string_lossy().into_owned();
-    let (_ctx, app) = build_test_app(tmp.path().join("otto-data"), &tmp.path().join("state.db")).await;
+    let (_ctx, app) =
+        build_test_app(tmp.path().join("otto-data"), &tmp.path().join("state.db")).await;
     let content = "export const a = 1;\n";
     let target = json!({ "kind": "local", "root": ws_str });
 
