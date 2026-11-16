@@ -176,7 +176,13 @@ count that was interrupted after the first delta, then `close`.
    A model or effort picked with it switches first (`set_model` /
    `apply_flag_settings`), so the rest of the turn uses it (T3 Code #34564);
    the session's stored model follows on the next prompt.
-   The other drivers do not steer; such a message is queued instead.
+   Codex steers with `turn/steer`, pi with its RPC `steer`, and Grok with
+   `_x.ai/interject` (`{sessionId, text, content?: [image blocks]}`; the
+   running tool finishes and the model reads the message at its next step;
+   only a `{status: "queued"}` answer is a delivery, anything else shows as
+   a failed row — T3 Code #37335). The driver reports it as
+   `capabilities.steer`, which is all the UI's "Send now" reads. The other
+   ACP agents do not steer; such a message is queued instead.
 10. **Resume.** A resumed CLI (`--resume`) gets
    `MCP_CONNECTION_NONBLOCKING=0` unless the daemon's environment sets it:
    Claude Code then connects its MCP servers before the first request
@@ -1041,7 +1047,7 @@ secret question forms are refused instead of being collected into history.
   idle sleep only, so closing the lid still sleeps, and `-w` ends the hold
   with the daemon.
 - **Features T3 Code has that Otto does not yet:** restart continuation
-  (Otto keeps the process instead, §4), steering for Codex (`turn/steer`) and ACP, Codex `thread/unarchive`,
+  (Otto keeps the process instead, §4), steering for ACP agents other than Grok, Codex `thread/unarchive`,
   Claude thinking summaries, subagent / background tracking for the other
   providers, ACP v2.
 - **Known limits.** A Claude resume key is persisted once the CLI answers its

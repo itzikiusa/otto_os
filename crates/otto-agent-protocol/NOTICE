@@ -20,7 +20,8 @@ from T3 Code main on 2026-11-16 (behaviour only): #28797 (an ACP refusal or
 limit stop fails the turn), #34128 (the Mac stays awake while a turn runs), #32325 and #34934 (idle and
 finished child threads release their agent process), #33151, #29208 and
 #24334 (provider retries and compactions as one row each; retries are not
-progress for the stall watchdog).
+progress for the stall watchdog), #37335 (Grok steering through
+`_x.ai/interject`).
 Threads
 inside a thread (`src/runtime/children.rs` and Otto's Threads UI) follow
 `apps/web/src/components/chat/V2LifecycleRow.tsx` (`SubagentTimelineLink`,

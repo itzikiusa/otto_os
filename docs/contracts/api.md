@@ -933,8 +933,9 @@ thread's agent takes: the provider's baseline until a running driver reports
 its own after the handshake, which `provider_session.capabilities` carries
 live — an ACP agent's `promptCapabilities` and its effort config option
 (agy and Muse `thought_level`, grok `reasoning_effort`). `steer`: Claude (stdin),
-Codex (`turn/steer`), pi (RPC `steer`); never an ACP agent (ACP v1 has no
-way into a running prompt, so a message for it waits in the queue). `files`:
+Codex (`turn/steer`), pi (RPC `steer`), Grok (`_x.ai/interject`, text and
+images; T3 Code #37335); no other ACP agent (ACP v1 has no way into a
+running prompt, so a message for it waits in the queue). `files`:
 PDFs — natively for Claude and ACP agents with `embeddedContext`; Codex and
 pi get the path the runtime saved it at (with its `.pdf` extension) appended
 to the text, T3 Code's `providerMessageTextWithAttachmentPaths`. `plan`: a
@@ -988,9 +989,10 @@ it says `delivery`: `queue` — it waits in the session's **queue** (persisted
 with the projection: it survives a daemon restart, after which it is sent)
 and goes out when the turn ends, one per turn, oldest first; `steer` — into
 the running turn now (Claude reads it at its next step, Codex takes it as
-`turn/steer`, pi as its RPC `steer`; it is a `user_message` of that turn; a
+`turn/steer`, pi as its RPC `steer`, Grok as `_x.ai/interject` (anything but
+`{status: "queued"}` is a refusal); it is a `user_message` of that turn; a
 steer the agent then refuses shows as a failed `system_notice`) — a provider
-that cannot steer (`capabilities.steer` false: the ACP agents) queues it
+that cannot steer (`capabilities.steer` false: the other ACP agents) queues it
 instead; `interrupt` — first in the queue, then the running turn is stopped
 ("Stop & send now"). The queue is `queued_prompts: [{id, text, attachments,
 created_at}]` on the snapshot and `queue.updated` events.
