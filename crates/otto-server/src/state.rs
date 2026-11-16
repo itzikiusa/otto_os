@@ -166,6 +166,9 @@ pub struct ServerCtx {
     pub agent_runtime: otto_agent_protocol::AgentRuntime,
     /// Full multi-language IDE engine (`/ide/*`, `otto-ide`).
     pub ide: Arc<otto_ide::IdeEngine>,
+    /// Parent of every user's Scratches folder (`<home>/<user id>`, see
+    /// `routes::scratches`): `$OTTO_SCRATCHES_HOME`, else `~/Otto/Scratches`.
+    pub scratches_home: std::path::PathBuf,
 }
 
 impl ServerCtx {

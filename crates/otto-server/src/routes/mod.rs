@@ -43,6 +43,7 @@ pub mod proof_pack;
 pub mod provider_accounts;
 pub mod repo_rules;
 pub mod scheduled_tasks;
+pub mod scratches;
 pub mod search;
 pub mod session_files;
 pub mod settings;
@@ -54,7 +55,6 @@ pub mod transcript;
 pub mod ui_commands;
 pub mod usage;
 pub mod users;
-pub mod workbench;
 pub mod workflow_progress;
 pub mod workflow_run_files;
 pub mod workflows;
@@ -738,8 +738,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .merge(browser::routes())
         // --- Browser remote live view (daemon Chromium) ------------------
         .merge(browser_live::routes())
-        // --- Workbench (per-user scratch files with full history) --------
-        .merge(workbench::workbench_routes())
+        // --- Scratches (each user's scratch folder; the IDE's Scratches project)
+        .merge(scratches::scratches_routes())
 }
 
 // ── The `scratch` workspace is a SESSION home, not a workspace API ──────────
@@ -791,11 +791,6 @@ fn scratch_path_allowed(path: &str) -> bool {
         // silently change that documented answer. `GET` is admin-gated and the
         // row has no members, so nothing leaks.
         || tail == "members"
-        // Workbench docs are owner-scoped (every query binds the caller), so
-        // the implicit scratch Editor shares nothing: scratch files work from
-        // the scratch home like any workspace.
-        || tail == "workbench"
-        || tail.starts_with("workbench/")
 }
 
 /// Minimal percent-decode for one path segment (ASCII comparison only — an

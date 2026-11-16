@@ -104,7 +104,9 @@ impl ServerCtx {
                 move |ev| crate::ws_fanout::publish_stream(&bus, ev)
             });
         let ide = Arc::new(otto_ide::IdeEngine::new(data_dir.clone()));
+        let scratches_home = crate::routes::scratches::default_home();
         ServerCtx {
+            scratches_home,
             authenticator: Arc::new(authenticator),
             roles: Arc::new(otto_rbac::RbacRoleChecker::new(pool.clone())),
             auth_cache,

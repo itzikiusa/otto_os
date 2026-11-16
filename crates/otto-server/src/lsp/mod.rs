@@ -165,12 +165,24 @@ pub async fn ide_local_root_authorized(
     if has_root {
         return Ok(true);
     }
-    let canon_root = tokio::task::spawn_blocking({
+    let home = ctx.scratches_home.clone();
+    let own = crate::routes::scratches::user_root(&home, &user.id);
+    let (canon_root, scratches) = tokio::task::spawn_blocking({
         let p = root.to_path_buf();
-        move || canonical_or_ancestor(&p)
+        move || {
+            let root = canonical_or_ancestor(&p);
+            let mine = root
+                .starts_with(canonical_or_ancestor(&home))
+                .then(|| root.starts_with(canonical_or_ancestor(&own)));
+            (root, mine)
+        }
     })
     .await
     .map_err(|e| otto_core::Error::Internal(format!("ide root check: {e}")))?;
+    // A Scratches folder is its user's alone, whatever workspace root holds it.
+    if let Some(own) = scratches {
+        return Ok(own);
+    }
 
     if !write && crate::routes::session_files::lsp_root_in_own_session(ctx, user, &canon_root).await
     {

@@ -123,7 +123,7 @@ impl ServerCtx {
         )
         .await;
 
-        ServerCtx::from_parts(CtxParts {
+        let mut ctx = ServerCtx::from_parts(CtxParts {
             pool: pool.clone(),
             secrets,
             events,
@@ -151,7 +151,10 @@ impl ServerCtx {
                 data_dir.join("browser"),
             )),
             cache_auth_lookups: false,
-        })
+        });
+        // Never the real `~/Otto/Scratches`.
+        ctx.scratches_home = data_dir.join("scratches");
+        ctx
     }
 }
 

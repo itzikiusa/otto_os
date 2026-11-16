@@ -616,9 +616,7 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // can grant it) — not workspace admins, not root.
         Event::UiControlRequested { user_id, .. }
         // A notice-list change (read/dismiss) cues only the actor's windows.
-        | Event::NotificationsChanged { user_id }
-        // Workbench docs are per-user: only the owner's windows hear of them.
-        | Event::WorkbenchDocChanged { user_id, .. } => Scope::Owner(user_id),
+        | Event::NotificationsChanged { user_id } => Scope::Owner(user_id),
     }
 }
 
@@ -1269,18 +1267,6 @@ mod tests {
                 session_title: "t".into(),
                 module: "connections".into(),
                 command: "db_run_query".into(),
-            },
-            // Workbench docs are per-user.
-            Event::WorkbenchDocChanged {
-                workspace_id: "ws1".into(),
-                user_id: "alice".into(),
-                doc_id: "d1".into(),
-                scope: "workspace".into(),
-                action: "updated".into(),
-                rev: 1,
-                content_hash: "h".into(),
-                updated_at: "t".into(),
-                client_id: None,
             },
         ];
         for ev in &evs {

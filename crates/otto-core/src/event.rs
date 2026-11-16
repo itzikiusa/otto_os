@@ -675,29 +675,6 @@ pub enum Event {
     /// read-all, dismiss, clear). Owner-only; clients refetch
     /// `GET /notifications` (the tray's "needs you" glyph).
     NotificationsChanged { user_id: Id },
-    /// A Workbench doc of `user_id` changed (create / content or metadata
-    /// update / trash / restore / permanent delete). Owner-only; an
-    /// invalidation cue — clients refetch the list and, unless `client_id` is
-    /// their own (self-echo), the open doc.
-    WorkbenchDocChanged {
-        workspace_id: Id,
-        user_id: Id,
-        doc_id: Id,
-        /// `workspace` | `global`. A global doc shows in every workspace, so
-        /// windows on OTHER workspaces than `workspace_id` refetch too.
-        #[serde(default)]
-        scope: String,
-        /// `created` | `updated` | `trashed` | `restored` | `deleted`.
-        action: String,
-        rev: i64,
-        /// The doc's content hash after the change — a coalesced autosave
-        /// keeps `rev`, so `rev` alone can't tell a window its copy is stale.
-        #[serde(default)]
-        content_hash: String,
-        updated_at: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        client_id: Option<String>,
-    },
     /// Live agent MCP database activity (`otto_db_query`, `otto_query_db`,
     /// `otto_db_schema`, `otto_db_children`, `otto_db_object`). Emitted on
     /// `"started"` and again on `"finished"` or `"error"` so the Database
@@ -807,7 +784,6 @@ impl Event {
             Event::McpApprovalChanged { .. } => "mcp_approval_changed",
             Event::ResourceAccessChanged { .. } => "resource_access_changed",
             Event::NotificationsChanged { .. } => "notifications_changed",
-            Event::WorkbenchDocChanged { .. } => "workbench_doc_changed",
             Event::DbMcpActivity { .. } => "db_mcp_activity",
         }
     }
@@ -929,17 +905,6 @@ mod tests {
                 workspace_id: "w".into(),
                 kind: "canvas_scene".into(),
                 id: "sc1".into(),
-            },
-            Event::WorkbenchDocChanged {
-                workspace_id: "w".into(),
-                user_id: "u".into(),
-                doc_id: "d".into(),
-                scope: "global".into(),
-                action: "updated".into(),
-                rev: 2,
-                content_hash: "h".into(),
-                updated_at: "2026-10-03T00:00:00Z".into(),
-                client_id: None,
             },
             Event::DbMcpActivity {
                 workspace_id: "w".into(),
