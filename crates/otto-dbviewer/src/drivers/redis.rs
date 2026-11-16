@@ -1000,7 +1000,12 @@ fn reply_to_result(reply: RedisValue) -> QueryResult {
         RedisValue::Double(d) => single_value(double_to_json(d)),
         RedisValue::Boolean(b) => single_value(JsonValue::Bool(b)),
         RedisValue::SimpleString(s) => single_value(JsonValue::String(s)),
-        RedisValue::BulkString(bytes) => single_value(bytes_to_json(bytes)),
+        RedisValue::BulkString(bytes) => {
+            let binary = std::str::from_utf8(&bytes).is_err();
+            let mut result = single_value(bytes_to_json(bytes));
+            result.columns[0].binary = binary;
+            result
+        }
         RedisValue::VerbatimString { text, .. } => single_value(JsonValue::String(text)),
         RedisValue::BigNumber(n) => single_value(bytes_to_json(n)),
         // Array / set: one row per element (nested arrays flattened to JSON).
@@ -1097,28 +1102,36 @@ fn bounded_reply_to_result_with_budget(
                 items.truncate(max_rows);
                 truncated = true;
             }
+            let binary = bytes_column(items.iter());
             let mut rows = Vec::with_capacity(items.len());
             for item in items {
-                if !push_row(&mut rows, vec![value_to_json(item)]) {
+                if !push_row(&mut rows, vec![column_cell(item, binary)]) {
                     truncated = true;
                     break;
                 }
             }
-            (vec![Column::new("value")], rows)
+            (vec![binary_column("value", binary)], rows)
         }
         RedisValue::Map(mut pairs) => {
             if pairs.len() > max_rows {
                 pairs.truncate(max_rows);
                 truncated = true;
             }
+            let key_binary = bytes_column(pairs.iter().map(|(k, _)| k));
+            let value_binary = bytes_column(pairs.iter().map(|(_, v)| v));
             let mut rows = Vec::with_capacity(pairs.len());
             for (k, v) in pairs {
-                if !push_row(&mut rows, vec![value_to_json(k), value_to_json(v)]) {
+                let row = vec![column_cell(k, key_binary), column_cell(v, value_binary)];
+                if !push_row(&mut rows, row) {
                     truncated = true;
                     break;
                 }
             }
-            (vec![Column::new("key"), Column::new("value")], rows)
+            let columns = vec![
+                binary_column("key", key_binary),
+                binary_column("value", value_binary),
+            ];
+            (columns, rows)
         }
         other => {
             let mut result = reply_to_result(other);
@@ -1144,6 +1157,37 @@ fn bounded_reply_to_result_with_budget(
         },
         budget,
     )
+}
+
+/// A result column is bytes when one of its bulk strings isn't UTF-8 and
+/// every cell is a bulk string or nil: then every cell is base64 and the
+/// column is marked `binary`, so the grid shows hex and refuses a text edit
+/// that would write the base64 back.
+fn bytes_column<'a>(cells: impl Iterator<Item = &'a RedisValue> + Clone) -> bool {
+    cells
+        .clone()
+        .all(|v| matches!(v, RedisValue::BulkString(_) | RedisValue::Nil))
+        && cells
+            .into_iter()
+            .any(|v| matches!(v, RedisValue::BulkString(b) if std::str::from_utf8(b).is_err()))
+}
+
+/// One cell of a column [`bytes_column`] classified.
+fn column_cell(value: RedisValue, binary: bool) -> JsonValue {
+    match value {
+        RedisValue::BulkString(bytes) if binary => {
+            use base64::Engine as _;
+            JsonValue::String(base64::engine::general_purpose::STANDARD.encode(bytes))
+        }
+        other => value_to_json(other),
+    }
+}
+
+fn binary_column(name: &str, binary: bool) -> Column {
+    Column {
+        binary,
+        ..Column::new(name)
+    }
 }
 
 fn single_value(value: JsonValue) -> QueryResult {
@@ -2123,6 +2167,30 @@ mod tests {
         assert_eq!(result.columns[0].name, "value");
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], JsonValue::String("Otto Shop".into()));
+    }
+
+    #[test]
+    fn non_utf8_bulk_replies_are_binary_columns() {
+        let bin = || RedisValue::BulkString(vec![0xff, 0x00]);
+        let text = || RedisValue::BulkString(b"hi".to_vec());
+        let one = reply_to_result(bin());
+        assert!(one.columns[0].binary);
+        assert_eq!(one.rows[0][0], JsonValue::String("/wA=".into()));
+        assert!(!reply_to_result(text()).columns[0].binary);
+        // A list: every bulk becomes base64 once one isn't text.
+        let list =
+            bounded_reply_to_result(RedisValue::Array(vec![text(), bin(), RedisValue::Nil]), 10);
+        assert!(list.columns[0].binary);
+        assert_eq!(list.rows[0][0], JsonValue::String("aGk=".into()));
+        assert_eq!(list.rows[2][0], JsonValue::Null);
+        // A hash: only the column holding bytes is binary.
+        let hash = bounded_reply_to_result(RedisValue::Map(vec![(text(), bin())]), 10);
+        let flags: Vec<_> = hash.columns.iter().map(|c| c.binary).collect();
+        assert_eq!(flags, vec![false, true]);
+        assert_eq!(hash.rows[0][0], JsonValue::String("hi".into()));
+        // A mixed array (ints, nested arrays) stays as before.
+        let mixed = bounded_reply_to_result(RedisValue::Array(vec![bin(), RedisValue::Int(1)]), 10);
+        assert!(!mixed.columns[0].binary);
     }
 
     #[test]

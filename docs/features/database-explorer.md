@@ -796,6 +796,10 @@ surfaces the tail of both streams as the error.
   the plain Run already is one.
 - Scripts are capped at 30 minutes and 10,000 output lines (truncated badge
   beyond).
+- `show collections` / `show tables` and `show dbs` / `show databases` run as
+  `db.getCollectionNames()` and `db.getMongo().getDBNames()` (mongosh only
+  understands its `show` helpers interactively). A string result prints bare,
+  one per row, without JSON quotes.
 
 ### Automatic read `LIMIT`
 
@@ -1275,6 +1279,9 @@ connections refuse every write (§13) on top of these.
   database would compare the base64 text). MySQL reports `SHOW` output,
   `information_schema` and `->>` results as `VARBINARY` with a text
   collation; those are text, not bytes (only the `binary` collation is).
+  A Redis reply whose bulk string isn't UTF-8 is a binary column too: every
+  bulk in that column is base64 (a list or hash column holding only bulk
+  strings and nils), so its bytes aren't edited as text.
 - **Numbers read as the database prints them.** Postgres `NUMERIC` keeps its
   scale (`1.10`, never `1.1000` or `1.0E-7`) and `NaN`; `BIT` / `VARBIT` read
   as `0101…`; a float `NaN` / `Infinity` / `-Infinity` is that text, not NULL
@@ -1700,7 +1707,10 @@ is ignored and the request falls back to `offset` silently).
 one of them is decoded back on the way in (`decode_ejson`), so an edited
 ObjectId / Date / Decimal128 / Long / UUID / Binary / Timestamp round-trips
 without loss. The UI renders them as `ObjectId("…")`, `ISODate("…")`,
-`NumberLong("…")`, `UUID("…")`, `BinData(n, "…")`, `Timestamp(t, i)`.
+`NumberLong("…")`, `UUID("…")`, `BinData(n, "…")`, `Timestamp(t, i)`. A
+plain integer that fits 32 bits is written as `Int32` (as mongosh and the Node
+driver store it), so editing an `Int32` field keeps its type; a larger one is
+`Int64`.
 
 ---
 
