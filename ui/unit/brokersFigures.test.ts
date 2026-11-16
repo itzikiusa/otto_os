@@ -2,7 +2,7 @@
 // the Overview throughput before two sweeps, and a group's list lag.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { lagBadge, nextLagPoll, rateText, totalText } from '../src/modules/brokers/brokerFigures.ts';
+import { lagBadge, metricsUnreachable, nextLagPoll, rateText, totalText } from '../src/modules/brokers/brokerFigures.ts';
 
 test('no throughput samples yet reads "measuring…", not 0', () => {
   assert.equal(rateText(null, false), 'measuring…');
@@ -31,4 +31,10 @@ test('the list re-polls only while some lag is pending, with a bounded backoff',
   assert.equal(nextLagPoll([{ lag_pending: true }], 0), 5_000);
   assert.equal(nextLagPoll([{ lag_pending: true }], 6), 30_000);
   assert.equal(nextLagPoll([{ lag_pending: true }], 8), null);
+});
+
+test('a set but unreadable Metrics URL is named, not "set a Metrics URL"', () => {
+  assert.equal(metricsUnreachable(null), null);
+  assert.equal(metricsUnreachable('  '), null);
+  assert.match(metricsUnreachable('http://broker:9644/public_metrics') ?? '', /Couldn’t read metrics from http:\/\/broker:9644\/public_metrics/);
 });

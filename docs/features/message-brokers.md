@@ -92,7 +92,8 @@ authenticates.
   Schema Registry tab (e.g. `http://schema-registry:8081`).
 - **Metrics URL** *(optional)* — a Prometheus exposition endpoint for broker
   CPU/RAM (e.g. Redpanda `http://broker:9644/public_metrics`, or a Kafka JMX
-  exporter).
+  exporter). When it is set but can't be read, the Overview says "Couldn’t
+  read metrics from <url>" instead of asking you to set one.
 - **SSH tunnel** *(optional)* — bastion to reach a private cluster (see §4).
 - **Environment** — `dev` / `staging` / `prod`. `prod` arms the write-guard.
 - **Accent color** *(optional)* — a hex color for the sidebar dot/tab.
@@ -361,6 +362,9 @@ replicas, ISR, low/high watermarks, message count), a **Config** view, and a
 ## 6. Peek & produce
 
 ### Peek (consume)
+
+Opening a topic peeks once with the current options (newest messages by
+default), so the Messages view opens on data, not an empty pane.
 
 `POST /brokers/clusters/{id}/topics/{topic}/consume` with a `ConsumeReq`. Peeking
 uses a **throwaway consumer group** (`otto-peek-…`) with **`enable.auto.commit =
