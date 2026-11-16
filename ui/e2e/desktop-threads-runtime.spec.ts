@@ -147,6 +147,10 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   // Model + effort for the next turn and an attached image ride the prompt.
   await thread.getByTestId('runtime-model').click();
   const mp = page.getByTestId('model-picker');
+  // A17: column rows keep their 30px; they used to stretch to the provider rail.
+  for (const row of [mp.locator('.mp-row', { hasText: 'Default model' }), mp.getByTestId('picker-effort').locator('.mp-row').first()]) {
+    expect((await row.boundingBox())!.height).toBeLessThanOrEqual(32);
+  }
   const pick = mp.locator('.mp-row:not(.cur)').filter({ hasNotText: 'Default model' }).first();
   const pickedLabel = (await pick.locator('.mp-name').innerText()).trim();
   await pick.click();
