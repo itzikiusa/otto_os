@@ -3,17 +3,18 @@ import { test } from 'node:test';
 import { componentFunctions } from './componentFunctions.ts';
 import { templateDraft, researchDraft } from '../src/modules/loops/templates.ts';
 import { graphError, initialGraph, restoreGraph } from '../src/modules/loops/graph.ts';
+import { launchBlocker } from '../src/modules/loops/launchBlocker.ts';
 
 function fixture() {
   const creates: any[] = [];
   const calls: string[] = [];
   const state = componentFunctions(new URL('../src/modules/loops/GoalDefineForm.svelte', import.meta.url),
-    ['chooseTemplate', 'applyDraft', 'setMode', 'setExecution', 'canLaunch', 'launch', 'formState'], {
+    ['chooseTemplate', 'applyDraft', 'setMode', 'setExecution', 'launchReason', 'canLaunch', 'launch', 'formState'], {
       selectedTemplate: '', pocScope: 'both', draftSource: 'agent', draft: null, seed: '', mode: 'build', execution: 'graph', savedGraph: null,
       name: '', repoPath: '/tmp/repo', ws: { currentId: 'ws' }, alive: true, formGeneration: 0, defining: false,
       launching: false, feedback: '', allowCommits: false, requireReview: false, sourceLinks: '', selectedSkills: '',
       maxIterations: 5, maxMinutes: 30, perPhaseMinutes: 10, executorCount: 1, execProvider: 'codex', execModel: '',
-      defProvider: 'codex', defModel: '', templateDraft, researchDraft, graphError, initialGraph, restoreGraph, initialSnapshot: '', defaultAgentProvider: () => 'codex',
+      defProvider: 'codex', defModel: '', templateDraft, researchDraft, graphError, launchBlocker, initialGraph, restoreGraph, initialSnapshot: '', defaultAgentProvider: () => 'codex',
       confirmer: { ask: async () => true }, loops: { create: async (_ws: string, req: any) => { creates.push(req); return { id: 'created' }; }, define: () => { calls.push('define'); } },
       oncreated: (id: string) => calls.push(id), toastError: () => calls.push('error'),
     });

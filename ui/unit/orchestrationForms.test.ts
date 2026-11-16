@@ -6,6 +6,7 @@ import ts from 'typescript';
 import {componentFunctions} from './componentFunctions.ts';
 import {deferred,loadSource} from './sourceHarness.ts';
 import {graphError} from '../src/modules/loops/graph.ts';
+import {launchBlocker} from '../src/modules/loops/launchBlocker.ts';
 
 function handlers(path: string, state: Record<string, any>) {
   const url=new URL(`../src/${path}`,import.meta.url);
@@ -85,7 +86,7 @@ function goal() {
     defining:false,launching:false,draft:null,name:'',maxIterations:5,maxMinutes:30,perPhaseMinutes:10,executorCount:1,
     execProvider:'claude',execModel:'',defProvider:'claude',defModel:'',showAdvanced:false,ws:{currentId:'ws-A'},alive:true,formGeneration:0,
     draftSnapshot:'',initialSnapshot:'',formWorkspaceId:'ws-A',defaultAgentProvider:()=> 'claude',
-    selectedTemplate:'',pocScope:'both',draftSource:'agent',execution:'loop',savedGraph:null,graphError,
+    selectedTemplate:'',pocScope:'both',draftSource:'agent',execution:'loop',savedGraph:null,graphError,launchBlocker,
     confirmer:{ask:async()=>{prompts++;return confirm;}},oncancel(){},oncreated:(id:string)=>created.push(id),toastError(){},
     loops:{create:()=>result.promise},
   });
