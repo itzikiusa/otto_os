@@ -72,4 +72,33 @@ test.describe('Desktop IDE editor wave 2', () => {
     await dialog.getByRole('button', { name: 'Match case' }).click();
     await expect(preview).toHaveCount(0);
   });
+
+  test('E8: Local History opens on the newest entry that differs; Revert is off on an identical one', async ({ page }) => {
+    const c = await apiCtx();
+    try {
+      for (const v of ['v1', 'v2']) {
+        await daemonCall(c.ctx, c.base, c.token, 'PUT', '/ide/fs/file', { target: target(), path: 'notes.txt', content: `notes ${v}\n` });
+      }
+    } finally {
+      await c.ctx.dispose();
+    }
+    await bootIde(page, 'notes.txt');
+    const item = page.getByTestId('ide-project-tree').locator('button.tree-item[title$="notes.txt"]').first();
+    await item.click({ button: 'right' });
+    const menu = page.locator('.ctx-menu');
+    await menu.getByRole('menuitem', { name: 'Local History' }).click();
+    await menu.getByRole('menuitem', { name: 'Show History…' }).click();
+    const modal = page.getByTestId('ide-comparison-modal');
+    await expect(modal).toBeVisible({ timeout: 15_000 });
+    const rows = modal.getByTestId('ide-local-history-row');
+    const revert = page.getByTestId('ide-local-history-restore');
+    // The newest entry (v2) is the file itself: the modal moves on to v1.
+    await expect(rows.nth(1)).toHaveClass(/active/, { timeout: 10_000 });
+    await expect(page.getByTestId('ide-compare-identical-banner')).toHaveCount(0);
+    await expect(revert).toBeEnabled();
+
+    await rows.nth(0).click();
+    await expect(page.getByTestId('ide-compare-identical-banner')).toBeVisible({ timeout: 10_000 });
+    await expect(revert).toBeDisabled();
+  });
 });
