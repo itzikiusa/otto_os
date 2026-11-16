@@ -267,6 +267,8 @@ fn cors_layer() -> CorsLayer {
             // Conditional list reads (k8s resources: an unchanged list is a 304).
             header::IF_NONE_MATCH,
             header::HeaderName::from_static("traceparent"),
+            // IDE live-share: guest calls and the host's room stream carry it.
+            header::HeaderName::from_static("x-ide-collab-token"),
         ])
         .expose_headers([
             header::ETAG,
@@ -403,6 +405,12 @@ mod cors_tests {
         let h = ok.headers();
         assert_eq!(h[header::ACCESS_CONTROL_MAX_AGE], "600");
         assert_eq!(h[header::ACCESS_CONTROL_ALLOW_ORIGIN], "tauri://localhost");
+        // IDE live-share calls send this header; without it every guest call
+        // fails preflight from the desktop app.
+        assert!(h[header::ACCESS_CONTROL_ALLOW_HEADERS]
+            .to_str()
+            .unwrap()
+            .contains("x-ide-collab-token"));
 
         // A LAN / tailnet origin is trusted only for its OWN host.
         let lan_preflight = |origin: &'static str, host: &'static str| {
