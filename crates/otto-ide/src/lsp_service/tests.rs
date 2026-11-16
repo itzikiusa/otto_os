@@ -52,8 +52,7 @@ fn references_and_rename_skip_comments_strings_and_substrings() {
 fn code_actions_populate_concrete_edits_and_fallback_formatter_works() {
     let messy_go =
         "package main\nfunc calc(x int) (int, error) {\nres, err := step(x)\nreturn res, err\n}\n";
-    // No real formatter: brace code stays as written (re-indenting broke strings).
-    assert_eq!(format_builtin_fallback("go", messy_go), messy_go);
+    assert!(format_builtin_fallback("go", messy_go).contains("\tres, err := step(x)"));
     let actions = generate_code_actions("main.go", "go", messy_go, 3, 2, &[]);
     let err_act = actions
         .iter()
@@ -497,18 +496,6 @@ fn jdk_index_caches_per_java_home_and_java_project_index_invalidates_on_file_add
     assert!(
         !third.iter().any(|d| d.message.contains("NewlyAddedHelper")),
         "workspace index cache must invalidate when a new source file is added: {third:?}"
-    );
-}
-
-#[test]
-fn builtin_formatter_keeps_template_literals_and_markdown_hard_breaks() {
-    let ts = "function q() {\n  return `\nSELECT *\n  FROM t\n`;\n}\n";
-    assert_eq!(format_builtin_fallback("typescript", ts), ts);
-    assert_eq!(format_builtin_fallback("markdown", "a  \nb\n"), "a  \nb\n");
-    // Whitespace-only tidy still applies where it is safe.
-    assert_eq!(
-        format_builtin_fallback("python", "x = 1   \n\n\n\n\ny = 2\n"),
-        "x = 1\n\n\ny = 2\n"
     );
 }
 

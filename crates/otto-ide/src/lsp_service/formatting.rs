@@ -361,14 +361,6 @@ fn format_builtin_fallback_inner(lang: &str, content: &str) -> String {
             | "cpp"
             | "protobuf"
     );
-    // Re-indenting brace code by counting braces rewrote multi-line strings and template
-    // literals and forced 4 spaces over the project's style: with no real formatter
-    // installed it stays as written (JSON keeps the re-indent: no strings span lines).
-    if brace_indent && !matches!(lang, "json" | "jsonc") {
-        return content.to_string();
-    }
-    // Markdown's two trailing spaces are a hard line break.
-    let keep_trailing = matches!(lang, "markdown" | "md" | "mdx");
     let unit = if lang == "go" {
         "\t"
     } else if matches!(lang, "json" | "jsonc") {
@@ -392,7 +384,7 @@ fn format_builtin_fallback_inner(lang: &str, content: &str) -> String {
         }
         blanks = 0;
         if !brace_indent {
-            out_lines.push(if keep_trailing { raw } else { trimmed_end }.to_string());
+            out_lines.push(trimmed_end.to_string());
             continue;
         }
         let trimmed = trimmed_end.trim_start();
