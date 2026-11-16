@@ -192,4 +192,7 @@ pub struct SftpReadResp {
     pub text: String,
     /// True when the file exceeded the read cap (content is the capped prefix).
     pub truncated: bool,
+    /// The file isn't UTF-8 text: `text` is empty. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
 }

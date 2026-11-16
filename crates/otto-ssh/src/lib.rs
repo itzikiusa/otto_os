@@ -88,6 +88,34 @@ pub fn valid_proxy_jump(jump: &str) -> bool {
         && !jump.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
+/// `ssh` args that reach the destination through `jump`. `-J` lets the hop
+/// pick its own key (`~/.ssh/config`, the agent), so with an explicit
+/// `identity` a single hop goes through a `ProxyCommand` that uses that key
+/// too. A multi-hop chain keeps `-J`.
+pub fn jump_args(jump: &str, identity: Option<&str>) -> Vec<String> {
+    let Some(identity) = identity.filter(|i| !i.is_empty() && !jump.contains(',')) else {
+        return vec!["-J".into(), jump.into()];
+    };
+    let (dest, port) = match jump.rsplit_once(':') {
+        Some((d, p)) if p.parse::<u16>().is_ok() && (d.ends_with(']') || !d.contains(':')) => {
+            (d, Some(p))
+        }
+        _ => (jump, None),
+    };
+    // ProxyCommand runs through the shell after ssh expands `%` tokens.
+    let quote = |s: &str| format!("'{}'", s.replace('%', "%%").replace('\'', r"'\''"));
+    let mut cmd = format!(
+        "ssh -i {} -o IdentitiesOnly=yes -o BatchMode=yes \
+         -o StrictHostKeyChecking=accept-new",
+        quote(identity)
+    );
+    if let Some(port) = port {
+        cmd += &format!(" -p {port}");
+    }
+    cmd += &format!(" -W %h:%p -- {}", quote(&dest.replace(['[', ']'], "")));
+    vec!["-o".into(), format!("ProxyCommand={cmd}")]
+}
+
 impl SshTunnelConfig {
     /// The ProxyJump chain, when one is set (blank counts as unset).
     fn jump(&self) -> Option<&str> {
@@ -426,13 +454,13 @@ fn base_args(cfg: &SshTunnelConfig) -> Vec<String> {
         "-p".into(),
         cfg.port.to_string(),
     ];
-    if let Some(identity) = cfg.identity_file.as_deref().filter(|s| !s.is_empty()) {
+    let identity = cfg.identity_file.as_deref().filter(|s| !s.is_empty());
+    if let Some(identity) = identity {
         args.push("-i".into());
         args.push(identity.to_string());
     }
     if let Some(jump) = cfg.jump() {
-        args.push("-J".into());
-        args.push(jump.to_string());
+        args.extend(jump_args(jump, identity));
     }
     args
 }
@@ -520,6 +548,34 @@ mod tests {
         c.proxy_jump = Some("  ".into());
         assert!(c.validate().is_ok());
         assert!(!socks_forward_args(&c, 1).iter().any(|a| a == "-J"));
+    }
+
+    #[test]
+    fn jump_with_an_identity_authenticates_the_hop_with_that_key() {
+        assert_eq!(jump_args("bastion", None), vec!["-J", "bastion"]);
+        assert_eq!(jump_args("a,b", Some("/k")), vec!["-J", "a,b"]);
+        // Shell-quoted, and `%` doubled so ssh doesn't expand it.
+        let base = r"ProxyCommand=ssh -i '/my keys/it'\''s%%' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new";
+        assert_eq!(
+            jump_args("ops@bastion:2200", Some("/my keys/it's%")),
+            vec![
+                "-o".to_string(),
+                format!("{base} -p 2200 -W %h:%p -- 'ops@bastion'")
+            ]
+        );
+        assert_eq!(
+            jump_args("ops@[fd00::1]:22", Some("/my keys/it's%"))[1],
+            format!("{base} -p 22 -W %h:%p -- 'ops@fd00::1'")
+        );
+        // A tunnel with an identity uses it for the hop as well.
+        let mut c = cfg();
+        c.identity_file = Some("/k".into());
+        c.proxy_jump = Some("bastion".into());
+        let args = socks_forward_args(&c, 1);
+        assert!(!args.iter().any(|a| a == "-J"));
+        assert!(args
+            .iter()
+            .any(|a| a.starts_with("ProxyCommand=ssh -i '/k'")));
     }
 
     #[test]

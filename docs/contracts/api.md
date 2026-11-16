@@ -1249,7 +1249,7 @@ existing directory, the remote file's basename is used.
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /connections/{id}/sftp/list?path= | ws viewer | — | SftpListResp `{path, entries: SftpEntry[], truncated?}` — empty/absent `path` ⇒ remote `pwd` then list; at most 20,000 entries, `truncated: true` (omitted when false) when the directory held more |
-| GET /connections/{id}/sftp/read?path= | ws viewer | — | SftpReadResp `{text, truncated}` — downloads to a temp file, returns up to 1 MiB of UTF-8 text |
+| GET /connections/{id}/sftp/read?path= | ws viewer | — | SftpReadResp `{text, truncated, binary?}` — downloads to a temp file, returns up to 1 MiB of UTF-8 text; a file that isn't UTF-8 returns `binary: true` and empty `text` |
 | POST /connections/{id}/sftp/download | ws editor **and root** (the local path is on the daemon host — every connection, Legacy included; non-root → 403) | SftpDownloadReq `{remote_path, local_path}` | SftpDownloadResp `{local_path, bytes}` |
 | POST /connections/{id}/sftp/upload | ws editor **and root** (reads a daemon-host file — every connection; non-root → 403) | SftpUploadReq `{local_path, remote_path}` | 200 |
 | POST /connections/{id}/sftp/mkdir | ws editor | SftpMkdirReq `{path}` | 200 |
