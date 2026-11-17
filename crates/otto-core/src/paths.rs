@@ -268,6 +268,33 @@ pub fn percent_decode_utf8(input: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// Recursively copy a directory (otto-server: installs a local plugin
+/// into the home and stages review-lens skills into a shared `--add-dir` bundle),
+/// skipping `.git`, `node_modules` and `target`.
+#[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — install runs it via offload::blocking
+pub fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        // Skip VCS + heavy build dirs.
+        if matches!(
+            name.to_str(),
+            Some(".git") | Some("node_modules") | Some("target")
+        ) {
+            continue;
+        }
+        let from = entry.path();
+        let to = dest.join(&name);
+        if from.is_dir() {
+            copy_dir(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to).map_err(|e| format!("copy {}: {e}", from.display()))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

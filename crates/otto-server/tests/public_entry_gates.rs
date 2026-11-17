@@ -427,14 +427,19 @@ async fn plugin_host_routes_need_an_enabled_plugins_bearer_token() {
     // The enabled plugin's token passes the gate on the read routes (the
     // agent route is not run for real).
     for route in routes.iter().filter(|r| **r != "agents/run").copied() {
+        let status = send(route, Some("Bearer plugin-token"))
+            .await
+            .unwrap()
+            .status();
         assert_ne!(
-            send(route, Some("Bearer plugin-token"))
-                .await
-                .unwrap()
-                .status(),
-            401,
+            status, 401,
             "{route}: the enabled plugin's token passes the gate"
         );
+        // The PR routes reach the git handlers (unknown repo → 404), not a
+        // 500 from a mis-extracted path.
+        if route.starts_with("repos/") {
+            assert_eq!(status, 404, "{route}: reaches the git handler");
+        }
     }
     f.server.abort();
 }

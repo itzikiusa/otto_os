@@ -63,15 +63,62 @@ pub trait GitCtx: Clone + Send + Sync + 'static {
     fn worktree_files_changed(&self, _paths: Vec<PathBuf>) {}
 }
 
-/// Read-only PR routes (list, detail, commits, diff) — the subset the plugin
-/// host re-serves under `/plugin-host` so a sidecar can read PRs without a
-/// user API token. Same handlers (and caller checks) as [`router`].
+/// Read-only PR routes (list, detail, commits, diff) — the subset a host (the
+/// plugin host) re-serves under its own prefix via [`serve_pr_read`].
+pub const PR_READ_PATHS: [&str; 4] = [
+    "/repos/{id}/prs",
+    "/repos/{id}/prs/{number}",
+    "/repos/{id}/prs/{number}/commits",
+    "/repos/{id}/prs/{number}/diff",
+];
+
+/// The [`PR_READ_PATHS`] router — same handlers (and caller checks) as [`router`].
 pub fn pr_read_router<S: GitCtx>() -> Router<S> {
     Router::new()
-        .route("/repos/{id}/prs", get(pr_list::<S>))
-        .route("/repos/{id}/prs/{number}", get(pr_detail::<S>))
-        .route("/repos/{id}/prs/{number}/commits", get(pr_commits::<S>))
-        .route("/repos/{id}/prs/{number}/diff", get(pr_diff::<S>))
+        .route(PR_READ_PATHS[0], get(pr_list::<S>))
+        .route(PR_READ_PATHS[1], get(pr_detail::<S>))
+        .route(PR_READ_PATHS[2], get(pr_commits::<S>))
+        .route(PR_READ_PATHS[3], get(pr_diff::<S>))
+}
+
+/// Serve one read-only PR request as `user` (the host's lookup: `Ok(None)` →
+/// 409, not onboarded) for a host re-exposing [`pr_read_router`] under
+/// `prefix`. Strips the prefix, the caller's bearer and the outer match's
+/// extensions (axum would otherwise hand `Path` both routes' params).
+pub async fn serve_pr_read<S: GitCtx>(
+    state: S,
+    user: Result<Option<otto_core::domain::User>>,
+    prefix: &str,
+    req: axum::extract::Request,
+) -> Response {
+    use tower::ServiceExt;
+    let user = match user {
+        Ok(Some(u)) => AuthUser(u),
+        Ok(None) => return (StatusCode::CONFLICT, "no root user yet").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let (mut parts, body) = req.into_parts();
+    let pq = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("");
+    let Some(uri) = pq.strip_prefix(prefix).and_then(|r| r.parse().ok()) else {
+        return (StatusCode::BAD_REQUEST, "bad PR path").into_response();
+    };
+    parts.uri = uri;
+    parts.headers.remove(axum::http::header::AUTHORIZATION);
+    parts.extensions = Default::default();
+    let app = pr_read_router::<S>()
+        .with_state(state)
+        .layer(Extension(user));
+    match app
+        .oneshot(axum::extract::Request::from_parts(parts, body))
+        .await
+    {
+        Ok(resp) => resp,
+        Err(never) => match never {},
+    }
 }
 
 /// Build the git router. Paths are relative to the `/api/v1` mount point.

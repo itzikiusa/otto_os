@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+tower = { version = "0.5.3", features = ["util"] }
 otto-telemetry.workspace = true
 otto-core.workspace = true
 otto-git-cmd.workspace = true
@@ -29,5 +30,4 @@ notify = { version = "8.2.1", default-features = false, features = ["macos_fseve
 
 [dev-dependencies]
 sqlx.workspace = true
-tower = { version = "0.5.3", features = ["util"] }
 wiremock = "0.6.5"

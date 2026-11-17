@@ -43,7 +43,6 @@ otto-netguard.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tower-http.workspace = true
-tower = { version = "0.5.3", features = ["util"] }
 sqlx.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -117,6 +116,7 @@ otto-keychain.workspace = true
 otto-server = { path = ".", features = ["test-util"] }
 # RBAC guard integration tests drive a minimal router via tower's oneshot and
 # read the response body. Pinned to the versions axum 0.8 already resolves.
+tower = { version = "0.5.3", features = ["util"] }
 http-body-util = "0.1.5"
 # Isolated Jira/Confluence captures for the actual workflow publication path.
 wiremock = "0.6.5"
