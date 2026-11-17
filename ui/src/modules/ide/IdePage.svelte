@@ -32,6 +32,7 @@
   import IdePhoneTabRow from './editor/IdePhoneTabRow.svelte';
   import { IDE_TYPING_SELECTOR, idePhoneChrome } from './editor/idePhoneChrome.svelte';
   import { ideLayout, paneAfterFileOpen, STACK_MAX_H, type IdeStackPane } from './shell/ideLayout.svelte';
+  import { ideTabRestore } from './shell/ideProjectHelpers';
   import {
     handleIdeChord,
     handleIdeWindowKeyDown,
@@ -253,14 +254,15 @@
     if ((next === 'agent') !== ideAgent.panelOpen) ideAgent.togglePanel(next === 'agent');
   }
 
-  // A file opened from the Files pane (a tap in the tree) shows the editor.
+  // A file opened from the Files pane (a tap in the tree) shows the editor; the tabs a
+  // project restores on load leave the pane the person already picked.
   let lastActivePath = ide.activePath;
   $effect(() => {
     const p = ide.activePath;
     if (p === lastActivePath) return;
     lastActivePath = p;
     untrack(() => {
-      if (p && ideLayout.stack) ideLayout.pane = paneAfterFileOpen(ideLayout.pane);
+      if (p && ideLayout.stack && !ideTabRestore.active) ideLayout.pane = paneAfterFileOpen(ideLayout.pane);
     });
   });
 

@@ -177,7 +177,7 @@ test('after a gutter Run, the toolbar Debug debugs that test', async ({ page }) 
   await expect(page.getByTestId('ide-run-config-select')).toContainText('TestDeleteSuccess');
 });
 
-test('after a gutter Run, ⌃D, the Debug panel button and the editor right-click Debug all debug that test', async ({ page }) => {
+test('after a gutter Run, ⌃D, the Debug panel restart and the editor right-click Debug all debug that test', async ({ page }) => {
   test.skip(!haveDlv, 'dlv is not installed');
   test.setTimeout(240_000);
   const runs: string[] = [];
@@ -190,8 +190,9 @@ test('after a gutter Run, ⌃D, the Debug panel button and the editor right-clic
   }, 'go-ctrl-d-after-gutter-run');
   await expectPausesOnBothBreakpoints(
     page,
-    () => page.getByTestId('ide-debugger-panel').locator('.dbg-launch-btn').click(),
-    'go-debug-panel-button-after-gutter-run',
+    // Main's one-row debugger bar has no Debug button; its restart debugs the same test again.
+    () => page.getByTestId('ide-debug-restart').click(),
+    'go-debug-panel-restart-after-gutter-run',
   );
   await expectPausesOnBothBreakpoints(page, async () => {
     await page.locator('.cm-editor:visible .cm-line').filter({ hasText: 'query := buildDelete' }).first().click({ button: 'right' });

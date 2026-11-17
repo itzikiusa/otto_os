@@ -676,6 +676,10 @@ export function detectBuildToolFromState(
   return null;
 }
 
+/** True while the page restores a project's tabs (or opens its first file): the
+ *  stacked layout keeps the pane the person picked instead of following those opens. */
+export const ideTabRestore = { active: false };
+
 export async function restoreWorkspaceTabsOrInitial(host: {
   target: IdeTargetSpec; collabIsGuest: boolean; tabs: IdeOpenTab[]; hasClosedAllTabs: boolean; activePath: string | null;
   treeRootEntries: IdeFsEntry[]; childrenByDir: Record<string, IdeFsEntry[]>;
@@ -683,6 +687,17 @@ export async function restoreWorkspaceTabsOrInitial(host: {
 }): Promise<void> {
   if (host.collabIsGuest || host.tabs.length > 0 || host.hasClosedAllTabs) return;
   if (typeof window !== 'undefined' && /[?&](file|collab)=/.test(window.location.hash)) return;
+  ideTabRestore.active = true;
+  try {
+    await restoreTabs(host);
+  } finally {
+    // After the effects that react to these opens have run.
+    await new Promise((r) => setTimeout(r, 0));
+    ideTabRestore.active = false;
+  }
+}
+
+async function restoreTabs(host: Parameters<typeof restoreWorkspaceTabsOrInitial>[0]): Promise<void> {
   const saved = loadWorkspaceOpenTabs(host.target.root);
   // Stop as soon as the project switches: the rest of the list belongs to the old one.
   const key = ideTargetKey(host.target);
