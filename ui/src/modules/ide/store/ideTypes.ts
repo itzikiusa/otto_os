@@ -86,6 +86,8 @@ export interface IdeNavLocation {
 export interface IdeFsEntry {
   name: string; path: string; kind: 'dir' | 'file' | 'symlink';
   size?: number; mtime?: number; git_status?: 'M' | 'A' | 'D' | '?' | string | null; language?: string | null;
+  /** Git ignores it (local listings; absent = not ignored). */
+  ignored?: boolean;
 }
 
 export interface IdeFsTreeResp {

@@ -64,7 +64,8 @@ impl TargetManager {
         }
     }
 
-    /// Shallow 1-level directory listing on `target` (`<1ms` locally, zero subprocesses).
+    /// Shallow 1-level directory listing on `target`; locally one batched `git check-ignore`
+    /// marks the ignored entries (SSH listings carry no ignored marks).
     pub async fn list_tree(
         &self,
         target: &ResolvedTarget,
@@ -98,11 +99,12 @@ impl TargetManager {
                 }
                 let dir_for_scan = resolved_dir.clone();
                 let restricted = !*is_root_user;
-                let entries = tokio::task::spawn_blocking(move || {
+                let mut entries = tokio::task::spawn_blocking(move || {
                     list_local_dir_sync(&dir_for_scan, show_hidden, restricted)
                 })
                 .await
                 .map_err(|e| Error::Internal(format!("list_tree join: {e}")))??;
+                super::tree_ignored::mark_git_ignored(&resolved_dir, &mut entries).await;
                 let parent = if resolved_dir == matched_root {
                     None
                 } else {

@@ -101,6 +101,8 @@ export interface IdePreferences {
   lombokSupport: boolean;
   unusedImports: boolean;
   gitTreeBadges: boolean;
+  /** Project tree: lockfiles & companions fold under their file (go.sum under go.mod). */
+  nestRelatedFiles: boolean;
   localHistoryEnabled: boolean;
   localHistoryRetentionDays: number;
   breakOnExceptions: boolean;
@@ -148,6 +150,7 @@ export const DEFAULT_IDE_PREFERENCES: IdePreferences = {
   lombokSupport: true,
   unusedImports: true,
   gitTreeBadges: true,
+  nestRelatedFiles: true,
   localHistoryEnabled: true,
   localHistoryRetentionDays: 14,
   breakOnExceptions: false,
@@ -293,6 +296,7 @@ export function normalizeIdePreferencesRecord(
       p.gitTreeBadges ?? p.gitStatusInTree ?? p.showGitStatusInTree,
       d.gitTreeBadges,
     ),
+    nestRelatedFiles: asBool(p.nestRelatedFiles, d.nestRelatedFiles),
     localHistoryEnabled: asBool(
       p.localHistoryEnabled ?? p.enableLocalHistory,
       d.localHistoryEnabled,

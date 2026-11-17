@@ -247,6 +247,7 @@ pub(super) fn list_local_dir_sync(
             mtime,
             git_status: None,
             language,
+            ignored: false,
         };
         if kind == IdeFsEntryKind::Dir {
             dirs.push(entry);
@@ -295,6 +296,7 @@ pub(super) fn build_remote_tree_entries(
             mtime: item.mtime,
             git_status: None,
             language,
+            ignored: false,
         };
         if kind == IdeFsEntryKind::Dir {
             dirs.push(entry);
