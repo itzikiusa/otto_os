@@ -335,8 +335,18 @@ fn profile_req(name: &str, profile: &str) -> serde_json::Value {
 async fn status_sees_the_fake_binary() {
     let ctx = TestCtx::new().await;
     let root = seed_user(&ctx.pool, "root", true).await;
-    let (st, v, _) = call(&ctx, &root, "GET", "/aws/status", None).await;
-    assert_eq!(st, StatusCode::OK);
+    // A cold `aws --version` slower than the 150 ms inline budget (a busy runner)
+    // answers `null` and finishes in the background; the next status carries it.
+    let mut v = serde_json::Value::Null;
+    for _ in 0..100 {
+        let (st, body, _) = call(&ctx, &root, "GET", "/aws/status", None).await;
+        assert_eq!(st, StatusCode::OK);
+        v = body;
+        if !v["version"].is_null() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     assert_eq!(v["installed"], true);
     assert_eq!(v["version"], "2.17.0");
     assert_eq!(v["install"]["state"], "idle");
