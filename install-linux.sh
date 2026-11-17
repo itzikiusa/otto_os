@@ -12,10 +12,16 @@
 #   4. build the UI  (npm ci + npm run build → ui/dist)
 #   5. build ottod   (cargo build --release -p ottod --features embed-ui)
 #                    → the UI is baked into the binary and served on the same port
-#   6. (optional) install + start a systemd service that runs ottod on boot
+#   6. install ClickHouse (usage tracking) into ~/.local/bin if missing
+#   7. (optional) install + start a systemd service that runs ottod on boot
+#
+# Memory: compiling otto-server at opt-level 3 peaks at ~11.5 GB even with one
+# job, so the build needs RAM + swap >= 14 GB (some headroom). The preflight stops early with
+# the swap commands instead of an out-of-memory kill ten minutes in.
 #
 # Why these system packages (verified against Cargo.lock, not guessed):
-#   • rdkafka  → cmake-build + ssl-vendored  ⇒ cmake, a C compiler, perl
+#   • rdkafka  → cmake-build + ssl-vendored  ⇒ cmake, a C compiler, perl, and
+#                libcurl dev headers (librdkafka includes curl/curl.h)
 #   • aws-lc   → cmake + C compiler                (the TLS crypto provider)
 #   • lib{z,sqlite3,zstd}-sys, bindgen        ⇒ C compiler, zlib, clang/libclang
 #   OpenSSL is *vendored* by rdkafka, so no system libssl is strictly required —
@@ -32,30 +38,40 @@
 #   ./install-linux.sh --port 7700     # override the listen port (default 7700)
 #   ./install-linux.sh --no-deps       # skip OS/Rust/Node install, just build
 #   ./install-linux.sh --force-ci      # force `npm ci` even if node_modules is fresh
+#   ./install-linux.sh --no-clickhouse # skip ClickHouse (the Usage page stays empty)
+#   ./install-linux.sh --skip-mem-check  # build even with RAM + swap < 14 GB
 #   ./install-linux.sh -h | --help
 #
 set -uo pipefail
 
 # ---- config ---------------------------------------------------------------
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NODE_VERSION="v20.18.1"          # pinned LTS used when Node must be installed
-MIN_NODE_MAJOR=18                # Vite 5/6 + Svelte 5 need >= 18
+# The UI pins its Node in ui/.nvmrc (CI uses the same file); install that
+# version when Node is missing or older.
+NODE_VERSION="v$(tr -d '[:space:]v' < "$ROOT/ui/.nvmrc" 2>/dev/null)"
+[[ "$NODE_VERSION" == "v" ]] && { echo "ui/.nvmrc is missing" >&2; exit 1; }
 PORT=7700
+CLICKHOUSE_VERSION="26.8.34.13"   # the version CI pins (.github/workflows/ci.yml)
+MIN_BUILD_MEM_GB=14
 HEALTH_PATH="/api/v1/health"
 
 DO_RUN=0
 DO_SERVICE=0
 NO_DEPS=0
 FORCE_CI=0
+NO_CLICKHOUSE=0
+SKIP_MEM_CHECK=0
 for arg in "$@"; do
     case "$arg" in
         --run)        DO_RUN=1 ;;
         --service)    DO_SERVICE=1 ;;
         --no-deps)    NO_DEPS=1 ;;
         --force-ci)   FORCE_CI=1 ;;
+        --no-clickhouse)  NO_CLICKHOUSE=1 ;;
+        --skip-mem-check) SKIP_MEM_CHECK=1 ;;
         --port)       PORT="__NEXT__" ;;
         --port=*)     PORT="${arg#--port=}" ;;
-        -h|--help)    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)    sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)
             if [[ "$PORT" == "__NEXT__" ]]; then PORT="$arg"
             else echo "unknown flag: $arg (try --help)" >&2; exit 2; fi ;;
@@ -88,6 +104,17 @@ case "$(uname -m)" in
     *) NODE_ARCH="" ;;   # unknown → we'll fall back to the distro package manager
 esac
 
+# Building otto-server needs ~11.5 GB at its peak (measured on a clean build).
+if [[ "$SKIP_MEM_CHECK" -eq 0 && -r /proc/meminfo ]]; then
+    mem_kb=$(awk '/^(MemTotal|SwapTotal):/ {t += $2} END {print t}' /proc/meminfo)
+    if (( mem_kb < MIN_BUILD_MEM_GB * 1024 * 1024 )); then
+        die "RAM + swap is $(( mem_kb / 1024 / 1024 )) GB; building ottod needs about ${MIN_BUILD_MEM_GB} GB.
+   Add swap, then re-run (or pass --skip-mem-check):
+     sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile
+     sudo mkswap /swapfile && sudo swapon /swapfile"
+    fi
+fi
+
 # ---- 1/5  OS build dependencies -------------------------------------------
 # Detect the package manager once; reuse for both system deps and (Alpine) Node.
 PM=""
@@ -97,7 +124,7 @@ sys_satisfied() {
     # The hard requirements for the native crates above. clang is insurance-only,
     # so it is installed but not part of this gate.
     have cmake && have pkg-config && have perl && have git && have curl && have xz \
-        && { have cc || have gcc; }
+        && { have cc || have gcc; } && pkg-config --exists libcurl
 }
 
 install_system_deps() {
@@ -106,17 +133,17 @@ install_system_deps() {
             run $SUDO apt-get update -y
             run $SUDO apt-get install -y --no-install-recommends \
                 build-essential pkg-config cmake perl clang libclang-dev \
-                zlib1g-dev libsqlite3-dev libssl-dev \
+                zlib1g-dev libsqlite3-dev libssl-dev libcurl4-openssl-dev \
                 curl git ca-certificates xz-utils ;;
         dnf|yum)
             run $SUDO "$PM" install -y \
                 gcc gcc-c++ make cmake perl clang clang-devel \
-                zlib-devel sqlite-devel openssl-devel pkgconf-pkg-config \
+                zlib-devel sqlite-devel openssl-devel libcurl-devel pkgconf-pkg-config \
                 curl git ca-certificates xz ;;
         zypper)
             run $SUDO zypper --non-interactive install \
                 gcc gcc-c++ make cmake perl clang llvm-clang \
-                zlib-devel sqlite3-devel libopenssl-devel pkg-config \
+                zlib-devel sqlite3-devel libopenssl-devel libcurl-devel pkg-config \
                 curl git xz ;;
         pacman)
             run $SUDO pacman -Sy --noconfirm --needed \
@@ -124,7 +151,7 @@ install_system_deps() {
         apk)
             run $SUDO apk add --no-cache \
                 build-base cmake perl clang clang-dev zlib-dev sqlite-dev \
-                openssl-dev pkgconf curl git xz ;;
+                openssl-dev curl-dev pkgconf curl git xz ;;
         *)
             die "no supported package manager found (apt/dnf/yum/zypper/pacman/apk).
    Install manually: a C/C++ compiler, make, cmake, pkg-config, perl, clang,
@@ -163,8 +190,9 @@ have cargo || die "cargo still not on PATH after install"
 step "3/5  Node.js + npm"
 node_ok() {
     have node || return 1
-    local maj; maj="$(node -v 2>/dev/null | sed 's/^v//;s/\..*//')"
-    [[ -n "$maj" && "$maj" -ge "$MIN_NODE_MAJOR" ]]
+    # Version compare: the installed node must be >= the pinned one.
+    local have_v; have_v="$(node -v 2>/dev/null)"
+    [[ "$(printf '%s\n%s\n' "${NODE_VERSION#v}" "${have_v#v}" | sort -V | head -1)" == "${NODE_VERSION#v}" ]]
 }
 install_node() {
     # Alpine (musl) OR an arch with no official tarball: use the package manager.
@@ -200,7 +228,7 @@ install_node() {
 if node_ok; then
     ok "node present ($(node -v), npm $(npm -v 2>/dev/null))"
 elif [[ "$NO_DEPS" -eq 1 ]]; then
-    die "node >= $MIN_NODE_MAJOR not found and --no-deps set"
+    die "node >= ${NODE_VERSION#v} not found and --no-deps set"
 else
     install_node || die "node install failed"
     node_ok || die "node still missing/old after install ($(node -v 2>/dev/null || echo none))"
@@ -227,6 +255,38 @@ BIN="$ROOT/target/release/ottod"
 [[ -x "$BIN" ]] || die "expected binary not found at $BIN"
 ok "daemon built → $BIN"
 
+# ---- ClickHouse (usage tracking) -----------------------------------------
+# ottod finds `clickhouse` on PATH or in ~/.local/bin; without it the Usage page
+# stays empty. Same pinned build CI uses, checked against its published SHA-512.
+install_clickhouse() {
+    local arch tmp base url bin
+    case "$(uname -m)" in
+        x86_64|amd64)  arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        *) warn "no ClickHouse build for $(uname -m) — usage tracking stays off"; return 0 ;;
+    esac
+    base="clickhouse-common-static-${CLICKHOUSE_VERSION}-${arch}.tgz"
+    url="https://github.com/ClickHouse/ClickHouse/releases/download/v${CLICKHOUSE_VERSION}-lts/${base}"
+    tmp="$(mktemp -d)"
+    run curl -fsSL --retry 3 "$url" -o "$tmp/$base" || return 1
+    run curl -fsSL --retry 3 "$url.sha512" -o "$tmp/$base.sha512" || return 1
+    (cd "$tmp" && sha512sum --check --status "$base.sha512") || { rm -rf "$tmp"; die "ClickHouse download failed its SHA-512 check"; }
+    tar -xzf "$tmp/$base" -C "$tmp" || return 1
+    bin="$(find "$tmp" -type f -name clickhouse -path '*/bin/*' | head -n 1)"
+    [[ -n "$bin" ]] || return 1
+    mkdir -p "$HOME/.local/bin" && install -m 0755 "$bin" "$HOME/.local/bin/clickhouse"
+    rm -rf "$tmp"
+}
+step "ClickHouse  (usage tracking)"
+if [[ "$NO_CLICKHOUSE" -eq 1 ]]; then
+    warn "--no-clickhouse: skipped — the Usage page stays empty"
+elif have clickhouse || [[ -x "$HOME/.local/bin/clickhouse" ]]; then
+    ok "clickhouse present"
+else
+    install_clickhouse || die "ClickHouse install failed (re-run, or pass --no-clickhouse)"
+    ok "clickhouse ${CLICKHOUSE_VERSION} → ~/.local/bin/clickhouse"
+fi
+
 # ---- optional: systemd service --------------------------------------------
 install_service() {
     local unit name scope wanted
@@ -249,6 +309,7 @@ Wants=network-online.target
 Type=simple
 Environment=OTTO_SECRETS=file
 Environment=OTTO_SECRETS_ALLOW_PLAINTEXT=1
+Environment=OTTO_PORT=$PORT
 WorkingDirectory=$ROOT
 ExecStart=$BIN
 Restart=on-failure
@@ -271,7 +332,7 @@ step "Done in ${ELAPSED}s"
 ok "binary: $BIN"
 echo
 echo "  ${BOLD}Run it (foreground):${RST}"
-echo "    ${DIM}OTTO_SECRETS=file $BIN${RST}"
+echo "    ${DIM}OTTO_SECRETS=file OTTO_PORT=$PORT $BIN${RST}"
 echo "  Then open ${BOLD}http://127.0.0.1:${PORT}/${RST}  (UI is baked into the binary)."
 echo
 echo "  ${DIM}Loopback-only by default. For remote access (Jenkins → browser) either:${RST}"
@@ -285,6 +346,6 @@ if [[ "$DO_SERVICE" -eq 1 ]]; then
     echo; echo "  Health:  curl -fsS http://127.0.0.1:${PORT}${HEALTH_PATH}"
 elif [[ "$DO_RUN" -eq 1 ]]; then
     step "Launching ottod (Ctrl-C to stop)"
-    echo "  ${DIM}\$ OTTO_SECRETS=file $BIN${RST}"
-    exec env OTTO_SECRETS=file "$BIN"
+    echo "  ${DIM}\$ OTTO_SECRETS=file OTTO_PORT=$PORT $BIN${RST}"
+    exec env OTTO_SECRETS=file OTTO_PORT="$PORT" "$BIN"
 fi
