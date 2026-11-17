@@ -9,7 +9,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { router } from '../../lib/router.svelte';
+  import { pageKeyOf } from '../../shell/pages.svelte';
 
   const tiled = $derived(ws.viewMode === 'tiled');
 
@@ -43,10 +43,11 @@
     const key = ws.currentId;
     if (autoOpenedFor === key) return;
     autoOpenedFor = key;
-    if (untrack(() => router.module === 'agents' && !!router.parts[1])) return;
-    // Already leaving for another page: this page stays mounted while that
-    // page's chunk loads, and opening a session now pulled the person back.
-    if (untrack(() => !!router.pendingTarget?.[0] && router.pendingTarget[0] !== 'agents')) return;
+    // Read the hash, not the router: it already names the next page (or
+    // session) while that hashchange is queued or the page's chunk loads, and
+    // opening a session then overwrote it and pulled the person back.
+    const target = window.location.hash.replace(/^#\/?/, '').split('/');
+    if (untrack(() => pageKeyOf(target)) !== 'agents' || target[1]) return;
     if (ws.panes.length > 0 || tiled) return;
     const latest = [...ws.mainSessions].sort(
       (a, b) => Date.parse(b.last_active_at) - Date.parse(a.last_active_at),
