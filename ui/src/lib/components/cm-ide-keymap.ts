@@ -316,14 +316,6 @@ export function buildIdeKeymapSpecs(
     cb({ line: i.line, column: i.column, symbol: i.word || undefined });
     return true;
   };
-  const showIntentions = (v: EditorView): boolean => {
-    const cb = getCallbacks().onQuickFix;
-    if (!cb) return applyFirstFix(v);
-    const i = wordAtCursor(v.state);
-    const c = v.coordsAtPos(v.state.selection.main.head);
-    cb({ line: i.line, column: i.column, symbol: i.word || undefined, clientX: c?.left, clientY: c?.bottom });
-    return true;
-  };
   const renameSymbol = (v: EditorView): boolean => {
     const cb = getCallbacks().onRenameSymbol;
     if (!cb) return false;
@@ -346,6 +338,15 @@ export function buildIdeKeymapSpecs(
       return true;
     }
     return false;
+  };
+
+  const runQuickFix = (v: EditorView): boolean => {
+    const cb = getCallbacks().onQuickFix;
+    if (!cb) return applyFirstFix(v);
+    const i = wordAtCursor(v.state);
+    const c = v.coordsAtPos(v.state.selection.main.head);
+    cb({ line: i.line, column: i.column, symbol: i.word || undefined, clientX: c?.left, clientY: c?.bottom });
+    return true;
   };
 
   return [
@@ -372,18 +373,7 @@ export function buildIdeKeymapSpecs(
     { key: 'Alt-ArrowUp', run: smartExpandSelection },
     { key: 'Alt-ArrowDown', run: simplifySelection },
     { key: 'Shift-Enter', run: startNewLineBelow },
-    { key: 'Ctrl-g', run: selectNextOccurrence },
     { key: 'Ctrl-Mod-g', run: selectAllOccurrences },
-    {
-      key: 'Mod-g',
-      run: (v) => {
-        // Find panel open: leave ⌘G to the search keymap's "find next".
-        if (searchPanelOpen(v.state)) return false;
-        const cb = getCallbacks().onGoToLine;
-        if (cb) { cb(); return true; }
-        return cmGotoLine(v);
-      },
-    },
     { key: 'Alt-Shift-i', run: splitSelectionIntoLines },
     { key: 'Alt-Shift-I', run: splitSelectionIntoLines },
     { key: 'Mod-/', run: toggleLineComment },
@@ -395,7 +385,6 @@ export function buildIdeKeymapSpecs(
     { key: 'Cmd-Shift-v', run: runPasteFromHistory },
     { key: 'Cmd-Shift-V', run: runPasteFromHistory },
     { key: 'F12', run: (v) => runDive(v, 'definition') },
-    { key: 'Mod-b', run: (v) => runDive(v, 'definition') },
     { key: 'Mod-Alt-b', run: (v) => runDive(v, 'implementation') },
     { key: 'Alt-F7', run: findUsages },
     {
@@ -425,7 +414,7 @@ export function buildIdeKeymapSpecs(
         return true;
       },
     },
-    { key: 'Alt-Enter', run: showIntentions },
+    { key: 'Alt-Enter', run: runQuickFix },
     { key: 'Alt-Shift-Enter', run: applyFirstFix },
     { key: 'Shift-F6', run: renameSymbol },
     { key: 'Mod-Alt-l', run: reformat },
@@ -438,8 +427,23 @@ export function buildIdeKeymapSpecs(
         return true;
       },
     },
+    // The keys each preset means differently. Shell/window keys of the same presets
+    // live in `modules/ide/shell/ideShortcuts.ts` (Standard's ⌘B / ⌃G / ⌘G belong to
+    // the window there: explorer, Go to Line, find next).
     ...(preset === 'jetbrains'
       ? [
+          { key: 'Ctrl-g', run: selectNextOccurrence },
+          {
+            key: 'Mod-g',
+            run: (v: EditorView) => {
+              // Find panel open: leave ⌘G to the search keymap's "find next".
+              if (searchPanelOpen(v.state)) return false;
+              const cb = getCallbacks().onGoToLine;
+              if (cb) { cb(); return true; }
+              return cmGotoLine(v);
+            },
+          },
+          { key: 'Mod-b', run: (v: EditorView) => runDive(v, 'definition') },
           {
             key: 'Mod-[',
             run: () => {
@@ -462,14 +466,11 @@ export function buildIdeKeymapSpecs(
           { key: 'Mod-Backspace', run: deleteLine },
         ]
       : [
-          // The Standard column of Settings › Keymap (ideKeymapRows.ts): a unit test holds them in step.
+          // The Standard preset's editor rows of shell/ideShortcuts.ts (ideActionsShortcuts.test.ts holds them in step).
           { key: 'Mod-d', run: selectNextOccurrence },
           { key: 'Shift-Mod-d', run: duplicateLineOrSelection },
           { key: 'Shift-Mod-k', run: deleteLine },
-          { key: 'Shift-F12', run: findUsages },
-          { key: 'F2', run: renameSymbol },
-          { key: 'Mod-.', run: showIntentions },
-          { key: 'Shift-Alt-f', run: reformat },
+          { key: 'Mod-.', run: runQuickFix },
         ]),
   ];
 }

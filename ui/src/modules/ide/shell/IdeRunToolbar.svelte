@@ -7,6 +7,7 @@
   import LazyMount from '../../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { GUTTER_TARGET_ID, ide, type IdeRunConfig } from '../ideStore.svelte';
+  import { launchSelectorLabel } from '../store/ideLaunchTarget';
   import { bridgeEnvCache } from './networkBridgeGuard.svelte';
   import { formatBridgeToolbarLabel } from './networkBridgeModel';
 
@@ -22,14 +23,12 @@
     Boolean(ide.activeDebug && ide.activeDebug.state !== 'terminated' && ide.activeDebug.state !== 'error'),
   );
   const gutterTarget = $derived(ide.selectedConfigId === GUTTER_TARGET_ID ? ide.envState.gutterTarget : null);
+  // No match (`current-file`, nothing picked yet) = the file being looked at;
+  // never the first configuration by position.
   const selectedConfig = $derived<IdeRunConfig | null>(
-    gutterTarget ? null : ide.runConfigs.find((c) => c.id === ide.selectedConfigId) ?? ide.runConfigs[0] ?? null,
+    ide.runConfigs.find((c) => c.id === ide.selectedConfigId) ?? null,
   );
-  const selectorLabel = $derived(
-    gutterTarget?.label.replace(/^Run /, '') ||
-      selectedConfig?.name ||
-      (ide.activeTab ? `Current file (${ide.activeTab.name})` : 'Current file'),
-  );
+  const selectorLabel = $derived(gutterTarget?.label.replace(/^Run /, '') || launchSelectorLabel(selectedConfig, ide.activeTab));
   const bridgeLabel = $derived(
     ide.target.kind === 'local' ? formatBridgeToolbarLabel(ide.projectEnv?.network_bridge) : null,
   );
@@ -127,6 +126,19 @@
     >
       <Icon name="gear" size={14} />
     </button>
+
+    <!-- Inside the cluster, not beside it: a direct child of the page header's
+         actions row is an "action" its overflow fitter can collapse (it hid
+         this popover at 1280 px). Fixed positioning keeps it anchored. -->
+    {#if menuOpen}
+      <LazyMount
+        lazy={IdeRunConfigPopoverLazy}
+        what="launch targets"
+        quiet
+        props={{ triggerEl, selectedConfig, onclose: () => (menuOpen = false) }}
+        onerror={() => (menuOpen = false)}
+      />
+    {/if}
   </div>
 {:else}
   {#if bridgeLabel && isProdBridge}
@@ -166,16 +178,6 @@
       Run
     </button>
   {/if}
-{/if}
-
-{#if menuOpen}
-  <LazyMount
-    lazy={IdeRunConfigPopoverLazy}
-    what="launch targets"
-    quiet
-    props={{ triggerEl, selectedConfig, onclose: () => (menuOpen = false) }}
-    onerror={() => (menuOpen = false)}
-  />
 {/if}
 
 <style>

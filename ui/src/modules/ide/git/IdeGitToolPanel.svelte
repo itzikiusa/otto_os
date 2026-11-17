@@ -6,6 +6,7 @@
   import Badge from '../../../lib/components/Badge.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { isBroadNonProjectRootClient } from '../../../lib/fileUri';
   import { router } from '../../../lib/router.svelte';
   import { git } from '../../../lib/stores/git.svelte';
@@ -84,6 +85,19 @@
       ws.select(repo.workspace_id);
     }
     router.go('git');
+  }
+
+  /** The panel's one ⋯: remote actions and the jump to the full Git module. */
+  function openGitMoreMenu(e: MouseEvent): void {
+    const repoPath = activeRepo?.path;
+    const items: MenuItem[] = [
+      { label: 'Fetch', icon: 'fetch', disabled: !repoPath, action: () => repoPath && void gitFetchRepo(repoPath) },
+      { label: 'Pull', icon: 'arrowDown', disabled: !repoPath, action: () => repoPath && void gitPullRepo(repoPath) },
+      { label: 'Push…', icon: 'arrowUp', disabled: !repoPath, action: () => repoPath && void gitPushRepo(repoPath) },
+      { separator: true },
+      { label: 'Open in Git module', icon: 'external', action: () => void openInGitModule() },
+    ];
+    ctxMenu.show(e, items);
   }
 </script>
 
@@ -204,39 +218,6 @@
 
     <span class="grow"></span>
 
-    {#if activeRepo}
-      <button
-        type="button"
-        class="ig-act"
-        aria-label="Fetch from remote"
-        title="Fetch from remote"
-        onclick={() => void gitFetchRepo(activeRepo.path)}
-        data-testid="ide-git-fetch-btn"
-      >
-        <Icon name="fetch" size={12} />
-      </button>
-      <button
-        type="button"
-        class="ig-act"
-        aria-label="Pull changes"
-        title="Pull from remote"
-        onclick={() => void gitPullRepo(activeRepo.path)}
-        data-testid="ide-git-pull-btn"
-      >
-        <Icon name="arrowDown" size={12} />
-      </button>
-      <button
-        type="button"
-        class="ig-act"
-        aria-label="Push commits"
-        title="Push commits to remote…"
-        onclick={() => void gitPushRepo(activeRepo.path)}
-        data-testid="ide-git-push-btn"
-      >
-        <Icon name="arrowUp" size={12} />
-      </button>
-    {/if}
-
     <button
       type="button"
       class="ig-act"
@@ -248,15 +229,16 @@
     >
       <Icon name="refresh" size={12} />
     </button>
-
     <button
       type="button"
-      class="btn small ghost ig-open-mod"
-      onclick={() => void openInGitModule()}
-      data-testid="ide-git-open-module"
+      class="ig-act"
+      aria-label="Git actions"
+      title="Fetch, pull, push, open in the Git module"
+      aria-haspopup="menu"
+      onclick={openGitMoreMenu}
+      data-testid="ide-git-more-btn"
     >
-      <Icon name="external" size={12} />
-      <span>Open in Git Module</span>
+      <Icon name="more" size={12} />
     </button>
   </header>
 
@@ -354,6 +336,5 @@
   }
   .ig-act:hover:not(:disabled) { background: var(--hover); color: var(--text); }
   .ig-act:disabled { opacity: var(--disabled-opacity); cursor: default; }
-  .ig-open-mod { block-size: 22px; padding-block: 0; flex-shrink: 0; }
   .ig-body { display: flex; flex-direction: column; flex: 1; min-block-size: 0; min-inline-size: 0; overflow: hidden; }
 </style>

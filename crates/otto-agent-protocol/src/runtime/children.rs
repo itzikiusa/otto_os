@@ -103,7 +103,7 @@ fn one_line(s: &str, max: usize) -> String {
 }
 
 /// "Claude", "Codex", … for a notice's words (the UI draws its own label).
-fn provider_label(p: RuntimeProvider) -> &'static str {
+pub(super) fn provider_label(p: RuntimeProvider) -> &'static str {
     match p {
         RuntimeProvider::Claude => "Claude",
         RuntimeProvider::Codex => "Codex",
@@ -493,15 +493,30 @@ impl AgentRuntime {
         text: String,
     ) -> Result<()> {
         let live = self.live(parent).await?;
+        let key = WakeKey {
+            child: child.clone(),
+            turn: turn.clone(),
+        };
+        let parent_row = {
+            let st = live.lock();
+            let queued = st.proj.queue.iter().any(|q| q.wake.as_ref() == Some(&key));
+            if st.session.status == RuntimeSessionStatus::Closed || queued {
+                return Ok(());
+            }
+            st.session.clone()
+        };
+        // A reply to an agent is an agent-to-agent message: past the group's
+        // cap it is held in the queue (kept, not sent) until the person sends it.
+        let error = self
+            .admit_agent_prompt(&parent_row)
+            .await
+            .err()
+            .map(|_| loop_guard::PAUSED_QUEUED.to_string());
         let kick = {
             let mut st = live.lock();
             if st.session.status == RuntimeSessionStatus::Closed {
                 return Ok(());
             }
-            let key = WakeKey {
-                child: child.clone(),
-                turn: turn.clone(),
-            };
             let at = st
                 .proj
                 .queue
@@ -513,18 +528,18 @@ impl AgentRuntime {
                     let q = &mut st.proj.queue[i];
                     q.req = Arc::new(RuntimePromptReq::of(&text));
                     q.wake = Some(key);
-                    q.error = None;
+                    q.error = error.clone();
                 }
                 None => st.proj.queue.push(QueuedRecord {
                     id: new_id(),
                     created_at: Utc::now(),
                     req: Arc::new(RuntimePromptReq::of(&text)),
                     wake: Some(key),
-                    error: None,
+                    error: error.clone(),
                 }),
             }
             emit_queue(&self.inner, &live, &mut st);
-            st.proc.is_some() && st.turn.is_none()
+            error.is_none() && st.proc.is_some() && st.turn.is_none()
         };
         if kick {
             self.kick_queue(parent);
@@ -559,6 +574,8 @@ mod tests {
             background_tasks: Vec::new(),
             capabilities: Default::default(),
             meta: Some(child_meta(&"lead".into(), ChildOpener::Agent)),
+            last_turn_status: None,
+            last_error_class: None,
         }
     }
 

@@ -295,16 +295,15 @@ export function buildGitSubmenuItems(opts: {
       {
         label: 'Commit File…',
         icon: 'commit',
-        hint: '⌘K',
         action: () => void ideGit.openChangesForFile(absPath, { focusCommit: true }),
       },
-      { label: 'Add / Stage', icon: 'plus', hint: '⌥⌘A', action: () => void gitStageSingleFile(absPath) },
+      { label: 'Add / Stage', icon: 'plus', action: () => void gitStageSingleFile(absPath) },
       {
         label: 'Annotate with Git Blame',
         icon: 'user',
         action: () => void ideGit.openFileHistoryTab(absPath, 'blame'),
       },
-      { label: 'Show Diff', icon: 'split', hint: '⌘D', action: () => void ideGit.openChangesForFile(absPath) },
+      { label: 'Show Diff', icon: 'split', action: () => void ideGit.openChangesForFile(absPath) },
       {
         label: 'Compare with Revision…',
         icon: 'clock',
@@ -323,7 +322,6 @@ export function buildGitSubmenuItems(opts: {
       {
         label: 'Rollback…',
         icon: 'undo',
-        hint: '⌥⌘Z',
         danger: true,
         action: () => void gitRollbackSingleFile(absPath),
       },
@@ -353,8 +351,8 @@ export function buildGitSubmenuItems(opts: {
     );
   }
   items.push(
-    { label: 'Push…', icon: 'arrowUp', hint: '⌘⇧K', action: () => void gitPushRepo(absPath) },
-    { label: 'Pull…', icon: 'arrowDown', hint: '⌘T', action: () => void gitPullRepo(absPath) },
+    { label: 'Push…', icon: 'arrowUp', action: () => void gitPushRepo(absPath) },
+    { label: 'Pull…', icon: 'arrowDown', action: () => void gitPullRepo(absPath) },
     { label: 'Fetch', icon: 'fetch', action: () => void gitFetchRepo(absPath) },
     { separator: true },
     { label: 'Branches…', icon: 'branch', action: () => void gitOpenBranchesMenu(absPath, anchor) },

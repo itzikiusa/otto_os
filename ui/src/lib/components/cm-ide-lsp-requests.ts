@@ -1,12 +1,10 @@
 // Requests a host makes of the language server attached to an editor (rename, quick
-// fixes, references) and the once-per-language "failed to start" notice. Split out of
+// fixes, references). Split out of
 // `cm-ide-lsp.ts` (the pooled client); marimo loads on demand like there.
 
 import type { EditorView } from '@codemirror/view';
-import { toasts } from '../toast.svelte.ts';
 import { posToLsp, workspaceEditToTextEdits, type LspFileTextEdit } from './cm-ide-lsp-completion.ts';
 import { normalizeLocations } from './cm-ide-lsp-dive.ts';
-import { retryLspNow } from './cm-ide-lsp-reconnect.ts';
 
 type RpcRequester = { request: (method: string, params: unknown) => Promise<unknown> };
 
@@ -16,23 +14,6 @@ async function pluginOf(view: EditorView) {
 
 function rpcOf(client: object): RpcRequester | null {
   return (client as { client?: RpcRequester }).client ?? null;
-}
-
-/** Languages whose start failure was already announced (cleared once a session comes up). */
-const startFailureShown = new Set<string>();
-const LSP_LANG_LABELS: Record<string, string> = { typescript: 'TypeScript', javascript: 'JavaScript', css: 'CSS', html: 'HTML' };
-
-export function announceLspStartFailure(langProbeKey: string, serverLang: string, rootPath: string): void {
-  if (startFailureShown.has(langProbeKey)) return;
-  startFailureShown.add(langProbeKey);
-  const label = LSP_LANG_LABELS[serverLang] ?? serverLang.charAt(0).toUpperCase() + serverLang.slice(1);
-  toasts.push('warn', `${label} language server couldn’t start`, 'Language features are off for this language. The daemon log has the server output.', 12000, {
-    action: { label: 'Retry', run: () => { startFailureShown.delete(langProbeKey); retryLspNow(rootPath); } },
-  });
-}
-
-export function clearLspStartFailure(langProbeKey: string): void {
-  startFailureShown.delete(langProbeKey);
 }
 
 /**

@@ -92,12 +92,14 @@ async function createBranch(repo: Repo): Promise<void> {
   }
 }
 
-/** "Current checkout" vs the repo's other worktrees (T3's checkout picker). */
+/** "Current checkout" vs the repo's other worktrees (T3's checkout picker);
+ *  `threadsHere` counts the open threads already working in a checkout. */
 export async function openCheckoutMenu(
   anchor: Element,
   repo: Repo,
   cwd: string,
   onPick: (path: string, branch: string | null) => void,
+  threadsHere?: (path: string) => number,
 ): Promise<void> {
   let list: WorktreeInfo[] = [];
   try {
@@ -110,21 +112,29 @@ export async function openCheckoutMenu(
   const here = cwd.replace(/\/+$/, '');
   const items: MenuItem[] = list
     .filter((w) => !w.prunable)
-    .map(
-      (w): MenuItem => ({
+    .map((w): MenuItem => {
+      const n = threadsHere?.(w.path) ?? 0;
+      return {
         label: w.is_main ? 'Current checkout' : projectNameFromCwd(w.path),
-        hint: w.branch ?? 'detached',
+        hint: [w.branch ?? 'detached', n > 0 ? `${n} ${n === 1 ? 'thread' : 'threads'} here` : ''].filter(Boolean).join(' · '),
         title: compactPath(w.path, home),
         checked: here === w.path.replace(/\/+$/, '') || (w.is_main && here.startsWith(`${w.path.replace(/\/+$/, '')}/`)),
         action: () => onPick(w.path, w.branch),
-      }),
-    );
+      };
+    });
   items.push(
     { label: 'New worktree…', icon: 'plus', action: () => void newWorktree(repo, list, onPick) },
     { separator: true },
     { label: 'Manage worktrees in Git', icon: 'worktree', action: () => router.go(`git/${encodeURIComponent(repo.id)}`) },
   );
   ctxMenu.showAt(anchor, items, { align: 'start' });
+}
+
+/** "Use a new worktree" outside the checkout menu (the stage's same-checkout
+ *  line): the same prompt, from the repo's main checkout branch. */
+export async function startNewWorktree(repo: Repo, onPick: (path: string, branch: string | null) => void): Promise<void> {
+  const list = await api.get<WorktreeInfo[]>(`/repos/${encodeURIComponent(repo.id)}/worktrees`).catch(() => [] as WorktreeInfo[]);
+  await newWorktree(repo, list, onPick);
 }
 
 /** A new branch in a new worktree beside the repo, from the current branch

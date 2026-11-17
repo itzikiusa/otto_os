@@ -348,7 +348,7 @@ export interface IdeStackFrame { id: number; name: string; path?: string | null;
 export interface IdeVariable { name: string; value: string; var_type?: string | null; variables_reference: number; indexed_variables?: number | null }
 export interface IdeScope { name: string; variables_reference: number; variables: IdeVariable[]; expensive?: boolean | null }
 export interface IdeInlineValue { line: number; name: string; value: string }
-export interface IdeDebugOutputEntry { category: 'stdout' | 'stderr' | 'console' | string; text: string }
+export interface IdeDebugOutputEntry { category: 'stdout' | 'stderr' | 'console' | string; text: string; seq?: number }
 
 export interface IdeDebugSessionSnapshot {
   id: string; revision?: number; title: string; language: string; adapter: string;
@@ -356,13 +356,18 @@ export interface IdeDebugSessionSnapshot {
   state: 'starting' | 'running' | 'paused' | 'terminated' | 'error'; stop_seq?: number; stopped_reason?: string | null;
   active_thread_id?: number | null; active_frame_id?: number | null;
   paused_file?: string | null; paused_line?: number | null;
+  selected_frame_file?: string | null; selected_frame_line?: number | null;
   stopped_file?: string | null; stopped_line?: number | null;
   threads: IdeThread[]; stack_frames: IdeStackFrame[]; scopes: IdeScope[];
   inline_values: IdeInlineValue[]; breakpoints: IdeBreakpoint[]; output: IdeDebugOutputEntry[]; error?: string | null;
+  error_kind?: 'adapter_missing' | 'toolchain_missing' | 'build_failed' | null; error_ecosystem?: string | null;
+  target_root?: string | null;
 }
 
 export interface IdeWatch { id: string; expression: string; value: string; var_type?: string | null; error?: string | null }
-export interface IdeReplEntry { id: string; expression: string; result: string; var_type?: string | null; isError?: boolean }
+/** `afterSeq`: last debug-output sequence number when it was evaluated (its console position);
+ *  `variables_reference` > 0: the result has children (expandable like a variable). */
+export interface IdeReplEntry { id: string; expression: string; result: string; var_type?: string | null; isError?: boolean; afterSeq?: number; variables_reference?: number }
 
 export interface IdeCollabPeer {
   peer_id: string; display_name: string; color: string; role: IdeCollabRole;

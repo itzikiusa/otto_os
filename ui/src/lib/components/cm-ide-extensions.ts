@@ -53,6 +53,11 @@ import {
 } from './cm-ide-refactor.ts';
 import { readIdeEditorPreferences } from './cm-ide-theme.ts';
 import { isIdeManifestPath } from './cm-ide-manifest.ts';
+import {
+  breakpointAppearance, mapBreakpointLines, pendingBreakpointMoves, sameBreakpointLines, selectedFrameMark, shouldMapBreakpoints,
+  type BpVisualKind, type IdeBreakpointMove,
+} from './cm-ide-bp-model.ts';
+import { createIdeDebugHoverExtension, type IdeDebugEditorCallbacks } from './cm-ide-debug-hover.ts';
 
 export {
   addCursorAbove, addCursorBelow, applyClientQuickFix, applyConcreteEditsToView,
@@ -67,10 +72,11 @@ export {
   splitSelectionIntoLines, startNewLineBelow, toggleLineComment, wordAtCursor,
   type AttachPooledLspOptions, type ClientDiagQuickFix, type DirectLspOptions,
   type IdeConcreteTextEdit, type IdeDiffBaselineSource, type IdeEditorCallbacks, type IdeEditorSelectionRange,
-  type IdeInlineRefactorHint, type IdeQuickFixAction,
+  type IdeInlineRefactorHint, type IdeQuickFixAction, type IdeBreakpointMove, type IdeDebugEditorCallbacks,
 };
 
-export interface IdeDebugStatePayload { pausedLine: number | null; inlineValues: IdeInlineValue[]; }
+/** `pausedLine` = where execution stopped; `selectedLine` = a selected caller frame (muted mark). */
+export interface IdeDebugStatePayload { pausedLine: number | null; selectedLine?: number | null; inlineValues: IdeInlineValue[]; }
 export type BreakpointsEffectPayload = IdeBreakpoint[] | { breakpoints: IdeBreakpoint[]; muted?: boolean };
 export type PeerCursorInput = IdePeerCursor | IdeCollabPeer;
 
@@ -79,6 +85,8 @@ export const setGutterItemsEffect = StateEffect.define<IdeGutterItem[]>();
 export const setDebugDecorationsEffect = StateEffect.define<IdeDebugStatePayload>();
 export const setPeerCursorsEffect = StateEffect.define<PeerCursorInput[]>();
 const setHoverBpLineEffect = StateEffect.define<number | null>();
+/** The store took the gutter's moves: current lines are now the store's lines. */
+const rebaseBreakpointsEffect = StateEffect.define<null>();
 
 const ideRunItemsField = StateField.define<Map<number, IdeGutterItem>>({
   create() { return new Map(); },
@@ -106,7 +114,6 @@ const ideRunItemsField = StateField.define<Map<number, IdeGutterItem>>({
   },
 });
 
-type BpVisualKind = 'enabled' | 'disabled' | 'muted' | 'conditional' | 'logpoint' | 'paused' | 'preview';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 function bulbSvg(): SVGSVGElement {
@@ -172,10 +179,11 @@ class CombinedGutterMarker extends GutterMarker {
         ? 'ide-bp-hover-preview'
         : isDirectPaused
           ? 'ide-exec-gutter-arrow'
-          : 'ide-bp-marker';
+          : this.bpKind === 'frame' ? 'ide-frame-gutter-marker' : 'ide-bp-marker';
       if (this.bpKind !== 'preview') { el.title = this.tooltip; el.setAttribute('role', 'img'); el.setAttribute('aria-label', this.tooltip); }
       else el.setAttribute('aria-hidden', 'true');
-      const shape = isDirectPaused ? 'play' : this.bpKind === 'logpoint' ? 'diamond' : (this.bpKind === 'disabled' || this.bpKind === 'muted') ? 'hollow' : 'enabled';
+      const hollow = this.bpKind === 'disabled' || this.bpKind === 'muted' || this.bpKind === 'unbound';
+      const shape = isDirectPaused || this.bpKind === 'frame' ? 'play' : this.bpKind === 'logpoint' ? 'diamond' : hollow ? 'hollow' : 'enabled';
       el.appendChild(gutterSvg(shape, this.verified, this.bpKind === 'conditional'));
       bpSlot.appendChild(el);
       if (this.alsoPaused && !isDirectPaused) {
@@ -247,58 +255,89 @@ export interface CreateIdeExtensionsOptions {
   pausedLine: number | null; inlineValues: IdeInlineValue[]; peerCursors: PeerCursorInput[];
   diskSavedContent?: string | null; savedContent?: string | null; baselineSource?: IdeDiffBaselineSource;
   blameByLine?: Record<number, string> | null;
-  keymapPreset: 'jetbrains' | 'standard'; getCallbacks: () => IdeEditorCallbacks;
+  keymapPreset: 'jetbrains' | 'standard'; getCallbacks: () => IdeEditorCallbacks & IdeDebugEditorCallbacks;
+  selectedFrameLine?: number | null;
 }
+
+type BpFieldValue = {
+  map: Map<number, IdeBreakpoint>; origin: Map<number, number>; dropped: IdeBreakpointMove[]; muted: boolean;
+  pausedLine: number | null; selectedLine: number | null; hoverLine: number | null; decos: DecorationSet;
+};
+const identityOrigin = (map: Map<number, IdeBreakpoint>): Map<number, number> => new Map([...map.keys()].map((ln) => [ln, ln]));
 
 /** Mounted immediately after `lineNumbers()` so the red breakpoint circle sits RIGHT NEXT to the line number! */
 export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Extension {
   const bpLineMark = Decoration.line({ class: 'cm-ide-bp-line' });
-  const bpField = StateField.define<{ map: Map<number, IdeBreakpoint>; muted: boolean; pausedLine: number | null; hoverLine: number | null; decos: DecorationSet }>({
+  // Breakpoints follow the code they were set on (edits move them; `origin` remembers the
+  // line the store knows until the debounced report below rewrites the store once).
+  const bpField = StateField.define<BpFieldValue>({
     create(st) {
       const map = new Map<number, IdeBreakpoint>();
       for (const bp of opts.breakpoints) map.set(bp.line, bp);
       const muted = Boolean(opts.breakpointsMuted);
-      return { map, muted, pausedLine: opts.pausedLine, hoverLine: null, decos: buildBpLineDecos(st.doc, map, muted) };
+      return { map, origin: identityOrigin(map), dropped: [], muted, pausedLine: opts.pausedLine, selectedLine: opts.selectedFrameLine ?? null, hoverLine: null, decos: buildBpLineDecos(st.doc, map, muted) };
     },
     update(val, tr) {
-      let { map, muted, pausedLine, hoverLine } = val;
-      let bpSet = false;
+      let { map, origin, dropped, muted, pausedLine, selectedLine, hoverLine } = val;
       for (const ef of tr.effects) {
         if (ef.is(setBreakpointsEffect)) {
           const raw = ef.value, list = Array.isArray(raw) ? raw : raw.breakpoints;
           if (!Array.isArray(raw) && raw.muted !== undefined) muted = raw.muted;
+          const pending = pendingBreakpointMoves({ origin, dropped });
+          if (!pending.length && sameBreakpointLines(map, list)) continue; // the store echoing what we show
           map = new Map(); for (const bp of list) map.set(bp.line, bp);
-          bpSet = true;
-        } else if (ef.is(setDebugDecorationsEffect)) pausedLine = ef.value.pausedLine;
+          if (pending.length) {
+            // Unreported moves stay ahead of a store update that predates them.
+            const re = mapPendingOnto(map, origin, dropped);
+            map = re.map; origin = re.origin;
+          } else origin = identityOrigin(map);
+        } else if (ef.is(rebaseBreakpointsEffect)) { origin = identityOrigin(map); dropped = []; }
+        else if (ef.is(setDebugDecorationsEffect)) { pausedLine = ef.value.pausedLine; selectedLine = ef.value.selectedLine ?? null; }
         else if (ef.is(setHoverBpLineEffect)) hoverLine = ef.value;
       }
       if (tr.docChanged) {
-        if (!bpSet && map.size > 0) {
-          const nextMap = new Map<number, IdeBreakpoint>();
-          let moved = false;
-          for (const [ln, bp] of map) {
-            if (ln < 1 || ln > tr.startState.doc.lines) continue;
-            const mappedPos = tr.changes.mapPos(tr.startState.doc.line(ln).from, 1);
-            const newLn = tr.state.doc.lineAt(Math.min(mappedPos, tr.state.doc.length)).number;
-            if (newLn !== ln) moved = true;
-            if (!nextMap.has(newLn)) nextMap.set(newLn, newLn === ln ? bp : { ...bp, line: newLn });
-          }
-          if (moved || nextMap.size !== map.size) map = nextMap;
-        }
+        const mapped = shouldMapBreakpoints(tr) ? mapBreakpointLines({ map, origin, dropped }, tr.changes, tr.startState.doc, tr.state.doc) : null;
+        if (mapped) ({ map, origin, dropped } = mapped);
         if (hoverLine != null && hoverLine > tr.state.doc.lines) hoverLine = null;
       }
-      if (map === val.map && muted === val.muted && pausedLine === val.pausedLine && hoverLine === val.hoverLine && !tr.docChanged) return val;
-      return { map, muted, pausedLine, hoverLine, decos: buildBpLineDecos(tr.state.doc, map, muted) };
+      if (map === val.map && origin === val.origin && dropped === val.dropped && muted === val.muted && pausedLine === val.pausedLine
+        && selectedLine === val.selectedLine && hoverLine === val.hoverLine && !tr.docChanged) return val;
+      const decos = map === val.map && muted === val.muted && !tr.docChanged ? val.decos : buildBpLineDecos(tr.state.doc, map, muted);
+      return { map, origin, dropped, muted, pausedLine, selectedLine, hoverLine, decos };
     },
     provide: (f) => EditorView.decorations.from(f, (v) => v.decos),
   });
+
+  /** A store list (base lines) with this field's unreported moves applied again. */
+  function mapPendingOnto(list: Map<number, IdeBreakpoint>, origin: Map<number, number>, dropped: IdeBreakpointMove[]) {
+    const gone = new Set(dropped.map((d) => d.from)), curOf = new Map<number, number>();
+    for (const [cur, base] of origin) curOf.set(base, cur);
+    const map = new Map<number, IdeBreakpoint>(), nextOrigin = new Map<number, number>();
+    for (const [base, bp] of list) {
+      if (gone.has(base)) continue;
+      const cur = curOf.get(base) ?? base;
+      if (map.has(cur)) continue;
+      map.set(cur, cur === base ? bp : { ...bp, line: cur }); nextOrigin.set(cur, base);
+    }
+    return { map, origin: nextOrigin };
+  }
+
+  /** Tells the store where breakpoints went (once), then treats the current lines as its own. */
+  const reportMoves = (view: EditorView): void => {
+    const st = view.state.field(bpField, false), cb = opts.getCallbacks().onBreakpointsMoved;
+    if (!st || !cb || !opts.filePath) return;
+    const moves = pendingBreakpointMoves(st);
+    if (!moves.length) return;
+    cb(opts.filePath, moves);
+    view.dispatch({ effects: rebaseBreakpointsEffect.of(null) });
+  };
 
   function buildBpLineDecos(doc: EditorState['doc'], map: Map<number, IdeBreakpoint>, muted: boolean): DecorationSet {
     if (!map.size || muted) return Decoration.none;
     const ranges: Range<Decoration>[] = [];
     for (const ln of [...map.keys()].sort((a, b) => a - b)) {
       const bp = map.get(ln);
-      if (bp?.enabled && ln >= 1 && ln <= doc.lines) ranges.push(bpLineMark.range(doc.line(ln).from));
+      if (bp?.enabled && bp.verified !== false && ln >= 1 && ln <= doc.lines) ranges.push(bpLineMark.range(doc.line(ln).from));
     }
     return ranges.length ? Decoration.set(ranges, true) : Decoration.none;
   }
@@ -309,18 +348,20 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
     return m;
   });
 
-  const handleBpClick = (_v: EditorView, ln: number, me: MouseEvent): boolean => {
+  // A click acts on the lines the person sees, so unreported moves reach the store first.
+  const handleBpClick = (v: EditorView, ln: number, me: MouseEvent): boolean => {
     const cbs = opts.getCallbacks();
+    if ((me.shiftKey && cbs.onEditBreakpoint) || cbs.onToggleBreakpoint) reportMoves(v);
     if (me.shiftKey && cbs.onEditBreakpoint) { me.preventDefault(); me.stopPropagation(); cbs.onEditBreakpoint(ln, me); return true; }
     if (cbs.onToggleBreakpoint) { me.preventDefault(); me.stopPropagation(); cbs.onToggleBreakpoint(ln); return true; }
     return false;
   };
+  // The line-number column behaves like the breakpoint lane (JetBrains): the editor popover.
   const handleBpCtx = (v: EditorView, ln: number, me: MouseEvent): boolean => {
     const cbs = opts.getCallbacks();
     if (!cbs.onToggleBreakpoint && !cbs.onEditBreakpoint) return false;
+    reportMoves(v);
     const bp = v.state.field(bpField).map.get(ln);
-    const el = me.target instanceof Element ? me.target : null;
-    if (el?.closest('.cm-lineNumbers') && !bp) return false;
     me.preventDefault(); me.stopPropagation();
     if (cbs.onEditBreakpoint) { cbs.onEditBreakpoint(ln, me); return true; }
     ctxMenu.show(me, [{ label: bp ? 'Remove breakpoint' : 'Add breakpoint', icon: bp ? 'trash' : 'plus', action: () => cbs.onToggleBreakpoint?.(ln) }]);
@@ -330,42 +371,37 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
   const bpAndRunGutter = gutter({
     class: 'cm-ide-bp-gutter',
     markers(view) {
-      const { map, muted, pausedLine, hoverLine } = view.state.field(bpField);
+      const { map, muted, pausedLine, selectedLine, hoverLine } = view.state.field(bpField);
       const runMap = view.state.field(ideRunItemsField);
       const curLn = view.state.doc.lineAt(view.state.selection.main.head).number;
       const hasBulbOnCur =
         !view.state.readOnly &&
         (getIdeQuickFixesAtLine(view.state, curLn).length > 0 ||
           hasDeterministicQuickFixAtLine(view.state.doc, opts.filePath ?? '', opts.language, curLn));
+      const frameLn = selectedFrameMark(pausedLine, selectedLine);
       const lines = new Set<number>([...map.keys(), ...runMap.keys()]);
       if (pausedLine != null) lines.add(pausedLine);
+      if (frameLn != null) lines.add(frameLn);
       if (hoverLine != null) lines.add(hoverLine);
       if (hasBulbOnCur) lines.add(curLn);
       if (!lines.size) return RangeSet.empty;
       const markers: Range<GutterMarker>[] = [];
       for (const ln of [...lines].sort((a, b) => a - b)) {
         if (ln < 1 || ln > view.state.doc.lines) continue;
-        const bp = map.get(ln) as (IdeBreakpoint & { verified?: boolean }) | undefined;
+        const bp = map.get(ln);
         const runItem = runMap.get(ln) ?? null;
         const isPaused = pausedLine === ln;
         let bpKind: BpVisualKind | null = null;
         let tip = '';
         let verified = false;
         if (bp) {
-          bpKind = muted ? 'muted' : !bp.enabled ? 'disabled' : bp.log_message ? 'logpoint' : (bp.condition || bp.hit_condition) ? 'conditional' : 'enabled';
-          tip = muted
-            ? `Muted breakpoint at line ${ln}`
-            : bp.log_message
-              ? `Logpoint at line ${ln}: ${bp.log_message}`
-              : bp.condition
-                ? `Conditional breakpoint at line ${ln}: ${bp.condition}`
-                : !bp.enabled
-                  ? `Disabled breakpoint at line ${ln}`
-                  : `${bp.verified ? 'Verified b' : 'B'}reakpoint at line ${ln}`;
-          verified = Boolean((bp.verified || pausedLine != null) && !muted && bp.enabled);
+          ({ kind: bpKind, tooltip: tip, verified } = breakpointAppearance(bp, ln, muted));
         } else if (isPaused) {
           bpKind = 'paused';
           tip = `Paused at line ${ln}`;
+        } else if (frameLn === ln) {
+          bpKind = 'frame';
+          tip = `Selected frame at line ${ln}`;
         } else if (hoverLine === ln) {
           bpKind = 'preview';
         }
@@ -393,7 +429,19 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
     private onLeave: () => void;
     private onDown: (ev: MouseEvent) => void;
     private onCtx: (ev: MouseEvent) => void;
+    private moveTimer: ReturnType<typeof setTimeout> | null = null;
+    private unreported: IdeBreakpointMove[] = [];
+    private view: EditorView;
+    // Edits that carried a breakpoint report once, ~300 ms after typing settles.
+    update(u: ViewUpdate): void {
+      if (!u.docChanged) return;
+      const st = u.state.field(bpField, false);
+      this.unreported = st ? pendingBreakpointMoves(st) : [];
+      if (this.moveTimer !== null) clearTimeout(this.moveTimer);
+      this.moveTimer = this.unreported.length ? setTimeout(() => { this.moveTimer = null; this.unreported = []; reportMoves(this.view); }, 300) : null;
+    }
     constructor(view: EditorView) {
+      this.view = view;
       this.dom = view.scrollDOM;
       const lineAtY = (clientY: number) =>
         view.state.doc.lineAt(view.lineBlockAtHeight(clientY - view.documentTop).from).number;
@@ -425,6 +473,11 @@ export function createIdeGutterExtensions(opts: CreateIdeExtensionsOptions): Ext
       this.dom.addEventListener('contextmenu', this.onCtx, true);
     }
     destroy(): void {
+      // Swapping tabs or rebuilding the gutter must not lose a move still in its debounce.
+      if (this.moveTimer !== null) clearTimeout(this.moveTimer);
+      const cb = opts.getCallbacks().onBreakpointsMoved;
+      if (this.moveTimer !== null && this.unreported.length && cb && opts.filePath) cb(opts.filePath, this.unreported);
+      this.moveTimer = null; this.unreported = [];
       this.dom.removeEventListener('mousemove', this.onMove);
       this.dom.removeEventListener('mouseleave', this.onLeave);
       this.dom.removeEventListener('mousedown', this.onDown, true);
@@ -457,12 +510,14 @@ function computeDebugDecorations(doc: EditorState['doc'], payload: IdeDebugState
       ),
     );
   }
+  const frameLn = selectedFrameMark(payload.pausedLine, payload.selectedLine);
+  if (frameLn != null && frameLn <= doc.lines) ranges.push(Decoration.line({ class: 'cm-ide-frame-line' }).range(doc.line(frameLn).from));
   if (payload.inlineValues.length) {
     const byLine = new Map<number, Map<string, string>>();
     for (const iv of payload.inlineValues) {
       if (iv.line < 1 || iv.line > doc.lines) continue;
       let m = byLine.get(iv.line); if (!m) { m = new Map(); byLine.set(iv.line, m); }
-      m.set(iv.name, iv.value.length > 80 ? `${iv.value.slice(0, 77)}…` : iv.value);
+      m.set(iv.name, iv.value.length > 40 ? `${iv.value.slice(0, 39)}…` : iv.value);
     }
     for (const [ln, vars] of byLine) {
       const summary = [...vars.entries()].map(([k, v]) => `${k} = ${v}`).join(', ');
@@ -543,6 +598,11 @@ const ideEditorTheme = EditorView.baseTheme({
   '.cm-ide-bp-marker.cm-ide-bp-preview': { opacity: '0.45', color: 'var(--danger)' },
   '.cm-ide-bp-marker.cm-ide-bp-muted': { color: 'var(--text-dim)' },
   '.cm-ide-bp-marker.cm-ide-bp-disabled': { color: 'var(--danger)' },
+  '.cm-ide-bp-marker.cm-ide-bp-unbound, .cm-ide-bp-marker.cm-ide-bp-frame': { color: 'var(--text-dim)' },
+  '.cm-line.cm-ide-frame-line': { backgroundColor: 'color-mix(in srgb, var(--success) 12%, transparent)', boxShadow: 'inset 3px 0 0 color-mix(in srgb, var(--success) 60%, transparent)' },
+  // `.cm-gutter` is a flex column: centring it (cm-editor-helpers' fold-gutter rule) floats a
+  // short file's fold chevron to the middle of the empty gutter. Elements stack from the top.
+  '.cm-gutters .cm-foldGutter': { justifyContent: 'flex-start', alignItems: 'stretch' },
   '.cm-ide-bp-marker.cm-ide-bp-logpoint, .cm-ide-bp-marker.cm-ide-bp-paused': { color: 'var(--warning)' },
   '.cm-ide-exec-arrow': { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '12px', height: '12px', lineHeight: '1', color: 'var(--warning)', filter: 'drop-shadow(0 0 1px var(--bg))' },
   '.cm-ide-exec-arrow.is-combo': { position: 'absolute', insetInlineEnd: '-2px', insetBlockEnd: '-1px', width: '9px', height: '9px', pointerEvents: 'none' },
@@ -573,7 +633,7 @@ export function buildIdeKeymap(
 export function createIdeExtensions(opts: CreateIdeExtensionsOptions): Extension {
   const debugField = StateField.define<{ payload: IdeDebugStatePayload; decos: DecorationSet }>({
     create(st) {
-      const payload = { pausedLine: opts.pausedLine, inlineValues: opts.inlineValues };
+      const payload = { pausedLine: opts.pausedLine, selectedLine: opts.selectedFrameLine ?? null, inlineValues: opts.inlineValues };
       return { payload, decos: computeDebugDecorations(st.doc, payload) };
     },
     update(cur, tr) {
@@ -622,6 +682,7 @@ export function createIdeExtensions(opts: CreateIdeExtensionsOptions): Extension
       onFindUsages: (ctx) => opts.getCallbacks().onFindUsages?.(ctx),
       onQuickFix: (ctx) => opts.getCallbacks().onQuickFix?.(ctx),
     }),
+    createIdeDebugHoverExtension(() => opts.getCallbacks().onDebugHover),
     createCmdHoverDiveExtension(opts.getCallbacks),
     createIdeGitAndAgentExtensions({
       savedContent: opts.savedContent,

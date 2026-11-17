@@ -9,6 +9,8 @@ import {
   type IdeBreakpoint,
   type IdeDebugSessionSnapshot,
   type IdeProjectRoot,
+  type IdeReplEntry,
+  type IdeRunState,
   type IdeTargetSpec,
   type IdeVariable,
   type IdeWatch,
@@ -73,6 +75,7 @@ export function normalizeIncomingDebugSnapshot(
     ...raw,
     paused_file: paused,
     paused_line: pausedLine,
+    ...(raw.selected_frame_file ? { selected_frame_file: normPath(raw.selected_frame_file) } : {}),
     stack_frames,
     breakpoints,
     output,
@@ -153,4 +156,36 @@ export function syncSnapshotBreakpointsToStore(
     nextMap[path] = updated;
   }
   if (changed) host.breakpointsByPath = nextMap;
+}
+
+/** Where the editor follows a paused session: the frame the person selected,
+ *  else the stop itself (`selected_frame_*` is absent on daemons before it). */
+export function debugRevealTarget(
+  snap: Pick<IdeDebugSessionSnapshot, 'state' | 'paused_file' | 'paused_line' | 'selected_frame_file' | 'selected_frame_line'> | null | undefined,
+): { path: string; line: number; key: string } | null {
+  if (!snap || snap.state !== 'paused') return null;
+  const path = snap.selected_frame_file || snap.paused_file;
+  const line = snap.selected_frame_file ? snap.selected_frame_line : snap.paused_line;
+  return path && line ? { path, line, key: `${path}:${line}` } : null;
+}
+
+/** A different session arrived: the old one's REPL results and watch values
+ *  describe another process. Input history and the watch expressions stay. */
+export function resetForNewDebugSession(
+  host: { replEntries: IdeReplEntry[]; watches: IdeWatch[] },
+  prev: Pick<IdeDebugSessionSnapshot, 'id'> | null | undefined,
+  next: Pick<IdeDebugSessionSnapshot, 'id'>,
+): void {
+  if (!prev || prev.id === next.id) return;
+  if (host.replEntries.length > 0) host.replEntries = [];
+  if (host.watches.some((w) => w.value !== '…' || w.error)) {
+    host.watches = host.watches.map((w) => ({ ...w, value: '…', var_type: null, error: null }));
+  }
+}
+
+/** Sequence number of `run.output[0]`: the daemon counts every line ever
+ *  written (`output_seq`), and both it and the client trim from the front, so
+ *  line `i` is `base + i`. A console clears/keys by this, not by index. */
+export function runOutputSeqBase(run: Pick<IdeRunState, 'output' | 'output_seq'>): number {
+  return Math.max(1, (run.output_seq ?? run.output.length) - run.output.length + 1);
 }

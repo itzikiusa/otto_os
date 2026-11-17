@@ -316,8 +316,8 @@ function rollback_release {
     assert_eq!(sh_items.len(), 3);
     assert_eq!(sh_items[0].line, 1);
     assert_eq!(sh_items[0].run_spec.runner, IdeRunnerKind::Shell);
-    assert_eq!(sh_items[1].label, "Run deploy_staging()");
-    assert_eq!(sh_items[2].label, "Run rollback_release()");
+    assert_eq!(sh_items[1].label, "deploy_staging()");
+    assert_eq!(sh_items[2].label, "rollback_release()");
 
     let bats_src = "\
 #!/usr/bin/env bats

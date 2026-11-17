@@ -12,6 +12,47 @@
      bar so heights stay consistent across the touch shell. */
   --mobile-topbar-h: 44px;
   --mobile-bottomnav-h: 56px;
+  /* Safe areas (index.html `viewport-fit=cover`): the notch / status bar, the
+     home indicator and the landscape side insets. Chrome reads these, never
+     env() directly, so each edge is padded exactly once (App.svelte .shell,
+     BottomNav) — and a test can set them. start/end follow the text
+     direction for logical padding. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-start: var(--safe-left);
+  --safe-end: var(--safe-right);
+  /* The on-screen keyboard's height (lib/viewportFit.ts); 0 when closed. */
+  --kb-h: 0px;
+}
+:root[dir='rtl'] {
+  --safe-start: var(--safe-right);
+  --safe-end: var(--safe-left);
+}
+/* The compact shell (App.svelte: .shell.mobile — phone, phone on its side,
+   tablet) pads each screen edge once: the status bar / notch, the landscape
+   side insets and — where no BottomNav pads it (.bnav) — the home indicator;
+   an open keyboard covers the home indicator, so nothing is added above it.
+   The top bar reaches up into the status-bar strip so its colour fills it.
+   (Global, not in App.svelte: that file may not grow.) */
+.shell.mobile {
+  padding-block-start: var(--safe-top);
+  padding-inline: var(--safe-start) var(--safe-end);
+}
+.shell.mobile:not(.bnav) {
+  padding-block-end: var(--safe-bottom);
+}
+html[data-kb='open'] .shell.mobile {
+  padding-block-end: 0;
+}
+html .shell.mobile .mtopbar:not(.tauri-top) {
+  margin-block-start: calc(-1 * var(--safe-top));
+  padding-block-start: var(--safe-top);
+  height: calc(var(--mobile-topbar-h) + var(--safe-top));
+}
+html .shell.mobile.short .mtopbar:not(.tauri-top) {
+  height: calc(36px + var(--safe-top));
 }
 
 * {
@@ -679,6 +720,37 @@ button.chip:focus-visible {
 .hljs-built_in,
 .hljs-type {
   color: var(--code-builtin);
+}
+/* A fenced ```diff: added / removed lines read red and green like the work
+   rows' file diff (semantic tokens, so light and dark both hold). */
+.hljs-addition {
+  color: var(--success);
+  background: var(--success-soft);
+}
+.hljs-deletion {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.language-diff .hljs-meta {
+  color: var(--info);
+}
+
+/* Phones: long lines in chat code blocks wrap (hanging under their own text)
+   instead of cutting every line mid-identifier behind a sideways scroll; the
+   block's Wrap button turns it off (`.nowrap`, codeBlocks.ts). Diffs keep one
+   line per line (NO_PHONE_WRAP) — their +/− column is the meaning. A phone
+   on its side counts too (short + touch, as viewport.svelte.ts). */
+@media (max-width: 640px), (max-height: 500px) and (pointer: coarse) {
+  .md .code-block:not(.nowrap):not([data-lang='diff'], [data-lang='patch']) code {
+    min-width: 0;
+  }
+  .md .code-block:not(.nowrap):not([data-lang='diff'], [data-lang='patch']) .cl {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .md .code-block:not(.nowrap):not([data-lang='diff'], [data-lang='patch']) .code-btn[data-code-act='wrap'] {
+    color: var(--accent-text);
+  }
 }
 
 /* Agent UI control: the element an agent just acted on (lib/uiCommands.ts

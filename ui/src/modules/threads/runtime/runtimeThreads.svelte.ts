@@ -9,7 +9,7 @@ import { runtimeDrafts } from '../../../lib/stores/runtimeDrafts.svelte';
 import { api } from '../../../lib/api/client';
 import { appLive, onLive } from '../../../lib/live';
 import { router } from '../../../lib/router.svelte';
-import { noteRuntimeWaiting } from '../../../lib/stores/runtimeAttention.svelte';
+import { noteRuntimeWaiting, syncRuntimeWaiting } from '../../../lib/stores/runtimeAttention.svelte';
 import { uiControl } from '../../../lib/stores/uiControl.svelte';
 import type {
   ApprovalDecision,
@@ -99,10 +99,51 @@ export function asThreadSession(r: RuntimeSession): Session {
     archived: r.status === 'closed',
     // `parent_session_id` nests a linked thread under its group's root in
     // the sidebar (the delegated-worker rule, `delegatedParentId`).
-    meta: { ...kept, surface: 'threads', runtime: 'structured', ...(r.parent_id ? { parent_session_id: r.parent_id } : {}) },
+    meta: {
+      ...kept,
+      surface: 'threads',
+      runtime: 'structured',
+      ...(r.parent_id ? { parent_session_id: r.parent_id } : {}),
+      // The row's own attention (lib/status.ts `sessionState` reads these):
+      // a pending request is "needs you" after a reload too, and a failed /
+      // stopped last turn never reads idle.
+      ...(r.status === 'awaiting_permission' ? { runtime_waiting: true } : {}),
+      ...(r.last_turn_status ? { last_turn_status: r.last_turn_status } : {}),
+      ...(r.last_error_class ? { last_error_class: r.last_error_class } : {}),
+    },
   };
   threadSessionRowCache.set(r, mapped);
   return mapped;
+}
+
+/** `RuntimeSession.last_turn_status` / `last_error_class` from a
+ *  `turn.terminal` event (the daemon's own classes: `usage_limit`, `auth`,
+ *  else `provider`). */
+export function turnOutcomeOf(
+  status: string,
+  failure?: { class?: string; message?: string } | null,
+): Pick<RuntimeSession, 'last_turn_status' | 'last_error_class'> {
+  if (status === 'failed') {
+    const cls = failure?.class ?? '';
+    const msg = failure?.message ?? '';
+    const errorClass =
+      cls === 'usage_limit' || /usage limit|rate.?limit|quota|\b429\b|too many requests/i.test(msg)
+        ? 'usage_limit'
+        : cls === 'auth' || /not (?:logged|signed) in|\/login|unauthori[sz]ed|\b401\b|invalid api key/i.test(msg)
+          ? 'auth'
+          : 'provider';
+    return { last_turn_status: 'failed', last_error_class: errorClass };
+  }
+  if (status === 'interrupted' || status === 'cancelled') return { last_turn_status: 'interrupted', last_error_class: null };
+  return { last_turn_status: 'completed', last_error_class: null };
+}
+
+/** A re-read row from a daemon without `last_turn_status` (the field is
+ *  missing, not null) keeps the outcome this tab saw live; a newer daemon's
+ *  own value always wins. */
+export function keepOutcome(next: RuntimeSession, prev: RuntimeSession | undefined): RuntimeSession {
+  if ('last_turn_status' in next || !prev?.last_turn_status) return next;
+  return { ...next, last_turn_status: prev.last_turn_status, last_error_class: prev.last_error_class ?? null };
 }
 
 /** A Threads row backed by a runtime session (see `asThreadSession`). */
@@ -175,8 +216,8 @@ class RuntimeThreads {
       const next = { ...this.byId };
       for (const id of Object.keys(next)) if (next[id].workspace_id === workspaceId) delete next[id];
       for (const r of rows) {
-        next[r.id] = r;
-        noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
+        next[r.id] = keepOutcome(r, this.byId[r.id]);
+        noteRuntimeWaiting(r.id, r.status === 'awaiting_permission', r.title);
         this.emitSequence(r.id, r.last_sequence);
       }
       this.byId = next;
@@ -197,19 +238,21 @@ class RuntimeThreads {
     const rows = await api.get<RuntimeSession[]>('/runtime-sessions');
     const next = { ...this.byId };
     for (const r of rows) {
-      next[r.id] = r;
-      noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
+      next[r.id] = keepOutcome(r, this.byId[r.id]);
       this.emitSequence(r.id, r.last_sequence);
     }
+    // Every thread of the caller: the waiting set becomes exactly the rows
+    // that wait (a thread deleted or answered elsewhere leaves it).
+    syncRuntimeWaiting(rows.filter((r) => r.status === 'awaiting_permission').map((r) => ({ id: r.id, title: r.title })));
     this.byId = next;
   }
 
   /** Read one thread's row: an embed needs only its own, never the
    *  workspace's whole list. */
   async loadOne(id: string): Promise<RuntimeSession> {
-    const r = await api.get<RuntimeSession>(`/runtime-sessions/${id}`);
+    const r = keepOutcome(await api.get<RuntimeSession>(`/runtime-sessions/${id}`), this.byId[id]);
     this.byId[r.id] = r;
-    noteRuntimeWaiting(r.id, r.status === 'awaiting_permission');
+    noteRuntimeWaiting(r.id, r.status === 'awaiting_permission', r.title);
     this.emitSequence(r.id, r.last_sequence);
     return r;
   }
@@ -290,6 +333,7 @@ class RuntimeThreads {
       .get<RuntimeSession>(`/runtime-sessions/${id}`)
       .then((r) => {
         this.byId[r.id] = r;
+        noteRuntimeWaiting(r.id, r.status === 'awaiting_permission', r.title);
         this.emitSequence(r.id, r.last_sequence);
       })
       .catch(() => {
@@ -321,8 +365,18 @@ class RuntimeThreads {
     if (row && row.status !== 'closed' && (ev.type === 'provider_session.updated' || ev.type === 'provider_turn.updated')) {
       if (ev.type === 'provider_session.updated') {
         const ps = ev.provider_session;
-        this.byId[ev.session_id] = { ...row, status: SESSION_STATUS[ps.status], background_tasks: ps.background_tasks ?? [], capabilities: ps.capabilities ?? row.capabilities, title: ps.title ?? row.title, last_active_at: ev.ts };
+        const status = SESSION_STATUS[ps.status];
+        // A new turn clears how the last one ended (the daemon's rule for `last_turn_status`).
+        const fresh = status === 'working' || status === 'starting' ? { last_turn_status: null, last_error_class: null } : {};
+        this.byId[ev.session_id] = { ...row, ...fresh, status, background_tasks: ps.background_tasks ?? [], capabilities: ps.capabilities ?? row.capabilities, title: ps.title ?? row.title, last_active_at: ev.ts };
       } else this.byId[ev.session_id] = { ...row, last_active_at: ev.ts };
+    }
+    // How the turn ended stays on the row until the next one starts — live,
+    // so an older daemon (no `last_turn_status` on the row) still shows it
+    // until a reload.
+    if (row && row.status !== 'closed' && ev.type === 'turn.terminal') {
+      const cur = this.byId[ev.session_id] ?? row;
+      this.byId[ev.session_id] = { ...cur, ...turnOutcomeOf(ev.status, ev.failure) };
     }
   }
 

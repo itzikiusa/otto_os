@@ -3,8 +3,14 @@
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { paneResizer, RESIZE_TITLE } from '../../lib/paneResizer';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+  import { addCandidates } from './runtime/paneStrip';
+  import { runtimeThreads } from './runtime/runtimeThreads.svelte';
   import ThreadPane from './ThreadPane.svelte';
+  import { threadOrigin } from './threadOrigins';
   import { isThreadSession } from './threadsHelpers';
   import { threads } from './threadsStore.svelte';
 
@@ -13,12 +19,22 @@
   }
   let { onstartroom }: Props = $props();
 
+  // The strip and its "Message every pane…" sheet only matter with several panes or a
+  // council: their code loads after the page, not with it.
+  const PaneStrip = lazyComponent(() => import('./runtime/PaneStrip.svelte'));
+  const PaneMessageSheet = lazyComponent(() => import('./runtime/PaneMessageSheet.svelte'));
+
   let splitContainer = $state<HTMLDivElement | null>(null);
   let splitRatio = $state(50);
 
   const panes = $derived(threads.paneIds);
+  // Terminal and runtime threads alike: needs you first, then working, then recent.
   const availableToAdd = $derived(
-    ws.sessions.filter((s) => !s.archived && isThreadSession(s) && !panes.includes(s.id)),
+    addCandidates(
+      [...ws.sessions.filter((s) => isThreadSession(s)), ...runtimeThreads.rows().filter((s) => threadOrigin(s) === 'main')],
+      panes,
+      (id) => ws.needsYou[id] === true || runtimeThreads.get(id)?.status === 'awaiting_permission',
+    ),
   );
 
   const effectiveMode = $derived.by(() => {
@@ -52,6 +68,8 @@
   <ThreadPane paneId={id} {focused} {multiPane} {onstartroom} />
 {/snippet}
 
+<div class="tc-root">
+<LazyMount lazy={PaneStrip} what="the pane strip" quiet props={{ paneIds: viewport.isPhone ? (threads.focusedSessionId ? [threads.focusedSessionId] : panes.slice(0, 1)) : panes, focusedId: threads.focusedSessionId, phone: viewport.isPhone }} />
 <div
   class="tc-canvas"
   class:single={effectiveMode === 'single'}
@@ -107,6 +125,7 @@
                   <button
                     type="button"
                     class="btn small tc-pick-btn"
+                    data-testid="threads-add-{cand.id}"
                     onclick={() => threads.openBeside(cand.id)}
                   >
                     {#if hasProviderIcon(cand.provider)}
@@ -147,6 +166,7 @@
                 <button
                   type="button"
                   class="btn small tc-pick-btn"
+                  data-testid="threads-add-{cand.id}"
                   onclick={() => threads.openBeside(cand.id)}
                 >
                   {#if hasProviderIcon(cand.provider)}
@@ -169,13 +189,21 @@
     {/if}
   {/if}
 </div>
+</div>
+<LazyMount lazy={PaneMessageSheet} what="the message sheet" quiet />
 
 <style>
-  .tc-canvas {
+  .tc-root {
     flex: 1;
     min-width: 0;
     min-height: 0;
-    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  .tc-canvas {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
     padding: 8px;
     background: var(--bg);
     box-sizing: border-box;

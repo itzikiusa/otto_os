@@ -50,7 +50,7 @@ export const INTERACTIVE_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
   },
   {
     name: 'mode',
-    description: 'Choose execution mode (Full access, Accept edits, Plan)',
+    description: 'Choose execution mode (Full access, Auto-accept edits, Plan)',
     source: 'interactive',
   },
   {

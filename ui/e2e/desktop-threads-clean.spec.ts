@@ -57,12 +57,18 @@ test('the toolbar keeps four controls; the rest is one ⋯ away', async ({ page 
   await page.getByTestId('threads-thread-menu').click();
   const menu = page.locator('.ctx-menu');
   await expectFullyInViewport(page, menu, 'toolbar ⋯ menu');
-  for (const name of ['New thread', 'Related threads…']) await expect(menu.getByRole('menuitem', { name })).toBeVisible();
-  for (const name of ['Project card', 'Terminal drawer', 'Single thread', 'Split', 'Grid']) {
-    await expect(menu.getByRole('menuitemcheckbox', { name })).toBeVisible();
+  // New thread is the sidebar's pencil while the sidebar shows; layout and
+  // the project card sit in View.
+  await expect(menu.getByRole('menuitem', { name: 'Related threads…' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'New thread' })).toHaveCount(0);
+  await expect(menu.getByRole('menuitemcheckbox', { name: 'Terminal drawer' })).toHaveCount(1);
+  await menu.getByRole('menuitem', { name: 'View' }).click();
+  const view = page.locator('.ctx-submenu');
+  for (const name of ['Project card', 'Single thread', 'Split', 'Grid']) {
+    await expect(view.getByRole('menuitemcheckbox', { name })).toBeVisible();
   }
   // The project card opens from ⋯ and closes on Escape.
-  await menu.getByRole('menuitemcheckbox', { name: 'Project card' }).click();
+  await view.getByRole('menuitemcheckbox', { name: 'Project card' }).click();
   await expect(page.getByTestId('threads-project-card')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByTestId('threads-project-card')).toHaveCount(0);

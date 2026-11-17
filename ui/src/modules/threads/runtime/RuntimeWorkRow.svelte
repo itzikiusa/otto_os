@@ -79,7 +79,8 @@
     const elapsed = Math.max(0, now() - startMs);
     return elapsed >= 1000 ? formatDuration(elapsed) : null;
   });
-  const took = $derived(itemDuration(item) ?? liveReasoningElapsed);
+  // An error has no meaningful duration ("Provider error · 0ms" read as noise).
+  const took = $derived(item.type === 'error' ? null : (itemDuration(item) ?? liveReasoningElapsed));
   function hasAtLeastNewlines(raw: string, minCount: number): boolean {
     let found = 0;
     for (let i = 0; i < raw.length; i++) {

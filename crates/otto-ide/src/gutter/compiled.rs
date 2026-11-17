@@ -58,7 +58,7 @@ pub(super) fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeG
                 out.push(IdeGutterItem {
                     line: line_no,
                     kind: IdeGutterKind::Main,
-                    label: "Run main".into(),
+                    label: "main".into(),
                     language: "go".into(),
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::GoRun,
@@ -86,7 +86,7 @@ pub(super) fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeG
                 out.push(IdeGutterItem {
                     line: line_no,
                     kind: IdeGutterKind::Test,
-                    label: format!("Run {fn_name}"),
+                    label: fn_name.to_string(),
                     language: "go".into(),
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::GoTest,
@@ -147,7 +147,7 @@ pub(super) fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeG
                     out.push(IdeGutterItem {
                         line: line_no,
                         kind: IdeGutterKind::Test,
-                        label: format!("Run {parent_fn}/{sub_name}"),
+                        label: format!("{parent_fn}/{sub_name}"),
                         language: "go".into(),
                         run_spec: IdeQuickRunSpec {
                             runner: IdeRunnerKind::GoTest,
@@ -284,7 +284,7 @@ pub(super) fn detect_java(path: &str, dir: &str, content: &str, out: &mut Vec<Id
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Main,
-                label: format!("Run {cls_name}.main()"),
+                label: format!("{cls_name}.main()"),
                 language: "java".into(),
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::JavaMain,
@@ -348,7 +348,7 @@ fn emit_java_test(
         out.push(IdeGutterItem {
             line: cls_line,
             kind: IdeGutterKind::Suite,
-            label: format!("Run {cls_name}"),
+            label: cls_name.to_string(),
             language: "java".into(),
             run_spec: IdeQuickRunSpec {
                 runner: IdeRunnerKind::JavaJunit,
@@ -367,7 +367,7 @@ fn emit_java_test(
     out.push(IdeGutterItem {
         line: line_no,
         kind: IdeGutterKind::Test,
-        label: format!("Run {cls_name}.{method}"),
+        label: format!("{cls_name}.{method}"),
         language: "java".into(),
         run_spec: IdeQuickRunSpec {
             runner: IdeRunnerKind::JavaJunit,
@@ -458,7 +458,7 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                 out.push(IdeGutterItem {
                     line: line_no,
                     kind,
-                    label: format!("Run {fn_name}"),
+                    label: fn_name.to_string(),
                     language: "rust".into(),
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::CargoTest,
@@ -475,7 +475,7 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                 out.push(IdeGutterItem {
                     line: line_no,
                     kind: IdeGutterKind::Main,
-                    label: "Run main".into(),
+                    label: "main".into(),
                     language: "rust".into(),
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::CargoRun,

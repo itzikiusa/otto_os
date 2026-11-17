@@ -1,7 +1,9 @@
 <script lang="ts">
-  // The right panel as T3's "Open a surface": with nothing open it lists the
-  // surfaces (B F D P S while the panel has focus); opened ones sit as tabs
-  // with + (another surface), close and maximize. Every surface is its own
+  // The right panel as T3's "Open a surface" (person-facing: "panel"): with
+  // nothing open it lists them (B F C P S while the panel has focus); opened
+  // ones sit as tabs with + (another), close and maximize. On a phone (the
+  // details drawer) the card folds to one line and the key badges and
+  // Maximize (which the drawer can't do) go. Every surface is its own
   // lazy chunk, prefetched on hover, so the panel itself stays light.
   import { tick } from 'svelte';
   import { runtimeDrafts } from '../../lib/stores/runtimeDrafts.svelte';
@@ -79,7 +81,7 @@
   }
   const SURFACE_LABEL: Record<ThreadsInspectorTab, string> = {
     files: 'Files',
-    changes: 'Diff',
+    changes: 'Changes',
     pr: 'Pull request',
     side: 'Side chat',
     connections: 'Connections',
@@ -88,7 +90,7 @@
   const launcher = $derived<Surface[]>([
     { id: 'browser', label: 'Browser', key: 'B', icon: 'globe', prefetch: () => BrowserTab.prefetch() },
     { id: 'files', label: 'Files', key: 'F', icon: 'file', prefetch: () => FilesView.prefetch() },
-    { id: 'changes', label: 'Diff', key: 'D', icon: 'branch', disabled: repo ? null : 'Not a git repository', prefetch: () => ChangesView.prefetch() },
+    { id: 'changes', label: 'Changes', key: 'C', icon: 'branch', disabled: repo ? null : 'Not a git repository', prefetch: () => ChangesView.prefetch() },
     {
       id: 'pr',
       label: 'Pull request',
@@ -159,14 +161,14 @@
 
 <aside class="ti" aria-label="Thread panel" data-testid="threads-inspector" use:surfaceKeys>
   {#if showCard && contextCwd}
-    <div class="ti-card"><ThreadProjectCard cwd={contextCwd} /></div>
+    <div class="ti-card"><ThreadProjectCard cwd={contextCwd} compact={threads.inspectorCompact} /></div>
   {/if}
   {#if contextThreadId}<ThreadAgentsTasks sessionId={contextThreadId} />{/if}
   <header class="ti-head">
     {#if tabs.length > 0}
       <div class="ti-tabs">
         <Tabs
-          label="Open surfaces"
+          label="Open panels"
           size="s"
           idBase="threads-insp"
           testid="threads-inspector-tabs"
@@ -176,10 +178,10 @@
         />
       </div>
     {:else}
-      <span class="ti-title">Open a surface</span>
+      <span class="ti-title">Open a panel</span>
     {/if}
     {#if active}
-      <button type="button" class="icon-btn" aria-label="Close {SURFACE_LABEL[active]}" title="Close surface" onclick={closeActive}>
+      <button type="button" class="icon-btn" aria-label="Close {SURFACE_LABEL[active]}" title="Close {SURFACE_LABEL[active]}" onclick={closeActive}>
         <Icon name="x" size={12} />
       </button>
     {/if}
@@ -187,14 +189,14 @@
       type="button"
       class="icon-btn"
       aria-haspopup="menu"
-      aria-label="Open another surface"
-      title="Open another surface"
+      aria-label="Open another panel"
+      title="Open another panel"
       data-testid="threads-surface-add"
       onclick={openAddMenu}
     >
       <Icon name="plus" size={13} />
     </button>
-    <button
+    {#if !threads.inspectorCompact}<button
       type="button"
       class="icon-btn"
       class:ti-on={threadsChrome.maximized}
@@ -204,7 +206,7 @@
       onclick={() => (threadsChrome.maximized = !threadsChrome.maximized)}
     >
       <Icon name={threadsChrome.maximized ? 'minimize' : 'maximize'} size={12} />
-    </button>
+    </button>{/if}
   </header>
 
   <div
@@ -343,5 +345,11 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     text-align: center;
+  }
+  /* Touch: no keyboard to press the key with. */
+  @media (hover: none) {
+    .ti-key {
+      display: none;
+    }
   }
 </style>

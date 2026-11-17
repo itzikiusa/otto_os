@@ -11,6 +11,7 @@ import {
   type Extension, type Range,
 } from '@codemirror/state';
 import { foldAll, foldCode, unfoldAll, unfoldCode } from '@codemirror/language';
+import { gotoLine as cmGotoLine, openSearchPanel } from '@codemirror/search';
 import type { IdeGutterItem } from '../api/types.ts';
 import { copyWithToast } from '../clipboard.ts';
 import { ctxMenu, type MenuItem } from '../contextmenu.svelte.ts';
@@ -18,7 +19,9 @@ import {
   selectionOrCurrentLine, setSavedContentEffect,
 } from './cm-ide-git-and-agent.ts';
 import { buildIdeVcsContextRows } from './cm-ide-history.ts';
-import { wordAtCursor, type IdeEditorCallbacks } from './cm-ide-keymap.ts';
+import { openReplaceInFile, wordAtCursor, type IdeEditorCallbacks } from './cm-ide-keymap.ts';
+import { showIdeDocsAtCaret } from './cm-ide-touch.ts';
+import { isCoarsePointer, touchShapeIdeMenu } from './cm-ide-touch-menu.ts';
 import {
   computeExtractInterfaceEdit, computeExtractMethodEdit, computeGenerateCodeSnippet,
   computeInlineVariableEdit, computeIntroduceTypeEdit, computeIntroduceVariableEdit,
@@ -337,6 +340,23 @@ function dispatchRepoTestAction(filePath: string, mode: 'run' | 'coverage' | 'de
   window.dispatchEvent(new CustomEvent('otto:ide-repo-test-action', { detail: { path: filePath, mode } }));
 }
 
+/** What the page adds to the editor menu opened by touch. */
+export interface IdeTouchMenuExtra {
+  goToLine?: (() => void) | null;
+  textSize?: ((delta: -1 | 1) => void) | null;
+}
+
+const ideTouchMenus = new WeakMap<EditorView, (x: number, y: number, extra: IdeTouchMenuExtra) => void>();
+
+/** Opens the editor's context menu (touch-shaped) for `view` at (x, y), e.g. under the
+ *  phone's ⋯ button. False for an editor without it (a manifest file). */
+export function openIdeEditorMenu(view: EditorView, x: number, y: number, extra: IdeTouchMenuExtra = {}): boolean {
+  const open = ideTouchMenus.get(view);
+  if (!open) return false;
+  open(x, y, extra);
+  return true;
+}
+
 function nearestGutterRunItem(runMap: Map<number, IdeGutterItem> | undefined, cursorLine: number): IdeGutterItem | null {
   if (!runMap || !runMap.size) return null;
   const exact = runMap.get(cursorLine);
@@ -372,11 +392,11 @@ export function createIdeRefactorExtensions(opts: {
     { key: 'F5', run: () => { if (!fPath) return false; dispatchFileRefactorEvent('copy', fPath); return true; } },
   ]));
 
-  const contextMenuExt = opts.isManifest ? [] : Prec.highest(EditorView.domEventHandlers({
-    contextmenu(event, view) {
-      if (event.target instanceof Element && event.target.closest('.cm-gutters')) return false;
+  // `touch` = opened from a touch entry point (the phone ⋯): it opens on the caret and
+  // never moves it; `extra` adds what the page provides (Go to line via quick-open).
+  const openMenu = (event: MouseEvent, view: EditorView, touch?: IdeTouchMenuExtra): void => {
       const cbs = opts.getCallbacks();
-      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      const pos = touch ? null : view.posAtCoords({ x: event.clientX, y: event.clientY });
       const main = view.state.selection.main;
       if (pos != null && (main.empty || pos < main.from || pos > main.to)) {
         view.dispatch({ selection: { anchor: pos, head: pos } });
@@ -518,6 +538,13 @@ export function createIdeRefactorExtensions(opts: {
         if (cbs.onDefinitionJump) goToChildren.push({ label: 'Declaration or Usages', icon: 'arrow', hint: '⌘B', action: () => cbs.onDefinitionJump?.({ line: sym.line, column: sym.column, symbol: sym.word || undefined }) });
         if (cbs.onImplementationJump) goToChildren.push({ label: 'Implementation(s)', icon: 'layers', hint: '⌥⌘B', action: () => cbs.onImplementationJump?.({ line: sym.line, column: sym.column, symbol: sym.word || undefined }) });
         if (cbs.onFileStructure) goToChildren.push({ label: 'File Structure…', icon: 'book', hint: '⌘F12', action: () => cbs.onFileStructure?.() });
+        // Moved here from the crumbs row; only where a file has functions (not prose or data).
+        if (cbs.onJumpSymbol && !/\.(md|markdown|mdx|txt|rst|adoc|csv|tsv|jsonl?|ndjson|ya?ml|toml|xml|ini|lock|css|scss|less|sql)$/i.test(fPath)) {
+          goToChildren.push(
+            { label: 'Previous Function', icon: 'arrowUp', hint: '⌃↑', action: () => cbs.onJumpSymbol?.(-1) },
+            { label: 'Next Function', icon: 'arrowDown', hint: '⌃↓', action: () => cbs.onJumpSymbol?.(1) },
+          );
+        }
         if (cbs.onGoToLine) goToChildren.push({ label: 'Line:Column…', icon: 'step', action: () => cbs.onGoToLine?.() });
         if (goToChildren.length) items.push({ label: 'Go To', icon: 'arrow', children: goToChildren });
 
@@ -637,14 +664,38 @@ export function createIdeRefactorExtensions(opts: {
         }
 
         const syn = new MouseEvent('contextmenu', { clientX: event.clientX, clientY: event.clientY, bubbles: true });
-        ctxMenu.show(syn, items);
+        if (!touch && !isCoarsePointer()) { ctxMenu.show(syn, items); return; }
+        const at = { line: sym.line, column: sym.column, symbol: sym.word || undefined };
+        ctxMenu.show(syn, touchShapeIdeMenu(items, {
+          symbol: sym.word, readOnly: ro,
+          definition: cbs.onDefinitionJump ? () => cbs.onDefinitionJump?.(at) : null,
+          usages: cbs.onFindUsages ? () => cbs.onFindUsages?.(at) : null,
+          docs: () => void showIdeDocsAtCaret(view),
+          rename: cbs.onRenameSymbol ? () => cbs.onRenameSymbol?.({ line: sym.line, column: sym.column, symbol: sym.word }) : null,
+          quickFix: cbs.onQuickFix ? () => cbs.onQuickFix?.({ ...at, clientX: event.clientX, clientY: event.clientY }) : null,
+          find: () => { openSearchPanel(view); },
+          replace: () => { openReplaceInFile(view); },
+          goToLine: touch?.goToLine ?? cbs.onGoToLine ?? (() => { cmGotoLine(view); }),
+          textSize: touch?.textSize ?? null,
+        }));
       };
-
-      event.preventDefault();
       showMain();
-      return true;
-    },
-  }));
+  };
+
+  const contextMenuExt = opts.isManifest ? [] : [
+    Prec.highest(EditorView.domEventHandlers({
+      contextmenu(event, view) {
+        if (event.target instanceof Element && event.target.closest('.cm-gutters')) return false;
+        event.preventDefault();
+        openMenu(event, view);
+        return true;
+      },
+    })),
+    ViewPlugin.define((view) => {
+      ideTouchMenus.set(view, (x, y, extra) => openMenu(new MouseEvent('contextmenu', { clientX: x, clientY: y }), view, extra));
+      return { destroy: () => ideTouchMenus.delete(view) };
+    }),
+  ];
 
   const ideRefactorTheme = EditorView.baseTheme({
     '.cm-ide-col-select-mode .cm-content': { cursor: 'crosshair' },

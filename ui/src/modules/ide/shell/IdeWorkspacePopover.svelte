@@ -12,6 +12,7 @@
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
   import { projectListEntries, scratchesMenuItems, SCRATCHES_LOCKED } from './ideProjectList';
   import { onScratches, openScratches } from './ideScratches.svelte';
+  import { ideSwitcherFolders, realWorkspaceId } from './ideProjectRecents.svelte';
 
   interface Props {
     triggerEl: HTMLButtonElement | undefined;
@@ -33,7 +34,7 @@
 
   const filteredWorkspaces = $derived.by(() => {
     const q = query.trim().toLowerCase();
-    const list = ws.workspaces.filter((w) => w.id !== SCRATCH_WORKSPACE_ID && w.root_path);
+    const list = ideSwitcherFolders(ws.workspaces.filter((w) => w.id !== SCRATCH_WORKSPACE_ID && w.root_path));
     if (!q) return list;
     return list.filter(
       (w) => (w.name || '').toLowerCase().includes(q) || w.root_path.toLowerCase().includes(q),
@@ -83,20 +84,15 @@
     };
   });
 
+  // Close BEFORE switching: the unsaved-changes confirm must not open under the popover (I3-01).
   async function pickWorkspace(rootPath: string, id: string): Promise<void> {
-    try {
-      await ide.setLocalTarget(rootPath, id);
-    } finally {
-      closePopover(true);
-    }
+    closePopover(true);
+    await ide.setLocalTarget(rootPath, realWorkspaceId(id));
   }
 
   async function pickNamedProject(proj: IdeNamedProject): Promise<void> {
-    try {
-      await ide.activateProject(proj.id);
-    } finally {
-      closePopover(true);
-    }
+    closePopover(true);
+    await ide.activateProject(proj.id);
   }
 </script>
 
@@ -151,7 +147,7 @@
             type="button"
             class="ws-proj-select"
             title={SCRATCHES_LOCKED}
-            onclick={() => void openScratches().finally(() => closePopover(true))}
+            onclick={() => { closePopover(true); void openScratches(); }}
             oncontextmenu={(e) => { e.preventDefault(); ctxMenu.show(e, scratchesMenuItems()); }}
             use:rowMenu
             data-testid="ide-scratches-option"

@@ -8,7 +8,6 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import { enterSends } from '../../../lib/enterSends';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { PATH_LINK_CTX } from '../../../lib/pathLinks/open';
@@ -34,6 +33,10 @@
   import { availableSlash } from './hostCommands';
   import RuntimeAccessChip from './RuntimeAccessChip.svelte';
   import RuntimeAskAgent from './RuntimeAskAgent.svelte';
+  import { attentionItems, attentionPillText } from './attentionDock';
+  import RuntimeAttentionDock from './RuntimeAttentionDock.svelte';
+  import RuntimeComposerActions from './RuntimeComposerActions.svelte';
+  import RuntimeModelChip from './RuntimeModelChip.svelte';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
   import {
     appendDraftAttachments, buildOptimisticUserMessage, buildRuntimeBanners, collectMessageIds,
@@ -55,7 +58,6 @@
   import RuntimePlanToggle from './RuntimePlanToggle.svelte';
   import RuntimeQueueBar from './RuntimeQueueBar.svelte';
   import { linkedChildren } from './council';
-  import RuntimeSecretCard from './RuntimeSecretCard.svelte';
   import { secretRequests } from '../../../lib/stores/secretRequests.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
   import RuntimeTimelineRows from './RuntimeTimelineRows.svelte';
@@ -66,6 +68,8 @@
   import { renderWindow, timelineRowKey } from './follow';
   import { sendRefusal } from './queueRows';
   import { isRunning, latestTurn, pendingApprovals, timelineRows, turnOutcome } from './timeline';
+  import { composerStopKey, isStopChord } from './stopKeys';
+  import { failureView, turnErrorItem } from './turnFailure';
 
   const RuntimeQuestions = lazyComponent(() => import('./RuntimeQuestions.svelte'));
   const ModelPicker = lazyComponent(() => import('../../../lib/components/ModelPickerPopover.svelte'));
@@ -147,12 +151,8 @@
   // The owner's own sign-in answers a private secret request.
   const secretAsk = $derived(session && !auth.isImpersonating && session.created_by === auth.me?.id ? (secretRequests.bySession[sessionId] ?? null) : null);
   $effect(() => void secretRequests.load());
-  const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || needsRevive);
-  const banners = $derived(buildRuntimeBanners({
-    sessionError, uiAsk, secretAsk: !!secretAsk, queueShown, needsRevive, freshContext: draft.freshContext,
-    hasQuestions: Boolean(p?.requests.some((r) => r.kind === 'question')),
-    hasPlan: Boolean(plan),
-  }));
+  // What the agent waits on the person for: answered in the attention dock.
+  const attention = $derived(attentionItems(p?.requests ?? [], secretAsk));
 
   let scroller = $state<HTMLDivElement | null>(null);
   let streamEl = $state<HTMLDivElement | null>(null);
@@ -183,6 +183,18 @@
     return effort ? `${label} · ${formatEffortShort(effort)}` : label;
   });
 
+  // A failed turn is ONE block (RuntimeTurnStatus): its error row and the
+  // dormant "Agent stopped" line would only repeat it.
+  const failedError = $derived(outcome?.kind === 'failed' && p ? turnErrorItem(p.items, turn?.id) : null);
+  const lastError = $derived(p?.session?.last_error ? { class: '', message: p.session.last_error } : null);
+  const failure = $derived(outcome?.kind === 'failed' ? failureView(failedError?.failure ?? lastError, harnessLabel(provider)) : null);
+  const failedQuiet = $derived(!!failure && dormant);
+  const queueShown = $derived((background.length > 0 && !closed) || (p?.queued.length ?? 0) > 0 || (needsRevive && !failedQuiet));
+  const banners = $derived(buildRuntimeBanners({
+    sessionError, uiAsk, queueShown, needsRevive, freshContext: draft.freshContext,
+    hasQuestions: Boolean(p?.requests.some((r) => r.kind === 'question' && r.status !== 'pending')),
+    hasPlan: Boolean(plan),
+  }));
   const accessMode = $derived(accessModeOverride ?? draft.pickedMode ?? session?.access_mode ?? 'approval-required');
   // What the agent takes, as the daemon reports it (live first).
   const caps = $derived(capsOf(p?.session?.capabilities ?? session?.capabilities, runtimeBaselineCaps(provider, auth.meta)));
@@ -365,10 +377,18 @@
 
   let askEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   let emojiEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
+  let dockEl = $state<{ onKey: (e: KeyboardEvent, composerEmpty: boolean) => boolean } | null>(null);
+  const escState = { lastEscAt: -Infinity };
   function onKeydown(e: KeyboardEvent): void {
     if (e.isComposing || askEl?.onKey(e) || emojiEl?.onKey(e)) return;
     if (caps.plan && !suggestions.length && isPlanToggleKey(e)) return void (e.preventDefault(), (runtimeThreads.planIds[ownerId] = !planOn));
     if (handleSlashMenuKey(e, suggestions, cmdIdx, (i) => (cmdIdx = i), () => (cmdDismissed = true), acceptCmd)) return;
+    if (dockEl?.onKey(e, !canSendOrQueue)) return;
+    if (!ui.overlayOpen && composerStopKey(e, { running, composerEmpty: !canSendOrQueue, now: performance.now() }, escState)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return void stop();
+    }
     if (enterSends(e)) {
       e.preventDefault();
       submit();
@@ -378,6 +398,20 @@
   const focusComposer = (): void => {
     composerEl?.focus({ preventScroll: true });
   };
+  /** ⌘. stops the turn from anywhere in this pane (the composer handles its own keys). */
+  function onWindowKey(e: KeyboardEvent): void {
+    const pane = scroller?.parentElement;
+    const here = !!pane && (pane.contains(document.activeElement) || (focused && document.activeElement === document.body));
+    if (here && running && !ui.overlayOpen && isStopChord(e)) {
+      e.preventDefault();
+      void stop();
+    }
+  }
+  /** The dock's "Show": the request's row in the timeline. */
+  function jumpTo(requestId: string): void {
+    followRef?.releaseBottom();
+    scroller?.querySelector(`[data-testid="runtime-approval-${CSS.escape(requestId)}"]`)?.scrollIntoView({ block: 'center' });
+  }
 
   $effect(() => {
     const el = composerEl;
@@ -385,6 +419,7 @@
   });
 </script>
 
+<svelte:window onkeydown={onWindowKey} />
 <section class="rt" class:compact aria-label="Conversation" data-testid="runtime-thread-{sessionId}">
   {#if onswitch}<RuntimeLinkedThreads {sessionId} {onswitch} />{/if}
   <div class="rt-scroll" class:isolated={!ui.overlayOpen} bind:this={scroller}>
@@ -418,6 +453,8 @@
               cwd={effectiveCwd}
               workspaceId={session?.workspace_id}
               onrespond={respond}
+              hideItemId={failedError?.id ?? null}
+              onedituser={closed ? undefined : (m) => void restoreFailedTurnToDraft({ sessionId, draft, text: m.text, attachments: m.attachments, transformText: transformRestoredQueuedText, focusComposer })}
               {onopenpath}
               {formatAssistantText}
               {assistantFooter}
@@ -429,6 +466,9 @@
             {ownTurn}
             background={closed ? [] : background}
             {outcome}
+            {failure}
+            {agentName}
+            revive={failedQuiet && !draft.reopening ? () => void reopen() : undefined}
             disabled={closed}
             onedit={(t, atts) => void restoreFailedTurnToDraft({ sessionId, draft, text: t, attachments: atts, transformText: transformRestoredQueuedText, focusComposer })}
             onresend={async (t, atts) => {
@@ -444,7 +484,7 @@
       </div>
     </div>
   </div>
-  <RuntimeFollow bind:this={followRef} {scroller} seq={p?.lastSequence} {messageIds} firstRow={visibleRows[0] ? timelineRowKey(visibleRows[0]) : null} bind:holdFrom />
+  <RuntimeFollow bind:this={followRef} {scroller} seq={p?.lastSequence} {messageIds} needs={attentionPillText(attention)} firstRow={visibleRows[0] ? timelineRowKey(visibleRows[0]) : null} bind:holdFrom />
   <RuntimeStreamTools root={streamEl} {rows} bind:rowCap bind:text={draft.text} composer={composerEl} />
 
   <div class="rt-dock">
@@ -455,8 +495,6 @@
           <RuntimeFreshStop show={draft.freshContext && background.some((b) => b.stopId) && freshStopBg === ''} count={background.length} onstop={() => { freshStopBg = 'next'; submit(); }} />
         {:else if key === 'ui'}
           <RuntimeUiControl {sessionId} />
-        {:else if key === 'secret' && secretAsk}
-          <RuntimeSecretCard request={secretAsk} />
         {:else if key === 'questions' && p}
           <LazyMount lazy={RuntimeQuestions} what="the questions" variant="compact" props={{ requests: p.requests, sessionId, agent: agentName, onanswered: focusComposer }} />
         {:else if key === 'plan' && plan}
@@ -470,7 +508,7 @@
             {running}
             canSteer={!!caps.steer}
             {closed}
-            {dormant}
+            dormant={dormant && !failedQuiet}
             reopening={draft.reopening}
             onreopen={() => void reopen()}
             onedit={(t, restoredAtts, editedSessionId) => restorePoppedQueuedMessageToDraft({ activeSessionId: sessionId, editedSessionId, text: t, restoredAtts, transformText: transformRestoredQueuedText, focusComposer })}
@@ -484,6 +522,20 @@
       {/snippet}
     </RuntimeBannerStack>
 
+    {#if p && attention.length > 0}
+      <RuntimeAttentionDock
+        bind:this={dockEl}
+        {sessionId}
+        items={attention}
+        requests={p.requests}
+        {approvals}
+        secret={secretAsk}
+        agent={agentName}
+        onrespond={respond}
+        onanswered={focusComposer}
+        onjump={jumpTo}
+      />
+    {/if}
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
     <div class="rt-composer" style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
@@ -560,26 +612,22 @@
         {#if !agentChat}<RuntimeAskAgent part="button" {sessionId} {provider} access={accessMode} disabled={closed || !session} />{/if}
         <span class="rt-grow">
           {#if !agentChat}
-            <button
-              bind:this={agentEl}
-              type="button"
-              class="rt-agent"
-              aria-haspopup="dialog"
-              aria-expanded={pickerOpen}
-              aria-label="Model for the next turn: {agentLabel}"
-              title="Model and effort for the next turn"
-              data-testid={testIds?.model ?? 'runtime-model'}
+            <RuntimeModelChip
+              bind:el={agentEl}
+              {provider}
+              label={agentLabel}
+              expanded={pickerOpen}
               disabled={closed || !session}
-              onpointerenter={() => ModelPicker.prefetch()}
-              onclick={() => {
+              showIcon={!!session}
+              testId={testIds?.model ?? 'runtime-model'}
+              onprefetch={() => ModelPicker.prefetch()}
+              onopen={() => {
                 if (ModelPicker.error) ModelPicker.retry();
                 pickerOpen = true;
               }}
-            >
-              {#if session && hasProviderIcon(provider)}<ProviderIcon {provider} size={13} />{/if}
-              <span class="ellipsis">{agentLabel}</span>
-            </button>
+            />
             <RuntimeAccessChip
+              readOnly={!!session?.meta?.read_only}
               mode={accessMode}
               agent={harnessLabel(provider)}
               cwd={effectiveCwd ?? 'this folder'}
@@ -592,31 +640,17 @@
             {#if caps.plan}<RuntimePlanToggle id={ownerId} on={planOn} disabled={closed || !session} />{/if}
           {/if}
         </span>
-        {#if running && !canSendOrQueue}
-          <button
-            type="button"
-            class="rt-send stop"
-            aria-label="Stop the turn"
-            title="Stop"
-            data-testid={testIds?.stop ?? 'runtime-stop'}
-            disabled={draft.stopping}
-            onclick={() => void stop()}
-          >
-            <Icon name="stop" size={14} />
-          </button>
-        {:else}
-          <button
-            type="button"
-            class="rt-send"
-            aria-label={running ? 'Queue message' : 'Send message'}
-            title={running ? 'Queue (↵)' : 'Send (↵)'}
-            data-testid={testIds?.send ?? 'runtime-send'}
-            disabled={!draft.recovered || draft.reopening || draft.sending || !canSendOrQueue}
-            onclick={submit}
-          >
-            <Icon name="arrowUp" size={16} />
-          </button>
-        {/if}
+        <RuntimeComposerActions
+          {running}
+          canSend={canSendOrQueue}
+          sendDisabled={!draft.recovered || draft.reopening || draft.sending || !canSendOrQueue}
+          stopping={draft.stopping}
+          waiting={attention.length > 0}
+          stopTestId={testIds?.stop ?? 'runtime-stop'}
+          sendTestId={testIds?.send ?? 'runtime-send'}
+          onstop={() => void stop()}
+          onsend={submit}
+        />
       </div>
     </div>
   </div>
@@ -716,8 +750,10 @@
     border-radius: var(--radius-l);
     background: var(--surface);
   }
+  /* A visible focus ring (the shared accent line), not just a border shade. */
   .rt-composer:focus-within {
-    border-color: var(--border-strong);
+    border-color: var(--accent-line);
+    box-shadow: 0 0 0 1px var(--accent-line);
   }
   .rt-composer textarea {
     inline-size: 100%;
@@ -754,46 +790,5 @@
   @container (max-inline-size: 380px) {
     .rt-foot { flex-wrap: wrap; row-gap: 4px; }
     .rt-grow { order: -1; flex-basis: 100%; flex-wrap: wrap; }
-  }
-  .rt-agent {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    max-inline-size: 100%;
-    min-inline-size: 0;
-    block-size: 28px;
-    padding-inline: 6px;
-    border: 0;
-    border-radius: var(--radius-m);
-    background: transparent;
-    font: inherit;
-    cursor: pointer;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-  }
-  .rt-agent:hover:not(:disabled) {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .rt-send {
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    inline-size: 30px;
-    block-size: 30px;
-    border: 0;
-    border-radius: 50%;
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-    cursor: pointer;
-  }
-  .rt-send.stop {
-    background: var(--text);
-    color: var(--bg);
-  }
-  .rt-send:disabled {
-    background: var(--surface-3);
-    color: var(--text-dim);
-    cursor: default;
   }
 </style>

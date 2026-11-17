@@ -43,7 +43,7 @@
     foldMarkerGutter, hasLongLine, langExtOf,
     lightEditorTheme, parkEditorHistory, placeholderEditorTheme,
     restoreOrCreateEditorState, revealEditorLine,
-    splitSelectionIntoLinesSync, type CursorChangeInfo,
+    splitSelectionIntoLinesSync, type CursorChangeInfo, outsideText,
   } from './cm-editor-helpers';
   import { isIdeManifestPath } from './cm-ide-manifest';
   import { ui } from '../stores/ui.svelte';
@@ -64,9 +64,9 @@
     ideMode?: boolean; connectionId?: string | null; projectFolders?: string[];
     savedContent?: string | null; gitBaseContent?: string | null;
     breakpoints?: IdeBreakpoint[]; breakpointsMuted?: boolean; blameByLine?: Record<number, string> | null;
-    onToggleBreakpoint?: ((line: number) => void) | null; onEditBreakpoint?: ((line: number, event?: MouseEvent) => void) | null;
+    onToggleBreakpoint?: ((line: number) => void) | null; onEditBreakpoint?: ((line: number, event?: MouseEvent) => void) | null; onBreakpointsMoved?: ((path: string, moves: CmIdeMod.IdeBreakpointMove[]) => void) | null;
     gutterItems?: IdeGutterItem[]; onGutterAction?: ((item: IdeGutterItem, mode: 'run' | 'debug' | 'run_keep_tc') => void) | null;
-    pausedLine?: number | null; executionLine?: number | null; inlineValues?: IdeInlineValue[];
+    pausedLine?: number | null; executionLine?: number | null; inlineValues?: IdeInlineValue[]; selectedFrameLine?: number | null; onDebugHover?: ((expression: string) => Promise<string>) | null;
     peerCursors?: (IdePeerCursor | IdeCollabPeer)[]; keymapPreset?: 'jetbrains' | 'standard'; fontLigatures?: boolean;
     jumpToLine?: { line: number; column?: number | null; seq?: number } | number | null;
     onCursorChange?: ((info: CursorChangeInfo) => void) | null;
@@ -91,7 +91,7 @@
     wrap = false, keepStates = false, historyKey = null, oncopy = null, lsp = false, sqlDialect = 'standard',
     highlightLineLimit = 0, ideMode = false, connectionId = null, projectFolders = [], savedContent = null, gitBaseContent = undefined,
     breakpoints = [], breakpointsMuted = false, blameByLine = null,
-    onToggleBreakpoint = null, onEditBreakpoint = null, gutterItems = [], onGutterAction = null,
+    onToggleBreakpoint = null, onEditBreakpoint = null, onBreakpointsMoved = null, gutterItems = [], onGutterAction = null, selectedFrameLine = null, onDebugHover = null,
     pausedLine = null, executionLine = null, inlineValues = [], peerCursors = [], keymapPreset = 'jetbrains', fontLigatures, jumpToLine = null,
     onCursorChange = null, onDefinitionJump = null, onImplementationJump = null,
     onFindUsages = null, onFileStructure = null, onJumpSymbol = null, onNavigateBack = null, onNavigateForward = null,
@@ -158,11 +158,11 @@
     );
   }
 
-  const getIdeCallbacks = (): CmIdeMod.IdeEditorCallbacks => ({
+  const getIdeCallbacks = (): CmIdeMod.IdeEditorCallbacks & CmIdeMod.IdeDebugEditorCallbacks => ({
     onToggleBreakpoint, onEditBreakpoint, onGutterAction, onDefinitionJump, onImplementationJump,
     onFindUsages, onFileStructure, onJumpSymbol, onNavigateBack, onNavigateForward,
     onQuickFix, onRenameSymbol, onFormat, onToggleBlame, onDiagnostics, onAgentAction,
-    onGoToLine, onPasteFromHistory,
+    onGoToLine, onPasteFromHistory, onBreakpointsMoved, onDebugHover,
   });
 
   const effectiveDiffBaseline = (): string | null =>
@@ -173,7 +173,7 @@
 
   const buildIdeOpts = (forPath?: string): CmIdeMod.CreateIdeExtensionsOptions => ({
     filePath: forPath ?? (livePath || path), language, root, connectionId, projectFolders,
-    breakpoints, breakpointsMuted, gutterItems, pausedLine: effectivePausedLine, inlineValues, peerCursors,
+    breakpoints, breakpointsMuted, gutterItems, pausedLine: effectivePausedLine, selectedFrameLine, inlineValues, peerCursors,
     diskSavedContent: savedContent, savedContent: effectiveDiffBaseline(), baselineSource: effectiveDiffBaselineSource(), blameByLine, keymapPreset, getCallbacks: getIdeCallbacks,
   });
 
@@ -648,7 +648,7 @@
       }
       if (stale) {
         const upd = computeMinimalTextUpdate(keptDoc.toString(), toContent, kept.state.selection.main.anchor, kept.state.selection.main.head);
-        view.dispatch({ effects, ...(upd ? { changes: { from: upd.from, to: upd.to, insert: upd.insert }, selection: EditorSelection.range(upd.anchor, upd.head) } : {}) });
+        view.dispatch({ effects, ...(upd ? { changes: { from: upd.from, to: upd.to, insert: upd.insert }, selection: EditorSelection.range(upd.anchor, upd.head), annotations: outsideText.of(true) } : {}) });
         pendingScrollTop = (coreSmartMod?.getIdeViewPosition(root, toPath) ?? stateCache.lightTabMeta.get(toPath))?.scrollTop ?? 0;
         applyPendingScroll();
       } else {
@@ -680,7 +680,7 @@
     } else if (curContent !== prevContent && !changes.pending && (!contentEchoed || view.state.doc.toString() !== curContent)) {
       prevContent = curContent;
       const upd = computeMinimalTextUpdate(view.state.doc.toString(), curContent, view.state.selection.main.anchor, view.state.selection.main.head);
-      if (upd) view.dispatch({ changes: { from: upd.from, to: upd.to, insert: upd.insert }, selection: EditorSelection.range(upd.anchor, upd.head) });
+      if (upd) view.dispatch({ changes: { from: upd.from, to: upd.to, insert: upd.insert }, selection: EditorSelection.range(upd.anchor, upd.head), annotations: outsideText.of(true) }); // outside text: breakpoints keep their lines
     } else if (curContent !== prevContent) {
       prevContent = curContent;
     }
@@ -732,8 +732,8 @@
   $effect(() => { const b = breakpoints, mu = breakpointsMuted; syncIdeEffect(b.length > 0 || !!onToggleBreakpoint, (m) => m.setBreakpointsEffect.of({ breakpoints: b, muted: mu })); });
   $effect(() => { const v = gutterItems; syncIdeEffect(v.length > 0, (m) => m.setGutterItemsEffect.of(v)); });
   $effect(() => {
-    const p = effectivePausedLine, iv = inlineValues, curPath = path;
-    syncIdeEffect(p != null || iv.length > 0, (m) => m.setDebugDecorationsEffect.of({ pausedLine: p, inlineValues: iv }));
+    const p = effectivePausedLine, sf = selectedFrameLine, iv = inlineValues, curPath = path;
+    syncIdeEffect(p != null || sf != null || iv.length > 0, (m) => m.setDebugDecorationsEffect.of({ pausedLine: p, selectedLine: sf, inlineValues: iv }));
     const execKey = p != null && p >= 1 ? `${curPath}:${p}` : '';
     if (!execKey) { prevScrolledExecKey = ''; return; }
     if (execKey === prevScrolledExecKey) return;

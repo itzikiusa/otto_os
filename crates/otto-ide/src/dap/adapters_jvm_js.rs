@@ -400,6 +400,7 @@ pub(super) async fn resolve_java_adapter(
         initial_output.push(IdeDebugOutputEntry {
             category: "console".into(),
             text: format!("Compiled {} with debug symbols (-g)\n", plan.main_class),
+            seq: 0,
         });
         (plan.classpath, plan.main_class)
     } else if program.ends_with(".java") {

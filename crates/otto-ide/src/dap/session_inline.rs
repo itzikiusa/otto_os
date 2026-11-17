@@ -256,11 +256,15 @@ impl DapManager {
             snap.stopped_reason = None;
             snap.paused_file = None;
             snap.paused_line = None;
+            snap.selected_frame_file = None;
+            snap.selected_frame_line = None;
             snap.threads.clear();
             snap.stack_frames.clear();
             snap.scopes.clear();
             snap.inline_values.clear();
             snap.error = None;
+            snap.error_kind = None;
+            snap.error_ecosystem = None;
         });
         entry.restarting.store(false, Ordering::SeqCst);
         drop(lifecycle_guard);
@@ -279,7 +283,7 @@ impl DapManager {
             Err(err) => {
                 let _guard = entry.lifecycle_lock.lock().await;
                 if entry.boot_generation.load(Ordering::SeqCst) == my_gen && !entry.is_terminal() {
-                    entry.fail_and_evict(&self.sessions, err.to_string());
+                    entry.fail_start(&self.sessions, &err);
                 }
                 return Err(err);
             }
@@ -300,7 +304,7 @@ impl DapManager {
         let boot = boot_session_connection(&self.sessions, entry, resolved, &orig_req, &orig_ctx);
         if let Some(Err(err)) = entry.unless_superseded(my_gen, boot).await {
             if entry.boot_generation.load(Ordering::SeqCst) == my_gen && !entry.is_terminal() {
-                entry.fail_and_evict(&self.sessions, err.to_string());
+                entry.fail_start(&self.sessions, &err);
             }
             return Err(err);
         }
@@ -380,6 +384,8 @@ pub(super) fn mark_resumed(entry: &SessionEntry) {
         snap.stopped_reason = None;
         snap.paused_file = None;
         snap.paused_line = None;
+        snap.selected_frame_file = None;
+        snap.selected_frame_line = None;
         snap.inline_values.clear();
     });
 }

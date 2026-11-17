@@ -40,6 +40,9 @@
   }
 
   let projectName = $state('');
+  // New projects keep `pinned: true` — the data the tabbed projects view reads as "always
+  // shown"; the header pills it used to drive are gone, so there is no switch for it (I3-11).
+  const pinned = true;
   let parentInput = $state(initialParentDir());
   let resolvedParent = $state('');
   let parentOfParent = $state<string | null>(null);

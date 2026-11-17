@@ -77,6 +77,14 @@ pub trait RuntimeHost: Send + Sync + 'static {
 
     /// Deliver one event to WebSocket clients (owner / admin / root).
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>);
+
+    /// Thread `session` began waiting on its person (`Some(what)`: what its
+    /// approval, question or secret request asks) or stopped waiting
+    /// (`None`) — once per waiting episode (`runtime/attention.rs`; never
+    /// for a background thread). Production raises / settles the "Agent
+    /// needs attention" notice ([`crate::attention`]). Called under the
+    /// session lock: must not block.
+    fn attention(&self, _session: &RuntimeSession, _what: Option<&str>) {}
 }
 
 /// The synthetic PTY-shaped [`Session`] the safety helpers read (never
@@ -118,6 +126,8 @@ pub struct SessionManagerHost {
     pub workspaces: WorkspacesRepo,
     /// Publishes on the WS streaming path (otto-server's `publish_stream`).
     pub publish: Box<dyn Fn(Event) + Send + Sync>,
+    /// The "Agent needs attention" notices ([`RuntimeHost::attention`]).
+    pub notices: crate::attention::AttentionNotices,
 }
 
 #[async_trait::async_trait]
@@ -207,6 +217,10 @@ impl RuntimeHost for SessionManagerHost {
 
     async fn session_persistence_enabled(&self) -> bool {
         self.manager.session_persistence_enabled().await
+    }
+
+    fn attention(&self, session: &RuntimeSession, what: Option<&str>) {
+        self.notices.signal(session, what);
     }
 
     fn publish(&self, session: &RuntimeSession, event: Arc<RuntimeEvent>) {

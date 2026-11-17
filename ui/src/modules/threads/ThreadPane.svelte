@@ -24,6 +24,9 @@
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { threadsHostCommands } from './runtime/threadsHost';
   import { asThreadSession, runtimeThreads } from './runtime/runtimeThreads.svelte';
+  import { paneSeatLabel } from './runtime/councilStore.svelte';
+  import { runtimeViews } from './runtime/runtimeView.svelte';
+  import { formatTokens, threadTokenTotal } from './runtime/turnUsage';
   // The structured-runtime conversation loads with the first runtime thread.
   const RuntimeThread = lazyComponent(() => import('./runtime/RuntimeThread.svelte'));
   const LegacyConversation = lazyComponent(() => import('../agents/conversation/ConversationView.svelte')); // ui-guards: allow — experimental threads embeds shared ConversationView
@@ -42,6 +45,14 @@
   const rawStatus = $derived(ws.statusMap[paneId] ?? session?.status ?? 'idle');
   const needsYou = $derived(ws.needsYou[paneId] === true);
   const paneState = $derived(sessionState(session, rawStatus, needsYou, { stale: events.state !== 'connected' }));
+  // A council seat reads "Seat 2 · Opus · High" (two seats of one agent stay
+  // apart); its tokens show once its conversation is loaded (never fetched for this).
+  const seat = $derived(runtime ? paneSeatLabel(paneId) : null);
+  const tokens = $derived(formatTokens(threadTokenTotal(runtimeViews.projections[paneId]?.turns ?? [])));
+  // A narrow pane (Grid at 1280) keeps its composer: secondary header
+  // buttons move into its ⋯.
+  let paneW = $state(0);
+  const narrow = $derived(paneW > 0 && paneW < 460);
   // Branch for the composer meta row too: metadata / registered repo, else the
   // repo detected behind the thread's folder.
   const detectedRepo = $derived(session ? threadRepos.repoFor(session.cwd, session.workspace_id) : null);
@@ -167,8 +178,9 @@
 
   function openPaneMenu(e: MouseEvent): void {
     // Related threads (message, rooms) sits in every pane's ⋯ (threadMenu.ts).
-    if (runtime) ctxMenu.show(e, [...runtimeThreadMenu(paneId), { separator: true }, relatedThreadsItem(paneId)]);
-    else if (session) ctxMenu.show(e, buildThreadMenu(session));
+    const term = narrow && !isPlainShellSession(session) ? [{ label: showTerminal ? 'Hide terminal drawer' : 'Terminal drawer', icon: 'terminal', action: toggleTerminal }, { separator: true }] : [];
+    if (runtime) ctxMenu.show(e, [...term, ...runtimeThreadMenu(paneId), { separator: true }, relatedThreadsItem(paneId)]);
+    else if (session) ctxMenu.show(e, [...term, ...buildThreadMenu(session)]);
   }
   function paneFocus(node: HTMLElement): { destroy(): void } {
     const mark = (): void => {
@@ -188,8 +200,11 @@
 <article
   class="tp-pane"
   class:focused={focused && multiPane}
-  aria-label={session ? `Thread ${session.title}` : 'Thread pane'}
+  class:narrow
+  aria-label={session ? `Thread ${seat ?? session.title}` : 'Thread pane'}
+  aria-current={focused && multiPane ? 'true' : undefined}
   data-testid="thread-pane-{paneId}"
+  bind:clientWidth={paneW}
   use:paneFocus
 >
   {#if multiPane}
@@ -214,15 +229,18 @@
             type="button"
             class="tp-title ellipsis"
             dir="auto"
-            title="{session?.title ?? 'Thread'}{branch ? ` · ${branch}` : ''} — double-click to rename"
+            title="{session?.title ?? 'Thread'}{branch ? ` · ${branch}` : ''} — click to rename"
+            data-testid="pane-title-{paneId}"
+            onclick={() => focused && beginRename()}
             ondblclick={beginRename}
           >
-            {session?.title ?? 'Loading thread…'}
+            {seat ?? session?.title ?? 'Loading thread…'}
           </button>
+          {#if tokens && !narrow}<span class="tp-tokens" data-testid="pane-tokens-{paneId}">{tokens}</span>{/if}
         {/if}
       </div>
       <div class="tp-actions">
-        {#if !isPlainShellSession(session)}
+        {#if !isPlainShellSession(session) && !narrow}
           <button
             type="button"
             class="icon-btn"
@@ -321,8 +339,28 @@
     border-radius: var(--radius-m);
     overflow: hidden;
   }
+  /* The pane that takes the keyboard: an accent edge on top, its header
+     tinted and its title at full weight; the others read quieter. */
   .tp-pane.focused {
     border-color: var(--accent-line-strong);
+    box-shadow: inset 0 2px 0 var(--accent-solid);
+  }
+  .tp-pane.focused .tp-head {
+    background: var(--accent-soft);
+  }
+  .tp-pane:not(.focused) .tp-title {
+    font-weight: 500;
+    color: var(--text-dim);
+  }
+  .tp-tokens {
+    flex-shrink: 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .tp-pane.narrow .tp-head {
+    block-size: 32px;
+    padding-inline: 8px;
   }
   .tp-head {
     display: flex;

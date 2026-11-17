@@ -9,7 +9,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { plural } from '../../../lib/plural';
-  import { queuedRow } from './queueRows';
+  import { queuedLabel, queuedRow } from './queueRows';
   import { stopSummary } from './taskStop';
   import { taskStops } from './taskStops.svelte';
   import { toasts } from '../../../lib/toast.svelte';
@@ -42,6 +42,18 @@
   /** The tasks the daemon can stop one by one (not a swarm member or a turn's own subagent). */
   const stoppable = $derived(background.filter((b) => b.stopId));
   let stoppingAll = $state(false);
+  // A phone (or a short window) folds several queued messages into one line.
+  let small = $state(false);
+  let showQueued = $state(false);
+  $effect(() => {
+    if (typeof matchMedia !== 'function') return;
+    const mq = matchMedia('(max-width: 640px), (max-height: 500px)');
+    small = mq.matches;
+    const on = (): void => void (small = mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  });
+  const foldQueued = $derived(small && !showQueued && queued.length > 1);
 
   async function stopAll(): Promise<void> {
     const ids = stoppable.map((b) => b.stopId!);
@@ -120,30 +132,36 @@
     {/if}
   </div>
 {/if}
-{#each queued as q (q.id)}
+{#if foldQueued}
+  <button type="button" class="qb qb-fold" aria-expanded="false" data-testid="runtime-queued-fold" onclick={() => (showQueued = true)}>
+    <span class="ellipsis">{queued.length} queued messages{queued.some((q) => q.error) ? ' · one couldn’t send' : ''}</span>
+    <Icon name="chevronDown" size={12} />
+  </button>
+{/if}
+{#each foldQueued ? [] : queued as q (q.id)}
   {@const v = queuedRow(q, { running, canSteer })}
   <div class="qb" class:qb-failed={v.error} data-testid="runtime-queued" data-failed={v.error ? 'true' : undefined}>
     <span class="qb-text">
-      <span class="ellipsis" dir="auto">Queued: {q.text}{q.attachments ? ` (+${q.attachments})` : ''}</span>
+      <span class="ellipsis" dir="auto" title={q.text.slice(0, 500)}>{queuedLabel(q.text)}{q.attachments ? ` (+${q.attachments})` : ''}</span>
       {#if v.error}<span class="qb-error" dir="auto" use:announceShown={{ text: v.error, assertive: true }} data-testid="runtime-queued-error">{v.error}</span>{/if}
     </span>
     <!-- Send now steers into the running turn; it never stops it (Stop does that). -->
     {#if v.actions.includes('steer')}
-      <button type="button" class="btn small" title="Send it into the running turn — the agent reads it at its next step" onclick={() => void deliver(q, 'steer')}>Send now</button>
+      <button type="button" class="btn small qb-act" title="Send it into the running turn — the agent reads it at its next step" onclick={() => void deliver(q, 'steer')}>Send now</button>
     {/if}
     {#if v.actions.includes('retry')}
-      <button type="button" class="btn small" title="Put it back in line — it is sent after the messages ahead of it" data-testid="runtime-queued-retry" onclick={() => void deliver(q, 'queue')}>Send again</button>
+      <button type="button" class="btn small qb-act" title="Put it back in line — it is sent after the messages ahead of it" data-testid="runtime-queued-retry" onclick={() => void deliver(q, 'queue')}>Send again</button>
     {/if}
-    <button type="button" class="btn small" onclick={() => void edit(q)}>Edit</button>
-    <button type="button" class="icon-btn" aria-label="Remove queued message" title="Remove" onclick={() => void remove(q)}>
+    <button type="button" class="btn small qb-act" onclick={() => void edit(q)}>Edit</button>
+    <button type="button" class="icon-btn qb-act" aria-label="Remove queued message" title="Remove" onclick={() => void remove(q)}>
       <Icon name="x" size={12} />
     </button>
   </div>
 {/each}
 {#if closed || dormant}
   <div class="qb" data-testid="runtime-closed">
-    <span class="ellipsis">{closed ? 'Closed — in History. Revive to continue this conversation.' : 'Agent stopped. Your next message resumes it.'}</span>
-    <button type="button" class="btn small" disabled={reopening} onclick={onreopen} data-testid="runtime-reopen">{reopening ? 'Reviving…' : 'Revive'}</button>
+    <span class="ellipsis">{closed ? 'Closed — in History. Revive to continue this conversation.' : 'Agent stopped.'}</span>
+    <button type="button" class="btn small qb-act" title={closed ? undefined : 'Start the agent again (your next message does this too)'} disabled={reopening} onclick={onreopen} data-testid="runtime-reopen">{reopening ? 'Reviving…' : 'Revive'}</button>
   </div>
 {/if}
 
@@ -212,5 +230,25 @@
   }
   .qb .spinner {
     --spinner-size: 11px;
+  }
+  .qb-fold {
+    inline-size: 100%;
+    border: 0;
+    font: inherit;
+    font-size: var(--fs-s);
+    text-align: start;
+    cursor: pointer;
+  }
+  .qb-fold:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
+  }
+  @media (pointer: coarse) {
+    .qb-act,
+    .qb-stop,
+    .qb-fold {
+      min-block-size: var(--hit-min);
+      min-inline-size: var(--hit-min);
+    }
   }
 </style>

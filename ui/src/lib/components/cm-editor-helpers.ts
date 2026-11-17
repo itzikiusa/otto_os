@@ -110,10 +110,14 @@ export const lightEditorTheme = EditorView.theme(
 
 export const placeholderEditorTheme = EditorView.theme({
   '.cm-placeholder': { color: 'var(--text-dim)', fontStyle: 'normal' },
-  // Centre the chevron in its row only: centring the gutter column itself
-  // shifts every margin-top-placed marker down by half the free space.
-  '.cm-foldGutter': { inlineSize: '14px', minInlineSize: '14px', maxInlineSize: '14px' },
+  // The gutter itself is CodeMirror's flex COLUMN of line elements: only its width is set
+  // here. Centring belongs to each line element — centring the column floats a short file's
+  // fold chevron into the middle of the empty gutter.
+  '.cm-foldGutter': { inlineSize: '14px', minInlineSize: '14px', maxInlineSize: '14px', padding: '0', boxSizing: 'border-box' },
   '.cm-foldGutter .cm-gutterElement': {
+    inlineSize: '14px',
+    minInlineSize: '14px',
+    maxInlineSize: '14px',
     padding: '0',
     display: 'flex',
     alignItems: 'center',
@@ -653,3 +657,6 @@ export function createEditorStateCache() {
     },
   };
 }
+
+// Re-exported so the shared editor needs no extra import line (see cm-outside-text.ts).
+export { outsideText } from './cm-outside-text.ts';

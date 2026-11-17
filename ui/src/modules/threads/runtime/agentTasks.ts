@@ -7,13 +7,19 @@
 import type {
   BackgroundTask,
   RuntimeSessionStatus,
+  RuntimeTurnOutcome,
   TurnItem,
   TurnItemStatus,
 } from '../../../lib/api/types';
 import { plural } from '../../../lib/plural.ts';
 import { subagentChildren, workLabel } from './timeline.ts';
 
-export type AgentTaskStatus = 'running' | 'done' | 'failed' | 'stopped';
+/** `needs-you`: a linked child thread waits on a person (an approval, a
+ *  question, a secret) — still active, listed with the running ones. */
+export type AgentTaskStatus = 'running' | 'needs-you' | 'done' | 'failed' | 'stopped';
+
+/** Still going (running or waiting on a person): the strip's and the running list's rows. */
+export const isActiveTask = (t: Pick<AgentTask, 'status'>): boolean => t.status === 'running' || t.status === 'needs-you';
 
 export interface LinkedChildThreadSummary {
   id: string;
@@ -25,6 +31,9 @@ export interface LinkedChildThreadSummary {
   updatedAt: string;
   /** Latest activity summary from the child thread's projection when loaded. */
   stepSummary?: string | null;
+  /** How its latest turn ended (`RuntimeSession.last_turn_status`, or the
+   *  loaded projection's latest turn); absent = unknown. */
+  lastTurnStatus?: RuntimeTurnOutcome | null;
 }
 
 export interface AgentTask {
@@ -93,9 +102,13 @@ function noticeStatusOf(verb: string, fallback: TurnItemStatus): AgentTaskStatus
   return statusOf(fallback);
 }
 
-function childThreadStatusOf(s: RuntimeSessionStatus): AgentTaskStatus {
-  if (s === 'working' || s === 'starting' || s === 'awaiting_permission') return 'running';
-  if (s === 'closed' || s === 'idle' || s === 'dormant') return 'done';
+/** A linked child thread's row: a waiting request needs you, a turn runs,
+ *  else how its last turn ended — a closed child that did not fail stopped. */
+export function childThreadStatusOf(s: RuntimeSessionStatus, lastTurn?: RuntimeTurnOutcome | null): AgentTaskStatus {
+  if (s === 'awaiting_permission') return 'needs-you';
+  if (s === 'working' || s === 'starting') return 'running';
+  if (lastTurn === 'failed') return 'failed';
+  if (lastTurn === 'interrupted' || s === 'closed') return 'stopped';
   return 'done';
 }
 
@@ -488,7 +501,7 @@ export function agentTasks(
     for (let idx = 0; idx < opts.childThreads.length; idx++) {
       const c = opts.childThreads[idx];
       if (rows.some((r) => r.childSessionId === c.id)) continue;
-      const status = childThreadStatusOf(c.status);
+      const status = childThreadStatusOf(c.status, c.lastTurnStatus);
       const sublabel = [c.provider, c.model].filter(Boolean).join(' · ') || null;
       rows.push({
         id: `thread:${c.id}`,
@@ -497,7 +510,7 @@ export function agentTasks(
         status,
         background: true,
         startedAt: c.createdAt,
-        endedAt: status === 'running' ? null : c.updatedAt,
+        endedAt: status === 'running' || status === 'needs-you' ? null : c.updatedAt,
         itemId: null,
         childSessionId: c.id,
         taskId: null,
@@ -517,10 +530,10 @@ export function agentTasks(
   const at = (iso: string | null): number => (iso ? Date.parse(iso) : 0);
   return {
     running: rows
-      .filter((r) => r.status === 'running')
+      .filter(isActiveTask)
       .sort((a, b) => at(a.startedAt) - at(b.startedAt)),
     finished: rows
-      .filter((r) => r.status !== 'running')
+      .filter((r) => !isActiveTask(r))
       .sort((a, b) => at(b.endedAt ?? b.startedAt) - at(a.endedAt ?? a.startedAt)),
   };
 }

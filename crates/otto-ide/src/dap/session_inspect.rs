@@ -341,11 +341,7 @@ pub(super) async fn handle_stopped_event(
             .await;
         return;
     }
-    let selected_frame = frames
-        .iter()
-        .find(|f| f.path.as_deref().is_some_and(|p| !p.is_empty()))
-        .or_else(|| frames.first())
-        .cloned();
+    let selected_frame = top_source_frame(&frames);
 
     let (active_fid, paused_file, paused_line, scopes, inline_values) = if let Some(frame) =
         selected_frame
@@ -378,6 +374,8 @@ pub(super) async fn handle_stopped_event(
         snap.stopped_reason = Some(reason);
         snap.active_thread_id = Some(active_tid);
         snap.active_frame_id = active_fid;
+        snap.selected_frame_file = paused_file.clone();
+        snap.selected_frame_line = paused_line;
         snap.paused_file = paused_file;
         snap.paused_line = paused_line;
         snap.threads = threads;
@@ -406,6 +404,7 @@ pub(super) async fn select_frame_and_refresh(
         .clone();
     let snap = entry.read_snapshot();
     let effective_tid = thread_id.or(snap.active_thread_id).unwrap_or(1);
+    let thread_changed = snap.active_thread_id != Some(effective_tid);
 
     let need_refetch_frames = (thread_id.is_some() && thread_id != snap.active_thread_id)
         || snap.stack_frames.is_empty()
@@ -425,32 +424,49 @@ pub(super) async fn select_frame_and_refresh(
             .find(|f| f.id == fid)
             .cloned()
             .ok_or_else(|| Error::NotFound(format!("stack frame '{fid}' not found")))?,
-        None => frames
-            .iter()
-            .find(|f| f.path.as_deref().is_some_and(|p| !p.is_empty()))
-            .or_else(|| frames.first())
-            .cloned()
-            .ok_or_else(|| {
-                Error::NotFound(format!(
-                    "no stack frames available on thread '{effective_tid}'"
-                ))
-            })?,
+        None => top_source_frame(&frames).ok_or_else(|| {
+            Error::NotFound(format!(
+                "no stack frames available on thread '{effective_tid}'"
+            ))
+        })?,
     };
 
     let scopes = fetch_scopes_with_variables(&conn.wire, frame.id).await?;
     let inline_values =
         load_and_compute_inline_values(entry, frame.path.as_deref(), frame.line, &scopes).await;
+    // Execution stays where it stopped: only another thread has another stop
+    // location (its own top frame). Selecting a caller frame moves the
+    // selection, never `paused_file`/`paused_line`.
+    let stop_frame = if thread_changed {
+        top_source_frame(&frames)
+    } else {
+        None
+    };
 
     entry.mutate_and_broadcast(|s| {
         s.active_thread_id = Some(effective_tid);
         s.active_frame_id = Some(frame.id);
         s.stack_frames = frames;
-        s.paused_file = frame.path;
-        s.paused_line = Some(frame.line);
+        if let Some(top) = stop_frame {
+            s.paused_file = top.path;
+            s.paused_line = Some(top.line);
+        }
+        s.selected_frame_file = frame.path;
+        s.selected_frame_line = Some(frame.line);
         s.scopes = scopes;
         s.inline_values = inline_values;
     });
     Ok(())
+}
+
+/// The first frame that has a source file (else the first frame): where a
+/// thread is stopped as far as the editor can show it.
+fn top_source_frame(frames: &[IdeStackFrame]) -> Option<IdeStackFrame> {
+    frames
+        .iter()
+        .find(|f| f.path.as_deref().is_some_and(|p| !p.is_empty()))
+        .or_else(|| frames.first())
+        .cloned()
 }
 
 async fn fetch_threads(wire: &DapWireClient) -> Result<Vec<IdeThreadInfo>> {

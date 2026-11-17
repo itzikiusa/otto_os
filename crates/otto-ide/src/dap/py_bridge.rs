@@ -7,7 +7,7 @@
 //! conditional/hit-count breakpoints, and compound dict/list/object variable expansion.
 
 pub(crate) const PY_STDLIB_DAP_BRIDGE: &str = r#"
-import bdb, json, os, queue, runpy, sys, threading, traceback
+import bdb, dis, json, os, queue, runpy, sys, threading, traceback
 
 _raw_in = os.fdopen(os.dup(0), 'rb', 0)
 _raw_out = os.fdopen(os.dup(1), 'wb', 0)
@@ -67,6 +67,7 @@ class _OttoDapBdb(bdb.Bdb):
         self.initial_run = True
         self.pause_requested = False
         self.break_on_exceptions = False
+        self._line_tables = {}
         self._bdb_file = os.path.realpath(bdb.__file__)
         self._runpy_file = os.path.realpath(runpy.__file__)
         # Keep a sentinel in self.breaks so bdb.set_continue() NEVER calls sys.settrace(None),
@@ -224,6 +225,49 @@ class _OttoDapBdb(bdb.Bdb):
             else:
                 _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': cmd, 'body': {}})
 
+    def _line_table(self, fn):
+        # [(first_line, last_line, own_executable_lines, depth)] per code object of `fn`,
+        # cached by mtime; None when the file can't be read or compiled.
+        try:
+            mtime = os.path.getmtime(fn)
+        except OSError:
+            return None
+        hit = self._line_tables.get(fn)
+        if hit and hit[0] == mtime:
+            return hit[1]
+        try:
+            with open(fn, 'rb') as fh:
+                top = compile(fh.read(), fn, 'exec')
+        except Exception:
+            return None
+        table = []
+        def walk(co, depth):
+            own = sorted({ln for _, ln in dis.findlinestarts(co) if ln})
+            hi = own[-1] if own else co.co_firstlineno
+            for c in co.co_consts:
+                if isinstance(c, type(top)):
+                    hi = max(hi, walk(c, depth + 1))
+            table.append((co.co_firstlineno, hi, own, depth))
+            return hi
+        walk(top, 0)
+        self._line_tables[fn] = (mtime, table)
+        return table
+
+    def _resolve_line(self, fn, ln):
+        # The line a breakpoint on `ln` actually stops at: `ln` itself, else the
+        # next executable line of the same function; None when nothing can break.
+        table = self._line_table(fn)
+        if table is None:
+            return ln
+        spans = [t for t in table if t[0] <= ln <= t[1]]
+        if not spans:
+            return None
+        own = max(spans, key=lambda t: (t[0], -t[1], t[3]))[2]
+        for cand in own:
+            if cand >= ln:
+                return cand
+        return None
+
     def _apply_bps(self, rseq, args):
         raw_src = (args.get('source') or {}).get('path') or ''
         fn = self.canonic(raw_src)
@@ -235,9 +279,13 @@ class _OttoDapBdb(bdb.Bdb):
             out = []
             for bp in (args.get('breakpoints') or []):
                 ln = int(bp.get('line') or 1)
-                self.set_break(fn, ln)
-                self.bps[(fn, ln)] = dict(bp)
-                out.append({'verified': True, 'line': ln})
+                actual = self._resolve_line(fn, ln)
+                if actual is None:
+                    out.append({'verified': False, 'line': ln, 'message': 'No code on this line'})
+                    continue
+                self.set_break(fn, actual)
+                self.bps[(fn, actual)] = dict(bp, line=actual)
+                out.append({'verified': True, 'line': actual})
         _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': 'setBreakpoints', 'body': {'breakpoints': out}})
 
 dbg = _OttoDapBdb()

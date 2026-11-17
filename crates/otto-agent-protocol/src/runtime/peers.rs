@@ -178,6 +178,10 @@ impl AgentRuntime {
         let (provider, custom_slug) =
             self.resolve_target_provider(req.provider, Some(&requested_slug))?;
         self.ensure_group_room(&c).await?;
+        // An agent's opening prompt is an agent-to-agent message (`loop_guard`).
+        if framed && req.prompt.as_deref().is_some_and(|p| !p.trim().is_empty()) {
+            self.admit_agent_prompt(&c).await?;
+        }
         let root = c.parent_id.clone().unwrap_or_else(|| c.id.clone());
         let mut meta = req.meta;
         if let Some(slug) = custom_slug {
@@ -243,22 +247,43 @@ impl AgentRuntime {
             .collect())
     }
 
-    /// Send `text` to linked thread `peer` as its next turn. A peer still
-    /// working its turn refuses (409) — read it with [`Self::peer_reply`]
-    /// and send again.
+    /// Send `text` to linked thread `peer` as its next turn, from `caller`'s
+    /// agent. A peer still working its turn refuses (409) — read it with
+    /// [`Self::peer_reply`] and send again.
     pub async fn message_peer(
         &self,
         caller: &Id,
         peer: &Id,
         text: &str,
     ) -> Result<RuntimePromptResp> {
+        self.message_peer_by(caller, peer, text, false).await
+    }
+
+    /// [`Self::message_peer`]; `by_person` = the thread's owner sent it (it
+    /// resumes a paused group instead of counting toward `loop_guard`).
+    pub async fn message_peer_by(
+        &self,
+        caller: &Id,
+        peer: &Id,
+        text: &str,
+        by_person: bool,
+    ) -> Result<RuntimePromptResp> {
         if text.trim().is_empty() {
             return Err(Error::Invalid("message text is empty".into()));
         }
         let c = self.get(caller).await?;
         let p = self.group_member(&c, peer).await?;
+        if by_person {
+            self.person_prompted(caller).await;
+        } else {
+            self.admit_agent_prompt(&c).await?;
+        }
         let framed = format!("{}\n\n{text}", Self::peer_header(&c, "Message from"));
-        self.prompt(&p.id, &framed).await.map_err(|e| match e {
+        let sent = self.prompt(&p.id, &framed).await;
+        if sent.is_err() && !by_person {
+            self.refund_agent_prompt(&c);
+        }
+        sent.map_err(|e| match e {
             Error::Conflict(m) if m.contains("turn is already running") => Error::Conflict(format!(
                 "thread \"{}\" is busy with a turn — wait for it with otto_thread_read, then send again",
                 p.title

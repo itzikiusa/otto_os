@@ -34,9 +34,10 @@ carry into another conversation.
 0. **Top bar:** four controls — sidebar toggle, a `project / thread`
    breadcrumb (with the **Related threads** chip while the thread has any),
    the **right panel**, and ⋯. The ⋯ holds the thread's actions (rename, pin,
-   search, system notes, Related threads…, Continue on phone, settle,
-   archive), then New thread, Project card, Terminal drawer and the layout
-   (single · split · grid). Back / Forward are ⌘⇧← / ⌘⇧→. Single view has no
+   search, system notes, Related threads…, Continue on phone, Move to History,
+   close), then New thread, Terminal drawer and **View ▸** (single · split ·
+   grid, Project card; a phone gets no View). Back / Forward are ⌘⇧← / ⌘⇧→.
+   Single view has no
    separate pane header. See
    [Threads layout](./threads-structured-runtime.md#threads-layout).
 1. **Sidebar (`ThreadSidebar`):**
@@ -46,7 +47,7 @@ carry into another conversation.
    - **Pinned**, then each **project** with its threads — threads needing
      approval first, then working ones, then most recent; `delegated_by`
      workers nest under their lead.
-   - **History** (settled + archived threads) folded at the bottom.
+   - **History** (threads moved to History + closed ones) folded at the bottom.
    - Footer: Settings, Git, Usage, and Refresh (sessions + git status).
 2. **New Thread Stage (`NewThreadStage`):**
    - "What should we build in *project*?" (click the project to switch folder
@@ -54,10 +55,11 @@ carry into another conversation.
      chip holding the harness, model and reasoning effort (plus "Start without
      a prompt" and "Open beside current thread"), and a round send button.
    - Under it: **Current checkout** (or another git worktree of the repo), the
-     branch (switch or create), and the access mode (Full access · Accept
-     edits · Plan, `⇧⇥`). A structured thread started in **Plan** stays in
-     Plan: every follow-up asks for a plan until you turn **Plan** off in the
-     thread's composer (or press `⇧⇥` there). The mode is kept in this window.
+     branch (switch or create), the interaction mode (Full access ·
+     Auto-accept edits · Plan, `⇧⇥`) and the access chip (below). A
+     structured thread started in **Plan** stays in Plan: every follow-up asks
+     for a plan until you turn **Plan** off in the thread's composer (or press
+     `⇧⇥` there). The mode is kept in this window.
    - On wide windows a **project card** floats top-right; it also heads the
      right panel: folder, **Open in…** (Files, Git, a terminal thread, copy
      path), **project scripts** (saved per folder in this browser; running one
@@ -84,7 +86,7 @@ carry into another conversation.
      the background"); tapping it opens this section.
    - **Files:** Workspace file tree + multi-tab file viewer (`Preview | Source`
      for Markdown and images, line-numbered code viewer, `file:line` jump).
-   - **Changes:** Working-tree staged/unstaged status + Unified/Split git diff
+   - **Changes** (key **C**; was "Diff"): Working-tree staged/unstaged status + Unified/Split git diff
      viewer. When the branch is ahead of its upstream, an **Uncommitted ·
      Unpushed N** switch reviews the local commits a push or Create PR would
      send — all of them as one range (`range:<upstream>...HEAD`) or one commit
@@ -227,6 +229,107 @@ to about 3 minutes, and the thread masks the value as `••••••` in ev
 it shows or stores afterwards (values shorter than 4 characters are not
 masked). The agent CLI's own transcript on disk still records the tool
 result, as it does for any tool. Threads only (T3 Code #15907, #30257).
+
+## This round's thread view (2026-11)
+
+- **Attention dock.** What the agent waits on — an approval, a question form
+  or a secret request — sits in one dock directly above the composer
+  (`runtime/RuntimeAttentionDock.svelte`, model `runtime/attentionDock.ts`),
+  with its live controls; the timeline row only records the request
+  ("Waiting for your approval · Answer", which jumps to the dock). Several
+  requests step with ‹ / › ("1 of 3"). From an empty composer **⌘↵** approves
+  and **⌘⌫** declines. The dock is capped to a share of its pane (45 % with a
+  mouse, 60 % on touch) and never pushes the composer off screen.
+- **Stop.** While a turn runs, Stop sits next to Send. **Esc** stops (press it
+  twice when the composer has text) and **⌘.** stops (`runtime/stopKeys.ts`).
+- **A failed turn** is one block (`runtime/turnFailure.ts`) that names the
+  cause — not signed in, usage limit, CLI missing, CLI unsupported, stopped
+  unexpectedly, provider error — with Details and Revive.
+- **"Reply from …" rows**: a child thread's or another agent's reply that came
+  back into this thread is attributed to its sender, not shown as yours.
+- **Token usage per turn**: a finished turn shows its token count
+  (`runtime/turnUsage.ts`); child threads and council seats show their total.
+- **Read-only seats**: a council seat's access chip is a static
+  **Read-only** chip (seats always run under the read-only sandbox).
+- **New-thread stage defaults**: the folder starts at the project you last
+  used in this workspace, else a repo of a recent thread, else the workspace's
+  repo or root, else **Home** — shown, never silent (`newThreadDefaults.ts`).
+  The access chip starts from Settings › Providers › *Skip permission
+  prompts* (on = Full access, off = Supervised) and the first turn is sent
+  with exactly what the chip shows (`threadAccessDefault.svelte.ts`).
+- **Vocabulary**: **Move to History** (was Settle), **Reopen thread** for a
+  closed thread vs **Revive thread** for a stopped agent, **Changes** (was
+  Diff), "panel" (was surface), **Auto-accept edits**, and the toolbar's
+  **Thread list** / **Right panel** toggles.
+- **Closing a thread with child threads** says they keep running and offers
+  to close them too (`threadClosePlan.ts`).
+- **Split / Grid strip.** With 2+ panes a pane strip shows one status chip
+  per pane — Working / Needs you / Answered / Failed / Stopped / Ready — that
+  focuses its pane, and **Message every pane…**. When every pane is one
+  council it is the council strip instead: "Council · *title*", seat chips
+  "Seat N · model", **Ask every seat…** (a multi-line sheet that says which
+  stopped seats it restarts), **Synthesize** (disabled, with its reason,
+  until a seat has answered and none is working), **Stop all** while a seat
+  works, **Continue with this answer** (opens the new-thread stage with the
+  quoted answer; nothing is sent) and **Send to a thread ▸**
+  (`runtime/PaneStrip.svelte`, `runtime/paneStrip.ts`). Pane headers read
+  "Seat N · model · effort" with token counts once the conversation is
+  loaded. On a phone a council thread shows a one-tap seat switcher and one
+  **Council ▾** menu instead. The **Add a thread** slot of Split / Grid lists
+  structured threads too (needs you → working → recent).
+- **Message a thread › All open threads in this project** also reaches the
+  structured threads in the same folder and reports who could not receive it
+  (`threadRelay.ts`).
+- *(Coordinator: sidebar rows / status words of this round — T-ATTENTION — go
+  here once that work lands.)*
+
+## On a phone and a tablet
+
+Threads is the main way to steer agents on the Mac from a phone, so the page
+keeps the conversation readable and the composer usable with the on-screen
+keyboard up, upright and on its side.
+
+- **One header row.** On a phone (upright or on its side) and on a tablet the
+  shell's own top bar steps aside on Threads; the Threads header is the only
+  row: thread list, the thread's title, right panel and ⋯. On a phone on its
+  side it also holds **Open navigator** (the Navigator drawer carries the
+  bell), the row is 40 px, and the thread list is a drawer. Upright, Otto's
+  modules are in the bottom bar.
+- **The keyboard** (`lib/viewportFit.ts`, `lib/stores/keyboard.svelte.ts`).
+  Otto decides "the keyboard is open" once for every page: a text field has
+  focus and the visible viewport dropped well below the keyboard-free height
+  at this width (iOS shrinks only the visual viewport; Android is told to do
+  the same through `interactive-widget=resizes-visual`, and an older
+  "resizes-content" Android is measured against the tallest height seen at
+  that width). While it is open, `html[data-kb="open"]` hides the bottom bar
+  (and the Agents action bar) on every page and `--kb-h` holds its height.
+- **Typing in a thread** folds what the reply does not need, the least needed
+  first (`threadsTyping.ts`): under 560 px of visible height the terminal
+  drawer; under 420 px the plan line and the queued-messages fold; under
+  340 px (a phone on its side, an iPhone SE) the header row, and the composer
+  becomes one row — text, attach, Stop/Send — with the attention dock showing
+  its one-line head while the caret is in the composer. Everything returns
+  when the keyboard closes. The composer never leaves the screen: the notices
+  and the dock shrink (and scroll inside) first, the timeline keeps at least
+  a one-line peek, and a timeline that was following the latest message stays
+  at its end as the screen shrinks.
+- **Composer at 375 px**: one foot row — Send/Stop, attach, ask-agent, the
+  model chip (truncated, never below ~5 letters) and the access mode as its
+  icon (its name stays in the label and the menu).
+- **Code blocks wrap** on a phone (upright or on its side); the block's
+  **Wrap** button turns wrapping off. Diffs keep one line per line and scroll
+  sideways — their +/− column is the meaning — and fenced ```` ```diff ````
+  blocks show added / removed lines in green / red in both themes.
+- **iPad**: Otto's navigator folds to its icon rail while Threads is open
+  (`pageChrome.foldNav`; expanding the rail brings it back) and the thread
+  list is a column beside the conversation; the right panel stays a drawer.
+  Other pages keep the tablet's navigator column.
+- **Safe areas**: the installed app draws under the status bar and notch
+  (`viewport-fit=cover`); the shell pads each edge once from
+  `--safe-top/-bottom/-start/-end` (`app.css`), the bottom bar pads the home
+  indicator, and nothing is added above an open keyboard.
+- **Menus** are an opaque surface on touch screens, so the conversation never
+  shows through a ⋯ menu.
 
 ## Find in a thread
 

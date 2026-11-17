@@ -202,7 +202,12 @@
     };
     window.addEventListener('resize', onResize);
     window.addEventListener('keydown', onWinKey, true);
+    // The panel grows after it opens (models load, the reasoning row appears for the picked
+    // model): re-place on every size change so it never ends below the window.
+    const grown = typeof ResizeObserver === 'undefined' || !panelEl ? null : new ResizeObserver(() => place());
+    if (grown && panelEl) grown.observe(panelEl);
     return () => {
+      grown?.disconnect();
       window.removeEventListener('resize', onResize);
       window.removeEventListener('keydown', onWinKey, true);
     };
@@ -318,6 +323,9 @@
   <div class="mp-main">
     <div class="mp-cols">
       <section class="mp-models" aria-label="Models">
+        <h3 class="mp-provname" data-testid="model-picker-provider-name">
+          {#if view === '★'}<Icon name="star" size={13} />Favorite models{:else}<ProviderIcon provider={view} size={14} />{harnessLabel(view)}{/if}
+        </h3>
         <div class="mp-search">
           <Icon name="search" size={13} />
           <input
@@ -392,23 +400,19 @@
           <button type="button" class="btn small ghost mp-more" onclick={() => void custom()}>Custom model…</button>
         {/if}
       </section>
-
-      {#if efforts.length > 0}
-        <section class="mp-effort" aria-label="Reasoning" data-testid="picker-effort">
-          <h3 class="mp-head">Reasoning</h3>
-          <button type="button" class="mp-row" class:cur={effort === null} onclick={() => pickEffort(null)}>
-            <span class="mp-check">{#if effort === null}<Icon name="check" size={12} />{/if}</span>
-            <span class="mp-name">Default</span>
-          </button>
-          {#each efforts as lvl (lvl)}
-            <button type="button" class="mp-row" class:cur={effort === lvl} onclick={() => pickEffort(lvl)}>
-              <span class="mp-check">{#if effort === lvl}<Icon name="check" size={12} />{/if}</span>
-              <span class="mp-name">{formatEffortLabel(lvl)}</span>
-            </button>
-          {/each}
-        </section>
-      {/if}
     </div>
+
+    {#if efforts.length > 0}
+      <section class="mp-effort" aria-label="Reasoning" data-testid="picker-effort">
+        <span class="mp-foot-label">Reasoning</span>
+        <div class="segmented mp-effort-row" role="group" aria-label="Reasoning effort">
+          <button type="button" class:active={effort === null} aria-pressed={effort === null} onclick={() => pickEffort(null)}>Default</button>
+          {#each efforts as lvl (lvl)}
+            <button type="button" class:active={effort === lvl} aria-pressed={effort === lvl} onclick={() => pickEffort(lvl)}>{formatEffortLabel(lvl)}</button>
+          {/each}
+        </div>
+      </section>
+    {/if}
 
     {#if onmode && supportsInteractionMode(provider)}
       <footer class="mp-foot">
@@ -491,8 +495,7 @@
     display: flex;
     overflow: hidden;
   }
-  .mp-models,
-  .mp-effort {
+  .mp-models {
     display: flex;
     flex-direction: column;
     gap: 1px;
@@ -503,17 +506,30 @@
     flex: 1;
     min-width: 0;
   }
+  /* Reasoning: one compact row under the models (was a tall column). */
   .mp-effort {
-    inline-size: 150px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-block-start: 1px solid var(--border);
     flex-shrink: 0;
-    border-inline-start: 1px solid var(--border);
+    min-width: 0;
   }
-  .mp-head {
+  .mp-effort-row {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  /* The rail is icons only: the picked provider is named here. */
+  .mp-provname {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     margin: 0;
-    padding: 6px 8px 4px;
-    font-size: var(--fs-xs);
-    font-weight: 500;
-    color: var(--text-dim);
+    padding: 4px 8px 2px;
+    font-size: var(--fs-s);
+    font-weight: 600;
+    color: var(--text);
   }
   .mp-search {
     display: flex;
@@ -631,10 +647,5 @@
   .mp-foot-label {
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  @media (max-width: 640px) {
-    .mp-effort {
-      inline-size: 120px;
-    }
   }
 </style>

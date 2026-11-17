@@ -10,6 +10,7 @@
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
   import { onScratches, openScratches } from './ideScratches.svelte';
+  import { ideFolderLabel } from './ideProjectRecents.svelte';
 
   const IdeWorkspacePopoverLazy = lazyComponent(() => import('./IdeWorkspacePopover.svelte'));
 
@@ -34,10 +35,7 @@
     }
     if (onScratches()) return 'Scratches';
     if (ide.activeProject) return ide.activeProject.name;
-    const matchedWs = ws.workspaces.find(
-      (w) => w.id !== SCRATCH_WORKSPACE_ID && w.root_path === ide.target.root,
-    );
-    return matchedWs?.name || ideBasename(ide.target.root) || ide.target.root;
+    return ideFolderLabel(ide.target.root, ws.workspaces.filter((w) => w.id !== SCRATCH_WORKSPACE_ID));
   });
 
   const subtitlePath = $derived(ide.hasTarget ? shortenHomePath(ide.target.root) : '');

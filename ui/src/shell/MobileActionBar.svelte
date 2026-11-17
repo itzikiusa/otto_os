@@ -102,6 +102,11 @@
     padding: 0 4px;
     gap: 2px;
   }
+  /* Typing (the on-screen keyboard is up, lib/viewportFit.ts): the shortcuts
+     row gives its height back to what is being typed into. */
+  :global(html[data-kb='open']) .action-bar {
+    display: none;
+  }
 
   .ab-btn {
     flex: 1;

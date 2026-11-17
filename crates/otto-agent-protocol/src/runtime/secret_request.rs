@@ -113,6 +113,9 @@ impl AgentRuntime {
             events,
             id: id.clone(),
         };
+        // Its card is off-screen too: the thread's waiting notice says so.
+        let what = format!("asks for a secret: {prompt}");
+        super::attention::signal(&self.inner, &thread, Some(what.as_str()));
         let _ = events.send(Event::SecretRequestUpdated {
             user_id: thread.created_by.clone(),
             workspace_id: thread.workspace_id.clone(),
@@ -122,7 +125,9 @@ impl AgentRuntime {
             prompt,
             name,
         });
-        Ok(match tokio::time::timeout(WAIT, rx).await {
+        let answer = tokio::time::timeout(WAIT, rx).await;
+        super::attention::signal(&self.inner, &thread, None);
+        Ok(match answer {
             Ok(Ok(Some(value))) => {
                 self.redact_value(session_id, &value).await?;
                 json!({"status": "provided", "value": value,

@@ -382,7 +382,7 @@ impl CollabHub {
                     room.active_debug = Some(guest_snap.clone());
                 }
                 let _ = room.events_tx.send(IdeCollabEvent::DebugUpdated {
-                    session: guest_snap.clone(),
+                    session: Box::new(guest_snap.clone()),
                 });
             }
         }

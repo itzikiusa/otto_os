@@ -11,7 +11,8 @@
 //     the real menu, flips above only when that fits, and clamps into the
 //     viewport otherwise.
 // Either way focus moves into the menu (item 0) and returns to the trigger —
-// or to whatever had focus — when it closes.
+// or to whatever had focus — when it closes. A menu never outlives its
+// screen: a route change (a deep link, a notification, Back) closes it.
 
 export interface MenuItem {
   label?: string;       // omit for a separator
@@ -91,6 +92,29 @@ class ContextMenuStore {
    *  component closure reachable from it) after the user navigated away. */
   private lastTrigger: WeakRef<HTMLElement> | null = null;
 
+  private routeHooked = false;
+  /** The route path (hash without its query) the open menu belongs to. */
+  private routePath = '';
+
+  /** Close the open menu on navigation (a deep link, a notification, Back): its
+   *  items act on the screen it was opened on. Only a change of the route PATH
+   *  counts — a page that rewrites its own query (the IDE syncing `?file=`)
+   *  must not take a menu away under the pointer. The trigger being redrawn or
+   *  removed does not close it either: headers and rows re-render under an open
+   *  menu all the time. */
+  private guard(): void {
+    if (typeof window === 'undefined') return;
+    const pathNow = (): string => window.location.hash.split('?')[0];
+    this.routePath = pathNow();
+    if (this.routeHooked) return;
+    this.routeHooked = true;
+    const onRoute = (): void => {
+      if (pathNow() !== this.routePath) this.close();
+    };
+    window.addEventListener('hashchange', onRoute);
+    window.addEventListener('popstate', onRoute);
+  }
+
   private liveTrigger(): HTMLElement | null {
     const el = this.lastTrigger?.deref() ?? null;
     if (el && el.isConnected) return el;
@@ -131,6 +155,7 @@ class ContextMenuStore {
     this.x = (e as MouseEvent).clientX ?? 0;
     this.y = (e as MouseEvent).clientY ?? 0;
     this.rememberFocus(null);
+    this.guard();
     this.seq++;
     this.open = true;
   }
@@ -158,6 +183,7 @@ class ContextMenuStore {
     }
     if (target) this.lastTrigger = new WeakRef(target);
     this.rememberFocus(target);
+    this.guard();
     this.seq++;
     this.open = true;
   }

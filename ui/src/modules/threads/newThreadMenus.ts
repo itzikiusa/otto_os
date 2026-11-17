@@ -1,7 +1,8 @@
 import type { Repo, Session, WorkspaceWithRole } from '../../lib/api/types';
 import type { MenuItem } from '../../lib/contextmenu.svelte';
 import { INTERACTIVE_SLASH_COMMANDS, type ComposerSlashCommand } from '../../lib/slashActions';
-import { compactPath, projectNameFromCwd } from './threadsHelpers';
+import { canonicalPath, folderCandidates } from './newThreadDefaults';
+import { compactPath } from './threadsHelpers';
 
 const NEW_STAGE_SLASH_NAMES = new Set([
   'model',
@@ -52,33 +53,36 @@ export function buildFolderMenuItems(opts: {
   homePath: string;
   onPickPath: (path: string) => void;
   onBrowse: () => void;
+  /** Recent thread folders not in `sessions` (structured threads). */
+  recentCwds?: readonly string[];
 }): MenuItem[] {
-  const candidates: { label: string; path: string }[] = [];
-  const seen = new Set<string>();
-  const add = (label: string, path: string | null | undefined) => {
-    const p = (path ?? '').trim().replace(/\/+$/, '');
-    if (!p || seen.has(p)) return;
-    seen.add(p);
-    candidates.push({ label, path: p });
+  const names = {
+    homePath: opts.homePath,
+    repos: opts.repos,
+    workspaces: opts.currentWorkspace ? [opts.currentWorkspace] : [],
   };
-  if (!opts.scratchActive && opts.currentWorkspace?.root_path) {
-    add(opts.currentWorkspace.name, opts.currentWorkspace.root_path);
-  }
-  for (const r of opts.repos) add(r.name, r.path);
-  for (const s of opts.sessions) {
-    if (s.cwd) add(projectNameFromCwd(s.cwd), s.cwd);
-  }
-  const normalizedCwd = opts.cwd.replace(/\/+$/, '');
+  // The repo's own name beats the workspace's for the same folder.
+  const entries = [
+    ...opts.repos.map((r) => ({ path: r.path })),
+    ...(!opts.scratchActive && opts.currentWorkspace?.root_path ? [{ path: opts.currentWorkspace.root_path }] : []),
+    ...(opts.recentCwds ?? []).map((path) => ({ path })),
+    ...opts.sessions.map((s) => ({ path: s.cwd })),
+    // Home is always offered, by name — never a silent default.
+    { path: opts.homePath },
+  ];
+  const here = canonicalPath(opts.cwd);
+  const rows = folderCandidates(entries, names);
   return [
-    ...candidates.slice(0, 10).map(
+    ...rows.map(
       (c): MenuItem => ({
         label: c.label,
-        hint: compactPath(c.path, opts.homePath),
-        checked: normalizedCwd === c.path,
+        hint: c.hint,
+        title: c.path,
+        checked: here === canonicalPath(c.path),
         action: () => opts.onPickPath(c.path),
       }),
     ),
-    ...(candidates.length > 0 ? [{ separator: true }] : []),
+    { separator: true },
     {
       label: 'Browse folder…',
       icon: 'folder',

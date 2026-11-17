@@ -26,6 +26,9 @@ import {
   type IdeInlinePromptState,
 } from '../store/ideDiffApplier';
 import { upsertIdeContextChipList } from './ideSymbolChip';
+import {
+  memoryKeyOf, recallDurable, recallVolatile, registerProjectMemoryParticipant, rememberDurable, stashVolatile,
+} from '../store/ideProjectMemory';
 
 export const AGENT_OPEN_KEY = 'otto.ide.agentOpen';
 export const AGENT_PROVIDER_KEY = 'otto.ide.agent.provider';
@@ -306,6 +309,31 @@ class IdeAgentSharedState {
     this.proposalCache.clear();
     this.appliedPathByProposalId.clear();
     this.appliedUndoByProposalId = {};
+    this.restoreProjectMemory(memoryKeyOf(ide.target));
+  }
+
+  /** What this project had (I3-08 / I3-17): its thread, its own draft (never another
+   *  project's), and which proposals were already applied there (so none is offered
+   *  twice). The draft and Undo stay in memory only. */
+  saveProjectMemory(key: string): void {
+    if (!key) return;
+    rememberDurable(key, { agentSessionId: this.sessionId });
+    const mem: IdeAgentProjectMemory = {
+      draft: this.composerText,
+      applied: { ...this.appliedUndoByProposalId },
+      appliedPaths: [...this.appliedPathByProposalId.entries()],
+    };
+    stashVolatile(key, 'agent', mem);
+  }
+
+  restoreProjectMemory(key: string): void {
+    const mem = key ? recallVolatile<IdeAgentProjectMemory>(key, 'agent') : undefined;
+    this.composerText = mem?.draft ?? '';
+    if (mem) {
+      this.appliedUndoByProposalId = { ...mem.applied };
+      for (const [id, path] of mem.appliedPaths) this.appliedPathByProposalId.set(id, path);
+    }
+    if (!this.sessionId && key) this.sessionId = recallDurable(key)?.agentSessionId ?? null;
   }
 
   /** Leaving the IDE page. Which proposals were applied (and their Undo) survives it: a
@@ -320,3 +348,16 @@ class IdeAgentSharedState {
 }
 
 export const ideAgentState = new IdeAgentSharedState();
+
+interface IdeAgentProjectMemory {
+  draft: string;
+  applied: Record<string, string>;
+  appliedPaths: [string, string][];
+}
+
+registerProjectMemoryParticipant('agent', {
+  save: (key) => ideAgentState.saveProjectMemory(key),
+  // `resetTargetState` restores the entered project's memory (the engine also calls it
+  // on a target change; both paths land on the same state).
+  restore: () => ideAgentState.resetTargetState(),
+});

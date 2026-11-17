@@ -35,10 +35,17 @@ import { processResources } from './process-resources';
 //      enforcing `active_server_count <= 3`, combined RSS (`ottod` + child LSPs + UI) <= 1.8 GB
 //      (`1,887,436` KB), zero crashes, and zero console or `/api/v1/ide/*` 4xx/5xx errors.
 
-/** The IDE header is one toolbar row: Settings, Share, Git, Search… live in its ⋯ menu. */
+/** The IDE header is one toolbar row: Settings, Share, SSH… live in its ⋯ menu. */
 async function openIdeMenuItem(page: Page, name: string | RegExp): Promise<void> {
   await page.getByTestId('ide-more-btn').click();
   await page.locator('.ctx-menu').getByRole('menuitem', { name }).first().click();
+}
+
+/** Git changes, Live DB watch… sit in ⋯ › Tool windows. */
+async function openIdeToolWindow(page: Page, name: string | RegExp): Promise<void> {
+  await page.getByTestId('ide-more-btn').click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Tool windows' }).first().click();
+  await page.locator('.ctx-submenu').getByRole('menuitem', { name }).first().click();
 }
 
 /** Open a named multi-repo project from the workspace switcher (the pills row is gone). */
@@ -689,7 +696,7 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
 
     // 1b) Open & close all IDE LazyMount modals via UI & Escape with ZERO `b.onclose` errors
     // Modal 1: IdeSettingsModal (`⌘,` button)
-    await openIdeMenuItem(page, 'Settings & Project Structure…');
+    await openIdeMenuItem(page, 'Open settings…');
     const dialog = page.locator('[role="dialog"]').first();
     await expect(dialog).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');
@@ -710,8 +717,9 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden({ timeout: 10_000 });
 
-    // Modal 4: FolderPicker (`Add folder to project` button in tree toolbar)
-    await page.getByTestId('ide-add-folder-btn').click();
+    // Modal 4: FolderPicker (explorer ⋯ › `Add folder to project…`)
+    await page.getByTestId('ide-tree-more-btn').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Add folder to project…' }).click();
     await expect(dialog).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden({ timeout: 10_000 });
@@ -723,14 +731,15 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden({ timeout: 10_000 });
 
-    // Modal 6: IdeComparisonModal (`Show project local history` button)
-    await page.getByTestId('ide-tree-local-history-btn').click();
+    // Modal 6: IdeComparisonModal (explorer ⋯ › `Local history and deleted files…`)
+    await page.getByTestId('ide-tree-more-btn').click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Local history and deleted files…' }).click();
     await expect(dialog).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden({ timeout: 10_000 });
 
-    // Modal 7: IdeSearchEverywhere (⋯ → `Search everywhere…`)
-    await openIdeMenuItem(page, 'Search everywhere…');
+    // Modal 7: IdeSearchEverywhere (⌘P — the quick-open)
+    await page.keyboard.press('Meta+p');
     await expect(dialog).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden({ timeout: 10_000 });
@@ -788,8 +797,7 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
 
     // 1d) Live DB Watch: code-level detection + Capture baseline + live mutation + Before -> After diff
     await expect(cmContent).toContainText('ScanActiveSessions');
-    await page.getByTestId('ide-more-btn').click();
-    await page.getByRole('menuitem', { name: 'Live DB Watch' }).click();
+    await openIdeToolWindow(page, /Live DB watch/i);
 
     const dbPanel = page.getByTestId('ide-dbwatch-panel');
     await expect(dbPanel).toBeVisible({ timeout: 10_000 });
@@ -996,11 +1004,11 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
 
       if (step === 0) {
         // Visit Git dock across 50-repo project
-        await openIdeMenuItem(page, 'Git Changes');
+        await openIdeToolWindow(page, /Git changes/i);
         await expect(page.getByTestId('ide-dock-tab-git')).toBeVisible({ timeout: 10_000 });
       } else if (step === 2) {
-        // Visit DB Watch dock
-        await page.getByTestId('ide-tab-dbwatch').click();
+        // Visit DB Watch dock (hidden until used: opened from ⋯ › Tool windows)
+        await openIdeToolWindow(page, /Live DB watch/i);
         await expect(page.getByTestId('ide-dbwatch-panel')).toBeVisible({ timeout: 10_000 });
       } else if (step === 4) {
         // Visit Problems & Run tabs
@@ -1012,7 +1020,7 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
         await sleep(500);
       } else if (step === 8) {
         // Search Everywhere across 50 repos
-        await openIdeMenuItem(page, 'Search everywhere…');
+        await page.keyboard.press('Meta+p');
         const searchDlg = page.locator('[role="dialog"]').first();
         await expect(searchDlg).toBeVisible({ timeout: 10_000 });
         await page.keyboard.type('stage_05');

@@ -1,22 +1,20 @@
 <script lang="ts">
-  // Secondary Project Explorer tabs (`Structure` symbol outline and `Breakpoints`
-  // list) extracted from `IdeProjectTree.svelte` to keep every file < 460 LOC.
+  // Secondary Project Explorer tabs (`Structure` symbol outline and the one
+  // `Breakpoints` list, `debug/IdeBreakpointsList.svelte`) extracted from
+  // `IdeProjectTree.svelte` to keep every file < 460 LOC.
   import Badge from '../../../lib/components/Badge.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import Switch from '../../../lib/components/Switch.svelte';
-  import { confirmer } from '../../../lib/confirm.svelte';
   import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { rowMenu } from '../../../lib/rowMenu';
   import type { BadgeTone } from '../../../lib/status';
   import {
     ide,
-    ideBasename,
-    type IdeBreakpoint,
     type IdeSymbolNode,
   } from '../ideStore.svelte';
   import { ideAgent } from '../store/ideAgentController.svelte';
+  import IdeBreakpointsList from '../debug/IdeBreakpointsList.svelte';
 
   export interface FlatSymbolNode {
     sym: IdeSymbolNode;
@@ -63,20 +61,6 @@
         action: () => ideAgent.attachSymbol(path, sym, { openPanel: true }),
       },
     ]);
-  }
-
-  async function editBreakpointCondition(bp: IdeBreakpoint): Promise<void> {
-    const cond = await confirmer.promptText(
-      `Break when expression is true at ${ideBasename(bp.path)}:${bp.line} (leave empty to clear)`,
-      {
-        title: 'Breakpoint condition',
-        confirmLabel: 'Save condition',
-        initial: bp.condition ?? '',
-        placeholder: 'err != nil && count > 0',
-      },
-    );
-    if (cond === null) return;
-    ide.updateBreakpoint(bp.path, bp.line, { condition: cond.trim() || null });
   }
 </script>
 
@@ -127,39 +111,7 @@
   </div>
 {:else}
   <div class="sec-panel" role="tabpanel" id="ide-explorer-panel-breakpoints" aria-labelledby="ide-explorer-tab-breakpoints">
-    <div class="bp-bar">
-      <div class="bp-exc-toggle">
-        <Switch checked={ide.breakpointsMuted} label="Mute all breakpoints" onchange={() => ide.toggleMuteBreakpoints()} />
-        <span>Mute all</span>
-      </div>
-      <div class="bp-exc-toggle">
-        <Switch checked={ide.breakOnExceptions} label="Break on uncaught exceptions" onchange={(next) => { ide.breakOnExceptions = next; void ide.syncBreakpointsToSession(); }} />
-        <span>Exceptions</span>
-      </div>
-    </div>
-    <div class="sec-scroll">
-      {#if ide.allBreakpoints.length === 0}
-        <EmptyState headingLevel={2} icon="bug" title="No breakpoints" body="Click the editor line gutter or press ⌘F8 to toggle a breakpoint." />
-      {:else}
-        <div class="sec-list">
-          {#each ide.allBreakpoints as bp (`${bp.path}:${bp.line}`)}
-            <div class="bp-row">
-              <Switch checked={bp.enabled} label="Enable breakpoint at {ideBasename(bp.path)} line {bp.line}" onchange={(next) => ide.updateBreakpoint(bp.path, bp.line, { enabled: next })} />
-              <button type="button" class="bp-jump" dir="ltr" onclick={() => void ide.openFile(bp.path, { line: bp.line })} title={ide.relativePath(bp.path)}>
-                <span class="sec-name">{ideBasename(bp.path)}:{bp.line}</span>
-                {#if bp.condition}<Badge variant="outline" tone="warn" label="if {bp.condition}" />{:else if bp.log_message}<Badge variant="outline" tone="info" label="log" />{/if}
-              </button>
-              <button type="button" class="sec-icon-btn" aria-label="Edit breakpoint condition" title="Edit breakpoint condition…" onclick={() => void editBreakpointCondition(bp)}>
-                <Icon name="edit" size={12} />
-              </button>
-              <button type="button" class="sec-icon-btn" aria-label="Remove breakpoint" title="Remove breakpoint" onclick={() => ide.removeBreakpoint(bp.path, bp.line)}>
-                <Icon name="x" size={12} />
-              </button>
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </div>
+    <IdeBreakpointsList />
   </div>
 {/if}
 
@@ -180,10 +132,5 @@
   .struct-line-wrap:hover, .struct-line-wrap.active { background: var(--surface-2); }
   .struct-row { display: flex; align-items: center; gap: 6px; flex: 1; min-inline-size: 0; padding-block: 4px; padding-inline-end: 4px; background: transparent; border: none; color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer; }
   .struct-line { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); flex-shrink: 0; }
-  .bp-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding-block: 6px; padding-inline: 10px; border-block-end: 1px solid var(--border); }
-  .bp-exc-toggle { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-dim); }
-  .bp-row { display: flex; align-items: center; gap: 6px; padding-block: 4px; padding-inline: 8px; min-inline-size: 0; }
-  .bp-row:hover { background: var(--surface-2); }
-  .bp-jump { flex: 1; min-inline-size: 0; display: flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--text); font-family: var(--font-mono); font-size: var(--fs-xs); text-align: start; cursor: pointer; }
   @media (hover: none) { .struct-agent-btn { opacity: 1; } }
 </style>

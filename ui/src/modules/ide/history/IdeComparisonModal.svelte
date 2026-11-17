@@ -16,8 +16,10 @@
   import { toastError } from '../../../lib/toastError';
   import { ideGit } from '../git/ideGitController.svelte';
   import { ide, ideBasename } from '../ideStore.svelte';
+  import { ideLayout } from '../shell/ideLayout.svelte';
   import IdeCompareDiffPane from './IdeCompareDiffPane.svelte';
   import IdeComparisonSidebar from './IdeComparisonSidebar.svelte';
+  import { ideCompareLayout, ideCompareListName, ideCompareStepAfterPick, ideCompareTitle, type IdeCompareStep } from './ideCompareLayout';
   import {
     fetchGitRefFileContent,
     promptPutLocalHistoryLabel,
@@ -42,6 +44,8 @@
     initialFilter?: 'all' | 'deleted';
     initialRef?: string | null;
     initialClipboardText?: string;
+    /** What the left side is when it is not the clipboard ("On disk" from the disk-changed banner). */
+    sourceLabel?: string | null;
     onclose: () => void;
   }
 
@@ -54,6 +58,7 @@
     initialFilter = 'all',
     initialRef = null,
     initialClipboardText,
+    sourceLabel = null,
     onclose,
   }: Props = $props();
 
@@ -102,6 +107,10 @@
   const hasSidebar = $derived(
     mode === 'local-history' || mode === 'git-revision' || mode === 'git-branch',
   );
+  // Stacked (phone): list → detail. It opens on the diff of the newest pick.
+  let step = $state<IdeCompareStep>('diff');
+  const layout = $derived(ideCompareLayout(ideLayout.stack, hasSidebar, step));
+  const pick = (): void => { step = ideCompareStepAfterPick(ideLayout.stack, step); };
 
   // 1. Load Local History entries (`GET /ide/history/list?...&q=`).
   $effect(() => {
@@ -122,7 +131,13 @@
         ctl.signal,
       )
       .then((res) => {
-        if (!ctl.signal.aborted) entries = res.entries ?? [];
+        if (ctl.signal.aborted) return;
+        entries = res.entries ?? [];
+        // A file with no snapshots yet: say so instead of a large modal of empty panes.
+        if (!isDir && !debouncedQuery && entries.length === 0) {
+          toasts.info(`No local history for ${ideBasename(targetPath)} yet`, 'Saves and edits are recorded automatically.');
+          onclose();
+        }
       })
       .catch((e: unknown) => {
         if (ctl.signal.aborted || isAbortError(e)) return;
@@ -301,7 +316,7 @@
         rightText = cur.content;
         rightDisk = cur.content;
         rightExists = cur.exists;
-        leftLabel = curMode === 'file' && secondPath ? ideBasename(secondPath) : 'Clipboard';
+        leftLabel = curMode === 'file' && secondPath ? ideBasename(secondPath) : (sourceLabel ?? 'Clipboard');
       } catch (e) {
         if (!ctl.signal.aborted && !isAbortError(e)) detailError = loadErrorText(e);
       } finally {
@@ -364,24 +379,17 @@
   const targetDisplay = $derived(
     targetPath === root ? ideBasename(root) : ide.relativePath(targetPath) || ideBasename(targetPath),
   );
-  const modalTitle = $derived(
-    mode === 'local-history'
-      ? `Local History — ${targetDisplay}`
-      : mode === 'clipboard'
-        ? `Compare with Clipboard — ${ideBasename(targetPath)}`
-        : mode === 'git-branch'
-          ? `Compare with Branch — ${ideBasename(targetPath)}`
-          : `Compare Revisions — ${ideBasename(targetPath)}`,
-  );
+  const modalTitle = $derived(ideCompareTitle(mode, ideBasename(targetPath), targetDisplay, sourceLabel, ideLayout.stack));
+  const restoreLabel = $derived(restoring ? 'Restoring…' : !rightExists ? 'Restore deleted file' : 'Revert whole file');
 </script>
 
-<Modal title={modalTitle} width={1160} height={680} dismissable={!restoring} {onclose}>
-  <div class="icm-root" data-testid="ide-comparison-modal">
-    {#if hasSidebar}
+<Modal title={modalTitle} width={1160} height={layout.footer ? 680 : 4000} dismissable={!restoring} {onclose} footer={layout.footer ? footer : undefined}>
+  <div class="icm-root" class:compact={!layout.split && ideLayout.stack} data-testid="ide-comparison-modal">
+    {#if layout.showList}
       <IdeComparisonSidebar
         {mode}
         {isDir}
-        widthPx={sideW}
+        widthPx={layout.split ? sideW : 0}
         {entries}
         {filteredEntries}
         {deletedCount}
@@ -396,16 +404,38 @@
         error={listError}
         onFilterMode={(next) => (filterMode = next)}
         onSearchInput={(next) => (searchInput = next)}
-        onSelectEntry={(id) => { autoPicked = false; selectedEntryId = id; }}
+        onSelectEntry={(id) => { autoPicked = false; selectedEntryId = id; pick(); }}
         onPutLabel={() => void onPutLabel()}
         onRefFilter={(next) => (refFilter = next)}
-        onSelectRef={(ref) => (selectedRef = ref)}
+        onSelectRef={(ref) => { selectedRef = ref; pick(); }}
         onRetry={() => (reloadSeq += 1)}
       />
-      <PaneDivider bind:width={sideW} storageKey={LS_SIDE_W} min={210} max={480} defaultWidth={290} label="Resize revision list" />
+      {#if layout.split}<PaneDivider bind:width={sideW} storageKey={LS_SIDE_W} min={210} max={480} defaultWidth={290} label="Resize revision list" />{/if}
     {/if}
 
+    {#if layout.showDiff}
     <section class="icm-right">
+      {#if layout.showBack}
+        <div class="icm-step-bar" data-testid="ide-compare-step-bar">
+          <button type="button" class="btn ghost icm-back" onclick={() => (step = 'list')} data-testid="ide-compare-back">
+            <Icon name="chevronLeft" size={14} />
+            <span>{ideCompareListName(mode)}</span>
+          </button>
+          <span class="icm-step-what mono ellipsis" dir="ltr">{leftLabel}</span>
+          {#if mode === 'local-history'}
+            <button
+              type="button"
+              class="btn primary icm-step-act"
+              disabled={!selectedEntry || restoring}
+              onclick={() => void restoreSelectedWholeFile()}
+              data-testid="ide-local-history-restore"
+            >
+              <Icon name="undo" size={13} />
+              <span>{restoreLabel}</span>
+            </button>
+          {/if}
+        </div>
+      {/if}
       {#if mode === 'local-history' && !selectedEntry}
         <EmptyState icon="clock" title="Select a snapshot" body="Pick any timestamped snapshot on the start pane to compare and revert individual hunks or the whole file." headingLevel={3} />
       {:else if detailError}
@@ -422,12 +452,15 @@
           {rightExists}
           canEditRight={Boolean(activeComparePath || !isDir)}
           onApplyRight={applyToCurrent}
+          unifiedOnly={layout.unifiedOnly}
         />
       {/if}
     </section>
+    {/if}
   </div>
+</Modal>
 
-  {#snippet footer()}
+{#snippet footer()}
     <button type="button" class="btn ghost" disabled={restoring} onclick={onclose}>Close</button>
     {#if mode === 'local-history'}
       <button
@@ -439,11 +472,10 @@
         data-testid="ide-local-history-restore"
       >
         <Icon name="undo" size={13} />
-        <span>{restoring ? 'Restoring…' : !rightExists ? 'Restore deleted file' : 'Revert whole file'}</span>
+        <span>{restoreLabel}</span>
       </button>
     {/if}
-  {/snippet}
-</Modal>
+{/snippet}
 
 <style>
   .icm-root {
@@ -452,4 +484,21 @@
     border-block: 1px solid var(--border); overflow: hidden; background: var(--surface);
   }
   .icm-right { flex: 1; min-inline-size: 0; min-block-size: 0; display: flex; flex-direction: column; overflow: hidden; }
+  /* Stacked (phone): the sheet is as tall as the window allows and the diff (or
+     the list step) fills all of it — no fixed 540 px box, no 76dvh cap. */
+  /* It also covers the sheet body's padding (4 px top, 16 px bottom, 16 px sides). */
+  .icm-root.compact { block-size: calc(100% + 20px); max-block-size: none; min-block-size: 0; margin-block: -4px -16px; margin-inline: -16px; border-block-end: 0; }
+  .icm-step-bar {
+    display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+    min-block-size: 44px; padding-inline: 4px 8px; border-block-end: 1px solid var(--border);
+  }
+  .icm-back, .icm-step-act { min-block-size: 36px; flex-shrink: 0; }
+  .icm-step-what { flex: 1; min-inline-size: 0; font-size: var(--fs-xs); color: var(--text-dim); }
+  /* The sheet's ✕ is a 24 px glyph; on this phone sheet it is the only way out,
+     so it gets a full 44 px target. */
+  :global(.sheet:has(> .sheet-body > .icm-root.compact) > header .icon-btn) { min-inline-size: 44px; min-block-size: 44px; }
+  /* A phone on its side is ~380 px tall: the sheet keeps a 12 px margin (not
+     32 px) and its header no extra padding, so the diff keeps most of the height. */
+  :global(.sheet:has(> .sheet-body > .icm-root.compact)) { max-block-size: calc(100% - 24px); max-inline-size: calc(100% - 24px); }
+  :global(.sheet:has(> .sheet-body > .icm-root.compact) > header) { padding-block: 0; padding-inline-end: 4px; }
 </style>

@@ -423,20 +423,18 @@
             if (document.activeElement !== el && document.activeElement !== searchEl) el.focus({ preventScroll: true });
           }}
         >
-          {#if item.checked !== undefined}
-            <!-- Check column (checkable rows), then the row's own icon if any. -->
-            {#if item.checked}
-              <span class="ctx-icon ctx-check"><Icon name="check" size={13} /></span>
-            {:else}
-              <span class="ctx-icon-gap"></span>
-            {/if}
-            {#if item.icon}<span class="ctx-icon"><Icon name={asIcon(item.icon)} size={13} /></span>{/if}
-          {:else if item.icon}
+          <!-- One leading column: the row's icon, else a checkable row's check.
+               A checkable row WITH an icon shows its check at the end, so it
+               lines up with its neighbours (no second, empty column). -->
+          {#if item.icon}
             <span class="ctx-icon"><Icon name={asIcon(item.icon)} size={13} /></span>
+          {:else if item.checked}
+            <span class="ctx-icon ctx-check"><Icon name="check" size={13} /></span>
           {:else}
             <span class="ctx-icon-gap"></span>
           {/if}
           <span class="ctx-label">{item.label}</span>
+          {#if item.icon && item.checked}<span class="ctx-icon ctx-check" data-check-end><Icon name="check" size={13} /></span>{/if}
           {#if itemHasSub}
             <span class="ctx-chevron"><Icon name="chevronRight" size={12} /></span>
           {:else if item.hint}
@@ -480,19 +478,15 @@
               if (document.activeElement !== el) el.focus({ preventScroll: true });
             }}
           >
-            {#if subItem.checked !== undefined}
-              {#if subItem.checked}
-                <span class="ctx-icon ctx-check"><Icon name="check" size={13} /></span>
-              {:else}
-                <span class="ctx-icon-gap"></span>
-              {/if}
-              {#if subItem.icon}<span class="ctx-icon"><Icon name={asIcon(subItem.icon)} size={13} /></span>{/if}
-            {:else if subItem.icon}
+            {#if subItem.icon}
               <span class="ctx-icon"><Icon name={asIcon(subItem.icon)} size={13} /></span>
+            {:else if subItem.checked}
+              <span class="ctx-icon ctx-check"><Icon name="check" size={13} /></span>
             {:else}
               <span class="ctx-icon-gap"></span>
             {/if}
             <span class="ctx-label">{subItem.label}</span>
+            {#if subItem.icon && subItem.checked}<span class="ctx-icon ctx-check" data-check-end><Icon name="check" size={13} /></span>{/if}
             {#if subItem.hint}<span class="ctx-hint">{subItem.hint}</span>{/if}
           </button>
         {/if}
@@ -598,6 +592,16 @@
   .ctx-check {
     color: var(--accent-text);
   }
+  /* Over a conversation on a touch screen the menu is a surface, not glass:
+     text behind a translucent menu showed through its rows (vibrancy is for
+     chrome only). */
+  @media (pointer: coarse), (max-width: 1024px) {
+    .ctx-menu {
+      background: var(--surface);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+  }
 
   .ctx-item.danger .ctx-icon {
     color: var(--danger);
@@ -608,16 +612,24 @@
     flex-shrink: 0;
   }
 
+  /* The label gives way first (its large shrink factor) but keeps at least 40%
+     of the row; only then does a long hint (a path) ellipsise. Before, the hint
+     never shrank and squeezed long labels to a one-letter stub. */
   .ctx-label {
-    flex: 1;
+    flex: 1 1000 auto;
+    min-inline-size: 40%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  /* Trailing shortcut / qualifier (never shrinks the label away first). */
+  /* Trailing shortcut / qualifier: shrinks (with an ellipsis) only after the
+     label reached its floor, so a shortcut beside a long label stays whole. */
   .ctx-hint {
-    flex-shrink: 0;
+    flex: 0 1 auto;
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     margin-inline-start: 12px;
     font-size: var(--fs-xs);
     color: var(--text-dim);

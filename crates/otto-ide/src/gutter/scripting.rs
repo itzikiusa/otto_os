@@ -47,7 +47,13 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Main,
-                label: "Run __main__".into(),
+                // The menu reads "Run 'review.py'" / "Debug 'review.py'": labels
+                // name the target; the verb is the menu's.
+                label: std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("__main__")
+                    .to_string(),
                 language: "python".into(),
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::Python,
@@ -73,7 +79,7 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
                 out.push(IdeGutterItem {
                     line: line_no,
                     kind: IdeGutterKind::Suite,
-                    label: format!("Run {cls_name}"),
+                    label: cls_name.to_string(),
                     language: "python".into(),
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::Pytest,
@@ -102,7 +108,7 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Test,
-                label: format!("Run {fn_name}"),
+                label: fn_name.to_string(),
                 language: "python".into(),
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::Pytest,
@@ -282,7 +288,7 @@ fn build_js_test_item(
     IdeGutterItem {
         line: line_no,
         kind,
-        label: format!("Run '{title}'"),
+        label: title.to_string(),
         language: lang.to_string(),
         run_spec: IdeQuickRunSpec {
             runner,
@@ -437,7 +443,7 @@ pub(super) fn detect_shell(
                     out.push(IdeGutterItem {
                         line: 1,
                         kind: IdeGutterKind::Suite,
-                        label: format!("Run {base_name}"),
+                        label: base_name.to_string(),
                         language: "shell".into(),
                         run_spec: IdeQuickRunSpec {
                             runner: IdeRunnerKind::Shell,
@@ -454,7 +460,7 @@ pub(super) fn detect_shell(
                 out.push(IdeGutterItem {
                     line: line_no,
                     kind: IdeGutterKind::Test,
-                    label: format!("Run '{desc}'"),
+                    label: desc.to_string(),
                     language: "shell".into(),
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::Shell,
@@ -480,7 +486,7 @@ pub(super) fn detect_shell(
         out.push(IdeGutterItem {
             line: 1,
             kind: IdeGutterKind::Main,
-            label: format!("Run {base_name}"),
+            label: base_name.to_string(),
             language: "shell".into(),
             run_spec: IdeQuickRunSpec {
                 runner: IdeRunnerKind::Shell,
@@ -516,7 +522,7 @@ pub(super) fn detect_shell(
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Main,
-                label: format!("Run {fn_name}()"),
+                label: format!("{fn_name}()"),
                 language: "shell".into(),
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::Shell,
@@ -639,7 +645,7 @@ pub(super) fn apply_plugin_detectors(
                     .replace("{dir}", dir)
                     .replace("{name}", name)
             };
-            let prefix = det.label_prefix.as_deref().unwrap_or("Run");
+            let prefix = det.label_prefix.as_deref().unwrap_or("").trim();
             let cmd = if det.command_template.is_empty() {
                 None
             } else {
@@ -652,7 +658,11 @@ pub(super) fn apply_plugin_detectors(
             out.push(IdeGutterItem {
                 line: (idx + 1) as u32,
                 kind: det.kind,
-                label: format!("{prefix} {name}"),
+                label: if prefix.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{prefix} {name}")
+                },
                 language: det.language.clone(),
                 run_spec: IdeQuickRunSpec {
                     runner: det.runner,

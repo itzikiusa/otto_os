@@ -3,6 +3,7 @@
 // fixes (E6): ⌘F12 is File Structure, ⌘⇧T after a batch close, ⌘W on a pinned tab, Go to Line.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import * as shortcutsModule from '../src/modules/ide/shell/ideShortcuts.ts';
 import { loadSource } from './sourceHarness.ts';
 
 function ideModules(api: Record<string, unknown>) {
@@ -122,10 +123,9 @@ test('E4: an opened tab carries the read flags, so a truncated or binary file is
 
 function shell(over: Record<string, unknown> = {}) {
   const calls: string[] = [];
-  let promptOpts: { validate?: (v: string) => string | null } = {};
   const ide = {
     activePath: '/repo/a.ts', activeTab: { path: '/repo/a.ts', pinned: false } as { path: string; pinned: boolean } | null,
-    cursorInfo: { line: 1, col: 1 }, searchEverywhereOpen: false, activeDebug: null, goToLineOpen: false,
+    cursorInfo: { line: 1, col: 1 }, searchEverywhereOpen: false, activeDebug: null, goToLineOpen: false, keymapPreset: 'jetbrains',
     jumpTo: () => {}, openSettings: () => {}, saveFile: async () => true,
     closeTab: async (p: string) => { calls.push(`close:${p}`); },
     openSearchEverywhere: (t: string) => { calls.push(`search:${t}`); },
@@ -133,17 +133,21 @@ function shell(over: Record<string, unknown> = {}) {
   };
   const page = { tagName: 'DIV', isContentEditable: false, matches: () => false, closest: () => null, querySelector: () => null };
   const mod = loadSource(new URL('../src/modules/ide/shell/ideShellCommands.ts', import.meta.url), {
-    '../../../lib/confirm.svelte': { confirmer: { promptText: async (_m: string, o: typeof promptOpts) => { promptOpts = o; return null; } } },
     '../../../lib/contextmenu.svelte': { ctxMenu: { showAt: () => {} } },
     '../../../lib/idePreferences.svelte': { readIdePreferences: () => ({}), writeIdePreferences: () => {} },
     '../ideStore.svelte': { ide, ideBasename: (p: string) => p },
+    '../search/ideQuickOpen.svelte': {
+      openGoToLine: () => calls.push('line'), openGoToFile: () => calls.push('search:files'),
+      openGoToSymbol: () => calls.push('search:symbols'), openRecentFiles: () => calls.push('recent'),
+    },
+    './ideShortcuts': shortcutsModule,
     '../store/ideAgentController.svelte': { ideAgent: { markSelectionFromEditor: () => null, openInlineEdit: () => {} } },
   }, { Element: class {}, window: { location: { reload() {} }, dispatchEvent() {} }, CustomEvent: class {} });
   const key = (k: string, code: string, mods: { meta?: boolean; shift?: boolean } = {}) => ({
     target: page, key: k, code, ctrlKey: false, metaKey: Boolean(mods.meta), shiftKey: Boolean(mods.shift), altKey: false,
     defaultPrevented: false, preventDefault() { this.defaultPrevented = true; },
   });
-  return { mod, calls, ide, key, prompt: () => promptOpts };
+  return { mod, calls, ide, key };
 }
 
 test('E6: ⌘F12 is left to the editor (File Structure); ⌘O still opens Symbols', () => {
@@ -164,12 +168,12 @@ test('E6: ⌘W on a pinned tab keeps it open (and still keeps the window)', () =
   assert.deepEqual(plain.calls, ['close:/repo/a.ts']);
 });
 
-test('E6: Go to Line rejects anything but line or line:column', async () => {
-  const { mod, prompt } = shell();
-  await mod.promptIdeGoToLine();
-  const validate = prompt().validate!;
-  for (const ok of ['42', '42:8']) assert.equal(validate(ok), null, ok);
-  for (const bad of ['abc', '12x', '4:', ':3', '1:2:3']) assert.ok(validate(bad), bad);
+test('E6: Go to Line (the quick-open `:` mode) takes only line or line:column', async () => {
+  // Superseded on main: ⌘G is the quick-open's `:` mode, not a prompt, so the
+  // strict parse lives in parseQuickOpenQuery.
+  const { parseQuickOpenQuery } = await import('../src/modules/ide/search/ideQuickOpenModel.ts');
+  for (const ok of [':42', ':42:8']) assert.equal(parseQuickOpenQuery('files', ok).lineOnly, true, ok);
+  for (const bad of [':abc', ':12x', ':1:2:3']) assert.equal(parseQuickOpenQuery('files', bad).lineOnly, false, bad);
 });
 
 test('E6: ⌘⇧T reopens tabs closed by Close others / Close unmodified / Close all', async () => {

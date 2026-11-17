@@ -84,19 +84,29 @@
       return;
     }
     composerFocused = typeof document !== 'undefined' && document.activeElement === el;
+    // A focused textarea removed from the page (its thread closing, a pane
+    // swap) blurs DURING Svelte's teardown, when writing state is unsafe
+    // (`state_unsafe_mutation`). Its listeners are gone by then in our
+    // cleanup, but the removal can fire first: write only while this effect
+    // is live and the field is still on the page, and after the update.
+    let live = true;
     const onCaret = (): void => syncCaret();
     const onFocus = (): void => {
       composerFocused = true;
       syncCaret();
     };
     const onBlur = (): void => {
-      composerFocused = false;
+      if (!live || !el.isConnected) return;
+      queueMicrotask(() => {
+        if (live && document.activeElement !== el) composerFocused = false;
+      });
     };
     el.addEventListener('keyup', onCaret);
     el.addEventListener('click', onCaret);
     el.addEventListener('focus', onFocus);
     el.addEventListener('blur', onBlur);
     return () => {
+      live = false;
       el.removeEventListener('keyup', onCaret);
       el.removeEventListener('click', onCaret);
       el.removeEventListener('focus', onFocus);

@@ -66,13 +66,14 @@
   // events socket introduces this document (`hello.capabilities`).
   import '../lib/uiCommands/index';
   import SplitDivider from './SplitDivider.svelte';
-  import { sidePane } from '../lib/stores/sidePane.svelte';
+  import { sidePane } from '../lib/stores/sidePane.svelte'; import { ideWindowTitle } from '../modules/ide/store/ideWindowTitle.svelte';
   import { startGuest, postToHost } from '../lib/embedGuest';
   import { embeddedKeyTarget, paneKey, routeOf, clampShare } from '../lib/sidePane';
   import { nativePane } from '../lib/nativePane';
   import { paneWindowAction, showPaneDisplays } from '../lib/nativePaneMenu';
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
+  import { pageChrome } from '../lib/stores/pageChrome.svelte';
   import { ws, LS_ATTENTION } from '../lib/stores/workspace.svelte';
   import { git } from '../lib/stores/git.svelte';
   import { auth, impersonationStartedMs } from '../lib/stores/auth.svelte';
@@ -172,6 +173,7 @@
     return queue.length ? prefetchPagesWhenIdle(queue) : undefined;
   });
   const compactShell = $derived(!viewport.isDesktop && !isPopout && !isEmbedded);
+  const navFolded = $derived(compactShell && viewport.isTablet && pageChrome.foldNav && !ui.railExpanded);
   // The page draws its own PageHeader (the first registered header, in the
   // centre column — not one inside the right panel's browser tab).
   const pageTitled = $derived(compactShell && !!uiControl.barOwner?.closest('.mcenter'));
@@ -205,7 +207,7 @@
   // embedded side pane (its document title is never shown).
   $effect(() => {
     if (isEmbedded || isPopout) return;
-    const page = moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleTitle;
+    const page = moduleName === 'agents' ? (ws.activeSession?.title ?? 'Agents') : moduleName === 'ide' && ideWindowTitle.project ? `${ideWindowTitle.project} — IDE` : moduleTitle;
     document.title = page ? `${page} — Otto` : 'Otto';
   });
   // Navigation and breakpoint changes dismiss compact overlays.
@@ -1045,8 +1047,9 @@
      browser we DON'T CSS-zoom — users scale crisply with the browser's own zoom
      (⌘+/−), which re-rasterizes everything (terminal included) and keeps
      coordinates correct. ui.zoom still drives native zoom inside Tauri. -->
-<div class="shell" class:vibrant class:embedded={isEmbedded} class:mobile={compactShell} class:tablet={compactShell && viewport.isTablet} class:short={compactShell && viewport.isShort} class:page-titled={pageTitled}>
-  {#if compactShell && !(viewport.isPhone && moduleName === 'threads')}
+<div class="shell" class:vibrant class:embedded={isEmbedded} class:mobile={compactShell} class:tablet={compactShell && viewport.isTablet} class:short={compactShell && viewport.isShort} class:bnav={compactShell && viewport.isPhone} class:page-titled={pageTitled}>
+  <!-- Threads draws the one header row on phones and tablets (no second pair of panel toggles); a narrow Mac window keeps it for the traffic lights. -->
+  {#if compactShell && !(moduleName === 'threads' && (viewport.navDrawer || !isTauri))}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <header
     class="mtopbar"
@@ -1117,7 +1120,7 @@
   {/if}
   <div class="shell-main" class:mbody={compactShell}>
     {#if !isPopout && !isEmbedded && !viewport.navDrawer}
-    <div class="sidebar" class:msidebar={compactShell} class:tauri-top={isTauri && !compactShell}>
+    <div class="sidebar" class:msidebar={compactShell} class:mfolded={navFolded} class:tauri-top={isTauri && !compactShell}>
       <!-- Draggable titlebar strip over the overlaid traffic-lights inset, so the
            window can be moved by dragging the top-left (the native title bar is
            hidden by `titleBarStyle: Overlay`). The empty 26px inset has no
@@ -1125,7 +1128,7 @@
       {#if isTauri && !compactShell}
         <div class="titlebar-drag" role="presentation" data-tauri-drag-region onmousedown={startWindowDrag}></div>
       {/if}
-      {#if compactShell || ui.railExpanded}
+      {#if (compactShell && !navFolded) || ui.railExpanded}
         <Navigator />
       {:else}
         <Rail />
@@ -1423,11 +1426,7 @@
   .shell.page-titled .mtop-title {
     display: none;
   }
-  .mbody {
-    flex: 1;
-    display: flex;
-    min-height: 0;
-  }
+  .mbody { flex: 1; display: flex; min-height: 0; }
   .msidebar {
     height: 100%;
     width: 220px;
@@ -1435,6 +1434,7 @@
     display: flex;
     border-inline-end: 1px solid var(--border);
   }
+  .msidebar.mfolded { width: auto; border-inline-end: 0; } /* tablet + pageChrome.foldNav: the Rail (own border) */
   .mcenter {
     /* the single content pane fills the remaining width */
     flex: 1;

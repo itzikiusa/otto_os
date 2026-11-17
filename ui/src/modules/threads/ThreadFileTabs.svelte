@@ -18,6 +18,8 @@
 
   // The shared file preview (Markdown, JSON tree, table, image) — the IDE's too.
   const FilePreviewLazy = lazyComponent(() => import('../../lib/components/FilePreview.svelte'));
+  // A touch screen has no double-click: its empty state says "Tap".
+  const touch = typeof matchMedia === 'function' && matchMedia('(hover: none)').matches;
 
   interface Props {
     rootPath: string;
@@ -312,7 +314,9 @@
         variant="panel"
         icon="file"
         title="Open a file to inspect"
-        body="Click any file above — single-click previews, double-click pins its tab. Markdown, JSON, CSV, SVG and code render inline."
+        body={touch
+          ? 'Tap a file above to preview it. Markdown, JSON, CSV, SVG and code render inline.'
+          : 'Click any file above — single-click previews, double-click pins its tab. Markdown, JSON, CSV, SVG and code render inline.'}
       />
     {:else}
       <div class="tf-file-toolbar">

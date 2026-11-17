@@ -9,10 +9,16 @@ import { auth } from '../../../lib/stores/auth.svelte';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
 import { ideCollabNotices } from './ideCollabNotices.svelte';
+import { debugActionVerb, debugStartErrorFrom, ideDebugLaunch } from './ideDebugLaunch.svelte';
+import {
+  CURRENT_FILE_CONFIG_ID, loadLaunchMemory, planLaunch, resolveLaunchSelection, saveLaunchMemory, type LaunchPlan,
+} from './ideLaunchTarget';
 import {
   attachDebugSessionStream,
+  debugRevealTarget,
   normalizeIncomingDebugSnapshot,
   refreshWatchValues,
+  resetForNewDebugSession,
   syncSnapshotBreakpointsToStore,
   syncStopVariables,
 } from './ideDebugSnapshotSync';
@@ -23,11 +29,16 @@ import {
 } from './ideRepoTestAndBuildTags';
 export {
   attachDebugSessionStream,
+  debugRevealTarget,
   normalizeIncomingDebugSnapshot,
   refreshWatchValues,
+  resetForNewDebugSession,
   syncSnapshotBreakpointsToStore,
   syncStopVariables,
 };
+export { guardDebugRelaunch } from './ideDebugLaunch.svelte';
+import { toolOutdatedNotice, updateDelveAndRetry } from './ideToolchainJobs';
+export { createProjectPythonVenv, installToolchainJob, toolOutdatedNotice } from './ideToolchainJobs';
 import {
   collabGuestPost, defaultRunnerForLanguage, GUTTER_TARGET_ID, IdeCollabHttpError, ideTargetKey, streamIdeSse, type IdeBottomTab,
   type IdeBreakpoint, type IdeCollabRoom, type IdeDebugSessionSnapshot, type IdeDetectedSdk,
@@ -298,13 +309,12 @@ export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
     host.detectedConfigs = backendDetected.length > 0 ? backendDetected : host.detectedConfigs;
     const combined = mergeRunConfigs(resp.configs ?? [], host.detectedConfigs);
     host.runConfigs = combined;
-    const explicitFirst = combined.find((c) => !c.auto_detected);
-    const hasCurrent = host.selectedConfigId === GUTTER_TARGET_ID
-      ? Boolean(host.envState.gutterTarget)
-      : Boolean(host.selectedConfigId && combined.some((c) => c.id === host.selectedConfigId));
-    if (!hasCurrent || (host.selectedConfigId?.startsWith('auto:') && explicitFirst)) {
-      host.selectedConfigId = explicitFirst?.id ?? combined[0]?.id ?? null;
-    }
+    // "Current file" unless the person picked a configuration for this project
+    // (never the first config by position: that launched the wrong file) or the
+    // last gutter launch ("From the editor") is the selected target.
+    host.selectedConfigId = host.selectedConfigId === GUTTER_TARGET_ID && host.envState.gutterTarget
+      ? GUTTER_TARGET_ID
+      : resolveLaunchSelection(loadLaunchMemory(host.target), combined, host.selectedConfigId);
   } catch (e) { if (!stale()) host.envError = loadErrorText(e); }
   finally { if (!stale()) host.envLoading = false; }
 }
@@ -361,6 +371,7 @@ export async function upsertRunConfig(host: DebugAndEnvHost, cfg: Partial<IdeRun
       coverage: cfg.coverage ?? existing?.coverage ?? false,
     });
     const saved = (resp.config ?? resp) as IdeRunConfig;
+    if (saved?.id) saveLaunchMemory(host.target, { selected: saved.id });
     await fetchEnvironments(host);
     if (saved?.id) host.selectedConfigId = saved.id;
     return saved;
@@ -398,9 +409,14 @@ export async function launchIdeRun(
   if (!host.target.root) return { poller: prevPoller, sseCtl: prevSseCtl };
   const gutterItem = opts.adhoc || opts.configId ? null : selectedGutterTarget(host);
   if (gutterItem) launchGutterAction(host, gutterItem, 'run', (adhoc) => { opts = { ...opts, adhoc }; }, () => {});
+  const plan = toolbarLaunchPlan(host, opts);
+  if (plan?.kind === 'none') {
+    toasts.info('Nothing to run', plan.reason);
+    return { poller: prevPoller, sseCtl: prevSseCtl };
+  }
   const keepTc = Boolean(opts.keepTestcontainers || host.keepTestcontainersAlive);
   const wantCoverage = Boolean(opts.coverage || opts.adhoc?.coverage);
-  const rawId = opts.configId ?? (opts.adhoc ? undefined : host.selectedConfigId ?? undefined);
+  const rawId = opts.configId ?? (plan?.kind === 'config' ? plan.configId : undefined);
   const selectedCfg = rawId ? host.runConfigs.find((c) => c.id === rawId) : undefined;
   const isClientAuto = Boolean(rawId?.startsWith('auto:') || selectedCfg?.auto_detected);
   const cfgId = isClientAuto || keepTc || wantCoverage ? undefined : rawId;
@@ -447,6 +463,7 @@ export async function launchIdeRun(
       ...(opts.confirmProdTargets ? { confirm_prod_targets: true } : {}),
     });
     host.activeRun = resp.run;
+    rememberLaunchedConfig(host, rawId);
     host.recordRunLaunch?.(resp.run.id, {
       configId: cfgId,
       adhoc,
@@ -514,6 +531,18 @@ const TOOL_ARGV_RUNNERS = new Set([
   'go_run', 'go_test', 'go_build', 'cargo_run', 'cargo_test', 'pytest', 'npm', 'vitest', 'maven', 'java_junit', 'gradle',
 ]);
 
+/** The toolbar/shortcut target when the caller named none (`null` = the caller did). */
+function toolbarLaunchPlan(host: DebugAndEnvHost, opts: { configId?: string; adhoc?: unknown; launch?: unknown }): LaunchPlan | null {
+  if (opts.configId || opts.adhoc || opts.launch) return null;
+  return planLaunch(host.selectedConfigId, host.activeTab, loadLaunchMemory(host.target), host.runConfigs);
+}
+
+/** Remember the configuration the person launched: Run falls back to it when the
+ *  active tab can't run (a README), instead of to an arbitrary config. */
+function rememberLaunchedConfig(host: DebugAndEnvHost, id: string | undefined): void {
+  if (id && id !== CURRENT_FILE_CONFIG_ID && host.runConfigs.some((c) => c.id === id)) saveLaunchMemory(host.target, { lastUsed: id });
+}
+
 export function launchGutterAction(
   host: DebugAndEnvHost,
   item: IdeGutterItem,
@@ -577,7 +606,14 @@ export async function launchDebugSession(
   if (!host.target.root) return prevCtl;
   const gutterItem = opts.launch || opts.configId ? null : selectedGutterTarget(host);
   if (gutterItem) launchGutterAction(host, gutterItem, 'debug', () => {}, (o) => { opts = { ...opts, ...o }; });
-  const rawCfgId = opts.configId ?? host.selectedConfigId ?? undefined;
+  ideDebugLaunch.startError = null;
+  const plan = toolbarLaunchPlan(host, opts);
+  if (plan?.kind === 'none') {
+    host.openBottomTab('debug');
+    ideDebugLaunch.startError = { message: plan.reason, kind: null, ecosystem: null };
+    return prevCtl;
+  }
+  const rawCfgId = opts.configId ?? (plan?.kind === 'config' ? plan.configId : undefined);
   const cfg = rawCfgId ? host.runConfigs.find((c) => c.id === rawCfgId) : undefined;
   const fallbackLang = host.activeTab?.language || 'go';
   const language = opts.language || languageFromRunner(cfg?.runner, fallbackLang);
@@ -634,43 +670,23 @@ export async function launchDebugSession(
       ...(opts.confirmProdTargets ? { confirm_prod_targets: true } : {}),
     });
     host.lastDebugLaunch = { configId: persistedConfigId, language, launch: effectiveLaunch };
+    rememberLaunchedConfig(host, rawCfgId);
     host.expandedVariables = {};
     onSnapshot(resp.session);
     return attachDebugSessionStream(host, resp.session.id, prevCtl, onSnapshot);
   } catch (e) {
+    // No session exists: the debugger panel shows this inline (with the
+    // snapshot's own `error` once a session does exist), not as a toast.
+    ideDebugLaunch.startError = debugStartErrorFrom(e);
     const outdated = toolOutdatedNotice(e);
     if (outdated && retry) {
       const run = () => updateDelveAndRetry(host, retry);
       toasts.push('warn', outdated.title, outdated.body, 20_000, { action: { label: outdated.action, run } });
-    } else {
-      toastError('Couldn’t start debugger', e);
     }
     return prevCtl;
   } finally {
     host.debugLoading = false;
   }
-}
-
-/** "Update Delve": rebuild it with the project's Go, then start the same debug session again. */
-async function updateDelveAndRetry(host: DebugAndEnvHost, retry: () => Promise<void>): Promise<void> {
-  const job = await installToolchainJob(host, 'go', 'dap', undefined, () => {});
-  if (!job) return;
-  for (let i = 0; i < 300; i++) {
-    await new Promise((r) => setTimeout(r, 1000));
-    const cur = (await api.get<{ job: IdeInstallJob }>(`/ide/toolchains/jobs/${encodeURIComponent(job.id)}`)).job;
-    if (cur.status === 'error') throw new Error(cur.error || 'Delve install failed');
-    if (cur.status === 'done') return retry();
-  }
-}
-
-/** The daemon's `tool_outdated:go:dap — …` launch error (Delve built for an older Go)
- *  as a notice with an "Update Delve" action; null for any other error. */
-export function toolOutdatedNotice(e: unknown): { title: string; body: string; action: string } | null {
-  const msg = e instanceof Error ? e.message : String(e ?? '');
-  const at = msg.indexOf('tool_outdated:go:dap');
-  if (at < 0) return null;
-  const body = msg.slice(at).replace(/^tool_outdated:go:dap\s*[—-]\s*/, '');
-  return { title: 'Delve is too old for this Go', body, action: 'Update Delve' };
 }
 
 export async function sendDebugAction(
@@ -694,7 +710,10 @@ export async function sendDebugAction(
       `/ide/debug/sessions/${encodeURIComponent(host.activeDebug.id)}/command`,
       {
         action, thread_id: extra.thread_id ?? host.activeDebug.active_thread_id ?? undefined,
-        frame_id: extra.frame_id ?? host.activeDebug.active_frame_id ?? undefined, path: extra.path, line: extra.line,
+        // Switching thread: the current frame id belongs to the old thread (the daemon would 404);
+        // without one it picks the new thread's top frame.
+        frame_id: extra.frame_id ?? (action === 'select_frame' && extra.thread_id != null ? undefined : host.activeDebug.active_frame_id ?? undefined),
+        path: extra.path, line: extra.line,
       },
     );
     onSnapshot(resp.session);
@@ -705,61 +724,7 @@ export async function sendDebugAction(
       ideCollabNotices.debug = e.message ? `${e.message.charAt(0).toUpperCase()}${e.message.slice(1)}` : 'Only the host can do that.';
       return;
     }
-    toastError(`Couldn’t run debugger ${action.replace('_', ' ')}`, e);
-  }
-}
-
-export async function installToolchainJob(
-  host: DebugAndEnvHost,
-  ecosystem: string,
-  component: 'sdk' | 'lsp' | 'dap' | 'all',
-  version: string | undefined,
-  ensurePoller: () => void,
-): Promise<IdeInstallJob | null> {
-  try {
-    // gopls / Delve are built with the project's own Go, so they match it.
-    const goRoot = ecosystem === 'go' && component !== 'sdk'
-      ? host.toolchains.find((e) => e.ecosystem === 'go')?.installed.find((s) => s.active)?.path ?? null
-      : null;
-    const resp = await api.post<{ job: IdeInstallJob }>('/ide/toolchains/install', {
-      target: host.targetPayload, ecosystem, component, version, ...(goRoot ? { go_root: goRoot } : {}),
-    });
-    host.installJobs = [resp.job, ...host.installJobs.filter((j) => j.id !== resp.job.id)].slice(0, 12);
-    ensurePoller();
-    return resp.job;
-  } catch (e) {
-    toastError(`Couldn’t install ${ecosystem} ${component}`, e);
-    return null;
-  }
-}
-
-export async function createProjectPythonVenv(
-  host: DebugAndEnvHost & { loadEnvironments(): Promise<void>; saveEnvironment(p: Partial<IdeProjectEnvironment>): Promise<boolean> },
-  venvDir = '.venv',
-  pythonVersion?: string,
-  moduleRoot?: string,
-): Promise<{ path: string; interpreter_path: string; version: string } | null> {
-  const effectiveRoot = (moduleRoot || host.target.root).replace(/\/+$/, '');
-  try {
-    type RawVenvPayload = { path?: string; interpreter_path?: string; python_path?: string; version?: string };
-    const raw = await api.long.post<{ venv?: RawVenvPayload } & RawVenvPayload>(
-      '/ide/environments/python-venv',
-      { target: host.targetPayload, root: effectiveRoot, venv_dir: venvDir, python_version: pythonVersion || undefined },
-    );
-    const v = raw.venv ?? raw;
-    const normPath = v.path || `${effectiveRoot}/${venvDir.replace(/^\.\//, '')}`;
-    const interp = v.interpreter_path || v.python_path || `${normPath}/bin/python`;
-    const normalized = { path: normPath, interpreter_path: interp, version: v.version || '' };
-    await host.loadEnvironments();
-    if (moduleRoot) {
-      await host.saveEnvironment({ module_sdks: { ...(host.projectEnv?.module_sdks ?? {}), [moduleRoot]: interp } });
-    } else {
-      await host.saveEnvironment({ python_interpreter: interp });
-    }
-    return normalized;
-  } catch (e) {
-    toastError('Couldn’t create Python virtual environment', e);
-    return null;
+    toastError(`Couldn’t ${debugActionVerb(action)}`, e);
   }
 }
 
@@ -770,7 +735,10 @@ export async function removeSavedRunConfig(
   try {
     await api.del(`/ide/run-configs/${encodeURIComponent(id)}?${host.targetQuery()}`);
     host.runConfigs = host.runConfigs.filter((c) => c.id !== id);
-    if (host.selectedConfigId === id) host.selectedConfigId = host.runConfigs[0]?.id ?? null;
+    if (host.selectedConfigId === id) {
+      host.selectedConfigId = CURRENT_FILE_CONFIG_ID;
+      saveLaunchMemory(host.target, { selected: CURRENT_FILE_CONFIG_ID });
+    }
   } catch (e) {
     toastError('Couldn’t delete run configuration', e);
   }

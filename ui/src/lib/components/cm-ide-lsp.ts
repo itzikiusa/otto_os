@@ -60,8 +60,7 @@ import {
   type IdeLspJumpTarget,
 } from './cm-ide-lsp-dive.ts';
 import { appLive } from '../live.ts';
-import { cancelLspReconnects, IDE_LSP_DIAGNOSTICS_EVENT, isLspReconnecting, noteLspDaemonShutdown, noteLspSessionReady, noteLspSocketClosed } from './cm-ide-lsp-reconnect.ts';
-import { announceLspStartFailure, clearLspStartFailure } from './cm-ide-lsp-requests.ts';
+import { cancelLspReconnects, IDE_LSP_DIAGNOSTICS_EVENT, isLspReconnecting, noteLspDaemonShutdown, noteLspSessionReady, noteLspSocketClosed, noteLspStatus } from './cm-ide-lsp-reconnect.ts';
 
 export {
   buildLspCompletionChangeSpec,
@@ -350,8 +349,7 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
       try {
         await super.initialize();
         unavailableLangUntil.delete(langProbeKey);
-        clearLspStartFailure(langProbeKey);
-        if (this.ready) noteLspSessionReady(resolvedRoot);
+        if (this.ready) { noteLspSessionReady(resolvedRoot); noteLspStatus(resolvedRoot, 'ready', serverLang); }
       } catch {
         const self = this as unknown as { isClosed?: boolean };
         self.isClosed = true;
@@ -469,7 +467,8 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
     const hadSession = !handshakeFailed && Boolean(client.ready) && entry.refCount > 0;
     if (!hadSession && !daemonShutdown && !isLspReconnecting(entry.rootPath)) {
       unavailableLangUntil.set(langProbeKey, Date.now() + 30_000);
-      announceLspStartFailure(langProbeKey, serverLang, entry.rootPath);
+      // Closed before any session (no binary: 503, or refused): say so instead of going silent.
+      if (handshakeFailed || !client.ready) noteLspStatus(entry.rootPath, 'unavailable', serverLang, 'no_session');
     }
     const root = entry.rootPath;
     entry.evictFn();
@@ -537,6 +536,7 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
 
   clientPool.set(key, entry);
   scheduleIdleDispose(entry, IDLE_CLOSE_MS);
+  noteLspStatus(resolvedRoot, 'starting', serverLang);
   return entry;
 }
 

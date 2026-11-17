@@ -15,6 +15,11 @@
   import { ideProjects, openProjectInIde } from './ideProjects.svelte';
   import type { OrderedIdeProjectGroup } from './ThreadIdeProjectsSection.svelte';
   import ThreadSidebarRow from './ThreadSidebarRow.svelte';
+  import ThreadGroupNote from './ThreadGroupNote.svelte';
+  import ThreadNextNeedsYou from './ThreadNextNeedsYou.svelte';
+  import { registry } from '../../lib/commands.svelte';
+  import { openAdjacentThread, openNextNeedsYou, THREAD_KEYS, threadNav, threadUrgency } from './threadNav.svelte';
+  import { listKeys, sidebarOrder } from './threadSidebarNav';
   import { originGroups, threadOrigin } from './threadOrigins';
   import { inboxOrder } from './threadFamilies';
   import {
@@ -28,7 +33,7 @@
   import { threadsChrome } from './threadsChrome.svelte';
   import { buildSidebarLegacyThreadMenu, reviveLegacyThread } from './threadMenu';
   import { promptNewScript } from './threadGitMenus';
-  import { reopenThread, runtimeThreadMenu } from './runtime/runtimeMenu';
+  import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
   import { threads } from './threadsStore.svelte';
 
@@ -134,9 +139,10 @@
   });
 
   // Inbox order inside each project (threadFamilies.ts): needs-you first, then
-  // working, then most recent — a thread's children nested under it, foldable.
+  // working, then failed, then most recent — a thread's children nested under
+  // it, foldable; a family ranks by its most urgent member (threadNav).
   let foldedFamilies = $state<Record<string, boolean>>({});
-  const score = (s: Session): number => (ws.needsYou[s.id] ? 0 : ['working', 'running'].includes(ws.statusMap[s.id] ?? s.status) ? 1 : 2);
+  const score = threadUrgency;
 
   const unsettledLive = $derived(filteredLive.filter((s) => !threads.isSettled(s.id)));
   const ideDiscoveredProjects = $derived(ideProjects.projectsFor(allLiveThreads));
@@ -186,6 +192,9 @@
       ensure((s.cwd ?? ws.current?.root_path ?? '~').replace(/\/+$/, '') || '~').items.push(s);
     }
     if (!search.trim()) {
+      // First open with no threads: the open workspace's project, ready for one.
+      const root = ws.current?.root_path?.replace(/\/+$/, '');
+      if (root && groups.size === 0 && ideGrouping.groups.length === 0 && threads.inProjectFilter(root)) ensure(root);
       for (const p of threads.extraProjects) {
         if (claimedIdeFolders.has(canonicalIdePath(p))) continue;
         if (threads.inProjectFilter(p)) ensure(p);
@@ -219,6 +228,18 @@
     }
     return combined;
   });
+
+  // The order next / previous thread and "Next that needs you" walk (threadNav).
+  $effect(() => {
+    threadNav.order = sidebarOrder(pinnedThreads, [...ideProjectGroups.map((g) => ({ items: g.ordered })), ...projectGroups.map((g) => ({ items: g.ordered }))], sideGroups);
+  });
+  $effect(() =>
+    registry.register('threads-nav', [
+      { id: 'threads.next-needs-you', title: 'Next thread that needs you', group: 'Threads', shortcut: THREAD_KEYS.needsYou, keywords: 'waiting approval question attention', run: () => void openNextNeedsYou() },
+      { id: 'threads.next', title: 'Next thread', group: 'Threads', shortcut: THREAD_KEYS.next, run: () => void openAdjacentThread(1) },
+      { id: 'threads.previous', title: 'Previous thread', group: 'Threads', shortcut: THREAD_KEYS.previous, run: () => void openAdjacentThread(-1) },
+    ]),
+  );
 
   // The filter popover (lazy; multi-select, pin, per-project options).
   let filterAnchor = $state<HTMLElement | null>(null);
@@ -271,10 +292,9 @@
 
   async function reopenArchived(s: Session, beside = false): Promise<void> {
     threads.unsettle(s.id);
-    // A closed runtime thread reopens (its agent resumes the conversation).
-    if (s.archived && isRuntimeThread(s)) {
-      if (!(await reopenThread(s.id, false))) return;
-    } else if (s.archived) {
+    // A closed runtime thread opens read-only: reading it starts no agent.
+    // Its view's "Revive" bar, a new message or ⋯ › Reopen thread bring it back.
+    if (s.archived && !isRuntimeThread(s)) {
       if (!(await reviveLegacyThread(s, false))) return;
     }
     if (beside) threads.openBeside(s.id);
@@ -375,7 +395,8 @@
     </div>
   {/if}
 
-  <div class="th-scroll">
+  <div class="th-scroll" use:listKeys>
+    <ThreadNextNeedsYou {onselect} />
     {#if pinnedThreads.length > 0}
       <section class="th-group" aria-label="Pinned threads">
         <h2 class="th-label">Pinned</h2>
@@ -432,6 +453,7 @@
                 {#if threads.isProjectPinned(grp.key)}
                   <span class="th-pinned-mark" aria-label="Pinned" title="Pinned project"><Icon name="star" size={12} /></span>
                 {/if}
+                {#if !open}<ThreadGroupNote items={grp.items} testid="threads-project-note-{grp.key}" />{/if}
               </button>
               <button
                 type="button"
@@ -457,7 +479,7 @@
                     {onselect}
                   />
                 {:else}
-                  <p class="th-empty-row">No threads yet</p>
+                  <p class="th-empty-row">No threads yet <button type="button" class="btn small ghost" data-testid="threads-empty-new" onclick={() => newThreadIn(grp.cwd)}>New thread</button></p>
                 {/each}
               </div>
             {/if}

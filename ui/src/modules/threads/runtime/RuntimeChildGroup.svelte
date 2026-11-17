@@ -9,8 +9,11 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { toastError } from '../../../lib/toastError';
   import RuntimeChildCard from './RuntimeChildCard.svelte';
+  import { childState } from './childThreads';
   import { runtimeThreads } from './runtimeThreads.svelte';
+  import { runtimeViews } from './runtimeView.svelte';
   import { stopThreadWork } from './taskStops.svelte';
+  import { childGroupSummary } from '../threadAttention';
 
   type Hint = { provider?: string | null; title?: string | null; model?: string | null; effort?: string | null };
   interface Props {
@@ -25,6 +28,8 @@
   };
   // A child busy only on background work counts as working too (its Stop stops that work).
   const working = $derived(kids.filter((k) => turnRuns(k.id) || (runtimeThreads.get(k.id)?.background_tasks?.length ?? 0) > 0));
+  // The header tallies the children's real states (the same words as their cards).
+  const summary = $derived(childGroupSummary(kids.map((k) => childState(runtimeThreads.get(k.id), runtimeViews.projections[k.id] ?? null).tone)));
 
   async function stopAll(): Promise<void> {
     if (stopping) return;
@@ -45,7 +50,7 @@
     <header class="rg-head">
       <Icon name="people" size={13} />
       <span class="rg-title">{kids.length} agents</span>
-      <span class="rg-sub">{working.length > 0 ? `${working.length} working` : 'all done'}</span>
+      <span class="rg-sub" class:rg-warn={summary.tone === 'warning'} class:rg-bad={summary.tone === 'danger'} data-testid="runtime-child-group-summary">{summary.text}</span>
       {#if working.length > 0}
         <button type="button" class="btn small ghost" disabled={stopping} data-testid="runtime-child-stop-all" onclick={() => void stopAll()}>
           <Icon name="stop" size={12} />{stopping ? 'Stopping…' : 'Stop all'}
@@ -83,6 +88,12 @@
     flex: 1;
     min-inline-size: 0;
     font-size: var(--fs-xs);
+  }
+  .rg-warn {
+    color: var(--warning);
+  }
+  .rg-bad {
+    color: var(--danger);
   }
   .rg-list {
     display: flex;

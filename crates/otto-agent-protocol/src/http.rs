@@ -171,6 +171,7 @@ async fn ask_children<S: RuntimeCtx>(
     ctx.roles()
         .check(&user, &s.workspace_id, WorkspaceRole::Editor)
         .await?;
+    ctx.agent_runtime().person_prompted(&id).await;
     let children = ctx.agent_runtime().ask_children(&id, req).await?;
     Ok((StatusCode::CREATED, Json(AskChildResp { children })))
 }
@@ -216,6 +217,9 @@ async fn open_peer<S: RuntimeCtx>(
 ) -> ApiResult<(StatusCode, Json<RuntimeSession>)> {
     as_thread(&ctx, &user, &auth, &id).await?;
     let s = ctx.agent_runtime().open_peer(&id, req).await?;
+    if ctx.is_human(&auth) {
+        ctx.agent_runtime().person_prompted(&id).await;
+    }
     Ok((StatusCode::CREATED, Json(s)))
 }
 
@@ -230,7 +234,7 @@ async fn message_peer<S: RuntimeCtx>(
     as_thread(&ctx, &user, &auth, &id).await?;
     let r = ctx
         .agent_runtime()
-        .message_peer(&id, &peer, &req.text)
+        .message_peer_by(&id, &peer, &req.text, ctx.is_human(&auth))
         .await?;
     Ok((StatusCode::ACCEPTED, Json(r)))
 }
@@ -443,6 +447,7 @@ async fn prompt<S: RuntimeCtx>(
 ) -> ApiResult<(StatusCode, Json<RuntimePromptResp>)> {
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
+    ctx.agent_runtime().person_prompted(&id).await;
     let r = ctx.agent_runtime().prompt_with(&id, &req).await?;
     Ok((StatusCode::ACCEPTED, Json(r)))
 }
@@ -560,6 +565,7 @@ async fn deliver_queued<S: RuntimeCtx>(
 ) -> ApiResult<(StatusCode, Json<RuntimePromptResp>)> {
     require_human(&ctx, &auth)?;
     authorized(&ctx, &user, &id).await?;
+    ctx.agent_runtime().person_prompted(&id).await;
     let r = ctx
         .agent_runtime()
         .deliver_queued(&id, &queued_id, req.delivery)

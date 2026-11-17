@@ -223,13 +223,24 @@
   .bottomnav {
     display: flex;
     align-items: stretch;
-    height: var(--mobile-bottomnav-h);
+    /* The tabs keep their 56 px; the home indicator's safe area is added
+       under them (box-sizing would otherwise take it out of the tabs). */
+    height: calc(var(--mobile-bottomnav-h) + var(--safe-bottom));
     flex-shrink: 0;
     border-top: 1px solid var(--border);
     background: var(--bg-sidebar);
-    /* iOS home-indicator safe area. */
-    padding-bottom: env(safe-area-inset-bottom, 0);
+    padding-block-end: var(--safe-bottom);
     z-index: var(--z-mobile-nav);
+  }
+  /* The on-screen keyboard is up (lib/viewportFit.ts): a tab bar pinned above
+     it is never used mid-sentence and costs 56 px of what you are replying
+     to — on every page (iOS Messages, Slack and GitHub do the same). Toasts
+     drop to the keyboard's edge with it. */
+  :global(html[data-kb='open']) {
+    --mobile-bottomnav-h: 0px;
+  }
+  :global(html[data-kb='open']) .bottomnav {
+    display: none;
   }
   .bn-btn {
     flex: 1;
@@ -321,7 +332,7 @@
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 8px;
-    padding: 12px 12px calc(16px + env(safe-area-inset-bottom, 0));
+    padding: 12px 12px calc(16px + var(--safe-bottom));
   }
   .sheet-item {
     position: relative;

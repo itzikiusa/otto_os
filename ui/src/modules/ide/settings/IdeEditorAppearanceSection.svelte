@@ -1,13 +1,13 @@
 <script lang="ts">
   // Appearance, Keymap, Editor (Font, Color Scheme, Rainbow Brackets, Inlay Hints,
   // Inspections), and Version Control (Git & Local History) sections.
-  import { KEYMAP_ROWS } from './ideKeymapRows';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import Switch from '../../../lib/components/Switch.svelte';
   import { ui } from '../../../lib/stores/ui.svelte';
   import { ide } from '../ideStore.svelte';
   import { EDITOR_SCHEMES, ideSettings } from './ideSettingsStore.svelte';
+  import { IDE_SHORTCUTS, ideShortcutLabels } from '../shell/ideShortcuts';
 
   interface Props {
     section: string;
@@ -15,6 +15,15 @@
 
   let { section }: Props = $props();
 
+  // Generated from the one shortcut table the key handler also reads
+  // (shell/ideShortcuts.ts), so a row can never list a key that does nothing.
+  const KEYMAP_ROWS = IDE_SHORTCUTS.map((r) => ({
+    id: r.id,
+    action: r.title,
+    category: r.category,
+    jetbrains: ideShortcutLabels(r.id, 'jetbrains'),
+    standard: ideShortcutLabels(r.id, 'standard'),
+  }));
 
   interface PreviewPalette {
     bg: string; fg: string; kw: string; fn: string; ty: string; str: string; num: string; fld: string;
@@ -174,12 +183,22 @@
 {:else if section === 'keymap'}
   <div class="ea-sec" data-testid="ide-settings-keymap">
     <div class="ea-toolbar">
-      <div class="ea-field ea-grow">
-        <label class="ea-lbl" for="ea-km-preset">Keymap Preset:</label>
-        <select id="ea-km-preset" class="input" bind:value={ideSettings.draft.keymapPreset} data-testid="ide-keymap-preset-select">
-          <option value="jetbrains">JetBrains / IntelliJ IDEA / GoLand</option>
-          <option value="standard">VS Code / Standard macOS</option>
-        </select>
+      <div class="ea-field">
+        <span class="ea-lbl" id="ea-km-preset">Keymap preset</span>
+        <div class="segmented" role="group" aria-labelledby="ea-km-preset" data-testid="ide-keymap-preset-select">
+          <button
+            type="button"
+            aria-pressed={ideSettings.draft.keymapPreset === 'jetbrains'}
+            onclick={() => (ideSettings.draft.keymapPreset = 'jetbrains')}
+            data-testid="ide-keymap-preset-jetbrains"
+          >JetBrains</button>
+          <button
+            type="button"
+            aria-pressed={ideSettings.draft.keymapPreset === 'standard'}
+            onclick={() => (ideSettings.draft.keymapPreset = 'standard')}
+            data-testid="ide-keymap-preset-standard"
+          >VS Code / Standard</button>
+        </div>
       </div>
       <div class="ea-field ea-grow">
         <label class="ea-lbl" for="ea-km-filter">Filter shortcuts:</label>
@@ -206,8 +225,8 @@
           </tr>
         </thead>
         <tbody>
-          {#each filteredKeymap as row (row.action)}
-            <tr>
+          {#each filteredKeymap as row (row.id)}
+            <tr data-testid="ide-keymap-row" data-shortcut={row.id}>
               <td class="km-act">{row.action}</td>
               <td><Badge tone="neutral" variant="outline" label={row.category} /></td>
               <td><code class="km-kbd" class:is-selected={ideSettings.draft.keymapPreset === 'jetbrains'}>{row.jetbrains}</code></td>

@@ -33,6 +33,7 @@
   import { runtimeThreads } from './runtimeThreads.svelte';
   import { runtimeViews } from './runtimeView.svelte';
   import { subagentChildren, workLabel } from './timeline';
+  import { turnOutcome } from './childThreads';
 
   let { sessionId }: { sessionId: string } = $props();
 
@@ -71,6 +72,7 @@
         createdAt: s.created_at,
         updatedAt: s.last_active_at,
         stepSummary,
+        lastTurnStatus: turnOutcome(s, cp),
       });
     }
     return out;
@@ -175,6 +177,7 @@
 
   const STATUS: Record<AgentTask['status'], { icon: IconName; label: string }> = {
     running: { icon: 'dot', label: 'Running' },
+    'needs-you': { icon: 'bell', label: 'Needs you' },
     done: { icon: 'check', label: 'Done' },
     failed: { icon: 'warning', label: 'Failed' },
     stopped: { icon: 'stop', label: 'Stopped' },

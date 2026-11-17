@@ -264,6 +264,8 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
         active_frame_id: Some(1),
         paused_file: Some("/tmp/shared-repo/main.go".into()),
         paused_line: Some(1),
+        selected_frame_file: None,
+        selected_frame_line: None,
         threads: vec![],
         stack_frames: vec![],
         scopes: vec![],
@@ -271,6 +273,9 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
         breakpoints: vec![],
         output: vec![],
         error: None,
+        error_kind: None,
+        error_ecosystem: None,
+        target_root: None,
     };
     hub.publish_debug_snapshot(
         Some(&IdeTargetSpec::local("/tmp/shared-repo")),
@@ -300,6 +305,8 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
         active_frame_id: Some(10),
         paused_file: Some("/tmp/shared-repo/main.go".into()),
         paused_line: Some(8),
+        selected_frame_file: None,
+        selected_frame_line: None,
         threads: vec![],
         stack_frames: vec![],
         scopes: vec![],
@@ -307,6 +314,9 @@ async fn full_room_lifecycle_roles_cursors_buffers_and_shared_debug() {
         breakpoints: vec![],
         output: vec![],
         error: None,
+        error_kind: None,
+        error_ecosystem: None,
+        target_root: None,
     };
     hub.publish_debug_snapshot(
         Some(&IdeTargetSpec::local("/tmp/shared-repo")),

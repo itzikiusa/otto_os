@@ -133,13 +133,13 @@ pub fn subscribe(bus: &broadcast::Sender<Event>) -> broadcast::Receiver<FanItem>
 /// event is dropped, exactly as the pump drops it. Relative order among
 /// streaming events is kept (same `tx`); a streaming event may overtake a
 /// bus event still in the pump's hop, which no client relies on (the
-/// transcript cursor, not arrival order, orders turns).
+/// transcript cursor, not arrival order, orders turns). Any other event (a
+/// structured thread's attention notice) goes onto the bus as usual.
 pub fn publish_stream(bus: &broadcast::Sender<Event>, event: Event) {
-    debug_assert!(
-        event.is_streaming(),
-        "{} is not a streaming event",
-        event.type_name()
-    );
+    if !event.is_streaming() {
+        let _ = bus.send(event);
+        return;
+    }
     let tx = {
         let hubs = hubs().lock().unwrap_or_else(|e| e.into_inner());
         hubs.iter()

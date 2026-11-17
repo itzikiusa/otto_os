@@ -158,13 +158,13 @@ test('a council is a group of threads: nested rows, side by side, synthesize and
   await page.screenshot({ path: info.outputPath('council-synthesis-dark.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'light' });
 
-  // ⋯ › Ask every seat…: one prompt dialog, the text queued in each seat.
+  // ⋯ › Ask every seat…: one multi-line sheet, the text queued in each seat.
   await canvas.getByTestId('thread-pane-rt_s2').click();
   await (await threadMenu(page, 'Ask every seat…')).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('textbox').fill('Why that one?');
   await dialog.getByRole('button', { name: 'Ask 3' }).click();
-  await expect(page.locator('.toast', { hasText: 'Asked 3 seats' })).toBeVisible();
+  await expect(page.locator('.toast', { hasText: 'Sent to 3 seats' })).toBeVisible();
   const prompts = await page.evaluate(() => (window as unknown as { __mockRuntime: { prompts: { id: string; text: string; delivery?: string }[] } }).__mockRuntime.prompts.filter((p) => p.text === 'Why that one?'));
   expect(prompts.map((p) => p.id).sort()).toEqual(['rt_s1', 'rt_s2', 'rt_s3']);
   expect(prompts.every((p) => p.delivery === 'queue')).toBe(true);

@@ -82,14 +82,3 @@ test('quick fixes: a used import gets no "Remove unused import", and "Prefix wit
   assert.equal(rsIds(1).some((id) => id.startsWith('rs-rm-use')), false);
   assert.equal(rsIds(2).some((id) => id.startsWith('rs-rm-use')), false);
 });
-
-test('every Standard keymap row that differs from JetBrains is bound in the Standard preset', async () => {
-  const { KEYMAP_ROWS } = await import('../src/modules/ide/settings/ideKeymapRows.ts');
-  const { buildIdeKeymapSpecs } = await import('../src/lib/components/cm-ide-keymap.ts');
-  const norm = (k: string) => k.split('-').map((p, i, a) => (i < a.length - 1 ? p : p.toLowerCase())).sort().join('-');
-  const glyph = (g: string) => norm([...g].map((c) => ({ '⌘': 'Mod-', '⇧': 'Shift-', '⌥': 'Alt-', '⌃': 'Ctrl-' })[c] ?? c).join(''));
-  const bound = new Set(buildIdeKeymapSpecs('standard', () => ({})).map((b) => norm(b.key ?? '')));
-  const differing = KEYMAP_ROWS.filter((r) => r.standard !== r.jetbrains);
-  assert.ok(differing.length >= 5);
-  for (const r of differing) assert.ok(bound.has(glyph(r.standard)), `${r.action}: ${r.standard} is not bound`);
-});

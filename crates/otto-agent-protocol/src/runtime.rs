@@ -15,6 +15,7 @@
 //! run on a per-session persister task fed in that order.
 
 mod admission;
+mod attention;
 mod auto_close;
 mod children;
 pub mod council;
@@ -24,6 +25,8 @@ mod fresh;
 mod held_adopt;
 mod held_proc;
 mod keep_awake;
+mod loop_guard;
+mod outcome;
 mod paging;
 mod peers;
 mod request_ids;
@@ -32,6 +35,7 @@ mod selection;
 mod task_stop;
 mod usage_hook;
 pub use admission::{HANDSHAKE_TIMEOUT, MAX_QUEUED_BYTES, MAX_QUEUED_PROMPTS};
+pub use loop_guard::{AGENT_HOPS_MAX, PAUSED_ERROR, PAUSED_NOTICE, PAUSED_QUEUED};
 use request_ids::RequestIds;
 pub use selection::check_effort;
 pub use task_stop::{TaskStopAllResp, TaskStopEntry, TaskStopOutcome, TaskStopResp};
@@ -515,6 +519,8 @@ pub(super) struct Inner {
     loading: otto_core::keyed_lock::KeyedLocks<Id>,
     /// Where settled turns' token usage goes (`usage_hook`); unset = nowhere.
     usage: std::sync::OnceLock<Arc<otto_usage::UsageEngine>>,
+    /// Agent-to-agent prompts per linked group since a person's last one.
+    loop_guard: loop_guard::LoopGuard,
 }
 
 /// Cheap to clone.
@@ -540,6 +546,7 @@ impl AgentRuntime {
                 live: DashMap::new(),
                 loading: otto_core::keyed_lock::KeyedLocks::new(),
                 usage: std::sync::OnceLock::new(),
+                loop_guard: Default::default(),
             }),
         }
     }
@@ -2805,6 +2812,7 @@ fn emit(inner: &Inner, live: &Live, st: &mut State, body: RuntimeEventBody) -> u
     if let Some(row) = st.proj.apply(&body, seq) {
         let _ = live.persist.send(PersistOp::Upsert(vec![row]));
     }
+    outcome::on_event(&mut st.session, &st.proj, &body);
     // A provider retry is not progress (`RETRY_NOTICE_SUFFIX`).
     let retry = matches!(&body, RuntimeEventBody::TurnItemUpdated { turn_item }
         if turn_item.id.ends_with(crate::driver::RETRY_NOTICE_SUFFIX));
@@ -2884,6 +2892,7 @@ fn set_session_status(
     }) {
         return;
     }
+    attention::on_status(inner, st, status);
     let provider_session = ProviderSession {
         status,
         cwd,

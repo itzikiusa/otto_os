@@ -13,6 +13,7 @@ function fixture() {
     '../../lib/stores/workspace.svelte': { ws }, './boxes/poll': { livePoll: () => ({ now() {}, stop() {} }) },
     '../../lib/plural': { plural: () => '' },
     './homeThreads': { threadSessions: () => [], threadRoute: (id: string) => `threads/${id}`, unlistedWaiting: () => 0 },
+    '../../lib/stores/runtimeAttention.svelte': { runtimeWaiting: () => [] },
   });
   return { today, ws, pending };
 }

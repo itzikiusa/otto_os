@@ -82,7 +82,10 @@ test('a Markdown scratch previews in the editor', async ({ page }) => {
   await expect(page.getByTestId('file-preview').getByRole('heading', { name: 'Hello scratches' })).toBeVisible({ timeout: 15_000 });
   await toggle.getByRole('button', { name: 'Editor', exact: true }).click();
   await expect(page.getByTestId('file-preview')).toHaveCount(0);
-  await expect(page.getByTestId('ide-send-to')).toBeVisible();
+  // Send to… lives in the crumbs row's ⋯ (editor actions) now.
+  await page.getByTestId('ide-editor-more-btn').click();
+  await expect(page.locator('.ctx-menu').getByRole('menuitem', { name: 'Send to' })).toBeVisible();
+  await page.keyboard.press('Escape');
 });
 
 test('Scratches is the default project: first in the list, never renamed or deleted', async ({ page }) => {

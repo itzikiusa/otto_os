@@ -17,7 +17,7 @@
 
 use otto_core::agent_runtime::{
     CouncilMeta, CouncilRole, CouncilSeatReq, CreateCouncilReq, OpenPeerReq, RuntimeAccessMode,
-    SynthesizeCouncilReq, COUNCIL_MAX_SEATS, COUNCIL_META_KEY, COUNCIL_MIN_SEATS,
+    RuntimeProvider, SynthesizeCouncilReq, COUNCIL_MAX_SEATS, COUNCIL_META_KEY, COUNCIL_MIN_SEATS,
     PROVIDER_SLUG_META_KEY,
 };
 
@@ -28,20 +28,30 @@ const ANSWER_MAX_CHARS: usize = 24_000;
 /// Characters of the prompt a council's default title takes.
 const TITLE_MAX_CHARS: usize = 60;
 
-/// The meta every council thread runs under.
+/// The meta every council thread runs under: which council and seat, and
+/// the provider (custom slug, else the built-in id), model and effort it was
+/// started on — so two seats of one provider can be told apart.
 fn council_meta(
     council: &Id,
     seat: u32,
     role: CouncilRole,
-    effort: Option<String>,
-    custom_slug: Option<&str>,
+    pick: SeatPick<'_>,
 ) -> serde_json::Value {
     let mut m = serde_json::Map::new();
+    let custom_slug = pick.custom_slug;
     let council = CouncilMeta {
         id: council.clone(),
         seat,
         role,
-        effort,
+        effort: pick.effort.clone(),
+        provider: Some(
+            custom_slug
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| pick.provider.as_str())
+                .to_string(),
+        ),
+        model: pick.model.clone(),
     };
     m.insert(
         COUNCIL_META_KEY.into(),
@@ -81,7 +91,64 @@ fn council_title(title: Option<&str>, prompt: &str) -> String {
     }
 }
 
-/// "codex gpt-6.1-sol" / "claude" — how errors and titles name a seat.
+/// The council's own title from seat 1's: "<title> · Seat 1 · <who>"
+/// (before the seat numbers, "<title> · <who>").
+fn council_base(seat_title: &str) -> &str {
+    seat_title
+        .rsplit_once(" · Seat ")
+        .or_else(|| seat_title.rsplit_once(" · "))
+        .map_or(seat_title, |(b, _)| b)
+}
+
+/// What a council thread was started on (its `meta.council` and title).
+struct SeatPick<'a> {
+    provider: RuntimeProvider,
+    custom_slug: Option<&'a str>,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+impl<'a> SeatPick<'a> {
+    fn new(
+        provider: RuntimeProvider,
+        custom_slug: Option<&'a str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Self {
+        let set = |v: Option<&str>| {
+            v.map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        Self {
+            provider,
+            custom_slug,
+            model: set(model),
+            effort: set(effort),
+        }
+    }
+
+    /// "Claude", "Codex gpt-6.1-sol High", "claudework Low" — a seat's
+    /// title part: the provider, then the model and effort when picked.
+    fn title(&self) -> String {
+        let mut words = vec![
+            match self.custom_slug.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(slug) => slug.to_string(),
+                None => super::children::provider_label(self.provider).to_string(),
+            },
+        ];
+        words.extend(self.model.clone());
+        words.extend(self.effort.as_deref().map(|e| {
+            let mut c = e.chars();
+            c.next()
+                .map(|f| f.to_uppercase().chain(c).collect::<String>())
+                .unwrap_or_default()
+        }));
+        words.join(" ")
+    }
+}
+
+/// "codex gpt-6.1-sol" / "claude" — how errors name a seat.
 fn seat_label(seat: &CouncilSeatReq) -> String {
     let p = seat
         .provider_slug
@@ -276,21 +343,21 @@ impl AgentRuntime {
         let mut seats: Vec<RuntimeSession> = Vec::with_capacity(n);
         for (i, (seat, (provider, custom_slug))) in req.seats.iter().zip(&resolved).enumerate() {
             let label = seat_label(seat);
-            let effort = seat.effort.clone().filter(|e| !e.trim().is_empty());
+            let pick = SeatPick::new(
+                *provider,
+                custom_slug.as_deref(),
+                seat.model.as_deref(),
+                seat.effort.as_deref(),
+            );
+            let n = i + 1;
             let create = CreateRuntimeSessionReq {
                 title_auto: false,
                 provider: Some(*provider),
                 cwd: req.cwd.clone(),
-                title: Some(format!("{base} · {label}")),
+                title: Some(format!("{base} · Seat {n} · {}", pick.title())),
                 model: seat.model.clone(),
                 access_mode: Some(RuntimeAccessMode::ApprovalRequired),
-                meta: Some(council_meta(
-                    &council,
-                    (i + 1) as u32,
-                    CouncilRole::Seat,
-                    effort,
-                    custom_slug.as_deref(),
-                )),
+                meta: Some(council_meta(&council, n as u32, CouncilRole::Seat, pick)),
             };
             let root = seats.first().map(|s| s.id.clone());
             match self.create_linked(user, ws_id, create, root).await {
@@ -492,13 +559,15 @@ impl AgentRuntime {
                 "no seat has answered yet — nothing to synthesize".into(),
             ));
         }
-        let base = c
-            .root
-            .title
-            .rsplit_once(" · ")
-            .map_or(c.root.title.as_str(), |(b, _)| b);
-        let title = format!("{base} · synthesis");
+        let title = format!("{} · synthesis", council_base(&c.root.title));
         let effort = req.effort.filter(|e| !e.trim().is_empty());
+        let pick = SeatPick::new(
+            judge_provider,
+            judge_slug.as_deref(),
+            req.model.as_deref(),
+            effort.as_deref(),
+        );
+        let meta = council_meta(&c.meta.id, 0, CouncilRole::Synthesis, pick);
         self.open_linked(
             &c.root.id,
             OpenPeerReq {
@@ -506,15 +575,9 @@ impl AgentRuntime {
                 prompt: Some(synthesis_prompt(&answers)),
                 title: Some(title),
                 model: req.model,
-                effort: effort.clone(),
+                effort,
                 cwd: None,
-                meta: Some(council_meta(
-                    &c.meta.id,
-                    0,
-                    CouncilRole::Synthesis,
-                    effort,
-                    judge_slug.as_deref(),
-                )),
+                meta: Some(meta),
             },
             false,
         )
@@ -587,17 +650,41 @@ mod tests {
             "Redis, beca\n(its last turn ended interrupted: this answer may be incomplete)"
         ));
         assert!(p.contains("agree") && p.contains("disagree") && p.contains("open questions"));
-        let meta = council_meta(
-            &"c1".into(),
-            0,
-            CouncilRole::Synthesis,
-            Some("high".into()),
+        let pick = SeatPick::new(
+            RuntimeProvider::Claude,
             Some("claudework"),
+            Some(" opus "),
+            Some("high"),
         );
+        assert_eq!(pick.title(), "claudework opus High");
+        let meta = council_meta(&"c1".into(), 0, CouncilRole::Synthesis, pick);
         assert_eq!(meta["council"]["effort"], "high");
         assert_eq!(meta["council"]["role"], "synthesis");
+        assert_eq!(meta["council"]["provider"], "claudework");
+        assert_eq!(meta["council"]["model"], "opus");
         assert_eq!(meta["read_only"], true);
         assert_eq!(meta["provider_slug"], "claudework");
+    }
+
+    #[test]
+    fn a_seat_title_names_its_number_provider_model_and_effort() {
+        let plain = SeatPick::new(RuntimeProvider::Codex, None, None, Some(""));
+        assert_eq!(plain.title(), "Codex");
+        let meta = council_meta(&"c1".into(), 2, CouncilRole::Seat, plain);
+        assert_eq!(meta["council"]["seat"], 2);
+        assert_eq!(meta["council"]["provider"], "codex");
+        assert!(meta["council"].get("model").is_none());
+        assert!(meta["council"].get("effort").is_none());
+        assert_eq!(
+            council_base("Cache choice · Seat 1 · Claude High"),
+            "Cache choice"
+        );
+        assert_eq!(council_base("A · B · Seat 1 · Codex"), "A · B");
+        assert_eq!(
+            council_base("Cache choice · claude"),
+            "Cache choice",
+            "older seats"
+        );
     }
 
     /// A seat followed up in its own composer was last asked something

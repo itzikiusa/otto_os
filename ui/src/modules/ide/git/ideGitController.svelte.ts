@@ -7,7 +7,6 @@ import { api, ApiError } from '../../../lib/api/client';
 import { gitApi } from '../../../lib/api/git';
 import type {
   DiscardReq,
-  FileChange,
   Repo,
   RepoResolveResp,
   RepoStatusResp,
@@ -26,8 +25,9 @@ import {
 } from '../ideStore.svelte';
 import { onIdeTargetReset } from '../store/ideStateSlices.svelte';
 import { detectTextEol, diskEolsOf, normalizeEditorLf } from '../store/ideTypes';
+import { buildIdeTreeGitOverlay, type IdeTreeGitOverlay } from './ideGitTreeOverlay';
 
-export type IdeGitLetter = 'M' | 'A' | 'D' | 'U' | 'R' | 'C';
+export type { IdeGitLetter, IdeTreeGitOverlay } from './ideGitTreeOverlay';
 
 export interface IdeGitHistoryTab {
   key: string;
@@ -43,24 +43,6 @@ export interface IdeGitHistoryTab {
 function normSlash(p: string): string {
   return normalizeMacPrivatePath(p).replace(/\/+$/, '') || '/';
 }
-
-function changeToLetter(c: FileChange): IdeGitLetter {
-  if (c.kind === 'conflicted') return 'C';
-  if (c.kind === 'untracked') return 'U';
-  if (c.kind === 'added') return 'A';
-  if (c.kind === 'deleted') return 'D';
-  if (c.kind === 'renamed') return 'R';
-  return 'M';
-}
-
-const LETTER_RANK: Record<IdeGitLetter, number> = {
-  C: 6,
-  D: 5,
-  M: 4,
-  R: 3,
-  A: 2,
-  U: 1,
-};
 
 class IdeGitController {
   repoByRoot = $state<Record<string, Repo>>({});
@@ -198,12 +180,6 @@ class IdeGitController {
     return best;
   }
 
-  /** True once `git.statusById` has populated live status for the repo owning `absPath`. */
-  isRepoStatusLoaded(absPath: string): boolean {
-    const repo = this.findKnownRepoForPath(absPath);
-    return Boolean(repo && git.statusById[repo.id] != null);
-  }
-
   /** Compact reactive digest of `absPath`'s git repo/branch/change/ref state for editor diff gutter refresh. */
   fileStatusDigest(absPath: string): string {
     const clean = normSlash(absPath);
@@ -272,40 +248,21 @@ class IdeGitController {
     return sum;
   });
 
-  /** Fast O(1) lookup maps for `IdeProjectTree.svelte`: file status letters + dirty parent folders. */
-  readonly treeGitOverlay = $derived.by(
-    (): { files: Map<string, IdeGitLetter>; dirtyDirs: Set<string> } => {
-      const files = new Map<string, IdeGitLetter>();
-      const dirtyDirs = new Set<string>();
-      const seenRepos = new Set<string>();
-
-      for (const repo of [...Object.values(this.repoByRoot), ...this.repos]) {
-        if (!repo || seenRepos.has(repo.id)) continue;
-        seenRepos.add(repo.id);
-        const st = git.statusById[repo.id];
-        if (!st || st.changes.length === 0) continue;
-        const repoRoot = normSlash(repo.path);
-        for (let i = 0; i < st.changes.length; i++) {
-          const ch = st.changes[i];
-          const rel = ch.path.replace(/^\/+/, '').replace(/\/+$/, '');
-          if (!rel) continue;
-          const abs = `${repoRoot}/${rel}`;
-          const letter = changeToLetter(ch);
-          const prev = files.get(abs);
-          if (!prev || LETTER_RANK[letter] > LETTER_RANK[prev]) files.set(abs, letter);
-
-          let slash = abs.lastIndexOf('/');
-          while (slash >= repoRoot.length) {
-            const dir = abs.slice(0, slash);
-            if (dir) dirtyDirs.add(dir);
-            if (dir.length <= repoRoot.length) break;
-            slash = dir.lastIndexOf('/');
-          }
-        }
-      }
-      return { files, dirtyDirs };
-    },
-  );
+  /** Fast O(1) lookup maps for `IdeProjectTree.svelte` (letters + dirty folders), keyed in the
+   *  tree's spelling of each repo: see `ideGitTreeOverlay.ts`. One status per repo, not per row. */
+  readonly treeGitOverlay = $derived.by((): IdeTreeGitOverlay => {
+    const byId = new Map<string, { repo: Repo; aliases: string[] }>();
+    for (const [alias, repo] of Object.entries(this.repoByRoot)) {
+      if (!repo) continue;
+      const slot = byId.get(repo.id) ?? { repo, aliases: [] };
+      slot.aliases.push(alias);
+      byId.set(repo.id, slot);
+    }
+    for (const repo of this.repos) if (!byId.has(repo.id)) byId.set(repo.id, { repo, aliases: [] });
+    return buildIdeTreeGitOverlay(
+      [...byId.values()].map(({ repo, aliases }) => ({ path: repo.path, aliases, changes: git.statusById[repo.id]?.changes ?? null })),
+    );
+  });
 
   rootContainingPath(absPath: string): IdeProjectRoot | null {
     const clean = normSlash(absPath);

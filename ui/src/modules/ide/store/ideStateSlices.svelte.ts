@@ -225,6 +225,10 @@ import {
   type ProjectHelperHost,
 } from '../shell/ideProjectHelpers';
 import { saveWorkspaceOpenTabs, type IdeBufferPerfController } from './ideBufferPerf';
+import { leaveDebugSessionOnSwitch } from './ideDebugLaunch.svelte';
+import { disambiguateLabels } from '../shell/ideProjectRecents.svelte';
+import { ideProjectHealth } from './ideProjectHealth.svelte';
+import { enterIdeTarget, leaveIdeTarget } from './ideProjectSwitch';
 import { ideTreeDirErrors } from './ideTreeDirErrors.svelte';
 import {
   ideBasename,
@@ -286,6 +290,10 @@ export function resetTargetLifecycleState(
   clearActivePath: () => void,
   overrideAdditionalRoots?: string[],
 ): void {
+  // A session still live in the project being left is stopped on the daemon (best-effort).
+  if (ideTargetKey(next) !== ideTargetKey(host.target)) leaveDebugSessionOnSwitch(host.debugState.activeDebug, host.collabState.collabIsGuest);
+  // Remember the tree, park a live run, let the agent save its thread (I3-03 / I3-08).
+  leaveIdeTarget(host);
   host.collabState.reset();
   for (let i = 0; i < targetResetHooks.length; i++) targetResetHooks[i]();
   host.target = next;
@@ -332,6 +340,7 @@ export function resetTargetLifecycleState(
   host.navHistory = [];
   host.navIndex = -1;
   host.syncWorkspacePort();
+  enterIdeTarget(host);
 }
 
 export function syncAdditionalRootsFromEnvState(
@@ -417,6 +426,7 @@ export async function fetchIdeWorkspaceTree(
         ? rawEntries.map((e) => ({ ...e, path: canonicalizeLocalProjectPath(e.path, host.projectRoots) }))
         : rawEntries;
       host.treeRootEntries = entries;
+      ideProjectHealth.clear();
       // A root load is a refresh: expanded folders refetch, and collapsed ones drop their
       // cached listing so the next expand reads the disk instead of a stale snapshot.
       const rootKey = normalizeRootPath(host.target.root);
@@ -430,8 +440,7 @@ export async function fetchIdeWorkspaceTree(
       if (host.runConfigs.length === 0) {
         const fast = detectFastRunConfigs(host.target.root, entries);
         host.detectedConfigs = fast;
-        host.runConfigs = mergeFastRunConfigs([], fast);
-        if (!host.selectedConfigId && host.runConfigs.length > 0) host.selectedConfigId = host.runConfigs[0].id;
+        host.runConfigs = mergeFastRunConfigs([], fast); // nothing auto-selected: "Current file" is the default
       }
       for (let i = 0; i < host.additionalRoots.length; i++) {
         const ar = host.additionalRoots[i];
@@ -450,8 +459,10 @@ export async function fetchIdeWorkspaceTree(
     }
   } catch (e) {
     if (stale()) return;
-    if (isRoot) host.treeError = loadErrorText(e);
-    else if (normDir) ideTreeDirErrors.set(normDir, loadErrorText(e));
+    if (isRoot) {
+      host.treeError = loadErrorText(e);
+      ideProjectHealth.noteRootError(host.target, e, host.treeError); // a deleted folder / host down (I3-12)
+    } else if (normDir) ideTreeDirErrors.set(normDir, loadErrorText(e));
   } finally {
     if (isRoot && !stale()) host.treeLoading = false;
   }
@@ -496,7 +507,9 @@ export function computeIdeProjectRoots(primaryRoot: string, additionalRoots: rea
       out.push({ path: r, name: ideBasename(r) || r, isPrimary: false });
     }
   }
-  return out;
+  // Two repos named `api` in one project read "api — team-a" / "api — team-b" (I3-07).
+  const labels = disambiguateLabels(out);
+  return out.map((r, i) => (labels[i] === r.name ? r : { ...r, name: labels[i] }));
 }
 
 export type IncomingIdeDiagnostic = Omit<IdeDiagnostic, 'path' | 'quick_fixes'> & {

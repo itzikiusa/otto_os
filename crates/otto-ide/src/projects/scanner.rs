@@ -276,10 +276,11 @@ pub(super) fn normalize_lookup_fast(root: &str) -> Option<String> {
     (!norm.is_empty()).then_some(norm)
 }
 
-/// Whether `lookup` is this project's PRIMARY root. A member folder opened on
-/// its own is a plain workspace: matching members too pulled the project's other
-/// folders into it, and Remove there could never stick.
-pub(super) fn stored_project_matches(entry: &StoredProject, lookup: &str) -> bool {
+/// Whether `lookup` is the project's PRIMARY root (either spelling). Opening a folder
+/// opens that folder: a repo that is merely a member of a multi-repo project must not
+/// pull the project's other folders in (review I3-02) — those are attached only when
+/// the person opens the project itself (its primary root, or by id).
+pub(super) fn stored_project_primary_matches(entry: &StoredProject, lookup: &str) -> bool {
     let lookup_key = crate::types::root_equiv_key(crate::types::IdeTargetKind::Local, lookup);
     let eq = |cand: &str| {
         cand == lookup
@@ -438,9 +439,9 @@ mod tests {
             },
             non_root_project: None,
         };
-        assert!(stored_project_matches(&entry, "/w/other"));
+        assert!(stored_project_primary_matches(&entry, "/w/other"));
         assert!(
-            !stored_project_matches(&entry, "/w/lonely"),
+            !stored_project_primary_matches(&entry, "/w/lonely"),
             "opening `lonely` alone must not attach `other`"
         );
     }

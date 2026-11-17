@@ -62,6 +62,8 @@
   const sub = $derived([model, hint.effort ? formatEffortShort(hint.effort) : null].filter(Boolean).join(' · ') || null);
   const name = $derived(s?.title ?? hint.title ?? (provider ? harnessLabel(provider) : 'Thread'));
   const answer = $derived(answerOf(p));
+  /** Waiting on a person: its primary action answers it, beside this thread (a phone opens it in place). */
+  const asks = $derived(st.tone === 'needs-you' && !gone);
   const live = $derived(st.tone === 'working' || st.tone === 'starting' || st.tone === 'background' || st.tone === 'needs-you');
   /** Asked by a person: its answer is the person's to pass on (the agent path wakes the parent itself). */
   const parent = $derived(childOf(s));
@@ -116,8 +118,8 @@
     ontoggle={answer ? () => (open = !open) : undefined}
     onstop={live && !gone && s?.status !== 'closed' && !stopping ? () => void stop() : undefined}
     onbeside={gone ? undefined : () => openChildThread(id, true)}
-    onopen={gone ? undefined : (e) => openChildThread(id, e.shiftKey)}
-    openLabel="Open"
+    onopen={gone ? undefined : asks ? () => openChildThread(id, true) : (e) => openChildThread(id, e.shiftKey)}
+    openLabel={asks ? 'Answer' : 'Open'}
     testid="runtime-child-row-{id}"
   />
   {#if parentRow && parentRow.status !== 'closed' && answer && !live && !gone}

@@ -66,6 +66,7 @@ const { computeMinimalTextUpdate } = loadSource(
       prepareEditorHistory() {},
       saveEditorState() {},
     },
+    './cm-outside-text.ts': { outsideText: cmState.Annotation.define() },
   },
 );
 const { detectTextEol, normalizeEditorLf, serializeTabDiskContent } = loadSource(
