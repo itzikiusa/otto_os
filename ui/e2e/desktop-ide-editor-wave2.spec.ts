@@ -52,7 +52,7 @@ test.describe('Desktop IDE editor wave 2', () => {
     await bootIde(page, 'flags.ts');
     await page.keyboard.press('Shift');
     await page.keyboard.press('Shift');
-    const dialog = page.locator('.sheet[role="dialog"]').last();
+    const dialog = page.getByTestId('ide-quick-open');
     await expect(dialog).toBeVisible({ timeout: 5_000 });
     await dialog.getByTestId('ide-se-tab-text').click();
     await dialog.locator('input.se-input').first().fill('FLAG_ONE');

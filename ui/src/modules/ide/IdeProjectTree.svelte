@@ -445,7 +445,7 @@
                   {#if dirtyDir}<span class="tree-dirty-dot" title="Contains uncommitted Git changes" aria-hidden="true"></span>{/if}
                   {#if gitLetter}<span class="tree-git-mark mono" data-git={gitLetter} data-testid="ide-tree-git-status">{gitLetter === 'U' ? '?' : gitLetter}</span>{/if}
                 </button>
-                <button type="button" class="tree-act tree-more" tabindex="-1" aria-label="Actions for {node.entry.name}" title="Actions for {node.entry.name} (⇧F10)" onclick={(e) => openNodeMenu(e, node)}>
+                <button type="button" class="tree-act tree-more" tabindex="-1" aria-hidden="true" aria-label="Actions for {node.entry.name}" title="Actions for {node.entry.name} (⇧F10)" onclick={(e) => openNodeMenu(e, node)}>
                   <Icon name="more" size={12} />
                 </button>
               </div>

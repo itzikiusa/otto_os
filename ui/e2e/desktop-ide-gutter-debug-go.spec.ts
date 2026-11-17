@@ -161,7 +161,7 @@ test('gutter Debug on a Go test starts delve and pauses on its breakpoints', asy
   test.setTimeout(120_000);
   const runs: string[] = [];
   await openTestWithBreakpoints(page, runs);
-  await expectPausesOnBothBreakpoints(page, () => gutterMenu(page, /^Debug 'Run TestDeleteSuccess'/), 'go-nested-package-tree');
+  await expectPausesOnBothBreakpoints(page, () => gutterMenu(page, /^Debug 'TestDeleteSuccess'/), 'go-nested-package-tree');
   expect(runs, 'Debug must not start a plain run').toEqual([]);
 });
 
@@ -170,7 +170,7 @@ test('after a gutter Run, the toolbar Debug debugs that test', async ({ page }) 
   test.setTimeout(150_000);
   const runs: string[] = [];
   await openTestWithBreakpoints(page, runs);
-  await gutterMenu(page, /^Run 'Run TestDeleteSuccess'$/);
+  await gutterMenu(page, /^Run 'TestDeleteSuccess'$/);
   await expect.poll(() => runs.length).toBe(1);
   await expectPausesOnBothBreakpoints(page, () => page.getByTestId('ide-debug-btn').click(), 'go-toolbar-debug-after-gutter-run');
   expect(runs).toHaveLength(1);
@@ -182,7 +182,7 @@ test('after a gutter Run, ⌃D, the Debug panel button and the editor right-clic
   test.setTimeout(240_000);
   const runs: string[] = [];
   await openTestWithBreakpoints(page, runs);
-  await gutterMenu(page, /^Run 'Run TestDeleteSuccess'$/);
+  await gutterMenu(page, /^Run 'TestDeleteSuccess'$/);
   await expect.poll(() => runs.length).toBe(1);
   await expectPausesOnBothBreakpoints(page, async () => {
     await page.getByTestId('ide-project-tree').click({ position: { x: 5, y: 5 } });
@@ -195,7 +195,7 @@ test('after a gutter Run, ⌃D, the Debug panel button and the editor right-clic
   );
   await expectPausesOnBothBreakpoints(page, async () => {
     await page.locator('.cm-editor:visible .cm-line').filter({ hasText: 'query := buildDelete' }).first().click({ button: 'right' });
-    await page.locator('.ctx-menu').getByRole('menuitem', { name: /^Debug 'Run TestDeleteSuccess'/ }).click();
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: /^Debug 'TestDeleteSuccess'/ }).click();
   }, 'go-editor-right-click-debug');
   expect(runs).toHaveLength(1);
 });
@@ -224,7 +224,7 @@ test('gutter Debug pauses in a module-root, nested, build-tagged and second-root
       await clickBreakpointGutter(page, BP2 + c.shift);
       await expectPausesOnBothBreakpoints(
         page,
-        () => gutterMenu(page, /^Debug 'Run TestDeleteSuccess'/, c.shift),
+        () => gutterMenu(page, /^Debug 'TestDeleteSuccess'/, c.shift),
         `go-${c.name.replace(/ /g, '-')}`,
       );
     });

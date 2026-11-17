@@ -59,7 +59,7 @@ test('a council on a phone: the Related chip switches seats, the parent chip goe
   await expectNoHorizontalOverflow(page);
 });
 
-test('a council side by side on a phone: every pane is a full stacked pane', async ({ page }, info) => {
+test('a council on a phone is not laid side by side: the ⋯ offers no grid', async ({ page }, info) => {
   test.skip(info.project.name.includes('landscape'), 'portrait phone layout only');
   await page.goto('/');
   await page.waitForFunction(() => typeof (window as unknown as { __mockRuntime?: { seed?: unknown } }).__mockRuntime?.seed === 'function');
@@ -80,16 +80,13 @@ test('a council side by side on a phone: every pane is a full stacked pane', asy
     location.hash = '#/threads/rt_g1';
   });
   await expect(page.getByTestId('runtime-thread-rt_g1')).toBeVisible({ timeout: 15_000 });
+  // Superseded by main (PR #169): a phone has no side-by-side layouts, so the
+  // council is read seat by seat (the council strip) — the ⋯ no longer offers
+  // "Open council side by side".
   await page.getByTestId('threads-thread-menu').click();
-  await page.locator('.ctx-menu').first().getByRole('menuitem', { name: 'Open council side by side' }).click();
-  const canvas = page.getByTestId('threads-canvas');
-  await expect(canvas).toHaveAttribute('data-layout', 'grid');
-  // The desktop 2×2 rows used to squash panes 1–2 to a header strip.
-  for (const id of ['rt_g1', 'rt_g2', 'rt_g3', 'rt_g4']) {
-    const pane = canvas.getByTestId(`thread-pane-${id}`);
-    await expect(pane).toBeAttached();
-    const h = (await pane.boundingBox())?.height ?? 0;
-    expect(h, `${id} pane height`).toBeGreaterThanOrEqual(250);
-  }
+  const names = await page.locator('.ctx-menu').first().locator('[role^="menuitem"]').allInnerTexts();
+  expect(names.some((n) => /^Open council side by side/.test(n))).toBe(false);
+  await page.keyboard.press('Escape');
   await expectNoHorizontalOverflow(page);
 });
+

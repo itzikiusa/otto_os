@@ -1,7 +1,7 @@
 //! Scratches routes: thin handlers over [`otto_ide::scratches`] (the folder,
 //! the one-time Workbench export, path rules, read / write).
 //!
-//!   GET /scratches[?query=]                 → { root, files: [ScratchFile] }
+//!   GET /scratches[?query=]                 → { root, files: \[ScratchFile\] }
 //!   GET /scratches/file?path=<rel>          → ScratchFile + { content }
 //!   PUT /scratches/file { path, content }   → ScratchFile + { created }
 
