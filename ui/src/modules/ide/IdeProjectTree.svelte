@@ -562,7 +562,8 @@
   .tree-name { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tree-name.is-root-name { font-weight: 600; flex: 0 1 auto; }
   /* Git-ignored entries recede (GoLand's dimmed ignored files); still 4.5:1 on the surface. */
-  .tree-name.is-ignored, .tree-kind.is-ignored { color: var(--text-dim); }
+  /* GoLand-style olive: the warning hue pushed toward the dim text colour. */
+  .tree-name.is-ignored, .tree-kind.is-ignored { color: color-mix(in oklab, var(--warning) 55%, var(--text-dim)); }
   .tree-name[data-git='M'], .tree-git-mark[data-git='M'] { color: var(--info); }
   .tree-name[data-git='A'], .tree-git-mark[data-git='A'] { color: var(--success); }
   .tree-name[data-git='U'], .tree-git-mark[data-git='U'] { color: var(--warning); }
