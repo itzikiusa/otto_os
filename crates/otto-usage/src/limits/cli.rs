@@ -225,7 +225,10 @@ pub(crate) async fn query_usage(
             json!({"subtype": "initialize", "hooks": null}),
         )
         .await?;
-        await_response(&mut lines, INIT_ID).await?;
+        let init = await_response(&mut lines, INIT_ID).await?;
+        if signed_out(&init) {
+            return Err(not_signed_in(config_dir, default_login));
+        }
         send(
             &mut stdin,
             USAGE_ID,
@@ -244,6 +247,34 @@ pub(crate) async fn query_usage(
             timeout.as_secs().max(1)
         )),
     }
+}
+
+/// `initialize` says the login has no sign-in at all: an Anthropic backend,
+/// no claude.ai plan, no API key, and `tokenSource: "none"` (what `claude
+/// auth status` reports as `loggedIn: false`). Older CLIs without `account`
+/// are not judged.
+fn signed_out(init: &Value) -> bool {
+    let Some(a) = init.get("account") else {
+        return false;
+    };
+    a.get("apiProvider").and_then(Value::as_str) == Some("firstParty")
+        && a.get("tokenSource").and_then(Value::as_str) == Some("none")
+        && a.get("subscriptionType").is_none()
+        && a.get("apiKeySource").is_none()
+}
+
+/// What to run to sign the login in.
+fn not_signed_in(config_dir: &Path, default_login: bool) -> String {
+    let cmd = if default_login {
+        "claude".to_string()
+    } else {
+        let home = otto_transcript::roots::home_dir();
+        format!(
+            "CLAUDE_CONFIG_DIR={} claude",
+            super::tilde(config_dir, &home)
+        )
+    };
+    format!("This login isn’t signed in. Run `{cmd}` and /login.")
 }
 
 async fn send(
@@ -351,6 +382,12 @@ pub(crate) async fn check(
                         .into(),
                 );
             }
+            Ok(UsageAnswer::NotFetched) => {
+                e.check_error = Some(
+                    "Anthropic didn’t return this login’s usage (offline, rate-limited, or the sign-in expired). Try again later; if it keeps failing, sign in again with /login."
+                        .into(),
+                );
+            }
             Err(why) => e.check_error = Some(why),
         }
     });
@@ -365,6 +402,11 @@ mod tests {
     /// to `<dir>/log`, counts runs in `<dir>/runs`, and answers the two
     /// control requests with `usage_json` (an SDK-shaped get_usage reply).
     fn fake_cli(dir: &Path, usage_json: &str) -> PathBuf {
+        fake_cli_with(dir, "{}", usage_json)
+    }
+
+    /// [`fake_cli`] whose `initialize` answers `init_json`.
+    fn fake_cli_with(dir: &Path, init_json: &str, usage_json: &str) -> PathBuf {
         let p = dir.join("claude");
         let log = dir.join("log");
         let runs = dir.join("runs");
@@ -377,7 +419,7 @@ echo "apikey: ${{ANTHROPIC_API_KEY:-none}}" >> '{log}'
 echo 'not json, a warning'
 read line; echo "in: $line" >> '{log}'
 echo '{{"type":"system","subtype":"init","session_id":"s"}}'
-echo '{{"type":"control_response","response":{{"subtype":"success","request_id":"otto-init","response":{{}}}}}}'
+echo '{{"type":"control_response","response":{{"subtype":"success","request_id":"otto-init","response":{init}}}}}'
 read line; echo "in: $line" >> '{log}'
 echo '{{"type":"control_response","response":{{"subtype":"success","request_id":"other","response":{{}}}}}}'
 echo '{{"type":"control_response","response":{{"subtype":"success","request_id":"otto-usage","response":{usage}}}}}'
@@ -386,6 +428,7 @@ read line
             runs = runs.display(),
             log = log.display(),
             usage = usage_json,
+            init = init_json,
         );
         std::fs::write(&p, script).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -509,6 +552,94 @@ read line
         let e = claude::entry(&missing).unwrap();
         assert!(e.check_error.unwrap().contains("isn’t installed"));
         assert!(e.windows.is_empty());
+    }
+
+    /// What CLI 2.1.326 answers for a config dir with no sign-in.
+    const SIGNED_OUT_INIT: &str =
+        r#"{"account":{"tokenSource":"none","apiProvider":"firstParty"}}"#;
+    const SIGNED_OUT_USAGE: &str = r#"{"session":{"total_cost_usd":0},"subscription_type":null,"rate_limits_available":false,"rate_limits":null,"behaviors":null}"#;
+
+    #[tokio::test]
+    async fn a_signed_out_login_says_how_to_sign_in_and_an_api_key_login_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = fake_cli_with(dir.path(), SIGNED_OUT_INIT, SIGNED_OUT_USAGE);
+        let home = otto_transcript::roots::home_dir();
+        let cfg = home.join(format!(".claude-otto-test-{}", std::process::id()));
+        let now = Utc::now();
+        check(
+            Some(cli.to_str().unwrap()),
+            &cfg,
+            false,
+            CHECK_TIMEOUT,
+            || now,
+        )
+        .await;
+        let why = claude::entry(&cfg).unwrap().check_error.unwrap();
+        assert_eq!(
+            why,
+            format!(
+                "This login isn’t signed in. Run `CLAUDE_CONFIG_DIR=~/.claude-otto-test-{} claude` and /login.",
+                std::process::id()
+            )
+        );
+        let log = std::fs::read_to_string(dir.path().join("log")).unwrap();
+        assert!(!log.contains("get_usage"), "nothing more is asked: {log}");
+        assert!(!cfg.exists(), "the fake CLI never touched the dir");
+
+        // The default login names plain `claude`.
+        let other = tempfile::tempdir().unwrap();
+        let cli = fake_cli_with(other.path(), SIGNED_OUT_INIT, SIGNED_OUT_USAGE);
+        let default_dir = other.path().join("default");
+        check(
+            Some(cli.to_str().unwrap()),
+            &default_dir,
+            true,
+            CHECK_TIMEOUT,
+            || now,
+        )
+        .await;
+        let why = claude::entry(&default_dir).unwrap().check_error.unwrap();
+        assert!(why.contains("Run `claude` and /login"), "{why}");
+
+        // An API-key login answers the same get_usage but is signed in.
+        let keyed = tempfile::tempdir().unwrap();
+        let cli = fake_cli_with(
+            keyed.path(),
+            r#"{"account":{"apiKeySource":"/login managed key","apiProvider":"firstParty"}}"#,
+            SIGNED_OUT_USAGE,
+        );
+        let cfg = keyed.path().join("cfg");
+        check(
+            Some(cli.to_str().unwrap()),
+            &cfg,
+            false,
+            CHECK_TIMEOUT,
+            || now,
+        )
+        .await;
+        let why = claude::entry(&cfg).unwrap().check_error.unwrap();
+        assert!(why.contains("no plan limits"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_usage_fetch_is_not_an_unknown_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = fake_cli(
+            dir.path(),
+            r#"{"subscription_type":"max","rate_limits_available":true,"rate_limits":null}"#,
+        );
+        let cfg = dir.path().join("cfg");
+        let now = Utc::now();
+        check(
+            Some(cli.to_str().unwrap()),
+            &cfg,
+            false,
+            CHECK_TIMEOUT,
+            || now,
+        )
+        .await;
+        let why = claude::entry(&cfg).unwrap().check_error.unwrap();
+        assert!(why.starts_with("Anthropic didn’t return"), "{why}");
     }
 
     #[tokio::test]
