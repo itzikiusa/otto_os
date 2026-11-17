@@ -28,7 +28,6 @@
   import { loadScratchesRoot, newScratchFile, openScratches } from './shell/ideScratches.svelte';
   import IdeHeaderActions from './shell/IdeHeaderActions.svelte';
   import IdeStackSwitcher from './shell/IdeStackSwitcher.svelte';
-  import IdeModeTabs from './shell/IdeModeTabs.svelte';
   import IdePhoneTabRow from './editor/IdePhoneTabRow.svelte';
   import { IDE_TYPING_SELECTOR, idePhoneChrome } from './editor/idePhoneChrome.svelte';
   import { ideLayout, paneAfterFileOpen, STACK_MAX_H, type IdeStackPane } from './shell/ideLayout.svelte';
@@ -71,6 +70,9 @@
   // Stacked layout (phone, phone on its side, a narrow window): one pane at a
   // time, decided by this page's own size (shell/ideLayout.svelte.ts).
   const stack = $derived(ideLayout.stack);
+  // Project tabs take the header's tabs slot on wide layouts only; stacked
+  // (phones) keeps the dropdown.
+  const projectTabsOn = $derived(!stack && !ide.collabIsGuest && idePreferences.current.projectTabs);
   const pane = $derived(ideLayout.pane);
   // One owner for the page's chrome: a tablet folds Otto's navigator to its icon rail (an iPad
   // portrait then has room for the workbench, I4-24); the workbench's status strip replaces the shell's.
@@ -426,16 +428,17 @@
 >
   <!-- One toolbar row (G13). Stacked: the pane switcher takes the tabs slot
        (below the bar when the page is tall, inline when it is short); wide, the
-       optional Project | Scratches tabs (Settings › Appearance) do. -->
+       optional project tabs (Settings › Appearance) do, and then carry the
+       switcher's ▾ themselves. -->
   {#snippet stackTabs()}<IdeStackSwitcher onshow={showPane} />{#if phone.fileRowInHeader && pane === 'editor'}<IdePhoneTabRow inHeader />{/if}{/snippet}
-  {#snippet modeTabs()}<IdeModeTabs />{/snippet}
+  {#snippet projectTabs()}<IdeWorkspaceSwitcher mode="tabs" onpickfolder={(m) => (folderPickerMode = m)} />{/snippet}
   <PageHeader
     title={stack ? 'IDE' : 'IDE (Beta)'}
-    tabs={stack ? (ide.hasTarget ? stackTabs : undefined) : idePreferences.current.scratchesTab ? modeTabs : undefined}
+    tabs={stack ? (ide.hasTarget ? stackTabs : undefined) : projectTabsOn ? projectTabs : undefined}
     tabsPlacement={stack && ideLayout.height >= STACK_MAX_H ? 'below' : 'inline'}
   >
     {#snippet badge()}
-      {#if !ide.collabIsGuest}<IdeWorkspaceSwitcher onpickfolder={(m) => (folderPickerMode = m)} />{/if}
+      {#if !ide.collabIsGuest && !projectTabsOn}<IdeWorkspaceSwitcher onpickfolder={(m) => (folderPickerMode = m)} />{/if}
     {/snippet}
 
     {#snippet actions()}

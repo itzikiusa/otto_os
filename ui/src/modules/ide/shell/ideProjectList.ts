@@ -1,5 +1,5 @@
-// The project switcher's list and the Project | Scratches tabs' "back to the
-// project" rule. Pure (no runes) so unit tests import it directly.
+// The project switcher's list and the header's project tabs. Pure (no runes)
+// so unit tests import it directly.
 //
 // Scratches is the built-in default project: listed first, never renamed or
 // deleted (it is the user's own folder, not an `/ide/projects` row), and where
@@ -45,25 +45,21 @@ export function scratchesMenuItems(): MenuItem[] {
   ];
 }
 
-/** Where the IDE was before Scratches (a named project or a plain folder). */
-export interface RealProject {
-  root: string;
-  workspaceId: string | null;
-  projectId: string | null;
-  /** Set when that project was a folder on an SSH host. */
-  ssh?: { connectionId: string; connectionName: string | null };
+export interface ProjectTab {
+  /** `scratches` or the named project's id. */
+  id: string;
+  label: string;
+  /** Scratches is the default project: no delete, no rename. */
+  deletable: boolean;
+  active: boolean;
 }
 
-/** What the Project tab returns to: the last real project if it still exists, else the
- *  first named project, else the first workspace folder; null when there is none. */
-export function pickReturnProject(
-  last: RealProject | null,
-  projects: readonly NamedLike[],
-  workspaces: readonly { id: string; root_path: string }[],
-): RealProject | null {
-  if (last && (!last.projectId || projects.some((p) => p.id === last.projectId))) return last;
-  const p = projects[0];
-  if (p) return { root: p.primary_root, workspaceId: null, projectId: p.id };
-  const w = workspaces.find((x) => x.root_path);
-  return w ? { root: w.root_path, workspaceId: w.id, projectId: null } : null;
+/** The header tabs ("Show projects as tabs"): Scratches first, then every named
+ *  project in the switcher's order. A plain folder or SSH target is no tab, so
+ *  then none is active. */
+export function projectTabs(projects: readonly NamedLike[], activeProjectId: string | null, onScratches: boolean): ProjectTab[] {
+  return [
+    { id: 'scratches', label: 'Scratches', deletable: false, active: onScratches },
+    ...projects.map((p) => ({ id: p.id, label: p.name, deletable: true, active: !onScratches && p.id === activeProjectId })),
+  ];
 }

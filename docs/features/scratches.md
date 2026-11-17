@@ -11,9 +11,8 @@ run configurations, Local History, search and the agent dock.
   when there is no other project (no workspace folder, or the open project was
   deleted). ⌘K: **New scratch file…** from anywhere. `#/workbench` (the old
   Scratches page) opens the IDE on the Scratches project. IDE Settings ›
-  Appearance › **Show Scratches as a tab** adds **Project | Scratches** tabs to
-  the IDE header (wide layouts; off by default): Project returns to the last
-  real project.
+  Appearance › **Show projects as tabs** puts every project in the IDE header
+  as a tab, Scratches first (see [IDE](./ide.md) § 1b).
 - Folder: `~/Otto/Scratches/<user id>` (`$OTTO_SCRATCHES_HOME` moves the
   parent). It is an ordinary folder, so Finder, a terminal or another editor
   work on it too.
