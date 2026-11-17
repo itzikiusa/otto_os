@@ -1037,6 +1037,9 @@ async fn host_prs(State(ctx): State<ServerCtx>, req: Request) -> Response {
     };
     // Never forward the plugin bearer into the git handlers.
     parts.headers.remove(axum::http::header::AUTHORIZATION);
+    // Drop the outer match's extensions: axum appends this route's `{id}` /
+    // `{number}` params to the inner router's own, so `Path<Id>` would see two.
+    parts.extensions = Default::default();
     let app = otto_git::pr_read_router::<ServerCtx>()
         .with_state(ctx)
         .layer(axum::Extension(AuthUser(root)));
