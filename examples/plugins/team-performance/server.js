@@ -188,19 +188,19 @@ function reworkAsync(repoPaths, since, signal) {
 const reworkPath = () => path.join(DATA_DIR, 'rework.json');
 
 // ---- PR ingestion (Bitbucket via the Otto daemon) ----------------------------
-// The daemon's git/PR routes live under /api/v1 next to the plugin-host API.
-// They need a USER token: OTTO_API_TOKEN / OTTO_TP_DAEMON_TOKEN in the sidecar
-// env; without one the sync is skipped and the no_pr_data guardrail explains it.
-const DAEMON_API = HOST_API.replace(/\/plugin-host\/?$/, '');
-const DAEMON_TOKEN = process.env.OTTO_TP_DAEMON_TOKEN || process.env.OTTO_API_TOKEN || '';
+// The plugin host re-serves the daemon's read-only PR routes
+// (`/plugin-host/repos/{id}/prs[/{n}[/commits|/diff]]`, next to `/repos`) under
+// our own OTTO_PLUGIN_TOKEN, so no user API token is needed. Without a host API
+// (run outside Otto) the sync is skipped and the no_pr_data guardrail explains it.
+const PR_API = HOST_API.replace(/\/+$/, '');
 const prPacer = createPacer(); // >= 2s between calls, 429 backoff
 let prStatus = { state: 'idle', error: null, repos: {}, unregistered: [], at: null };
 const prRepoMapPath = () => path.join(DATA_DIR, 'data', 'prs', 'repo-map.json');
 
 function getPrClient(job, signal) {
-  if (!DAEMON_API || !DAEMON_TOKEN) return null;
+  if (!PR_API || !TOKEN) return null;
   return PRS.createPrClient({
-    baseUrl: DAEMON_API, token: DAEMON_TOKEN, pacer: prPacer, dataDir: DATA_DIR, signal,
+    baseUrl: PR_API, token: TOKEN, pacer: prPacer, dataDir: DATA_DIR, signal,
     onProgress: (p) => { if (job) { job.prs_progress = p; job.next_call_at = Date.now() + prPacer.nextCallEtaMs(); job.backoff_ms = prPacer.stats.last_backoff_ms || 0; } },
   });
 }
@@ -209,7 +209,7 @@ async function syncPrs(repos, job, signal) {
   check(signal);
   const client = getPrClient(job, signal);
   if (!client) {
-    prStatus = { ...prStatus, state: 'unavailable', error: 'no daemon API token in the plugin env (OTTO_TP_DAEMON_TOKEN) — PR data unavailable', at: Date.now() };
+    prStatus = { ...prStatus, state: 'unavailable', error: 'no Otto plugin host API (OTTO_HOST_API / OTTO_PLUGIN_TOKEN) — PR data unavailable', at: Date.now() };
     return;
   }
   prStatus = { ...prStatus, state: 'running', error: null };
@@ -241,7 +241,7 @@ function loadAllPrs() {
   const map = store.readJson(prRepoMapPath(), null);
   if (!map) return null;
   const out = [];
-  const client = DAEMON_API ? PRS.createPrClient({ baseUrl: DAEMON_API, token: '', pacer: prPacer, dataDir: DATA_DIR }) : null;
+  const client = PR_API ? PRS.createPrClient({ baseUrl: PR_API, token: '', pacer: prPacer, dataDir: DATA_DIR }) : null;
   if (!client) return null;
   for (const id of new Set(Object.values(map))) out.push(...client.loadPrs(id));
   return out;

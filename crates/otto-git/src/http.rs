@@ -63,6 +63,17 @@ pub trait GitCtx: Clone + Send + Sync + 'static {
     fn worktree_files_changed(&self, _paths: Vec<PathBuf>) {}
 }
 
+/// Read-only PR routes (list, detail, commits, diff) — the subset the plugin
+/// host re-serves under `/plugin-host` so a sidecar can read PRs without a
+/// user API token. Same handlers (and caller checks) as [`router`].
+pub fn pr_read_router<S: GitCtx>() -> Router<S> {
+    Router::new()
+        .route("/repos/{id}/prs", get(pr_list::<S>))
+        .route("/repos/{id}/prs/{number}", get(pr_detail::<S>))
+        .route("/repos/{id}/prs/{number}/commits", get(pr_commits::<S>))
+        .route("/repos/{id}/prs/{number}/diff", get(pr_diff::<S>))
+}
+
 /// Build the git router. Paths are relative to the `/api/v1` mount point.
 pub fn router<S: GitCtx>() -> Router<S> {
     Router::new()

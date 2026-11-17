@@ -434,6 +434,16 @@ pub fn host_routes() -> Router<ServerCtx> {
         .route("/plugin-host/jira/accounts", get(host_jira_accounts))
         .route("/plugin-host/jira/credentials", get(host_jira_credentials))
         .route("/plugin-host/agents/run", post(host_agents_run))
+        // Read-only PRs (list / detail / commits / diff) on behalf of the root
+        // user — so a sidecar (Team Performance) can ingest PRs with only its
+        // own OTTO_PLUGIN_TOKEN, never holding a user API token.
+        .route("/plugin-host/repos/{id}/prs", get(host_prs))
+        .route("/plugin-host/repos/{id}/prs/{number}", get(host_prs))
+        .route(
+            "/plugin-host/repos/{id}/prs/{number}/commits",
+            get(host_prs),
+        )
+        .route("/plugin-host/repos/{id}/prs/{number}/diff", get(host_prs))
 }
 
 /// Root-mounted iframe asset server: `/plugins/{slug}/ui/{*path}` (public static).
@@ -991,6 +1001,48 @@ async fn host_repos(State(ctx): State<ServerCtx>, headers: HeaderMap) -> Respons
         )
         .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// `GET /plugin-host/repos/{id}/prs[/{number}[/commits|/diff]]` — re-serves
+/// otto-git's read-only PR handlers ([`otto_git::pr_read_router`]) as the root
+/// user (the account that installs plugins; its forge credential reads the
+/// PRs). Plugin-token auth; writes are not reachable from here.
+async fn host_prs(State(ctx): State<ServerCtx>, req: Request) -> Response {
+    use tower::ServiceExt;
+    if let Err(r) = auth_plugin(&ctx, req.headers()).await {
+        return *r;
+    }
+    let root = match otto_state::UsersRepo::new(ctx.pool.clone()).list().await {
+        Ok(users) => users.into_iter().find(|u| u.is_root && !u.disabled),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let Some(root) = root else {
+        return (StatusCode::CONFLICT, "no root user yet — finish onboarding").into_response();
+    };
+    // The nested public router hands us `/plugin-host/repos/…`; the git router
+    // serves `/repos/…`.
+    let (mut parts, body) = req.into_parts();
+    let path_q = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("");
+    let Some(rest) = path_q.strip_prefix("/plugin-host") else {
+        return (StatusCode::BAD_REQUEST, "bad plugin-host path").into_response();
+    };
+    parts.uri = match rest.parse() {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, "bad plugin-host path").into_response(),
+    };
+    // Never forward the plugin bearer into the git handlers.
+    parts.headers.remove(axum::http::header::AUTHORIZATION);
+    let app = otto_git::pr_read_router::<ServerCtx>()
+        .with_state(ctx)
+        .layer(axum::Extension(AuthUser(root)));
+    match app.oneshot(Request::from_parts(parts, body)).await {
+        Ok(resp) => resp,
+        Err(never) => match never {},
     }
 }
 

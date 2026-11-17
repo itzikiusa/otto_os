@@ -206,12 +206,13 @@ must match an **enabled** plugin):
 | Method & path (under `$OTTO_HOST_API`) | Returns / does |
 |---|---|
 | `GET  /plugin-host/repos` | `[{id, name, path, remote_url}]` — every Git repo Otto knows about. The plugin runs git itself against `path`. |
+| `GET  /plugin-host/repos/{id}/prs[/{number}[/commits\|/diff]]` | Read-only PRs (list, detail, commits, diff) — same query params and bodies as the user `/repos/{id}/prs…` routes, read with the **root user's** forge credential. No user API token needed; writes (comment, approve, merge…) are not exposed. |
 | `GET  /plugin-host/jira/accounts` | `[{id, label, base_url, email}]` — configured Jira accounts (no tokens). |
 | `GET  /plugin-host/jira/credentials?account=<id>` | `{base_url, email, token}` — the Jira **token** for one account, so the plugin can call Jira directly. |
 | `POST /plugin-host/agents/run` | `{prompt, provider?, model?, cwd?}` → `{text}` — one agent turn (`claude`, or `codex`). By default **text in, text out**: no tools, no MCP, Seatbelt-confined, in a throwaway scratch dir (`cwd` ignored), because the prompt carries third-party text (Jira, git). Full tools only when the manifest sets `"agent_tools": true`; then `cwd` (default `$OTTO_PLUGIN_DATA_DIR`) must be inside the data dir or a registered repo and never the daemon's own directory (else 400). Every run is audited (`plugin.agent_run`). |
 
 **A plugin CAN:** serve its own UI + backend; read the repo list and run git on
-those paths; read Jira accounts and fetch a Jira account's credentials; run a
+those paths; read PRs (list/detail/commits/diff); read Jira accounts and fetch a Jira account's credentials; run a
 one-shot agent prompt; persist its own state under `$OTTO_PLUGIN_DATA_DIR`
 (files, SQLite, whatever it wants); know the calling user via `X-Otto-User`.
 
@@ -330,6 +331,7 @@ while). Files: `Cargo.toml`, `src/main.rs`, `otto-plugin.json`, `ui/index.html`.
 | Method & path | Returns |
 |---|---|
 | `GET /plugin-host/repos` | `[{id,name,path,remote_url}]` |
+| `GET /plugin-host/repos/{id}/prs[/{number}[/commits\|/diff]]` | read-only PRs as the root user |
 | `GET /plugin-host/jira/accounts` | `[{id,label,base_url,email}]` |
 | `GET /plugin-host/jira/credentials?account=<id>` | `{base_url,email,token}` |
 | `POST /plugin-host/agents/run` | `{prompt,provider?,model?,cwd?}` → `{text}` (tool-less unless `agent_tools`) |

@@ -378,7 +378,7 @@ function prSummaryByKey(prs, businessDaysFn = businessDaysBetween) {
 
 /**
  * First-class status for the PR ingest, so the UI can explain an empty panel.
- *   not_configured — no daemon API/token, or no repo mapped to a daemon repo
+ *   not_configured — no plugin host API/token, or no repo mapped to a daemon repo
  *   never_run      — configured, but no repo has finished a sync or failed
  *   failing        — a repo's last attempt errored after its last good sync
  *   ok             — every mapped repo synced at least once (some may be pending)
@@ -407,7 +407,7 @@ function prIngestStatus({ dataDir, configured, repoIds, runtime = {}, unregister
   }
   const base = { cursor_by_repo: cursorByRepo, fetched, pending, unregistered, partial: partialTotal };
   if (!configured) {
-    return { state: 'not_configured', reason: runtime.error || 'Otto daemon API token not available to the plugin — PR data cannot be fetched.', last_error: null, ...base };
+    return { state: 'not_configured', reason: runtime.error || 'Otto plugin host API not available to the plugin — PR data cannot be fetched.', last_error: null, ...base };
   }
   if (!ids.length) {
     return { state: 'not_configured', reason: unregistered.length

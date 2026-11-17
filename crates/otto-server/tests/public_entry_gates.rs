@@ -356,7 +356,7 @@ async fn ingest_routes_write_only_with_the_sessions_own_token() {
     f.server.abort();
 }
 
-/// test-quality-6-01/6w1-01: all four `/plugin-host/*` routes authenticate
+/// test-quality-6-01/6w1-01: every `/plugin-host/*` route authenticates
 /// the sidecar with `auth_plugin` before doing anything. `/agents/run` is the
 /// dangerous one (a headless agent CLI with the caller's prompt and cwd); its
 /// body points at a missing cwd, so a request that slipped past the gate would
@@ -385,6 +385,11 @@ async fn plugin_host_routes_need_an_enabled_plugins_bearer_token() {
         "repos",
         "jira/accounts",
         "jira/credentials?account=nope",
+        // Read-only PRs re-served as the root user (no forge call: unknown repo).
+        "repos/no-such-repo/prs?state=all",
+        "repos/no-such-repo/prs/1",
+        "repos/no-such-repo/prs/1/commits",
+        "repos/no-such-repo/prs/1/diff?summary=true",
         "agents/run",
     ];
     let send = |route: &'static str, auth: Option<&'static str>| {
@@ -421,7 +426,7 @@ async fn plugin_host_routes_need_an_enabled_plugins_bearer_token() {
     repo.set_enabled("fixture", true).await.unwrap();
     // The enabled plugin's token passes the gate on the read routes (the
     // agent route is not run for real).
-    for route in routes.iter().take(3).copied() {
+    for route in routes.iter().filter(|r| **r != "agents/run").copied() {
         assert_ne!(
             send(route, Some("Bearer plugin-token"))
                 .await

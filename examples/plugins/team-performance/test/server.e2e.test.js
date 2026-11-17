@@ -845,13 +845,21 @@ test('PR sync via daemon + deploy/hotfix tags → phases, DORA, canonical guardr
       }],
     },
   });
-  // One HTTP server plays both the plugin host (/plugin-host/*) and the daemon (/repos…).
+  // One HTTP server plays the plugin host (/plugin-host/*, PR reads included).
   const srv = http.createServer(async (req, res) => {
     const u = new URL(req.url, 'http://localhost');
     const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
     if (u.pathname.startsWith('/plugin-host/')) {
       const p = u.pathname.slice('/plugin-host'.length);
-      if (p === '/repos') return send(200, [{ id: 'r-pr', name: 'fixture-pr', path: repo2, remote_url: null }]);
+      if (p === '/repos') {
+        mock.calls.push({ route: p, auth: req.headers.authorization });
+        return send(200, [{ id: 'r-pr', name: 'fixture-pr', path: repo2, remote_url: null }]);
+      }
+      // Read-only PR routes the host re-serves for the sidecar (plugin token).
+      if (p.startsWith('/repos/')) {
+        const r = await mock.fetch(`http://daemon${p}${u.search}`, { headers: { authorization: req.headers.authorization } });
+        return send(r.status, await r.json());
+      }
       if (p === '/jira/accounts') return send(200, [{ id: 'acc1', label: 'Fixture Jira', base_url: `http://127.0.0.1:${mockJira.port}`, email: 'e@e' }]);
       if (p === '/jira/credentials') return send(200, { base_url: `http://127.0.0.1:${mockJira.port}`, email: 'e@e', token: 'tok' });
       if (p === '/agents/run') {
@@ -865,8 +873,9 @@ test('PR sync via daemon + deploy/hotfix tags → phases, DORA, canonical guardr
       }
       return send(404, {});
     }
-    const r = await mock.fetch(`http://daemon${u.pathname}${u.search}`, { headers: { authorization: req.headers.authorization } });
-    return send(r.status, await r.json());
+    // The real daemon serves no `/repos` list at its root (it is `/git/repos`,
+    // user-token only): anything outside the plugin host must not be called.
+    return send(404, { error: `unexpected daemon call ${u.pathname}` });
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const port = srv.address().port;
@@ -874,7 +883,7 @@ test('PR sync via daemon + deploy/hotfix tags → phases, DORA, canonical guardr
   const port2 = 20000 + Math.floor(Math.random() * 20000);
   const plugin2 = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, OTTO_PLUGIN_PORT: String(port2), OTTO_HOST_API: `http://127.0.0.1:${port}/plugin-host`, OTTO_PLUGIN_TOKEN: 'ptok', OTTO_PLUGIN_DATA_DIR: dataDir2, OTTO_TP_DAEMON_TOKEN: 'dtok' },
+    env: { ...process.env, OTTO_PLUGIN_PORT: String(port2), OTTO_HOST_API: `http://127.0.0.1:${port}/plugin-host`, OTTO_PLUGIN_TOKEN: 'ptok', OTTO_PLUGIN_DATA_DIR: dataDir2 },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   plugin2.stderr.on('data', (c) => process.stderr.write(`[sidecar-pr] ${c}`));
@@ -905,7 +914,7 @@ test('PR sync via daemon + deploy/hotfix tags → phases, DORA, canonical guardr
       await new Promise((r) => setTimeout(r, 100));
     }
     await scan(false);
-    assert.ok(mock.calls.every((c) => c.auth === 'Bearer dtok'), 'daemon calls carry the user token');
+    assert.ok(mock.calls.length > 0 && mock.calls.every((c) => c.auth === 'Bearer ptok'), 'PR calls go through the plugin host with the plugin token');
     assert.equal(detailCalls(), 3, 'detail + commits + diff for the one PR');
 
     // /prs/status: cursor persisted, cached summary visible.
