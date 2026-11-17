@@ -1776,7 +1776,7 @@
         {#if flow.editable}
           <span
             class="gt-edit-hint"
-            title="Double-click a cell to edit (you review the SQL before it runs). Primary key {flow.editPkCols.length > 1 ? 'columns' : 'column'} ({flow.editPkCols.join(', ')}) {flow.editPkCols.length > 1 ? 'are' : 'is'} read-only."
+            title={flow.engine === 'mongodb' ? 'Double-click a cell to edit (you review the statement before it runs). An _id change copies the document under the new _id, then deletes the old one.' : `Double-click a cell to edit (you review the SQL before it runs). Primary key ${flow.editPkCols.length > 1 ? 'columns' : 'column'} (${flow.editPkCols.join(', ')}) ${flow.editPkCols.length > 1 ? 'are' : 'is'} read-only.`}
           >
             <Icon name="edit" size={12} />Editable · double-click a cell
           </span>

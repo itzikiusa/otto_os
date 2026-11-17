@@ -85,13 +85,16 @@ export function mongoCollectionForEdit(s: string): string | null {
 }
 
 /** JSON-encode a value typed into a Mongo cell editor: keep numbers/bools when
- * the prior value was one; valid JSON when editing a nested object/array;
- * empty → null; else a quoted string. */
+ * the prior value was one (a null field typed `true`/`false` is a boolean, not
+ * the string); an ObjectId stays an ObjectId; valid JSON when editing a nested
+ * object/array; empty → null; else a quoted string. */
 export function mongoLiteral(raw: string, prev: unknown): string {
   if (raw === '' || raw === SET_NULL) return 'null';
   if (raw === SET_EMPTY) return '""';
   if (typeof prev === 'number' && /^-?\d+(\.\d+)?$/.test(raw)) return raw;
-  if (typeof prev === 'boolean' && (raw === 'true' || raw === 'false')) return raw;
+  if ((typeof prev === 'boolean' || prev === null || prev === undefined) && (raw === 'true' || raw === 'false')) return raw;
+  const oid = raw.match(/^(?:ObjectId\(\s*["']?)?([0-9a-fA-F]{24})(?:["']?\s*\))?$/);
+  if (oid && prev !== null && typeof prev === 'object' && '$oid' in prev) return `{"$oid": ${JSON.stringify(oid[1])}}`;
   if (isComplex(prev)) {
     try {
       JSON.parse(raw);
@@ -114,6 +117,34 @@ export function mongoIdValueFor(idVal: unknown): string {
 /** `{"_id": …}` filter for a row — the `_id` exactly as the result carries it. */
 export function mongoIdFilterFor(idVal: unknown): string {
   return `{"_id": ${mongoIdValueFor(idVal)}}`;
+}
+
+/** The runner splits a Mongo batch on top-level `;` only — a newline alone
+ *  hands the whole text to mongosh as ONE expression (a syntax error). */
+const MONGO_BATCH_SEP = ';\n';
+
+/** `_id` is immutable in MongoDB, so an `_id` change copies the STORED
+ *  document (every field and type, not the shown row a projection may trim)
+ *  under the new `_id` — `$merge` fails rather than overwrite an existing one,
+ *  and the batch stops there — then deletes the old document. */
+export function mongoRenameId(coll: string, oldId: unknown, newIdLit: string): string[] {
+  const old = mongoIdFilterFor(oldId);
+  return [
+    `db.${coll}.aggregate([{"$match": ${old}}, {"$set": {"_id": {"$literal": ${newIdLit}}}}, {"$merge": {"into": ${JSON.stringify(coll)}, "whenMatched": "fail"}}])`,
+    `db.${coll}.deleteOne(${old})`,
+  ];
+}
+
+/** The `_id` a generated row statement targets (its first argument's `_id`),
+ *  or undefined when the statement isn't one. */
+export function mongoStatementId(stmt: string): unknown {
+  const m = stmt.trim().match(/^db\.[A-Za-z0-9_$-]+\.\w+\s*(\()/);
+  const first = m && mongoCall(stmt.trim().slice(m[0].length - 1))?.args[0];
+  try {
+    return first ? (JSON.parse(first) as { _id?: unknown })._id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** JSON for a stored Mongo value inside a generated document. Typed values
@@ -228,21 +259,36 @@ export const mongoAdapter: EditAdapter = {
     const stmts: string[] = [];
     const stmtRows: number[] = [];
     const diff: DiffLine[] = [];
+    const idIdx = ctx.columns.findIndex((c) => c.name === '_id');
     for (const { rowIdx, patch } of rows) {
-      const built = buildUpdateOne(
-        ctx.target.table,
-        mongoIdFilterFor(idOf(ctx, rowIdx)),
-        patch,
-        ctx.columns,
-        ctx.liveRows[rowIdx],
-      );
+      const oldId = idOf(ctx, rowIdx);
+      // An `_id` draft (grid cell or Vertical set) is a rename, never a `$set`.
+      const idCell = patch.cells.get(idIdx);
+      const idSet = patch.set.get('_id');
+      let rest = patch;
+      let filter = mongoIdFilterFor(oldId);
+      if (idCell !== undefined || idSet) {
+        const newId = idSet ? mongoTypedLiteral(idSet) : mongoLiteral(idCell!, oldId);
+        const cells = new Map(patch.cells);
+        cells.delete(idIdx);
+        const set = new Map(patch.set);
+        set.delete('_id');
+        rest = { ...patch, cells, set };
+        for (const sql of mongoRenameId(ctx.target.table, oldId, newId)) {
+          stmts.push(sql);
+          stmtRows.push(rowIdx);
+        }
+        diff.push({ row: rowIdx, path: '_id', op: 'set', before: shown(oldId), after: newId });
+        filter = `{"_id": ${newId}}`;
+      }
+      const built = buildUpdateOne(ctx.target.table, filter, rest, ctx.columns, ctx.liveRows[rowIdx]);
       if (!built) continue;
       stmts.push(built.sql);
       stmtRows.push(rowIdx);
       for (const d of built.diff) diff.push({ row: rowIdx, ...d });
     }
     if (stmts.length === 0) return null;
-    return { title: 'Review updateOne', sql: stmts.join('\n'), diff, stmtRows };
+    return { title: 'Review updateOne', sql: stmts.join(MONGO_BATCH_SEP), diff, stmtRows };
   },
 
   buildDelete(idxs, ctx) {
@@ -316,11 +362,13 @@ export const mongoAdapter: EditAdapter = {
     const update: Record<string, unknown> = {};
     if (Object.keys(sets).length) update.$set = sets;
     if (Object.keys(unsets).length) update.$unset = unsets;
-    if (!Object.keys(update).length) return null;
-    return {
-      title: 'Review updateOne',
-      sql: `db.${ctx.target.table}.updateOne(${mongoIdFilterFor(idOf(ctx, rowIdx))}, ${JSON.stringify(update)})`,
-      diff,
-    };
+    const oldId = idOf(ctx, rowIdx);
+    const renamed = Object.hasOwn(doc, '_id') && JSON.stringify(doc._id) !== JSON.stringify(oldId);
+    const stmts = renamed ? mongoRenameId(ctx.target.table, oldId, mongoValueLiteral(doc._id)) : [];
+    if (renamed) diff.unshift({ row: rowIdx, path: '_id', op: 'set', before: shown(oldId), after: shown(doc._id) });
+    const target = renamed ? `{"_id": ${mongoValueLiteral(doc._id)}}` : mongoIdFilterFor(oldId);
+    if (Object.keys(update).length) stmts.splice(1, 0, `db.${ctx.target.table}.updateOne(${target}, ${JSON.stringify(update)})`);
+    if (!stmts.length) return null;
+    return { title: renamed ? 'Review _id change' : 'Review updateOne', sql: stmts.join(MONGO_BATCH_SEP), diff };
   },
 };
