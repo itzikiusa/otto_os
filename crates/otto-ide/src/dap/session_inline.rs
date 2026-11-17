@@ -3,10 +3,11 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use otto_core::{Error, Result};
+use regex::Regex;
 use serde_json::{json, Value};
 
 use super::adapters::{display_target_path, resolve_dap_adapter_with_manager};
@@ -116,8 +117,26 @@ pub fn compute_inline_values(
         return Vec::new();
     }
 
-    let start_line = paused_line.saturating_sub(25).max(1) as usize;
+    // Up to 25 lines back, but never above the paused function's own header: a function
+    // above with the same local names must not show this frame's values.
+    static FN_HEADER: OnceLock<Regex> = OnceLock::new();
+    let fn_header = FN_HEADER.get_or_init(|| {
+        Regex::new(concat!(
+            r"^\s*(?:(?:pub(?:\([^)]*\))?|async|unsafe|export|static|const)\s+)*(?:func|def|fn|function)\b",
+            r"|^\s*(?:(?:public|private|protected|static|final|synchronized|abstract)\s+)+[\w<>\[\],.? ]+\s+\w+\s*\(",
+        ))
+        .unwrap()
+    });
     let end_line = paused_line as usize;
+    let window_start = paused_line.saturating_sub(25).max(1) as usize;
+    let start_line = source_text
+        .lines()
+        .enumerate()
+        .take(end_line)
+        .skip(window_start - 1)
+        .filter(|(_, l)| fn_header.is_match(l))
+        .last()
+        .map_or(window_start, |(idx, _)| idx + 1);
     let mut out = Vec::new();
 
     for (idx, raw_line) in source_text.lines().enumerate() {

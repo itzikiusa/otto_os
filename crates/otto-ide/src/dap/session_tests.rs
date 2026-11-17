@@ -440,6 +440,30 @@ fn inline_values_matches_nearby_lines_and_skips_comments() {
         .any(|v| v.line == 3 && v.name == "total" && v.value == "42"));
 }
 
+/// Paused in one function, a function above it with the same local names shows nothing.
+#[test]
+fn inline_values_stay_inside_the_paused_function() {
+    let source = "func TestA(t *testing.T) {\n\tgot := 1\n\t_ = got\n}\n\n\
+                  func TestB(t *testing.T) {\n\tgot := 2\n\t_ = got\n}\n";
+    let var = |name: &str, value: &str| IdeVariable {
+        name: name.into(),
+        value: value.into(),
+        var_type: None,
+        variables_reference: 0,
+        indexed_variables: None,
+    };
+    let scopes = vec![IdeScope {
+        name: "Locals".into(),
+        variables_reference: 1,
+        variables: vec![var("t", "*testing.T"), var("got", "2")],
+    }];
+    let lines: Vec<u32> = compute_inline_values(source, 8, &scopes)
+        .iter()
+        .map(|v| v.line)
+        .collect();
+    assert_eq!(lines, vec![6, 7, 8], "{lines:?}");
+}
+
 #[tokio::test]
 async fn launch_compile_error_fails_fast_without_hanging_on_initialized() {
     let (client_io, server_io) = tokio::io::duplex(16384);
