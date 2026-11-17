@@ -17,6 +17,7 @@
   import type { FlatSymbolNode } from './history/IdeTreeSecondaryTabs.svelte';
   import type { FlatTreeNode } from './history/ideTreeNodeMenus';
   import { treeFilterMatches, treeNavAction, treeRevealScrollTop, treeRowHeight } from './history/ideTreeNav';
+  import { nestSiblings } from './history/ideTreeNesting';
   import { ide, ideBasename, type IdeFsEntry, type IdeSymbolNode } from './ideStore.svelte';
   import { ideTreeDirErrors } from './store/ideTreeDirErrors.svelte';
   import { ideProjectHealth } from './store/ideProjectHealth.svelte';
@@ -67,6 +68,8 @@
   // One Tab stop for the whole tree (roving tabindex): the row last moved to with the arrow
   // keys, else the open file's row, else the first row.
   let focusKey = $state<string | null>(null);
+  // Nested-file parents (go.mod over go.sum) the person opened; collapsed by default.
+  let nestOpen = $state<Record<string, boolean>>({});
   // The filter input updates at once; the (whole-tree) filtering runs ~80 ms after typing stops.
   let filterDraft = $state(ide.treeFilter);
   let filterTimer: ReturnType<typeof setTimeout> | null = null;
@@ -155,10 +158,22 @@
       const err = dirErrors[dirPath];
       if (err) out.push({ entry: { name: '', path: `${dirPath}\u0000error`, kind: 'file' }, depth, loadError: err, errorDir: dirPath });
     };
+    const hidden = (entry: IdeFsEntry): boolean => /^__debug_bin\d*$/.test(entry.name) || (!ide.showHidden && entry.name.startsWith('.'));
     const walk = (entries: IdeFsEntry[], depth: number): void => {
+      const nest = nestSiblings(entries, ideDockPrefs.nestRelatedFiles);
       for (let i = 0; i < entries.length; i++) {
         const entry = entries[i];
-        if (/^__debug_bin\d*$/.test(entry.name) || (!ide.showHidden && entry.name.startsWith('.')) || !matchesTree(entry)) continue;
+        if (nest.parentOf.has(entry.path) || hidden(entry)) continue;
+        const kids = nest.childrenOf.get(entry.path)?.filter((k) => !hidden(k));
+        // Filtering: a parent stays (as context) when one of its nested files matches.
+        const shownKids = kids?.filter(matchesTree);
+        if (!matchesTree(entry) && !shownKids?.length) continue;
+        if (kids?.length) {
+          const open = Boolean(nestOpen[entry.path] || (q && shownKids?.length));
+          out.push({ entry, depth, nestKids: kids.length, nestOpen: open });
+          if (open) for (const kid of q ? shownKids! : kids) out.push({ entry: kid, depth: depth + 1 });
+          continue;
+        }
         out.push({ entry, depth });
         if (entry.kind === 'dir' && (ide.expandedDirs[entry.path] || Boolean(q && ide.childrenByDir[entry.path]))) {
           const kids = ide.childrenByDir[entry.path];
@@ -193,7 +208,16 @@
 
   const rowKey = (node: FlatTreeNode): string => `${node.isProjectRoot ? 'root:' : ''}${node.entry.path}`;
   const rowExpanded = (node: FlatTreeNode): boolean =>
-    node.entry.kind === 'dir' && Boolean(ide.expandedDirs[node.entry.path] ?? node.defaultExpanded ?? false);
+    node.nestKids ? Boolean(node.nestOpen) : node.entry.kind === 'dir' && Boolean(ide.expandedDirs[node.entry.path] ?? node.defaultExpanded ?? false);
+  const toggleNest = (path: string): void => { nestOpen = { ...nestOpen, [path]: !nestOpen[path] }; };
+  /** Revealing a nested file (go.sum) opens its parent (go.mod) first. */
+  function openNestFor(path: string): void {
+    if (!ideDockPrefs.nestRelatedFiles) return;
+    const dir = parentDirOfPath(path);
+    const siblings = ide.childrenByDir[dir] ?? (normPath(dir) === normPath(ide.target.root) ? ide.treeRootEntries : []);
+    const parent = nestSiblings(siblings).parentOf.get(path);
+    if (parent && !nestOpen[parent]) nestOpen = { ...nestOpen, [parent]: true };
+  }
   const tabStopKey = $derived.by((): string | null => {
     const nodes = visibleNodes;
     if (focusKey && nodes.some((n) => rowKey(n) === focusKey)) return focusKey;
@@ -221,7 +245,7 @@
   function onTreeKeyDown(e: KeyboardEvent, node: FlatTreeNode): void {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const index = visibleNodes.indexOf(node);
-    const rows = visibleNodes.map((n) => ({ depth: n.depth, isDir: n.entry.kind === 'dir', expanded: rowExpanded(n), loadError: n.loadError }));
+    const rows = visibleNodes.map((n) => ({ depth: n.depth, isDir: n.entry.kind === 'dir' || Boolean(n.nestKids), expanded: rowExpanded(n), loadError: n.loadError }));
     const act = treeNavAction(rows, index, e.key, e.shiftKey);
     if (!act) return;
     e.preventDefault();
@@ -234,7 +258,8 @@
     }
     // Expand / collapse goes through the same path as a click (lazy child load included).
     focusKey = rowKey(node);
-    onNodeClick(node);
+    if (node.nestKids) toggleNest(node.entry.path);
+    else onNodeClick(node);
   }
 
   const treeWin = $derived.by(() => {
@@ -265,6 +290,7 @@
     if (!req || req.seq === lastRevealSeq) return;
     lastRevealSeq = req.seq;
     activeTab = 'files';
+    untrack(() => openNestFor(req.path));
     void scrollRowIntoView(req.path);
   });
 
@@ -278,6 +304,7 @@
     // Already on screen in the flattened tree: just scroll; else the store opens its folders
     // (loading them) and sends a reveal request the effect above scrolls to.
     untrack(() => {
+      openNestFor(p);
       if (visibleNodes.some((n) => !n.isProjectRoot && n.entry.path === p)) void scrollRowIntoView(p);
       else void ide.revealInProjectTree(p);
     });
@@ -298,7 +325,13 @@
     return Boolean(ideDockPrefs.gitStatusInTree && node.entry.kind === 'dir' && liveGit && ideTreeDirIsDirty(liveGit.treeGitOverlay, node.entry.path));
   }
 
-  function onNodeClick(node: FlatTreeNode): void {
+  function onNodeClick(node: FlatTreeNode, e?: MouseEvent): void {
+    // A nested-file parent (go.mod): its chevron folds go.sum, the rest of the row opens it
+    // (← / → fold from the keyboard).
+    if (node.nestKids && e?.target instanceof Element && e.target.closest('.tree-chevron')) {
+      toggleNest(node.entry.path);
+      return;
+    }
     if (node.entry.kind === 'dir') {
       selectedDirPath = node.entry.path;
       const curExpanded = ide.expandedDirs[node.entry.path] ?? node.defaultExpanded ?? false;
@@ -424,24 +457,28 @@
                   tabindex={rowKey(node) === tabStopKey ? 0 : -1}
                   data-tree-key={rowKey(node)}
                   onfocus={() => (focusKey = rowKey(node))}
-                  aria-expanded={node.entry.kind === 'dir' ? isExpanded : undefined}
+                  aria-expanded={node.entry.kind === 'dir' || node.nestKids ? isExpanded : undefined}
+                  data-ignored={node.entry.ignored ? 'true' : undefined}
                   aria-current={node.entry.kind !== 'dir' && ide.activePath === node.entry.path ? 'true' : undefined}
-                  onclick={() => onNodeClick(node)}
+                  onclick={(e) => onNodeClick(node, e)}
                   ondblclick={() => node.entry.kind !== 'dir' && void ide.openFile(node.entry.path, { preview: false })}
                   onkeydown={(e) => onNodeKeyDown(e, node)}
                   oncontextmenu={(e) => openNodeMenu(e, node)}
                   use:rowMenu
-                  title={node.isProjectRoot ? node.entry.path : ide.relativePath(node.entry.path)}
+                  title={node.isProjectRoot ? node.entry.path : `${ide.relativePath(node.entry.path)}${node.entry.ignored ? ' — ignored by .gitignore' : ''}`}
                 >
                   {#if node.entry.kind === 'dir'}
                     <span class="tree-chevron"><Icon name={isExpanded ? 'chevronDown' : 'chevronRight'} size={12} noflip /></span>
+                  {:else if node.nestKids}
+                    <span class="tree-chevron" data-testid="ide-tree-nest-toggle"><Icon name={isExpanded ? 'chevronDown' : 'chevronRight'} size={12} noflip /></span>
                   {:else}
                     <span class="tree-chevron" aria-hidden="true"></span>
                   {/if}
-                  <span class="tree-kind" class:is-dir={node.entry.kind === 'dir'}>
+                  <span class="tree-kind" class:is-dir={node.entry.kind === 'dir'} class:is-ignored={Boolean(node.entry.ignored)}>
                     <Icon name={node.isProjectRoot && !node.isPrimaryRoot ? 'worktree' : node.entry.kind === 'dir' ? 'folder' : 'file'} size={13} />
                   </span>
-                  <span class="tree-name" class:is-root-name={Boolean(node.isProjectRoot)} data-git={gitLetter ?? undefined}>{node.entry.name}</span>
+                  <span class="tree-name" class:is-root-name={Boolean(node.isProjectRoot)} class:is-ignored={Boolean(node.entry.ignored)} data-git={gitLetter ?? undefined}>{node.entry.name}</span>
+                  {#if node.entry.ignored}<span class="sr-only" data-testid="ide-tree-ignored-label">, ignored by .gitignore</span>{/if}
                   {#if dirtyDir}<span class="tree-dirty-dot" title="Contains uncommitted Git changes" aria-hidden="true"></span>{/if}
                   {#if gitLetter}<span class="tree-git-mark mono" data-git={gitLetter} data-testid="ide-tree-git-status">{gitLetter === 'U' ? '?' : gitLetter}</span>{/if}
                 </button>
@@ -524,6 +561,8 @@
   .tree-kind.is-dir { color: var(--accent-text); }
   .tree-name { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tree-name.is-root-name { font-weight: 600; flex: 0 1 auto; }
+  /* Git-ignored entries recede (GoLand's dimmed ignored files); still 4.5:1 on the surface. */
+  .tree-name.is-ignored, .tree-kind.is-ignored { color: var(--text-dim); }
   .tree-name[data-git='M'], .tree-git-mark[data-git='M'] { color: var(--info); }
   .tree-name[data-git='A'], .tree-git-mark[data-git='A'] { color: var(--success); }
   .tree-name[data-git='U'], .tree-git-mark[data-git='U'] { color: var(--warning); }

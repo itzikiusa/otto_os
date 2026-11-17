@@ -19,6 +19,7 @@ pub(crate) mod sdk_paths;
 mod search;
 mod search_replace;
 pub(crate) mod ssh_exec;
+mod tree_ignored;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

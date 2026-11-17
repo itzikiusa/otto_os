@@ -169,6 +169,21 @@ Every IDE subsystem operates over a unified `IdeTargetSpec`:
 - **A missing folder or unreachable host.** The tree says what is wrong (the full
   path, wrapped) with next steps: **Choose another folder…**, **Remove from
   recents** (when listed there), and **Retry** only for an SSH host.
+- **Ignored files.** Git-ignored files and folders (`*.iml`, `out/`…) show dimmed,
+  with "ignored by .gitignore" in the tooltip and for screen readers; dotfiles too
+  when tree ⋯ → **Show dotfiles** is on. The daemon asks git once per listed folder
+  (`git check-ignore --stdin -z`), so nested `.gitignore`s, `!` negations,
+  `.git/info/exclude` and the global excludes file all apply and tracked files are
+  never dimmed. Local projects only (each attached root is its own repo); an SSH
+  tree is not dimmed, and a folder outside a repo shows nothing.
+- **File nesting.** Like IntelliJ, a companion file folds under its file in the
+  same folder: `go.sum` under `go.mod` (`go.work.sum` under `go.work`), lockfiles
+  under `package.json` / `Cargo.toml` / `pyproject.toml` / `Gemfile` /
+  `composer.json`, `tsconfig.*.json` under `tsconfig.json`, `X.js` / `X.js.map` /
+  `X.d.ts` under `X.ts`, and `.env.*` under `.env`. The chevron (or ← / →) folds
+  them; the row opens the file. The filter still finds a nested file, and opening
+  one (or the tree following the open tab) unfolds its parent. Turn it off in IDE
+  Settings → Appearance → **Nest related files**.
 
 ### 2. Multi-cursor editor, prefix/suffix & JetBrains/Standard keymaps
 

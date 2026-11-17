@@ -58,6 +58,9 @@ pub struct IdeFsEntry {
     pub mtime: Option<String>,
     pub git_status: Option<String>,
     pub language: Option<String>,
+    /// Git ignores it (local listings only; the Project tree dims it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignored: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -26,6 +26,9 @@ export interface FlatTreeNode {
   loadError?: string;
   /** For a `loadError` row: the folder to retry. */
   errorDir?: string;
+  /** A file with nested siblings (go.mod → go.sum): how many, and whether they show. */
+  nestKids?: number;
+  nestOpen?: boolean;
 }
 
 export function parentDirOfPath(fullPath: string): string {

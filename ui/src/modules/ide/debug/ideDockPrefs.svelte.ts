@@ -29,6 +29,10 @@ class IdeDockPreferences {
     return idePreferences.current.gitTreeBadges;
   }
 
+  get nestRelatedFiles(): boolean {
+    return idePreferences.current.nestRelatedFiles;
+  }
+
   get dbgShowFrames(): boolean {
     return idePreferences.current.dbgShowFrames;
   }

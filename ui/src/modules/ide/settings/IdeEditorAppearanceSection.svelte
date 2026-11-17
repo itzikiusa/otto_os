@@ -177,6 +177,14 @@
         />
         <span class="ea-title">Show projects as tabs in the IDE header</span>
       </div>
+      <div class="ea-sw-row">
+        <Switch
+          checked={ideSettings.draft.nestRelatedFiles}
+          label="Nest related files"
+          onchange={(v) => (ideSettings.draft.nestRelatedFiles = v)}
+        />
+        <span class="ea-title">Nest related files in the Project tree (go.sum under go.mod…)</span>
+      </div>
     </div>
   </div>
 
