@@ -588,7 +588,9 @@ async fn run_java_main_and_collect_output(
     .await;
     assert_eq!(st, StatusCode::OK, "start_run failed: {start_body}");
     let run_id = start_body["run"]["id"].as_str().unwrap().to_string();
-    for _ in 0..80 {
+    // A Maven module's Run tries Maven first when `mvn` is on PATH (CI runners have it):
+    // a cold `~/.m2` downloads plugins before Maven fails over to javac.
+    for _ in 0..600 {
         let (_, poll_body): (_, Value) =
             send_json(app, Method::GET, &format!("/ide/runs/{run_id}"), None).await;
         let status = poll_body["run"]["status"].as_str().unwrap_or("");

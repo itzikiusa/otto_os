@@ -94,7 +94,7 @@ pub fn prepare_java_execution(
     let mut compiler_logs: Vec<String> = Vec::new();
 
     if let Some(owner) = graph.owning_module(target_file_or_dir) {
-        let maven = maven_module_classpath(&owner.dir, env_map, out_base_dir);
+        let maven = maven_module_classpath(owner, &graph, env_map, out_base_dir);
         // A module whose deps Maven can't resolve (an attached repo that was never
         // installed) still gets the javac build below; if that fails too, Maven's
         // error is the one to show.
@@ -284,14 +284,23 @@ fn first_lines(text: &str) -> String {
 /// Maven's own classpath for a module with a `pom.xml`:
 /// `target/test-classes:target/classes:<dependency:build-classpath>`, after
 /// `test-compile`. Maven resolves parents, BOMs and transitive deps, which a
-/// hand-built javac classpath gets wrong. `None` when the module has no pom or
-/// no `mvnw` / `mvn` is available (the caller falls back to javac).
+/// hand-built javac classpath gets wrong. `None` when the module has no pom, no
+/// `mvnw` / `mvn` is available, or it depends on an attached module outside its
+/// reactor (the caller falls back to javac).
 fn maven_module_classpath(
-    module_dir: &Path,
+    owner: &WorkspaceJavaModule,
+    graph: &JavaWorkspaceGraph,
     env_map: &BTreeMap<String, String>,
     out_base_dir: &Path,
 ) -> Option<Result<Vec<String>>> {
+    let module_dir = owner.dir.as_path();
     if !module_dir.join("pom.xml").is_file() {
+        return None;
+    }
+    let reactor = crate::lsp_host::servers::climb_to_build_root("java", module_dir, &|_| true);
+    // Maven would build against that module's `~/.m2` copy and run stale code (or spend
+    // a failed resolve first); the javac build puts its local sources first.
+    if depends_outside(owner, graph, &reactor) {
         return None;
     }
     let mvn = crate::environments::find_build_wrapper(
@@ -316,7 +325,6 @@ fn maven_module_classpath(
     // Build from the reactor root (`-pl <module> -am`) so sibling modules come from
     // their sources, not from a stale or missing `~/.m2` copy. With `-am` every
     // upstream module writes the output file first; the target module writes it last.
-    let reactor = crate::lsp_host::servers::climb_to_build_root("java", module_dir, &|_| true);
     cmd.current_dir(&reactor);
     if let Ok(rel) = module_dir.strip_prefix(&reactor) {
         if !rel.as_os_str().is_empty() {
@@ -352,6 +360,30 @@ fn maven_module_classpath(
         );
         Ok(cp)
     })())
+}
+
+/// Whether `owner` (transitively) depends on a workspace module outside `reactor`.
+fn depends_outside(
+    owner: &WorkspaceJavaModule,
+    graph: &JavaWorkspaceGraph,
+    reactor: &Path,
+) -> bool {
+    let mut seen = HashSet::new();
+    let mut stack = vec![owner];
+    while let Some(m) = stack.pop() {
+        for d in &m.dependencies {
+            let Some(dep) = graph.find_dep(&d.group_id, &d.artifact_id) else {
+                continue;
+            };
+            if !dep.dir.starts_with(reactor) {
+                return true;
+            }
+            if seen.insert(&dep.key) {
+                stack.push(dep);
+            }
+        }
+    }
+    false
 }
 
 /// Run a build tool in its own process group with the run env, cancellable
@@ -945,6 +977,53 @@ mod javac_process_tests {
                 root.display()
             )),
             "built from the reactor root: {call}"
+        );
+    }
+
+    #[test]
+    fn an_attached_module_outside_the_reactor_skips_maven_for_local_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("svc-repo")).unwrap();
+        let (module, app) = maven_module(&root.join("svc-repo"));
+        fs::write(
+            module.join("pom.xml"),
+            "<project><groupId>com.acme</groupId><artifactId>svc</artifactId><version>1</version>\
+             <dependencies><dependency><groupId>com.acme</groupId><artifactId>tk</artifactId>\
+             <version>1</version></dependency></dependencies></project>",
+        )
+        .unwrap();
+        let tk = root.join("tk");
+        fs::create_dir_all(tk.join("src/main/java/com/acme/tk")).unwrap();
+        fs::write(
+            tk.join("pom.xml"),
+            "<project><groupId>com.acme</groupId><artifactId>tk</artifactId><version>1</version></project>",
+        )
+        .unwrap();
+        fs::write(
+            tk.join("src/main/java/com/acme/tk/G.java"),
+            "package com.acme.tk;\npublic class G {}\n",
+        )
+        .unwrap();
+        let bin = root.join("bin");
+        let seen = root.join("mvn-call");
+        fake_bin(&bin, "mvn", &format!("touch {}", seen.display()));
+        let javac = fake_bin(&bin, "javac", "exit 0");
+        let plan = prepare_java_execution(
+            &app,
+            None,
+            false,
+            &[module.clone(), tk.clone()],
+            &path_env(&bin),
+            &javac,
+            &root.join("out"),
+        )
+        .unwrap();
+        assert!(!seen.exists(), "Maven would build against tk's ~/.m2 copy");
+        assert!(
+            plan.source_roots.iter().any(|r| r.starts_with(&tk)),
+            "tk's local sources are on the build: {:?}",
+            plan.source_roots
         );
     }
 
