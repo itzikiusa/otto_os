@@ -9,6 +9,7 @@
 //
 // SQL and Redis stay STATIC on purpose: they power the hot-path DB console.
 import type { Extension } from '@codemirror/state';
+import { foldInside, foldNodeProp, LanguageSupport } from '@codemirror/language';
 import { sql } from '@codemirror/lang-sql';
 import { sqlDialect as dialectFor, type SqlDialectName } from '../sql-dialects.ts';
 import { redisLang } from './redis-lang.ts';
@@ -34,7 +35,13 @@ const LOADERS: Record<string, () => Promise<Build>> = {
   cts: () => js().then((m) => () => m.javascript({ typescript: true })),
   py: () => import('@codemirror/lang-python').then((m) => () => m.python()),
   pyi: () => import('@codemirror/lang-python').then((m) => () => m.python()),
-  go: () => import('@codemirror/lang-go').then((m) => () => m.go()),
+  go: () =>
+    import('@codemirror/lang-go').then((m) => {
+      // lang-go folds `StructType` / `InterfaceType`, whose range ends before their `{`, so
+      // `type X struct {` got no chevron; fold their bodies instead.
+      const lang = m.goLanguage.configure({ props: [foldNodeProp.add({ 'StructBody InterfaceBody': foldInside })] });
+      return () => new LanguageSupport(lang, m.go().support);
+    }),
   rs: () => import('@codemirror/lang-rust').then((m) => () => m.rust()),
   json: () => import('@codemirror/lang-json').then((m) => () => m.json()),
   jsonc: () => import('@codemirror/lang-json').then((m) => () => m.json()),

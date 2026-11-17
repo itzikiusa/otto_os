@@ -81,9 +81,10 @@ fn spawn_mock_dap_server(
                         req.seq,
                         "threads",
                         Ok(Some(json!({
+                            // A parked goroutine before the stopped one, as Delve lists them.
                             "threads": [
-                                { "id": 1, "name": "goroutine 1 (running)" },
-                                { "id": 2, "name": "goroutine 14 (chan receive)" }
+                                { "id": 2, "name": "goroutine 14 (chan receive)" },
+                                { "id": 1, "name": "goroutine 1 (running)" }
                             ]
                         }))),
                     )
@@ -294,6 +295,10 @@ async fn full_mock_dap_lifecycle_over_duplex() {
     assert_eq!(paused.stop_seq, 1);
     assert_eq!(paused.paused_line, Some(6));
     assert_eq!(paused.threads.len(), 2);
+    assert_eq!(
+        paused.threads[0].id, 1,
+        "the stopped goroutine leads the Frames list"
+    );
     assert_eq!(paused.stack_frames.len(), 1);
     assert_eq!(paused.scopes.len(), 1);
     assert!(paused.scopes[0]
@@ -438,6 +443,30 @@ fn inline_values_matches_nearby_lines_and_skips_comments() {
     assert!(inline
         .iter()
         .any(|v| v.line == 3 && v.name == "total" && v.value == "42"));
+}
+
+/// Paused in one function, a function above it with the same local names shows nothing.
+#[test]
+fn inline_values_stay_inside_the_paused_function() {
+    let source = "func TestA(t *testing.T) {\n\tgot := 1\n\t_ = got\n}\n\n\
+                  func TestB(t *testing.T) {\n\tgot := 2\n\t_ = got\n}\n";
+    let var = |name: &str, value: &str| IdeVariable {
+        name: name.into(),
+        value: value.into(),
+        var_type: None,
+        variables_reference: 0,
+        indexed_variables: None,
+    };
+    let scopes = vec![IdeScope {
+        name: "Locals".into(),
+        variables_reference: 1,
+        variables: vec![var("t", "*testing.T"), var("got", "2")],
+    }];
+    let lines: Vec<u32> = compute_inline_values(source, 8, &scopes)
+        .iter()
+        .map(|v| v.line)
+        .collect();
+    assert_eq!(lines, vec![6, 7, 8], "{lines:?}");
 }
 
 #[tokio::test]

@@ -249,6 +249,11 @@ pub(super) async fn execute_run_task(
 
         let cwd = resolve_run_cwd(&target, cfg.cwd.as_deref());
         let cwd = resolve_jvm_build_dir(&mut cfg, &target, cwd);
+        let cwd = if cfg.runner == IdeRunnerKind::Pytest {
+            crate::environments::pytest_rootdir(&target, &cwd)
+        } else {
+            cwd
+        };
         // A Go benchmark run (`-bench`) runs no tests on purpose.
         last_filter = cfg.test_filter.clone().filter(|f| {
             is_test_runner(cfg.runner)

@@ -251,6 +251,11 @@ never spawned per request) and merges:
 
 into **all** Run executions, DAP Debug sessions, IDE Terminals, and local LSP
 servers (`gopls`, `jdtls`, `rust-analyzer`, `pyright`, `tsserver`).
+When that PATH has no `mvn` / `gradle` (a slow capture falls back to `-lc`, which
+skips `~/.zshrc` and so sdkman's init), a local run looks in
+`~/.sdkman/candidates/{maven,gradle}/current/bin`, then `/opt/homebrew/bin` and
+`/usr/local/bin`. A program that is still missing fails with a hint to add its
+folder under Shell env & vars › Custom PATH entries.
 
 Per-project configuration is persisted in SQLite (`0214_ide_configs.sql`), with
 secret environment variable values stored in the macOS Keychain via
@@ -318,8 +323,13 @@ How each item runs:
 - **Python:** a run uses the nearest `.venv` / `venv` (with `pyvenv.cfg`) found
   up from its folder inside the workspace roots, so a test in `tests/` gets the
   project venv. A package's `__main__.py` runs as `python3 -m <package>` from
-  above the package. pytest Debug under `debugpy` launches the `pytest` module
-  without a `program` (debugpy rejects both). pyright gets the workspace venv
+  above the package. A pytest Run and Debug start from pytest's rootdir (the
+  nearest folder with `pytest.ini` / `pyproject.toml` / `tox.ini` / `setup.cfg` /
+  `setup.py`, else the highest `conftest.py`, local targets only), so a test in
+  `tests/` imports the project code and gets the root fixtures. pytest Debug under
+  `debugpy` launches the `pytest` module without a `program` (debugpy rejects
+  both); the built-in bdb bridge runs pytest itself in-process when the venv has
+  it, so breakpoints bind in the test and in the project code. pyright gets the workspace venv
   through `workspace/configuration`, which Otto now advertises for Python
   (root-owned sessions only).
 - **JS / TS:** a test runs from its nearest `package.json` folder with that

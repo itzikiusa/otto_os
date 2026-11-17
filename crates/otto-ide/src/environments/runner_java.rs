@@ -105,6 +105,32 @@ pub(in crate::environments) fn resolve_jvm_build_dir(
     module.to_string_lossy().into_owned()
 }
 
+/// pytest's rootdir for a test run from `cwd`, so a test in `tests/` imports the project and
+/// gets its root `conftest.py`: the nearest ancestor inside the target roots with a pytest
+/// config / project file, else the highest one with a `conftest.py`. Local targets only;
+/// otherwise (or when neither exists) `cwd`.
+pub(crate) fn pytest_rootdir(target: &IdeTargetSpec, cwd: &str) -> String {
+    let mut top_conftest = None;
+    let config = nearest_dir_in_roots(target, cwd, |dir| {
+        if dir.join("conftest.py").is_file() {
+            top_conftest = Some(dir.to_path_buf());
+        }
+        [
+            "pytest.ini",
+            ".pytest.ini",
+            "pyproject.toml",
+            "tox.ini",
+            "setup.cfg",
+            "setup.py",
+        ]
+        .iter()
+        .any(|f| dir.join(f).is_file())
+    });
+    config
+        .or(top_conftest)
+        .map_or_else(|| cwd.to_string(), |d| d.to_string_lossy().into_owned())
+}
+
 pub(in crate::environments) fn has_manual_classpath(cfg: &IdeRunConfig) -> bool {
     cfg.args
         .iter()

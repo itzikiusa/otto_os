@@ -131,6 +131,8 @@ describe('GitHub emoji table', () => {
     assert.ok(hits.every((h) => h.shortcode.startsWith('smi')));
     assert.equal(new Set(hits.map((h) => h.emoji)).size, hits.length);
     assert.ok(searchEmojiShortcodes('ocke').some((h) => h.shortcode === 'rocket'));
+    // A popular shortcode leads its prefix: `:roc` + Enter is 🚀, not 🪨 (`:rock:`).
+    assert.equal(searchEmojiShortcodes('roc')[0]?.shortcode, 'rocket');
   });
 
   it('expands plain text but keeps URLs, ports, escapes and unknown names', () => {

@@ -61,13 +61,29 @@ export function expandEmojiHtml(html: string): string {
   });
 }
 
-/** Composer completions for `:query` — prefix hits first, one row per emoji. */
+// Shortcodes people reach for, ranked ahead of the table's Unicode order: `:roc` + Enter
+// is 🚀, not 🪨 (`:rock:` comes first in the table).
+const POPULAR = [
+  '+1', '-1', '100', 'bug', 'clap', 'eyes', 'fire', 'heart', 'joy', 'pray', 'rocket', 'sob',
+  'smile', 'sparkles', 'tada', 'thinking', 'wave', 'warning', 'white_check_mark', 'x', 'zap',
+];
+
+/** Composer completions for `:query` — popular prefix hits, then prefix hits, then substring
+ *  hits; one row per emoji. */
 export function searchEmojiShortcodes(query: string, limit = 8): EmojiSuggestion[] {
   const q = query.toLowerCase();
   const out: EmojiSuggestion[] = [];
   const seen = new Set<string>();
-  for (const pass of [(s: string) => s.startsWith(q), (s: string) => !s.startsWith(q) && s.includes(q)]) {
-    for (const e of order) {
+  const popular = POPULAR.flatMap((shortcode) => {
+    const emoji = table?.get(shortcode);
+    return emoji ? [{ shortcode, emoji }] : [];
+  });
+  for (const [list, pass] of [
+    [popular, (s: string) => s.startsWith(q)],
+    [order, (s: string) => s.startsWith(q)],
+    [order, (s: string) => !s.startsWith(q) && s.includes(q)],
+  ] as const) {
+    for (const e of list) {
       if (out.length >= limit) return out;
       if (pass(e.shortcode) && !seen.has(e.emoji)) {
         seen.add(e.emoji);

@@ -191,7 +191,17 @@ pub(super) async fn spawn_run_child(
             apply_scrubbed_local_env(&mut cmd, env_map);
             #[cfg(unix)]
             cmd.process_group(0);
-            cmd.spawn().map_err(|e| format!("spawn '{program}': {e}"))
+            cmd.spawn().map_err(|e| {
+                let hint = if e.kind() == std::io::ErrorKind::NotFound && !program.contains('/') {
+                    format!(
+                        ". '{program}' is not on the run's PATH: install it, or add its folder \
+                         under Shell env & vars › Custom PATH entries"
+                    )
+                } else {
+                    String::new()
+                };
+                format!("spawn '{program}': {e}{hint}")
+            })
         }
         IdeTargetKind::Ssh => {
             let spec = ssh.ok_or("missing SSH connection spec for remote run")?;

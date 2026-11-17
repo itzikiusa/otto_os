@@ -309,10 +309,14 @@ pub(super) async fn handle_stopped_event(
         .unwrap_or_else(|e| e.into_inner())
         .target
         .clone();
-    let threads = fetch_threads(&conn.wire).await.unwrap_or_default();
+    let mut threads = fetch_threads(&conn.wire).await.unwrap_or_default();
     let active_tid = stopped_tid
         .or_else(|| threads.first().map(|t| t.id))
         .unwrap_or(1);
+    // The stopped thread leads the list: Delve lists parked runtime goroutines first.
+    if let Some(i) = threads.iter().position(|t| t.id == active_tid) {
+        threads[..=i].rotate_right(1);
+    }
 
     let (frames, top_ip) = fetch_stack_frames(&conn.wire, &target, active_tid)
         .await

@@ -168,13 +168,16 @@ async function clickBreakpoint(page: Page, line: number): Promise<void> {
 CELLS.push(
   {
     name: 'pytest test in tests/sub',
+    // The code and a fixture live at the project root: the test must run from pytest's rootdir.
     files: {
-      'tests/sub/test_calc.py': 'def add(a, b):\n    return a + b\n\n\ndef test_adds_numbers():\n    left = 20\n    total = add(left, 22)\n    assert total == 42\n    print("PY_TEST_DONE")\n',
+      'calc.py': 'def add(a, b):\n    return a + b\n',
+      'conftest.py': 'import pytest\n\n\n@pytest.fixture\ndef base():\n    return 20\n',
+      'tests/sub/test_calc.py': 'from calc import add\n\n\ndef test_adds_numbers(base):\n    left = base\n    total = add(left, 22)\n    assert total == 42\n    print("PY_TEST_DONE")\n',
     },
     open: 'tests/sub/test_calc.py',
     gutterKind: 'test',
     menu: /^Debug/,
-    stops: [{ line: 7, text: 'total = add', local: 'left' }, { line: 8, text: 'assert total', local: 'total' }],
+    stops: [{ line: 6, text: 'total = add', local: 'left' }, { line: 7, text: 'assert total', local: 'total' }],
     needs: ['python3'],
     // The IDE runs the project's .venv; pip serves pytest from its cache when it holds it.
     setup: (root) => sh('python3', ['-m', 'venv', '.venv'], root) && sh(join(root, '.venv', 'bin', 'pip'), ['install', '-q', '--disable-pip-version-check', 'pytest'], root),
