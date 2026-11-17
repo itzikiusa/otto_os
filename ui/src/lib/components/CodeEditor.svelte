@@ -508,8 +508,8 @@
   function parkLive(): void {
     if (historySaveTimer !== null) clearTimeout(historySaveTimer);
     historySaveTimer = null;
-    if (!view) return;
-    const main = view.state.selection.main, top = view.scrollDOM.scrollTop;
+    if (!view) return; // Svelte drops the DOM before onDestroy: a detached scroller reads 0, so keep the tracked position
+    const main = view.state.selection.main, top = view.scrollDOM.isConnected ? view.scrollDOM.scrollTop : (coreSmartMod?.getIdeViewPosition(root, livePath)?.scrollTop ?? 0);
     coreSmartMod?.saveIdeViewPosition(root, livePath, { anchor: main.anchor, head: main.head, scrollTop: top }, { immediate: true });
     parkHistory(livePath, view.state, top, liveSavedContent);
   }
