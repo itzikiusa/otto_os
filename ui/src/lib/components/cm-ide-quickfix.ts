@@ -1,7 +1,8 @@
 // Deterministic <5ms Quick-Fix Engine & Concrete TextEdit Applier (`userEvent: 'input.quickfix'`,
 // 100% undoable with `⌘Z`) across all 8 IDE languages (Java, Go, TS/JS, Python, Rust, JSON, Shell, CSV/Manifests).
 
-import { EditorSelection, type ChangeSpec, type Text } from '@codemirror/state';
+import { forEachDiagnostic } from '@codemirror/lint';
+import { EditorSelection, type ChangeSpec, type EditorState, type Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import { getCachedSemanticDoc } from './cm-ide-semantic-model.ts';
 import { analyzeGoImports, detectSemanticLang, inferGoImportPkgNames } from './cm-ide-semantic.ts';
@@ -167,6 +168,55 @@ export function isGoImportUnusedInDoc(
     }
   }
   return true;
+}
+
+/** The lint messages on 1-based `line` (gates the fixes that need a diagnostic). */
+export function lintMessagesAtLine(state: EditorState, line: number): { line: number; message: string }[] {
+  const out: { line: number; message: string }[] = [];
+  forEachDiagnostic(state, (d, from) => { if (state.doc.lineAt(from).number === line) out.push({ line, message: d.message }); });
+  return out;
+}
+
+/** The names an import line binds (`null`: not a one-line import whose names can be judged). */
+function importedNames(lang: string, line: string): string[] | null {
+  const strip = (n: string) => n.trim().split(/\s+as\s+/).pop()!.trim();
+  if (lang === 'ts') {
+    const m = /^\s*import\s+(?:type\s+)?(.+?)\s+from\s+['"][^'"]+['"]\s*;?\s*$/.exec(line);
+    if (!m) return null;
+    const out: string[] = [];
+    for (const part of m[1].replace(/\{([^}]*)\}/, (_a, inner: string) => { out.push(...inner.split(',').map((n) => strip(n.replace(/^\s*type\s+/, ''))).filter(Boolean)); return ''; }).split(',')) {
+      const n = part.trim().replace(/^\*\s+as\s+/, '');
+      if (n) out.push(n);
+    }
+    return out;
+  }
+  if (lang === 'python') {
+    const imp = /^\s*import\s+([\w.,\s]+?)\s*(?:#.*)?$/.exec(line);
+    if (imp) return imp[1].split(',').map((n) => (/\s+as\s+/.test(n) ? strip(n) : n.trim().split('.')[0])).filter(Boolean);
+    const from = /^\s*from\s+[\w.]+\s+import\s+([\w,\s]+?)\s*(?:#.*)?$/.exec(line);
+    return from ? from[1].split(',').map(strip).filter(Boolean) : null;
+  }
+  if (lang === 'rust') {
+    const m = /^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([\w:{}\s,]+?)\s*;\s*$/.exec(line);
+    if (!m || m[1].includes('*')) return null;
+    const brace = /\{([^}]*)\}/.exec(m[1]);
+    const leaves = brace ? brace[1].split(',') : [m[1].split('::').pop() ?? ''];
+    return leaves.map((n) => strip(n)).filter((n) => n && n !== 'self');
+  }
+  return null;
+}
+
+/** An import line none of whose names the rest of the file mentions (a wildcard or multi-line import can't be judged). */
+function isImportUnusedInDoc(lang: string, lines: readonly string[], line1: number): boolean {
+  const names = importedNames(lang, lines[line1 - 1] ?? '');
+  if (!names?.length || names.includes('*')) return false;
+  const body = lines.filter((_l, i) => i !== line1 - 1 && !/^\s*(?:import|from\s+\S+\s+import|(?:pub\s+)?use)\s/.test(_l)).join('\n');
+  return !names.some((n) => new RegExp(`(?<![\\w$])${n.replace(/\$/g, '\\$')}(?![\\w$])`).test(body));
+}
+
+/** The server or checker flags something unused on this line (gates the "Prefix with _" fixes). */
+function hasUnusedDiagnostic(diagnostics: readonly { line?: number; message?: string }[] | null | undefined, line: number): boolean {
+  return Boolean(diagnostics?.some((d) => d.line === line && /unused|never (?:read|used)|not used|declared but/i.test(d.message ?? '')));
 }
 
 /** Compute deterministic, instant (<5ms) concrete Quick Fixes at 1-based `line` across all 8 languages. */
@@ -340,10 +390,10 @@ export function computeDeterministicQuickFixes(
       });
     }
   } else if (lang === 'ts') {
-    if (/^\s*import\s+/.test(curLine)) {
-      out.push({ id: `ts-rm-imp-${line}`, title: 'Remove unused import', kind: 'quickfix', isPreferred: true, edits: [makeDeleteLineEdit(lines, line, filePath)], previewBefore: curLine, previewAfter: '// (import removed)' });
+    if (isImportUnusedInDoc('ts', lines, line)) {
+      out.push({ id: `ts-rm-imp-${line}`, title: 'Remove unused import', kind: 'quickfix', isPreferred: false, edits: [makeDeleteLineEdit(lines, line, filePath)], previewBefore: curLine, previewAfter: '// (import removed)' });
     }
-    if (symbol && /^[a-zA-Z]\w*$/.test(symbol) && !symbol.startsWith('_')) {
+    if (symbol && /^[a-zA-Z]\w*$/.test(symbol) && !symbol.startsWith('_') && hasUnusedDiagnostic(diagnostics, line)) {
       const colIdx = curLine.indexOf(symbol);
       if (colIdx >= 0) {
         const after = `${curLine.slice(0, colIdx)}_${symbol}${curLine.slice(colIdx + symbol.length)}`;
@@ -355,8 +405,8 @@ export function computeDeterministicQuickFixes(
       out.push({ id: `ts-async-${line}`, title: "Add 'async' modifier", kind: 'quickfix', edits: [{ path: filePath, start_line: line, start_col: 1, end_line: line, end_col: curLine.length + 1, new_text: after }], previewBefore: curLine, previewAfter: after });
     }
   } else if (lang === 'python') {
-    if (/^\s*(?:import|from)\s+/.test(curLine)) {
-      out.push({ id: `py-rm-imp-${line}`, title: 'Remove unused import', kind: 'quickfix', isPreferred: true, edits: [makeDeleteLineEdit(lines, line, filePath)], previewBefore: curLine, previewAfter: '# (import removed)' });
+    if (isImportUnusedInDoc('python', lines, line)) {
+      out.push({ id: `py-rm-imp-${line}`, title: 'Remove unused import', kind: 'quickfix', isPreferred: false, edits: [makeDeleteLineEdit(lines, line, filePath)], previewBefore: curLine, previewAfter: '# (import removed)' });
     }
     for (const m of curLine.matchAll(/\b([a-z_]\w*)\.[A-Za-z_]\w*/g)) {
       const mod = m[1];
@@ -365,15 +415,15 @@ export function computeDeterministicQuickFixes(
       }
     }
   } else if (lang === 'rust') {
-    if (/^\s*use\s+/.test(curLine)) {
-      out.push({ id: `rs-rm-use-${line}`, title: "Remove unused 'use' import", kind: 'quickfix', isPreferred: true, edits: [makeDeleteLineEdit(lines, line, filePath)], previewBefore: curLine, previewAfter: '// (use removed)' });
+    if (isImportUnusedInDoc('rust', lines, line)) {
+      out.push({ id: `rs-rm-use-${line}`, title: "Remove unused 'use' import", kind: 'quickfix', isPreferred: false, edits: [makeDeleteLineEdit(lines, line, filePath)], previewBefore: curLine, previewAfter: '// (use removed)' });
     }
     if (/^\s*(?:pub\s+)?(?:struct|enum)\s+\w+/.test(curLine) && !(line > 1 && lines[line - 2].trim().startsWith('#[derive'))) {
       const indent = /^(\s*)/.exec(curLine)?.[1] ?? '';
       out.push({ id: `rs-derive-${line}`, title: 'Add #[derive(Debug, Clone)]', kind: 'quickfix', edits: [{ path: filePath, start_line: line, start_col: 1, end_line: line, end_col: 1, new_text: `${indent}#[derive(Debug, Clone)]\n` }], previewBefore: curLine, previewAfter: `${indent}#[derive(Debug, Clone)]\n${curLine}` });
     }
     const mLet = /^(\s*let\s+)([a-z]\w*)(\s*[=:])/.exec(curLine);
-    if (mLet) {
+    if (mLet && hasUnusedDiagnostic(diagnostics, line)) {
       const after = `${mLet[1]}_${mLet[2]}${curLine.slice(mLet[0].length - mLet[3].length)}`;
       out.push({ id: `rs-underscore-${line}`, title: `Prefix '${mLet[2]}' with '_'`, kind: 'quickfix', edits: [{ path: filePath, start_line: line, start_col: 1, end_line: line, end_col: curLine.length + 1, new_text: after }], previewBefore: curLine, previewAfter: after });
     }

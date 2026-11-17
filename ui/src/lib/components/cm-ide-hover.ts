@@ -634,7 +634,7 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
   const tip = hoverTooltip(async (view, pos) => {
     if (isDepManifestPath(opts.filePath)) return null;
     const isCompact = (opts.getPreferences ? opts.getPreferences() : readIdeEditorPreferences()).compactHover !== false;
-    const { queryPooledLspHover, tokenSpanAtPos } = await import('./cm-ide-lsp.ts');
+    const [{ queryPooledLspHover, tokenSpanAtPos }, { queryPooledLspCodeActions }] = await Promise.all([import('./cm-ide-lsp.ts'), import('./cm-ide-lsp-requests.ts')]);
     const ln = view.state.doc.lineAt(pos), lineNo = ln.number, char0 = pos - ln.from, docText = view.state.doc.toString();
     const span = tokenSpanAtPos(view.state, pos);
     const word = span && !span.isStringPath && span.word && !/^\d+$/.test(span.word) ? span.word : '';
@@ -650,8 +650,9 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
         };
     const lineFixes = getIdeQuickFixesAtLine(view.state, lineNo);
     const detFixes = computeDeterministicQuickFixes(docText, opts.filePath, opts.language, lineNo, word || undefined);
-    const primaryLineFix = lineFixes[0] ?? null;
-    const primaryDetFix = detFixes[0] ?? null;
+    const lspFixes = ((await queryPooledLspCodeActions(view, lineNo)) ?? []).filter((f) => f.edits.every((e) => e.path === f.edits[0].path)); // the server's one-file fixes lead
+    const primaryLspFix = lspFixes.find((f) => f.isPreferred) ?? lspFixes[0] ?? null, primaryLineFix = lineFixes[0] ?? null;
+    const primaryDetFix = detFixes.find((f) => f.isPreferred) ?? null; // Otto's heuristic only when preferred (never "Prefix with _")
 
     let parsed: ParsedQuickDoc | null = null;
     let authoritativeDef: { path: string; line: number } | null = null;
@@ -756,14 +757,14 @@ export function createIdeHoverExtension(opts: CreateIdeHoverOptions): Extension 
         }
 
         const foot = document.createElement('div'); foot.className = 'cm-ide-qdoc-foot';
-        if (primaryLineFix || primaryDetFix) {
+        if (primaryLspFix || primaryLineFix || primaryDetFix) {
           const qfBtn = document.createElement('button'); qfBtn.type = 'button'; qfBtn.className = 'cm-ide-qdoc-act cm-ide-qdoc-qf'; qfBtn.dataset.testid = 'ide-hover-quickfix-btn';
-          const title = (primaryLineFix ?? primaryDetFix)!.title;
+          const title = (primaryLspFix ?? primaryLineFix ?? primaryDetFix)!.title;
           qfBtn.textContent = `Quick Fix: ${title} (⌥⏎)`;
           qfBtn.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
           qfBtn.addEventListener('click', (e) => {
             e.preventDefault(); e.stopPropagation();
-            if (primaryLineFix) applyClientQuickFix(view, primaryLineFix);
+            if (primaryLspFix) applyConcreteEditsToView(view, primaryLspFix.edits); else if (primaryLineFix) applyClientQuickFix(view, primaryLineFix);
             else if (primaryDetFix) applyConcreteEditsToView(view, primaryDetFix.edits, opts.filePath);
           });
           foot.appendChild(qfBtn);

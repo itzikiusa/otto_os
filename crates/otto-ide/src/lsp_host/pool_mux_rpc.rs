@@ -46,7 +46,9 @@ pub(crate) fn default_gopls_settings(go_build_tags: &[String]) -> Value {
             "-**/.svelte-kit",
             "-**/__pycache__"
         ],
-        "completeUnimported": true
+        "completeUnimported": true,
+        // gopls answers `textDocument/semanticTokens/full` only with this on (off by default).
+        "semanticTokens": true
     })
 }
 

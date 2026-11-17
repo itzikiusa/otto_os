@@ -60,7 +60,7 @@
     <header class="usg-bar">
       {#if ide.usagesSymbol}<Badge tone="accent" label={ide.usagesSymbol} />{/if}
       <span class="usg-summary dim">
-        {plural(ide.usages.length, 'reference')} across {plural(usageGroups.length, 'file')}
+        {plural(ide.usages.length, 'reference')} across {plural(usageGroups.length, 'file')}{#if ide.usagesSource === 'text'}<span title="No language server answered, so these are whole-word text matches" data-testid="ide-usages-text-match"> · text match</span>{/if}
       </span>
       <span class="grow"></span>
       {#if ide.usages.length > 0}

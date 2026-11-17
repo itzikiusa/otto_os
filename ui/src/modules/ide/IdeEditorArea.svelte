@@ -37,6 +37,7 @@
   } from './editor/ideEditorStoreBridge.svelte';
   import type { ideGit as IdeGitSingleton } from './git/ideGitController.svelte';
   import type { IdeOutlineNode } from './editor/ideLangAnalyzer';
+  import type { IdeDiagnostic } from '../../lib/api/types';
   let langAnalyzerMod = $state<typeof import('./editor/ideLangAnalyzer') | null>(null);
   let liveGit = $state<typeof IdeGitSingleton | null>(null);
   function fastDocKind(filePath: string, language?: string): string {
@@ -201,6 +202,7 @@
       primaryEditorRef?.reconnectLspClients?.(rootPath);
       splitEditorRef?.reconnectLspClients?.(rootPath);
     };
+    const onLspDiags = (e: Event) => { const d = (e as CustomEvent<{ path: string; diagnostics: IdeDiagnostic[] }>).detail; ide.setDiagnostics(d.path, d.diagnostics); };
     const onGitReloaded = (e: Event) => {
       const reloadedPath = (e as CustomEvent<{ path?: string }>).detail?.path;
       const tab = reloadedPath ? ide.tabs.find((t) => t.path === reloadedPath) : ide.activeTab;
@@ -248,6 +250,7 @@
     window.addEventListener('otto:ide-apply-quickfix-edits', onApplyFixes);
     window.addEventListener('otto:ide-enable-go-build-tag', onEnableGoTag);
     window.addEventListener('otto:ide-reconnect-lsp', onReconnectLsp);
+    window.addEventListener('otto:ide-lsp-diagnostics', onLspDiags);
     window.addEventListener('otto:ide-git-file-reloaded', onGitReloaded);
     window.addEventListener('otto:ide-open-find-in-files', onFindInFiles);
     window.addEventListener('otto:ide-repo-test-action', onRepoTestAction);
@@ -259,6 +262,7 @@
       window.removeEventListener('otto:ide-apply-quickfix-edits', onApplyFixes);
       window.removeEventListener('otto:ide-enable-go-build-tag', onEnableGoTag);
       window.removeEventListener('otto:ide-reconnect-lsp', onReconnectLsp);
+      window.removeEventListener('otto:ide-lsp-diagnostics', onLspDiags);
       window.removeEventListener('otto:ide-git-file-reloaded', onGitReloaded);
       window.removeEventListener('otto:ide-open-find-in-files', onFindInFiles);
       window.removeEventListener('otto:ide-repo-test-action', onRepoTestAction);
@@ -363,6 +367,8 @@
       applyAgentEdit: (nextContent, range) => ref.applyAgentEdit?.(nextContent, range) ?? false,
       applyQuickFixEdits: (edits) => ref.applyQuickFixEdits?.(edits) ?? false,
       lspRenameEdits: (line, column, newName) => ref.lspRenameEdits?.(line, column, newName) ?? Promise.resolve(null),
+      lspReferences: (line, column) => ref.lspReferences?.(line, column) ?? Promise.resolve(null),
+      lspQuickFixes: (line) => ref.lspQuickFixes?.(line) ?? Promise.resolve(null),
     };
     return h;
   }

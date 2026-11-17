@@ -35,11 +35,12 @@ import {
 } from './cm-ide-keymap.ts';
 import {
   buildPooledLspExtensions, createCmdHoverDiveExtension, createDirectLspExtension,
-  disposePooledLspClients, hasWarmPooledLspClient, lspUriToPath, notifyLspDidSave, queryPooledLspRename, requestIdeDiveAtPos,
+  disposePooledLspClients, hasWarmPooledLspClient, lspUriToPath, notifyLspDidSave, requestIdeDiveAtPos,
   type AttachPooledLspOptions, type DirectLspOptions,
 } from './cm-ide-lsp.ts';
+import { queryPooledLspCodeActions, queryPooledLspReferences, queryPooledLspRename } from './cm-ide-lsp-requests.ts';
 import {
-  applyConcreteEditsToView, computeDeterministicQuickFixes, hasDeterministicQuickFixAtLine, previewConcreteEdits,
+  applyConcreteEditsToView, computeDeterministicQuickFixes, hasDeterministicQuickFixAtLine, lintMessagesAtLine, previewConcreteEdits,
   type IdeConcreteTextEdit, type IdeQuickFixAction,
 } from './cm-ide-quickfix.ts';
 import {
@@ -58,9 +59,9 @@ export {
   applyLinePrefixSuffix, buildIdeKeymapSpecs, buildPooledLspExtensions,
   computeDeterministicQuickFixes, createDirectLspExtension, crosshairCursor,
   detectInlineRefactorHints, disposePooledLspClients, duplicateLineOrSelection,
-  getIdeQuickFixesAtLine, hasWarmPooledLspClient,
+  getIdeQuickFixesAtLine, hasWarmPooledLspClient, lintMessagesAtLine,
   isBpTargetGutterElement, lspUriToPath, moveLineDown, moveLineUp, notifyLspDidSave,
-  openReplaceInFile, previewConcreteEdits, queryPooledLspRename, rectangularSelection, requestIdeDiveAtPos,
+  openReplaceInFile, previewConcreteEdits, queryPooledLspCodeActions, queryPooledLspReferences, queryPooledLspRename, rectangularSelection, requestIdeDiveAtPos,
   selectAllOccurrences, selectNextOccurrence, selectionOrCurrentLine,
   setBaselineSourceEffect, setBlameLinesEffect, setDiskSavedContentEffect, setSavedContentEffect, smartExpandSelection,
   splitSelectionIntoLines, startNewLineBelow, toggleLineComment, wordAtCursor,

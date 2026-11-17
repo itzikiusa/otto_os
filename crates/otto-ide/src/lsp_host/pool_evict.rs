@@ -203,9 +203,24 @@ impl LspPool {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             return;
         };
-        if !is_build_manifest_name(name) {
-            return;
+        if is_build_manifest_name(name) {
+            self.notify_watched_file(path, change_type);
         }
+    }
+
+    /// `workspace/didChangeWatchedFiles` for one local file (1 created, 2 changed,
+    /// 3 deleted) to every pooled server whose root holds it. The IDE's own writes
+    /// and git checkouts call this: the servers don't watch the disk themselves, so a
+    /// closed file changed under them stays stale (gopls, pyright) until restart.
+    /// [`Self::notify_watched_file`] for files a git operation rewrote: changed, or
+    /// deleted when gone.
+    pub fn notify_watched_files(&self, paths: &[PathBuf]) {
+        for p in paths {
+            self.notify_watched_file(p, if p.exists() { 2 } else { 3 });
+        }
+    }
+
+    pub fn notify_watched_file(&self, path: &Path, change_type: u8) {
         let uri = otto_core::paths::path_to_file_uri(path);
         let candidates: Vec<(PoolKey, mpsc::UnboundedSender<Ctl>)> = self
             .lock()

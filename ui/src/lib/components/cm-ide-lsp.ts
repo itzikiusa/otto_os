@@ -2,7 +2,7 @@
 // Signature Help, Dot-Triggered Auto-Imports (`additionalTextEdits`), `semanticTokens/full`,
 // and Direct JSON-RPC WS Fallback.
 
-import { EditorView, ViewPlugin } from '@codemirror/view';
+import { EditorView, ViewPlugin, type ViewUpdate } from '@codemirror/view';
 import type { Extension } from '@codemirror/state';
 import type { IdeDiagnostic } from '../api/types';
 import { pathToFileUri } from '../fileUri.ts';
@@ -60,7 +60,8 @@ import {
   type IdeLspJumpTarget,
 } from './cm-ide-lsp-dive.ts';
 import { appLive } from '../live.ts';
-import { cancelLspReconnects, isLspReconnecting, noteLspDaemonShutdown, noteLspSessionReady, noteLspSocketClosed } from './cm-ide-lsp-reconnect.ts';
+import { cancelLspReconnects, IDE_LSP_DIAGNOSTICS_EVENT, isLspReconnecting, noteLspDaemonShutdown, noteLspSessionReady, noteLspSocketClosed } from './cm-ide-lsp-reconnect.ts';
+import { announceLspStartFailure, clearLspStartFailure } from './cm-ide-lsp-requests.ts';
 
 export {
   buildLspCompletionChangeSpec,
@@ -111,7 +112,8 @@ interface PooledClientEntry {
   offTransportClose: (() => void) | null;
   evictFn: () => void;
   diagListeners: Map<string, Set<(diags: IdeDiagnostic[]) => void>>;
-  openViews: Map<string, EditorView>;
+  /** Live views per document URI; the first one owns document sync (`didChange`). */
+  openViews: Map<string, EditorView[]>;
   refCount: number;
   closeTimer: ReturnType<typeof setTimeout> | null;
   disposed: boolean;
@@ -124,7 +126,6 @@ let marimoCache: MarimoMod | null = null;
 const clientPool = new Map<string, PooledClientEntry>();
 const canonicalModuleRootByDir = new Map<string, string>();
 const unavailableLangUntil = new Map<string, number>();
-
 function parentDirOf(absPath: string): string {
   const clean = absPath.replace(/\\/g, '/').replace(/\/+$/, '');
   const idx = clean.lastIndexOf('/');
@@ -160,7 +161,9 @@ function resolvePoolKeyForFile(
     return `${serverLang}::${connKey}::${normRoot}`;
   }
   const absFile = toAbsoluteIdeFilePath(normRoot, filePath);
-  if (!absFile) return `${serverLang}::${connKey}::${normRoot}`;
+  // A file outside the root (a dependency reached by ⌘B) rides the workspace's client:
+  // the daemon serves it from the workspace server too.
+  if (!absFile || !absFile.startsWith(`${normRoot}/`)) return `${serverLang}::${connKey}::${normRoot}`;
   const fileDir = parentDirOf(absFile);
   let probe = fileDir;
   for (let depth = 0; depth < 32; depth++) {
@@ -327,14 +330,14 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
 
   const rootUri = pathToFileUri(resolvedRoot);
   const langProbeKey = `${serverLang}::${connKey}`;
-  const openViews = new Map<string, EditorView>();
+  const openViews = new Map<string, EditorView[]>();
   const transport = new mod.WebSocketTransport(opts.wsUri, opts.protocols);
   const origOnMessage = transport.onMessage.bind(transport);
   transport.onMessage = (handler) =>
     origOnMessage((msg) =>
       handler(
         dedupeLspJsonRpcMessage(msg, (uri) => {
-          const v = openViews.get(uri);
+          const v = openViews.get(uri)?.[0];
           return v ? v.state.sliceDoc(0, Math.min(v.state.doc.length, 4096)) : null;
         }),
       ),
@@ -347,6 +350,7 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
       try {
         await super.initialize();
         unavailableLangUntil.delete(langProbeKey);
+        clearLspStartFailure(langProbeKey);
         if (this.ready) noteLspSessionReady(resolvedRoot);
       } catch {
         const self = this as unknown as { isClosed?: boolean };
@@ -362,6 +366,15 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
       const self = this as unknown as { isClosed?: boolean };
       if (!this.ready || self.isClosed) return Promise.resolve(false);
       return super.textDocumentDidOpen(params).catch(() => false);
+    }
+
+    // The lint tooltip lists these as the diagnostic's fixes: refactors ("Move to a new
+    // file", "Inline variable") are not fixes.
+    override async textDocumentCodeAction(
+      params: Parameters<InstanceType<MarimoMod['LanguageServerClient']>['textDocumentCodeAction']>[0],
+    ): ReturnType<InstanceType<MarimoMod['LanguageServerClient']>['textDocumentCodeAction']> {
+      const res = await super.textDocumentCodeAction(params.context.only ? params : { ...params, context: { ...params.context, only: ['quickfix'] } });
+      return res && res.filter((a) => !('kind' in a) || !a.kind || a.kind.startsWith('quickfix'));
     }
 
     override notify(method: string, params: unknown): Promise<void> {
@@ -454,7 +467,10 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
   const onSocketGone = (handshakeFailed: boolean, daemonShutdown = false): void => {
     if (entry.disposed) return;
     const hadSession = !handshakeFailed && Boolean(client.ready) && entry.refCount > 0;
-    if (!hadSession && !daemonShutdown && !isLspReconnecting(entry.rootPath)) unavailableLangUntil.set(langProbeKey, Date.now() + 30_000);
+    if (!hadSession && !daemonShutdown && !isLspReconnecting(entry.rootPath)) {
+      unavailableLangUntil.set(langProbeKey, Date.now() + 30_000);
+      announceLspStartFailure(langProbeKey, serverLang, entry.rootPath);
+    }
     const root = entry.rootPath;
     entry.evictFn();
     if (daemonShutdown) noteLspDaemonShutdown(root, hadSession, (resume) => appLive.onConnection((up) => { if (up) resume(); }));
@@ -494,8 +510,7 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
       markLiveLspDiagnostics(opts.rootPath, fPath);
     }
     const subs = diagListeners.get(n.params.uri);
-    if (!subs || subs.size === 0) return;
-    const viewForDoc = openViews.get(n.params.uri);
+    const viewForDoc = openViews.get(n.params.uri)?.[0];
     const headerText = viewForDoc ? viewForDoc.state.sliceDoc(0, Math.min(viewForDoc.state.doc.length, 4096)) : null;
     const mapped: IdeDiagnostic[] = (n.params.diagnostics ?? []).map((d) => {
       const rawMsg = typeof d.message === 'string' ? d.message : d.message.value;
@@ -514,7 +529,10 @@ function acquirePooledClient(mod: MarimoMod, opts: AttachPooledLspOptions, resol
         code: rw.isBuildTagDiag ? 'otto_go_build_tag' : (d.code != null ? String(d.code) : null),
       };
     });
-    for (const cb of subs) cb(mapped);
+    // No mounted editor listens (a background tab, a split-only view, a file that isn't
+    // open): the IDE still files the diagnostics under Problems.
+    if (subs?.size) for (const cb of subs) cb(mapped);
+    else if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(IDE_LSP_DIAGNOSTICS_EVENT, { detail: { path: fPath, diagnostics: mapped } }));
   });
 
   clientPool.set(key, entry);
@@ -545,19 +563,21 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
 
   const lifecycleCleanup = ViewPlugin.fromClass(class {
     private unsubDiag: (() => void) | null = null;
+    private readonly view: EditorView;
     constructor(view: EditorView) {
+      this.view = view;
       if (pooled.closeTimer !== null) {
         clearTimeout(pooled.closeTimer);
         pooled.closeTimer = null;
       }
       pooled.refCount += 1;
-      pooled.openViews.set(documentUri, view);
+      pooled.openViews.set(documentUri, [...(pooled.openViews.get(documentUri) ?? []), view]);
       if (pooled.client.ready) {
         markLiveLspDiagnostics(pooled.rootPath, absFile);
         if (opts.rootPath && opts.rootPath !== pooled.rootPath) markLiveLspDiagnostics(opts.rootPath, absFile);
       } else {
         void pooled.client.initializePromise?.then(() => {
-          if (!pooled.disposed && pooled.client.ready && pooled.openViews.get(documentUri) === view) {
+          if (!pooled.disposed && pooled.client.ready && pooled.openViews.get(documentUri)?.includes(view)) {
             markLiveLspDiagnostics(pooled.rootPath, absFile);
             if (opts.rootPath && opts.rootPath !== pooled.rootPath) markLiveLspDiagnostics(opts.rootPath, absFile);
           }
@@ -578,7 +598,9 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
       }
     }
     destroy() {
-      pooled.openViews.delete(documentUri);
+      const rest = (pooled.openViews.get(documentUri) ?? []).filter((v) => v !== this.view);
+      if (rest.length) pooled.openViews.set(documentUri, rest);
+      else pooled.openViews.delete(documentUri);
       this.unsubDiag?.();
       this.unsubDiag = null;
       pooled.refCount = Math.max(0, pooled.refCount - 1);
@@ -607,6 +629,23 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
     onShowLocation: (res) => opts.onLocationJump(res.uri, res.range.start.line + 1, res.range.start.character + 1),
   });
 
+  // Split views of one file all see every edit (the store mirrors it): only the URI's first
+  // view sends `didChange`; the others render diagnostics and keep their version in step.
+  const syncGate = ViewPlugin.fromClass(class {
+    constructor(view: EditorView) {
+      const plugin = mod.getLanguageServerPlugin(view) as unknown as { update: (u: ViewUpdate) => void; destroy: () => void; documentVersion: number } | undefined;
+      if (!plugin) return;
+      // marimo's destroy() dispatches: mid-update (a compartment swap) that threw and skipped didClose.
+      const destroy = plugin.destroy.bind(plugin);
+      plugin.destroy = () => queueMicrotask(destroy);
+      const update = plugin.update.bind(plugin);
+      plugin.update = (u) => {
+        if (pooled.openViews.get(documentUri)?.[0] === view) update(u);
+        else if (u.docChanged) plugin.documentVersion += 1;
+      };
+    }
+  });
+
   const completionExt = createIdeLspCompletionExtension({
     documentUri,
     languageId: opts.languageId,
@@ -614,7 +653,7 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
     requestCompletion: async (params) => {
       const rpc = getPooledRpc(pooled.client);
       if (rpc) {
-        return (await rpc.request('textDocument/completion', params)) as RawLspCompletionItem[] | { items?: RawLspCompletionItem[] } | null;
+        return (await rpc.request('textDocument/completion', params)) as RawLspCompletionItem[] | { items?: RawLspCompletionItem[]; isIncomplete?: boolean } | null;
       }
       return (await pooled.client.textDocumentCompletion(params as never)) as unknown as { items?: RawLspCompletionItem[] } | null;
     },
@@ -654,7 +693,7 @@ export async function buildPooledLspExtensions(opts: AttachPooledLspOptions): Pr
     },
   });
 
-  return [lspTooltipTheme, lifecycleCleanup, ...exts, completionExt, semanticExt];
+  return [lspTooltipTheme, lifecycleCleanup, ...exts, syncGate, completionExt, semanticExt];
 }
 
 export interface PooledLspHoverResult {
@@ -708,26 +747,6 @@ export async function queryPooledLspHover(view: EditorView, pos: number): Promis
 export async function queryPooledLspHoverMarkdown(view: EditorView, pos: number): Promise<string | null> {
   const res = await queryPooledLspHover(view, pos);
   return res?.markdown || null;
-}
-
-/**
- * Ask the language server attached to `view` to rename the symbol at 1-based `line`/`column`.
- * `null` when no ready server with rename support owns the file (the caller then
- * falls back to the daemon's text match).
- */
-export async function queryPooledLspRename(view: EditorView, line: number, column: number, newName: string): Promise<LspFileTextEdit[] | null> {
-  const plugin = marimoCache?.getLanguageServerPlugin(view);
-  const doc = view.state.doc;
-  if (!plugin?.client.ready || !plugin.client.hasCapability('textDocument/rename') || line < 1 || line > doc.lines) return null;
-  const rpc = getPooledRpc(plugin.client);
-  if (!rpc) return null;
-  const pos = Math.min(doc.line(line).to, doc.line(line).from + Math.max(0, column - 1));
-  try {
-    const res = await rpc.request('textDocument/rename', { textDocument: { uri: plugin.documentUri }, position: posToLsp(doc, pos), newName });
-    return workspaceEditToTextEdits(res);
-  } catch {
-    return null;
-  }
 }
 
 /** Notify the active LSP plugin on `view` that the buffer was saved (`willSave` / `didSave`). */

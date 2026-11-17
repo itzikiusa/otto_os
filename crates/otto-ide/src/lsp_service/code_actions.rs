@@ -425,6 +425,14 @@ pub(super) fn build_organize_imports_action(
         }
     }
     let s = start?;
+    // A parenthesised or `\`-continued import spans lines the line sort would tear apart.
+    if lang == "python"
+        && lines[s..=end]
+            .iter()
+            .any(|l| l.trim_end().ends_with('(') || l.trim_end().ends_with('\\'))
+    {
+        return None;
+    }
     let orig: Vec<&str> = lines[s..=end]
         .iter()
         .copied()

@@ -59,19 +59,39 @@ pub fn parse_document_symbols(path: &str, lang: &str, content: &str) -> Vec<IdeS
 
 fn parse_brace_language_symbols(lang: &str, lines: &[&str]) -> Vec<IdeSymbolNode> {
     let brace_ends = compute_brace_block_ends(lang, lines);
+    // TS/JS class fields, abstract methods and enum members look like statements on
+    // their own; they count only directly inside a class or enum body.
+    let openers = if matches!(lang, "javascript" | "typescript" | "svelte" | "vue") {
+        innermost_block_openers(lang, lines)
+    } else {
+        Vec::new()
+    };
+    let mut member_bodies: BTreeMap<u32, bool> = BTreeMap::new(); // opener line → is enum
     let mut raw = Vec::new();
     for (idx, &line) in lines.iter().enumerate() {
         let trimmed = line.trim();
+        // In TS/JS `#token` is a private field, not a comment.
+        let private_field = !openers.is_empty()
+            && trimmed.strip_prefix('#').is_some_and(|r| {
+                r.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '$')
+            });
         if trimmed.is_empty()
             || ["//", "/*", "*", "#"]
                 .iter()
-                .any(|p| trimmed.starts_with(p))
+                .any(|p| trimmed.starts_with(p) && !private_field)
         {
             continue;
         }
         let line_no = (idx + 1) as u32;
         let indent = line.chars().take_while(|c| c.is_whitespace()).count();
-        if let Some((name, kind, detail, is_container)) = match_brace_symbol(lang, trimmed) {
+        let matched = match_brace_symbol(lang, trimmed).or_else(|| {
+            let opener = openers.get(idx).copied().flatten()?;
+            match_ts_member(trimmed, *member_bodies.get(&opener)?)
+        });
+        if let Some((name, kind, detail, is_container)) = matched {
+            if matches!(kind.as_str(), "class" | "enum") && trimmed.ends_with('{') {
+                member_bodies.insert(line_no, kind == "enum");
+            }
             let end_line = brace_ends
                 .get(&line_no)
                 .copied()
@@ -311,7 +331,7 @@ fn match_ts_symbol(trimmed: &str) -> Option<(String, String, Option<String>, boo
     if let Some(cap) = RE_ARR
         .get_or_init(|| {
             Regex::new(
-                r"^(?:export\s+)?(const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?\(([^)]*)\)\s*=>",
+                r"^(?:export\s+)?(const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?\(([^)]*)\)\s*(?::\s*[^=]+?)?\s*=>",
             )
             .unwrap()
         })
@@ -480,6 +500,69 @@ fn parse_makefile_symbols(lines: &[&str]) -> Vec<IdeSymbolNode> {
             ))
         })
         .collect()
+}
+
+/// A class or enum body member: `#token: string`, `retries = 3;`, `onError = (e) => …`,
+/// `abstract find(): T;`, or an enum's `Active = 'a',`.
+fn match_ts_member(trimmed: &str, in_enum: bool) -> Option<(String, String, Option<String>, bool)> {
+    static RE_ENUM: OnceLock<Regex> = OnceLock::new();
+    static RE_SIG: OnceLock<Regex> = OnceLock::new();
+    static RE_FIELD: OnceLock<Regex> = OnceLock::new();
+    if in_enum {
+        let cap = RE_ENUM
+            .get_or_init(|| Regex::new(r"^([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=[^,]*)?,?$").unwrap())
+            .captures(trimmed)?;
+        return Some((cap[1].to_string(), "constant".into(), None, false));
+    }
+    const MODS: &str = r"^(?:(?:public|private|protected|static|readonly|abstract|override|declare|accessor|async)\s+)*";
+    if let Some(cap) = RE_SIG
+        .get_or_init(|| {
+            Regex::new(&format!(r"{MODS}(#?[A-Za-z_$][A-Za-z0-9_$]*)\??\s*(?:<[^>]*>)?\s*\(([^)]*)\)\s*(?::[^;{{]+)?;$")).unwrap()
+        })
+        .captures(trimmed)
+    {
+        return Some((cap[1].to_string(), "method".into(), Some(format!("({})", cap[2].trim())), false));
+    }
+    let cap = RE_FIELD
+        .get_or_init(|| {
+            Regex::new(&format!(
+                r"{MODS}(#?[A-Za-z_$][A-Za-z0-9_$]*)[?!]?\s*(?::\s*[^=;]+?)?\s*(?:=\s*(.*?))?;?$"
+            ))
+            .unwrap()
+        })
+        .captures(trimmed)?;
+    let arrow = cap.get(2).is_some_and(|v| {
+        (v.as_str().starts_with('(') && v.as_str().contains("=>"))
+            || v.as_str().starts_with("async")
+    });
+    Some((
+        cap[1].to_string(),
+        if arrow { "method" } else { "field" }.into(),
+        None,
+        false,
+    ))
+}
+
+/// For each line, the line whose `{` opened the innermost block it starts in.
+fn innermost_block_openers(lang: &str, lines: &[&str]) -> Vec<Option<u32>> {
+    let mut stack: Vec<u32> = Vec::new();
+    let mut out = Vec::with_capacity(lines.len());
+    let mut in_block = false;
+    for (idx, &line) in lines.iter().enumerate() {
+        out.push(stack.last().copied());
+        let mask = code_mask_for_line(lang, line, &mut in_block);
+        for (byte_idx, ch) in line.char_indices() {
+            if !mask.get(byte_idx).copied().unwrap_or(false) {
+                continue;
+            }
+            if ch == '{' {
+                stack.push((idx + 1) as u32);
+            } else if ch == '}' {
+                stack.pop();
+            }
+        }
+    }
+    out
 }
 
 pub(super) fn compute_brace_block_ends(lang: &str, lines: &[&str]) -> BTreeMap<u32, u32> {

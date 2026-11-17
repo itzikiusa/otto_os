@@ -97,7 +97,7 @@ class IdeStore {
   symbolsLoading = $state(false);
   problems = $state<IdeDiagnostic[]>([]);
   usages = $state<IdeReferenceLocation[]>([]);
-  usagesSymbol = $state('');
+  usagesSymbol = $state(''); usagesSource = $state<'lsp' | 'text'>('text');
   usagesLoading = $state(false);
   renameState = $state<{ open: boolean; path: string; line: number; column: number; symbol: string; newName: string; edits: IdeRenameEdit[]; source: 'lsp' | 'text'; previewedName: string; loading: boolean; error: string | null }>({
     open: false, path: '', line: 1, column: 1, symbol: '', newName: '', edits: [], source: 'text', previewedName: '', loading: false, error: null });
@@ -536,7 +536,7 @@ class IdeStore {
     return tab ? computeFallbackSelection(this.getBuffer(tab.path), this.cursorInfo) : null;
   }
 
-  private editorHandleForPath(resolvedPath: string): IdeEditorHandle | null {
+  editorHandleForPath(resolvedPath: string): IdeEditorHandle | null {
     if (this._activePath === resolvedPath) return this.editorHandles.primary;
     if (this.splitPath === resolvedPath) return this.editorHandles.split;
     return null;

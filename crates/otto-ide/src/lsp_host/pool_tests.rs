@@ -593,3 +593,25 @@ async fn evicting_an_in_use_server_tells_its_socket_before_closing() {
         .expect("socket should close after the notice");
     assert!(closed.is_none());
 }
+
+#[tokio::test]
+async fn a_source_file_write_reaches_the_server_as_a_watched_file_change() {
+    let (pool, fake) = fake_pool(IDLE_TIMEOUT);
+    let mut a = pool.attach(key("/repo-w"), "tsls", &[]).unwrap();
+    init(&mut a, 1).await;
+    // A closed `.ts`/`.go` file renamed or replaced under the server: it must hear of it.
+    pool.notify_watched_file(Path::new("/repo-w/src/money.ts"), 2);
+    // The manifest-only entry point still drops source files (deps actions use it).
+    pool.notify_watched_file_if_build_manifest(Path::new("/repo-w/src/other.ts"), 2);
+    let want = "watched file:///repo-w/src/money.ts";
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !fake.doc_log.lock().unwrap().iter().any(|l| l == want) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no didChangeWatchedFiles for money.ts"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let log = fake.doc_log.lock().unwrap().clone();
+    assert!(!log.iter().any(|l| l.ends_with("/src/other.ts")));
+}

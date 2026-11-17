@@ -59,6 +59,9 @@ test('LSP pool limits and shouldAttachIdeLsp gate code buffers strictly and skip
     'typescript',
     'javascript',
     'python',
+    'shell',
+    'css',
+    'html',
   ]);
 
   assert.equal(shouldAttachIdeLsp('/ws/cmd/main.go', 'go', '/ws'), true);
@@ -75,11 +78,8 @@ test('LSP pool limits and shouldAttachIdeLsp gate code buffers strictly and skip
     ['/ws/Cargo.toml', 'toml', '/ws'],
     ['/ws/schema.sql', 'sql', '/ws'],
     ['/ws/data.csv', 'csv', '/ws'],
-    ['/ws/index.html', 'html', '/ws'],
-    ['/ws/tokens.css', 'css', '/ws'],
     ['/ws/Dockerfile', 'dockerfile', '/ws'],
     ['/ws/Makefile', 'makefile', '/ws'],
-    ['/ws/scripts/check.sh', 'shell', '/ws'],
     ['untitled:1', 'go', '/ws'],
     ['jdt://contents/java.base/String.class', 'java', '/ws'],
     ['/ws/.env', 'go', '/ws'],

@@ -17,6 +17,7 @@ import type * as CmIdeMod from './cm-ide-extensions';
 import { isIdeManifestPath } from './cm-ide-manifest';
 import { lspLanguageIdFor, normalizeIdeLspServerLang } from './cm-ide-keymap';
 import {
+  registerIdeLspPluginLanguage,
   resolveIdeLspModuleRoot,
   shouldAttachIdeLsp,
   toAbsoluteIdeFilePath,
@@ -73,12 +74,19 @@ export async function attachCodeEditorLsp(opts: {
   onDiagnostics?: ((diags: IdeDiagnostic[]) => void) | null;
 }): Promise<void> {
   try {
-    if (!shouldAttachIdeLsp(opts.filePath, opts.language, opts.rootPath)) return;
     const resolvedRoot = resolveIdeLspModuleRoot(opts.rootPath, opts.filePath, opts.projectFolders ?? []);
     const absFile = toAbsoluteIdeFilePath(opts.rootPath, opts.filePath) || opts.filePath;
     const lspLang = lspLangFor(absFile, opts.ideMode, opts.language);
     if (!lspLang || !resolvedRoot) return;
     const serverLang = normalizeIdeLspServerLang(lspLang);
+    if (!shouldAttachIdeLsp(opts.filePath, lspLang, opts.rootPath)) {
+      // A plugin server (Kotlin, …) is known only from the daemon's capability list.
+      if (opts.connId || !auth.isRoot) return;
+      const caps = await getLspCapabilities(false);
+      if (!caps?.servers.some((s) => s.lang === serverLang && s.available)) return;
+      registerIdeLspPluginLanguage(serverLang);
+      if (!shouldAttachIdeLsp(opts.filePath, lspLang, opts.rootPath)) return;
+    }
     if (!opts.connId) {
       // The daemon serves a local pooled language server to root only (403 otherwise).
       if (!auth.isRoot) return;
