@@ -434,9 +434,7 @@ pub fn host_routes() -> Router<ServerCtx> {
         .route("/plugin-host/jira/accounts", get(host_jira_accounts))
         .route("/plugin-host/jira/credentials", get(host_jira_credentials))
         .route("/plugin-host/agents/run", post(host_agents_run))
-        // Read-only PRs (list / detail / commits / diff) on behalf of the root
-        // user — so a sidecar (Team Performance) can ingest PRs with only its
-        // own OTTO_PLUGIN_TOKEN, never holding a user API token.
+        // Read-only PRs as the root user (otto_git::serve_pr_read / PR_READ_PATHS).
         .route("/plugin-host/repos/{id}/prs", get(host_prs))
         .route("/plugin-host/repos/{id}/prs/{number}", get(host_prs))
         .route(
@@ -1004,49 +1002,15 @@ async fn host_repos(State(ctx): State<ServerCtx>, headers: HeaderMap) -> Respons
     }
 }
 
-/// `GET /plugin-host/repos/{id}/prs[/{number}[/commits|/diff]]` — re-serves
-/// otto-git's read-only PR handlers ([`otto_git::pr_read_router`]) as the root
-/// user (the account that installs plugins; its forge credential reads the
-/// PRs). Plugin-token auth; writes are not reachable from here.
+/// `GET /plugin-host/repos/{id}/prs…` (see `host_routes`).
 async fn host_prs(State(ctx): State<ServerCtx>, req: Request) -> Response {
-    use tower::ServiceExt;
     if let Err(r) = auth_plugin(&ctx, req.headers()).await {
         return *r;
     }
-    let root = match otto_state::UsersRepo::new(ctx.pool.clone()).list().await {
-        Ok(users) => users.into_iter().find(|u| u.is_root && !u.disabled),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let Some(root) = root else {
-        return (StatusCode::CONFLICT, "no root user yet — finish onboarding").into_response();
-    };
-    // The nested public router hands us `/plugin-host/repos/…`; the git router
-    // serves `/repos/…`.
-    let (mut parts, body) = req.into_parts();
-    let path_q = parts
-        .uri
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("");
-    let Some(rest) = path_q.strip_prefix("/plugin-host") else {
-        return (StatusCode::BAD_REQUEST, "bad plugin-host path").into_response();
-    };
-    parts.uri = match rest.parse() {
-        Ok(u) => u,
-        Err(_) => return (StatusCode::BAD_REQUEST, "bad plugin-host path").into_response(),
-    };
-    // Never forward the plugin bearer into the git handlers.
-    parts.headers.remove(axum::http::header::AUTHORIZATION);
-    // Drop the outer match's extensions: axum appends this route's `{id}` /
-    // `{number}` params to the inner router's own, so `Path<Id>` would see two.
-    parts.extensions = Default::default();
-    let app = otto_git::pr_read_router::<ServerCtx>()
-        .with_state(ctx)
-        .layer(axum::Extension(AuthUser(root)));
-    match app.oneshot(Request::from_parts(parts, body)).await {
-        Ok(resp) => resp,
-        Err(never) => match never {},
-    }
+    let root = otto_state::UsersRepo::new(ctx.pool.clone())
+        .active_root()
+        .await;
+    otto_git::serve_pr_read(ctx, root, "/plugin-host", req).await
 }
 
 #[derive(Serialize)]
@@ -1193,32 +1157,7 @@ async fn host_agents_run(
     }
 }
 
-/// Recursively copy a directory (used to install a local plugin into the home,
-/// and to stage review-lens skills into a shared `--add-dir` bundle — see
-/// `modules::stage_review_skills`).
-#[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — install runs it via offload::blocking
-pub(crate) fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
-    for entry in std::fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let name = entry.file_name();
-        // Skip VCS + heavy build dirs.
-        if matches!(
-            name.to_str(),
-            Some(".git") | Some("node_modules") | Some("target")
-        ) {
-            continue;
-        }
-        let from = entry.path();
-        let to = dest.join(&name);
-        if from.is_dir() {
-            copy_dir(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to).map_err(|e| format!("copy {}: {e}", from.display()))?;
-        }
-    }
-    Ok(())
-}
+pub(crate) use otto_core::paths::copy_dir;
 
 #[cfg(test)]
 mod proxy_timeout_tests {

@@ -131,6 +131,15 @@ impl UsersRepo {
         })
     }
 
+    /// The first enabled root user (`None` before onboarding).
+    pub async fn active_root(&self) -> Result<Option<User>> {
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .find(|u| u.is_root && !u.disabled))
+    }
+
     pub async fn list(&self) -> Result<Vec<User>> {
         let rows = sqlx::query("SELECT * FROM users ORDER BY created_at")
             .fetch_all(&self.pool)
