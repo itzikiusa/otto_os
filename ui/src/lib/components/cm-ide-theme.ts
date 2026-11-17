@@ -295,6 +295,8 @@ function makeEditorSurfaceTheme(
         cursor: 'pointer',
       },
       '.cm-diagnosticAction:hover': { backgroundColor: 'var(--surface)' },
+      // The LSP plugin links `Source(code)` under the message; CodeMirror repeats it below.
+      '.cm-diagnostic:has(.cm-diagnostic-code-link) > .cm-diagnosticSource': { display: 'none' },
       '.cm-search label': { display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--text-dim)' },
       '.cm-search input[type=checkbox]': { accentColor: 'var(--accent-solid)', margin: '0' },
       '.cm-search button[name=close]': {
