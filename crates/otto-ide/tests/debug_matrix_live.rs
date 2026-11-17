@@ -14,6 +14,8 @@
 //! - Gradle: the wrapper is generated from a fully cached `~/.gradle/wrapper/dists`
 //!   distribution and runs `--offline`. Kotlin debug needs `kotlin-debug-adapter`
 //!   (the plugin pack's adapter) and skips without it.
+//! - Maven / JUnit and Go testify: runs are offline, so a cell skips when an
+//!   artifact it resolves is not in `~/.m2` or the Go module cache.
 //!
 //! With `OTTO_REQUIRE_TOOLCHAINS=1` every missing runner FAILS its cell.
 //! - Bats (shell tests): only when `bats` is installed; the shell script cells
@@ -428,14 +430,30 @@ async fn go_fixture() -> Fixture {
             ("../proj2/go.mod", "module example.com/second\n\ngo 1.21\n"),
             ("../proj2/svc/deep/deep_test.go", &second),
         ],
-        // testify comes from the module cache: never reach the network.
-        &[
-            ("GOFLAGS", "-mod=mod"),
-            ("GOPROXY", "off"),
-            ("GOSUMDB", "off"),
-        ],
+        GO_OFFLINE,
     )
     .await
+}
+
+/// testify comes from the module cache: never reach the network.
+const GO_OFFLINE: &[(&str, &str)] = &[
+    ("GOFLAGS", "-mod=mod"),
+    ("GOPROXY", "off"),
+    ("GOSUMDB", "off"),
+];
+
+/// `calc`'s test imports testify: skip unless it and its deps are cached.
+fn go_testify_cached(f: &Fixture) -> bool {
+    let ok = std::process::Command::new(find_bin("go").unwrap())
+        .args(["list", "-deps", "-test", "./calc"])
+        .current_dir(&f.root)
+        .envs(GO_OFFLINE.iter().copied())
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        missing_runner("testify v1.11.1 in the Go module cache (GOPROXY=off)");
+    }
+    ok
 }
 
 #[tokio::test]
@@ -444,6 +462,9 @@ async fn matrix_go_run_test() {
         return;
     }
     let f = go_fixture().await;
+    if !go_testify_cached(&f) {
+        return;
+    }
     let item = f.gutter("calc/calc_test.go", "test", "TestAddWorks").await;
     f.run(&item, "GO_TEST_DONE").await;
 }
@@ -454,6 +475,9 @@ async fn matrix_go_debug_test() {
         return;
     }
     let f = go_fixture().await;
+    if !go_testify_cached(&f) {
+        return;
+    }
     let item = f.gutter("calc/calc_test.go", "test", "TestAddWorks").await;
     f.debug(
         &item,
@@ -625,9 +649,53 @@ fn java_ready() -> bool {
     ensure_bins_or_skip(&["java", "javac"]) && have_mvn()
 }
 
+/// What an offline `mvn test` of the JUnit 5 / JUnit 4 module resolves.
+const M2_JUNIT5_RUN: &[&str] = &[
+    "org.apache.maven.plugins:maven-resources-plugin:3.3.1",
+    "org.apache.maven.plugins:maven-compiler-plugin:3.13.0",
+    "org.apache.maven.plugins:maven-surefire-plugin:3.2.5",
+    "org.apache.maven.surefire:surefire-junit-platform:3.2.5",
+    "org.junit.jupiter:junit-jupiter:5.10.5",
+];
+const M2_JUNIT4_RUN: &[&str] = &[
+    "org.apache.maven.plugins:maven-resources-plugin:3.3.1",
+    "org.apache.maven.plugins:maven-compiler-plugin:3.13.0",
+    "org.apache.maven.plugins:maven-surefire-plugin:2.12.4",
+    "org.apache.maven.surefire:surefire-junit4:2.12.4",
+    "junit:junit:4.13.2",
+];
+/// The JUnit 5 debugger launches the platform launcher from `~/.m2`.
+const M2_JUNIT5_DEBUG: &[&str] = &["org.junit.platform:junit-platform-launcher:1.10.5"];
+
+/// Java and Maven are present and every `group:artifact:version` is in `~/.m2`.
+fn java_ready_with(coords: &[&str]) -> bool {
+    if !java_ready() {
+        return false;
+    }
+    let repo = Path::new(&std::env::var("HOME").unwrap_or_default()).join(".m2/repository");
+    let missing: Vec<&str> = coords
+        .iter()
+        .copied()
+        .filter(|c| {
+            let [g, a, v] = c.split(':').collect::<Vec<_>>()[..] else {
+                return true;
+            };
+            let pom = format!("{}/{a}/{v}/{a}-{v}.pom", g.replace('.', "/"));
+            !repo.join(pom).is_file()
+        })
+        .collect();
+    if !missing.is_empty() {
+        missing_runner(&format!(
+            "{} in ~/.m2 (Maven runs offline)",
+            missing.join(", ")
+        ));
+    }
+    missing.is_empty()
+}
+
 #[tokio::test]
 async fn matrix_java_junit5_run_test() {
-    if !java_ready() {
+    if !java_ready_with(M2_JUNIT5_RUN) {
         return;
     }
     let f = java_fixture().await;
@@ -637,7 +705,7 @@ async fn matrix_java_junit5_run_test() {
 
 #[tokio::test]
 async fn matrix_java_junit5_debug_test() {
-    if !java_ready() {
+    if !java_ready_with(M2_JUNIT5_DEBUG) {
         return;
     }
     let f = java_fixture().await;
@@ -648,7 +716,7 @@ async fn matrix_java_junit5_debug_test() {
 
 #[tokio::test]
 async fn matrix_java_junit4_run_test() {
-    if !java_ready() {
+    if !java_ready_with(M2_JUNIT4_RUN) {
         return;
     }
     let f = java_fixture().await;
@@ -1164,7 +1232,7 @@ class DeepTest {
 
 #[tokio::test]
 async fn matrix_java_run_and_debug_test_in_a_deeper_package() {
-    if !java_ready() {
+    if !java_ready_with(&[M2_JUNIT5_RUN, M2_JUNIT5_DEBUG].concat()) {
         return;
     }
     let f = Fixture::new(
