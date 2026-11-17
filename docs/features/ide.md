@@ -138,6 +138,14 @@ Every IDE subsystem operates over a unified `IdeTargetSpec`:
   20 entries, ids and paths only — an SSH target is reopened through its saved
   connection, never a stored secret). ⌘K also has one **IDE: Open project <name>**
   row per project you can reopen (named, folder, recent, SSH).
+- **Project tabs.** IDE Settings › Appearance › **Show projects as tabs** (off by
+  default; on for anyone who had the old Project | Scratches tabs) puts one tab
+  per project in the header row: **Scratches** first (no delete or rename), then
+  the named projects in the switcher's order. A click switches; right-click
+  gives the project's menu; the strip scrolls and keeps the active tab in view.
+  The trailing ▾ opens the switcher for workspaces, folders, search and **New
+  project…**, and names a plain folder or SSH target while one is open (those
+  are not tabs). Stacked layouts (phones) keep the dropdown.
 - **Opening one repo opens that repo.** A repo that is a member of a multi-repo
   project stays a single folder when opened on its own; the project's other folders
   come only when you open the project itself (its primary root, or by name).

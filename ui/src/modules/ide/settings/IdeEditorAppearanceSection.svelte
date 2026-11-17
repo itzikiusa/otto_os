@@ -171,11 +171,11 @@
     <div class="ea-card">
       <div class="ea-sw-row">
         <Switch
-          checked={ideSettings.draft.scratchesTab}
-          label="Show Scratches as a tab in the IDE header"
-          onchange={(v) => (ideSettings.draft.scratchesTab = v)}
+          checked={ideSettings.draft.projectTabs}
+          label="Show projects as tabs"
+          onchange={(v) => (ideSettings.draft.projectTabs = v)}
         />
-        <span class="ea-title">Show Scratches as a tab in the IDE header (Project | Scratches)</span>
+        <span class="ea-title">Show projects as tabs in the IDE header</span>
       </div>
     </div>
   </div>

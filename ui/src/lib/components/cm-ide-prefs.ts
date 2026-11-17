@@ -78,8 +78,8 @@ export interface IdePreferences {
   lightColorScheme: ConcreteIdeColorSchemeId;
   rainbowBrackets: boolean;
   uiDensity: 'comfortable' | 'compact';
-  /** Show Project | Scratches tabs in the IDE header. */
-  scratchesTab: boolean;
+  /** Show every project (Scratches first) as a tab in the IDE header. */
+  projectTabs: boolean;
   debuggerLayout: 'tabbed' | 'split';
   keymapPreset: IdeKeymapPreset;
   fontSize: number;
@@ -127,7 +127,7 @@ export const DEFAULT_IDE_PREFERENCES: IdePreferences = {
   lightColorScheme: 'jetbrains-islands-light',
   rainbowBrackets: true,
   uiDensity: 'comfortable',
-  scratchesTab: false,
+  projectTabs: false,
   debuggerLayout: 'tabbed',
   keymapPreset: 'jetbrains',
   fontSize: 13,
@@ -268,7 +268,8 @@ export function normalizeIdePreferencesRecord(
     lightColorScheme: preferredLightScheme,
     rainbowBrackets: asBool(p.rainbowBrackets, d.rainbowBrackets),
     uiDensity: asEnum(p.uiDensity, ['comfortable', 'compact'] as const, d.uiDensity),
-    scratchesTab: asBool(p.scratchesTab, d.scratchesTab),
+    // `scratchesTab` was the old Project | Scratches pair: whoever turned it on wanted tabs.
+    projectTabs: asBool(p.projectTabs ?? p.scratchesTab, d.projectTabs),
     debuggerLayout: asEnum(p.debuggerLayout, ['tabbed', 'split'] as const, d.debuggerLayout),
     keymapPreset,
     fontSize: asNum(p.fontSize ?? p.editorFontSize, 10, 24, d.fontSize),

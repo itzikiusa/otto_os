@@ -12,8 +12,6 @@ import { apiCtx, seedWorkspace } from './seed';
 let wsA = '';
 let wsB = '';
 let projectName = '';
-// SCRATCHES_SHOTS=<dir> saves light/dark screenshots of the switcher and the tabs.
-const SHOTS = process.env.SCRATCHES_SHOTS;
 
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
@@ -112,47 +110,5 @@ test('Scratches is the default project: first in the list, never renamed or dele
     await expect(item).toHaveAttribute('aria-disabled', 'true');
     await item.hover(); // the reason shows as the row's tooltip
     await expect(item).toHaveAttribute('title', /default project/);
-  }
-});
-
-test('the optional Project | Scratches tabs switch and come back by keyboard', async ({ page }) => {
-  await useWorkspace(page, wsA);
-  await page.goto('/#/ide');
-  // Off by default.
-  await expect(switcher(page)).toBeVisible();
-  await expect(page.getByTestId('ide-mode-tabs')).toHaveCount(0);
-
-  await page.addInitScript(() => localStorage.setItem('otto.ide.preferences.v1', JSON.stringify({ scratchesTab: true })));
-  await page.reload(); // with the setting on
-  const tabs = page.getByRole('tablist', { name: 'IDE mode' });
-  const projectTab = tabs.getByRole('tab', { name: 'Project' });
-  const scratchesTab = tabs.getByRole('tab', { name: 'Scratches' });
-  await expect(projectTab).toHaveAttribute('aria-selected', 'true');
-  await expect(switcher(page)).toContainText('Scratches A');
-
-  await scratchesTab.click();
-  await expect(scratchesTab).toHaveAttribute('aria-selected', 'true');
-  await expect(switcher(page)).toContainText('Scratches');
-  await expect(tree(page).getByTestId('ide-tree-root-node')).toContainText('Scratches');
-
-  // ← goes back to the last real project and keeps focus on the selected tab.
-  await scratchesTab.focus();
-  await page.keyboard.press('ArrowLeft');
-  await expect(projectTab).toHaveAttribute('aria-selected', 'true');
-  await expect(switcher(page)).toContainText('Scratches A');
-  await expect(projectTab).toBeFocused();
-
-  if (SHOTS) {
-    for (const scheme of ['light', 'dark'] as const) {
-      await page.emulateMedia({ colorScheme: scheme });
-      await page.evaluate((v) => localStorage.setItem('otto_scheme', v), scheme);
-      await page.reload();
-      await expect(projectTab).toBeVisible();
-      await page.screenshot({ path: `${SHOTS}/tabs-${scheme}.png` });
-      await switcher(page).click();
-      await expect(page.getByTestId('ide-scratches-option')).toBeVisible();
-      await page.screenshot({ path: `${SHOTS}/switcher-${scheme}.png` });
-      await page.keyboard.press('Escape');
-    }
   }
 });

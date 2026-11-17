@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DEFAULT_IDE_PREFERENCES, normalizeIdePreferencesRecord } from '../src/lib/components/cm-ide-prefs.ts';
 import {
-  pickReturnProject,
   projectListEntries,
+  projectTabs,
   SCRATCHES_LOCKED,
   scratchesMenuItems,
 } from '../src/modules/ide/shell/ideProjectList.ts';
@@ -37,21 +37,29 @@ test('Scratches can be neither renamed nor deleted, and the menu says why', () =
   }
 });
 
-test('the Project tab returns to the last real project while it exists', () => {
-  const ws = [{ id: 'w1', root_path: '/ws/one' }];
-  const last = { root: '/repos/b', workspaceId: null, projectId: 'b' };
-  assert.deepEqual(pickReturnProject(last, projects, ws), last);
-  const folder = { root: '/elsewhere', workspaceId: 'w9', projectId: null };
-  assert.deepEqual(pickReturnProject(folder, projects, ws), folder);
-  // The last project was deleted: the first named project, then a workspace folder.
-  const gone = { root: '/repos/z', workspaceId: null, projectId: 'z' };
-  assert.deepEqual(pickReturnProject(gone, projects, ws), { root: '/repos/a', workspaceId: null, projectId: 'a' });
-  assert.deepEqual(pickReturnProject(gone, [], ws), { root: '/ws/one', workspaceId: 'w1', projectId: null });
-  assert.equal(pickReturnProject(null, [], [{ id: 'w2', root_path: '' }]), null);
+test('project tabs: Scratches first and not deletable, then the named projects in order', () => {
+  const tabs = projectTabs(projects, 'b', false);
+  assert.deepEqual(tabs.map((t) => t.id), ['scratches', 'a', 'b', 'c']);
+  assert.deepEqual(tabs.map((t) => t.label), ['Scratches', 'Otto', 'Sinatra Java', 'Koala Golang']);
+  assert.deepEqual(tabs.map((t) => t.deletable), [false, true, true, true]);
+  assert.deepEqual(tabs.map((t) => t.active), [false, false, true, false]);
+  assert.deepEqual(projectTabs([], null, false).map((t) => t.id), ['scratches']);
 });
 
-test('the Scratches tab setting is off by default and survives a round trip', () => {
-  assert.equal(DEFAULT_IDE_PREFERENCES.scratchesTab, false);
-  assert.equal(normalizeIdePreferencesRecord({}).scratchesTab, false);
-  assert.equal(normalizeIdePreferencesRecord({ scratchesTab: true }).scratchesTab, true);
+test('project tabs: Scratches is active on it; a plain folder activates no tab', () => {
+  assert.deepEqual(projectTabs(projects, null, true).map((t) => t.active), [true, false, false, false]);
+  // A stale project id never lights a second tab while Scratches is open.
+  assert.deepEqual(projectTabs(projects, 'a', true).filter((t) => t.active).map((t) => t.id), ['scratches']);
+  assert.equal(projectTabs(projects, null, false).some((t) => t.active), false);
+});
+
+test('"Show projects as tabs" is off by default; the old Scratches tab setting turns it on', () => {
+  assert.equal(DEFAULT_IDE_PREFERENCES.projectTabs, false);
+  assert.equal(normalizeIdePreferencesRecord({}).projectTabs, false);
+  assert.equal(normalizeIdePreferencesRecord({ projectTabs: true }).projectTabs, true);
+  assert.equal(normalizeIdePreferencesRecord({ scratchesTab: true }).projectTabs, true);
+  assert.equal(normalizeIdePreferencesRecord({ scratchesTab: false }).projectTabs, false);
+  // The new key wins once it is saved.
+  assert.equal(normalizeIdePreferencesRecord({ scratchesTab: true, projectTabs: false }).projectTabs, false);
+  assert.equal('scratchesTab' in normalizeIdePreferencesRecord({ scratchesTab: true }), false);
 });
