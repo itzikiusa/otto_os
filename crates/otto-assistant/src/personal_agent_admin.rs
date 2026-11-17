@@ -453,12 +453,18 @@ pub async fn check_name_free(
     Ok(())
 }
 
-/// [`check_name_free`] for renaming `agent` to `name`.
-pub async fn check_rename(
+/// An update's new working folder must be valid and its new name free
+/// ([`check_name_free`] for renaming `agent`).
+pub async fn check_update(
     repo: &PersonalAgentsRepo,
     agent: &PersonalAgent,
-    name: &str,
+    cwd: Option<&str>,
+    name: Option<&str>,
 ) -> Result<()> {
+    if let Some(c) = cwd {
+        validate_agent_cwd(c)?;
+    }
+    let Some(name) = name else { return Ok(()) };
     let owner = agent.created_by.as_deref();
     check_name_free(repo, &agent.workspace_id, owner, name, Some(&agent.id)).await
 }
