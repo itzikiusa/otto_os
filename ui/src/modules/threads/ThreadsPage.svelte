@@ -390,7 +390,8 @@
         cardOn: compact ? null : showWelcomeStage ? threadsChrome.cardVisible : cardPopover,
         threadId: focused?.id ?? null,
         compact,
-        phone: viewport.isPhone,
+        // A phone on its side is tablet-wide but still the phone: no hand-off to itself.
+        phone: viewport.isPhone || viewport.isShort,
         sidebarVisible: !listDrawer && threads.sidebarOpen,
       },
       {

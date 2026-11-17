@@ -648,7 +648,8 @@
      its side) no sub-bar. */
   /* CodeMirror's base theme declares `.cm-gutter { display: flex !important }`. */
   .ide-page.stack :global(.cm-gutter.cm-foldGutter) { display: none !important; }
-  .ide-page.short-stack :global(.ide-subbar) { display: none; }
+  /* A short stacked page keeps its rows for code, unless the person asked for the toolbar (tab ▾). */
+  .ide-page.short-stack :global(.ide-subbar:not(.asked)) { display: none; }
   .ide-page.typing :global(.page-header-bar), .ide-page.typing :global(.ide-subbar) { display: none; }
   @media (max-width: 1024px) {
     .ide-workbench:not(.stack) > .ide-rail-wrap { max-inline-size: 32%; }

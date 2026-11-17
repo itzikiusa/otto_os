@@ -217,7 +217,7 @@
   }
 </script>
 
-<div class="ide-subbar" class:stack-collapsed={stackCollapsed} data-testid="ide-editor-subbar">
+<div class="ide-subbar" class:stack-collapsed={stackCollapsed} class:asked={ideLayout.stack && ideEditorChrome.subbarShown} data-testid="ide-editor-subbar">
   <div class="ide-crumbs" dir="ltr" data-testid="ide-path-crumbs">
     {#if showCrumbs}
       {#each crumbs as c, idx (c.kind === 'seg' ? `s${c.index}` : 'more')}
