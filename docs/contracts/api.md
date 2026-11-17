@@ -3292,6 +3292,10 @@ Plugins are external sidecar processes installed at runtime under `~/otto-plugin
 | Method & path | Returns |
 |---|---|
 | GET `/plugin-host/repos` | `[{id,name,path,remote_url}]` |
+| GET `/plugin-host/repos/{id}/prs` | Read-only PR list — same query params and body as `GET /repos/{id}/prs`, run as the root user (its forge credential). 409 before onboarding. |
+| GET `/plugin-host/repos/{id}/prs/{number}` | PR detail, as `GET /repos/{id}/prs/{number}` (root user). |
+| GET `/plugin-host/repos/{id}/prs/{number}/commits` | PR commits, as `GET /repos/{id}/prs/{number}/commits` (root user). |
+| GET `/plugin-host/repos/{id}/prs/{number}/diff` | PR diff, as `GET /repos/{id}/prs/{number}/diff` (root user). No PR write routes are exposed. |
 | GET `/plugin-host/jira/accounts` | `[{id,label,base_url,email}]` |
 | GET `/plugin-host/jira/credentials?account=<id>` | `{base_url,email,token}` |
 | POST `/plugin-host/agents/run` | `{prompt,provider?,model?,cwd?}` → `{text}`. Default: a tool-less, no-MCP, Seatbelt-confined claude turn (codex: read-only sandbox) in a throwaway scratch dir; `cwd` ignored. Full tools only when the manifest sets `agent_tools: true`, and then `cwd` (default the plugin data dir) must be inside the data dir or a registered repo and never the daemon's own cwd (else 400). Unknown provider → 400. Every run writes a `plugin.agent_run` audit row. |

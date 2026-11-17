@@ -41,7 +41,7 @@ mod working_diff;
 mod worktree_changes;
 mod worktree_probe;
 
-pub use http::{router, GitCtx};
+pub use http::{pr_read_router, router, GitCtx};
 pub use local::{
     clone_repo, hardened_command, hardened_std_command, DiffOpts, DiffTarget, LocalGit,
     ResolvedBase,
