@@ -36,7 +36,8 @@ function setup(
     './review-batch': reviewBatch,
     '../../lib/stores/database.svelte': { database },
     './results-format': {}, './edit-types': { adapterFor: () => adapter },
-    './edit-sql': { scopeDatabase: (n: string | null) => n }, './edit-mongo': {}, '../../lib/jsonTree/expansion-plan': {},
+    './edit-sql': { scopeDatabase: (n: string | null) => n },
+    './edit-mongo': { mongoStatementId: (s: string) => JSON.parse(/\((\{.*?\})[,)]/.exec(s)?.[1] ?? '{}')._id }, '../../lib/jsonTree/expansion-plan': {},
     // "Add row" (InsertFlow) is covered by dbInsertForm.test.ts.
     './insert-flow.svelte': { InsertFlow: class { target = null; form = null; } },
     '../../lib/toastError': { toastError: (t: string) => toasts.push(`error:${t}`) }, '../../lib/plural': plural,
@@ -142,7 +143,7 @@ test('a single-row edit that matched no row keeps its draft and the modal, and d
   assert.ok(h.flow.reviewSql, 'the review modal stays open');
   assert.match(h.flow.reviewError ?? '', /did not match any row/);
   assert.equal(h.reruns.length, 0, 'a refresh would discard the kept draft');
-  assert.deepEqual(h.toasts, ['warn:Did not match any row']);
+  assert.deepEqual(h.toasts, ['error:Did not match any row']);
 });
 
 test('in a 3-row batch only the draft whose UPDATE matched nothing is kept', async () => {
@@ -154,7 +155,7 @@ test('in a 3-row batch only the draft whose UPDATE matched nothing is kept', asy
   await h.flow.runReview();
   assert.deepEqual([...h.flow.pending.keys()], [1], 'rows 0 and 2 were written; row 1 matched nothing');
   assert.match(h.flow.reviewError ?? '', /other edits were written/);
-  assert.deepEqual(h.toasts, ['warn:Did not match any row']);
+  assert.deepEqual(h.toasts, ['error:Did not match any row']);
 });
 
 test('a single-row edit that changed several rows is applied with a warning', async () => {
@@ -169,7 +170,7 @@ test('a single-row edit that changed several rows is applied with a warning', as
 /** One mongosh `updateOne` per row — what the Mongo adapter builds. */
 const perRowUpdateOne = (rows: { rowIdx: number }[]): Built => ({
   title: 'Review update',
-  sql: rows.map((r) => `db.t.updateOne({_id: ${r.rowIdx + 1}}, {$set: {v: "x"}})`).join('\n'),
+  sql: rows.map((r) => `db.t.updateOne({"_id": ${r.rowIdx + 1}}, {"$set": {"v": "x"}})`).join('\n'),
   diff: [],
   stmtRows: rows.map((r) => r.rowIdx),
 });
@@ -179,8 +180,8 @@ test('Mongo reports MATCHED documents: an updateOne that matched none keeps its 
   h.flow.reviewPending();
   await h.flow.runReview();
   assert.equal(h.flow.pending.size, 1);
-  assert.match(h.flow.reviewError ?? '', /did not match any row/);
-  assert.deepEqual(h.toasts, ['warn:Did not match any row']);
+  assert.match(h.flow.reviewError ?? '', /^No document matched _id 1; it may have been changed or deleted\./);
+  assert.deepEqual(h.toasts, ['error:Did not match any row']);
 });
 
 test('a Mongo updateOne that matched its document is Applied', async () => {
@@ -194,10 +195,10 @@ test('a Mongo updateOne that matched its document is Applied', async () => {
 test('affectedCheck ignores the BEGIN / COMMIT wrapper and non-row statements', () => {
   const res = { ...counted('BEGIN', 0), more_results: [counted('UPDATE t SET v = 1 WHERE id = 1', 0), counted('COMMIT', 0)] };
   const plain = (v: unknown) => JSON.parse(JSON.stringify(v)); // the module runs in its own vm realm
-  assert.deepEqual(plain(reviewBatch.affectedCheck('mysql', res, true, '')), { unmatched: [0], multi: [] });
+  assert.deepEqual(plain(reviewBatch.affectedCheck('mysql', res, true, '')), { unmatched: [0], unmatchedStmts: ['UPDATE t SET v = 1 WHERE id = 1'], multi: [] });
   assert.equal(reviewBatch.affectedCheck('postgres', counted('INSERT INTO t VALUES (1)', 0), false, 'INSERT INTO t VALUES (1)'), null);
   assert.equal(reviewBatch.affectedCheck('mysql', { columns: [], rows: [] }, false, 'UPDATE t SET v = 1'), null, 'no count, no claim');
-  assert.deepEqual(plain(reviewBatch.affectedCheck('postgres', { columns: [], rows: [], rows_affected: 0 }, false, 'DELETE FROM t WHERE id IN (1)')), { unmatched: [0], multi: [] });
+  assert.deepEqual(plain(reviewBatch.affectedCheck('postgres', { columns: [], rows: [], rows_affected: 0 }, false, 'DELETE FROM t WHERE id IN (1)')), { unmatched: [0], unmatchedStmts: ['DELETE FROM t WHERE id IN (1)'], multi: [] });
 });
 
 test('reviewBatchSql wraps only multi-statement MySQL / Postgres reviews that manage no transaction', () => {

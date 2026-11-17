@@ -12,7 +12,7 @@
 // failure stay written, so only the drafts they covered are cleared.
 
 import type { DbEngine, QueryResult } from '../../lib/api/types';
-import { countStatements } from '../../lib/database/sql-util';
+import { codeStatements, countStatements } from '../../lib/database/sql-util';
 import { splitModeFor } from '../../lib/database/sql-dialect.ts';
 
 /** Engines whose edit batch runs as one transaction. */
@@ -77,21 +77,26 @@ export function affectedCheck(
   res: QueryResult,
   atomic: boolean,
   ranSql: string,
-): { unmatched: number[]; multi: number[] } | null {
+): { unmatched: number[]; unmatchedStmts: string[]; multi: number[] } | null {
   if (!engine || !MATCH_COUNTED.has(engine)) return null;
   const rowWrite = engine === 'mongodb' ? MONGO_ROW_WRITE : ROW_WRITE;
   let entries = [res, ...(res.more_results ?? [])];
   if (atomic) entries = entries.slice(1, -1);
+  // The full statements (a batch entry carries only an 80-char preview).
+  const full = atomic ? [] : codeStatements(ranSql, splitModeFor(engine)).map((s) => s.text.trim());
   const unmatched: number[] = [];
+  const unmatchedStmts: string[] = [];
   const multi: number[] = [];
   entries.forEach((r, i) => {
     // A single statement's result carries no preview: the review text is it.
     const text = r.statement ?? (atomic || res.more_results?.length ? '' : ranSql);
     if (!rowWrite.test(text) || typeof r.rows_affected !== 'number') return;
-    if (r.rows_affected === 0) unmatched.push(i);
-    else if (r.rows_affected > 1 && /^\s*update\b/i.test(text)) multi.push(i);
+    if (r.rows_affected === 0) {
+      unmatched.push(i);
+      unmatchedStmts.push(full.length === entries.length ? full[i] : text);
+    } else if (r.rows_affected > 1 && /^\s*update\b/i.test(text)) multi.push(i);
   });
-  return unmatched.length || multi.length ? { unmatched, multi } : null;
+  return unmatched.length || multi.length ? { unmatched, unmatchedStmts, multi } : null;
 }
 
 /** What to tell the person when row statements matched nothing, and which
@@ -100,9 +105,14 @@ export function affectedCheck(
 export function unmatchedReport(
   unmatched: readonly number[],
   stmtRows: readonly number[] | null,
+  mongoIds: readonly unknown[] = [],
 ): { written: Set<number> | null; message: string } {
   const n = unmatched.length;
-  const lead = `${n === 1 ? 'A statement' : `${n} statements`} did not match any row — the row was deleted or its key changed since this result loaded.`;
+  // Mongo names the document(s): `undefined` = a statement without an `_id` filter.
+  const ids = mongoIds.filter((id) => id !== undefined).map((id) => JSON.stringify(id));
+  const lead = ids.length
+    ? `No document matched _id ${ids.join(', ')}; it may have been changed or deleted.`
+    : `${n === 1 ? 'A statement' : `${n} statements`} did not match any row — the row was deleted or its key changed since this result loaded.`;
   if (!stmtRows) return { written: null, message: `${lead} Nothing else was rolled back; every draft is kept. Re-run the query to see the current rows.` };
   const missed = new Set(unmatched.map((i) => stmtRows[i]));
   const written = new Set(stmtRows.filter((row) => !missed.has(row)));

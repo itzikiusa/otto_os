@@ -35,7 +35,7 @@ import {
   type TypedValue,
 } from './edit-types';
 import { parseSimpleSelect, qid, scopeDatabase, typedCellDraft, valueLiteral, whereByPk } from './edit-sql';
-import { mongoCollectionForEdit } from './edit-mongo';
+import { mongoCollectionForEdit, mongoStatementId } from './edit-mongo';
 import { InsertFlow } from './insert-flow.svelte';
 import { applyPatchAtPath, flattenPaths, valueKind } from '../../lib/jsonTree/expansion-plan';
 import { toastError } from '../../lib/toastError';
@@ -346,8 +346,8 @@ export class EditFlow {
 
   isEditableCell(colIdx: number): boolean {
     if (!this.editable) return false;
-    const col = this.result?.columns[colIdx]; // PK column(s) and base64 bytes (no faithful text box) read-only
-    return !!col?.name && !col.binary && !this.editPkCols.includes(col.name);
+    const col = this.result?.columns[colIdx]; // PK column(s) — but Mongo's `_id`, a reviewed rename (mongoRenameId) — and base64 bytes (no faithful text box) read-only
+    return !!col?.name && !col.binary && (!this.editPkCols.includes(col.name) || (this.engine === 'mongodb' && col.name === '_id'));
   }
 
   beginEdit(rowIdx: number, colIdx: number): void {
@@ -766,12 +766,12 @@ export class EditFlow {
   }
   /** Row statements that matched NO row (deleted, key changed) — not "Applied":
    *  keep those drafts and the modal, clear only the rows fully written. */
-  private reportUnmatched(unmatched: readonly number[], ranSql: string): void {
+  private reportUnmatched(unmatched: readonly number[], texts: readonly string[], ranSql: string): void {
     const stmtRows = this.reviewStmtRows?.sql === ranSql ? this.reviewStmtRows.rows : null;
-    const { written, message } = unmatchedReport(unmatched, stmtRows);
+    const { written, message } = unmatchedReport(unmatched, stmtRows, this.engine === 'mongodb' ? texts.map(mongoStatementId) : []);
     if (written?.size) this.clearCoveredDrafts(written);
     this.reviewError = message;
-    toasts.warn('Did not match any row', message);
+    toasts.error('Did not match any row', message);
   }
 
   async runReview(): Promise<void> {
@@ -803,7 +803,7 @@ export class EditFlow {
       if (failure) return this.reportPartialReview(failure, batch.atomic, sql);
       // Nor is an UPDATE / DELETE that matched no row (MySQL / Postgres counts).
       const miss = affectedCheck(this.engine, res, batch.atomic, sql);
-      if (miss?.unmatched.length) return this.reportUnmatched(miss.unmatched, sql);
+      if (miss?.unmatched.length) return this.reportUnmatched(miss.unmatched, miss.unmatchedStmts, sql);
       toasts.success('Applied', 'Statement ran successfully');
       if (miss?.multi.length) toasts.warn('An edit changed more than one row', `${plural(miss.multi.length, 'UPDATE')} matched several rows — the key may not be unique.`);
       // The drafts this review applied are written now: clear them BEFORE the
@@ -1108,8 +1108,8 @@ export class EditFlow {
       this.openReview(this.engine === 'mongodb' ? 'Review insertOne' : 'Review INSERT', sql, diff);
       return;
     }
-    // Null = nothing changed (SQL) — just close the editor.
     const built = adapterFor(this.engine).buildReplace?.(rowIdx, doc, ctx) ?? null;
+    if (!built && compactJson(doc) !== compactJson(this.rowObject(rowIdx))) return void (this.docEditor.err = 'Nothing to save: only read-only fields changed (key columns, or field names with "." or "$").');
     this.docEditor = null;
     if (built) this.openReview(built.title, built.sql, built.diff);
   }

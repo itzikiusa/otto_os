@@ -907,3 +907,101 @@ async fn mongo_show_helpers_list_names_without_quotes() {
         .await
         .expect("drop");
 }
+
+/// The statements the Explorer's edit flow generates for a string `_id` with
+/// spaces and dots (`edit-mongo.ts`): `updateOne` by `_id` keeps booleans and
+/// null typed, a missing `_id` reports 0 matched (the UI turns that into an
+/// error), and an `_id` change — immutable in MongoDB — copies the STORED
+/// document under the new `_id` with `$merge` (refusing an existing one) and
+/// then deletes the old document.
+#[tokio::test]
+#[ignore]
+async fn mongo_string_id_edit_statements() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let d = MongoDriver::default();
+    let cfg = cfg();
+    let run = |stmt: &str| {
+        let req = QueryRequest {
+            statement: stmt.into(),
+            max_rows: Some(100),
+            ..Default::default()
+        };
+        let d = &d;
+        let cfg = &cfg;
+        async move { d.run(cfg, &req).await }
+    };
+    const C: &str = "e2e_edit_ids";
+    run(&format!("db.{C}.deleteMany({{}})"))
+        .await
+        .expect("reset");
+    run(&format!(
+        r#"db.{C}.insertMany([{{"_id": "SLEIPNIR INTERACTIVE d.o.o", "checkAdditionalFields": true, "supportOnlySinglePlayer": false, "supportOnlySingleGame": null, "hidden": {{"n": 1}}}}, {{"_id": "SoftSwiss", "checkAdditionalFields": false}}])"#
+    ))
+    .await
+    .expect("seed");
+
+    let upd = run(&format!(
+        r#"db.{C}.updateOne({{"_id": "SLEIPNIR INTERACTIVE d.o.o"}}, {{"$set": {{"checkAdditionalFields": false, "supportOnlySingleGame": true}}}})"#
+    ))
+    .await
+    .expect("updateOne");
+    assert_eq!(upd.rows_affected, Some(1), "{:?}", upd.message);
+
+    let miss = run(&format!(
+        r#"db.{C}.updateOne({{"_id": "SLEIPNIR INTERACTIVE d.o.o."}}, {{"$set": {{"x": 1}}}})"#
+    ))
+    .await
+    .expect("updateOne on a missing _id still answers");
+    assert_eq!(miss.rows_affected, Some(0), "a missing _id matches nothing");
+
+    // Rename: copy under the new _id, then delete the old one.
+    let merge = |from: &str, to: &str| {
+        format!(
+            r#"db.{C}.aggregate([{{"$match": {{"_id": {from}}}}}, {{"$set": {{"_id": {{"$literal": {to}}}}}}}, {{"$merge": {{"into": "{C}", "whenMatched": "fail"}}}}])"#
+        )
+    };
+    run(&merge(
+        r#""SLEIPNIR INTERACTIVE d.o.o""#,
+        r#""SLEIPNIR INTERACTIVE d.o.o.""#,
+    ))
+    .await
+    .expect("$merge copy");
+    let del = run(&format!(
+        r#"db.{C}.deleteOne({{"_id": "SLEIPNIR INTERACTIVE d.o.o"}})"#
+    ))
+    .await
+    .expect("deleteOne");
+    assert_eq!(del.rows_affected, Some(1));
+    // A rename onto an existing _id fails instead of overwriting it.
+    let dup = run(&merge(r#""SoftSwiss""#, r#""SLEIPNIR INTERACTIVE d.o.o.""#)).await;
+    assert!(
+        dup.is_err(),
+        "renaming onto an existing _id must fail: {dup:?}"
+    );
+
+    let all = run(&format!(
+        r#"db.{C}.find({{"_id": "SLEIPNIR INTERACTIVE d.o.o."}})"#
+    ))
+    .await
+    .expect("find renamed");
+    assert_eq!(all.rows.len(), 1, "exactly the renamed document");
+    let col = |name: &str| all.columns.iter().position(|c| c.name == name).unwrap();
+    let row = &all.rows[0];
+    assert_eq!(row[col("checkAdditionalFields")], json!(false));
+    assert_eq!(row[col("supportOnlySinglePlayer")], json!(false));
+    assert_eq!(row[col("supportOnlySingleGame")], json!(true));
+    assert_eq!(
+        row[col("hidden")],
+        json!({"n": 1}),
+        "every stored field is copied"
+    );
+    let old = run(&format!(
+        r#"db.{C}.find({{"_id": "SLEIPNIR INTERACTIVE d.o.o"}})"#
+    ))
+    .await
+    .expect("find old");
+    assert!(old.rows.is_empty(), "the old _id is gone");
+    run(&format!("db.{C}.drop()")).await.ok();
+}

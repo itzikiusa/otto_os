@@ -87,3 +87,35 @@ test('lossy results clear stale edit targets; row pagination and ordinary marker
   assert.equal(flow.editTable, 'users');
   assert.equal(flow.editReason, null);
 });
+
+test('an _id change is a server-side rename ($merge copy, then delete), never a silent no-op', () => {
+  const { mongoAdapter } = adapter();
+  const id = 'SLEIPNIR INTERACTIVE d.o.o';
+  const ctx = {target:{table:'providers'},columns:[{name:'_id'},{name:'check'},{name:'single'}],liveRows:[[id,true,null]]};
+  const copy = `db.providers.aggregate([{"$match": {"_id": "${id}"}}, {"$set": {"_id": {"$literal": "${id}."}}}, {"$merge": {"into": "providers", "whenMatched": "fail"}}])`;
+  const del = `db.providers.deleteOne({"_id": "${id}"})`;
+  // Doc editor: only the _id changed (the reported "Save does nothing").
+  const only = mongoAdapter.buildReplace(0,{_id:`${id}.`,check:true,single:null},ctx);
+  assert.equal(only.sql, [copy, del].join(';\n'), 'statements are `;`-separated: the runner splits on `;` only');
+  // ...plus a field: the update targets the NEW _id, between copy and delete.
+  const both = mongoAdapter.buildReplace(0,{_id:`${id}.`,check:false,single:null},ctx);
+  assert.equal(both.sql, [copy, `db.providers.updateOne({"_id": "${id}."}, {"$set":{"check":false}})`, del].join(';\n'));
+  // Grid: an _id cell draft renames; a null field typed `true` stays a boolean.
+  const grid = mongoAdapter.buildUpdate([{rowIdx:0,patch:{cells:new Map([[0,`${id}.`],[2,'true']]),set:new Map(),unset:new Set(),rename:new Map()}}],ctx);
+  assert.equal(grid.sql, [copy, del, `db.providers.updateOne({"_id": "${id}."}, {"$set": {"single": true}})`].join(';\n'));
+  assert.deepEqual([...grid.stmtRows], [0, 0, 0]);
+});
+
+test('typed grid literals keep booleans for null fields and ObjectIds as ObjectIds', () => {
+  const { mongoLiteral, mongoStatementId } = adapter();
+  assert.equal(mongoLiteral('true', null), 'true');
+  assert.equal(mongoLiteral('false', undefined), 'false');
+  assert.equal(mongoLiteral('5624', null), '"5624"', 'a null field never guesses a number');
+  const oid = '507f1f77bcf86cd799439011';
+  assert.equal(mongoLiteral(`ObjectId("${oid}")`, {$oid:'0'.repeat(24)}), `{"$oid": "${oid}"}`);
+  assert.equal(mongoLiteral(oid, {$oid:'0'.repeat(24)}), `{"$oid": "${oid}"}`);
+  assert.equal(mongoLiteral(oid, 'text'), `"${oid}"`, 'a string _id stays a string');
+  assert.equal(mongoStatementId('db.c.updateOne({"_id": "a.b c"}, {"$set": {"x": 1}})'), 'a.b c');
+  assert.equal(JSON.stringify(mongoStatementId('db.c.deleteOne({"_id": {"$oid": "' + oid + '"}})')), `{"$oid":"${oid}"}`);
+  assert.equal(mongoStatementId('db.c.find({})'), undefined);
+});

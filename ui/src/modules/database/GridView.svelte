@@ -871,7 +871,7 @@
                 <span class="th-inner">
                   <span class="th-line">
                     <span class="th-name">{c.name}</span>
-                    {#if isPk}<span class="th-pk" title="Primary key (read-only)">PK</span>{/if}
+                    {#if isPk}<span class="th-pk" title={flow.engine === 'mongodb' ? 'Document key: a change is reviewed as a copy under the new _id, then a delete of the old one' : 'Primary key (read-only)'}>PK</span>{/if}
                     <span class="th-sort-ind" class:on={sortCol === ci} aria-hidden="true"
                       >{sortCol === ci ? (sortDir === 'asc' ? '▲' : '▼') : '↕'}</span
                     >

@@ -355,7 +355,8 @@
     const items: MenuItem[] = [];
     const editableHere = canEdit && (ctx.colIdx === -1 || flow.isEditableCell(ctx.colIdx));
     // SQL: a top-level row IS a column — it can be set, never removed/renamed.
-    const sqlColumn = engine !== 'mongodb' && ctx.topLevel;
+    // …and Mongo's `_id` can be changed (a reviewed rename) but never removed.
+    const sqlColumn = (engine !== 'mongodb' || ctx.path === '_id') && ctx.topLevel;
     const parent = ctx.path.includes('.') ? ctx.path.slice(0, ctx.path.lastIndexOf('.')) : '';
     if (editableHere) {
       if (!ctx.container) items.push({ label: 'Edit value', icon: 'edit', action: ctx.edit });
