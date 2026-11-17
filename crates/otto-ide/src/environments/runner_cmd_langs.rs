@@ -118,7 +118,7 @@ fn script_then_args(cfg: &IdeRunConfig, flags: Vec<String>, args: Vec<String>) -
     // Already named (a gutter `npx jest calc.test.js`): not passed twice.
     let named = |tp: &String| {
         args.iter()
-            .any(|a| a == tp || std::path::Path::new(tp).ends_with(a))
+            .any(|a| a == tp || (!a.is_empty() && std::path::Path::new(tp).ends_with(a)))
     };
     if let Some(tp) = cfg.target_path.as_ref().filter(|tp| !named(tp)) {
         out.push(tp.clone());

@@ -487,10 +487,10 @@ fn a_script_config_keeps_its_target_when_program_arguments_are_set() {
             name: "script".into(),
             runner,
             command: Some(
-                if runner == IdeRunnerKind::Python {
-                    "python3"
-                } else {
-                    "node"
+                match runner {
+                    IdeRunnerKind::Python => "python3",
+                    IdeRunnerKind::Shell => "bash",
+                    _ => "node",
                 }
                 .into(),
             ),
@@ -513,6 +513,19 @@ fn a_script_config_keeps_its_target_when_program_arguments_are_set() {
     assert_eq!(
         run(IdeRunnerKind::Node, "index.js", &["--foo"]),
         ["index.js", "--foo"]
+    );
+    // An empty argument (`''`) is an argument, not the script's name.
+    assert_eq!(
+        run(IdeRunnerKind::Python, "app.py", &["hello", ""]),
+        ["app.py", "hello", ""]
+    );
+    assert_eq!(
+        run(IdeRunnerKind::Node, "index.js", &[""]),
+        ["index.js", ""]
+    );
+    assert_eq!(
+        run(IdeRunnerKind::Shell, "run.sh", &["", "x"]),
+        ["run.sh", "", "x"]
     );
     // A config saved with the script in its arguments runs it once.
     assert_eq!(
