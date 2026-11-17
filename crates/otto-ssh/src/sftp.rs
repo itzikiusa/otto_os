@@ -147,13 +147,13 @@ impl SftpSession {
         if let Some(port) = p.port {
             args.extend(["-P".into(), port.to_string()]);
         }
-        if let Some(identity) = p.identity_file.as_deref().filter(|s| !s.is_empty()) {
+        let identity = p.identity_file.as_deref().filter(|s| !s.is_empty());
+        if let Some(identity) = identity {
             args.push("-i".into());
             args.push(identity.to_string());
         }
         if let Some(jump) = p.jump.as_deref().filter(|s| !s.is_empty()) {
-            args.push("-J".into());
-            args.push(jump.to_string());
+            args.extend(crate::jump_args(jump, identity));
         }
         // `--` ends option parsing: the destination is never read as an option
         // (a profile host like `-oProxyCommand=…` would otherwise run locally).
@@ -893,10 +893,11 @@ not-a-mode-string here we go
             args[args.iter().position(|a| a == "-i").unwrap() + 1],
             "/home/me/.ssh/id_ed25519"
         );
-        assert_eq!(
-            args[args.iter().position(|a| a == "-J").unwrap() + 1],
-            "bastion.example.com"
-        );
+        // With an identity, the hop authenticates with that key too.
+        assert!(!args.iter().any(|a| a == "-J"));
+        assert!(args.iter().any(|a| a
+            .starts_with("ProxyCommand=ssh -i '/home/me/.ssh/id_ed25519'")
+            && a.ends_with("-W %h:%p -- 'bastion.example.com'")));
         assert_eq!(args.last().unwrap(), "deploy@h.example.com");
     }
 

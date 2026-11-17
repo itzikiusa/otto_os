@@ -27,7 +27,7 @@
   import { registerLiveParker, PERSIST_MAX_BYTES } from '../editor-history';
   import { search, searchKeymap, openSearchPanel } from '@codemirror/search';
   import { completionKeymap, type CompletionSource } from '@codemirror/autocomplete';
-  import { lintGutter, lintKeymap } from '@codemirror/lint';
+  import { lintGutter, lintKeymap, setDiagnostics } from '@codemirror/lint';
   import { indentOnInput, bracketMatching, foldKeymap, defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language';
   import { oneDark, oneDarkTheme } from '@codemirror/theme-one-dark';
   import { cmLangNow, cmLangPending, loadCmLang } from './cm-langs';
@@ -382,7 +382,7 @@
     const docText = view.state.doc.toString(), ln = line ?? view.state.doc.lineAt(view.state.selection.main.head).number;
     return {
       clientFixes: ideMod.getIdeQuickFixesAtLine(view.state, ln),
-      deterministicFixes: ideMod.computeDeterministicQuickFixes(docText, livePath || path, language, ln, symbol),
+      deterministicFixes: ideMod.computeDeterministicQuickFixes(docText, livePath || path, language, ln, symbol, ideMod.lintMessagesAtLine(view.state, ln)),
       docText,
     };
   }
@@ -433,19 +433,18 @@
     }
   }
 
-  export function disposeLspClients(rootPath?: string): void {
-    ideMod?.disposePooledLspClients({ rootPath, forceAll: true });
-  }
+  export function disposeLspClients(rootPath?: string): void { ideMod?.disposePooledLspClients({ rootPath, forceAll: true }); }
+  export function lspRenameEdits(line: number, column: number, name: string) { return view && ideMod ? ideMod.queryPooledLspRename(view, line, column, name) : Promise.resolve(null); }
+  export function lspReferences(line: number, column: number) { return view && ideMod ? ideMod.queryPooledLspReferences(view, line, column) : Promise.resolve(null); }
+  export function lspQuickFixes(line: number) { return view && ideMod ? ideMod.queryPooledLspCodeActions(view, line) : Promise.resolve(null); }
 
   export function reconnectLspClients(rootPath?: string): void {
     ideMod?.disposePooledLspClients({ rootPath, forceAll: true });
     if (!view || !isIdeActive() || !ideMod) return;
-    const p = livePath || path;
-    const normFilter = rootPath ? rootPath.replace(/\\/g, '/').replace(/\/+$/, '') : '';
-    const normPath = p.replace(/\\/g, '/');
-    if (!normFilter || normPath === normFilter || normPath.startsWith(`${normFilter}/`)) {
-      view.dispatch({ effects: ideCompartment.reconfigure(buildIdeExtIfLoaded(p)) });
-    }
+    const p = livePath || path, normFilter = rootPath ? rootPath.replace(/\\/g, '/').replace(/\/+$/, '') : '', normPath = p.replace(/\\/g, '/');
+    if (normFilter && normPath !== normFilter && !normPath.startsWith(`${normFilter}/`)) return;
+    view.dispatch({ effects: ideCompartment.reconfigure(buildIdeExtIfLoaded(p)) });
+    if (!completionSource && lsp) void attachLsp(view, p, root, connectionId); // the LSP lives in lspCompartment: dial a fresh client
   }
 
   $effect(() => registerFindProvider(buildEditorFindProviderSpec(() => view)));
@@ -636,6 +635,7 @@
         ideDepsCompartment.reconfigure(nextColdDeps),
         ...(!stale ? [kept.scroll] : []),
       ];
+      if (lsp) effects.push(...[setDiagnostics(kept.state, []).effects ?? []].flat()); // the kept marks belong to the detached LSP plugin
       if (ideMod && isIdeActive()) {
         effects.push(ideBpCompartment.reconfigure(buildIdeBpExtIfLoaded(toPath)), ideCompartment.reconfigure(buildIdeExtIfLoaded(toPath)));
       }

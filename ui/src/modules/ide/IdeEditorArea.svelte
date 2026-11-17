@@ -38,6 +38,7 @@
   } from './editor/ideEditorStoreBridge.svelte';
   import type { ideGit as IdeGitSingleton } from './git/ideGitController.svelte';
   import type { IdeOutlineNode } from './editor/ideLangAnalyzer';
+  import type { IdeDiagnostic } from '../../lib/api/types';
   let langAnalyzerMod = $state<typeof import('./editor/ideLangAnalyzer') | null>(null);
   let liveGit = $state<typeof IdeGitSingleton | null>(null);
   function fastDocKind(filePath: string, language?: string): string {
@@ -131,6 +132,12 @@
       .catch(() => { /* ignore aborted or non-git paths */ });
   }
 
+  /** A dependency action wrote the manifest itself: take the file from disk (an
+   *  edit on top of the old sha would end in a save conflict and a dirty tab). */
+  function reloadTabFromDisk(path: string): void {
+    void import('./git/ideGitController.svelte').then((m) => m.ideGit.reloadIdeTabIfOpen(path));
+  }
+
   $effect(() => {
     const cur = ide.activeTab;
     if (!cur) { stagedPrimaryTab = null; return; }
@@ -196,6 +203,7 @@
       primaryEditorRef?.reconnectLspClients?.(rootPath);
       splitEditorRef?.reconnectLspClients?.(rootPath);
     };
+    const onLspDiags = (e: Event) => { const d = (e as CustomEvent<{ path: string; diagnostics: IdeDiagnostic[] }>).detail; ide.setDiagnostics(d.path, d.diagnostics); };
     const onGitReloaded = (e: Event) => {
       const reloadedPath = (e as CustomEvent<{ path?: string }>).detail?.path;
       const tab = reloadedPath ? ide.tabs.find((t) => t.path === reloadedPath) : ide.activeTab;
@@ -222,7 +230,7 @@
             isCopy ? `Create a copy of ${ide.relativePath(targetPath)} at:` : `Move or rename ${ide.relativePath(targetPath)} to:`,
             { title: isCopy ? 'Copy file' : 'Move file', confirmLabel: isCopy ? 'Copy' : 'Move', initial },
           );
-          if (dest && dest !== targetPath) await ide.mutateFs(isCopy ? 'duplicate' : 'rename', targetPath, dest);
+          if (dest?.trim() && ide.resolvePath(dest.trim()) !== targetPath) await ide.mutateFs(isCopy ? 'duplicate' : 'rename', targetPath, dest.trim());
         } else if (det.op === 'safe-delete') {
           const baseSym = (targetPath.split('/').pop() ?? '').replace(/\.[^.]+$/, '');
           if (baseSym && /^[A-Za-z_]\w*$/.test(baseSym)) {
@@ -243,6 +251,7 @@
     window.addEventListener('otto:ide-apply-quickfix-edits', onApplyFixes);
     window.addEventListener('otto:ide-enable-go-build-tag', onEnableGoTag);
     window.addEventListener('otto:ide-reconnect-lsp', onReconnectLsp);
+    window.addEventListener('otto:ide-lsp-diagnostics', onLspDiags);
     window.addEventListener('otto:ide-git-file-reloaded', onGitReloaded);
     window.addEventListener('otto:ide-open-find-in-files', onFindInFiles);
     window.addEventListener('otto:ide-repo-test-action', onRepoTestAction);
@@ -254,6 +263,7 @@
       window.removeEventListener('otto:ide-apply-quickfix-edits', onApplyFixes);
       window.removeEventListener('otto:ide-enable-go-build-tag', onEnableGoTag);
       window.removeEventListener('otto:ide-reconnect-lsp', onReconnectLsp);
+      window.removeEventListener('otto:ide-lsp-diagnostics', onLspDiags);
       window.removeEventListener('otto:ide-git-file-reloaded', onGitReloaded);
       window.removeEventListener('otto:ide-open-find-in-files', onFindInFiles);
       window.removeEventListener('otto:ide-repo-test-action', onRepoTestAction);
@@ -351,6 +361,9 @@
       replaceBufferContent: (nextContent, range) => ref.replaceBufferContent?.(nextContent, range) ?? false,
       applyAgentEdit: (nextContent, range) => ref.applyAgentEdit?.(nextContent, range) ?? false,
       applyQuickFixEdits: (edits) => ref.applyQuickFixEdits?.(edits) ?? false,
+      lspRenameEdits: (line, column, newName) => ref.lspRenameEdits?.(line, column, newName) ?? Promise.resolve(null),
+      lspReferences: (line, column) => ref.lspReferences?.(line, column) ?? Promise.resolve(null),
+      lspQuickFixes: (line) => ref.lspQuickFixes?.(line) ?? Promise.resolve(null),
     };
     return h;
   }
@@ -486,7 +499,7 @@
               connectionId: ide.target.kind === 'ssh' ? ide.target.connection_id : null, projectFolders,
               readOnly: stagedPrimaryTab.readOnly || !ide.canEditCollab,
               initialDeps: manifestDepsByPath[stagedPrimaryTab.path] ?? [],
-              onapplycontent: (nextContent: string) => { if (!primaryEditorRef?.applyAgentEdit?.(nextContent)) ide.updateBuffer(stagedPrimaryTab!.path, nextContent); },
+              onfilewritten: () => reloadTabFromDisk(stagedPrimaryTab!.path),
               onjumplocation: (loc: { path: string; line: number; column: number }) => { void performIdeDive('definition', stagedPrimaryTab!.path, loc, stagedPrimaryTab!.content); },
               onswitchtext: (ln: number) => { manifestModeByPath = { ...manifestModeByPath, [stagedPrimaryTab!.path]: 'text' }; requestAnimationFrame(() => primaryEditorRef?.goToLine(ln, 1)); },
             }}
@@ -628,7 +641,7 @@
     <div class="ide-empty-editor">
       <EmptyState
         headingLevel={2} icon="ide" title="Select a file to start coding"
-        body="Choose a file in the explorer, press ⇧⇧ to search everywhere, or hold ⌥ and drag in any file for multi-cursor editing"
+        body="Choose a file in the explorer or press ⇧⇧ to search everywhere."
         actionLabel="Search everywhere" actionIcon="search" actionKind="secondary"
         onaction={() => { ide.searchInitialTab = 'all'; ide.searchEverywhereOpen = true; }}
       />
@@ -654,7 +667,7 @@
       allManifestDeps: manifestDepsByPath[intentionState.path] ?? [],
       onapplyclientfix: (fix: CmIdeMod.ClientDiagQuickFix) => { iRef?.applyClientDiagFix?.(fix); },
       onapplyedits: (edits: CmIdeMod.IdeConcreteTextEdit[]) => { iRef?.applyQuickFixEdits?.(edits); },
-      onapplycontent: (nextContent: string) => { if (!iRef?.applyAgentEdit?.(nextContent) && intentionState) ide.updateBuffer(intentionState.path, nextContent); },
+      onfilewritten: () => { if (intentionState) reloadTabFromDisk(intentionState.path); },
       onapplyserveraction: (act: IdeCodeAction) => { if (intentionState) ide.applyCodeAction(intentionState.path, act); },
       onrename: () => { if (intentionState) void ide.openRenameModal(intentionState.path, intentionState.line, intentionState.col, intentionState.symbol); },
       onfindusages: () => { if (intentionState) void ide.findReferences(intentionState.path, intentionState.line, intentionState.col, intentionState.symbol); },

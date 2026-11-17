@@ -45,6 +45,23 @@ pub(crate) const SERVER_KEY: &str = "otto-browser";
 /// (Task B2b). Opt-in per workspace (`otto_mcp_enabled`); never auto-injected.
 pub(crate) const OTTO_TOOLS_KEY: &str = "otto";
 
+/// Every name `otto_tools_env` can set, forwarded by the `.mcp.json` `otto`
+/// entry as `${NAME:-}`. Muse starts stdio servers with a scrubbed env (HOME,
+/// PATH, …) plus only the entry's own `env`, so without these its `ottod
+/// mcp-tools` ran without `OTTO_MCP_TOKEN`, exited at once, and Muse reported
+/// "the transport closed unexpectedly". Claude and Muse both expand the
+/// references from their own process env, so the shared file still holds no
+/// credential, and `:-` keeps an unset name (a plain `claude` run outside
+/// Otto) from failing Claude's config parse.
+pub(crate) const OTTO_TOOLS_ENV_NAMES: [&str; 6] = [
+    "OTTO_MCP_TOKEN",
+    "OTTO_MCP_BASE",
+    "OTTO_SESSION_ID",
+    "OTTO_WORKSPACE_ID",
+    "OTTO_SESSION_SOURCE",
+    "OTTO_MCP_PROFILES",
+];
+
 /// Top-level `.mcp.json` marker listing the `mcpServers` names Otto manages.
 /// Reconciliation removes stale names from this set and never touches names
 /// outside it, so user hand-edits survive while Otto's own entries track the
@@ -212,7 +229,7 @@ pub fn reconcile_managed_servers(
     workspace_root: &str,
     cfg: &ManagedMcpConfig,
 ) -> Result<Vec<String>, String> {
-    reconcile_json_launcher(workspace_root, &mcp_path(workspace_root), cfg)
+    reconcile_json_launcher(workspace_root, &mcp_path(workspace_root), cfg, true)
 }
 
 /// The agy counterpart of [`reconcile_managed_servers`]: the same managed set
@@ -223,15 +240,18 @@ pub fn reconcile_managed_servers_agy(
     workspace_root: &str,
     cfg: &ManagedMcpConfig,
 ) -> Result<Vec<String>, String> {
-    reconcile_json_launcher(workspace_root, &agy_mcp_path(workspace_root), cfg)
+    reconcile_json_launcher(workspace_root, &agy_mcp_path(workspace_root), cfg, false)
 }
 
 /// One `mcpServers`-shaped JSON launcher file (`.mcp.json` or agy's
 /// `.agents/mcp_config.json`) reconciled against `cfg` under the cwd lock.
+/// `forward_env`: the `otto` entry names [`OTTO_TOOLS_ENV_NAMES`] (`.mcp.json`
+/// only; agy passes its whole env to stdio children).
 fn reconcile_json_launcher(
     workspace_root: &str,
     path: &Path,
     cfg: &ManagedMcpConfig,
+    forward_env: bool,
 ) -> Result<Vec<String>, String> {
     let lock = cwd_lock(workspace_root);
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -246,11 +266,16 @@ fn reconcile_json_launcher(
         ));
     }
     if let Some(t) = &cfg.otto_tools {
-        // Identity-neutral: command/args only, never the session env.
-        desired.push((
-            OTTO_TOOLS_KEY.to_string(),
-            json!({ "command": t.command, "args": t.args }),
-        ));
+        // Identity-neutral: command/args and env NAMES, never a session value.
+        let mut entry = json!({ "command": t.command, "args": t.args });
+        if forward_env {
+            let env: Map<String, Value> = OTTO_TOOLS_ENV_NAMES
+                .iter()
+                .map(|k| (k.to_string(), Value::String(format!("${{{k}:-}}"))))
+                .collect();
+            entry["env"] = Value::Object(env);
+        }
+        desired.push((OTTO_TOOLS_KEY.to_string(), entry));
     }
     for s in cfg.user_servers.iter().flatten() {
         // Reserved for Otto's own entries — a user server named "otto-browser"
@@ -1467,9 +1492,17 @@ mod tests {
         let otto = servers.get("otto").and_then(|v| v.as_object()).unwrap();
         assert_eq!(otto["command"], json!("/usr/local/bin/ottod"));
         assert_eq!(otto["args"], json!(["mcp-tools"]));
+        // Muse scrubs a stdio child's env: the entry forwards every bridge
+        // name by reference, never a value.
+        assert_eq!(otto["env"]["OTTO_MCP_TOKEN"], json!("${OTTO_MCP_TOKEN:-}"));
+        assert_eq!(
+            otto["env"].as_object().unwrap().len(),
+            OTTO_TOOLS_ENV_NAMES.len()
+        );
+        let raw = std::fs::read_to_string(mcp_path(root)).unwrap();
         assert!(
-            otto.get("env").is_none(),
-            "shared config leaked session env: {otto:?}"
+            !raw.contains("secret-token"),
+            "shared config leaked session env"
         );
         assert!(servers.contains_key("otto-browser"));
         assert!(servers.contains_key("myserver"));

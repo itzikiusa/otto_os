@@ -28,9 +28,11 @@
   import { loadScratchesRoot, newScratchFile, openScratches } from './shell/ideScratches.svelte';
   import IdeHeaderActions from './shell/IdeHeaderActions.svelte';
   import IdeStackSwitcher from './shell/IdeStackSwitcher.svelte';
+  import IdeModeTabs from './shell/IdeModeTabs.svelte';
   import IdePhoneTabRow from './editor/IdePhoneTabRow.svelte';
   import { IDE_TYPING_SELECTOR, idePhoneChrome } from './editor/idePhoneChrome.svelte';
   import { ideLayout, paneAfterFileOpen, STACK_MAX_H, type IdeStackPane } from './shell/ideLayout.svelte';
+  import { ideTabRestore } from './shell/ideProjectHelpers';
   import {
     handleIdeChord,
     handleIdeWindowKeyDown,
@@ -75,7 +77,9 @@
   $effect(() => pageChrome.set({ foldNav: true, hideStatusBar: !stack }));
   // Opening the agent / build-tool window hides the explorer rail when the editor would
   // drop under ~720 px, and brings it back when that window closes (ideExplorerRoom.ts).
-  const treeShown = $derived(stack ? pane === 'files' : explorerVisible);
+  // A live-session guest works only in the host's open files (no tree, run, agent or
+  // terminal routes exist for guests): those controls stay out of its page.
+  const treeShown = $derived(!ide.collabIsGuest && (stack ? pane === 'files' : explorerVisible));
   // "Breakpoints (n)…" in the debugger opens the tree's Breakpoints tab: a hidden explorer comes back for it.
   let bpNavSeen = ideBreakpointsNav.seq;
   $effect(() => {
@@ -92,7 +96,7 @@
     if (next.hid) hintExplorerYield(ide.keymapPreset);
     if (next.visible !== explorerVisible) explorerVisible = next.visible;
   });
-  const agentShown = $derived(stack ? pane === 'agent' : ideAgent.panelOpen);
+  const agentShown = $derived(!ide.collabIsGuest && (stack ? pane === 'agent' : ideAgent.panelOpen));
   // Typing (code or agent composer) with the on-screen keyboard up: the page header
   // steps aside so the code keeps its lines (editor/idePhoneChrome.svelte.ts).
   const phone = $derived(idePhoneChrome.current);
@@ -250,14 +254,15 @@
     if ((next === 'agent') !== ideAgent.panelOpen) ideAgent.togglePanel(next === 'agent');
   }
 
-  // A file opened from the Files pane (a tap in the tree) shows the editor.
+  // A file opened from the Files pane (a tap in the tree) shows the editor; the tabs a
+  // project restores on load leave the pane the person already picked.
   let lastActivePath = ide.activePath;
   $effect(() => {
     const p = ide.activePath;
     if (p === lastActivePath) return;
     lastActivePath = p;
     untrack(() => {
-      if (p && ideLayout.stack) ideLayout.pane = paneAfterFileOpen(ideLayout.pane);
+      if (p && ideLayout.stack && !ideTabRestore.active) ideLayout.pane = paneAfterFileOpen(ideLayout.pane);
     });
   });
 
@@ -420,19 +425,21 @@
   bind:clientHeight={ideLayout.height}
 >
   <!-- One toolbar row (G13). Stacked: the pane switcher takes the tabs slot
-       (below the bar when the page is tall, inline when it is short). -->
+       (below the bar when the page is tall, inline when it is short); wide, the
+       optional Project | Scratches tabs (Settings › Appearance) do. -->
   {#snippet stackTabs()}<IdeStackSwitcher onshow={showPane} />{#if phone.fileRowInHeader && pane === 'editor'}<IdePhoneTabRow inHeader />{/if}{/snippet}
+  {#snippet modeTabs()}<IdeModeTabs />{/snippet}
   <PageHeader
     title={stack ? 'IDE' : 'IDE (Beta)'}
-    tabs={stack && ide.hasTarget ? stackTabs : undefined}
+    tabs={stack ? (ide.hasTarget ? stackTabs : undefined) : idePreferences.current.scratchesTab ? modeTabs : undefined}
     tabsPlacement={stack && ideLayout.height >= STACK_MAX_H ? 'below' : 'inline'}
   >
     {#snippet badge()}
-      <IdeWorkspaceSwitcher onpickfolder={(m) => (folderPickerMode = m)} />
+      {#if !ide.collabIsGuest}<IdeWorkspaceSwitcher onpickfolder={(m) => (folderPickerMode = m)} />{/if}
     {/snippet}
 
     {#snippet actions()}
-      <IdeHeaderActions
+      {#if !ide.collabIsGuest}<IdeHeaderActions
         {stack}
         bind:quickPrefs
         {explorerVisible}
@@ -442,7 +449,7 @@
         onShowPane={showPane}
         onOpenScratches={() => void openScratches()}
         onToggleAgentDock={() => { ideAgent.togglePanel(); if (ideAgent.panelOpen) focusAgentComposer(); }}
-      />
+      />{/if}
     {/snippet}
   </PageHeader>
 
@@ -524,7 +531,7 @@
           {#if !stack}<LazyMount lazy={IdeStatusStripLazy} what="status bar" quiet />{/if}
         </div>
 
-        {#if ide.buildToolOpen && !stack}
+        {#if ide.buildToolOpen && !stack && !ide.collabIsGuest}
           <PaneDivider bind:width={buildToolW} storageKey={BUILD_TOOL_W_KEY} min={240} max={720} defaultWidth={310} invert label="Resize build tool window" />
           <div class="ide-bt-wrap" style:inline-size="{buildToolW}px">
             <LazyMount lazy={IdeBuildToolWindowLazy} what="build tool window" variant="panel" />
@@ -641,7 +648,8 @@
      its side) no sub-bar. */
   /* CodeMirror's base theme declares `.cm-gutter { display: flex !important }`. */
   .ide-page.stack :global(.cm-gutter.cm-foldGutter) { display: none !important; }
-  .ide-page.short-stack :global(.ide-subbar) { display: none; }
+  /* A short stacked page keeps its rows for code, unless the person asked for the toolbar (tab ▾). */
+  .ide-page.short-stack :global(.ide-subbar:not(.asked)) { display: none; }
   .ide-page.typing :global(.page-header-bar), .ide-page.typing :global(.ide-subbar) { display: none; }
   @media (max-width: 1024px) {
     .ide-workbench:not(.stack) > .ide-rail-wrap { max-inline-size: 32%; }

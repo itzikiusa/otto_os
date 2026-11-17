@@ -846,6 +846,10 @@ pub(crate) async fn start_local_review(
         .await
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
+    ctx.reviews_store
+        .refuse_if_running(&repo_id, LOCAL_REVIEW_PR_NUMBER)
+        .await
+        .map_err(crate::error::ApiError)?;
     review_budget_gate(&ctx, &repo.workspace_id)
         .await
         .map_err(crate::error::ApiError)?;
@@ -860,14 +864,10 @@ pub(crate) async fn start_local_review(
         .resolve_base(want)
         .await
         .map_err(crate::error::ApiError)?;
-    let diff_text = match git.review_diff_text(&resolved.diff_ref).await {
-        Ok(d) => d,
-        Err(e) => {
-            return Err(crate::error::ApiError(Error::Invalid(format!(
-                "git diff failed: {e}"
-            ))));
-        }
-    };
+    let diff_text = git
+        .review_diff_text(&resolved.diff_ref)
+        .await
+        .map_err(|e| crate::error::ApiError(Error::Invalid(format!("git diff failed: {e}"))))?;
 
     // Create the review row.
     let review = ctx

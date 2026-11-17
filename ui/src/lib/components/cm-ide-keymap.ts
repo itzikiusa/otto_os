@@ -283,7 +283,9 @@ export function buildIdeKeymapSpecs(
       i.line,
       i.word || undefined,
     );
-    if (dFixes.length) return applyConcreteEditsToView(v, dFixes[0].edits, filePath);
+    // Only a preferred fix applies blind; "Prefix with _" & co. stay in the ⌥⏎ menu.
+    const preferred = dFixes.find((f) => f.isPreferred);
+    if (preferred) return applyConcreteEditsToView(v, preferred.edits, filePath);
     const cb = getCallbacks().onQuickFix;
     if (cb) {
       cb({ line: i.line, column: i.column, symbol: i.word || undefined });
@@ -304,6 +306,27 @@ export function buildIdeKeymapSpecs(
     const target = { line: i.line, column: i.column, symbol: i.word || undefined };
     if (mode === 'implementation' && cbs.onImplementationJump) cbs.onImplementationJump(target);
     else cbs.onDefinitionJump?.(target);
+    return true;
+  };
+
+  const findUsages = (v: EditorView): boolean => {
+    const cb = getCallbacks().onFindUsages;
+    if (!cb) return false;
+    const i = wordAtCursor(v.state);
+    cb({ line: i.line, column: i.column, symbol: i.word || undefined });
+    return true;
+  };
+  const renameSymbol = (v: EditorView): boolean => {
+    const cb = getCallbacks().onRenameSymbol;
+    if (!cb) return false;
+    const i = wordAtCursor(v.state);
+    cb({ line: i.line, column: i.column, symbol: i.word });
+    return true;
+  };
+  const reformat = (): boolean => {
+    const cb = getCallbacks().onFormat;
+    if (!cb) return false;
+    cb();
     return true;
   };
 
@@ -363,16 +386,7 @@ export function buildIdeKeymapSpecs(
     { key: 'Cmd-Shift-V', run: runPasteFromHistory },
     { key: 'F12', run: (v) => runDive(v, 'definition') },
     { key: 'Mod-Alt-b', run: (v) => runDive(v, 'implementation') },
-    {
-      key: 'Alt-F7',
-      run: (v) => {
-        const cb = getCallbacks().onFindUsages;
-        if (!cb) return false;
-        const i = wordAtCursor(v.state);
-        cb({ line: i.line, column: i.column, symbol: i.word || undefined });
-        return true;
-      },
-    },
+    { key: 'Alt-F7', run: findUsages },
     {
       key: 'Mod-F12',
       run: () => {
@@ -402,25 +416,8 @@ export function buildIdeKeymapSpecs(
     },
     { key: 'Alt-Enter', run: runQuickFix },
     { key: 'Alt-Shift-Enter', run: applyFirstFix },
-    {
-      key: 'Shift-F6',
-      run: (v) => {
-        const cb = getCallbacks().onRenameSymbol;
-        if (!cb) return false;
-        const i = wordAtCursor(v.state);
-        cb({ line: i.line, column: i.column, symbol: i.word });
-        return true;
-      },
-    },
-    {
-      key: 'Mod-Alt-l',
-      run: () => {
-        const cb = getCallbacks().onFormat;
-        if (!cb) return false;
-        cb();
-        return true;
-      },
-    },
+    { key: 'Shift-F6', run: renameSymbol },
+    { key: 'Mod-Alt-l', run: reformat },
     {
       key: 'Mod-F8',
       run: (v) => {
@@ -469,6 +466,7 @@ export function buildIdeKeymapSpecs(
           { key: 'Mod-Backspace', run: deleteLine },
         ]
       : [
+          // The Standard preset's editor rows of shell/ideShortcuts.ts (ideActionsShortcuts.test.ts holds them in step).
           { key: 'Mod-d', run: selectNextOccurrence },
           { key: 'Shift-Mod-d', run: duplicateLineOrSelection },
           { key: 'Shift-Mod-k', run: deleteLine },

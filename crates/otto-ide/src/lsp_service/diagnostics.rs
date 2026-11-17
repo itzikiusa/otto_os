@@ -208,6 +208,77 @@ fn byte_col_to_utf16_col(raw_ln: &str, one_based_byte_col: usize) -> u32 {
     (raw_ln[..idx].encode_utf16().count() + 1) as u32
 }
 
+/// JSON files that allow comments and trailing commas (VS Code's JSONC set).
+fn is_jsonc_path(path: &str) -> bool {
+    let p = Path::new(path);
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    name.ends_with(".jsonc")
+        || ((name.starts_with("tsconfig") || name.starts_with("jsconfig"))
+            && name.ends_with(".json"))
+        || matches!(
+            name,
+            "devcontainer.json" | ".devcontainer.json" | ".eslintrc.json"
+        )
+        || p.parent()
+            .and_then(Path::file_name)
+            .is_some_and(|d| d == ".vscode")
+}
+
+/// JSONC → JSON with the same line layout: comments and trailing commas
+/// become spaces (newlines kept); strings are left alone.
+fn blank_jsonc(src: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = chars.clone();
+    let (mut i, mut in_str, mut comma) = (0, false, None);
+    while i < chars.len() {
+        let c = chars[i];
+        if in_str {
+            match c {
+                '\\' => i += 1,
+                '"' => in_str = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        let next = chars.get(i + 1).copied();
+        if c == '/' && matches!(next, Some('/') | Some('*')) {
+            let rest = &chars[i + 2..];
+            let len = if next == Some('*') {
+                rest.windows(2)
+                    .position(|w| w == ['*', '/'])
+                    .map_or(rest.len(), |p| p + 2)
+            } else {
+                rest.iter().position(|&ch| ch == '\n').unwrap_or(rest.len())
+            };
+            let end = i + 2 + len;
+            for ch in &mut out[i..end] {
+                if *ch != '\n' {
+                    *ch = ' ';
+                }
+            }
+            i = end;
+            continue;
+        }
+        match c {
+            '"' => {
+                in_str = true;
+                comma = None;
+            }
+            ',' => comma = Some(i),
+            '}' | ']' => {
+                if let Some(j) = comma.take() {
+                    out[j] = ' ';
+                }
+            }
+            c if c.is_whitespace() => {}
+            _ => comma = None,
+        }
+        i += 1;
+    }
+    out.into_iter().collect()
+}
+
 // ---------------------------------------------------------------------------
 // JSON / JSONL Diagnostics (`serde_json` exact line/col + trailing comma fix)
 // ---------------------------------------------------------------------------
@@ -217,6 +288,13 @@ pub(crate) fn analyze_json_diagnostics(
     lang: &str,
     content: &str,
 ) -> Vec<IdeDiagnostic> {
+    let jsonc;
+    let content = if is_jsonc_path(path) {
+        jsonc = blank_jsonc(content);
+        jsonc.as_str()
+    } else {
+        content
+    };
     let lines: Vec<&str> = content.lines().collect();
     if lang == "jsonl" || path.ends_with(".jsonl") {
         let mut out = Vec::new();

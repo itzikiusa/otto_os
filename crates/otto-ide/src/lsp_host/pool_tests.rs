@@ -496,6 +496,43 @@ fn language_memory_caps_set_go_java_rust_and_node_flags() {
     assert!(java_args.contains(&"-data".to_string()));
 }
 
+#[test]
+fn jdtls_gets_the_newest_lombok_javaagent_from_the_local_m2() {
+    let m2 = tempfile::tempdir().unwrap();
+    let base = m2.path().join("org/projectlombok/lombok");
+    for v in ["1.18.9", "1.18.30", "1.18.32"] {
+        std::fs::create_dir_all(base.join(v)).unwrap();
+        if v != "1.18.32" {
+            // 1.18.32 has only a pom (an incomplete download), so it is skipped.
+            std::fs::write(base.join(v).join(format!("lombok-{v}.jar")), b"jar").unwrap();
+        }
+    }
+    let args_with = |env: &BTreeMap<String, String>| -> Vec<String> {
+        let mut cmd = tokio::process::Command::new("jdtls");
+        apply_language_memory_caps(&mut cmd, "java", "/repo-java", "jdtls", &[], env);
+        cmd.as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
+    };
+    let env = BTreeMap::from([(
+        "MAVEN_REPO_LOCAL".to_string(),
+        m2.path().to_string_lossy().into_owned(),
+    )]);
+    let want = format!(
+        "--jvm-arg=-javaagent:{}",
+        base.join("1.18.30/lombok-1.18.30.jar").display()
+    );
+    assert!(args_with(&env).contains(&want), "{:?}", args_with(&env));
+
+    let empty_m2 = tempfile::tempdir().unwrap();
+    let env = BTreeMap::from([(
+        "MAVEN_REPO_LOCAL".to_string(),
+        empty_m2.path().to_string_lossy().into_owned(),
+    )]);
+    assert!(!args_with(&env).iter().any(|a| a.contains("javaagent")));
+}
+
 /// The periodic RSS sweep never kills a server an editor is attached to: being
 /// over budget is the lesser harm (the count caps still bound the pool).
 #[tokio::test]
@@ -555,4 +592,26 @@ async fn evicting_an_in_use_server_tells_its_socket_before_closing() {
         .await
         .expect("socket should close after the notice");
     assert!(closed.is_none());
+}
+
+#[tokio::test]
+async fn a_source_file_write_reaches_the_server_as_a_watched_file_change() {
+    let (pool, fake) = fake_pool(IDLE_TIMEOUT);
+    let mut a = pool.attach(key("/repo-w"), "tsls", &[]).unwrap();
+    init(&mut a, 1).await;
+    // A closed `.ts`/`.go` file renamed or replaced under the server: it must hear of it.
+    pool.notify_watched_file(Path::new("/repo-w/src/money.ts"), 2);
+    // The manifest-only entry point still drops source files (deps actions use it).
+    pool.notify_watched_file_if_build_manifest(Path::new("/repo-w/src/other.ts"), 2);
+    let want = "watched file:///repo-w/src/money.ts";
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !fake.doc_log.lock().unwrap().iter().any(|l| l == want) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no didChangeWatchedFiles for money.ts"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let log = fake.doc_log.lock().unwrap().clone();
+    assert!(!log.iter().any(|l| l.ends_with("/src/other.ts")));
 }

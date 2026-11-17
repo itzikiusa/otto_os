@@ -482,3 +482,63 @@ async fn submit_prompt_and_submit_text_do_not_interleave() {
     );
     let _ = ctx.manager.kill_session(&sid).await;
 }
+
+/// A second local review of a repo while one runs is a 409: it used to start
+/// beside the first, hidden from the panel, which could only stop the newest.
+#[tokio::test]
+async fn second_local_review_while_one_runs_is_a_conflict() {
+    use otto_core::domain::ReviewStatus;
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = mem_pool().await;
+    let ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
+    let owner = otto_state::UsersRepo::new(pool.clone())
+        .create("owner", "unused", "Owner", true)
+        .await
+        .unwrap();
+    let token = otto_rbac::AuthRepo::new(pool.clone())
+        .issue(&owner.id)
+        .await
+        .unwrap();
+    let ws = ctx
+        .workspaces
+        .create("Local review", tmp.path().to_str().unwrap(), &owner.id)
+        .await
+        .unwrap();
+    let repo = ctx
+        .git_store
+        .create_repo(NewRepo {
+            workspace_id: ws.id.clone(),
+            name: "repo".into(),
+            path: tmp.path().to_string_lossy().into_owned(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap();
+    let running = ctx.reviews_store.create_review(&repo.id, 0).await.unwrap();
+    let (api, root) = otto_server::modules::module_routers(&ctx);
+    let app = otto_server::build_router(ctx.clone(), api, root);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!(
+        "http://{}/api/v1/repos/{}/local-review",
+        listener.local_addr().unwrap(),
+        repo.id
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = reqwest::Client::new();
+    let start = || {
+        http.post(&endpoint)
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"base":"main"}))
+            .send()
+    };
+    assert_eq!(start().await.unwrap().status(), 409);
+    ctx.reviews_store
+        .set_status(&running.id, ReviewStatus::Done, None)
+        .await
+        .unwrap();
+    // Settled: the gate lets it through (it then fails on the non-git path).
+    assert_ne!(start().await.unwrap().status(), 409);
+    server.abort();
+}

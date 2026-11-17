@@ -52,6 +52,7 @@
     type VarSpec,
   } from '../../lib/database/sql-util';
   import { splitModeFor } from '../../lib/database/sql-dialect';
+  import { tabLabel } from '../../lib/stores/database/statement';
   import { loadErrorText } from '../../lib/loadError';
   import { api } from '../../lib/api/client';
   import { paneResizer } from '../../lib/paneResizer';
@@ -242,26 +243,8 @@
     void probeMongosh();
   });
 
-  // ── Tab labels ────────────────────────────────────────────────────────────
-  // Derive a short, human label from a tab's SQL: prefer an explicit user name,
-  // else the table after FROM/INTO/UPDATE, else a leading keyword snippet,
-  // falling back to "Query N".
-  function tabLabel(t: QueryTab, index: number): string {
-    if (t.name && t.name !== 'Query') return t.name;
-    // The head of the buffer is enough for a label — never regex-scan a pasted
-    // 150 KB script on every keystroke.
-    const sql = t.statement.slice(0, 2048).trim();
-    if (!sql) return `Query ${index + 1}`;
-    const from = sql.match(/\b(?:from|into|update|join)\s+`?([\w.$]+)`?/i);
-    if (from) {
-      const obj = from[1].split('.').pop() ?? from[1];
-      const verb = sql.match(/^\s*(\w+)/)?.[1]?.toUpperCase() ?? '';
-      return verb && verb !== 'SELECT' ? `${verb} ${obj}` : obj;
-    }
-    const verb = sql.match(/^\s*(\w+)/)?.[1];
-    if (verb) return verb.length > 18 ? `${verb.slice(0, 18)}…` : verb;
-    return `Query ${index + 1}`;
-  }
+  // The profile's own database, which an unscoped run uses.
+  const profileDb = $derived((database.selectedConn?.params?.db as string | undefined) || null);
 
   // Inline rename (double-click a chip).
   let renaming = $state<number | null>(null);
@@ -1311,7 +1294,7 @@
           value={database.activeDb ?? ''}
           onchange={(e) => database.setActiveDb((e.currentTarget as HTMLSelectElement).value || null)}
         >
-          <option value="">No active DB</option>
+          <option value="">{profileDb ? `Default (${profileDb})` : 'No active DB'}</option>
           {#each database.databaseNames as db (db)}
             <option value={db}>{db}</option>
           {/each}

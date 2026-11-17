@@ -255,6 +255,36 @@ fn env_based_mcp_providers_preserve_reviewer_source() {
     );
 }
 
+/// Muse hands a stdio MCP child only the names its `.mcp.json` entry lists, so
+/// every variable the bridge reads must be forwarded there: a name added to
+/// `otto_tools_env` but not to `OTTO_TOOLS_ENV_NAMES` would never reach a
+/// Muse session's `ottod mcp-tools`.
+#[test]
+fn mcp_json_forwards_every_otto_tools_env_name() {
+    let session = Session {
+        id: new_id(),
+        workspace_id: new_id(),
+        kind: SessionKind::Agent,
+        provider: "muse".into(),
+        title: "t".into(),
+        status: SessionStatus::Idle,
+        cwd: "/tmp".into(),
+        provider_session_id: None,
+        connection_id: None,
+        created_by: new_id(),
+        created_at: chrono::Utc::now(),
+        last_active_at: chrono::Utc::now(),
+        archived: false,
+        meta: serde_json::json!({"source": "vault-docs-review"}),
+    };
+    for name in otto_tools_env(&session, "t", "b").keys() {
+        assert!(
+            crate::mcp::OTTO_TOOLS_ENV_NAMES.contains(&name.as_str()),
+            "{name} is not forwarded by the .mcp.json otto entry"
+        );
+    }
+}
+
 /// Every provider's `otto` server runs under the session's MCP profile: the
 /// env Claude/agy/grok inherit carries `OTTO_MCP_PROFILES` (the creds file
 /// carries it for Codex — `codex_creds_preserve_session_source_for_mcp_policy`),
@@ -1211,6 +1241,92 @@ async fn workspace_context_refreshes_on_create_and_restart_including_reviews() {
     assert_eq!(calls[1]["context"]["memory_md"], "before");
     assert_eq!(calls[2]["context"]["memory_md"], "after");
     assert_eq!(calls[3]["context"]["memory_md"], "after");
+}
+
+#[tokio::test]
+async fn ide_terminal_gets_the_project_env_on_create_and_restart() {
+    #[derive(Default)]
+    struct RecordingEnv(std::sync::Mutex<Vec<(String, String)>>);
+    impl otto_core::hooks::TerminalEnvSource for RecordingEnv {
+        fn ide_terminal_env<'a>(
+            &'a self,
+            user_id: &'a str,
+            root: &'a str,
+        ) -> otto_core::auth::BoxFuture<'a, Vec<(String, String)>> {
+            self.0.lock().unwrap().push((user_id.into(), root.into()));
+            Box::pin(async { vec![("FROM_DOTENV".into(), "dotenv-value".into())] })
+        }
+    }
+    let (manager, _repo, workspace, user) = test_manager().await;
+    let source = Arc::new(RecordingEnv::default());
+    manager.set_terminal_env(source.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("env.txt");
+    let spec = || CommandSpec {
+        program: "/bin/sh".into(),
+        args: vec![
+            "-c".into(),
+            format!(
+                "printf %s \"$FROM_DOTENV\" >> '{}'; exec /bin/sleep 60",
+                out.display()
+            ),
+        ],
+        cwd: Some(dir.path().to_string_lossy().into_owned()),
+        env: vec![],
+    };
+    let create = |meta: serde_json::Value| CreateSessionReq {
+        kind: SessionKind::Agent,
+        provider: Some("shell".into()),
+        title: Some("IDE terminal".into()),
+        cwd: Some(dir.path().to_string_lossy().into_owned()),
+        connection_id: None,
+        model: None,
+        meta: Some(meta),
+    };
+    let plain = manager
+        .create(
+            &workspace,
+            &user,
+            create(serde_json::json!({})),
+            Some(spec()),
+        )
+        .await
+        .unwrap();
+    let term = manager
+        .create(
+            &workspace,
+            &user,
+            create(serde_json::json!({"ide_terminal": true, "ide_root": "/proj"})),
+            Some(spec()),
+        )
+        .await
+        .unwrap();
+    let read = || std::fs::read_to_string(&out).unwrap_or_default();
+    for _ in 0..100 {
+        if !read().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    manager.restart(&term.id, Some(spec())).await.unwrap();
+    for _ in 0..100 {
+        if read() == "dotenv-value".repeat(2) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        *source.0.lock().unwrap(),
+        vec![(user.clone(), "/proj".to_string()); 2],
+        "asked only for the IDE terminal, as its owner"
+    );
+    assert_eq!(
+        read(),
+        "dotenv-value".repeat(2),
+        "create and restart both carry the var; the plain shell none"
+    );
+    manager.remove(&plain.id).await.unwrap();
+    manager.remove(&term.id).await.unwrap();
 }
 
 #[tokio::test]

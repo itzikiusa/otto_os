@@ -31,6 +31,12 @@
   import { toastError } from '../../lib/toastError';
   import { ide, ideBasename } from './ideStore.svelte';
 
+  /** The tab label saved on the session (restored after a reload), else its title. */
+  function ideTermLabel(s: Session): string {
+    const saved = s.meta?.ide_label;
+    return typeof saved === 'string' && saved ? saved : s.title || '';
+  }
+
   let spawning = $state(false);
   let spawnError = $state<string | null>(null);
   let primaryRef = $state<ReturnType<typeof LazyTerminal> | undefined>();
@@ -59,7 +65,7 @@
           ...savedTabs,
           {
             id: s.id,
-            label: s.title || `Shell ${savedTabs.length + 1}`,
+            label: ideTermLabel(s) || `Shell ${savedTabs.length + 1}`,
             kind: 'local',
             targetKey,
             cwd: sCwd || ide.target.root,
@@ -81,6 +87,10 @@
   });
 
   const targetTabs = $derived(savedTabs.filter((t) => t.targetKey === targetKey));
+  /** Next tab number: one past the highest shown, so Kill + New never repeats a label. */
+  const nextTabNumber = $derived(
+    1 + Math.max(0, ...targetTabs.map((t) => Number(/(\d+)/.exec(t.label)?.[1] ?? 0))),
+  );
   const activeTab = $derived(
     targetTabs.find((t) => t.id === savedActiveByTarget[targetKey]) ?? targetTabs[0] ?? null,
   );
@@ -120,12 +130,17 @@
     const launchCwd = customCwd || ide.target.root;
     const dirName = ideBasename(launchCwd) || folderLabel;
     try {
-      const idx = targetTabs.length + 1;
+      const idx = nextTabNumber;
       if (isSshTarget && ide.target.connection_id) {
         const hostName = ide.target.connection_name || ide.target.connection_id;
+        // Connections are global profiles: the session needs a workspace to live in.
         const s = await api.post<Session>(
           `/connections/${encodeURIComponent(ide.target.connection_id)}/open`,
-          { title: `IDE SSH · ${hostName}` },
+          {
+            title: `IDE SSH · ${hostName}`,
+            workspace_id: ws.current ? ws.currentId : SCRATCH_WORKSPACE_ID,
+            cwd: launchCwd || null,
+          },
         );
         ws.statusMap[s.id] = s.status;
         const entry: IdeTermTab = {
@@ -138,20 +153,21 @@
         savedTabs = [...savedTabs.filter((t) => t.id !== s.id), entry];
         savedActiveByTarget[targetKey] = s.id;
       } else {
+        const sub = launchCwd && launchCwd !== ide.target.root ? ` · ${dirName}` : '';
+        const label = `Terminal ${idx}${sub}`;
         const s = await ws.createSessionQuiet(
           {
             kind: 'agent',
             provider: 'shell',
             title: `IDE · ${dirName}`,
             cwd: launchCwd || null,
-            meta: { surface: 'ide', ide_terminal: true },
+            meta: { surface: 'ide', ide_terminal: true, ide_root: ide.target.root, ide_label: label },
           },
           { scratch: ws.current === null && ws.currentId !== SCRATCH_WORKSPACE_ID },
         );
-        const sub = launchCwd && launchCwd !== ide.target.root ? ` · ${dirName}` : '';
         const entry: IdeTermTab = {
           id: s.id,
-          label: `Terminal ${idx}${sub}`,
+          label,
           kind: 'local',
           targetKey,
           cwd: launchCwd,

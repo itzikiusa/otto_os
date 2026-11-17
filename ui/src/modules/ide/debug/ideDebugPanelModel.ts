@@ -126,6 +126,19 @@ export function threadOptionLabel(
   return reason ? `#${th.id} ${th.name} · ${reason}` : `#${th.id} ${th.name}`;
 }
 
+/** The Frames column: wide enough for `testing.tRunner  testing.go:2195` and the
+ *  goroutine picker (at 190px names were cut to ~9 characters). */
+export const FRAMES_PANE = { default: 280, min: 220, max: 560 } as const;
+
+/** Hover text for the thread picker: the active thread's full label. */
+export function activeThreadTitle(
+  threads: readonly { id: number; name: string; stopped_reason?: string | null }[],
+  active: { id: number | null | undefined; reason: string | null | undefined },
+): string | undefined {
+  const th = threads.find((t) => t.id === (active.id ?? threads[0]?.id));
+  return th ? threadOptionLabel(th, active) : undefined;
+}
+
 const ARIA_KEY: Record<string, string> = { ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown', ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight' };
 
 /** `aria-keyshortcuts` value for a chord (`Meta+Alt+R`). */

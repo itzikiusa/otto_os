@@ -12,12 +12,15 @@
   // Shared across every mounted block: a re-derived block with an unchanged
   // string is a Map lookup, not marked + hljs + DOMParser (mdCache.ts).
   // Code-block chrome is part of the cached string (codeBlocks.ts).
-  const cache = createMdCache(renderChatMarkdown, {
+  const CACHE_OPTS = {
     // Room for the whole mounted window (≤300 turns, a few prose blocks each).
     maxEntries: 1000,
     maxChars: 4_000_000,
     maxEntryChars: 512 * 1024,
-  });
+  };
+  const cache = createMdCache((md) => renderChatMarkdown(md), CACHE_OPTS);
+  // Blocks that render `:shortcode:`s as emoji (agent text, setting on).
+  const emojiCache = createMdCache((md) => renderChatMarkdown(md, true), CACHE_OPTS);
   // Perf-spec probe (formerly e2e/desktop-conversation-perf.spec.ts): opt-in via a
   // `window.__ottoMdProbe` object installed before load; nothing otherwise.
   if (typeof window !== 'undefined') {
@@ -46,6 +49,7 @@
   import Lightbox from '../../../lib/components/Lightbox.svelte';
   import { CONV_CTX, type ConvContext } from './context';
   import { ui } from '../../../lib/stores/ui.svelte';
+  import { agentEmojiFor } from '../../../lib/agentEmojiRender.svelte';
 
   interface Props {
     md: string;
@@ -53,8 +57,11 @@
     small?: boolean;
     /** Active streaming turn: cache completed paragraphs/fences without polluting `mdCache` on tail deltas. */
     streaming?: boolean;
+    /** Agent text: `:shortcode:`s show as emoji ("Show emoji in agent replies").
+     *  Pass false for the person's own messages. */
+    emoji?: boolean;
   }
-  let { md, small = false, streaming = false }: Props = $props();
+  let { md, small = false, streaming = false, emoji = true }: Props = $props();
   const ctx = getContext<ConvContext | undefined>(CONV_CTX);
   // File references resolve against the session's folders (lib/pathLinks): the
   // conversation view's session, or the Threads runtime thread hosting us.
@@ -81,14 +88,16 @@
   const html = $derived.by(() => {
     const fenced = FENCE.test(md);
     const cacheable = !fenced || hlReady;
+    const withEmoji = emoji && agentEmojiFor(md);
+    const c = withEmoji ? emojiCache : cache;
     if (streaming) {
       const { settled, tail } = splitStreamingMarkdown(md);
-      const settledHtml = settled ? cache.get(settled, cacheable) : '';
-      const tailHtml = tail ? renderChatMarkdown(tail) : '';
+      const settledHtml = settled ? c.get(settled, cacheable) : '';
+      const tailHtml = tail ? renderChatMarkdown(tail, withEmoji) : '';
       return settledHtml + tailHtml;
     }
     // Read hlReady only when it matters, so fence-free blocks never re-render.
-    return cache.get(md, cacheable);
+    return c.get(md, cacheable);
   });
 
   // Mermaid / D2 fences render as diagrams (lazy libs, like the vault's reading

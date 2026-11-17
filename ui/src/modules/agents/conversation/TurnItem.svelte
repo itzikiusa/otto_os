@@ -275,7 +275,7 @@
             {/if}
           {/if}
           {#if parts.md}
-            <div class="user-text"><Markdown md={parts.md} /></div>
+            <div class="user-text"><Markdown md={parts.md} emoji={false} /></div>
           {/if}
           {#if parts.images.length}
             <div class="attach" data-attachments={parts.images.length}>

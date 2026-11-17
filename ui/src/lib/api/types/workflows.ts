@@ -355,6 +355,8 @@ export interface UpdateWorkflowReq {
   graph?: WorkflowGraph | null;
   /** Restart policy: 'resume' | 'fail' (see `Workflow.on_restart`); absent/null leaves it unchanged. */
   on_restart?: 'resume' | 'fail' | null;
+  /** The `version` the edit started from; a newer stored version answers 409 and saves nothing. */
+  expected_version?: number | null;
 }
 
 export interface GenerateWorkflowReq {

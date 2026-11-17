@@ -2005,6 +2005,7 @@ enum PgCell {
     Float8,
     Json,
     Numeric,
+    Bit,
     Text,
     TimestampTz,
     Timestamp,
@@ -2024,6 +2025,7 @@ fn pg_cell_decoder(type_name: &str) -> PgCell {
         "FLOAT8" => PgCell::Float8,
         "JSON" | "JSONB" => PgCell::Json,
         "NUMERIC" => PgCell::Numeric,
+        "BIT" | "VARBIT" => PgCell::Bit,
         "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" => PgCell::Text,
         "TIMESTAMPTZ" => PgCell::TimestampTz,
         "TIMESTAMP" => PgCell::Timestamp,
@@ -2038,7 +2040,7 @@ fn pg_cell_decoder(type_name: &str) -> PgCell {
 /// applies to that type; a rejected value falls back to the cascade.
 fn pg_cell(row: &PgRow, idx: usize, dec: PgCell) -> Value {
     use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-    use sqlx::types::{BigDecimal, Uuid};
+    use sqlx::types::Uuid;
     fn text<T: ToString>(v: Option<T>) -> Value {
         v.map(|t| Value::String(t.to_string()))
             .unwrap_or(Value::Null)
@@ -2069,7 +2071,8 @@ fn pg_cell(row: &PgRow, idx: usize, dec: PgCell) -> Value {
             .try_get::<Option<Value>, _>(idx)
             .map(|v| v.unwrap_or(Value::Null))
             .ok(),
-        PgCell::Numeric => row.try_get::<Option<BigDecimal>, _>(idx).map(text).ok(),
+        PgCell::Numeric => Some(raw_text_cell(row.try_get_raw(idx), numeric_text)),
+        PgCell::Bit => Some(raw_text_cell(row.try_get_raw(idx), bit_text)),
         PgCell::Text => row
             .try_get::<Option<String>, _>(idx)
             .map(|v| v.map(Value::String).unwrap_or(Value::Null))
@@ -2237,6 +2240,92 @@ fn pg_value_to_json(row: &PgRow, idx: usize) -> Value {
     // enums (binary encoding = the label text), citext, and future types render
     // as text when UTF-8, else base64. Only a true SQL NULL stays Null.
     raw_cell_fallback(row.try_get_raw(idx))
+}
+
+/// A cell Postgres sends as text in the text format and as `binary` bytes
+/// the caller renders the way Postgres prints them; anything unexpected
+/// takes [`raw_cell_fallback`].
+fn raw_text_cell(
+    raw: std::result::Result<sqlx::postgres::PgValueRef<'_>, sqlx::Error>,
+    binary: fn(&[u8]) -> Option<String>,
+) -> Value {
+    use sqlx::postgres::PgValueFormat;
+    use sqlx::ValueRef as _;
+    let Ok(raw) = raw else { return Value::Null };
+    if raw.is_null() {
+        return Value::Null;
+    }
+    let text = match raw.format() {
+        PgValueFormat::Text => raw.as_str().ok().map(str::to_owned),
+        PgValueFormat::Binary => raw.as_bytes().ok().and_then(binary),
+    };
+    text.map(Value::String)
+        .unwrap_or_else(|| raw_cell_fallback(Ok(raw)))
+}
+
+/// Binary NUMERIC as Postgres prints it: the column's display scale (`1.10`,
+/// never exponent form) and `NaN` / `±Infinity`. sqlx's BigDecimal decode
+/// drops the scale and rejects the specials.
+fn numeric_text(b: &[u8]) -> Option<String> {
+    let word = |i: usize| Some(u16::from_be_bytes(b.get(i..i + 2)?.try_into().ok()?));
+    let (ndigits, weight, sign, dscale) = (word(0)?, word(2)? as i16, word(4)?, word(6)?);
+    let neg = match sign {
+        0x0000 => false,
+        0x4000 => true,
+        0xC000 => return Some("NaN".into()),
+        0xD000 => return Some("Infinity".into()),
+        0xF000 => return Some("-Infinity".into()),
+        _ => return None,
+    };
+    let digits: Vec<u16> = (0..ndigits as usize)
+        .map(|i| word(8 + 2 * i))
+        .collect::<Option<_>>()?;
+    // Base-10000 group `i` sits `weight - i` groups left of the point.
+    let group = |i: i32| {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| digits.get(i))
+            .copied()
+            .unwrap_or(0)
+    };
+    let mut out = String::from(if neg { "-" } else { "" });
+    if weight < 0 {
+        out.push('0');
+    } else {
+        out += &group(0).to_string();
+        for i in 1..=i32::from(weight) {
+            out += &format!("{:04}", group(i));
+        }
+    }
+    if dscale > 0 {
+        let mut frac = String::new();
+        let mut i = i32::from(weight) + 1;
+        while frac.len() < usize::from(dscale) {
+            frac += &format!("{:04}", group(i));
+            i += 1;
+        }
+        frac.truncate(usize::from(dscale));
+        out = format!("{out}.{frac}");
+    }
+    Some(out)
+}
+
+/// Binary BIT / VARBIT (`int32` bit count, then the bits, high bit first) as
+/// Postgres prints it: `0101…`.
+fn bit_text(b: &[u8]) -> Option<String> {
+    let len = usize::try_from(i32::from_be_bytes(b.get(..4)?.try_into().ok()?)).ok()?;
+    let bits = b.get(4..)?;
+    (len <= bits.len() * 8).then(|| {
+        (0..len)
+            .map(|i| {
+                if bits[i / 8] & (0x80 >> (i % 8)) != 0 {
+                    '1'
+                } else {
+                    '0'
+                }
+            })
+            .collect()
+    })
 }
 
 /// Decode-of-last-resort for a raw Postgres value: SQL NULL → Null, UTF-8
@@ -2796,9 +2885,29 @@ mod tests {
     }
 
     #[test]
+    fn numeric_and_bit_render_as_postgres_prints_them() {
+        // ndigits, weight, sign, dscale, then base-10000 digit groups.
+        let num = |w: &[u16]| w.iter().flat_map(|x| x.to_be_bytes()).collect::<Vec<u8>>();
+        assert_eq!(numeric_text(&num(&[2, 0, 0, 2, 1, 2500])).unwrap(), "1.25");
+        assert_eq!(numeric_text(&num(&[2, 0, 0, 2, 1, 1000])).unwrap(), "1.10");
+        assert_eq!(numeric_text(&num(&[1, 0, 0x4000, 0, 7])).unwrap(), "-7");
+        assert_eq!(numeric_text(&num(&[1, 1, 0, 0, 1])).unwrap(), "10000");
+        assert_eq!(
+            numeric_text(&num(&[1, 0xFFFF, 0, 6, 5])).unwrap(),
+            "0.000500"
+        );
+        assert_eq!(numeric_text(&num(&[0, 0, 0, 3])).unwrap(), "0.000");
+        assert_eq!(numeric_text(&num(&[0, 0, 0xC000, 0])).unwrap(), "NaN");
+        assert_eq!(numeric_text(&num(&[0, 0, 0xF000, 0])).unwrap(), "-Infinity");
+        assert_eq!(bit_text(&[0, 0, 0, 5, 0b1010_1000]).unwrap(), "10101");
+        assert_eq!(bit_text(&[0, 0, 0, 9, 0xFF]), None);
+        assert_eq!(pg_cell_decoder("VARBIT"), PgCell::Bit);
+    }
+
+    #[test]
     fn float_shaping() {
         assert_eq!(float_to_json(Some(1.5)), serde_json::json!(1.5));
         assert_eq!(float_to_json(None), Value::Null);
-        assert_eq!(float_to_json(Some(f64::NAN)), Value::Null);
+        assert_eq!(float_to_json(Some(f64::NAN)), serde_json::json!("NaN"));
     }
 }

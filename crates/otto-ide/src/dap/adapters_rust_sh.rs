@@ -342,6 +342,10 @@ async fn compile_rust_debug_artifact(
     } else {
         vec!["build".into(), "--message-format=json".into()]
     };
+    let selector = (req.target.kind == IdeTargetKind::Local)
+        .then(|| debug_target_selector(raw_prog, want_test))
+        .flatten();
+    cargo_args.extend(selector.iter().flatten().cloned());
     for extra_flag in ctx
         .run_config
         .iter()
@@ -434,11 +438,14 @@ async fn compile_rust_debug_artifact(
         )));
     }
     let stdout_txt = String::from_utf8_lossy(&out.stdout);
-    let hint = Path::new(raw_prog)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| *s != "lib" && *s != "main" && *s != "Cargo")
-        .or(bp_target_hint.as_deref());
+    let hint = match &selector {
+        Some(sel) => sel.get(1).map(String::as_str),
+        None => Path::new(raw_prog)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| *s != "lib" && *s != "main" && *s != "Cargo")
+            .or(bp_target_hint.as_deref()),
+    };
     let exe = parse_cargo_artifact_executable(&stdout_txt, want_test, hint).ok_or_else(|| {
         Error::Upstream("cargo succeeded but produced no debuggable binary artifact".into())
     })?;
@@ -446,6 +453,16 @@ async fn compile_rust_debug_artifact(
         super::rust_build_cache::store_cached_rust_artifact(stamp, exe.clone());
     }
     Ok(exe)
+}
+
+/// The cargo selector that builds exactly `program`'s target (`cargo build` only takes a
+/// binary or an example), so the artifact match is exact.
+fn debug_target_selector(program: &str, want_test: bool) -> Option<Vec<String>> {
+    let target = crate::gutter::cargo_target::cargo_target_for(program)?;
+    if want_test {
+        return Some(target.selector);
+    }
+    target.run_selector().map(<[String]>::to_vec)
 }
 
 fn derive_breakpoint_integration_test_hint(
@@ -502,4 +519,42 @@ fn find_cargo_dir(
         }
     }
     fallback_cwd.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::debug_target_selector;
+
+    #[test]
+    fn debug_build_selects_the_files_own_cargo_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src/bin")).unwrap();
+        std::fs::create_dir_all(root.join("examples")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+        let path = |rel: &str| root.join(rel).to_string_lossy().into_owned();
+        let sel = |rel: &str, test: bool| debug_target_selector(&path(rel), test);
+
+        assert_eq!(
+            sel("src/main.rs", false),
+            Some(vec!["--bin".into(), "app".into()])
+        );
+        assert_eq!(
+            sel("examples/demo.rs", false),
+            Some(vec!["--example".into(), "demo".into()])
+        );
+        assert_eq!(
+            sel("src/bin/tool.rs", true),
+            Some(vec!["--bin".into(), "tool".into()])
+        );
+        // A unit test in a module of the binary-only crate builds the binary's test harness.
+        assert_eq!(
+            sel("src/parser.rs", true),
+            Some(vec!["--bin".into(), "app".into()])
+        );
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+        assert_eq!(sel("src/parser.rs", true), Some(vec!["--lib".into()]));
+        // `cargo build --lib` has no executable: keep the plain build.
+        assert_eq!(sel("src/parser.rs", false), None);
+    }
 }

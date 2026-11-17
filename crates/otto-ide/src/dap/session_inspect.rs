@@ -309,14 +309,42 @@ pub(super) async fn handle_stopped_event(
         .unwrap_or_else(|e| e.into_inner())
         .target
         .clone();
-    let threads = fetch_threads(&conn.wire).await.unwrap_or_default();
+    let mut threads = fetch_threads(&conn.wire).await.unwrap_or_default();
     let active_tid = stopped_tid
         .or_else(|| threads.first().map(|t| t.id))
         .unwrap_or(1);
+    // The stopped thread leads the list: Delve lists parked runtime goroutines first.
+    if let Some(i) = threads.iter().position(|t| t.id == active_tid) {
+        threads[..=i].rotate_right(1);
+    }
 
-    let frames = fetch_stack_frames(&conn.wire, &target, active_tid)
+    let (frames, top_ip) = fetch_stack_frames(&conn.wire, &target, active_tid)
         .await
         .unwrap_or_default();
+    let key = frames
+        .first()
+        .map(|f| (active_tid, frames.len(), f.path.clone(), f.line));
+    let skip = match entry.last_bp_stop.lock() {
+        Ok(mut last) => {
+            let prev = last.take();
+            match (key, top_ip) {
+                (Some(key), Some(ip)) if reason == "breakpoint" => {
+                    let skip = is_same_line_relocation(prev.as_ref(), &key, ip);
+                    *last = Some((key, ip));
+                    skip
+                }
+                _ => false,
+            }
+        }
+        Err(_) => false,
+    };
+    if skip {
+        let _ = conn
+            .wire
+            .request("continue", Some(json!({ "threadId": active_tid })))
+            .await;
+        return;
+    }
     let selected_frame = top_source_frame(&frames);
 
     let (active_fid, paused_file, paused_line, scopes, inline_values) = if let Some(frame) =
@@ -346,6 +374,7 @@ pub(super) async fn handle_stopped_event(
             return;
         }
         snap.state = IdeDebugState::Paused;
+        snap.stop_seq += 1;
         snap.stopped_reason = Some(reason);
         snap.active_thread_id = Some(active_tid);
         snap.active_frame_id = active_fid;
@@ -386,7 +415,9 @@ pub(super) async fn select_frame_and_refresh(
         || frame_id.is_some_and(|fid| !snap.stack_frames.iter().any(|f| f.id == fid));
 
     let frames = if need_refetch_frames {
-        fetch_stack_frames(&conn.wire, &target, effective_tid).await?
+        fetch_stack_frames(&conn.wire, &target, effective_tid)
+            .await?
+            .0
     } else {
         snap.stack_frames
     };
@@ -465,11 +496,29 @@ async fn fetch_threads(wire: &DapWireClient) -> Result<Vec<IdeThreadInfo>> {
         .collect())
 }
 
+/// Where a breakpoint stop happened: thread, stack depth, top frame file and line.
+pub(super) type BpStopKey = (i64, usize, Option<String>, u32);
+
+/// A line holding a macro (`println!`, `assert_eq!`) compiles to several breakpoint
+/// locations in one function, and lldb stops at each: Continue looked stuck on that
+/// line. A stop is such a relocation when it follows a breakpoint stop at the same
+/// place and depth at a HIGHER address; a loop coming back to the line restarts at
+/// its first (lowest) address, so it still stops.
+pub(super) fn is_same_line_relocation(
+    prev: Option<&(BpStopKey, u64)>,
+    key: &BpStopKey,
+    ip: u64,
+) -> bool {
+    prev.is_some_and(|(k, prev_ip)| k == key && ip > *prev_ip)
+}
+
+/// The thread's frames and the top frame's instruction pointer, when the adapter
+/// reports one.
 async fn fetch_stack_frames(
     wire: &DapWireClient,
     target: &IdeTargetSpec,
     thread_id: i64,
-) -> Result<Vec<IdeStackFrame>> {
+) -> Result<(Vec<IdeStackFrame>, Option<u64>)> {
     let resp = wire
         .request(
             "stackTrace",
@@ -483,7 +532,12 @@ async fn fetch_stack_frames(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    Ok(arr
+    let top_ip = arr
+        .first()
+        .and_then(|f| f.get("instructionPointerReference"))
+        .and_then(Value::as_str)
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok());
+    let frames = arr
         .into_iter()
         .filter_map(|f| {
             let id = f.get("id").and_then(Value::as_i64)?;
@@ -508,5 +562,6 @@ async fn fetch_stack_frames(
                 column,
             })
         })
-        .collect())
+        .collect();
+    Ok((frames, top_ip))
 }

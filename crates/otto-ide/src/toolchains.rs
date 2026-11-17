@@ -17,8 +17,9 @@ mod remote_probe;
 
 use self::detected::scan_detected_sdks;
 use self::discovery::{
-    collect_managed_bin_dirs, discover_local_dap_with_shell, discover_local_lsp_with_shell,
-    discover_local_sdks_with_shell, empty_tool, mark_active_sdk,
+    canonical_key, collect_managed_bin_dirs, discover_local_dap_with_shell,
+    discover_local_lsp_with_shell, discover_local_sdks_with_shell, empty_tool, label_builtin_dap,
+    mark_active_sdk, mark_go_tool_outdated,
 };
 #[cfg(test)]
 use self::discovery::{discover_local_dap, discover_local_lsp, discover_local_sdks};
@@ -368,12 +369,12 @@ impl ToolchainManager {
                 .map(|eco| {
                     let mut installed = custom_sdks.remove(&eco).unwrap_or_default();
                     let mut seen: BTreeSet<String> =
-                        installed.iter().map(|s| s.path.clone()).collect();
+                        installed.iter().map(|s| canonical_key(&s.path)).collect();
                     if eco == EcosystemKind::Python {
                         for det in &detected {
                             if det.ecosystem == IdeEcosystemKind::Python
                                 && matches!(det.source.as_str(), "venv" | "poetry" | "conda")
-                                && seen.insert(det.bin_path.clone())
+                                && seen.insert(canonical_key(&det.bin_path))
                             {
                                 installed.push(IdeInstalledSdk {
                                     id: format!("python-{}-{}", det.source, installed.len() + 1),
@@ -386,11 +387,47 @@ impl ToolchainManager {
                         }
                     }
                     for disc in discover_local_sdks_with_shell(&roots, eco, shell_path.as_deref()) {
-                        if seen.insert(disc.path.clone()) {
+                        if seen.insert(canonical_key(&disc.path)) {
                             installed.push(disc);
                         }
                     }
+                    // Everything else the detector found (Homebrew JDKs, pyenv, fnm,
+                    // Go toolchains…), so the SDK pickers list what "Detected" shows.
+                    let api_eco: IdeEcosystemKind = eco.into();
+                    for det in detected
+                        .iter()
+                        .filter(|d| d.ecosystem == api_eco && d.valid)
+                    {
+                        if seen.insert(canonical_key(&det.path)) {
+                            installed.push(IdeInstalledSdk {
+                                id: format!(
+                                    "{}-{}-{}",
+                                    eco.as_str(),
+                                    det.source,
+                                    installed.len() + 1
+                                ),
+                                version: det.version.clone(),
+                                path: det.path.clone(),
+                                source: det.source.clone(),
+                                active: false,
+                            });
+                        }
+                    }
                     mark_active_sdk(&mut installed, eco, env_clone.as_ref());
+                    let mut lsp_status =
+                        discover_local_lsp_with_shell(&roots, eco, shell_path.as_deref());
+                    let mut dap_status = label_builtin_dap(
+                        eco,
+                        discover_local_dap_with_shell(&roots, eco, shell_path.as_deref()),
+                    );
+                    if eco == EcosystemKind::Go {
+                        let goroot = installed
+                            .iter()
+                            .find(|s| s.active)
+                            .map(|s| PathBuf::from(&s.path));
+                        mark_go_tool_outdated(&mut lsp_status, goroot.as_deref());
+                        mark_go_tool_outdated(&mut dap_status, goroot.as_deref());
+                    }
                     let downloadable = catalogs
                         .get(&eco)
                         .cloned()
@@ -402,16 +439,8 @@ impl ToolchainManager {
                         ecosystem: eco.into(),
                         display_name: eco.display_name().to_string(),
                         installed,
-                        lsp_status: discover_local_lsp_with_shell(
-                            &roots,
-                            eco,
-                            shell_path.as_deref(),
-                        ),
-                        dap_status: discover_local_dap_with_shell(
-                            &roots,
-                            eco,
-                            shell_path.as_deref(),
-                        ),
+                        lsp_status,
+                        dap_status,
                         downloadable,
                     }
                 })

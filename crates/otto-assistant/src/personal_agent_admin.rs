@@ -430,6 +430,45 @@ pub async fn clear_other_primaries(repo: &PersonalAgentsRepo, agent: &PersonalAg
     Ok(())
 }
 
+/// 409 when `owner` already has another agent named `name` in `ws` (ignoring
+/// case): delegation and routines find agents by name, so a twin is unreachable.
+pub async fn check_name_free(
+    repo: &PersonalAgentsRepo,
+    ws: &str,
+    owner: Option<&str>,
+    name: &str,
+    except: Option<&str>,
+) -> Result<()> {
+    let taken = repo.list_by_workspace(ws).await?.iter().any(|a| {
+        Some(a.id.as_str()) != except
+            && a.created_by.as_deref() == owner
+            && a.name.trim().eq_ignore_ascii_case(name.trim())
+    });
+    if taken {
+        return Err(Error::Conflict(format!(
+            "you already have an agent named \"{}\"",
+            name.trim()
+        )));
+    }
+    Ok(())
+}
+
+/// An update's new working folder must be valid and its new name free
+/// ([`check_name_free`] for renaming `agent`).
+pub async fn check_update(
+    repo: &PersonalAgentsRepo,
+    agent: &PersonalAgent,
+    cwd: Option<&str>,
+    name: Option<&str>,
+) -> Result<()> {
+    if let Some(c) = cwd {
+        validate_agent_cwd(c)?;
+    }
+    let Some(name) = name else { return Ok(()) };
+    let owner = agent.created_by.as_deref();
+    check_name_free(repo, &agent.workspace_id, owner, name, Some(&agent.id)).await
+}
+
 /// Create an agent owned by `owner` in `ws` — the agent, then its schedules,
 /// then "main agent". Everything is validated BEFORE the agent row exists, so
 /// a bad cadence never leaves a half-made agent. Returns the agent with its
@@ -482,6 +521,7 @@ pub async fn create<C: AssistantCtx>(
         check_schedule::<C>(s)?;
     }
     let repo = pa_engine::repo(ctx);
+    check_name_free(&repo, ws, Some(owner), &name, None).await?;
     let agent = repo
         .create(NewPersonalAgent {
             avatar: req.avatar.clone().unwrap_or_else(|| from_tpl("avatar")),

@@ -20,12 +20,9 @@ async fn java_and_polyglot_diagnostics_quickfixes_and_clean_hover_work_end_to_en
     let db_path = tmp.path().join("state.db");
     let ws = tmp.path().join("java-svc");
     let pkg_dir = ws.join("src/main/java/com/acme/order");
+    // No `pom.xml`: otto-java judges imports only for sources outside a Maven/Gradle
+    // build (a build's transitive classpath is jdtls's to resolve).
     std::fs::create_dir_all(&pkg_dir).unwrap();
-    std::fs::write(
-        ws.join("pom.xml"),
-        "<project><modelVersion>4.0.0</modelVersion><groupId>com.acme</groupId><artifactId>java-svc</artifactId><version>1.0.0</version></project>\n",
-    )
-    .unwrap();
 
     let order_file = pkg_dir.join("OrderProcessor.java");
     let java_src = r#"package com.acme.order;
@@ -591,7 +588,9 @@ async fn run_java_main_and_collect_output(
     .await;
     assert_eq!(st, StatusCode::OK, "start_run failed: {start_body}");
     let run_id = start_body["run"]["id"].as_str().unwrap().to_string();
-    for _ in 0..80 {
+    // A Maven module's Run tries Maven first when `mvn` is on PATH (CI runners have it):
+    // a cold `~/.m2` downloads plugins before Maven fails over to javac.
+    for _ in 0..600 {
         let (_, poll_body): (_, Value) =
             send_json(app, Method::GET, &format!("/ide/runs/{run_id}"), None).await;
         let status = poll_body["run"]["status"].as_str().unwrap_or("");

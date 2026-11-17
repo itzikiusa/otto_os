@@ -52,7 +52,7 @@ fn references_and_rename_skip_comments_strings_and_substrings() {
 fn code_actions_populate_concrete_edits_and_fallback_formatter_works() {
     let messy_go =
         "package main\nfunc calc(x int) (int, error) {\nres, err := step(x)\nreturn res, err\n}\n";
-    assert!(format_builtin_fallback("go", messy_go).contains("\tres, err := step(x)"));
+    assert_eq!(format_builtin_fallback("go", messy_go), messy_go);
     let actions = generate_code_actions("main.go", "go", messy_go, 3, 2, &[]);
     let err_act = actions
         .iter()
@@ -237,6 +237,55 @@ public class DemoService {
 }
 
 #[test]
+fn java_imports_under_a_build_file_are_trusted_but_standalone_ones_are_checked() {
+    let src = "package com.acme;\n\nimport org.springframework.stereotype.Service;\nimport org.springframework.web.bind.annotation.*;\n\n@Service\n@RestController\npublic class Api {\n    Missing m;\n}\n";
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let file = root.join("svc/src/main/java/com/acme/Api.java");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let diags_of = |src: &str, roots: &[std::path::PathBuf]| {
+        java_diag::analyze_java_diagnostics(
+            &file.to_string_lossy(),
+            src,
+            roots,
+            None,
+            &BTreeMap::new(),
+        )
+    };
+    let diags = |roots: &[std::path::PathBuf]| diags_of(src, roots);
+    let codes = |d: &[crate::types::IdeDiagnostic]| -> Vec<String> {
+        d.iter()
+            .map(|d| format!("{} {}", d.code, d.message))
+            .collect()
+    };
+
+    let standalone = diags(std::slice::from_ref(&root));
+    assert!(
+        standalone.iter().any(|d| d.code == "unresolved_import"),
+        "{:?}",
+        codes(&standalone)
+    );
+
+    // A module pom (parent BOMs and starters bring transitive jars this index can't see).
+    std::fs::write(root.join("svc/pom.xml"), "<project/>").unwrap();
+    let managed = diags(std::slice::from_ref(&root));
+    assert!(
+        !managed.iter().any(|d| d.code.starts_with("unresolved_")),
+        "{:?}",
+        codes(&managed)
+    );
+    // A type with no import at all is still a missing import.
+    let no_wildcard = src.replace("import org.springframework.web.bind.annotation.*;\n", "");
+    let missing = diags_of(&no_wildcard, std::slice::from_ref(&root));
+    let unresolved: Vec<_> = missing
+        .iter()
+        .filter(|d| d.code.starts_with("unresolved_"))
+        .collect();
+    assert_eq!(unresolved.len(), 2, "{:?}", codes(&missing));
+    assert!(unresolved.iter().all(|d| d.code == "unresolved_type"));
+}
+
+#[test]
 fn hover_isolates_single_go_var_doc_without_neighbor_bleed() {
     let decimal_src = r#"package decimal
 
@@ -271,6 +320,21 @@ var PowPrecisionNegativeExponent = 16
         !doc.contains("PowPrecisionNegativeExponent"),
         "hover doc must never bleed into subsequent symbols: {doc}"
     );
+}
+
+#[test]
+fn rust_hover_names_the_crate_from_the_nearest_cargo_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("app/src")).unwrap();
+    std::fs::write(
+        dir.path().join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let file = dir.path().join("app/src/lib.rs");
+    let src = "/// Adds.\npub fn add(a: i32, b: i32) -> i32 { a + b }\n";
+    let hov = hover::extract_hover_from_definition("add", file.to_str().unwrap(), 2, "rust", src);
+    assert_eq!(hov.package_name.as_deref(), Some("app"));
 }
 
 #[tokio::test]
@@ -432,5 +496,70 @@ fn jdk_index_caches_per_java_home_and_java_project_index_invalidates_on_file_add
     assert!(
         !third.iter().any(|d| d.message.contains("NewlyAddedHelper")),
         "workspace index cache must invalidate when a new source file is added: {third:?}"
+    );
+}
+
+#[test]
+fn python_organize_imports_leaves_parenthesised_imports_alone() {
+    let src = "import sys\nfrom typing import (\n    Any,\n    Dict,\n)\nimport os\n";
+    let lines: Vec<&str> = src.lines().collect();
+    assert!(code_actions::build_organize_imports_action("python", &lines, src).is_none());
+    let cont = "import sys\nfrom a import b, \\\n    c\nimport os\n";
+    let lines: Vec<&str> = cont.lines().collect();
+    assert!(code_actions::build_organize_imports_action("python", &lines, cont).is_none());
+    // A plain one-line block is still sorted.
+    let plain = "import sys\nimport os\n";
+    let lines: Vec<&str> = plain.lines().collect();
+    let (_, organized) =
+        code_actions::build_organize_imports_action("python", &lines, plain).unwrap();
+    assert_eq!(organized, "import os\nimport sys\n");
+}
+
+#[test]
+fn ts_outline_lists_typed_arrows_class_fields_abstract_methods_and_enum_members() {
+    let src = "export const fetchBalance = async (id: string): Promise<Money> => {\n  return get(id);\n};\nexport abstract class Repo {\n  static readonly VERSION = '1';\n  #token: string;\n  retries = 3;\n  onError = (e: Error) => log(e);\n  abstract find(): Promise<Money>;\n  get(id: string): string {\n    count = 1;\n    return id;\n  }\n}\nenum Status {\n  Active = 'a',\n  Closed,\n}\n";
+    let syms = parse_document_symbols("api.ts", "typescript", src);
+    let names = |n: &crate::types::IdeSymbolNode| {
+        n.children
+            .iter()
+            .map(|c| (c.name.clone(), c.kind.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(syms[0].name, "fetchBalance");
+    let repo = syms.iter().find(|s| s.name == "Repo").unwrap();
+    assert_eq!(
+        names(repo),
+        [
+            ("VERSION", "field"),
+            ("#token", "field"),
+            ("retries", "field"),
+            ("onError", "method"),
+            ("find", "method"),
+            ("get", "method")
+        ]
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+    );
+    let status = syms.iter().find(|s| s.name == "Status").unwrap();
+    assert_eq!(
+        names(status),
+        [("Active", "constant"), ("Closed", "constant")]
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+    );
+}
+
+#[test]
+fn builtin_formatter_leaves_code_and_markdown_hard_breaks_alone() {
+    // A template literal's continuation lines are string content, not code to re-indent.
+    let ts = "function f() {\n  const sql = `\n  SELECT *\n    FROM t\n`;\n  return sql;\n}\n";
+    assert_eq!(format_builtin_fallback("typescript", ts), ts);
+    // A two-space indent project is not forced to four.
+    let rs = "fn main() {\n  let s = r#\"a\n   b\"#;\n}\n";
+    assert_eq!(format_builtin_fallback("rust", rs), rs);
+    // Two trailing spaces are a Markdown hard line break.
+    assert_eq!(format_builtin_fallback("markdown", "a  \nb\n"), "a  \nb\n");
+    // Invalid JSON still gets the brace re-indent.
+    assert_eq!(
+        format_builtin_fallback("jsonc", "{\n// c\n\"a\": 1,\n}\n"),
+        "{\n  // c\n  \"a\": 1,\n}\n"
     );
 }

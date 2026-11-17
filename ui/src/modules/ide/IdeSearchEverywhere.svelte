@@ -87,6 +87,12 @@
     return undefined;
   });
 
+  // A preview only describes the query, replacement and options it ran with.
+  $effect(() => {
+    void [query, replacement, caseSensitive, wholeWord, regex, fileGlob, effectiveScopePath];
+    ide.replacePreview = null;
+  });
+
   const parsed = $derived(parseQuickOpenQuery(tab, query));
 
   // Register as an open overlay: the native browser webview hides, and the IDE's own
@@ -303,9 +309,8 @@
     if (query.length === 0) return;
     replaceMode = 'apply';
     try {
-      const preview =
-        ide.replacePreview ??
-        (await ide.replaceInWorkspace(query, replacement, true, buildSearchOpts()));
+      // Always a fresh dry run: the count we confirm is the count the disk has now.
+      const preview = await ide.replaceInWorkspace(query, replacement, true, buildSearchOpts());
       if (!preview || preview.replacements === 0) return;
       const ok = await confirmer.ask(
         `Replace ${plural(preview.replacements, 'occurrence')} across ${plural(preview.files_changed, 'file')}?`,
@@ -431,7 +436,7 @@
             {#each ide.replacePreview.previews.slice(0, 12) as p (p.path)}
               <div class="se-preview-item" dir="ltr">
                 <div class="se-preview-top">
-                  <span class="se-preview-file">{ide.relativePath(ide.resolvePath(p.path))} ({plural(p.count, 'match')})</span>
+                  <span class="se-preview-file">{ide.relativePath(ide.resolvePath(p.path))} ({plural(p.count, 'match', 'matches')})</span>
                   <button type="button" class="btn small ghost" disabled={ide.replaceLoading} onclick={() => void replaceSingleFile(p.path)}>Replace file</button>
                 </div>
                 <div class="se-diff-before">- {p.sample_before}</div>
@@ -520,6 +525,9 @@
               Show all {rows.length} matches ({rows.length - ROW_CAP} more)
             </button>
           {/if}
+          {#if ide.searchTruncated && tab !== 'actions'}
+            <p class="se-truncated" data-testid="ide-search-truncated">There are more matches than shown. Narrow the query to see the rest.</p>
+          {/if}
         </div>
       </LoadState>
     </div>
@@ -581,6 +589,7 @@
   .se-diff-after { color: var(--success); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .se-results { flex: 1 1 auto; min-block-size: 0; overflow-y: auto; border-block-start: 1px solid var(--border); padding-block-start: var(--sp-3); }
   .se-list { display: flex; flex-direction: column; gap: var(--sp-1); }
+  .se-truncated { margin: 0; padding: var(--sp-2) 10px; font-size: var(--fs-xs); color: var(--text-dim); }
   .se-hint { margin: 0; padding: var(--sp-3) 10px; font-size: var(--fs-xs); color: var(--text-dim); }
   .se-section-head { padding: var(--sp-2) 10px; font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); }
   .se-group-head {

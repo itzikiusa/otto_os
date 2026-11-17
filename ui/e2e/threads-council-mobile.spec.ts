@@ -58,3 +58,35 @@ test('a council on a phone: the Related chip switches seats, the parent chip goe
   await expect(page.getByTestId('runtime-thread-rt_p1')).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
+
+test('a council on a phone is not laid side by side: the ⋯ offers no grid', async ({ page }, info) => {
+  test.skip(info.project.name.includes('landscape'), 'portrait phone layout only');
+  await page.goto('/');
+  await page.waitForFunction(() => typeof (window as unknown as { __mockRuntime?: { seed?: unknown } }).__mockRuntime?.seed === 'function');
+  await page.evaluate(() => {
+    const m = (window as unknown as { __mockRuntime: { seed: (r: Record<string, unknown>) => string } }).__mockRuntime;
+    const meta = (seat: number) => ({ council: { id: 'cnc_grid', seat, role: 'seat' }, read_only: true });
+    const seats = ['claude', 'codex', 'gemini', 'grok'];
+    seats.forEach((provider, i) =>
+      m.seed({
+        id: `rt_g${i + 1}`,
+        title: `Grid plan · ${provider}`,
+        provider,
+        ...(i ? { parent_id: 'rt_g1' } : {}),
+        last_active_at: `2026-11-12T10:0${9 - i}:00Z`,
+        meta: meta(i + 1),
+      }),
+    );
+    location.hash = '#/threads/rt_g1';
+  });
+  await expect(page.getByTestId('runtime-thread-rt_g1')).toBeVisible({ timeout: 15_000 });
+  // Superseded by main (PR #169): a phone has no side-by-side layouts, so the
+  // council is read seat by seat (the council strip) — the ⋯ no longer offers
+  // "Open council side by side".
+  await page.getByTestId('threads-thread-menu').click();
+  const names = await page.locator('.ctx-menu').first().locator('[role^="menuitem"]').allInnerTexts();
+  expect(names.some((n) => /^Open council side by side/.test(n))).toBe(false);
+  await page.keyboard.press('Escape');
+  await expectNoHorizontalOverflow(page);
+});
+

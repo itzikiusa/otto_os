@@ -33,7 +33,7 @@ test('database change draft binds validation to selected executor before submiss
   await page.goto('/#/connections');
   await page.getByRole('button',{name:/Migration fixture.*mysql/}).first().click();
   await page.getByTestId('db-conn-actions').click();
-  await page.getByRole('menuitem',{name:'Schema changes',exact:true}).click();
+  await page.getByRole('menuitem',{name:'Database changes',exact:true}).click();
   const panel=page.getByTestId('database-changes');
   await panel.getByRole('button',{name:'New change',exact:true}).click();
   await panel.getByLabel('Title',{exact:true}).fill('Add reviewed column');

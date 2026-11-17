@@ -411,15 +411,18 @@
   }
 
   /* ── Side headers (A / B) ── */
+  /* minmax(0, 1fr): a long side label ellipsizes instead of widening its
+     column (a merge message split the header ~10/90, off the lines below). */
   .side-heads {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     border-bottom: 1px solid var(--border);
   }
   .side-heads.stacked {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .side-head {
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 6px;

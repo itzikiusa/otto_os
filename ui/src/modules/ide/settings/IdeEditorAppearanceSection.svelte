@@ -167,6 +167,17 @@
         </div>
       </div>
     </div>
+
+    <div class="ea-card">
+      <div class="ea-sw-row">
+        <Switch
+          checked={ideSettings.draft.scratchesTab}
+          label="Show Scratches as a tab in the IDE header"
+          onchange={(v) => (ideSettings.draft.scratchesTab = v)}
+        />
+        <span class="ea-title">Show Scratches as a tab in the IDE header (Project | Scratches)</span>
+      </div>
+    </div>
   </div>
 
 {:else if section === 'keymap'}

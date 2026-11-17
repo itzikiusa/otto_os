@@ -27,10 +27,9 @@
     selectedId: string | null;
     /** "Zoom" the run detail to ~85vh (R6). */
     runDetailMax: boolean;
-    onstop: () => void;
     onOpenSession: (sid: string) => void;
   }
-  let { mon, nodeName, selectedId = $bindable(), runDetailMax = $bindable(), onstop, onOpenSession }: Props = $props();
+  let { mon, nodeName, selectedId = $bindable(), runDetailMax = $bindable(), onOpenSession }: Props = $props();
 
   const run = $derived(mon.run);
   // Whether the run is still active (so Stop makes sense even when this
@@ -68,16 +67,6 @@
     {#if !runActive && hasReview}
       <button class="btn small" onclick={rereview} disabled={rereviewing} data-testid="workflow-re-review" title="Review the latest revision and verify previous findings">
         <Icon name="refresh" size={12} /> {rereviewing ? 'Starting…' : 'Re-review'}
-      </button>
-    {/if}
-    {#if runActive}
-      <button
-        class="btn small danger"
-        data-testid="run-cancel"
-        onclick={onstop}
-        title="Stop this run (finishes the current step, then halts)"
-      >
-        <Icon name="stop" size={12} /> Stop run…
       </button>
     {/if}
     <RunLinkButton workflowId={run.workflow_id} runId={run.id} />

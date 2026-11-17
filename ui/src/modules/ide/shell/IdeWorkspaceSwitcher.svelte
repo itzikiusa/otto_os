@@ -9,7 +9,7 @@
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
-  import { onScratches } from './ideScratches.svelte';
+  import { onScratches, openScratches } from './ideScratches.svelte';
   import { ideFolderLabel } from './ideProjectRecents.svelte';
 
   const IdeWorkspacePopoverLazy = lazyComponent(() => import('./IdeWorkspacePopover.svelte'));
@@ -43,6 +43,9 @@
 
   function openProjectContextMenu(e: MouseEvent, proj: IdeNamedProject): void {
     e.preventDefault();
+    // Every item opens a dialog or switches project: close the popover first, or
+    // its backdrop sits above the dialog and eats the first click.
+    menuOpen = false;
     const items: MenuItem[] = [
       {
         label: 'Rename project…',
@@ -95,7 +98,11 @@
               confirmLabel: 'Delete',
               danger: true,
             });
-            if (ok) await ide.deleteNamedProject(proj.id);
+            if (!ok) return;
+            const wasActive = ide.activeProjectId === proj.id;
+            await ide.deleteNamedProject(proj.id);
+            // The open project is gone: land on the default project.
+            if (wasActive && !ide.namedProjects.some((p) => p.id === proj.id)) await openScratches();
           })(),
       },
     ];
@@ -164,5 +171,5 @@
   .ws-name { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
   .ws-path { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-inline-size: 90px; }
   @media (max-width: 1024px) { .ws-path { display: none; } .ws-switcher-btn { max-inline-size: 175px; } }
-  @media (max-width: 640px) { .ws-switcher-btn { max-inline-size: min(145px, 34vw); block-size: 26px; padding-inline: 8px; font-size: var(--fs-xs); } }
+  @media (max-width: 640px) { .ws-switcher-btn :global(.badge) { display: none; } .ws-switcher-btn { max-inline-size: min(145px, 34vw); block-size: 26px; padding-inline: 8px; font-size: var(--fs-xs); } }
 </style>

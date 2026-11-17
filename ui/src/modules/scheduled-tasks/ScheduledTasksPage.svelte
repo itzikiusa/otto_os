@@ -41,6 +41,7 @@
   import type { EmailSenderResp, Integration, Workflow } from '../../lib/api/types';
   import { copyText } from '../../lib/clipboard';
   import { convertOutcome } from './convertOutcome';
+  import { runReason, runSummary } from './runRow';
   import AutomateTasksTabs from '../../lib/components/AutomateTasksTabs.svelte';
 
   let creating = $state(false);
@@ -448,14 +449,6 @@
 
   function intervalTooShort(): boolean {
     return !(Number(fEveryMin) >= 5);
-  }
-
-  function onIntervalBlur(): void {
-    if (fCadence !== 'interval') {
-      intervalError = '';
-      return;
-    }
-    intervalError = intervalTooShort() ? 'The shortest interval is 5 minutes' : '';
   }
 
   /** A corrected value drops the error immediately, so submit is not stuck on a stale flag. */
@@ -1035,7 +1028,7 @@
         {#if fCadence === 'interval'}
           <label class="field">
             <span>Every (minutes, min 5)</span>
-            <input id="sched-every" class="input" type="number" bind:value={fEveryMin} onblur={onIntervalBlur} oninput={onIntervalInput}
+            <input id="sched-every" class="input" type="number" bind:value={fEveryMin} oninput={onIntervalInput}
               aria-invalid={!!intervalError}
               aria-describedby={intervalError ? 'sched-every-err' : undefined} />
             {#if intervalError}<small id="sched-every-err" class="field-hint bad" use:announceShown={{ text: intervalError, assertive: true }}>{intervalError}</small>{/if}
@@ -1281,9 +1274,9 @@
                     <Icon name="play" size={12} /> Resume
                   </button>
                 {/if}
-                <button class="btn small" onclick={() => runNow(t)} disabled={!!runningIds[t.id]}
+                <button class="btn small" onclick={() => runNow(t)} disabled={live}
                   title={destLabel(t) === 'Report kept in Otto' ? 'Run once now' : `Run once now — ${destLabel(t).toLowerCase()}`}>
-                  <Icon name="play" size={12} /> {runningIds[t.id] ? 'Starting…' : t.enabled ? 'Run now' : 'Run once'}
+                  <Icon name="play" size={12} /> {runningIds[t.id] ? 'Starting…' : live ? 'Running…' : t.enabled ? 'Run now' : 'Run once'}
                 </button>
                 <button class="btn small ghost" onclick={() => toggleRuns(t)} aria-expanded={expandedId === t.id} aria-controls="runs-{t.id}">
                   <Icon name={expandedId === t.id ? 'chevronUp' : 'chevronDown'} size={12} /> Runs
@@ -1311,7 +1304,7 @@
                   <div class="run">
                     <StatusBadge status={runStatus(r.status)} />
                     <span class="run-when"><RelTime iso={r.started_at} /></span>
-                    <span class="run-sum" class:none={!r.summary} title={r.summary || undefined}>{r.summary || 'No summary'}</span>
+                    <span class="run-sum" class:none={!r.summary} title={r.summary || undefined}>{runSummary(r)}</span>
                     {#if r.report_rel}
                       <button class="btn small" onclick={() => viewReport(r, t.name)}>View report</button>
                     {/if}
@@ -1331,11 +1324,11 @@
                     <!-- Why it failed / why it wasn't delivered, readable without
                          hovering (a failed run used to say only "No summary"). -->
                     {#if r.status === 'error' && r.error}
-                      <p class="run-err" role="note"><Icon name="warning" size={12} /> {r.error}</p>
-                    {:else if r.status === 'skipped' && r.error}
+                      <p class="run-err" role="note"><Icon name="warning" size={12} /> {runReason(r.error)}</p>
+                    {:else if (r.status === 'skipped' || r.status === 'canceled') && r.error}
                       <!-- Why it was skipped (e.g. the workflow was still busy) —
                            neutral, not a failure (S3-306). -->
-                      <p class="run-err note" role="note">{r.error}</p>
+                      <p class="run-err note" role="note">{runReason(r.error)}</p>
                     {/if}
                     {#if r.delivery_error}
                       <p class="run-err warn" role="note">Not delivered: {r.delivery_error}</p>

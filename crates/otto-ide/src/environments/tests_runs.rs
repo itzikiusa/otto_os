@@ -16,7 +16,8 @@ use crate::types::{IdeRunConfig, IdeRunStatus, IdeRunnerKind, IdeTargetKind, Ide
 
 use super::runner::{
     append_run_line, build_runner_command, evict_finished_runs, execute_run_task, finish_run,
-    ActiveRunHandle, RunStateInner, MAX_FINISHED_RUNS, MAX_RUN_OUTPUT_BYTES, MAX_RUN_OUTPUT_LINES,
+    resolve_jvm_build_dir, ActiveRunHandle, RunStateInner, MAX_FINISHED_RUNS, MAX_RUN_OUTPUT_BYTES,
+    MAX_RUN_OUTPUT_LINES,
 };
 use super::EnvironmentManager;
 
@@ -392,6 +393,39 @@ async fn subscribe_run_for_user_streams_live_events_and_enforces_owner_rbac() {
 }
 
 #[test]
+fn vitest_runs_list_each_test_unless_a_reporter_is_chosen() {
+    let gutter = IdeRunConfig {
+        runner: IdeRunnerKind::Vitest,
+        command: Some("npx".into()),
+        args: ["--no-install", "vitest", "run", "a.test.ts", "-t", "adds"]
+            .map(String::from)
+            .to_vec(),
+        ..Default::default()
+    };
+    let (_, args) = super::runner_cmd::build_runner_command(
+        &gutter,
+        IdeTargetKind::Local,
+        "/w",
+        &BTreeMap::new(),
+    );
+    assert_eq!(args.last().map(String::as_str), Some("--reporter=verbose"));
+    let chosen = IdeRunConfig {
+        args: vec!["--reporter=dot".into()],
+        ..gutter
+    };
+    let (_, args) = super::runner_cmd::build_runner_command(
+        &chosen,
+        IdeTargetKind::Local,
+        "/w",
+        &BTreeMap::new(),
+    );
+    assert!(
+        !args.iter().any(|a| a == "--reporter=verbose"),
+        "args={args:?}"
+    );
+}
+
+#[test]
 fn build_runner_command_merges_go_tags_and_coverage_flags() {
     let tmp = tempfile::tempdir().unwrap();
     let test_file = tmp.path().join("assign_component_test.go");
@@ -443,6 +477,100 @@ fn build_runner_command_merges_go_tags_and_coverage_flags() {
     );
     assert_eq!(npm_prog, "npm");
     assert_eq!(npm_args, vec!["test", "--", "--coverage"]);
+}
+
+#[test]
+fn a_script_config_keeps_its_target_when_program_arguments_are_set() {
+    let run = |runner, target: &str, args: &[&str]| {
+        let cfg = IdeRunConfig {
+            id: "rc".into(),
+            name: "script".into(),
+            runner,
+            command: Some(
+                match runner {
+                    IdeRunnerKind::Python => "python3",
+                    IdeRunnerKind::Shell => "bash",
+                    _ => "node",
+                }
+                .into(),
+            ),
+            target_path: Some(target.into()),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            ..Default::default()
+        };
+        super::runner_cmd::build_runner_command(
+            &cfg,
+            IdeTargetKind::Local,
+            "/tmp",
+            &BTreeMap::new(),
+        )
+        .1
+    };
+    assert_eq!(
+        run(IdeRunnerKind::Python, "main.py", &["hello", "two words"]),
+        ["main.py", "hello", "two words"]
+    );
+    assert_eq!(
+        run(IdeRunnerKind::Node, "index.js", &["--foo"]),
+        ["index.js", "--foo"]
+    );
+    // An empty argument (`''`) is an argument, not the script's name.
+    assert_eq!(
+        run(IdeRunnerKind::Python, "app.py", &["hello", ""]),
+        ["app.py", "hello", ""]
+    );
+    assert_eq!(
+        run(IdeRunnerKind::Node, "index.js", &[""]),
+        ["index.js", ""]
+    );
+    assert_eq!(
+        run(IdeRunnerKind::Shell, "run.sh", &["", "x"]),
+        ["run.sh", "", "x"]
+    );
+    // A config saved with the script in its arguments runs it once.
+    assert_eq!(
+        run(IdeRunnerKind::Python, "main.py", &["main.py", "x"]),
+        ["main.py", "x"]
+    );
+    // A gutter test run already names its file among the tool's arguments.
+    assert_eq!(
+        run(
+            IdeRunnerKind::Node,
+            "/p/calc.test.js",
+            &["--no-install", "jest", "calc.test.js"]
+        ),
+        ["--no-install", "jest", "calc.test.js"]
+    );
+    assert_eq!(
+        shell_words::join(["hello", "two words", "", "a'b"]),
+        r#"hello 'two words' '' 'a'\''b'"#,
+        "the run echo can be copied and re-run"
+    );
+}
+
+#[test]
+fn a_tests_folder_without_python_gets_no_pytest_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+    std::fs::write(tmp.path().join("tests/a_test.go"), "package tests\n").unwrap();
+    let mut out = Vec::new();
+    super::discovery_jvm_py::discover_python(tmp.path(), None, &None, &mut out);
+    assert!(
+        out.iter().all(|c| c.runner != IdeRunnerKind::Pytest),
+        "{out:?}"
+    );
+    std::fs::write(tmp.path().join("tests/test_x.py"), "def test_x(): pass\n").unwrap();
+    std::fs::write(tmp.path().join("main.py"), "print(1)\n").unwrap();
+    super::discovery_jvm_py::discover_python(tmp.path(), None, &None, &mut out);
+    assert!(out.iter().any(|c| c.runner == IdeRunnerKind::Pytest));
+    let main = out
+        .iter()
+        .find(|c| c.target_path.as_deref() == Some("main.py"))
+        .unwrap();
+    assert!(
+        main.args.is_empty(),
+        "the script lives in the target, not the arguments"
+    );
 }
 
 #[cfg(unix)]
@@ -655,4 +783,457 @@ async fn before_launch_timeout_fails_the_step_and_kills_the_group() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(gone, "hook child {pid} survived the timeout");
+}
+
+/// Writes `files` under `root`; a `mvnw`/`gradlew` entry is made executable.
+#[cfg(unix)]
+fn write_jvm_fixture(root: &std::path::Path, files: &[(&str, &str)]) {
+    use std::os::unix::fs::PermissionsExt;
+    for (rel, body) in files {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body).unwrap();
+        if rel.ends_with("mvnw") || rel.ends_with("gradlew") {
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+}
+
+/// Resolves the run dir the way `execute_run_task` does and builds the command there.
+fn jvm_run(
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    runner: IdeRunnerKind,
+    filter: &str,
+) -> (IdeRunnerKind, String, String, Vec<String>) {
+    let target = IdeTargetSpec::local(root.to_string_lossy().into_owned());
+    let mut cfg = IdeRunConfig {
+        runner,
+        test_filter: Some(filter.into()),
+        cwd: Some(cwd.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    let dir = resolve_jvm_build_dir(&mut cfg, &target, cwd.to_string_lossy().into_owned());
+    let (prog, args) = build_runner_command(&cfg, IdeTargetKind::Local, &dir, &BTreeMap::new());
+    (cfg.runner, dir, prog, args)
+}
+
+fn canon(p: std::path::PathBuf) -> String {
+    std::fs::canonicalize(p)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+#[cfg(unix)]
+fn jvm_test_runs_from_its_maven_module_not_the_source_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let reactor = "<project><modules><module>svc</module></modules></project>";
+    write_jvm_fixture(
+        root,
+        &[
+            ("pom.xml", reactor),
+            ("svc/pom.xml", "<project/>"),
+            ("svc/src/test/java/com/x/FooTest.java", ""),
+            ("platform/core/pom.xml", "<project/>"),
+            ("platform/core/src/test/java/com/y/BarTest.java", ""),
+            ("src/test/java/com/z/RootTest.java", ""),
+        ],
+    );
+    let src = root.join("svc/src/test/java/com/x");
+
+    // Single class: the module that owns the file, not the package folder.
+    let (runner, dir, prog, args) = jvm_run(root, &src, IdeRunnerKind::JavaJunit, "com.x.FooTest");
+    assert_eq!(runner, IdeRunnerKind::JavaJunit);
+    assert_eq!(dir, canon(root.join("svc")));
+    assert_eq!(prog, "mvn");
+    assert_eq!(args, vec!["test", "-Dtest=com.x.FooTest"]);
+
+    // Single method keeps Surefire's `Class#method` selector.
+    let (_, _, _, args) = jvm_run(root, &src, IdeRunnerKind::JavaJunit, "com.x.FooTest#bar");
+    assert!(args.contains(&"-Dtest=com.x.FooTest#bar".to_string()));
+
+    // A module nested two levels down.
+    let nested = root.join("platform/core/src/test/java/com/y");
+    let (_, dir, _, _) = jvm_run(root, &nested, IdeRunnerKind::Maven, "com.y.BarTest");
+    assert_eq!(dir, canon(root.join("platform/core")));
+
+    // A test in the reactor root itself runs there; other modules must not fail on `-Dtest`.
+    let at_root = root.join("src/test/java/com/z");
+    let (_, dir, _, args) = jvm_run(root, &at_root, IdeRunnerKind::JavaJunit, "com.z.RootTest");
+    assert_eq!(dir, canon(root.to_path_buf()));
+    assert!(args.contains(&"-Dsurefire.failIfNoSpecifiedTests=false".to_string()));
+}
+
+#[test]
+#[cfg(unix)]
+fn jvm_test_uses_the_reactor_root_maven_wrapper_from_a_module() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_jvm_fixture(
+        root,
+        &[
+            (
+                "pom.xml",
+                "<project><modules><module>svc</module></modules></project>",
+            ),
+            ("mvnw", "#!/bin/sh\n"),
+            ("svc/pom.xml", "<project/>"),
+            ("svc/src/test/java/com/x/FooTest.java", ""),
+        ],
+    );
+    let src = root.join("svc/src/test/java/com/x");
+    let (_, dir, prog, _) = jvm_run(root, &src, IdeRunnerKind::JavaJunit, "com.x.FooTest");
+    assert_eq!(dir, canon(root.join("svc")));
+    assert_eq!(prog, format!("{}/mvnw", canon(root.to_path_buf())));
+
+    let (_, _, prog, _) = jvm_run(root, root, IdeRunnerKind::Maven, "com.x.FooTest");
+    assert_eq!(prog, "./mvnw");
+}
+
+#[test]
+#[cfg(unix)]
+fn jvm_test_in_a_gradle_module_runs_gradle_with_a_dotted_method_filter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_jvm_fixture(
+        root,
+        &[
+            ("settings.gradle", "include 'app'"),
+            ("gradlew", "#!/bin/sh\n"),
+            ("app/build.gradle.kts", ""),
+            ("app/src/test/java/com/x/FooTest.java", ""),
+        ],
+    );
+    let src = root.join("app/src/test/java/com/x");
+    let (runner, dir, prog, args) =
+        jvm_run(root, &src, IdeRunnerKind::JavaJunit, "com.x.FooTest#bar");
+    assert_eq!(runner, IdeRunnerKind::Gradle);
+    assert_eq!(dir, canon(root.join("app")));
+    assert_eq!(prog, format!("{}/gradlew", canon(root.to_path_buf())));
+    assert_eq!(args, vec!["test", "--tests", "com.x.FooTest.bar"]);
+}
+
+#[test]
+#[cfg(unix)]
+fn jvm_build_dir_stays_put_without_a_build_file_or_off_local() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_jvm_fixture(root, &[("src/test/java/com/x/FooTest.java", "")]);
+    let src = root
+        .join("src/test/java/com/x")
+        .to_string_lossy()
+        .into_owned();
+    let (_, dir, _, _) = jvm_run(
+        root,
+        std::path::Path::new(&src),
+        IdeRunnerKind::JavaJunit,
+        "X",
+    );
+    assert_eq!(dir, src);
+
+    // Never climbs above the workspace root, even when a parent has a POM.
+    std::fs::write(root.join("pom.xml"), "<project/>").unwrap();
+    let inner = root.join("src");
+    let (_, dir, _, _) = jvm_run(
+        &inner,
+        &inner.join("test/java/com/x"),
+        IdeRunnerKind::Maven,
+        "X",
+    );
+    assert!(dir.ends_with("src/test/java/com/x"), "{dir}");
+
+    let mut cfg = IdeRunConfig {
+        runner: IdeRunnerKind::JavaJunit,
+        ..Default::default()
+    };
+    let mut ssh = IdeTargetSpec::local("/remote/app");
+    ssh.kind = IdeTargetKind::Ssh;
+    let dir = resolve_jvm_build_dir(&mut cfg, &ssh, "/remote/app/svc/src/test".into());
+    assert_eq!(dir, "/remote/app/svc/src/test");
+}
+
+#[test]
+#[cfg(unix)]
+fn kotlin_pack_gutter_items_run_gradle_from_the_module_with_the_root_wrapper() {
+    let manifest: crate::types::IdePluginManifest = serde_json::from_str(include_str!(
+        "../../../../examples/ide-plugins/kotlin-ide/otto-ide-plugin.json"
+    ))
+    .unwrap();
+    let detectors = manifest.contributions.gutter_detectors;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_jvm_fixture(
+        root,
+        &[
+            ("settings.gradle.kts", "include(\"core\")"),
+            ("gradlew", "#!/bin/sh\n"),
+            ("core/build.gradle.kts", ""),
+            ("core/src/test/kotlin/CartTest.kt", ""),
+        ],
+    );
+    let file = root.join("core/src/test/kotlin/CartTest.kt");
+    let src = "fun main() {}\nfun `adds two items`() {}\nfun testTotal() {}\n";
+    let items = crate::gutter::detect_gutter_items(&file.to_string_lossy(), src, &detectors);
+    let target = IdeTargetSpec::local(root.to_string_lossy().into_owned());
+    let run = |idx: usize| {
+        let spec = &items[idx].run_spec;
+        let mut cfg = IdeRunConfig {
+            runner: spec.runner,
+            command: spec.command.clone(),
+            args: spec.args.clone(),
+            test_filter: spec.test_filter.clone(),
+            ..Default::default()
+        };
+        let dir = resolve_jvm_build_dir(&mut cfg, &target, spec.cwd.clone().unwrap());
+        let (prog, args) = build_runner_command(&cfg, IdeTargetKind::Local, &dir, &BTreeMap::new());
+        (dir, prog, args)
+    };
+    let wrapper = format!("{}/gradlew", canon(root.to_path_buf()));
+
+    let (dir, prog, args) = run(0);
+    assert_eq!(items[0].run_spec.test_filter, None);
+    assert_eq!(
+        (dir.as_str(), prog.as_str()),
+        (canon(root.join("core")).as_str(), wrapper.as_str())
+    );
+    assert_eq!(args, ["run"]);
+
+    assert_eq!(items[1].label, "Test adds two items");
+    assert_eq!(run(1).2, ["test", "--tests", "*.adds two items"]);
+    assert_eq!(run(2).2, ["test", "--tests", "*.testTotal"]);
+}
+
+const SUREFIRE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.x.CartTest" tests="5" failures="1">
+  <properties><property name="java.version" value="21"/></properties>
+  <testcase name="addsItem" classname="com.x.CartTest" time="0.012"/>
+  <testcase name="removesItem" classname="com.x.CartTest" time="0.003"/>
+  <testcase name="totals" classname="com.x.CartTest" time="0.5">
+    <failure message="expected: &lt;3&gt; but was: &lt;2&gt;" type="AssertionFailedError">trace</failure>
+  </testcase>
+  <testcase name="empty" classname="com.x.CartTest" time="0"/>
+  <testcase name="clears" classname="com.x.CartTest" time="0.001"></testcase>
+</testsuite>
+"#;
+
+#[test]
+fn junit_xml_reports_parse_per_test_rows_for_surefire_and_gradle() {
+    use super::runner_parsers::parse_junit_xml;
+    use crate::types::IdeTestCaseStatus;
+    let rows = parse_junit_xml(SUREFIRE_XML);
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows[0].name, "addsItem");
+    assert_eq!(rows[0].suite.as_deref(), Some("com.x.CartTest"));
+    assert_eq!(rows[0].duration_ms, Some(12));
+    assert_eq!(rows[2].status, IdeTestCaseStatus::Failed);
+    assert_eq!(
+        rows[2].message.as_deref(),
+        Some("expected: <3> but was: <2>")
+    );
+    let failed = rows
+        .iter()
+        .filter(|r| r.status == IdeTestCaseStatus::Failed);
+    assert_eq!(failed.count(), 1);
+
+    let gradle = r#"<testsuite name="CartTest" tests="2" skipped="1">
+  <testcase name="adds two items()" classname="CartTest" time="0.004"/>
+  <testcase name="later()" classname="CartTest" time="0.0">
+    <skipped/>
+  </testcase>
+</testsuite>"#;
+    let rows = parse_junit_xml(gradle);
+    assert_eq!(rows[0].name, "adds two items()");
+    assert_eq!(rows[0].status, IdeTestCaseStatus::Passed);
+    assert_eq!(rows[1].status, IdeTestCaseStatus::Skipped);
+}
+
+#[cfg(unix)]
+fn maven_sh_run_config(script: &str) -> IdeRunConfig {
+    IdeRunConfig {
+        runner: IdeRunnerKind::Maven,
+        test_filter: Some("CartTest".into()),
+        ..sh_run_config(script, None)
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn maven_run_reports_tests_from_the_surefire_xml_it_wrote() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A stale report from an earlier run must not count.
+    let stale = tmp.path().join("old/target/surefire-reports");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("TEST-com.x.OldTest.xml"), SUREFIRE_XML).unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(stale.join("TEST-com.x.OldTest.xml"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let xml = tmp.path().join("CartTest.xml");
+    std::fs::write(&xml, SUREFIRE_XML).unwrap();
+    let script = format!(
+        "mkdir -p core/target/surefire-reports && cp '{}' core/target/surefire-reports/TEST-com.x.CartTest.xml",
+        xml.display()
+    );
+    let (runs, handle, stop_rx) = local_run_handle("run_surefire");
+    let mut cfg = maven_sh_run_config(&script);
+    cfg.cwd = Some(tmp.path().to_string_lossy().into_owned());
+    execute_run_task(
+        runs,
+        Arc::clone(&handle),
+        TargetManager::new(),
+        IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned()),
+        None,
+        vec![(cfg, BTreeMap::new())],
+        None,
+        stop_rx,
+    )
+    .await;
+    let snap = handle.snapshot();
+    assert_eq!(snap.tests.len(), 5, "output: {:?}", snap.output);
+    assert_eq!(snap.status, IdeRunStatus::Passed);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn filtered_test_run_that_ran_nothing_is_not_passed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (runs, handle, stop_rx) = local_run_handle("run_no_tests");
+    execute_run_task(
+        runs,
+        Arc::clone(&handle),
+        TargetManager::new(),
+        IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned()),
+        None,
+        vec![(maven_sh_run_config("echo BUILD SUCCESS"), BTreeMap::new())],
+        None,
+        stop_rx,
+    )
+    .await;
+    let snap = handle.snapshot();
+    assert_eq!(snap.status, IdeRunStatus::Failed);
+    assert!(
+        snap.output
+            .iter()
+            .any(|l| l == "ERROR: No tests matched 'CartTest'"),
+        "{:?}",
+        snap.output
+    );
+}
+
+#[test]
+fn module_venv_is_found_up_from_the_run_dir_inside_the_roots() {
+    use super::runner::apply_runtime_profile_and_module_venv;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("proj");
+    std::fs::create_dir_all(root.join(".venv/bin")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(root.join(".venv/pyvenv.cfg"), "").unwrap();
+    std::fs::write(root.join(".venv/bin/python"), "").unwrap();
+    let target = IdeTargetSpec::local(root.to_string_lossy().into_owned());
+    let mut env = BTreeMap::new();
+    let tests_dir = root.join("tests").to_string_lossy().into_owned();
+    apply_runtime_profile_and_module_venv(&IdeRunConfig::default(), &target, &tests_dir, &mut env);
+    assert_eq!(env.get("VIRTUAL_ENV"), Some(&canon(root.join(".venv"))));
+    assert!(env["PATH"].starts_with(&canon(root.join(".venv/bin"))));
+
+    // Never above the workspace root: a venv above the roots is not the project's.
+    let inner = root.join("tests");
+    let target = IdeTargetSpec::local(inner.to_string_lossy().into_owned());
+    let mut env = BTreeMap::new();
+    apply_runtime_profile_and_module_venv(&IdeRunConfig::default(), &target, &tests_dir, &mut env);
+    assert_eq!(env.get("VIRTUAL_ENV"), None);
+}
+
+#[test]
+fn a_pytest_run_from_tests_dir_moves_to_the_projects_rootdir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tests = root.join("svc/tests/unit");
+    std::fs::create_dir_all(&tests).unwrap();
+    let target = IdeTargetSpec::local(root.to_string_lossy());
+    let rootdir = |cwd: &std::path::Path| super::pytest_rootdir(&target, &cwd.to_string_lossy());
+    let s = |p: PathBuf| p.to_string_lossy().into_owned();
+
+    // No conftest or config file: the run stays where it was asked to.
+    assert_eq!(rootdir(&tests), s(tests.clone()));
+    // The highest conftest.py wins over a nested one.
+    std::fs::write(root.join("svc/tests/conftest.py"), "").unwrap();
+    std::fs::write(root.join("svc/conftest.py"), "").unwrap();
+    assert_eq!(rootdir(&tests), s(root.join("svc")));
+    // The nearest pytest config / project file wins over any conftest.
+    std::fs::write(root.join("conftest.py"), "").unwrap();
+    std::fs::write(root.join("svc/tests/pytest.ini"), "").unwrap();
+    assert_eq!(rootdir(&tests), s(root.join("svc/tests")));
+
+    let mut ssh = IdeTargetSpec::local("/remote/app");
+    ssh.kind = IdeTargetKind::Ssh;
+    assert_eq!(
+        super::pytest_rootdir(&ssh, "/remote/app/tests"),
+        "/remote/app/tests"
+    );
+}
+
+/// `mvn` / `gradle` off the captured PATH still resolve from sdkman's current candidate.
+#[test]
+#[cfg(unix)]
+fn mvn_and_gradle_off_the_path_resolve_from_sdkman() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    for (cand, bin) in [("maven", "mvn"), ("gradle", "gradle")] {
+        let dir = home
+            .path()
+            .join(".sdkman/candidates")
+            .join(cand)
+            .join("current/bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(bin), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(dir.join(bin), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            super::runner_cmd::build_tool_fallback(bin, Some(home.path())),
+            Some(dir.join(bin))
+        );
+    }
+    assert_eq!(
+        super::runner_cmd::build_tool_fallback("go", Some(home.path())),
+        None
+    );
+}
+
+/// A program missing from the run's PATH fails with how to fix it, not a bare `os error 2`.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_program_missing_from_the_path_says_how_to_fix_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (runs, handle, stop_rx) = local_run_handle("run_missing");
+    let cfg = IdeRunConfig {
+        id: "rc_missing".into(),
+        name: "missing".into(),
+        runner: IdeRunnerKind::Custom,
+        command: Some("otto-no-such-tool".into()),
+        ..Default::default()
+    };
+    let env = BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+    execute_run_task(
+        runs,
+        Arc::clone(&handle),
+        TargetManager::new(),
+        IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned()),
+        None,
+        vec![(cfg, env)],
+        None,
+        stop_rx,
+    )
+    .await;
+    let out = handle.snapshot().output.join("\n");
+    assert!(
+        out.contains("'otto-no-such-tool' is not on the run's PATH")
+            && out.contains("Custom PATH entries"),
+        "{out}"
+    );
 }

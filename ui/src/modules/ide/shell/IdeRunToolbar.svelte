@@ -6,7 +6,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../../lib/lazy-component.svelte';
-  import { ide, type IdeRunConfig } from '../ideStore.svelte';
+  import { GUTTER_TARGET_ID, ide, type IdeRunConfig } from '../ideStore.svelte';
   import { launchSelectorLabel } from '../store/ideLaunchTarget';
   import { bridgeEnvCache } from './networkBridgeGuard.svelte';
   import { formatBridgeToolbarLabel } from './networkBridgeModel';
@@ -22,12 +22,13 @@
   const isDebugging = $derived(
     Boolean(ide.activeDebug && ide.activeDebug.state !== 'terminated' && ide.activeDebug.state !== 'error'),
   );
+  const gutterTarget = $derived(ide.selectedConfigId === GUTTER_TARGET_ID ? ide.envState.gutterTarget : null);
   // No match (`current-file`, nothing picked yet) = the file being looked at;
   // never the first configuration by position.
   const selectedConfig = $derived<IdeRunConfig | null>(
     ide.runConfigs.find((c) => c.id === ide.selectedConfigId) ?? null,
   );
-  const selectorLabel = $derived(launchSelectorLabel(selectedConfig, ide.activeTab));
+  const selectorLabel = $derived(gutterTarget?.label.replace(/^Run /, '') || launchSelectorLabel(selectedConfig, ide.activeTab));
   const bridgeLabel = $derived(
     ide.target.kind === 'local' ? formatBridgeToolbarLabel(ide.projectEnv?.network_bridge) : null,
   );

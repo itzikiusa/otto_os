@@ -28,7 +28,7 @@ import {
 } from '../store/ideDiffApplier';
 import {
   dispatchPromptToRuntimeSession,
-  isRuntimeTurnBusy,
+  isChatTurnRunning,
   extractInlineEditProposal,
   waitForInlineTurnCompletion,
 } from './ideAgentRuntimeOps.svelte';
@@ -229,7 +229,7 @@ export async function executeIdeInlineEdit(opts: {
   });
   if (opts.isCancelled()) return null;
   // A queued prompt has no turn id yet, so its reply can't be told apart from the running chat turn's.
-  if (isRuntimeTurnBusy(bridge, sid)) throw new Error('The agent is still answering in the chat. Try the inline edit when it finishes.');
+  if (isChatTurnRunning(bridge, sid)) throw new Error('The agent is still answering in the chat. Try the inline edit when it finishes.');
   const knownIds = new Set((bridge.runtimeViews.projections[sid]?.items ?? []).map((i) => i.id));
   const resp = await dispatchPromptToRuntimeSession(sid, promptPayload, {
     model: st.model,

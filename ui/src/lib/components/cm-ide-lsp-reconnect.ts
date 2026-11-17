@@ -13,6 +13,8 @@ export const LSP_RECONNECT_DELAYS_MS: readonly number[] = [1000, 2000, 5000, 10_
 
 export const IDE_RECONNECT_LSP_EVENT = 'otto:ide-reconnect-lsp';
 export const IDE_LSP_LINK_EVENT = 'otto:ide-lsp-link';
+/** `{ path, diagnostics }`: a server published diagnostics for a file no mounted editor listens to. */
+export const IDE_LSP_DIAGNOSTICS_EVENT = 'otto:ide-lsp-diagnostics';
 
 /** `waiting`: the daemon said it is shutting down; reattach once the app is connected again.
  *  `starting` / `ready` / `unavailable` describe a server's own life (with `lang`): a socket

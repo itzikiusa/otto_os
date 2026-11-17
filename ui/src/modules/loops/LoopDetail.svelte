@@ -651,6 +651,7 @@
     margin-top: 0;
   }
   .goal-sum {
+    white-space: pre-line;
     font-size: var(--fs-m);
     margin: 0 0 10px;
   }

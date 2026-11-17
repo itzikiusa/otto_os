@@ -169,7 +169,8 @@ active:
 
 - **Multi-cursor:** `Option + Click` adds/removes cursors; `Option + Drag`
   draws rectangular column selections; `⌥⇧I` splits a multi-line selection into
-  one cursor per line; `⌥⇧↑` / `⌥⇧↓` (`⌘⌥↑` / `⌘⌥↓`) adds cursors above/below;
+  one cursor per line; `⌘⌥↑` / `⌘⌥↓` adds cursors above/below (`⌥⇧↑` / `⌥⇧↓`
+  move the line);
   `⌃G` selects the next occurrence and `⌃⌘G` selects all occurrences.
 - **Add Prefix / Suffix to Lines:** Wraps every selected line (or every cursor
   line) with a chosen prefix and/or suffix in a single undoable CodeMirror
@@ -222,7 +223,15 @@ global system directories:
 | **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
 | **Node / TypeScript** | Node LTS (22), `pnpm`, `typescript-language-server`, `vscode-langservers-extracted`, `prettier`, `js-debug` |
 | **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
-| **JSON & CSV / TSV** | `vscode-json-language-server`, live JSONPath breadcrumb, Pretty / Minify / Sort Keys, `$ref` navigation, virtualized `IdeCsvView` (`Table ↔ Text` toggle, rainbow columns, sort/filter, inline cell edit + undo, column stats) |
+| **JSON & CSV / TSV** | `vscode-json-language-server`, live JSONPath breadcrumb (JSONC files — `.jsonc`, `tsconfig*.json`, `jsconfig*.json`, `.vscode/*.json`, `devcontainer.json`, `.eslintrc.json` — allow comments and trailing commas in the built-in syntax check), Pretty / Minify / Sort Keys, `$ref` navigation, virtualized `IdeCsvView` (`Table ↔ Text` toggle, rainbow columns, sort/filter, inline cell edit + undo, column stats) |
+
+**Tools that follow the SDK.** When the project's Go moves ahead of the Go that
+gopls or Delve were built with, the Toolchains window marks them **Outdated**
+("built with go1.22, project uses go1.25") and offers **Update**, which rebuilds
+them with the project's own Go (`POST /ide/toolchains/install` with `go_root`).
+A debug launch Delve refuses ("too old for Go 1.25") shows an **Update Delve**
+action that rebuilds it and starts the same session again. A Python debugger
+without the `debugpy` module is listed as the built-in bdb bridge.
 
 Installed `<data_dir>/toolchains/**/bin` directories and custom registered local
 SDKs (`POST /ide/toolchains/local`) are automatically prepended to `PATH` (setting
@@ -242,6 +251,11 @@ never spawned per request) and merges:
 
 into **all** Run executions, DAP Debug sessions, IDE Terminals, and local LSP
 servers (`gopls`, `jdtls`, `rust-analyzer`, `pyright`, `tsserver`).
+When that PATH has no `mvn` / `gradle` (a slow capture falls back to `-lc`, which
+skips `~/.zshrc` and so sdkman's init), a local run looks in
+`~/.sdkman/candidates/{maven,gradle}/current/bin`, then `/opt/homebrew/bin` and
+`/usr/local/bin`. A program that is still missing fails with a hint to add its
+folder under Shell env & vars › Custom PATH entries.
 
 Per-project configuration is persisted in SQLite (`0214_ide_configs.sql`), with
 secret environment variable values stored in the macOS Keychain via
@@ -260,6 +274,12 @@ secret environment variable values stored in the macOS Keychain via
   `python`, `shell`, `compound`, `custom`), launched in the **Run** bottom dock
   (`POST /ide/runs`) with live output and structured test-result trees, or
   stopped via `POST /ide/runs/{run_id}/stop`.
+- Maven / Gradle runs read the JUnit XML reports the run wrote (`TEST-*.xml`
+  under `**/target/surefire-reports` and `**/build/test-results/**`) for one row
+  per test with its time and failure message, instead of the console's one row
+  per class. A test run with a filter (`go_test`, `cargo_test`, `pytest`,
+  `vitest`, `java_junit`, `maven`, `gradle`) that exits 0 with no tests fails
+  with `No tests matched '<filter>'` instead of showing green.
 - A config's `before_launch` hook runs before the program, in its own process
   group, with its stdout/stderr streamed into the Run console. A non-zero exit
   fails the run (`before_launch failed (exit N)`); a hook that never exits
@@ -285,6 +305,51 @@ items directly into the editor gutter:
 - **Shell (Bash / Zsh):** runnable scripts and functions (plus custom `gutter_detectors` contributed by runtime IDE plugins)
 
 Clicking the gutter play button offers **Run** or **Debug** for that exact item.
+That item then becomes the toolbar's selected target (listed under **From the
+editor**), so the toolbar Run / Debug and `⌃R` / `⌃D` repeat it, like an
+IntelliJ temporary configuration. Debugging a JUnit test runs it through a small
+JUnit 5 Launcher / JUnit 4 `JUnitCore` launcher compiled next to the module's
+classes, so it stops inside the test.
+
+How each item runs:
+
+- **Rust:** the file's place under its nearest `Cargo.toml` picks the cargo
+  target: `src/main.rs` → `--bin <package>`, `src/bin/x.rs` → `--bin x`,
+  `examples/x.rs` → `--example x`, `tests/x.rs` → `--test x`, other `src/**`
+  files → `--lib` (or the package binary when there is no `lib.rs`). The test
+  filter is the module path from `<crate>/src/`, and an `#[ignore]` test runs with
+  `--include-ignored`. Debug builds the same target, so it launches that target's
+  executable.
+- **Python:** a run uses the nearest `.venv` / `venv` (with `pyvenv.cfg`) found
+  up from its folder inside the workspace roots, so a test in `tests/` gets the
+  project venv. A package's `__main__.py` runs as `python3 -m <package>` from
+  above the package. A pytest Run and Debug start from pytest's rootdir (the
+  nearest folder with `pytest.ini` / `pyproject.toml` / `tox.ini` / `setup.cfg` /
+  `setup.py`, else the highest `conftest.py`, local targets only), so a test in
+  `tests/` imports the project code and gets the root fixtures. pytest Debug under
+  `debugpy` launches the `pytest` module without a `program` (debugpy rejects
+  both); the built-in bdb bridge runs pytest itself in-process when the venv has
+  it, so breakpoints bind in the test and in the project code. pyright gets the workspace venv
+  through `workspace/configuration`, which Otto now advertises for Python
+  (root-owned sessions only).
+- **JS / TS:** a test runs from its nearest `package.json` folder with that
+  package's runner: Jest when it depends on `jest` and not `vitest`, else
+  Vitest, always through `npx --no-install` (a missing runner fails instead of
+  downloading one). The name is regex-escaped for `-t` /
+  `--test-name-pattern`. Debug launches the runner's own entry
+  (`node_modules/jest/bin/jest.js --runInBand` or `node_modules/vitest/vitest.mjs
+  run --no-file-parallelism` with Vitest's `--inspect-brk`, so the bridge attaches
+  to the worker that runs the test); only `node:test` files use `node --test`.
+  Vitest transforms the file, and the Node bridge doesn't read source maps yet, so
+  a breakpoint in a Vitest test may not stop on the line you set it.
+- **Shell:** `Run fn()` sources the script and calls the function, so it is
+  offered only when sourcing runs nothing else: the top level holds just function
+  definitions, assignments, `set`/`shopt`/`export`/`readonly`/`declare`,
+  `source`/`.` and comments, or the script guards its entry point with
+  `BASH_SOURCE[0]`. A script ending in `main "$@"` shows only `Run <script>`. The
+  shell debugger matches breakpoints by real path, so a file sourced through `..`
+  or a symlinked folder stops too (breakpoints inside a `$(…)` subshell still
+  don't stop).
 
 ### 6. Full DAP Debugger & Tabbed/Split Dock
 
@@ -295,7 +360,15 @@ plus zero-install built-in bridges across every major ecosystem: `dlv dap` (Go),
 `debugpy.adapter` or built-in `otto-py-bdb` (Python stdlib `bdb`), `js-debug`
 or built-in `otto-node-cdp` (`node --inspect-brk=0` CDP), `codelldb` /
 `lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust), and
-`otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter:
+`otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter.
+
+A Java Debug (or `java_main` Run) of a file in a Maven module takes the classpath
+from Maven itself: `mvn -q test-compile dependency:build-classpath` (run from the
+reactor root with `-pl <module> -am`, using `mvnw` when the build has one), then
+`target/test-classes:target/classes:<deps>`. Without a `pom.xml` or Maven, or
+when Maven can't resolve the module (an attached repo that was never installed),
+Otto compiles with its own `javac -g` instead; a failure shows the first 20 lines
+of the build output.
 
 - **1-Click Gutter Breakpoints:** Clicking anywhere beside or on line numbers in
   `.cm-gutters` toggles verified breakpoints in 1 click (persisted across tab
@@ -316,15 +389,39 @@ Combines live LSP multiplexing with zero-roundtrip editor intelligence:
   live `didOpen` / `didChange` diagnostics, hover, and completions per
   `(user, lang, root, ssh_target)`, automatically discovering binaries in
   `<data_dir>/toolchains/**/bin` and active runtime IDE plugins, and spawning
-  over SSH when `connection_id` is set.
+  over SSH when `connection_id` is set. Go, Rust, Java, TypeScript/JavaScript,
+  Python, shell, CSS/SCSS/Less and HTML buffers attach, plus any plugin language
+  `/lsp/capabilities` lists. A dropped socket (deploy, server crash, eviction)
+  re-attaches every open editor with backoff; a server that fails to start says
+  so once per language ("<Lang> language server failed to start", with Retry).
+  A split view of one file syncs it once (the first view owns `didChange`).
+  Diagnostics for files no editor shows (background tabs, files the server
+  checks on its own) still land in **Problems**. The IDE's own writes (save,
+  rename, Replace in Path, file moves) and git checkout / pull / stash send
+  `workspace/didChangeWatchedFiles`, so gopls and pyright see closed files
+  change. A dependency opened by `⌘B` (Go module cache, GOROOT, `site-packages`)
+  is served by the workspace's server, not a new one per module.
 - **Structured IDE intelligence (`/api/v1/ide/lsp/*`):** Provides document
-  outline symbols, workspace symbol search, go-to-definition, find usages
-  (feeding the **Usages** bottom dock), cross-file symbol rename, formatting,
+  outline symbols (TS class fields, abstract methods, enum members and typed
+  arrow functions included), workspace symbol search, go-to-definition, find
+  usages (`⌥F7`, feeding the **Usages** bottom dock: the attached language
+  server's `textDocument/references`, else a whole-word match labelled
+  **text match**), cross-file symbol rename (`⇧F6`: the
+  editor's language server answers `textDocument/rename` when one is attached;
+  otherwise a whole-word match in files of the same language, labelled
+  **Text match**; Rename applies only a previewed result), formatting,
   Lombok/`src.zip`/Maven/Gradle-aware Java & polyglot diagnostics
   (`POST /ide/lsp/diagnostics`), compact JetBrains-style **Quick-Doc hover**
   (`POST /ide/lsp/hover`, isolated strictly to the hovered declaration with zero
-  neighbor-comment bleed), and `<10ms` deterministic `⌥⏎` **Quick Fixes**
-  applied as native `⌘Z`-undoable CodeMirror transactions.
+  neighbor-comment bleed), and `⌥⏎` **Quick Fixes** applied as native
+  `⌘Z`-undoable CodeMirror transactions: the language server's own `quickfix`
+  code actions first (also on the hover's Quick Fix line and Problems › Apply
+  Quick Fix), then Otto's `<10ms` deterministic fixes. "Remove unused import"
+  is offered only for an import nothing uses, and "Prefix with `_`" only with an
+  unused-variable diagnostic; `⌥⇧⏎` applies only a fix marked Preferred.
+  Completion filters the server's list by what you typed before capping it, and
+  lists each entry once. Optimize Imports leaves Python files with
+  parenthesised or `\`-continued imports alone.
 - **Settings (`⌘,`), Named Multi-Repo Projects, Build Tools & Dependency Inspector:**
   Two-pane IntelliJ-style Settings & Project Structure modal (`Project` /
   per-module SDKs with auto-detected host SDKs, `Languages & Frameworks`,
@@ -333,7 +430,10 @@ Combines live LSP multiplexing with zero-roundtrip editor intelligence:
   with Maven & Spring Boot profile activation, and inline **Dependency &
   Vulnerability Intelligence** (`/ide/deps/*`) with `[Text | Dependency Analyzer]`
   tabs on `go.mod`, `pom.xml`, `build.gradle*`, `Cargo.toml`, `package.json`,
-  and `pyproject.toml`.
+  and `pyproject.toml`. For Cargo the inspector reads `[target.*.dependencies]`
+  and `[dependencies.<name>]` tables too, and checks the version resolved in the
+  nearest `Cargo.lock` (not the `Cargo.toml` requirement) against OSV; the
+  suggested fix is the one from the advisory range that covers that version.
 - **Interactive Comparison Tool & Backend Local History (`/ide/history/*`):**
   Side-by-side diff modal (`IdeComparisonModal`) with per-hunk `>>` / `<<`
   apply/revert arrows and an editable right-hand buffer, backed by a content-addressed
@@ -359,10 +459,21 @@ capability invite link (`#/ide?collab=<room_id>&token=<invite_token>`):
 - Live colored peer cursors, multi-range selections, active file indicators,
   **Follow peer**, real-time buffer edits, and shared debug session snapshots
   stream over `GET /api/v1/ide/collab/guest/{room_id}/events` (`text/event-stream`).
-- **Viewers** can browse files and follow cursors; any edit or debug action from
+- Guests work in the files the host has open (there is no guest file tree) and
+  follow cursors and the host's debugger; the guest page hides the project
+  tree, switcher, Run/Debug toolbar, agent, terminal and other tool tabs, which
+  have no guest routes. **Viewers** are read-only: any edit or debug action from
   a `viewer` peer is rejected with `403 Forbidden`. Hosts can promote/demote
   individual peers (`POST /ide/collab/rooms/{room_id}/role`) or close the room
   (`DELETE /ide/collab/rooms/{room_id}`, revoking all guest tokens).
+- Concurrent edits: when a peer's edit arrives while your own text is not yet in
+  the room, both are kept if they touch different parts of the file; when they
+  overlap, the peer's version is kept and a notice says so.
+- The invite link is built on the address the IDE page is open at. From the
+  desktop app (or `127.0.0.1`) it only opens on this Mac — the Share dialog says
+  so; open Otto over the network listener to invite someone else. After a reload
+  the host's Share dialog shows the same link again (`GET /ide/collab/rooms`
+  returns `share_hash` for the caller's own rooms).
 
 ### 9. Runtime IDE Plugins
 
@@ -378,6 +489,11 @@ Install an `otto-ide-plugin.json` extension into `<data_dir>/ide-plugins/<slug>/
   `keymaps`, `snippets`, and `panels`.
 - Reference plugins ship under `examples/ide-plugins/kotlin-ide` and
   `examples/ide-plugins/makefile-docker-pack`.
+- A gutter detector's first matched capture group names the item (a pattern may
+  offer alternatives, like the Kotlin pack's ``fun `backticked name`()`` or
+  `fun testXxx()`). Only `kind: "test"` items carry a test filter; a Gradle runner
+  turns a bare method name into `--tests *.<name>`. Leave `command_template` empty
+  for Maven/Gradle so the run uses the build's own wrapper from the module's folder.
 - Enable, disable (`POST /ide/plugins/{slug}/toggle`), or uninstall
   (`DELETE /ide/plugins/{slug}`) at runtime.
 
@@ -555,7 +671,18 @@ Full schemas and route tables live in [`docs/contracts/api.md`](../contracts/api
   toolbar and install the matching language server (for example `rust-analyzer`,
   `gopls`, `pyright`, `jdtls`, or `typescript-language-server`, or install/enable
   a runtime IDE plugin for additional languages such as Kotlin or C/C++). The
-  editor reconnects automatically once the install job finishes.
+  editor reconnects automatically once the install job finishes. A rustup
+  `rust-analyzer` proxy only counts as installed once `rust-analyzer --version`
+  succeeds (`rustup component add rust-analyzer`).
+- **One language server per build:** `jdtls` is rooted at the Maven reactor
+  (the parent `pom.xml` that lists the module in `<modules>`) or the Gradle
+  `settings.gradle*` dir, and `rust-analyzer` at the Cargo `[workspace]`, so
+  the modules of one build share a server. The root never climbs above the
+  project's allowed roots.
+- **jdtls and Lombok / Eclipse files:** jdtls starts with
+  `-javaagent:<newest lombok jar in ~/.m2>` when one is there, so Lombok
+  members resolve, and with `java.import.generatesMetadataFilesAtProjectRoot=false`,
+  so `.project`, `.classpath` and `.settings` go to its `-data` dir, not the repo.
 - **Remote SSH target fails to connect:** Verify the SSH connection succeeds in
   **Connections** first (`BatchMode=yes` key auth is used for non-interactive
   LSP/DAP/command execution) and confirm your role grants `discover` and `shell`

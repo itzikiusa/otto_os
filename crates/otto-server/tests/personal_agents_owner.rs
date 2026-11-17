@@ -869,3 +869,57 @@ async fn an_agent_token_cannot_rewrite_its_own_personality_note() {
     assert_eq!(st, 200, "the person: {body}");
     assert_eq!(d.autonomy(&me).await.personality.note, "keep it short");
 }
+
+/// A16: delegation and routines find agents by name, so an owner's twin name
+/// is refused (409) on create and on rename; another owner may reuse it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_agent_names_of_one_owner_are_refused() {
+    let d = boot().await;
+    let scout = d.agent(Some("alice")).await;
+    let (s, _) = d
+        .send(
+            "POST",
+            &d.alice,
+            "/workspaces/ws1/personal-agents",
+            json!({"name": " scout "}),
+        )
+        .await;
+    assert_eq!(s, 409, "same owner, same name (any case) is refused");
+    let (s, other) = d
+        .send(
+            "POST",
+            &d.alice,
+            "/workspaces/ws1/personal-agents",
+            json!({"name": "Writer"}),
+        )
+        .await;
+    assert_eq!(s, 200);
+    let writer = other["id"].as_str().unwrap();
+    let (s, _) = d
+        .send(
+            "PATCH",
+            &d.alice,
+            &format!("/personal-agents/{writer}"),
+            json!({"name": "SCOUT"}),
+        )
+        .await;
+    assert_eq!(s, 409, "renaming onto a sibling's name is refused");
+    let (s, _) = d
+        .send(
+            "PATCH",
+            &d.alice,
+            &format!("/personal-agents/{scout}"),
+            json!({"name": "Scout"}),
+        )
+        .await;
+    assert_eq!(s, 200, "keeping your own name is fine");
+    let (s, _) = d
+        .send(
+            "POST",
+            &d.bob,
+            "/workspaces/ws1/personal-agents",
+            json!({"name": "Scout"}),
+        )
+        .await;
+    assert_eq!(s, 200, "another owner may use the name");
+}

@@ -20,6 +20,7 @@ import {
   refreshWatchValues,
   resetForNewDebugSession,
   syncSnapshotBreakpointsToStore,
+  syncStopVariables,
 } from './ideDebugSnapshotSync';
 import {
   mergeGoBuildTagsIntoFlags,
@@ -33,10 +34,13 @@ export {
   refreshWatchValues,
   resetForNewDebugSession,
   syncSnapshotBreakpointsToStore,
+  syncStopVariables,
 };
 export { guardDebugRelaunch } from './ideDebugLaunch.svelte';
+import { toolOutdatedNotice, updateDelveAndRetry } from './ideToolchainJobs';
+export { createProjectPythonVenv, installToolchainJob, toolOutdatedNotice } from './ideToolchainJobs';
 import {
-  collabGuestPost, defaultRunnerForLanguage, IdeCollabHttpError, ideTargetKey, streamIdeSse, type IdeBottomTab,
+  collabGuestPost, defaultRunnerForLanguage, GUTTER_TARGET_ID, IdeCollabHttpError, ideTargetKey, streamIdeSse, type IdeBottomTab,
   type IdeBreakpoint, type IdeCollabRoom, type IdeDebugSessionSnapshot, type IdeDetectedSdk,
   type IdeEnvVar, type IdeGutterItem, type IdeInstalledSdk, type IdeInstallJob,
   type IdeOpenTab, type IdeProjectEnvironment, type IdeProjectRoot, type IdePythonVenv,
@@ -69,6 +73,7 @@ export interface DebugAndEnvHost {
   runConfigs: IdeRunConfig[];
   detectedConfigs: IdeRunConfig[];
   selectedConfigId: string | null;
+  readonly envState: { gutterTarget: IdeGutterItem | null };
   envLoading: boolean;
   envError: string | null;
   activeRun: IdeRunState | null;
@@ -305,8 +310,11 @@ export async function fetchEnvironments(host: DebugAndEnvHost): Promise<void> {
     const combined = mergeRunConfigs(resp.configs ?? [], host.detectedConfigs);
     host.runConfigs = combined;
     // "Current file" unless the person picked a configuration for this project
-    // (never the first config by position: that launched the wrong file).
-    host.selectedConfigId = resolveLaunchSelection(loadLaunchMemory(host.target), combined, host.selectedConfigId);
+    // (never the first config by position: that launched the wrong file) or the
+    // last gutter launch ("From the editor") is the selected target.
+    host.selectedConfigId = host.selectedConfigId === GUTTER_TARGET_ID && host.envState.gutterTarget
+      ? GUTTER_TARGET_ID
+      : resolveLaunchSelection(loadLaunchMemory(host.target), combined, host.selectedConfigId);
   } catch (e) { if (!stale()) host.envError = loadErrorText(e); }
   finally { if (!stale()) host.envLoading = false; }
 }
@@ -399,6 +407,8 @@ export async function launchIdeRun(
   prevSseCtl: AbortController | null = null,
 ): Promise<{ poller: Poller | null; sseCtl: AbortController | null }> {
   if (!host.target.root) return { poller: prevPoller, sseCtl: prevSseCtl };
+  const gutterItem = opts.adhoc || opts.configId ? null : selectedGutterTarget(host);
+  if (gutterItem) launchGutterAction(host, gutterItem, 'run', (adhoc) => { opts = { ...opts, adhoc }; }, () => {});
   const plan = toolbarLaunchPlan(host, opts);
   if (plan?.kind === 'none') {
     toasts.info('Nothing to run', plan.reason);
@@ -512,6 +522,15 @@ export async function launchIdeRun(
   }
 }
 
+/** The selected toolbar target when it is the last gutter launch ("From the editor"). */
+function selectedGutterTarget(host: DebugAndEnvHost): IdeGutterItem | null {
+  return host.selectedConfigId === GUTTER_TARGET_ID ? host.envState.gutterTarget : null;
+}
+
+const TOOL_ARGV_RUNNERS = new Set([
+  'go_run', 'go_test', 'go_build', 'cargo_run', 'cargo_test', 'pytest', 'npm', 'vitest', 'maven', 'java_junit', 'gradle',
+]);
+
 /** The toolbar/shortcut target when the caller named none (`null` = the caller did). */
 function toolbarLaunchPlan(host: DebugAndEnvHost, opts: { configId?: string; adhoc?: unknown; launch?: unknown }): LaunchPlan | null {
   if (opts.configId || opts.adhoc || opts.launch) return null;
@@ -539,12 +558,17 @@ export function launchGutterAction(
   const goFlags = lang === 'go'
     ? mergeGoBuildTagsIntoFlags([], resolveRepoGoBuildTags(host.projectEnv, host.target.root, repoInfo.path, openDoc))
     : [];
+  // The toolbar Run / Debug (and ⌃R / ⌃D) now repeat this test / main.
+  host.envState.gutterTarget = item;
+  host.selectedConfigId = GUTTER_TARGET_ID;
   if (mode === 'debug') {
     onDebug({
       language: lang,
       launch: {
         program: spec.debug_program || filePath,
-        args: spec.args ?? [],
+        // `spec.args` is the Run command line (`cargo run`, a pytest node id…);
+        // each debug adapter builds its own argv from program / test_name.
+        args: [],
         ...(goFlags.length > 0 ? { build_flags: goFlags } : {}),
         cwd: spec.cwd || repoInfo.path || host.target.root,
         test_name: spec.debug_test_name || spec.test_name || spec.test_filter || (item.kind === 'test' ? item.label : undefined),
@@ -577,8 +601,11 @@ export async function launchDebugSession(
   },
   prevCtl: AbortController | null,
   onSnapshot: (snap: IdeDebugSessionSnapshot) => void,
+  retry?: () => Promise<void>,
 ): Promise<AbortController | null> {
   if (!host.target.root) return prevCtl;
+  const gutterItem = opts.launch || opts.configId ? null : selectedGutterTarget(host);
+  if (gutterItem) launchGutterAction(host, gutterItem, 'debug', () => {}, (o) => { opts = { ...opts, ...o }; });
   ideDebugLaunch.startError = null;
   const plan = toolbarLaunchPlan(host, opts);
   if (plan?.kind === 'none') {
@@ -607,7 +634,10 @@ export async function launchDebugSession(
     const tcEnv: Record<string, string> = host.keepTestcontainersAlive ? { TESTCONTAINERS_RYUK_DISABLED: 'true' } : {};
     const baseLaunch = opts.launch ?? {
       program,
-      args: cfg?.args ?? [],
+      // A tool runner's args are its own command line (`run ./cmd/x`, `test -v ./...`),
+      // not the debuggee's argv; script and custom runners pass theirs through.
+      // A config saved with its script as the first argument names it once.
+      args: cfg && !TOOL_ARGV_RUNNERS.has(cfg.runner) ? cfg.args.filter((a, i) => i > 0 || a !== cfg.target_path) : [],
       build_flags: cfg?.build_flags ?? [],
       cwd: cfg?.cwd || repoInfo.path || host.target.root,
       test_name: cfg?.test_filter || undefined,
@@ -648,6 +678,11 @@ export async function launchDebugSession(
     // No session exists: the debugger panel shows this inline (with the
     // snapshot's own `error` once a session does exist), not as a toast.
     ideDebugLaunch.startError = debugStartErrorFrom(e);
+    const outdated = toolOutdatedNotice(e);
+    if (outdated && retry) {
+      const run = () => updateDelveAndRetry(host, retry);
+      toasts.push('warn', outdated.title, outdated.body, 20_000, { action: { label: outdated.action, run } });
+    }
     return prevCtl;
   } finally {
     host.debugLoading = false;
@@ -690,56 +725,6 @@ export async function sendDebugAction(
       return;
     }
     toastError(`Couldn’t ${debugActionVerb(action)}`, e);
-  }
-}
-
-export async function installToolchainJob(
-  host: DebugAndEnvHost,
-  ecosystem: string,
-  component: 'sdk' | 'lsp' | 'dap' | 'all',
-  version: string | undefined,
-  ensurePoller: () => void,
-): Promise<IdeInstallJob | null> {
-  try {
-    const resp = await api.post<{ job: IdeInstallJob }>('/ide/toolchains/install', {
-      target: host.targetPayload, ecosystem, component, version,
-    });
-    host.installJobs = [resp.job, ...host.installJobs.filter((j) => j.id !== resp.job.id)].slice(0, 12);
-    ensurePoller();
-    return resp.job;
-  } catch (e) {
-    toastError(`Couldn’t install ${ecosystem} ${component}`, e);
-    return null;
-  }
-}
-
-export async function createProjectPythonVenv(
-  host: DebugAndEnvHost & { loadEnvironments(): Promise<void>; saveEnvironment(p: Partial<IdeProjectEnvironment>): Promise<boolean> },
-  venvDir = '.venv',
-  pythonVersion?: string,
-  moduleRoot?: string,
-): Promise<{ path: string; interpreter_path: string; version: string } | null> {
-  const effectiveRoot = (moduleRoot || host.target.root).replace(/\/+$/, '');
-  try {
-    type RawVenvPayload = { path?: string; interpreter_path?: string; python_path?: string; version?: string };
-    const raw = await api.long.post<{ venv?: RawVenvPayload } & RawVenvPayload>(
-      '/ide/environments/python-venv',
-      { target: host.targetPayload, root: effectiveRoot, venv_dir: venvDir, python_version: pythonVersion || undefined },
-    );
-    const v = raw.venv ?? raw;
-    const normPath = v.path || `${effectiveRoot}/${venvDir.replace(/^\.\//, '')}`;
-    const interp = v.interpreter_path || v.python_path || `${normPath}/bin/python`;
-    const normalized = { path: normPath, interpreter_path: interp, version: v.version || '' };
-    await host.loadEnvironments();
-    if (moduleRoot) {
-      await host.saveEnvironment({ module_sdks: { ...(host.projectEnv?.module_sdks ?? {}), [moduleRoot]: interp } });
-    } else {
-      await host.saveEnvironment({ python_interpreter: interp });
-    }
-    return normalized;
-  } catch (e) {
-    toastError('Couldn’t create Python virtual environment', e);
-    return null;
   }
 }
 

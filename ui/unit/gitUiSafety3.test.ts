@@ -30,6 +30,8 @@ test('markAction refuses binary and absent files, keeps marker-free text as-is',
   assert.equal(markAction(conflictFile({ is_binary: true }), 0, 0), null, 'binary: segments are empty');
   assert.equal(markAction(conflictFile({ worktree_present: false }), 0, 0), null, 'deleted-by-us');
   assert.equal(markAction(conflictFile(), 0, 0), 'keep', 'marker-free text stages its bytes');
+  assert.equal(markAction(conflictFile({ theirs_present: false }), 0, 0), null, 'modify/delete: pick a side');
+  assert.equal(markAction(conflictFile({ ours_present: false }), 0, 0), null, 'delete/modify: pick a side');
   assert.equal(markAction(conflictFile(), 2, 1), null, 'undecided conflict');
   assert.equal(markAction(conflictFile(), 2, 2), 'compose');
   assert.equal(markAction(conflictFile({ is_binary: true }), 2, 2), null);

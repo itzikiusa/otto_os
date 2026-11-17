@@ -20,14 +20,15 @@
     projectFolders?: string[];
     readOnly?: boolean;
     initialDeps?: IdeDepItem[];
-    onapplycontent: (nextContent: string) => void;
+    /** The daemon rewrote the manifest on disk: reload the tab from it. */
+    onfilewritten: () => void;
     onjumplocation: (loc: { path: string; line: number; column: number }) => void;
     onswitchtext: (line: number) => void;
   }
 
   let {
     filePath, content, root, connectionId = null, projectFolders = [], readOnly = false,
-    initialDeps = [], onapplycontent, onjumplocation, onswitchtext,
+    initialDeps = [], onfilewritten, onjumplocation, onswitchtext,
   }: Props = $props();
 
   let filterText = $state('');
@@ -75,7 +76,7 @@
     let shouldRefresh = false;
     try {
       const res = await executeIdeDepAction({ root, connectionId, projectFolders, path: filePath, content, action, dep, version, deps: items });
-      if (res.updated_content && res.updated_content !== content) onapplycontent(res.updated_content);
+      if (res.updated_content && res.updated_content !== content) onfilewritten();
       shouldRefresh = true;
     } finally {
       busyAction = null;

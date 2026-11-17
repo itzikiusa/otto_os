@@ -37,18 +37,16 @@
         "pattern": "^\\s*(?:suspend\\s+)?fun\\s+(main)\\s*\\(",
         "kind": "main",
         "runner": "gradle",
-        "command_template": "./gradlew",
         "args_template": ["run"],
         "label_prefix": "Run"
       },
       {
         "language": "kotlin",
         "extensions": [".kt"],
-        "pattern": "^\\s*fun\\s+`?(test[A-Za-z0-9_ ]+|should[A-Za-z0-9_ ]+)`?\\s*\\(",
+        "pattern": "^\\s*fun\\s+(?:`([^`]+)`|(test[A-Za-z0-9_]*|should[A-Za-z0-9_]*))\\s*\\(",
         "kind": "test",
         "runner": "gradle",
-        "command_template": "./gradlew",
-        "args_template": ["test", "--tests", "*{name}*"],
+        "args_template": ["test"],
         "label_prefix": "Test"
       }
     ],

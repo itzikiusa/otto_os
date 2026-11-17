@@ -30,7 +30,8 @@
     allManifestDeps?: IdeDepItem[];
     onapplyclientfix: (fix: ClientDiagQuickFix) => void;
     onapplyedits: (edits: IdeConcreteTextEdit[]) => void;
-    onapplycontent: (nextContent: string) => void;
+    /** A dependency action rewrote the manifest on disk: reload the tab from it. */
+    onfilewritten: () => void;
     onapplyserveraction: (act: IdeCodeAction) => void;
     onrename: () => void;
     onfindusages: () => void;
@@ -42,7 +43,7 @@
   let {
     filePath, root, connectionId = null, projectFolders = [], docText, line, anchorX, anchorY, readOnly,
     clientFixes, deterministicFixes, serverActions, manifestDep = null, allManifestDeps = [],
-    onapplyclientfix, onapplyedits, onapplycontent, onapplyserveraction,
+    onapplyclientfix, onapplyedits, onfilewritten, onapplyserveraction,
     onrename, onfindusages, onformat, onaskagent, onclose,
   }: Props = $props();
 
@@ -97,7 +98,7 @@
   function runDepAction(action: string, dep?: IdeDepItem | null, version?: string | null): void {
     onclose();
     void executeIdeDepAction({ root, connectionId, projectFolders, path: filePath, content: docText, action, dep, version, deps: allManifestDeps }).then((res) => {
-      if (res.updated_content && res.updated_content !== docText) onapplycontent(res.updated_content);
+      if (res.updated_content && res.updated_content !== docText) onfilewritten();
     });
   }
 
@@ -232,6 +233,28 @@
       );
     }
 
+    // Server actions first: the language server's own fixes lead the list (runFetchCodeActions ranks them).
+    for (const sa of serverActions) {
+      const sEdits = (sa as IdeCodeAction & { edits?: IdeConcreteTextEdit[] }).edits;
+      if (!sEdits?.length && !sa.replacement_content) continue;
+      if (out.some((r) => r.label === sa.title)) continue;
+      const p = sEdits?.length ? splitPreview(sEdits) : { before: [`Line ${line}`], after: [sa.edit_preview ?? 'Apply server code action'] };
+      out.push({
+        id: `srv-${sa.id}`,
+        label: sa.title,
+        hint: sa.id.startsWith('lsp-') ? (sa.is_preferred ? 'Preferred' : 'Language server') : 'Quick Fix',
+        kind: 'fix',
+        disabled: readOnly,
+        previewMinus: p.before,
+        previewPlus: p.after,
+        run: () => {
+          if (sEdits?.length) onapplyedits(sEdits);
+          else onapplyserveraction(sa);
+          onclose();
+        },
+      });
+    }
+
     for (const [idx, qf] of clientFixes.entries()) {
       if (out.some((r) => r.label === qf.title)) continue;
       const p = clientFixPreview(qf);
@@ -259,27 +282,6 @@
         previewMinus: p.before,
         previewPlus: p.after,
         run: () => { onapplyedits(df.edits); onclose(); },
-      });
-    }
-
-    for (const sa of serverActions) {
-      const sEdits = (sa as IdeCodeAction & { edits?: IdeConcreteTextEdit[] }).edits;
-      if (!sEdits?.length && !sa.replacement_content) continue;
-      if (out.some((r) => r.label === sa.title)) continue;
-      const p = sEdits?.length ? splitPreview(sEdits) : { before: [`Line ${line}`], after: [sa.edit_preview ?? 'Apply server code action'] };
-      out.push({
-        id: `srv-${sa.id}`,
-        label: sa.title,
-        hint: 'LSP Fix',
-        kind: 'fix',
-        disabled: readOnly,
-        previewMinus: p.before,
-        previewPlus: p.after,
-        run: () => {
-          if (sEdits?.length) onapplyedits(sEdits);
-          else onapplyserveraction(sa);
-          onclose();
-        },
       });
     }
 

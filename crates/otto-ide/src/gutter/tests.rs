@@ -114,6 +114,20 @@ public class InvoiceServiceTest {
         items[3].run_spec.test_filter.as_deref(),
         Some("com.acme.billing.InvoiceServiceTest#validatesQuantities")
     );
+    // Every item runs from the module root, never the package folder Maven can't build in.
+    assert!(items
+        .iter()
+        .all(|i| i.run_spec.cwd.as_deref() == Some("/ws")));
+
+    let nested = detect_gutter_items(
+        "/ws/billing/invoices-services/src/test/java/com/acme/billing/InvoiceServiceTest.java",
+        src,
+        &[],
+    );
+    assert_eq!(
+        nested[2].run_spec.cwd.as_deref(),
+        Some("/ws/billing/invoices-services")
+    );
 }
 
 #[test]
@@ -390,4 +404,180 @@ fn plugin_registered_language_resolves_gutter_detector_without_hardcoded_match()
     assert_eq!(items[0].line, 2);
     assert_eq!(items[0].language, "elixir");
     assert_eq!(items[0].label, "Mix adds two numbers");
+}
+
+#[test]
+fn rust_gutter_args_select_the_files_cargo_target() {
+    // The crate sits under an ancestor folder named `src`, which used to leak into the filter.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("src/ws/app");
+    for dir in ["src/bin", "src/parser", "examples", "tests"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+    std::fs::write(root.join("src/lib.rs"), "").unwrap();
+    let items =
+        |rel: &str, src: &str| detect_gutter_items(&root.join(rel).to_string_lossy(), src, &[]);
+    let main_src = "fn main() {}\n";
+    let test_src = "#[test]\nfn works() {}\n";
+    let args = |rel: &str, src: &str| items(rel, src)[0].run_spec.args.clone();
+
+    assert_eq!(args("src/main.rs", main_src), ["run", "--bin", "app"]);
+    assert_eq!(args("src/bin/tool.rs", main_src), ["run", "--bin", "tool"]);
+    assert_eq!(
+        args("examples/demo.rs", main_src),
+        ["run", "--example", "demo"]
+    );
+    assert_eq!(
+        args("src/parser/mod.rs", test_src),
+        [
+            "test",
+            "--lib",
+            "parser::works",
+            "--",
+            "--exact",
+            "--nocapture"
+        ]
+    );
+    let it = items("tests/it.rs", test_src);
+    assert_eq!(
+        it[0].run_spec.args,
+        [
+            "test",
+            "--test",
+            "it",
+            "works",
+            "--",
+            "--exact",
+            "--nocapture"
+        ]
+    );
+    assert_eq!(it[0].run_spec.test_filter.as_deref(), Some("works"));
+
+    // `#[ignore]` tests run only with `--include-ignored`.
+    let ignored = items("src/lib.rs", "#[test]\n#[ignore]\nfn slow() {}\n");
+    assert_eq!(
+        ignored[0].run_spec.args,
+        [
+            "test",
+            "--lib",
+            "slow",
+            "--",
+            "--exact",
+            "--nocapture",
+            "--include-ignored"
+        ]
+    );
+}
+
+#[test]
+fn rust_discovery_main_config_names_the_package_bin_beside_src_bin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src/bin")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(root.join("src/bin/tool.rs"), "fn main() {}\n").unwrap();
+    let target = crate::types::IdeTargetSpec::local(root.to_string_lossy().into_owned());
+    let configs = crate::environments::discovery::discover_run_configs(&target, &[]);
+    let main = configs
+        .iter()
+        .find(|c| c.name == "Cargo Run app")
+        .expect("main config");
+    assert_eq!(main.args, ["run", "--bin", "app"]);
+}
+
+#[test]
+fn shell_function_items_only_when_sourcing_runs_nothing_else() {
+    let fn_labels = |src: &str| -> Vec<String> {
+        detect_gutter_items("/ws/scripts/tool.sh", src, &[])
+            .into_iter()
+            .filter(|i| i.label.ends_with("()"))
+            .map(|i| i.label)
+            .collect()
+    };
+    // Sourcing this would run `main` before the chosen function.
+    let script =
+        "#!/usr/bin/env bash\nset -e\ngreet() {\n  echo hi\n}\nmain() {\n  greet\n}\nmain \"$@\"\n";
+    assert!(fn_labels(script).is_empty());
+
+    let library = "#!/usr/bin/env bash\nNAME=x\nexport PATH\n. ./common.sh\ngreet() {\n  if true; then echo hi; fi\n}\n";
+    assert_eq!(fn_labels(library), ["greet()"]);
+
+    let guarded =
+        "greet() {\n  echo hi\n}\nif [[ \"${BASH_SOURCE[0]}\" == \"$0\" ]]; then\n  greet\nfi\n";
+    assert_eq!(fn_labels(guarded), ["greet()"]);
+}
+
+#[test]
+fn python_package_main_runs_as_a_module_from_above_the_package() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(src.join("shop/cli")).unwrap();
+    std::fs::write(src.join("shop/__init__.py"), "").unwrap();
+    std::fs::write(src.join("shop/cli/__init__.py"), "").unwrap();
+    let main_src = "if __name__ == \"__main__\":\n    run()\n";
+    let file = src.join("shop/cli/__main__.py");
+    let items = detect_gutter_items(&file.to_string_lossy(), main_src, &[]);
+    assert_eq!(items[0].run_spec.args, ["-m", "shop.cli"]);
+    assert_eq!(
+        items[0].run_spec.cwd.as_deref(),
+        Some(&*src.to_string_lossy())
+    );
+
+    // Any other file still runs as itself.
+    let plain = src.join("tool.py").to_string_lossy().into_owned();
+    let items = detect_gutter_items(&plain, main_src, &[]);
+    assert_eq!(items[0].run_spec.args, [plain]);
+}
+
+#[test]
+fn js_test_items_use_the_packages_runner_from_its_root_with_an_escaped_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let web = tmp.path().join("apps/web");
+    let api = tmp.path().join("apps/api");
+    std::fs::create_dir_all(web.join("src")).unwrap();
+    std::fs::create_dir_all(api.join("test")).unwrap();
+    std::fs::write(
+        web.join("package.json"),
+        r#"{"devDependencies":{"vitest":"^3"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        api.join("package.json"),
+        r#"{"devDependencies":{"jest":"^29"}}"#,
+    )
+    .unwrap();
+    let src = "it('returns 5xx (retry)', () => {});\n";
+
+    let vt = detect_gutter_items(&web.join("src/a.test.ts").to_string_lossy(), src, &[]);
+    let spec = &vt[0].run_spec;
+    assert_eq!(spec.runner, IdeRunnerKind::Vitest);
+    assert_eq!(spec.command.as_deref(), Some("npx"));
+    assert_eq!(
+        spec.args,
+        [
+            "--no-install",
+            "vitest",
+            "run",
+            "src/a.test.ts",
+            "-t",
+            r"returns 5xx \(retry\)"
+        ]
+    );
+    assert_eq!(spec.cwd.as_deref(), Some(&*web.to_string_lossy()));
+
+    let jest = detect_gutter_items(&api.join("test/a.test.js").to_string_lossy(), src, &[]);
+    let spec = &jest[0].run_spec;
+    assert_eq!(
+        spec.args,
+        [
+            "--no-install",
+            "jest",
+            "test/a.test.js",
+            "-t",
+            r"returns 5xx \(retry\)"
+        ]
+    );
+    assert_eq!(spec.cwd.as_deref(), Some(&*api.to_string_lossy()));
 }

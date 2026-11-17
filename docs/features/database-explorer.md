@@ -560,7 +560,12 @@ bare SELECT was auto-limited, the footer grows a **pager**
 (`‹ Prev · rows a–b · Next ›`) that re-runs server-side with `OFFSET`/`skip`
 (with an "unordered" hint when the statement has no `ORDER BY`; an explicit
 user `LIMIT` disables it; on MongoDB **Next** walks the collection by `_id`
-instead of `skip` — see §5). **⋯ → Keyboard shortcuts** lists every shortcut
+instead of `skip` — see §5). **Next** is enabled only when the server saw a
+row past the page (`truncated`), so a full last page doesn't offer an empty
+next one; an empty page past the first says "No more rows". **Stop** on a run
+of a different statement clears the old result instead of leaving it under the
+new statement (a stopped page of the same statement keeps the page on
+screen). **⋯ → Keyboard shortcuts** lists every shortcut
 (⌘↵, ⇧⌘↵, ⌘S save, ⇧⌘F format, ⇧⌘V cycle the results view, Esc cancel, ⌥⌘→/←
 switch query tabs, ⌥⌘T new tab, ⌥⌘W close tab, ⇧⌥⌘W reopen). The toolbar's
 first row is **Run** (the one primary action), **Run all** (when the buffer
@@ -796,6 +801,10 @@ surfaces the tail of both streams as the error.
   the plain Run already is one.
 - Scripts are capped at 30 minutes and 10,000 output lines (truncated badge
   beyond).
+- `show collections` / `show tables` and `show dbs` / `show databases` run as
+  `db.getCollectionNames()` and `db.getMongo().getDBNames()` (mongosh only
+  understands its `show` helpers interactively). A string result prints bare,
+  one per row, without JSON quotes.
 
 ### Automatic read `LIMIT`
 
@@ -849,13 +858,18 @@ Connection right-click → **Processes…** (MySQL, PostgreSQL, ClickHouse and
 MongoDB) opens a small panel listing what runs on the server now — id, user,
 database / namespace (PostgreSQL / MongoDB), time, state and the statement —
 with **Refresh** (`ProcessList.svelte`, `process-list.ts`). Redis has no list.
+The header counts the sessions running a statement (not an idle PostgreSQL
+session or a MySQL `Sleep` connection) and is hidden when the list failed to
+load. The table fits the dialog: the query column takes the spare width and
+ellipsizes (hover for the whole statement).
 
 - **Listing is read-only.** One fixed statement per engine goes through
   `…/db/query` with `read_only: true`, so the server classifies it as a read
   and runs it in the engine's native read-only mode — it works on a Read-only
   connection. These exact listings, sent read-only, are **not recorded in query
   history** (`service/process_list.rs`); the same text typed into the editor is.
-  - MySQL `SHOW FULL PROCESSLIST`; ClickHouse `SELECT … FROM system.processes`.
+  - MySQL `SHOW FULL PROCESSLIST`; ClickHouse `SELECT … FROM system.processes`
+    (the panel drops its own listing query).
   - PostgreSQL `SELECT … FROM pg_stat_activity`: client sessions plus busy
     background workers, the time in the current state, wait event, client
     address, and the statement capped at 4,000 characters. It uses only the
@@ -1272,7 +1286,16 @@ connections refuse every write (§13) on top of these.
   `decode('…', 'base64')` — in Duplicate row, Copy as INSERT and the key
   predicate of an UPDATE / DELETE, so a `BINARY(16)` primary key matches its
   row. Filter / Exclude / Query by value on a binary cell are disabled (the
-  database would compare the base64 text).
+  database would compare the base64 text). MySQL reports `SHOW` output,
+  `information_schema` and `->>` results as `VARBINARY` with a text
+  collation; those are text, not bytes (only the `binary` collation is).
+  A Redis reply whose bulk string isn't UTF-8 is a binary column too: every
+  bulk in that column is base64 (a list or hash column holding only bulk
+  strings and nils), so its bytes aren't edited as text.
+- **Numbers read as the database prints them.** Postgres `NUMERIC` keeps its
+  scale (`1.10`, never `1.1000` or `1.0E-7`) and `NaN`; `BIT` / `VARBIT` read
+  as `0101…`; a float `NaN` / `Infinity` / `-Infinity` is that text, not NULL
+  (ClickHouse spells them `nan` / `inf`).
 - **"Applied" means a row matched.** After **Review & apply**, every UPDATE /
   DELETE (Mongo `updateOne` / `deleteMany` …) that reports **0** matched rows
   — the row was deleted or its key changed since the result loaded — keeps its
@@ -1694,7 +1717,10 @@ is ignored and the request falls back to `offset` silently).
 one of them is decoded back on the way in (`decode_ejson`), so an edited
 ObjectId / Date / Decimal128 / Long / UUID / Binary / Timestamp round-trips
 without loss. The UI renders them as `ObjectId("…")`, `ISODate("…")`,
-`NumberLong("…")`, `UUID("…")`, `BinData(n, "…")`, `Timestamp(t, i)`.
+`NumberLong("…")`, `UUID("…")`, `BinData(n, "…")`, `Timestamp(t, i)`. A
+plain integer that fits 32 bits is written as `Int32` (as mongosh and the Node
+driver store it), so editing an `Int32` field keeps its type; a larger one is
+`Int64`.
 
 ---
 

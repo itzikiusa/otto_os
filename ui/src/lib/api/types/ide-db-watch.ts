@@ -33,7 +33,8 @@ export interface IdeEphemeralDbTarget {
   host: string;
   port: number;
   database?: string | null;
-  source: 'testcontainers' | 'process';
+  /** `container`: a DB container without the Testcontainers label (maybe another project's). */
+  source: 'testcontainers' | 'process' | 'container';
   container_image?: string | null;
 }
 

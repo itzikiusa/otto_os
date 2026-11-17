@@ -398,7 +398,12 @@ fn discover_rust(
             "main",
             format!("Cargo Run {pkg_name}"),
             Some("cargo"),
-            vec!["run".into()],
+            // With `src/bin/*` beside it, plain `cargo run` can't pick a binary.
+            if root.join("src/bin").is_dir() {
+                vec!["run".into(), "--bin".into(), pkg_name.clone()]
+            } else {
+                vec!["run".into()]
+            },
             cwd.clone(),
             Some("src/main.rs".into()),
         ));
@@ -434,7 +439,7 @@ fn discover_rust(
     ));
 }
 
-fn parse_cargo_package_name(toml_text: &str) -> Option<String> {
+pub(crate) fn parse_cargo_package_name(toml_text: &str) -> Option<String> {
     let mut in_pkg = false;
     for line in toml_text.lines() {
         let t = line.trim();

@@ -189,6 +189,14 @@ describe('IDE Live DB Watch target prioritization and cell formatting', () => {
     assert.equal(targetKeyOf(chosen), 'ephemeral:docker:abc123def456:3306');
   });
 
+  it('prefers a saved connection over an unlabelled container from another project', () => {
+    const other: IdeEphemeralDbTarget = { ...ephemeralMysql, ephemeral_id: 'tc:112233445566:13306', source: 'container' };
+    const chosen = pickPreferredDbTarget('mysql', [savedMysql], [other]);
+    assert.ok(chosen);
+    assert.equal(targetKeyOf(chosen), 'saved:conn-dev-mysql');
+    assert.equal(pickPreferredDbTarget('mysql', [], [other])?.target_kind, 'ephemeral', 'still offered with nothing saved');
+  });
+
   it('preserves explicit user target selection when engine still matches', () => {
     const chosen = pickPreferredDbTarget(
       'mysql',

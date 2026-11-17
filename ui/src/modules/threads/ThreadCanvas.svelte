@@ -329,6 +329,8 @@
     }
     .tc-canvas.grid {
       grid-template-columns: minmax(0, 1fr);
+      /* The desktop 2×2 rows would squash the first two panes. */
+      grid-template-rows: none;
       grid-auto-rows: minmax(260px, 1fr);
       overflow-y: auto;
     }

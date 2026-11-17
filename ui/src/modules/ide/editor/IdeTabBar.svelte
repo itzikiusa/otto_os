@@ -170,6 +170,7 @@
           type="button"
           class="icon-btn ide-tab-close"
           tabindex={-1}
+          aria-hidden="true"
           aria-label={isPinned ? `Unpin ${tab.name}` : `Close ${tab.name}`}
           title={isPinned ? 'Unpin tab' : 'Close tab'}
           onclick={() => (isPinned ? toggleIdeTabPinned(tab.path) : void ide.closeTab(tab.path))}

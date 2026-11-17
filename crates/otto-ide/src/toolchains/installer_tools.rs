@@ -1,6 +1,6 @@
 //! Local LSP and DAP binary installation routines for [`super::ToolchainManager`].
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::toolchains_catalog::{
     codelldb_vsix_url, jq_binary_url, rust_analyzer_gz_url, uv_tarball_url, EcosystemKind,
@@ -17,12 +17,20 @@ use super::{
     find_executable_in, is_executable_file, system_search_dirs_with_shell, ToolchainManager,
 };
 
+/// `<go_root>/bin/go` when the caller named the project's GOROOT and it holds a Go.
+fn project_go_bin(go_root: Option<&Path>) -> Option<PathBuf> {
+    go_root
+        .map(|r| r.join("bin/go"))
+        .filter(|b| super::discovery::is_executable_file(b))
+}
+
 pub(super) async fn install_local_lsp(
     mgr: &ToolchainManager,
     job_id: &str,
     root: &Path,
     eco: EcosystemKind,
     platform: TargetPlatform,
+    go_root: Option<&Path>,
 ) -> std::result::Result<String, String> {
     let tmp = root.join(".downloads");
     tokio::fs::create_dir_all(&tmp)
@@ -57,7 +65,8 @@ pub(super) async fn install_local_lsp(
             Ok(bin.to_string_lossy().into_owned())
         }
         EcosystemKind::Go => {
-            let go_bin = resolve_best_sdk_bin(mgr, root, EcosystemKind::Go, "go")
+            let go_bin = project_go_bin(go_root)
+                .or_else(|| resolve_best_sdk_bin(mgr, root, EcosystemKind::Go, "go"))
                 .ok_or("Go SDK required first")?;
             let (gobin, gopath) = (root.join("go/bin"), root.join("go/gopath"));
             tokio::fs::create_dir_all(&gobin)
@@ -174,6 +183,7 @@ pub(super) async fn install_local_dap(
     root: &Path,
     eco: EcosystemKind,
     platform: TargetPlatform,
+    go_root: Option<&Path>,
 ) -> std::result::Result<String, String> {
     let tmp = root.join(".downloads");
     tokio::fs::create_dir_all(&tmp)
@@ -186,7 +196,8 @@ pub(super) async fn install_local_dap(
             Ok(jar.to_string_lossy().into_owned())
         }
         EcosystemKind::Go => {
-            let go_bin = resolve_best_sdk_bin(mgr, root, EcosystemKind::Go, "go")
+            let go_bin = project_go_bin(go_root)
+                .or_else(|| resolve_best_sdk_bin(mgr, root, EcosystemKind::Go, "go"))
                 .ok_or("Go SDK required first")?;
             let (gobin, gopath) = (root.join("go/bin"), root.join("go/gopath"));
             tokio::fs::create_dir_all(&gobin)

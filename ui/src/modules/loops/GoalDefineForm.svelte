@@ -18,6 +18,7 @@
   import GoalGraphEditor from './GoalGraphEditor.svelte';
   import IterationDiagram from './IterationDiagram.svelte';
   import { graphError, initialGraph, restoreGraph } from './graph';
+  import { launchBlocker } from './launchBlocker';
   import { goalTemplates, templateDraft, researchDraft, type GoalTemplateId, type PocScope } from './templates';
 
   let { oncancel, oncreated }: { oncancel: () => void; oncreated: (id: string) => void } = $props();
@@ -183,21 +184,18 @@
     draft.definition.acceptance_criteria.splice(i, 1);
   }
 
+  /** What still blocks Launch (the first unmet condition), or null. */
+  function launchReason(): string | null {
+    if (!draft) return null;
+    const criteria = draft.definition.acceptance_criteria;
+    return launchBlocker({
+      name, seed, mode, repoPath, maxIterations, maxMinutes, perPhaseMinutes, executorCount, criteria,
+      graphIssue: graphError(draft.suggested_config.graph, criteria),
+      graphTasks: draft.suggested_config.graph?.nodes.length ?? 1,
+    });
+  }
   function canLaunch(): boolean {
-    if (!alive || !ws.currentId || !draft || !name.trim() || !seed.trim() || (mode === 'build' && !repoPath.trim())) return false;
-    if (graphError(draft.suggested_config.graph, draft.definition.acceptance_criteria)) return false;
-    if (maxIterations < (draft.suggested_config.graph?.nodes.length ?? 1)) return false;
-    if (![maxIterations, maxMinutes, perPhaseMinutes, executorCount].every(value => Number.isInteger(value) && value > 0) || executorCount > 6) return false;
-    const cs = draft.definition.acceptance_criteria;
-    return (
-      cs.length > 0 &&
-      cs.every(
-        (c) =>
-          c.text.trim() !== '' &&
-          c.verify.trim() !== '' &&
-          (c.verify_kind !== 'command' || (c.verify_cmd ?? '').trim() !== ''),
-      )
-    );
+    return alive && !!ws.currentId && !!draft && !launchReason();
   }
 
   async function launch(): Promise<void> {
@@ -408,10 +406,6 @@
         </div>
       {/each}
       <button class="btn small" onclick={addCriterion}><Icon name="plus" size={12} /> Add criterion</button>
-      {#if !canLaunch()}
-        <!-- A form hint, read in place; an inserted status would be silent anyway. -->
-        <p class="muted small" id="goal-criteria-hint">Each criterion needs a description and how it is verified.</p>
-      {/if}
     </section>
 
     <section class="block">
@@ -476,13 +470,14 @@
       {/if}
     </section>
     <div class="frow end">
-      {#if graphIssue}<p class="form-error">Fix the execution graph before launching.</p>{/if}
+      <!-- What still blocks Launch, read in place (first unmet condition). -->
+      {#if launchReason()}<p class="muted small" data-testid="goal-launch-blocker">{launchReason()}</p>{/if}
       <button class="btn" onclick={cancel}>Cancel</button>
       <button
         class="btn primary"
         onclick={launch}
         disabled={launching || !canLaunch()}
-        title={launching || canLaunch() ? undefined : 'Give the loop a name and at least one criterion, each with a description, how to verify it, and a shell command when verification runs a command'}
+        title={launching || canLaunch() ? undefined : (launchReason() ?? undefined)}
       >
         {launching ? 'Launching…' : 'Launch loop'}
       </button>

@@ -249,7 +249,11 @@ fn parse_docker_inspect_json(raw: &str) -> Vec<VerifiedEphemeralEntry> {
                     host: "127.0.0.1".into(),
                     port: host_port,
                     database: creds.2,
-                    source: IdeEphemeralSource::Testcontainers,
+                    source: if is_tc {
+                        IdeEphemeralSource::Testcontainers
+                    } else {
+                        IdeEphemeralSource::Container
+                    },
                     container_image: Some(image.clone()),
                 },
                 user: creds.0,
@@ -546,5 +550,18 @@ mod tests {
         assert_eq!(parsed[1].public.engine, IdeDbEngine::Mongodb);
         assert_eq!(parsed[1].public.port, 55124);
         assert_eq!(parsed[1].user.as_deref(), Some("component"));
+        assert_eq!(parsed[0].public.source, IdeEphemeralSource::Testcontainers);
+    }
+
+    #[test]
+    fn an_unlabelled_db_container_is_a_plain_container() {
+        let sample = r#"[{
+          "Id": "1122334455667788",
+          "Config": { "Image": "mysql:8.4", "Env": ["MYSQL_ROOT_PASSWORD=x", "MYSQL_DATABASE=shopdb"] },
+          "NetworkSettings": { "Ports": { "3306/tcp": [{ "HostIp": "0.0.0.0", "HostPort": "13306" }] } }
+        }]"#;
+        let parsed = parse_docker_inspect_json(sample);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].public.source, IdeEphemeralSource::Container);
     }
 }

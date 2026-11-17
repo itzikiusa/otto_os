@@ -217,7 +217,7 @@
   {:else if mode === 'preview' && kind === 'image' && imageUrl}
     <div class="pb-img"><img src={imageUrl} alt={absPath ?? 'Image'} /></div>
   {:else if mode === 'preview' && content != null && kind === 'markdown'}
-    <div class="pb-md"><Markdown md={content} /></div>
+    <div class="pb-md"><Markdown md={content} emoji={false} /></div>
   {:else if mode === 'preview' && content != null && kind === 'html'}
     <div class="pb-frame-wrap">
       <div class="pb-note">Sandboxed preview — scripts, forms and network-origin access are off.</div>

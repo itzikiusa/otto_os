@@ -2105,6 +2105,8 @@ impl StructuredDriver for AcpDriver {
         let (id, line) = self.request(method, params);
         self.state.interject_reqs.push(id);
         let mut step = DriverStep::default();
+        // What streams after the steer answers it: a new segment, after it.
+        self.close_segment(&mut step);
         step.write(line);
         Ok(step)
     }
@@ -3288,6 +3290,39 @@ mod tests {
             &json!({"jsonrpc":"2.0","id":w["id"],"result":{"status":"rejected"}}).to_string(),
         );
         assert!(matches!(&no.events[0], DriverEvent::Error(f) if f.message.contains("mid-turn")));
+    }
+
+    /// The answer after a steer is a new segment: it is not appended to the
+    /// text before the steer (which would sort it above the steer bubble).
+    #[test]
+    fn a_steer_closes_the_open_text_segment() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let chunk = |t: &str| {
+            json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1",
+                "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":t}}}})
+            .to_string()
+        };
+        let item = |s: &DriverStep| {
+            s.events.iter().rev().find_map(|e| match e {
+                DriverEvent::TurnItem(i) => Some(i.clone()),
+                _ => None,
+            })
+        };
+        let before = item(&d.on_line(&chunk("Before."))).unwrap();
+        let s = d.steer(&RuntimePromptReq::of("now this")).unwrap();
+        let closed = item(&s).expect("the steer settles the open segment");
+        assert_eq!(closed.id, before.id);
+        assert!(!closed.is_streaming());
+        let after = item(&d.on_line(&chunk("After."))).unwrap();
+        assert_ne!(after.id, before.id, "a new segment after the steer");
+        assert!(after.started_at >= closed.started_at);
+        assert!(
+            matches!(&after.kind, TurnItemKind::AssistantMessage { text, .. } if text == "After.")
+        );
     }
 
     /// T3 Code #28797: a refusal or a limit stop fails the turn with a

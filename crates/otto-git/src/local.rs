@@ -17,6 +17,7 @@ use tokio::process::Command;
 mod diff_flags;
 mod errors;
 mod identity;
+mod labels;
 mod status;
 use diff_flags::note_renames;
 pub(crate) use errors::{is_missing_remote_ref, push_err, unborn_or_err, upstream_err};
@@ -1620,7 +1621,7 @@ impl LocalGit {
     /// "is the tracked tree dirty"). Enumerating every untracked file costs a
     /// full directory walk, and these ran on every unstage / merge commit /
     /// pull, two or three times each.
-    async fn tracked_status(&self) -> Result<RepoStatusResp> {
+    pub(crate) async fn tracked_status(&self) -> Result<RepoStatusResp> {
         let out = self
             .exec_text(&GitCmd::read(&[
                 "status",
@@ -3734,6 +3735,16 @@ impl LocalGit {
             return Ok(());
         }
         let combined = format!("{stdout}\n{stderr}");
+        // The change is already in HEAD: git stops mid-sequence with nothing
+        // to commit, and `--continue` refuses forever. Skip it so the repo
+        // isn't left stuck, and say why.
+        if combined.contains("is now empty") {
+            self.run_raw(&[args[0], "--skip"], &[]).await?;
+            return Err(Error::Conflict(format!(
+                "nothing to {}: the change is already in HEAD",
+                args[0]
+            )));
+        }
         let conflicted = combined.contains("CONFLICT")
             || combined.contains("could not apply")
             || combined.contains("could not revert")
@@ -4545,9 +4556,14 @@ impl LocalGit {
                 merging: false,
                 op: None,
                 source: None,
+                ours: None,
                 conflicted_files: Vec::new(),
             });
         }
+        let (rebase_theirs, ours) = match op.as_deref() {
+            Some("rebase") => self.rebase_labels().await,
+            _ => (None, None),
+        };
         let source = match op.as_deref() {
             Some("merge") => self.merge_source().await,
             Some("cherry_pick") => self
@@ -4560,34 +4576,16 @@ impl LocalGit {
                 .await
                 .ok()
                 .map(|s| format!("revert {}", s.trim())),
-            Some("rebase") => Some("rebase".to_string()),
+            Some("rebase") => rebase_theirs.or_else(|| Some("rebase".to_string())),
             _ => None,
         };
         Ok(MergeConflictStatus {
             merging: true,
             op,
             source,
+            ours,
             conflicted_files,
         })
-    }
-
-    /// Best-effort source ref for an in-progress merge: first line of
-    /// `.git/MERGE_MSG` (e.g. "Merge branch 'feature'"), else the MERGE_HEAD sha.
-    async fn merge_source(&self) -> Option<String> {
-        // The real git dir: in a linked worktree `.git` is a FILE, so
-        // `<tree>/.git/MERGE_MSG` never existed and the label fell back to a sha.
-        if let Some(git_dir) = self.git_dir().await {
-            if let Ok(text) = tokio::fs::read_to_string(git_dir.join("MERGE_MSG")).await {
-                if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
-                    return Some(line.trim().to_string());
-                }
-            }
-        }
-        self.run(&["rev-parse", "MERGE_HEAD"])
-            .await
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
     }
 
     /// Read a conflicted working-tree file and split it into ordered segments.

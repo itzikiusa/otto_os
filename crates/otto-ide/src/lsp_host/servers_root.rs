@@ -124,6 +124,17 @@ pub fn is_multi_repo_umbrella_dir(dir: &Path) -> bool {
     false
 }
 
+/// A toolchain or package-manager copy of someone else's code: the Go module cache
+/// (`…/pkg/mod/…`), a Go SDK's `src` (GOROOT), or a Python `site-packages`.
+fn is_dependency_dir(dir: &Path) -> bool {
+    let parts: Vec<&str> = dir.iter().filter_map(|c| c.to_str()).collect();
+    parts.windows(2).any(|w| w == ["pkg", "mod"])
+        || parts.iter().any(|c| matches!(*c, "site-packages" | "dist-packages"))
+        // Homebrew's GOROOT is `…/go/<ver>/libexec`, the official one `/usr/local/go`.
+        || parts.windows(2).any(|w| w == ["libexec", "src"])
+        || parts.windows(3).any(|w| w == ["local", "go", "src"])
+}
+
 #[allow(clippy::disallowed_methods)]
 fn canonical_or_existing_ancestor(path: &Path) -> PathBuf {
     if let Ok(c) = std::fs::canonicalize(path) {
@@ -144,6 +155,62 @@ fn canonical_or_existing_ancestor(path: &Path) -> PathBuf {
         cur = parent;
     }
     path.to_path_buf()
+}
+
+/// From a module dir, climb to the build root one server should own: a Maven
+/// reactor whose `pom.xml` lists the child in `<modules>`, a Gradle build with
+/// `settings.gradle*`, or the Cargo `[workspace]` that holds the member.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn climb_to_build_root(
+    norm_lang: &str,
+    module: &Path,
+    allowed: &dyn Fn(&Path) -> bool,
+) -> PathBuf {
+    let read = |p: PathBuf| std::fs::read_to_string(p).unwrap_or_default();
+    let has_settings_gradle =
+        |d: &Path| d.join("settings.gradle").is_file() || d.join("settings.gradle.kts").is_file();
+    let is_cargo_workspace = |d: &Path| {
+        read(d.join("Cargo.toml"))
+            .lines()
+            .any(|l| l.trim() == "[workspace]")
+    };
+    if norm_lang == "rust" && is_cargo_workspace(module) {
+        return module.to_path_buf();
+    }
+    let mut top = module.to_path_buf();
+    let mut cur = module.to_path_buf();
+    for _ in 0..16 {
+        let Some(parent) = cur.parent().map(Path::to_path_buf) else {
+            break;
+        };
+        if !allowed(&parent) {
+            break;
+        }
+        let climb = match norm_lang {
+            "java" | "kotlin" => {
+                let lists_child = read(parent.join("pom.xml"))
+                    .split("<module>")
+                    .skip(1)
+                    .filter_map(|s| s.split("</module>").next())
+                    .any(|m| {
+                        std::fs::canonicalize(parent.join(m.trim())).ok().as_ref() == Some(&cur)
+                    });
+                lists_child || (has_settings_gradle(&parent) && !has_settings_gradle(&cur))
+            }
+            // Cargo binds a member to its nearest `[workspace]` ancestor.
+            "rust" if is_cargo_workspace(&parent) => return parent,
+            "rust" => true,
+            _ => false,
+        };
+        if !climb {
+            break;
+        }
+        if norm_lang != "rust" {
+            top = parent.clone();
+        }
+        cur = parent;
+    }
+    top
 }
 
 /// Scope an LSP root strictly to the nearest module manifest directory for `lang`
@@ -183,6 +250,17 @@ pub fn resolve_lsp_module_root_with_markers(
         return Ok(expanded_str.trim_end_matches('/').to_string());
     }
     let canon_root = std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
+    // The module root in the caller's spelling (`/tmp/x`, not `/private/tmp/x`): the
+    // server's rootUri must match the document URIs, or gopls calls every file
+    // "not included in your workspace".
+    let spell = |p: &Path| -> String {
+        let p = match p.strip_prefix(&canon_root) {
+            Ok(rel) if rel.as_os_str().is_empty() => root_path.to_path_buf(),
+            Ok(rel) => root_path.join(rel),
+            Err(_) => p.to_path_buf(),
+        };
+        p.to_string_lossy().trim_end_matches('/').to_string()
+    };
     let start_dir = if let Some(hint) = file_hint.map(str::trim).filter(|s| !s.is_empty()) {
         let hp = PathBuf::from(otto_core::paths::expand_tilde(hint));
         let full = if hp.is_absolute() {
@@ -206,6 +284,15 @@ pub fn resolve_lsp_module_root_with_markers(
             .unwrap_or_else(|| canon_root.clone())
     } else {
         canon_root.clone()
+    };
+
+    // A dependency file reached by go-to-definition (GOMODCACHE, GOROOT, site-packages)
+    // is served by the workspace's own server: rooting at the dependency's go.mod
+    // started one ~300 MB gopls per module visited.
+    let start_dir = if !start_dir.starts_with(&canon_root) && is_dependency_dir(&start_dir) {
+        canon_root.clone()
+    } else {
+        start_dir
     };
 
     if otto_core::paths::is_broad_non_project_root(&start_dir) {
@@ -237,7 +324,8 @@ pub fn resolve_lsp_module_root_with_markers(
                 break;
             }
             if dir_has_any_manifest(cur, manifests, extra_markers) {
-                return Ok(cur.to_string_lossy().into_owned());
+                let top = climb_to_build_root(norm_lang, cur, &within_allowed);
+                return Ok(spell(&top));
             }
             let Some(parent) = cur.parent() else {
                 break;
@@ -256,7 +344,7 @@ pub fn resolve_lsp_module_root_with_markers(
                 break;
             }
             if cur.join(".git").exists() {
-                return Ok(cur.to_string_lossy().into_owned());
+                return Ok(spell(cur));
             }
             let Some(parent) = cur.parent() else {
                 break;
@@ -271,7 +359,7 @@ pub fn resolve_lsp_module_root_with_markers(
         && within_allowed(&canon_root)
         && !is_multi_repo_umbrella_dir(&canon_root)
     {
-        return Ok(canon_root.to_string_lossy().into_owned());
+        return Ok(spell(&canon_root));
     }
 
     if !dir_has_any_manifest(&start_dir, manifests, extra_markers)
@@ -283,7 +371,7 @@ pub fn resolve_lsp_module_root_with_markers(
         ));
     }
 
-    Ok(start_dir.to_string_lossy().into_owned())
+    Ok(spell(&start_dir))
 }
 
 #[cfg(test)]
@@ -323,6 +411,37 @@ mod tests {
             );
             assert!(resolve_remote_lang(non_lsp, &reg).is_none(), "{non_lsp}");
         }
+    }
+
+    #[test]
+    fn a_go_module_cache_file_keeps_the_workspace_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        let dep = tmp.path().join("go/pkg/mod/github.com/x/ttlmap@v1.6.0");
+        for d in [&ws, &dep] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("go.mod"), "module m\n").unwrap();
+        }
+        std::fs::write(dep.join("map.go"), "package ttlmap\n").unwrap();
+        let root = resolve_lsp_module_root(
+            "go",
+            &ws.to_string_lossy(),
+            Some(&dep.join("map.go").to_string_lossy()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(root, ws.to_string_lossy());
+        // A file of the workspace itself still roots at its own module.
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        std::fs::write(ws.join("sub/go.mod"), "module s\n").unwrap();
+        let sub = resolve_lsp_module_root(
+            "go",
+            &ws.to_string_lossy(),
+            Some(&ws.join("sub/a.go").to_string_lossy()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(sub, ws.join("sub").to_string_lossy());
     }
 
     #[test]
@@ -402,7 +521,6 @@ mod tests {
         let ws = tmp.path().join("cue-workspace");
         let nested = ws.join("pkg/policy/sub");
         std::fs::create_dir_all(&nested).unwrap();
-        let canon_ws = std::fs::canonicalize(&ws).unwrap();
         let scoped = resolve_lsp_module_root(
             "cue",
             &ws.to_string_lossy(),
@@ -410,7 +528,28 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(PathBuf::from(scoped), canon_ws);
+        assert_eq!(PathBuf::from(scoped), ws);
+    }
+
+    #[test]
+    fn module_root_keeps_the_callers_spelling_of_a_symlinked_root() {
+        // `/tmp/x` is `/private/tmp/x` on macOS: the server's root must use the
+        // spelling of the document URIs or gopls says "not in your workspace".
+        let tmp = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(tmp.path()).unwrap().join("real");
+        std::fs::create_dir_all(real.join("goapp/pkg")).unwrap();
+        std::fs::write(real.join("goapp/go.mod"), "module example.com/a\n").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let file = link.join("goapp/pkg/a.go");
+        let root = resolve_lsp_module_root(
+            "go",
+            &link.to_string_lossy(),
+            Some(&file.to_string_lossy()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(PathBuf::from(root), link.join("goapp"));
     }
 
     #[test]
@@ -483,5 +622,81 @@ mod tests {
         )
         .unwrap();
         assert_eq!(PathBuf::from(resolved_unsaved), rebeltech);
+    }
+
+    #[test]
+    fn jvm_and_cargo_roots_climb_to_the_reactor_and_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let top = std::fs::canonicalize(tmp.path()).unwrap();
+        let w = |p: &str, body: &str| {
+            let f = top.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, body).unwrap();
+        };
+        w(
+            "mvn/pom.xml",
+            "<project><modules>\n<module>svc</module>\n</modules></project>",
+        );
+        w(
+            "mvn/svc/pom.xml",
+            "<project><modules><module>core</module></modules></project>",
+        );
+        w("mvn/svc/core/pom.xml", "<project/>");
+        w("mvn/svc/core/src/main/java/A.java", "class A {}");
+        // A pom next door that does NOT list `lone` keeps it standalone.
+        w(
+            "lone-parent/pom.xml",
+            "<project><modules><module>other</module></modules></project>",
+        );
+        w("lone-parent/lone/pom.xml", "<project/>");
+        w(
+            "cargo/Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        );
+        w("cargo/crates/app/Cargo.toml", "[package]\nname = \"app\"\n");
+        w("cargo/crates/app/src/lib.rs", "");
+        w("solo/Cargo.toml", "[package]\nname = \"solo\"\n");
+        w("gradle/settings.gradle.kts", "include(\"core\")");
+        w("gradle/core/build.gradle.kts", "");
+
+        let root = |lang: &str, file: &str| {
+            let f = top.join(file);
+            PathBuf::from(
+                resolve_lsp_module_root(
+                    lang,
+                    &f.to_string_lossy(),
+                    Some(&f.to_string_lossy()),
+                    std::slice::from_ref(&top),
+                )
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            root("java", "mvn/svc/core/src/main/java/A.java"),
+            top.join("mvn")
+        );
+        assert_eq!(
+            root("java", "lone-parent/lone/pom.xml"),
+            top.join("lone-parent/lone")
+        );
+        assert_eq!(
+            root("rust", "cargo/crates/app/src/lib.rs"),
+            top.join("cargo")
+        );
+        assert_eq!(root("rust", "solo/Cargo.toml"), top.join("solo"));
+        assert_eq!(
+            root("kotlin", "gradle/core/build.gradle.kts"),
+            top.join("gradle")
+        );
+        // Never above the allowed root.
+        let core = top.join("mvn/svc/core");
+        let scoped = resolve_lsp_module_root(
+            "java",
+            &core.to_string_lossy(),
+            None,
+            &[top.join("mvn/svc")],
+        )
+        .unwrap();
+        assert_eq!(PathBuf::from(scoped), top.join("mvn/svc"));
     }
 }

@@ -69,6 +69,8 @@ export interface IdeRenameReq {
   line: number;
   character: number;
   new_name: string;
+  /** The language server's `textDocument/rename` edits; when set they replace the text match. */
+  lsp_edits?: IdeTextEdit[];
   apply?: boolean;
   project_folders?: string[];
   projectFolders?: string[];
@@ -81,6 +83,8 @@ export interface IdeRenameResp {
   new_name: string;
   applied: boolean;
   edits: IdeRenameFileEdit[];
+  /** `lsp`: the language server's rename; `text`: whole-word matches in same-language files. */
+  source: 'lsp' | 'text';
 }
 
 export interface IdeFormatReq {
@@ -353,6 +357,8 @@ export interface IdeDepItem {
   property_name?: string | null;
   managed_in?: IdeDepManagedIn | null;
   vulnerabilities: IdeDepVulnerability[];
+  /** `current_version` is a range floor (`^1.0.0`, `>=1.0`): no vulnerability lookup. */
+  range?: boolean;
 }
 
 export interface IdeDepsInspectReq {
@@ -452,6 +458,8 @@ export interface IdeCollabRoom {
   created_at: string;
   peers: IdeCollabPeer[];
   active_debug_id?: string | null;
+  /** `GET /ide/collab/rooms` only, for the caller's own rooms: the invite link. */
+  share_hash?: string | null;
 }
 
 export interface IdeCreateCollabRoomReq {

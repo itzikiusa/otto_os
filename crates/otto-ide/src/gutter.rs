@@ -5,10 +5,13 @@
 //! rules, returning 1-based [`IdeGutterItem`] entries with ready-to-launch
 //! `IdeQuickRunSpec` configurations for both test runners and DAP debugging.
 
+pub(crate) mod cargo_target;
 mod compiled;
 mod scripting;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use scripting::js_test_package;
 
 use crate::plugins::IdePluginRegistry;
 use crate::types::{detect_language, IdeGutterItem, IdeRunnerKind, PluginGutterDetector};

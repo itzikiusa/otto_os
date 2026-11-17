@@ -140,7 +140,9 @@ test.describe('Desktop IDE — Maven tool window on a multi-root project', () =>
     page.on('pageerror', (e) => { if (/effect_update_depth_exceeded/i.test(e.message)) loopErrors.push(e.message); });
     let modelCalls = 0;
     let fsCalls = 0;
+    let runPosts = 0;
     page.on('request', (r) => {
+      if (r.method() === 'POST' && /\/ide\/runs(\?|$)/.test(r.url())) runPosts++;
       if (r.url().includes('/ide/build-tools/model')) modelCalls++;
       if (/\/ide\/fs\/(file|tree)/.test(r.url())) fsCalls++;
     });
@@ -187,6 +189,12 @@ test.describe('Desktop IDE — Maven tool window on a multi-root project', () =>
     await lifecycle.click();
     await expect(lifecycle).toHaveAttribute('aria-expanded', 'true');
     await expect(win.locator('.bt-goal-main', { hasText: 'package' }).first()).toBeVisible();
+
+    // A double-click on a goal starts it once, not once per click plus once for the dblclick.
+    await win.locator('.bt-goal-main', { hasText: 'validate' }).first().dblclick();
+    await expect.poll(() => runPosts).toBeGreaterThan(0);
+    await page.waitForTimeout(800); // ui-guards: allow — absence: no second or third run starts
+    expect(runPosts, 'POST /ide/runs per double-click').toBe(1);
 
     // Toolbar buttons respond.
     const skip = win.getByTestId('ide-bt-skip-tests');

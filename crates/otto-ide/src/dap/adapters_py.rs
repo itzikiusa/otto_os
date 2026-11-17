@@ -30,6 +30,20 @@ pub(super) async fn resolve_python_adapter(
     env: BTreeMap<String, String>,
 ) -> Result<ResolvedDapAdapter> {
     let program = normalize_target_path(&req.target, &req.launch.program);
+    // A test debugs from pytest's rootdir, like its Run: the project imports and the root
+    // `conftest.py` resolve the same way.
+    let test_cwd;
+    let cwd = if req
+        .launch
+        .test_name
+        .as_deref()
+        .is_some_and(|t| !t.is_empty())
+    {
+        test_cwd = crate::environments::pytest_rootdir(&req.target, cwd);
+        test_cwd.as_str()
+    } else {
+        cwd
+    };
     let mut candidates = Vec::new();
     let allow_workspace_venv = ctx.caller_is_root || req.target.kind == IdeTargetKind::Ssh;
     if allow_workspace_venv {
@@ -138,13 +152,15 @@ pub(super) async fn resolve_python_adapter(
             ]
         };
         args.extend(req.launch.args.clone());
-        (
-            "launch".to_string(),
-            json!({
-                "module": "pytest", "program": program, "testName": test_name, "args": args,
-                "cwd": cwd, "console": "internalConsole", "justMyCode": false, "python": [py_bin],
-            }),
-        )
+        let mut launch = json!({
+            "module": "pytest", "program": program, "testName": test_name, "args": args,
+            "cwd": cwd, "console": "internalConsole", "justMyCode": false, "python": [py_bin],
+        });
+        // debugpy rejects `module` with `program`; only the bdb bridge needs the file.
+        if let Some(o) = launch.as_object_mut().filter(|_| debugpy_host_py.is_some()) {
+            o.remove("program");
+        }
+        ("launch".to_string(), launch)
     } else {
         (
             "launch".to_string(),
@@ -227,8 +243,10 @@ async fn probe_debugpy_cached(
     .await
     .map(|o| o.status.success())
     .unwrap_or(false);
-    if let Some(key) = cache_key {
-        debugpy_probe_cache().insert(key, ok);
+    // Only a hit is cached: installing debugpy later changes nothing the key sees (the
+    // interpreter itself), so a cached miss would hide it until the daemon restarts.
+    if let Some(key) = cache_key.filter(|_| ok) {
+        debugpy_probe_cache().insert(key, true);
     }
     ok
 }

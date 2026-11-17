@@ -364,6 +364,106 @@ fn parse_jvm_test_line(line: &str) -> Option<IdeTestCaseResult> {
     None
 }
 
+/// Per-test results from the JUnit XML reports (`TEST-*.xml`) Surefire/Failsafe and Gradle
+/// write under `cwd` (`**/target/surefire-reports`, `**/build/test-results/**`), counting only
+/// files modified since `since` (this run). The console only prints one row per class
+/// (Maven) or nothing for passing tests (Gradle). Blocking: call off the async runtime.
+#[allow(clippy::disallowed_methods)] // bounded walk, run inside spawn_blocking
+pub(super) fn collect_junit_xml_results(
+    cwd: &std::path::Path,
+    since: std::time::SystemTime,
+) -> Vec<IdeTestCaseResult> {
+    fn walk(
+        dir: &std::path::Path,
+        depth: u8,
+        since: std::time::SystemTime,
+        out: &mut Vec<IdeTestCaseResult>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                if depth < 6 && !name.starts_with('.') && name != "src" && name != "node_modules" {
+                    walk(&path, depth + 1, since, out);
+                }
+            } else if name.starts_with("TEST-")
+                && name.ends_with(".xml")
+                && entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|m| m >= since)
+            {
+                if let Ok(xml) = std::fs::read_to_string(&path) {
+                    out.extend(parse_junit_xml(&xml));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(cwd, 0, since, &mut out);
+    out.truncate(MAX_PARSED_TESTS);
+    out
+}
+
+/// `<testcase name classname time>` entries of one JUnit XML report, with the `<failure>`
+/// / `<error>` message or `<skipped>`.
+pub(super) fn parse_junit_xml(xml: &str) -> Vec<IdeTestCaseResult> {
+    static RE_CASE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static RE_ATTR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static RE_FAIL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re_case = RE_CASE.get_or_init(|| {
+        regex::Regex::new(r"(?s)<testcase\b([^>]*?)(?:/>|>(.*?)</testcase>)").unwrap()
+    });
+    let re_attr = RE_ATTR.get_or_init(|| regex::Regex::new(r#"\b([a-z]+)="([^"]*)""#).unwrap());
+    let re_fail = RE_FAIL.get_or_init(|| regex::Regex::new(r"<(failure|error)\b([^>]*)").unwrap());
+    let attr = |attrs: &str, key: &str| {
+        re_attr
+            .captures_iter(attrs)
+            .find(|c| &c[1] == key)
+            .map(|c| xml_unescape(&c[2]))
+    };
+    re_case
+        .captures_iter(xml)
+        .map(|c| {
+            let attrs = &c[1];
+            let body = c.get(2).map_or("", |m| m.as_str());
+            let failure = re_fail.captures(body);
+            let status = if failure.is_some() {
+                IdeTestCaseStatus::Failed
+            } else if body.contains("<skipped") {
+                IdeTestCaseStatus::Skipped
+            } else {
+                IdeTestCaseStatus::Passed
+            };
+            let duration_ms = attr(attrs, "time")
+                .and_then(|t| t.parse::<f64>().ok())
+                .map(|sec| (sec * 1000.0).round() as u64);
+            let mut item = simple_test_case(
+                &attr(attrs, "name").unwrap_or_default(),
+                status,
+                duration_ms,
+            );
+            item.suite = attr(attrs, "classname");
+            item.message = failure.and_then(|f| attr(&f[2], "message"));
+            item
+        })
+        .collect()
+}
+
+fn xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#10;", "\n")
+        .replace("&amp;", "&")
+}
+
 fn simple_test_case(
     name: &str,
     status: IdeTestCaseStatus,

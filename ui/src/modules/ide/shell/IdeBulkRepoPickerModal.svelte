@@ -226,7 +226,6 @@
           name: projectName.trim() || fallbackName,
           primary_root: primary,
           folders: ordered,
-          pinned,
         });
         if (saved) {
           await ide.activateProject(saved.id);

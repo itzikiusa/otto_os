@@ -9,7 +9,6 @@
   import type { ApprovalDecision, ProviderTurn, RuntimeRequest, TurnItem } from '../../../lib/api/types';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
   import { activatePathLink } from '../../../lib/pathLinks/open';
-  import { replaceEmojiShortcodes } from '../../../lib/emojiShortcodes';
   import Markdown from '../../agents/conversation/Markdown.svelte'; // ui-guards: allow — shared chat markdown
   import { threadCall } from './agentRows';
   import { parseUserMessageItemWithBadges, type ParsedContextBadge } from './mentionMatcher';
@@ -234,7 +233,7 @@
         </div>
       {/if}
       {#if parsed.prose || (parsed.badges.length === 0 && row.item.text)}
-        <div class="rt-bubble" dir="auto">{replaceEmojiShortcodes(parsed.badges.length > 0 ? parsed.prose : row.item.text)}</div>
+        <div class="rt-bubble" dir="auto">{parsed.badges.length > 0 ? parsed.prose : row.item.text}</div>
       {/if}
       <div class="rt-msg-foot">
         {#if onedituser && row.item.id === lastUserId && (row.item.text || row.item.attachments?.length)}

@@ -17,6 +17,7 @@ import { fileUriToPath } from '../../../lib/fileUri.ts';
 import { applyHtmlBlockDirections } from '../../../lib/textDirection.ts';
 import { looksLikeNonPath } from '../../../lib/pathLinks/resolve.ts';
 import { resolveEmojiShortcode } from '../../../lib/emojiShortcodes.ts';
+import { ALLOWED_TAGS } from '../../../lib/sanitize.ts';
 
 const esc = escapeHtml;
 const LOCAL_IMG_EXT = /\.(?:png|jpe?g|gif|webp|svg|avif|bmp)$/i;
@@ -138,27 +139,16 @@ export const chatMarkedExtension: MarkedExtension = {
         return `<a class="ref-chip issue" data-raw="${n}" title="Pull request or issue #${n}">#${n}</a>`;
       },
     },
-    {
-      name: 'chatEmojiShortcode',
-      level: 'inline',
-      start(src: string) {
-        const m = /(?<![/\w]):[+-]?[a-z0-9_+-]{1,32}:(?![/\w])/i.exec(src);
-        return m ? m.index : undefined;
-      },
-      tokenizer(src: string) {
-        const m = /^:([+-]?[a-z0-9_+-]{1,32}):(?![/\w])/i.exec(src);
-        if (!m) return undefined;
-        const emoji = resolveEmojiShortcode(m[1]);
-        if (!emoji) return undefined;
-        return { type: 'chatEmojiShortcode', raw: m[0], emoji, shortcode: m[1] };
-      },
-      renderer(token) {
-        const { emoji, shortcode } = token as unknown as { emoji: string; shortcode: string };
-        return `<span class="chat-emoji" title=":${esc(shortcode)}:">${emoji}</span>`;
-      },
-    },
   ],
   renderer: {
+    // Raw HTML in agent prose: `Vec<String>` or `<name>` is text the sanitizer
+    // would unwrap into nothing, so only tags it keeps (`<br>`, `<details>`…)
+    // and comments stay HTML; anything else is shown as written.
+    html({ text }: Tokens.HTML | Tokens.Tag) {
+      const t = text.trim();
+      const tag = /^<\/?([a-z][a-z0-9-]*)/i.exec(t)?.[1]?.toLowerCase();
+      return t.startsWith('<!--') || (tag && ALLOWED_TAGS.has(tag)) ? false : esc(text);
+    },
     codespan({ text }: Tokens.Codespan) {
       const ref = codeSpanFile(text);
       if (!ref) return false;
@@ -193,6 +183,31 @@ export const chatMarkedExtension: MarkedExtension = {
   },
 };
 
+/** Agent replies only (Markdown.svelte's `emoji`): GitHub `:shortcode:`s in
+ *  prose become emoji; code, URLs, `\:escapes` and unknown names stay literal. */
+export const chatEmojiExtension: MarkedExtension = {
+  extensions: [
+    {
+      name: 'chatEmojiShortcode',
+      level: 'inline',
+      start(src: string) {
+        const m = /(?<![\\/\w]):[a-z0-9_+-]{1,40}:(?![/\w])/.exec(src);
+        return m ? m.index : undefined;
+      },
+      tokenizer(src: string) {
+        const m = /^:([a-z0-9_+-]{1,40}):(?![/\w])/.exec(src);
+        const emoji = m ? resolveEmojiShortcode(m[1]) : null;
+        if (!m || !emoji) return undefined;
+        return { type: 'chatEmojiShortcode', raw: m[0], emoji, shortcode: m[1] };
+      },
+      renderer(token) {
+        const { emoji, shortcode } = token as unknown as { emoji: string; shortcode: string };
+        return `<span class="chat-emoji" title=":${esc(shortcode)}:">${emoji}</span>`;
+      },
+    },
+  ],
+};
+
 // Plain (escaped, untagged) tool output: URLs and file references become
 // links — "panicked at crates/otto-net/src/retry.rs:88:9" opens the file there.
 const OUT_LINK = new RegExp(`(https?:\\/\\/[^\\s<>"'\\\`]+)|(${PROSE_PATH.source})`, 'g');
@@ -214,6 +229,7 @@ export function linkifyOutput(escaped: string): string {
 }
 
 const ctx: RenderCtx = { resolve: () => null, assetUrl: () => null, codeLines: true, use: [chatMarkedExtension] };
+const emojiCtx: RenderCtx = { ...ctx, use: [chatMarkedExtension, chatEmojiExtension] };
 
 // Anchors without an href are not focusable; the chat's own reference links
 // get a tab stop and a link role here (after the sanitizer, our own markup —
@@ -224,9 +240,10 @@ const REF_OPEN = /<a class="(file-ref|ref-chip)/g;
 // global `_blank` handler would open them a second time.
 const BLANK = / target="_blank"/g;
 
-/** Render one block of chat prose to sanitized, decorated, BiDi-isolated HTML. */
-export function renderChatMarkdown(md: string): string {
-  const html = renderNote(md, ctx);
+/** Render one block of chat prose to sanitized, decorated, BiDi-isolated HTML;
+ *  `emoji` expands `:shortcode:`s (agent replies, once the table has loaded). */
+export function renderChatMarkdown(md: string, emoji = false): string {
+  const html = renderNote(md, emoji ? emojiCtx : ctx);
   const decorated = decorateCodeBlocks(html)
     .replace(REF_OPEN, '<a tabindex="0" role="link" class="$1')
     .replace(BLANK, '');

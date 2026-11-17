@@ -224,6 +224,10 @@ export interface IdeToolStatus {
   name: string;
   available: boolean;
   path?: string | null;
+  /** What the binary reports (Go tools: the Go it was built with, `go1.22.3`). */
+  version?: string | null;
+  /** Why it no longer fits the project's toolchain; reinstalling updates it. */
+  outdated?: string | null;
 }
 
 export interface IdeDownloadableSdk {
@@ -628,6 +632,8 @@ export interface IdeDebugSessionSnapshot {
   config_id?: string | null;
   launch?: IdeDebugLaunch | null;
   state: IdeDebugState;
+  /** Bumped on every stop: two stops on the same line differ (DAP variable refs live one stop). */
+  stop_seq?: number;
   stopped_reason?: IdeDebugStoppedReason | null;
   active_thread_id?: number | null;
   active_frame_id?: number | null;

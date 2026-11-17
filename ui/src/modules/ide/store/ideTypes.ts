@@ -105,6 +105,8 @@ export interface IdeOpenTab {
    *  styles (CRLF + LF, lone CR): saving then keeps each untouched line's ending. */
   diskEols?: string[];
   sha256?: string; language: string; readOnly: boolean; truncated: boolean;
+  /** The read found NUL bytes or invalid UTF-8: shown read-only, maybe blank or garbled. */
+  binary?: boolean;
   loading: boolean; error: string | null; preview: boolean;
   pinned?: boolean; external?: boolean;
   lastAccessedAt?: number;
@@ -248,7 +250,7 @@ export interface IdeDetectedSdk {
   name: string; label?: string; version: string; path: string; home_path?: string;
   bin_path?: string | null; source: string; arch?: string | null; valid?: boolean; broken?: boolean;
 }
-export interface IdeToolStatus { name: string; available: boolean; installed?: boolean; path?: string | null }
+export interface IdeToolStatus { name: string; available: boolean; installed?: boolean; path?: string | null; version?: string | null; outdated?: string | null }
 export interface IdeDownloadableSdk { version: string; label: string; lts: boolean; os: string; arch: string; url: string; size_hint?: string | null; sha256?: string | null }
 
 export interface IdeToolchainEcosystem {
@@ -351,7 +353,7 @@ export interface IdeDebugOutputEntry { category: 'stdout' | 'stderr' | 'console'
 export interface IdeDebugSessionSnapshot {
   id: string; revision?: number; title: string; language: string; adapter: string;
   config_id?: string | null; launch?: IdeDebugLaunch | null;
-  state: 'starting' | 'running' | 'paused' | 'terminated' | 'error'; stopped_reason?: string | null;
+  state: 'starting' | 'running' | 'paused' | 'terminated' | 'error'; stop_seq?: number; stopped_reason?: string | null;
   active_thread_id?: number | null; active_frame_id?: number | null;
   paused_file?: string | null; paused_line?: number | null;
   selected_frame_file?: string | null; selected_frame_line?: number | null;
@@ -375,6 +377,8 @@ export interface IdeCollabPeer {
 export interface IdeCollabRoom {
   id: string; title: string; target: IdeTargetSpec;
   default_role: IdeCollabRole; peers: IdeCollabPeer[]; created_at?: string;
+  /** Room list only, for the caller's own rooms: the invite link (`#/ide?collab=…`). */
+  share_hash?: string | null;
 }
 
 export interface IdePeerCursor {
@@ -398,6 +402,10 @@ export interface IdeEditorHandle {
   getSelectionRange?: () => IdeEditorSelectionRange | null;
   replaceBufferContent?: (nextContent: string, range?: { from: number; to: number }) => boolean;
   applyAgentEdit?: (nextContent: string, range?: { from: number; to: number }) => boolean;
+  lspRenameEdits?: (line: number, column: number, newName: string) => Promise<IdeTextEdit[] | null>;
+  /** The live language server's answers; `null` when none owns the file. */
+  lspReferences?: (line: number, column: number) => Promise<Array<{ path: string; line: number; column: number }> | null>;
+  lspQuickFixes?: (line: number) => Promise<Array<{ title: string; isPreferred: boolean; edits: IdeTextEdit[] }> | null>;
 }
 
 export function isReadOnlySdkOrCachePath(p: string): boolean {
@@ -438,10 +446,14 @@ export function detectIdeLanguage(p: string): string {
   return map[ext] ?? 'txt';
 }
 
+/** `selectedConfigId` of the test / main last launched from the gutter (`gutterTarget`):
+ *  the toolbar Run / Debug repeat it, like an IntelliJ temporary configuration. */
+export const GUTTER_TARGET_ID = 'gutter';
+
 export function defaultRunnerForLanguage(lang: string): string {
   const map: Record<string, string> = {
     go: 'go_run', rust: 'cargo_run', java: 'java_main', python: 'python',
-    javascript: 'node', typescript: 'npm', tsx: 'npm', jsx: 'node', shell: 'shell',
+    javascript: 'node', typescript: 'node', tsx: 'npm', jsx: 'node', shell: 'shell',
   };
   return map[lang] ?? 'custom';
 }

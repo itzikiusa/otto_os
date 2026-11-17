@@ -36,10 +36,14 @@ export function pickPreferredDbTarget(
     );
     if (existingSameEngine) return existingSameEngine;
   }
-  const liveMatch = ephemeral.find((t) => t.engine === engine);
+  // This run's Testcontainers / miniredis first, then the user's saved
+  // connection; any other DB container may belong to another project.
+  const liveMatch = ephemeral.find((t) => t.engine === engine && t.source !== 'container');
   if (liveMatch) return liveMatch;
   const savedMatch = saved.find((t) => t.engine === engine);
   if (savedMatch) return savedMatch;
+  const containerMatch = ephemeral.find((t) => t.engine === engine);
+  if (containerMatch) return containerMatch;
   if (currentKey) {
     const existingAny = all.find((t) => targetKeyOf(t) === currentKey);
     if (existingAny) return existingAny;

@@ -113,13 +113,22 @@ export function parseProcesses(
     }));
   }
   const [qid, user, elapsed, read, , query] = pick(['query_id', 'user', 'elapsed', 'read_rows', 'memory_usage', 'query']);
-  return rows.map((r) => ({
+  // Like PostgreSQL: the listing sees itself running the listing.
+  return rows.filter((r) => str(r[query]).trim() !== PROCESS_SQL.clickhouse).map((r) => ({
     id: str(r[qid]),
     user: str(r[user]),
     seconds: num(r[elapsed]),
     state: r[read] === undefined ? '' : `${str(r[read])} rows read`,
     query: str(r[query]),
   }));
+}
+
+/** How many rows are running a statement: an idle PostgreSQL session
+ *  (`idle`, `idle in transaction`…) and a MySQL `Sleep` connection aren't. */
+export function runningCount(engine: ProcessEngine, rows: readonly ProcessRow[]): number {
+  if (engine === 'postgres') return rows.filter((r) => r.state.split(' · ')[0] === 'active').length;
+  if (engine === 'mysql') return rows.filter((r) => !r.state.startsWith('Sleep')).length;
+  return rows.length;
 }
 
 /** `query` stops the statement; `connection` (PostgreSQL only) closes the session. */

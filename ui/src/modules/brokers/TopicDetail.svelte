@@ -204,7 +204,7 @@
       clusterId: cluster.id,
       topic,
       async peek(o) {
-        tab = 'messages';
+        await openingPeek; tab = 'messages'; // `consume` won't start while the opening peek runs
         startMode = o.start ?? 'latest';
         partition = o.partition ?? '';
         limit = o.limit ?? 50;
@@ -246,9 +246,9 @@
       .catch((e) => (detailErr = loadErrorText(e)));
   }
 
+  let openingPeek: Promise<void> | null = null;
   $effect(() => {
-    // re-run when topic changes
-    void topic;
+    void topic; // re-run when topic changes
     result = null;
     selected = null;
     fullCtl?.abort();
@@ -258,7 +258,7 @@
     tailError = null;
     tailLastSuccess = null;
     tailOffsets = new Map();
-    loadDetail();
+    loadDetail(); openingPeek = untrack(() => consume()); // open on the newest messages
   });
 
   // Incremental live-tail: on each tick, request only messages past the max

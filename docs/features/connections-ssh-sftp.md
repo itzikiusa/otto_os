@@ -104,7 +104,12 @@ create/update via `validate_params`, which simply tries to build the command.
 
 Notes:
 - **SSH:** built as `ssh [-i identity] [-p port] [-J jump] user@host`. With no
-  `host`, you get a login shell.
+  `host`, you get a login shell. With an identity and a single-hop jump, the
+  hop is reached through `-o ProxyCommand=ssh -i <identity> -o
+  IdentitiesOnly=yes … -W %h:%p <jump>` instead of `-J`, so the hop
+  authenticates with that key too (`-J` would let it pick its own from
+  `~/.ssh/config` or the agent). The tunnels and SFTP do the same; a
+  multi-hop chain keeps `-J`.
 - **MongoDB:** you supply the whole connection string as `conn_string`. If it
   contains the literal token `{secret}`, the stored secret is substituted in
   (`mongodb://app:{secret}@host/db`); a `{secret}` reference with no stored secret
@@ -426,7 +431,7 @@ and may mutate only connections they created.
 | Method & path | Auth | Request → Response |
 |---|---|---|
 | `GET …/sftp/list?path=` | ws viewer | — → `SftpListResp{path, entries: SftpEntry[]}` (empty path ⇒ `pwd` then list) |
-| `GET …/sftp/read?path=` | ws viewer | — → `SftpReadResp{text, truncated}` (≤ 1 MiB UTF-8) |
+| `GET …/sftp/read?path=` | ws viewer | — → `SftpReadResp{text, truncated, binary?}` (≤ 1 MiB UTF-8; a non-UTF-8 file → `binary: true`, empty `text`) |
 | `POST …/sftp/download` | ws editor + root (writes a daemon-host path; non-root → 403 `HOST_PATH_ROOT_ONLY`) | `{remote_path, local_path}` → `SftpDownloadResp{local_path, bytes}` |
 | `POST …/sftp/upload` | ws editor + root (reads a daemon-host path; non-root → 403 `HOST_PATH_ROOT_ONLY`) | `{local_path, remote_path}` → 200 |
 | `POST …/sftp/mkdir` | ws editor | `{path}` → 200 |
@@ -491,6 +496,8 @@ removes its env file from every cwd.
 - ⚠️ SFTP transfers touch the **daemon host's** disk (your Mac), not the browser
   client's — intended, since the daemon is local, but worth knowing for remote/PWA
   access.
+- A file that isn't UTF-8 text opens as "This is a binary file", not as
+  mojibake; Download it instead.
 - ⚠️ SFTP text view is capped at **1 MiB**; larger files report `truncated` (use
   Download for the whole file). The view probes the size first and stops the
   transfer once 1 MiB has arrived, so previewing a multi-GB log costs ~1 MiB,

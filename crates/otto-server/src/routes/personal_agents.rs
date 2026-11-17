@@ -23,6 +23,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use otto_assistant::personal_agent_admin;
 use otto_assistant::personal_agents_engine::{agent_ownership, AgentOwnership};
 use otto_core::api::CreateSessionReq;
 use otto_core::domain::{SessionKind, User, WorkspaceRole};
@@ -346,9 +347,8 @@ async fn update(
     if let Some(d) = &req.delivery {
         check_delivery(d)?;
     }
-    if let Some(c) = req.cwd.as_deref() {
-        personal_agents_engine::validate_agent_cwd(c).map_err(ApiError)?;
-    }
+    personal_agent_admin::check_update(&repo, &agent, req.cwd.as_deref(), req.name.as_deref())
+        .await?;
     // Resuming the agent resumes all its schedules: re-arm them so what they
     // missed while it was paused is not fired (and delivered) at once.
     let resumed = !agent.enabled && req.enabled == Some(true);

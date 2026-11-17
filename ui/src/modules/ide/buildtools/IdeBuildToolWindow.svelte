@@ -98,6 +98,12 @@
     executeBuildToolGoal(mod, mod.tool === 'gradle' ? 'dependencies' : 'dependency:sources', 'run');
   }
 
+  /** A goal starts on the first click only: a double-click (habit from the tree)
+   *  must not start the same `mvn install` twice on one `target/`. */
+  function firstClick(e: MouseEvent): boolean {
+    return e.detail <= 1;
+  }
+
   const allMavenProfileIds = $derived.by(() => {
     const set = new Set(profiles.map((p) => p.id));
     for (const id of ide.activeMavenProfiles) set.add(id);
@@ -163,8 +169,7 @@
                 <button
                   type="button"
                   class="bt-goal-main"
-                  ondblclick={() => executeBuildToolGoal(mod, phase, 'run')}
-                  onclick={() => executeBuildToolGoal(mod, phase, 'run')}
+                  onclick={(e) => firstClick(e) && executeBuildToolGoal(mod, phase, 'run')}
                   title={`Run ${phase} in ${mod.name}`}
                 >
                   <Icon name="play" size={12} />
@@ -175,7 +180,7 @@
                   class="bt-mini-btn"
                   aria-label={`Debug ${phase}`}
                   title={`Debug ${phase} in ${mod.name}`}
-                  onclick={() => executeBuildToolGoal(mod, phase, 'debug')}
+                  onclick={(e) => firstClick(e) && executeBuildToolGoal(mod, phase, 'debug')}
                 >
                   <Icon name="bug" size={12} />
                 </button>
@@ -201,11 +206,11 @@
                   {#if expanded[pgKey]}
                     {#each plug.goals ?? [] as goal (goal)}
                       <div class="bt-goal-row">
-                        <button type="button" class="bt-goal-main" onclick={() => executeBuildToolGoal(mod, goal, 'run')} title={`Run ${goal}`}>
+                        <button type="button" class="bt-goal-main" onclick={(e) => firstClick(e) && executeBuildToolGoal(mod, goal, 'run')} title={`Run ${goal}`}>
                           <Icon name="play" size={12} />
                           <span dir="ltr">{goal}</span>
                         </button>
-                        <button type="button" class="bt-mini-btn" aria-label={`Debug ${goal}`} title={`Debug ${goal}`} onclick={() => executeBuildToolGoal(mod, goal, 'debug')}>
+                        <button type="button" class="bt-mini-btn" aria-label={`Debug ${goal}`} title={`Debug ${goal}`} onclick={(e) => firstClick(e) && executeBuildToolGoal(mod, goal, 'debug')}>
                           <Icon name="bug" size={12} />
                         </button>
                       </div>
@@ -328,6 +333,9 @@
               <label class="bt-prof-row">
                 <input type="checkbox" checked={ide.activeMavenProfiles.includes(pid)} onchange={() => ide.toggleMavenProfile(pid)} />
                 <span dir="ltr">{pid}</span>
+                {#if profiles.some((p) => p.id === pid && p.active_by_default)}
+                  <Badge tone="info" variant="soft" label="default" title="Active by default in the POM: it runs without -P" />
+                {/if}
                 <Badge tone="neutral" variant="outline" label={tool} />
               </label>
             {/each}

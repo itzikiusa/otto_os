@@ -2,10 +2,12 @@
 // language-specific `initializationOptions`, dot-triggered completion with atomic
 // `additionalTextEdits` auto-imports, and `textDocument/semanticTokens/full` decoding.
 
-import { startCompletion, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
+import { autocompletion, startCompletion, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
+import { filterLspCompletionItems, lspFirstCompletionSource } from './cm-ide-lsp-complete-source.ts';
 import { EditorSelection, EditorState, StateEffect, StateField, type ChangeSpec, type Extension, type Range } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { isSecretIdePath } from './cm-ide-drafts.ts';
+import { fileUriToPath } from '../fileUri.ts';
 
 export const MAX_POOLED_LSP_CLIENTS = 3;
 export const IDLE_CLOSE_MS = 180_000;
@@ -45,14 +47,24 @@ export const LSP_CODE_LANGUAGES = new Set([
   'typescript',
   'javascript',
   'python',
+  'shell',
+  'css',
+  'html',
 ]);
 
 const NON_CODE_EXTENSIONS = new Set([
   'md', 'markdown', 'mdx', 'json', 'jsonc', 'jsonl', 'ndjson', 'yaml', 'yml',
-  'toml', 'sql', 'csv', 'tsv', 'html', 'htm', 'css', 'scss', 'less', 'xml',
+  'toml', 'sql', 'csv', 'tsv', 'xml',
   'svg', 'txt', 'text', 'log', 'lock', 'env', 'ini', 'conf', 'cfg', 'properties',
-  'dockerfile', 'sh', 'bash', 'zsh', 'fish', 'gitignore', 'dockerignore', 'proto',
+  'dockerfile', 'fish', 'gitignore', 'dockerignore', 'proto',
 ]);
+
+/** Server languages beyond the built-in set that the daemon reports (plugin servers: Kotlin, …). */
+const pluginLspLanguages = new Set<string>();
+
+export function registerIdeLspPluginLanguage(lang: string): void {
+  if (!LSP_CODE_LANGUAGES.has(lang)) pluginLspLanguages.add(lang);
+}
 
 export function posToLsp(doc: EditorState['doc'], pos: number): LspPos {
   const clamped = Math.max(0, Math.min(doc.length, pos));
@@ -64,6 +76,47 @@ export function lspToPos(doc: EditorState['doc'], p: LspPos): number {
   if (doc.lines === 0) return 0;
   const ln = doc.line(Math.max(1, Math.min(doc.lines, p.line + 1)));
   return Math.max(0, Math.min(doc.length, Math.min(ln.to, ln.from + Math.max(0, p.character))));
+}
+
+/** A file edit from an LSP `WorkspaceEdit`, 1-based (line, UTF-16 column), like the daemon's `IdeTextEdit`. */
+export interface LspFileTextEdit {
+  path: string;
+  start_line: number;
+  start_col: number;
+  end_line: number;
+  end_col: number;
+  new_text: string;
+}
+
+type RawTextEdit = { range?: LspRange; newText?: string };
+
+/**
+ * Flatten a `textDocument/rename` `WorkspaceEdit` (`changes` or `documentChanges`)
+ * into per-file text edits. File create/rename/delete operations are not text
+ * edits and are skipped.
+ */
+export function workspaceEditToTextEdits(raw: unknown): LspFileTextEdit[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const ws = raw as { changes?: Record<string, RawTextEdit[]>; documentChanges?: Array<{ textDocument?: { uri?: string }; edits?: RawTextEdit[] }> };
+  const groups: Array<[string, RawTextEdit[]]> = ws.documentChanges
+    ? ws.documentChanges.filter((d) => d?.textDocument?.uri && Array.isArray(d.edits)).map((d) => [d.textDocument!.uri!, d.edits!])
+    : Object.entries(ws.changes ?? {});
+  const out: LspFileTextEdit[] = [];
+  for (const [uri, edits] of groups) {
+    const path = fileUriToPath(uri);
+    for (const e of edits) {
+      if (!e?.range || typeof e.newText !== 'string') continue;
+      out.push({
+        path,
+        start_line: e.range.start.line + 1,
+        start_col: e.range.start.character + 1,
+        end_line: e.range.end.line + 1,
+        end_col: e.range.end.character + 1,
+        new_text: e.newText,
+      });
+    }
+  }
+  return out;
 }
 
 export function normalizeIdeLspLanguage(langOrExt?: string | null): string | null {
@@ -79,7 +132,10 @@ export function normalizeIdeLspLanguage(langOrExt?: string | null): string | nul
     return 'javascript';
   }
   if (raw === 'py' || raw === 'pyi' || raw === 'python') return 'python';
-  return null;
+  if (raw === 'sh' || raw === 'bash' || raw === 'zsh' || raw === 'bats' || raw === 'shell' || raw === 'shellscript') return 'shell';
+  if (raw === 'css' || raw === 'scss' || raw === 'less') return 'css';
+  if (raw === 'html' || raw === 'htm') return 'html';
+  return pluginLspLanguages.has(raw) ? raw : null;
 }
 
 /** `?query` only exists on URIs (`jdt:`, `jar:`, `file:`); a plain path may contain a literal `?`. */
@@ -104,9 +160,9 @@ export function shouldAttachIdeLsp(
   }
   const dot = base.lastIndexOf('.');
   const ext = dot >= 0 ? base.slice(dot + 1) : '';
-  if (ext && NON_CODE_EXTENSIONS.has(ext)) return false;
-
   const resolved = languageId ? normalizeIdeLspLanguage(languageId) : normalizeIdeLspLanguage(ext);
+  if (resolved !== null && pluginLspLanguages.has(resolved)) return true;
+  if (ext && NON_CODE_EXTENSIONS.has(ext)) return false;
   return resolved !== null && LSP_CODE_LANGUAGES.has(resolved);
 }
 
@@ -361,7 +417,9 @@ export function detectLspCompletionTrigger(
   if (before.endsWith('@') && (lang === 'java' || lang === 'typescript' || lang === 'javascript' || lang === 'python')) {
     return { from: p, context: { triggerKind: 2, triggerCharacter: '@' } };
   }
-  if (explicit) {
+  // ⌃Space on an empty spot; never after `(`, `,`, `;`… (an explicit session started by
+  // `.` stays explicit, and Enter would then insert the global list's first item).
+  if (explicit && (before === '' || /\s$/.test(before))) {
     return { from: p, context: { triggerKind: 1 } };
   }
   return null;
@@ -452,7 +510,7 @@ export function createIdeLspCompletionExtension(opts: {
     textDocument: { uri: string };
     position: LspPos;
     context: { triggerKind: 1 | 2; triggerCharacter?: string };
-  }) => Promise<RawLspCompletionItem[] | { items?: RawLspCompletionItem[] } | null>;
+  }) => Promise<RawLspCompletionItem[] | { items?: RawLspCompletionItem[]; isIncomplete?: boolean } | null>;
   resolveItem?: (item: RawLspCompletionItem) => Promise<RawLspCompletionItem | null>;
 }): Extension {
   const source = async (ctx: CompletionContext): Promise<CompletionResult | null> => {
@@ -467,10 +525,12 @@ export function createIdeLspCompletionExtension(opts: {
         position: posToLsp(ctx.state.doc, ctx.pos),
         context: trig.context,
       });
-      const items = Array.isArray(res) ? res : (res?.items ?? []);
+      const all = Array.isArray(res) ? res : (res?.items ?? []);
+      const { items, truncated } = filterLspCompletionItems(all, ctx.state.sliceDoc(trig.from, ctx.pos));
       if (items.length === 0) return null;
+      const incomplete = truncated || (!Array.isArray(res) && Boolean(res?.isIncomplete));
 
-      const options: Completion[] = items.slice(0, 150).map((it, idx) => {
+      const options: Completion[] = items.map((it, idx) => {
         const rawInsert = it.textEdit?.newText ?? it.insertText ?? it.label;
         const cleanInsert = it.insertTextFormat === 2 ? stripLspSnippetPlaceholders(rawInsert) : rawInsert;
         const editRange = it.textEdit?.replace ?? it.textEdit?.range ?? it.textEdit?.insert ?? null;
@@ -524,7 +584,8 @@ export function createIdeLspCompletionExtension(opts: {
           },
         };
       });
-      return { from: trig.from, options, validFor: /^[\w$]*$/ };
+      // An incomplete list (the server said so, or the cap cut it) is asked again per keystroke.
+      return { from: trig.from, options, ...(incomplete ? {} : { validFor: /^[\w$]*$/ }) };
     } catch {
       return null;
     }
@@ -556,7 +617,7 @@ export function createIdeLspCompletionExtension(opts: {
     });
   });
 
-  return [EditorState.languageData.of(() => [{ autocomplete: source }]), dotTriggerListener];
+  return [autocompletion({ override: [lspFirstCompletionSource(opts.isReady, source)] }), dotTriggerListener];
 }
 
 export const DEFAULT_LSP_TOKEN_TYPES = [

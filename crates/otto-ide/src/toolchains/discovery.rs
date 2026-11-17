@@ -11,6 +11,8 @@ pub(super) fn empty_tool(name: &str) -> IdeToolBinaryStatus {
         name: name.to_string(),
         available: false,
         path: None,
+        version: None,
+        outdated: None,
     }
 }
 
@@ -222,7 +224,7 @@ fn scan_system_sdks(
                 }
             }
             if let Some(jh) = find_executable_in(&search, &["java"])
-                .and_then(|b| b.parent().and_then(|p| p.parent()).map(Path::to_path_buf))
+                .and_then(|b| bin_prefix(&b))
                 .filter(|jh| jh != Path::new("/usr"))
             {
                 let v = read_java_release_version(&jh).unwrap_or_else(|| "system".into());
@@ -232,13 +234,14 @@ fn scan_system_sdks(
         EcosystemKind::Go => {
             for cand in ["/opt/homebrew/opt/go/libexec", "/usr/local/go"] {
                 let p = PathBuf::from(cand);
-                if p.join("bin/go").is_file() {
+                if is_goroot(&p) {
                     let v = read_go_root_version(&p).unwrap_or_else(|| "system".into());
                     push_sdk(out, seen, "go", &v, &p, "system");
                 }
             }
             if let Some(gr) = find_executable_in(&search, &["go"])
-                .and_then(|b| b.parent().and_then(|p| p.parent()).map(Path::to_path_buf))
+                .and_then(|b| bin_prefix(&b))
+                .filter(|gr| is_goroot(gr))
             {
                 let v = read_go_root_version(&gr).unwrap_or_else(|| "system".into());
                 push_sdk(out, seen, "go", &v, &gr, "system");
@@ -275,10 +278,17 @@ fn scan_system_sdks(
                     }
                 }
             }
-            if let Some(prefix) = find_executable_in(&search, &["node"])
-                .and_then(|b| b.parent().and_then(|p| p.parent()).map(Path::to_path_buf))
+            if let Some(prefix) =
+                find_executable_in(&search, &["node"]).and_then(|b| bin_prefix(&b))
             {
-                push_sdk(out, seen, "node", "system", &prefix, "system");
+                push_sdk(
+                    out,
+                    seen,
+                    "node",
+                    &node_prefix_version(&prefix),
+                    &prefix,
+                    "system",
+                );
             }
         }
         EcosystemKind::Python => {
@@ -298,7 +308,14 @@ fn scan_system_sdks(
                 }
             }
             if let Some(py_bin) = find_executable_in(&search, &["python3"]) {
-                push_sdk(out, seen, "python", "3", &py_bin, "system");
+                push_sdk(
+                    out,
+                    seen,
+                    "python",
+                    &python_bin_version(&py_bin),
+                    &py_bin,
+                    "system",
+                );
             }
         }
         EcosystemKind::Shell => {
@@ -346,6 +363,8 @@ pub(super) fn discover_local_lsp_with_shell(
                 name,
                 available: true,
                 path: Some(cand.to_string_lossy().into_owned()),
+                version: None,
+                outdated: None,
             };
         }
     }
@@ -363,6 +382,8 @@ pub(super) fn discover_local_lsp_with_shell(
             name,
             available: true,
             path: Some(sys.to_string_lossy().into_owned()),
+            version: None,
+            outdated: None,
         };
     }
     empty_tool(&name)
@@ -410,6 +431,8 @@ pub(super) fn discover_local_dap_with_shell(
                     name,
                     available: true,
                     path: Some(cand.to_string_lossy().into_owned()),
+                    version: None,
+                    outdated: None,
                 };
             }
         }
@@ -428,9 +451,92 @@ pub(super) fn discover_local_dap_with_shell(
             name,
             available: true,
             path: Some(sys.to_string_lossy().into_owned()),
+            version: None,
+            outdated: None,
         };
     }
     empty_tool(&name)
+}
+
+/// Name what will really debug when no dedicated adapter is installed: a bare
+/// `python3` without the debugpy module runs Otto's bdb bridge, and a bare
+/// shell runs Otto's DEBUG-trap adapter. Runs `python3 -c "import debugpy"`
+/// once, so it is called only when the toolchain status is listed.
+pub(super) fn label_builtin_dap(
+    eco: EcosystemKind,
+    mut st: IdeToolBinaryStatus,
+) -> IdeToolBinaryStatus {
+    let file = st
+        .path
+        .as_deref()
+        .and_then(|p| Path::new(p).file_name()?.to_str().map(str::to_string))
+        .unwrap_or_default();
+    match eco {
+        EcosystemKind::Python
+            if file.starts_with("python")
+                && !python_has_debugpy(st.path.as_deref().unwrap_or_default()) =>
+        {
+            st.name = "built-in bdb bridge".into();
+        }
+        EcosystemKind::Shell if matches!(file.as_str(), "bash" | "zsh") => {
+            st.name = "built-in otto-sh-dap".into();
+        }
+        _ => {}
+    }
+    st
+}
+
+/// `major.minor` of a Go version (`go1.25.3`, `1.25`) for comparison.
+fn go_major_minor(v: &str) -> Option<(u32, u32)> {
+    let mut parts = v.trim().trim_start_matches("go").split(['.', '-', ' ']);
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// The Go a binary was built with: `go version <bin>` prints `<bin>: go1.22.3`.
+#[allow(clippy::disallowed_methods)] // called from the toolchain listing's blocking task
+fn go_built_with(goroot: &Path, bin: &str) -> Option<String> {
+    let out = std::process::Command::new(goroot.join("bin/go"))
+        .args(["version", bin])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v = text.rsplit(": ").next()?.split_whitespace().next()?;
+    v.starts_with("go").then(|| v.to_string())
+}
+
+/// gopls / Delve built with an older Go than the project's (`goroot`) can't
+/// load or debug its code ("Version of Delve is too old"): record the build
+/// version and why it is outdated. One `go version` exec per tool, only when
+/// the toolchain status is listed.
+pub(super) fn mark_go_tool_outdated(st: &mut IdeToolBinaryStatus, goroot: Option<&Path>) {
+    let (Some(goroot), Some(path)) = (goroot, st.path.as_deref()) else {
+        return;
+    };
+    let Some(project) = read_go_root_version(goroot) else {
+        return;
+    };
+    st.version = go_built_with(goroot, path);
+    let built = st.version.as_deref().and_then(go_major_minor);
+    if let (Some(b), Some(p)) = (built, go_major_minor(&project)) {
+        if b < p {
+            st.outdated = Some(format!(
+                "built with go{}.{}, project uses go{}.{}",
+                b.0, b.1, p.0, p.1
+            ));
+        }
+    }
+}
+
+#[allow(clippy::disallowed_methods)] // called from the toolchain listing's blocking task
+fn python_has_debugpy(python: &str) -> bool {
+    std::process::Command::new(python)
+        .args(["-c", "import debugpy"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 pub(super) fn mark_active_sdk(
@@ -494,6 +600,53 @@ pub(super) fn read_java_release_version(java_home: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// The install prefix of a PATH binary (`<prefix>/bin/<name>`), with symlinks
+/// resolved first: Homebrew's `/opt/homebrew/bin/go` links into
+/// `…/libexec/bin/go`, and its unresolved grandparent is `/opt/homebrew`.
+pub(super) fn bin_prefix(bin: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(bin).ok()?;
+    real.parent()?.parent().map(Path::to_path_buf)
+}
+
+/// A real GOROOT: a `go` binary next to the standard library.
+pub(super) fn is_goroot(dir: &Path) -> bool {
+    dir.join("bin/go").is_file()
+        && (dir.join("VERSION").is_file() || dir.join("src/runtime").is_dir())
+}
+
+/// Two spellings of one SDK (`/opt/homebrew/opt/go/libexec` and its Cellar
+/// target) are one row.
+pub(super) fn canonical_key(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// `python3` on PATH resolves to `python3.13` (Homebrew, python.org): that's its version.
+pub(super) fn python_bin_version(bin: &Path) -> String {
+    std::fs::canonicalize(bin)
+        .ok()
+        .and_then(|real| {
+            let name = real
+                .file_name()?
+                .to_str()?
+                .strip_prefix("python")?
+                .to_string();
+            name.contains('.').then_some(name)
+        })
+        .unwrap_or_else(|| "3".into())
+}
+
+/// A Node prefix's version from its folder (`…/Cellar/node/26.1.0`), else "system".
+pub(super) fn node_prefix_version(prefix: &Path) -> String {
+    let v = dir_name_version(prefix);
+    if v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        v
+    } else {
+        "system".into()
+    }
+}
+
 pub(super) fn read_go_root_version(goroot: &Path) -> Option<String> {
     let text = std::fs::read_to_string(goroot.join("VERSION")).ok()?;
     let first = text.lines().next()?.trim().trim_start_matches("go");
@@ -534,7 +687,7 @@ fn push_sdk(
     source: &str,
 ) {
     let path_str = path.to_string_lossy().into_owned();
-    if seen.insert(path_str.clone()) {
+    if seen.insert(canonical_key(&path_str)) {
         out.push(IdeInstalledSdk {
             id: format!("{prefix}-{source}-{}", out.len() + 1),
             version: version.to_string(),

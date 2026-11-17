@@ -74,6 +74,9 @@
   let searchInput = $state('');
   let debouncedQuery = $state('');
   let selectedEntryId = $state<string | null>(null);
+  // The first pick is automatic: if the newest entry equals the current file, move on to the
+  // newest one that differs, so the modal never opens on "No differences".
+  let autoPicked = false;
 
   let activeRepo = $state.raw<Repo | null>(null);
   let commits = $state.raw<CommitInfo[]>([]);
@@ -113,6 +116,11 @@
   $effect(() => {
     void reloadSeq;
     if (mode !== 'local-history') return;
+    if (ide.target.kind !== 'local') {
+      // Local History records local files only; an SSH file has none.
+      entries = [];
+      return;
+    }
     const ctl = new AbortController();
     listLoading = true;
     listError = null;
@@ -153,6 +161,7 @@
     if (list.length === 0) selectedEntryId = null;
     else if (!selectedEntryId || !list.some((e) => e.id === selectedEntryId)) {
       selectedEntryId = list[0].id;
+      autoPicked = true;
     }
   });
 
@@ -254,6 +263,11 @@
           rightExists = res.current_exists;
           const ts = new Date(res.entry.timestamp_ms).toLocaleTimeString();
           leftLabel = `Before · ${ts} (${res.entry.label || res.entry.event_kind})`;
+          if (autoPicked) {
+            autoPicked = false;
+            const older = leftText === rightText ? filteredEntries.find((e) => e.timestamp_ms < res.entry.timestamp_ms && e.sha256 !== res.entry.sha256) : null;
+            if (older) selectedEntryId = older.id;
+          }
         })
         .catch((e: unknown) => {
           if (!ctl.signal.aborted && !isAbortError(e)) detailError = loadErrorText(e);
@@ -390,7 +404,7 @@
         error={listError}
         onFilterMode={(next) => (filterMode = next)}
         onSearchInput={(next) => (searchInput = next)}
-        onSelectEntry={(id) => { selectedEntryId = id; pick(); }}
+        onSelectEntry={(id) => { autoPicked = false; selectedEntryId = id; pick(); }}
         onPutLabel={() => void onPutLabel()}
         onRefFilter={(next) => (refFilter = next)}
         onSelectRef={(ref) => { selectedRef = ref; pick(); }}
@@ -452,7 +466,8 @@
       <button
         type="button"
         class="btn primary"
-        disabled={!selectedEntry || restoring}
+        disabled={!selectedEntry || restoring || detailLoading || (rightExists && leftText === rightText)}
+        title={rightExists && leftText === rightText ? 'This version matches the current file' : undefined}
         onclick={() => void restoreSelectedWholeFile()}
         data-testid="ide-local-history-restore"
       >

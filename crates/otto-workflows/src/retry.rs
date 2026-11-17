@@ -98,9 +98,32 @@ pub fn retry_backoff(
     (attempt <= max_eff).then_some((sleep_ms, max_eff, reason))
 }
 
+/// The step log line for a scheduled retry: whole seconds, or milliseconds for
+/// a sub-second backoff (a 500 ms pause used to read "in 0s").
+pub fn retry_log_line(next: u32, of: u32, sleep_ms: u64, reason: &str) -> String {
+    let wait = if sleep_ms < 1000 {
+        format!("{sleep_ms}ms")
+    } else {
+        format!("{}s", sleep_ms / 1000)
+    };
+    format!("↻ retry {next}/{of} in {wait} ({reason})")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_log_line_shows_sub_second_backoff_in_ms() {
+        assert_eq!(
+            retry_log_line(2, 3, 500, "boom"),
+            "↻ retry 2/3 in 500ms (boom)"
+        );
+        assert_eq!(
+            retry_log_line(2, 3, 2500, "boom"),
+            "↻ retry 2/3 in 2s (boom)"
+        );
+    }
 
     #[test]
     fn retry_backoff_by_error_class() {

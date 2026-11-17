@@ -42,7 +42,8 @@ SessionManager.create()                      crates/otto-sessions/src/manager.rs
   (`manager.rs` `create()` and `restart()`).
 - The bundle path is **deterministic** (`<ctx_root>/<provider>/<enc(cwd)>`) so
   resume needs no re-materialize. `ctx_root` defaults to `~/.otto/context`
-  (`materialize::default_context_root`) and is injectable for tests.
+  (`materialize::default_context_root`; `$OTTO_CONTEXT_ROOT` moves it, which the
+  e2e harness does) and is injectable for tests.
 
 ## Per-provider reference (verified against the live CLIs, 2026-06-26)
 

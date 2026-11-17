@@ -320,7 +320,7 @@ async fn run_jdwp_bridge_loop(
     guard: Arc<BridgeGuard>,
 ) -> io::Result<()> {
     let (r, w) = tokio::io::split(server_io);
-    let mut dap_r = DapReader::new(r);
+    let mut dap_rx = DapReader::new(r).into_channel();
     let mut dap_w = DapWriter::new(w);
     let mut st = JdwpBridgeState::new(target, &spec);
 
@@ -345,8 +345,8 @@ async fn run_jdwp_bridge_loop(
                     break;
                 }
             }
-            dap_msg = dap_r.next_message() => {
-                let Some(DapMessage::Request(req)) = dap_msg? else { break; };
+            dap_msg = dap_rx.recv() => {
+                let Some(DapMessage::Request(req)) = dap_msg.unwrap_or(Ok(None))? else { break; };
                 if handle_dap_request(&req, &client, &mut st, &mut dap_w, &guard).await? {
                     break;
                 }

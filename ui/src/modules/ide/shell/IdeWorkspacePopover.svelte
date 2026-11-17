@@ -8,7 +8,9 @@
   import { plural } from '../../../lib/plural';
   import { rowMenu } from '../../../lib/rowMenu';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../../lib/stores/workspace.svelte';
+  import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { ide, ideBasename, type IdeNamedProject } from '../ideStore.svelte';
+  import { projectListEntries, scratchesMenuItems, SCRATCHES_LOCKED } from './ideProjectList';
   import { onScratches, openScratches } from './ideScratches.svelte';
   import { ideSwitcherFolders, realWorkspaceId } from './ideProjectRecents.svelte';
 
@@ -28,16 +30,7 @@
   let pos = $state<AnchorPlacement>({ left: 12, top: 48, maxH: 460 });
 
 
-  const filteredNamedProjects = $derived.by(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return ide.namedProjects;
-    return ide.namedProjects.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.primary_root.toLowerCase().includes(q) ||
-        p.folders.some((f) => f.toLowerCase().includes(q)),
-    );
-  });
+  const projectEntries = $derived(projectListEntries(ide.namedProjects, query));
 
   const filteredWorkspaces = $derived.by(() => {
     const q = query.trim().toLowerCase();
@@ -71,7 +64,7 @@
 
   $effect(() => {
     void filteredWorkspaces.length;
-    void filteredNamedProjects.length;
+    void projectEntries.length;
     void tick().then(clampPosition);
   });
 
@@ -123,32 +116,15 @@
       type="search"
       dir="ltr"
       aria-label="Filter projects, workspaces, and folders"
-      placeholder="Search multi-repo projects, workspaces, or paths…"
+      placeholder="Search projects, workspaces, or paths…"
       bind:value={query}
       data-testid="ide-workspace-search"
     />
   </div>
 
   <div class="ws-scroll">
-    {#if !query.trim() || 'scratches'.includes(query.trim().toLowerCase())}
-      <!-- Built in and pinned first: the same scratch folder in every workspace. -->
-      <button
-        type="button"
-        class="ws-item"
-        class:is-active={onScratches()}
-        onclick={() => { closePopover(true); void openScratches(); }}
-        data-testid="ide-scratches-option"
-      >
-        <span class="ws-item-icon"><Icon name="workbench" size={14} /></span>
-        <span class="ws-item-copy">
-          <span class="ws-item-title">Scratches</span>
-          <span class="ws-item-desc">Your scratch files — the same in every workspace</span>
-        </span>
-        {#if onScratches()}<Badge tone="ok" dot label="Active" />{/if}
-      </button>
-    {/if}
     <div class="ws-sec-head">
-      <span class="ws-sec-label">Multi-repo projects ({filteredNamedProjects.length})</span>
+      <span class="ws-sec-label">Projects ({projectEntries.length})</span>
       <button
         type="button"
         class="btn small ghost"
@@ -159,14 +135,36 @@
         New project…
       </button>
     </div>
-    {#if filteredNamedProjects.length === 0}
-      <div class="ws-empty">
-        {query.trim()
-          ? 'No multi-repo projects match this filter.'
-          : 'Group multiple repositories (e.g. Go or Java services) into one switchable project.'}
-      </div>
-    {:else}
-      {#each filteredNamedProjects as proj (proj.id)}
+    {#if projectEntries.length === 0}
+      <div class="ws-empty">No projects match this filter.</div>
+    {/if}
+    {#each projectEntries as entry (entry.kind === 'scratches' ? '' : entry.project.id)}
+      {#if entry.kind === 'scratches'}
+        <!-- The default project: the same scratch folder in every workspace. -->
+        {@const active = onScratches()}
+        <div class="ws-attached-row" class:is-active={active}>
+          <button
+            type="button"
+            class="ws-proj-select"
+            title={SCRATCHES_LOCKED}
+            onclick={() => { closePopover(true); void openScratches(); }}
+            oncontextmenu={(e) => { e.preventDefault(); ctxMenu.show(e, scratchesMenuItems()); }}
+            use:rowMenu
+            data-testid="ide-scratches-option"
+          >
+            <span class="ws-item-icon"><Icon name="workbench" size={14} /></span>
+            <span class="ws-item-copy">
+              <span class="ws-item-title">
+                Scratches
+                <Badge tone="neutral" variant="outline" label="Default" />
+              </span>
+              <span class="ws-item-desc">Your scratch files — the same in every workspace</span>
+            </span>
+          </button>
+          {#if active}<Badge tone="ok" dot label="Active" />{/if}
+        </div>
+      {:else}
+        {@const proj = entry.project}
         {@const active = ide.activeProjectId === proj.id}
         <div class="ws-attached-row" class:is-active={active}>
           <button
@@ -188,7 +186,10 @@
           </button>
           {#if active}<Badge tone="ok" dot label="Active" />{/if}
         </div>
-      {/each}
+      {/if}
+    {/each}
+    {#if !query.trim() && ide.namedProjects.length === 0}
+      <div class="ws-empty">Group multiple repositories (e.g. Go or Java services) into one switchable project.</div>
     {/if}
 
     {#if ide.hasTarget && ide.projectRoots.length > 1}

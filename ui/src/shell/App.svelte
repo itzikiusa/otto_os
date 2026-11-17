@@ -520,13 +520,13 @@
 
   // keep git store in sync with workspace
   $effect(() => {
-    if (ws.currentId) void git.loadRepos(ws.currentId);
+    if (ws.currentId) void git.loadRepos(ws.currentId, false, ws.current?.root_path);
   });
   // …and retry a failed load when the window comes back (S13-305): the
   // effect above only re-runs on a workspace switch.
   $effect(() => {
     const retry = (): void => {
-      if (git.reposError && ws.currentId) void git.loadRepos(ws.currentId);
+      if (git.reposError && ws.currentId) void git.loadRepos(ws.currentId, false, ws.current?.root_path);
     };
     window.addEventListener('focus', retry);
     return () => window.removeEventListener('focus', retry);

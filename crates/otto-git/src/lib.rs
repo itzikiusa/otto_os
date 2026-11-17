@@ -38,6 +38,7 @@ pub mod transport;
 pub mod types;
 pub mod watch;
 mod working_diff;
+mod worktree_changes;
 mod worktree_probe;
 
 pub use http::{router, GitCtx};

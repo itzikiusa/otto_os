@@ -111,6 +111,8 @@ pub async fn build_ctx(
         )),
         cache_auth_lookups: true,
     });
+    ctx.manager
+        .set_terminal_env(otto_ide::terminal_env::source(ctx.clone()));
     Ok(BuiltCtx { ctx, root_user_id })
 }
 

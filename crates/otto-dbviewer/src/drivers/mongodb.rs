@@ -562,6 +562,19 @@ impl Driver for MongoDriver {
             token.set(QueryHandle::MongoComment(t.clone()));
         }
         let comment = tag.as_deref();
+        // mongosh's `show …` helpers don't parse inside an expression or a
+        // `--file` script; run the method each one stands for.
+        let helper;
+        let req = match shell_helper(&req.statement) {
+            Some(statement) => {
+                helper = QueryRequest {
+                    statement: statement.into(),
+                    ..req.clone()
+                };
+                &helper
+            }
+            None => req,
+        };
         // A mongosh SCRIPT (variables, functions, control flow, getSiblingDB —
         // e.g. a seed/bootstrap file) is beyond the command parser: run it
         // through the real `mongosh` CLI instead of failing line one. The
@@ -1916,6 +1929,20 @@ fn single_db_expression(source: &str) -> Option<String> {
     }
 }
 
+/// The `db` method a mongosh `show` helper stands for.
+fn shell_helper(statement: &str) -> Option<&'static str> {
+    let words: Vec<&str> = statement
+        .trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect();
+    match words.as_slice() {
+        ["show", "collections" | "tables"] => Some("db.getCollectionNames()"),
+        ["show", "dbs" | "databases"] => Some("db.getMongo().getDBNames()"),
+        _ => None,
+    }
+}
+
 /// Render an otherwise unsupported shell expression without losing its value.
 /// Cursor consumption stops after one truncation probe; raw scripts use their
 /// original body and retain their own print/control-flow behavior.
@@ -1925,7 +1952,7 @@ fn mongosh_expression(statement: &str, max_rows: usize) -> String {
 const value = await (
 {statement}
 );
-const emit = item => print(EJSON.stringify(item, {{relaxed: false}}));
+const emit = item => print(typeof item === 'string' ? item : EJSON.stringify(item, {{relaxed: false}}));
 if (value && typeof value.hasNext === 'function' && typeof value.next === 'function') {{
   try {{
     for (let n = 0; n <= {max_rows} && await value.hasNext(); n++) emit(await value.next());
@@ -2853,6 +2880,11 @@ fn json_to_bson(v: &Value) -> Result<Bson> {
         Value::Array(arr) => {
             let items: Result<Vec<Bson>> = arr.iter().map(json_to_bson).collect();
             Ok(Bson::Array(items?))
+        }
+        // An integer that fits stays Int32, as the Node driver and mongosh
+        // store it; editing an Int32 field must not turn it into Int64.
+        Value::Number(n) if n.as_i64().is_some_and(|i| i32::try_from(i).is_ok()) => {
+            Ok(Bson::Int32(n.as_i64().unwrap_or_default() as i32))
         }
         _ => mongodb::bson::to_bson(v).map_err(types::upstream),
     }

@@ -407,6 +407,27 @@ impl ReviewsRepo {
         rows.iter().map(|r| row_to_review(r, Vec::new())).collect()
     }
 
+    /// 409 while a review of (repo, pr_number) is still running: a second local
+    /// review used to start beside the first, hidden from the panel, which
+    /// could only stop the newest.
+    pub async fn refuse_if_running(&self, repo_id: &Id, pr_number: u64) -> Result<()> {
+        let running: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pr_reviews
+             WHERE repo_id = ? AND pr_number = ? AND status = 'running')",
+        )
+        .bind(repo_id)
+        .bind(pr_number as i64)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("running review"))?;
+        if running {
+            return Err(Error::Conflict(
+                "a review is already running here — wait for it or stop it first".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Fetch the most-recent review for a (repo, pr_number) pair, with its comments.
     pub async fn latest_for_pr(&self, repo_id: &Id, pr_number: u64) -> Result<Option<Review>> {
         let row = sqlx::query(

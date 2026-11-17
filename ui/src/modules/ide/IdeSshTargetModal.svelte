@@ -13,17 +13,21 @@
   import { api } from '../../lib/api/client';
   import type { Connection } from '../../lib/api/types';
   import { announceShown } from '../../lib/announce.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { ide, type IdeFsEntry, type IdeFsTreeResp, type IdeNetworkBridgeConfig } from './ideStore.svelte';
   import IdeNetworkBridgeCard from './shell/IdeNetworkBridgeCard.svelte';
-  import { confirmProdNetworkBridge } from './shell/networkBridgeGuard.svelte';
+  import {
+    absoluteRemoteRoot,
+    confirmProdNetworkBridge,
+    confirmProdSshConnect,
+    connEndpointText,
+    defaultRemoteRoot,
+  } from './shell/networkBridgeGuard.svelte';
   import {
     emptyNetworkBridgeDraft,
-    isProdEnvironment,
     serializeNetworkBridgeDraft,
     type IdeNetworkBridgeDraft,
   } from './shell/networkBridgeModel';
@@ -95,22 +99,6 @@
     sshConns.find((c) => c.id === selectedConnId) ?? sshConns[0] ?? null,
   );
 
-  function connEndpointText(conn: Connection): string {
-    const p = conn.params ?? {};
-    const host = String(p.host ?? p.hostname ?? 'localhost');
-    const user = String(p.user ?? p.username ?? '').trim();
-    const port = Number(p.port ?? 22);
-    const addr = user ? `${user}@${host}` : host;
-    return port && port !== 22 ? `${addr}:${port}` : addr;
-  }
-
-  function defaultRemoteRoot(conn: Connection): string {
-    const p = conn.params ?? {};
-    const user = String(p.user ?? p.username ?? '').trim();
-    if (!user || user === 'root') return '/root';
-    return `/home/${user}`;
-  }
-
   async function loadSshConnections(): Promise<void> {
     connsLoading = true;
     connsError = null;
@@ -121,11 +109,9 @@
             ide.target.workspace_id,
             ws.currentId,
             ...ws.workspaces.map((w) => w.id),
-            ws.scratch?.id ?? SCRATCH_WORKSPACE_ID,
-          ].filter((id): id is string => Boolean(id)),
+          ].filter((id): id is string => Boolean(id) && id !== SCRATCH_WORKSPACE_ID),
         ),
       );
-      if (scopes.length === 0) scopes.push(SCRATCH_WORKSPACE_ID);
 
       const results = await Promise.allSettled(
         scopes.map((id) =>
@@ -263,23 +249,13 @@
       validationError = 'Select an SSH connection or add one in Connections.';
       return;
     }
-    const root = remotePath.trim();
-    if (!root || root.startsWith('-')) {
+    const root = absoluteRemoteRoot(conn, remotePath);
+    if (root.startsWith('-')) {
       validationError = 'Enter a valid remote directory path on the SSH host.';
       return;
     }
 
-    if (isProdEnvironment(conn.environment)) {
-      const ok = await confirmer.ask(
-        `Connect IDE to production SSH host "${conn.name}" (${connEndpointText(conn)}) at ${root}? File edits, commands, and debuggers will run directly on that host.`,
-        {
-          title: 'Connect to production SSH host?',
-          confirmLabel: 'Connect to production',
-          danger: true,
-        },
-      );
-      if (!ok) return;
-    }
+    if (!(await confirmProdSshConnect(conn, root))) return;
 
     switching = true;
     try {

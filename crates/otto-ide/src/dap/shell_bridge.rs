@@ -264,7 +264,7 @@ async fn run_shell_bridge_loop(
     launch_env: BTreeMap<String, String>,
 ) {
     let (r_half, w_half) = tokio::io::split(bridge_io);
-    let mut dap_in = DapReader::new(r_half);
+    let mut dap_in = DapReader::new(r_half).into_channel();
     let mut dap_out = DapWriter::new(w_half);
     let bps_file = ipc_dir.join("bps.txt");
     let pause_file = ipc_dir.join("pause.flag");
@@ -285,8 +285,8 @@ async fn run_shell_bridge_loop(
 
     loop {
         tokio::select! {
-            msg_res = dap_in.next_message() => {
-                let Ok(Some(DapMessage::Request(req))) = msg_res else { break; };
+            msg_res = dap_in.recv() => {
+                let Some(Ok(Some(DapMessage::Request(req)))) = msg_res else { break; };
                 match req.command.as_str() {
                     "initialize" => {
                         let _ = dap_out.send_response(req.seq, "initialize", Ok(Some(json!({

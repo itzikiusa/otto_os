@@ -184,7 +184,12 @@
     });
   }
 
-  const dockTabs = $derived(allDockTabs.filter((t) => t.id === activeDockTab || isTabShown(t.id)));
+  const dockTabs = $derived(
+    allDockTabs.filter(
+      // A live-session guest follows the host's debugger; its other tools have no guest routes.
+      (t) => (!ide.collabIsGuest || t.id === 'debug') && (t.id === activeDockTab || isTabShown(t.id)),
+    ),
+  );
 
   function onTabSelect(tab: DockTab): void {
     if (stack) ide.activeBottomTab = tab as IdeBottomTab;

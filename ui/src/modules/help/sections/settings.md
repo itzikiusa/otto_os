@@ -159,6 +159,9 @@ can open: admin-only panes are hidden rather than shown disabled.
   waits) or Auto.
 - **Run now**, evolve the active session, approve or reject pending edits with
   a before/after diff, and see recent runs.
+- For every workspace at once (header ⋯): **Reject all suggestions** (applied
+  edits stay applied) and **Turn off everywhere**. Turn it back on per
+  workspace with **Turn on**.
 
 **Insights** — see [Insights](#/walkthroughs/insights)
 - Turn on daily, weekly and monthly HTML reports (all off by default) and pick

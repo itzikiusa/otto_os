@@ -43,6 +43,7 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
         }
 
         if re_main.is_match(line) {
+            let (args, cwd) = python_main_invocation(path, dir);
             out.push(IdeGutterItem {
                 line: line_no,
                 kind: IdeGutterKind::Main,
@@ -57,8 +58,8 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::Python,
                     command: Some("python3".into()),
-                    args: vec![path.to_string()],
-                    cwd: Some(dir.to_string()),
+                    args,
+                    cwd: Some(cwd),
                     target_path: Some(path.to_string()),
                     test_filter: None,
                     debug_program: Some(path.to_string()),
@@ -124,6 +125,27 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
     }
 }
 
+/// A package's `__main__.py` runs as `python3 -m <pkg>` from above the package, so its own
+/// imports resolve; any other file runs as itself from its folder.
+fn python_main_invocation(path: &str, dir: &str) -> (Vec<String>, String) {
+    let file = std::path::Path::new(path);
+    if file.file_name().and_then(|n| n.to_str()) != Some("__main__.py") {
+        return (vec![path.to_string()], dir.to_string());
+    }
+    let mut pkg_dir = std::path::Path::new(dir);
+    let mut module = Vec::new();
+    while let (Some(name), Some(parent)) = (pkg_dir.file_name(), pkg_dir.parent()) {
+        module.push(name.to_string_lossy().into_owned());
+        pkg_dir = parent;
+        if !pkg_dir.join("__init__.py").is_file() {
+            break;
+        }
+    }
+    module.reverse();
+    let cwd = pkg_dir.to_string_lossy().into_owned();
+    (vec!["-m".into(), module.join(".")], cwd)
+}
+
 // ---------------------------------------------------------------------------
 // 5. JavaScript / TypeScript (`describe`, `it`, `test`, `package.json`)
 // ---------------------------------------------------------------------------
@@ -185,6 +207,25 @@ pub(super) fn detect_js_ts(
     }
 }
 
+/// The JS test runner that owns a test file: its nearest `package.json` folder and whether
+/// that package uses Jest (a `jest` dependency and no `vitest`) rather than Vitest.
+pub(crate) struct JsTestPackage {
+    pub dir: std::path::PathBuf,
+    pub jest: bool,
+}
+
+pub(crate) fn js_test_package(file: &str) -> Option<JsTestPackage> {
+    let dir = std::path::Path::new(file)
+        .ancestors()
+        .skip(1)
+        .find(|d| d.join("package.json").is_file())?;
+    let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap_or_default();
+    Some(JsTestPackage {
+        dir: dir.to_path_buf(),
+        jest: manifest.contains("\"jest\"") && !manifest.contains("vitest"),
+    })
+}
+
 fn build_js_test_item(
     path: &str,
     dir: &str,
@@ -194,26 +235,53 @@ fn build_js_test_item(
     title: &str,
     uses_node_test: bool,
 ) -> IdeGutterItem {
+    // Runners take the name as a regex: "returns 5xx (retry)" must match literally.
+    let pattern = regex::escape(title);
+    let package = js_test_package(path);
+    // Run from the package root so its config (`include`, environment) applies.
+    let (cwd, file) = match &package {
+        Some(pkg) => (
+            pkg.dir.to_string_lossy().into_owned(),
+            std::path::Path::new(path)
+                .strip_prefix(&pkg.dir)
+                .map_or_else(|_| path.to_string(), |r| r.to_string_lossy().into_owned()),
+        ),
+        None => (dir.to_string(), path.to_string()),
+    };
+    // `--no-install`: a missing runner fails instead of downloading one from the registry.
     let (runner, command, args) = if uses_node_test {
         (
             IdeRunnerKind::Node,
-            Some("node".into()),
+            "node",
             vec![
                 "--test".into(),
-                format!("--test-name-pattern={title}"),
-                path.to_string(),
+                format!("--test-name-pattern={pattern}"),
+                file,
+            ],
+        )
+    } else if package.as_ref().is_some_and(|p| p.jest) {
+        (
+            IdeRunnerKind::Node,
+            "npx",
+            vec![
+                "--no-install".into(),
+                "jest".into(),
+                file,
+                "-t".into(),
+                pattern,
             ],
         )
     } else {
         (
             IdeRunnerKind::Vitest,
-            Some("npx".into()),
+            "npx",
             vec![
+                "--no-install".into(),
                 "vitest".into(),
                 "run".into(),
-                path.to_string(),
+                file,
                 "-t".into(),
-                title.to_string(),
+                pattern,
             ],
         )
     };
@@ -224,9 +292,9 @@ fn build_js_test_item(
         language: lang.to_string(),
         run_spec: IdeQuickRunSpec {
             runner,
-            command,
+            command: Some(command.into()),
             args,
-            cwd: Some(dir.to_string()),
+            cwd: Some(cwd),
             target_path: Some(path.to_string()),
             test_filter: Some(title.to_string()),
             debug_program: Some(path.to_string()),
@@ -433,6 +501,10 @@ pub(super) fn detect_shell(
         });
     }
 
+    // `Run fn()` sources the file first, so only offer it when that runs nothing else.
+    if !sourcing_only_defines(content, re_sh_fn) {
+        return;
+    }
     for (idx, line) in content.lines().enumerate() {
         let line_no = (idx + 1) as u32;
         let trimmed = line.trim();
@@ -465,6 +537,39 @@ pub(super) fn detect_shell(
             });
         }
     }
+}
+
+/// True when sourcing the script only defines things: its top level (outside function
+/// bodies) holds just function definitions, assignments, `set`/`shopt`/`export`/`readonly`/
+/// `declare`, `source`/`.` and comments, or it guards its entry point with `BASH_SOURCE[0]`.
+/// A script ending in `main "$@"` would run `main` before the chosen function.
+fn sourcing_only_defines(content: &str, re_sh_fn: &Regex) -> bool {
+    static RE_ASSIGN: OnceLock<Regex> = OnceLock::new();
+    let re_assign =
+        RE_ASSIGN.get_or_init(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=").unwrap());
+    if content.contains("BASH_SOURCE[0]") {
+        return true;
+    }
+    let mut depth = 0i32;
+    for line in content.lines() {
+        let t = line.trim();
+        let at_top = depth == 0;
+        depth += t.matches('{').count() as i32 - t.matches('}').count() as i32;
+        if !at_top || t.is_empty() || t.starts_with('#') || t.starts_with('{') {
+            continue;
+        }
+        let first = t.split_whitespace().next().unwrap_or("");
+        let defines = re_sh_fn.is_match(line)
+            || re_assign.is_match(t)
+            || matches!(
+                first,
+                "set" | "shopt" | "export" | "readonly" | "declare" | "typeset" | "source" | "."
+            );
+        if !defines {
+            return false;
+        }
+    }
+    true
 }
 
 fn infer_shell_interpreter(base_name: &str, content: &str) -> &'static str {
@@ -526,8 +631,12 @@ pub(super) fn apply_plugin_detectors(
             let Some(cap) = re.captures(line) else {
                 continue;
             };
+            // The first group that matched (a pattern may offer alternatives), else the line.
             let name = cap
-                .get(1)
+                .iter()
+                .skip(1)
+                .flatten()
+                .next()
                 .or_else(|| cap.get(0))
                 .map(|m| m.as_str().trim())
                 .unwrap_or("target");
@@ -543,6 +652,8 @@ pub(super) fn apply_plugin_detectors(
                 Some(subst(&det.command_template))
             };
             let args: Vec<String> = det.args_template.iter().map(|a| subst(a)).collect();
+            // Only a test item filters: a runner adds it (`--tests`) to a `run` task too.
+            let filter = (det.kind == IdeGutterKind::Test).then(|| name.to_string());
 
             out.push(IdeGutterItem {
                 line: (idx + 1) as u32,
@@ -559,9 +670,9 @@ pub(super) fn apply_plugin_detectors(
                     args,
                     cwd: Some(dir.to_string()),
                     target_path: Some(path.to_string()),
-                    test_filter: Some(name.to_string()),
+                    test_filter: filter.clone(),
                     debug_program: Some(path.to_string()),
-                    debug_test_name: Some(name.to_string()),
+                    debug_test_name: filter,
                 },
             });
         }

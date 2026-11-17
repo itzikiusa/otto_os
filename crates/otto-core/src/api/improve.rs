@@ -83,3 +83,34 @@ pub struct UpdateSelfImprovementReq {
 pub struct RunNowResp {
     pub run_id: Id,
 }
+
+/// `GET /self-improvement` — the caller's view across every unarchived
+/// workspace they can see.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SelfImprovementSummary {
+    pub workspaces: u32,
+    /// Workspaces with self-improvement on.
+    pub enabled: u32,
+    /// Pending suggestions, and how many workspaces hold them.
+    pub pending: u32,
+    pub pending_workspaces: u32,
+}
+
+/// `PUT /self-improvement` — turn self-improvement on or off in every
+/// workspace the caller administers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSelfImprovementEnabledReq {
+    pub enabled: bool,
+}
+
+/// Result of a bulk self-improvement action (`PUT /self-improvement`,
+/// `POST /improvement/edits/reject`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BulkImprovementResp {
+    /// Workspaces switched, or suggestions rejected.
+    pub changed: u32,
+    /// Workspaces those changes touched.
+    pub workspaces: u32,
+    /// Workspaces the caller can see but lacks the role to change.
+    pub skipped: u32,
+}

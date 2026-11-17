@@ -2,6 +2,8 @@
 // API delegates for `IdeStore` so `ideStore.svelte.ts` stays focused and under 800 lines.
 
 import { api } from '../../../lib/api/client';
+import type { IdeRenameResp } from '../../../lib/api/types/ide-intelligence';
+import { renameBody } from './ideRenameRequest';
 import { readIdePreferences } from '../../../lib/components/cm-ide-prefs';
 import { confirmer } from '../../../lib/confirm.svelte';
 import { latestOnly } from '../../../lib/latest';
@@ -9,6 +11,7 @@ import { loadErrorText } from '../../../lib/loadError';
 import { plural } from '../../../lib/plural';
 import { toasts } from '../../../lib/toast.svelte';
 import { toastError } from '../../../lib/toastError';
+import { buildFallbackQuickFixes } from './ideFallbackQuickFixes';
 import { findContainingRoot } from './ideProjectHelpers';
 import { namesOf, noteFormatSkipped, stillDirtyTabsIn, toastKeptTabs, type IdeFormatAnswer } from './ideWorkspaceOpGuards';
 import { ideCollabNotices } from '../store/ideCollabNotices.svelte';
@@ -28,6 +31,7 @@ import {
   type IdeCollabRole,
   type IdeCollabRoom,
   type IdeDebugSessionSnapshot,
+  type IdeEditorHandle,
   type IdeFileReadResp,
   type IdePluginInfo,
   type IdeQuickFix,
@@ -53,6 +57,10 @@ export interface IdeLspSearchHost extends IdeBufferHost {
     symbol: string;
     newName: string;
     edits: IdeRenameEdit[];
+    /** Where the previewed edits came from: the language server, or a text match. */
+    source: 'lsp' | 'text';
+    /** The name the shown preview was made for; Rename applies only that preview. */
+    previewedName: string;
     loading: boolean;
     error: string | null;
   };
@@ -74,6 +82,9 @@ export interface IdeLspSearchHost extends IdeBufferHost {
   sharedBuffers: Record<string, { content: string; version: number }>;
   plugins: IdePluginInfo[];
   getBuffer(path?: string): string;
+  lspRenameEdits(path: string, line: number, column: number, newName: string): Promise<IdeTextEdit[] | null>;
+  editorHandleForPath(resolvedPath: string): IdeEditorHandle | null;
+  usagesSource: 'lsp' | 'text';
   openBottomTab(tab: 'usages'): void;
   applyAgentEdit(path: string, nextContent: string, range?: { from: number; to: number }): Promise<boolean>;
   loadPlugins(): Promise<void>;
@@ -108,6 +119,16 @@ export async function runFindReferences(
   host.openBottomTab('usages');
   try {
     await flushDirtyOpenTabsForWorkspaceOp(host, bufPerf, false);
+    // A live server knows which `Put` this is; the daemon's answer is a whole-word text match.
+    const lspLocs = await host.editorHandleForPath(host.resolvePath(path))?.lspReferences?.(line, column).catch(() => null);
+    if (lspLocs) {
+      const texts = new Map<string, string[]>();
+      for (const p of new Set(lspLocs.map((l) => l.path))) texts.set(p, (await readProjectFile(host, p)).split('\n'));
+      host.usagesSymbol = symbol || '';
+      host.usages = lspLocs.map((l) => ({ ...l, preview: (texts.get(l.path)?.[l.line - 1] ?? '').trim() }));
+      host.usagesSource = 'lsp';
+      return;
+    }
     const resp = await api.post<{ symbol: string; locations: IdeReferenceLocation[] }>('/ide/lsp/references', {
       target: host.targetPayload,
       project_folders: host.targetPayload.project_folders,
@@ -119,6 +140,7 @@ export async function runFindReferences(
     });
     host.usagesSymbol = resp.symbol || symbol || '';
     host.usages = resp.locations ?? [];
+    host.usagesSource = 'text';
   } catch (e) {
     toastError('Couldn’t find usages', e);
   } finally {
@@ -139,19 +161,11 @@ export async function runPreviewRename(
   try {
     await flushDirtyOpenTabsForWorkspaceOp(host, bufPerf, false);
     const content = bufPerf ? bufPerf.flush(host, host.renameState.path) : host.getBuffer(host.renameState.path);
-    const resp = await api.post<{ symbol: string; new_name: string; edits: IdeRenameEdit[] }>('/ide/lsp/rename', {
-      target: host.targetPayload,
-      project_folders: host.targetPayload.project_folders,
-      path: host.renameState.path,
-      line: host.renameState.line,
-      column: host.renameState.column,
-      symbol: host.renameState.symbol || undefined,
-      content: content || undefined,
-      new_name: next,
-      apply: false,
-    });
+    const resp = await api.post<IdeRenameResp>('/ide/lsp/rename', await renameBody(host, next, content, false));
     if (resp.symbol && !host.renameState.symbol) host.renameState.symbol = resp.symbol;
     host.renameState.edits = resp.edits ?? [];
+    host.renameState.source = resp.source === 'lsp' ? 'lsp' : 'text';
+    host.renameState.previewedName = next;
   } catch (e) {
     host.renameState.error = loadErrorText(e);
   } finally {
@@ -178,16 +192,8 @@ export async function runApplyRename(
       return false;
     }
     const content = bufPerf.flush(host, host.renameState.path);
-    const resp = await api.post<{ applied: boolean; edits: IdeRenameEdit[] }>('/ide/lsp/rename', {
-      target: host.targetPayload,
-      project_folders: host.targetPayload.project_folders,
-      path: host.renameState.path,
-      line: host.renameState.line,
-      column: host.renameState.column,
-      symbol: host.renameState.symbol || undefined,
-      content: content || undefined,
-      new_name: next,
-      apply: true,
+    const resp = await api.post<IdeRenameResp>('/ide/lsp/rename', {
+      ...(await renameBody(host, next, content, true)),
       local_history_enabled: prefs.localHistoryEnabled,
       local_history_retention_days: prefs.localHistoryRetentionDays,
     });
@@ -226,29 +232,22 @@ export async function runFormatActiveFile(
         });
     if (noteFormatSkipped(targetPath, resp)) return; // on purpose, not an error: buffer untouched
     if (resp.changed && typeof resp.formatted === 'string') {
-      if (bufPerf.getBuffer(host, targetPath) !== content || !host.tabs.some((t) => t.path === targetPath)) {
+      if (!host.tabs.some((t) => t.path === targetPath)) return;
+      if (bufPerf.getBuffer(host, targetPath) !== content) {
+        toasts.info('The file changed while formatting. Format it again');
         return;
       }
       await host.applyAgentEdit(targetPath, normalizeEditorLf(resp.formatted));
       toasts.info(opts.organizeImports ? 'Optimized imports' : `Formatted with ${resp.formatter || 'formatter'}`);
+    } else {
+      toasts.info(opts.organizeImports ? 'Imports are already in order'
+        : resp.formatter === 'builtin' ? 'No changes: no formatter is installed for this file type'
+        : `Already formatted (${resp.formatter || 'formatter'})`);
     }
   } catch (e) {
     toastError(opts.organizeImports ? 'Couldn’t optimize imports' : 'Couldn’t format file', e);
   }
 }
-
-const GO_STDLIB_BY_IDENT: Record<string, string> = {
-  fmt: 'fmt', context: 'context', strings: 'strings', errors: 'errors', time: 'time',
-  http: 'net/http', json: 'encoding/json', os: 'os', io: 'io', sync: 'sync', strconv: 'strconv',
-  filepath: 'path/filepath', regexp: 'regexp', bytes: 'bytes', sort: 'sort', math: 'math',
-};
-
-const JAVA_UTIL_BY_IDENT: Record<string, string> = {
-  List: 'java.util.List', ArrayList: 'java.util.ArrayList', Map: 'java.util.Map',
-  HashMap: 'java.util.HashMap', Set: 'java.util.Set', HashSet: 'java.util.HashSet',
-  Optional: 'java.util.Optional', Objects: 'java.util.Objects', UUID: 'java.util.UUID',
-  Collectors: 'java.util.stream.Collectors',
-};
 
 function lineStartsOf(src: string): number[] {
   const starts = [0];
@@ -280,68 +279,6 @@ function applyTextEditsToString(src: string, edits: IdeTextEdit[]): string {
     out = out.slice(0, r.from) + r.newText + out.slice(r.to);
   }
   return out;
-}
-
-function buildFallbackQuickFixes(path: string, content: string, line: number, diagMsg = ''): IdeCodeAction[] {
-  if (!content) return [];
-  const lines = content.split('\n');
-  const idx = Math.max(0, Math.min(lines.length - 1, line - 1));
-  const curLine = lines[idx] ?? '';
-  const actions: IdeCodeAction[] = [];
-
-  if (/^\s*(?:import|use)\b/.test(curLine) || (path.endsWith('.go') && /^\s*(?:[A-Za-z_]\w*\s+)?"[^"]+"\s*$/.test(curLine))) {
-    const endLine = idx + 1 < lines.length ? line + 1 : line;
-    const endCol = idx + 1 < lines.length ? 1 : curLine.length + 1;
-    actions.push({
-      id: 'remove-import-line',
-      title: 'Remove unused / unresolved import',
-      kind: 'quickfix',
-      is_preferred: true,
-      edits: [{ path, start_line: line, start_col: 1, end_line: endLine, end_col: endCol, new_text: '' }],
-    });
-  }
-
-  if (path.endsWith('.go')) {
-    const undefMatch = diagMsg.match(/(?:undefined|undeclared name):\s*([A-Za-z_]\w*)/i) ?? curLine.match(/\b(fmt|context|strings|errors|time|http|json|os|io|sync|strconv)\./);
-    const ident = undefMatch?.[1] ?? '';
-    const pkg = GO_STDLIB_BY_IDENT[ident];
-    if (pkg && !content.includes(`"${pkg}"`)) {
-      const pkgLineIdx = lines.findIndex((l) => /^\s*package\s+\w+/.test(l));
-      const insertLine = pkgLineIdx >= 0 ? pkgLineIdx + 2 : 1;
-      actions.push({
-        id: `go-import-${pkg}`,
-        title: `Import "${pkg}"`,
-        kind: 'quickfix',
-        is_preferred: true,
-        edits: [{ path, start_line: insertLine, start_col: 1, end_line: insertLine, end_col: 1, new_text: `\nimport "${pkg}"\n` }],
-      });
-    }
-  } else if (path.endsWith('.java')) {
-    const symMatch = diagMsg.match(/(?:cannot find symbol|unresolved).*?\b([A-Z]\w*)/i) ?? curLine.match(/\b(List|ArrayList|Map|HashMap|Set|HashSet|Optional|Objects|UUID|Collectors)\b/);
-    const sym = symMatch?.[1] ?? '';
-    const fqn = JAVA_UTIL_BY_IDENT[sym];
-    if (fqn && !content.includes(`import ${fqn};`)) {
-      const pkgIdx = lines.findIndex((l) => /^\s*package\s+[\w.]+;/.test(l));
-      const insertLine = pkgIdx >= 0 ? pkgIdx + 2 : 1;
-      actions.push({
-        id: `java-import-${fqn}`,
-        title: `Import '${fqn}'`,
-        kind: 'quickfix',
-        is_preferred: true,
-        edits: [{ path, start_line: insertLine, start_col: 1, end_line: insertLine, end_col: 1, new_text: `import ${fqn};\n` }],
-      });
-    }
-  } else if (path.endsWith('.json') && /,\s*$/.test(curLine)) {
-    const commaIdx = curLine.lastIndexOf(',');
-    actions.push({
-      id: 'json-remove-trailing-comma',
-      title: 'Remove trailing comma',
-      kind: 'quickfix',
-      is_preferred: true,
-      edits: [{ path, start_line: line, start_col: commaIdx + 1, end_line: line, end_col: commaIdx + 2, new_text: '' }],
-    });
-  }
-  return actions;
 }
 
 export function toIdeCodeAction(
@@ -376,6 +313,22 @@ export function toIdeCodeAction(
   };
 }
 
+/** A file's text: the open buffer, else the disk copy (from the project folder that holds it). */
+async function readProjectFile(host: IdeLspSearchHost, resolved: string, bufPerf?: IdeBufferPerfController): Promise<string> {
+  if (host.tabs.some((t) => t.path === resolved)) return bufPerf ? bufPerf.flush(host, resolved) : host.getBuffer(resolved);
+  try {
+    const containing = host.target.kind === 'local' && host.projectRoots
+      ? findContainingRoot(resolved, host.projectRoots)
+      : null;
+    const q = containing && !containing.isPrimary && host.target.kind === 'local'
+      ? host.targetQuery({ root: containing.path, path: resolved })
+      : host.targetQuery({ path: resolved });
+    return (await api.get<IdeFileReadResp>(`/ide/fs/file?${q}`)).content ?? '';
+  } catch {
+    return '';
+  }
+}
+
 export async function runFetchCodeActions(
   host: IdeLspSearchHost,
   bufPerf: IdeBufferPerfController,
@@ -384,19 +337,10 @@ export async function runFetchCodeActions(
   column: number,
 ): Promise<IdeCodeAction[]> {
   const resolved = host.resolvePath(path);
-  let content = bufPerf.flush(host, resolved);
-  if (!content && !host.tabs.some((t) => t.path === resolved)) {
-    try {
-      const containing = host.target.kind === 'local' && host.projectRoots
-        ? findContainingRoot(resolved, host.projectRoots)
-        : null;
-      const q = containing && !containing.isPrimary && host.target.kind === 'local'
-        ? host.targetQuery({ root: containing.path, path: resolved })
-        : host.targetQuery({ path: resolved });
-      const read = await api.get<IdeFileReadResp>(`/ide/fs/file?${q}`);
-      content = read.content ?? '';
-    } catch { /* ignore */ }
-  }
+  const content = await readProjectFile(host, resolved, bufPerf);
+  // The live server's own fixes (an import for an unknown name, …) rank first.
+  const lspFixes = (await host.editorHandleForPath(resolved)?.lspQuickFixes?.(line).catch(() => null)) ?? [];
+  const lspActions: IdeCodeAction[] = lspFixes.map((f, idx) => ({ id: `lsp-${line}-${idx}`, title: f.title, kind: 'quickfix', is_preferred: f.isPreferred, edits: f.edits }));
   const diagOnLine = host.problems.find((d) => host.resolvePath(d.path) === resolved && d.line === line);
   const diagActions = (diagOnLine?.quick_fixes ?? []).map((qf, idx) => toIdeCodeAction(resolved, qf, idx, content));
   try {
@@ -410,12 +354,12 @@ export async function runFetchCodeActions(
     });
     const serverActions = resp.actions ?? [];
     if (serverActions.some((a) => (a.edits && a.edits.length > 0) || typeof a.replacement_content === 'string')) {
-      return serverActions;
+      return [...lspActions, ...serverActions];
     }
     const fallbacks = buildFallbackQuickFixes(resolved, content, line, diagOnLine?.message);
-    return [...diagActions, ...fallbacks, ...serverActions];
+    return [...lspActions, ...diagActions, ...fallbacks, ...serverActions];
   } catch {
-    return [...diagActions, ...buildFallbackQuickFixes(resolved, content, line, diagOnLine?.message)];
+    return [...lspActions, ...diagActions, ...buildFallbackQuickFixes(resolved, content, line, diagOnLine?.message)];
   }
 }
 
@@ -465,7 +409,7 @@ export async function runApplyQuickFixEdits(
         const rawPrev = read.content ?? '';
         const eol = detectTextEol(rawPrev);
         const prevLf = normalizeEditorLf(rawPrev);
-        if (prefs.localHistoryEnabled) {
+        if (prefs.localHistoryEnabled && host.target.kind === 'local') {
           void api.post('/ide/history/snapshot', { target: fileTarget, path: filePath, content: rawPrev, label: 'Before Quick Fix' }).catch(() => {});
         }
         const nextLf = applyTextEditsToString(prevLf, fileEdits);

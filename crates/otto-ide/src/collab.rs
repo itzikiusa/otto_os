@@ -92,6 +92,9 @@ pub(super) struct RoomState {
     pub(super) host_user_id: String,
     pub(super) default_role: IdeCollabRole,
     pub(super) invite_token_hash: [u8; 32],
+    /// The invite link, kept (in memory only) so the host can show it again
+    /// after a reload; only [`CollabManager::list_rooms`] hands it out, to the host.
+    pub(super) share_hash: String,
     pub(super) peers: Vec<PeerRecord>,
     pub(super) shared_buffers: BTreeMap<String, SharedBufferRecord>,
     pub(super) buffer_seq: u64,
@@ -130,6 +133,7 @@ impl RoomState {
             peers: self.peers.iter().map(|p| p.peer.clone()).collect(),
             active_debug_id: self.active_debug.as_ref().map(|d| d.id.clone()),
             created_at: self.created_at.clone(),
+            share_hash: None,
         }
     }
 
@@ -362,6 +366,7 @@ impl CollabHub {
         let last_debug_id = initial_debug.as_ref().map(|d| d.id.clone());
         let active_debug = initial_debug.as_ref().map(ops::redact_guest_debug_snapshot);
         let (events_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let share_hash = format!("#/ide?collab={room_id}&token={invite_token}");
         let state = RoomState {
             id: room_id.clone(),
             created_seq,
@@ -372,6 +377,7 @@ impl CollabHub {
             host_user_id: host.id.clone(),
             default_role: req.default_role,
             invite_token_hash,
+            share_hash: share_hash.clone(),
             peers: vec![host_peer],
             shared_buffers: BTreeMap::new(),
             buffer_seq: 0,
@@ -384,7 +390,6 @@ impl CollabHub {
         };
 
         let snapshot = state.snapshot();
-        let share_hash = format!("#/ide?collab={room_id}&token={invite_token}");
         let mut guard = self
             .rooms
             .write()
@@ -443,7 +448,11 @@ impl CollabHub {
         let mut out: Vec<IdeCollabRoom> = guard
             .values()
             .filter(|r| has_root_auth || r.host_user_id == user.id)
-            .map(RoomState::snapshot)
+            .map(|r| IdeCollabRoom {
+                // The host's own invite link, so a reload can show it again.
+                share_hash: (r.host_user_id == user.id).then(|| r.share_hash.clone()),
+                ..r.snapshot()
+            })
             .collect();
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(out)

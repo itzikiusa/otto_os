@@ -404,7 +404,8 @@ The ⋯ menu on any diff's file header opens:
   parent using porcelain `previous <sha> <path>`, so it follows renames;
   **Back** walks the trail back. Lines longer than 1000 characters are cut.
 
-Both open as a right-side drawer over the graph and close with the ✕. The
+Both open as a right-side drawer over the graph; focus moves into it, and ✕ or
+**Escape** closes it. The
 revision blamed defaults to `HEAD`; a `-`-leading filename is handled (the path
 always rides after `--`).
 
@@ -415,7 +416,9 @@ always rides after `--`).
 userinfo stripped, and a new URL must be `https`/`http`/`ssh`/`git` or scp-like
 `user@host:path` (`git@host:owner/repo.git` — the user part is required). Removing a remote keeps every local branch. Push
 and checkout still address `origin` by name — re-pointing another remote does
-not redirect them.
+not redirect them. With no remote at all, **Pull** and **Publish** are disabled
+("Add a remote first"). In the Git page header, Remotes, Recovery tools and Copy
+repository path share the header's single **⋯** menu.
 
 ---
 
@@ -547,6 +550,9 @@ markers is no longer one careless checkbox away.
    file's hunks (`ConflictFilePane` / `ConflictHunk`). Its title and buttons name
    the actual operation (merge / rebase / cherry-pick / revert; stash-pop
    conflicts have nothing to abort or commit — resolutions are staged as you go).
+   The sides are named by branch: a merge or pull shows the merged tip
+   (`feature`, `origin/develop`); a rebase shows the branch being replayed and
+   the branch it is replayed onto.
    - `GET /repos/{id}/conflict?path=…` returns one file's conflict content;
    - `POST /repos/{id}/conflict/resolve` writes your chosen resolution for a path
      and re-stages it — or takes a whole side with `side: "ours" | "theirs"`.
@@ -580,7 +586,11 @@ branch/commit context menu, which pre-fills the source branch).
 
 1. **Pick Source → Target.** The sheet loads the repo's branches; Source defaults
    to the current branch (or the one you opened it from), and Target auto-picks
-   `develop`/`main`/`master` if present, else a different branch.
+   `develop`/`main`/`master` if present, else a different branch — never the
+   source. Target also lists remote-only branches (`origin/master` → `master`).
+   The branch/commit menus offer **Create pull request** only when the remote is
+   GitHub, Bitbucket Cloud or GitLab, and the sheet refuses an unsupported
+   remote before pushing anything.
 2. **(Optional) Draft message with agent.** Click **Draft message with agent**.
    Otto:
    - computes the diff of the current branch against the chosen target
@@ -825,7 +835,7 @@ distinction from the **"Draft message with agent"** button, which drafts the
 > check-your-token hint, 404 → 404, "not mergeable"-style 405/409/422 → 409.
 
 | `POST /repos/{id}/checkout` | ws editor | `CheckoutReq` (`create`) |
-| `POST /repos/{id}/cherry-pick` · `/revert` | ws editor | `{sha}`; a conflicting pick/revert is a normal 200 — status carries `op_in_progress` + conflicted paths, resolved/aborted via the merge lifecycle routes |
+| `POST /repos/{id}/cherry-pick` · `/revert` | ws editor | `{sha}`; a conflicting pick/revert is a normal 200 — status carries `op_in_progress` + conflicted paths, resolved/aborted via the merge lifecycle routes. A pick/revert whose change is already in HEAD is skipped (`--skip`) and refused with 409, so the repo is never left mid-pick |
 | `POST /repos/{id}/branch` · `/branch/rename` · `/branch/delete` | ws editor | Create / rename / delete branch |
 | `POST /repos/{id}/branch/update-to-upstream` | ws editor | `{branch, ahead}` → `{status, backup, also_kept?}` — move the checked-out branch to its upstream after a force-push, old tip kept on `otto-backup/…` |
 | `POST /repos/{id}/tag` · `/tag/push` · `/tag/delete` | ws editor | Create / push / delete tags |
@@ -989,7 +999,8 @@ Use **Recovery tools** in the repository header for:
 
 The conflict resolver also handles binary files and deletion-versus-modification:
 choose a whole side, keep edited working bytes, or explicitly delete the path. An
-absent side is labeled as a deletion. Resolving every file and reopening the view
+absent side is labeled as a deletion, and the pane says which side deleted the
+file — "Mark file resolved" stays off until you pick a side. Resolving every file and reopening the view
 still permits completion; a rebase stopping on another conflict refreshes its list.
 
 Hunk/line operations now validate a byte-exact file-diff fingerprint. Concurrent

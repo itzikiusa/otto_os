@@ -29,6 +29,7 @@ pub mod proc_group;
 pub mod projects;
 pub mod scratches;
 pub mod target;
+pub mod terminal_env;
 pub mod text_pos;
 pub mod toolchains;
 pub mod toolchains_catalog;

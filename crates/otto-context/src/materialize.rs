@@ -154,9 +154,14 @@ struct HooksPlan {
     merged: String,
 }
 
-/// Default Otto context-bundle root: `~/.otto/context`. Falls back to the system
-/// temp dir when `$HOME` is unset so a bundle root always exists.
+/// Default Otto context-bundle root: `$OTTO_CONTEXT_ROOT` when set (the e2e
+/// harness keeps its bundles in its temp data dir), else `~/.otto/context`.
+/// Falls back to the system temp dir when `$HOME` is unset so a bundle root
+/// always exists.
 pub fn default_context_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("OTTO_CONTEXT_ROOT").filter(|r| !r.is_empty()) {
+        return PathBuf::from(root);
+    }
     match std::env::var("HOME").ok().filter(|h| !h.is_empty()) {
         Some(home) => Path::new(&home).join(".otto").join("context"),
         None => std::env::temp_dir().join("otto").join("context"),
@@ -1073,6 +1078,14 @@ fn write_file(path: &Path, content: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn otto_context_root_overrides_the_home_root() {
+        std::env::set_var("OTTO_CONTEXT_ROOT", "/tmp/otto-e2e-x/context");
+        let root = default_context_root();
+        std::env::remove_var("OTTO_CONTEXT_ROOT");
+        assert_eq!(root, PathBuf::from("/tmp/otto-e2e-x/context"));
+    }
     use tempfile::TempDir;
 
     #[test]

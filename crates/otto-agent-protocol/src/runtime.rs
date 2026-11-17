@@ -1984,6 +1984,8 @@ impl AgentRuntime {
             } else if st.proc.is_some() {
                 return Ok(st.session.clone());
             }
+            // A revive is activity: the idle release must not stop it again.
+            st.session.last_active_at = Utc::now();
         }
         self.flush(id).await;
         self.spawn_resuming(id, &live).await?;
@@ -2017,6 +2019,7 @@ impl AgentRuntime {
                 } else if st.proc.is_some() {
                     return Ok(st.session.clone());
                 }
+                st.session.last_active_at = Utc::now();
             }
             self.flush(id).await;
             self.ensure_process(&live).await?;

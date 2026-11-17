@@ -78,6 +78,8 @@ export interface IdePreferences {
   lightColorScheme: ConcreteIdeColorSchemeId;
   rainbowBrackets: boolean;
   uiDensity: 'comfortable' | 'compact';
+  /** Show Project | Scratches tabs in the IDE header. */
+  scratchesTab: boolean;
   debuggerLayout: 'tabbed' | 'split';
   keymapPreset: IdeKeymapPreset;
   fontSize: number;
@@ -125,6 +127,7 @@ export const DEFAULT_IDE_PREFERENCES: IdePreferences = {
   lightColorScheme: 'jetbrains-islands-light',
   rainbowBrackets: true,
   uiDensity: 'comfortable',
+  scratchesTab: false,
   debuggerLayout: 'tabbed',
   keymapPreset: 'jetbrains',
   fontSize: 13,
@@ -265,6 +268,7 @@ export function normalizeIdePreferencesRecord(
     lightColorScheme: preferredLightScheme,
     rainbowBrackets: asBool(p.rainbowBrackets, d.rainbowBrackets),
     uiDensity: asEnum(p.uiDensity, ['comfortable', 'compact'] as const, d.uiDensity),
+    scratchesTab: asBool(p.scratchesTab, d.scratchesTab),
     debuggerLayout: asEnum(p.debuggerLayout, ['tabbed', 'split'] as const, d.debuggerLayout),
     keymapPreset,
     fontSize: asNum(p.fontSize ?? p.editorFontSize, 10, 24, d.fontSize),

@@ -63,22 +63,22 @@ pub async fn run(
     let meta = serde_json::json!({"source":"goal_loop", "loop_id":loop_.id,
         "role":name, "model":role.model});
     // Parks on the loop flag bell (perf W8) instead of a 100 ms poll.
-    let bound_wait = bound;
-    let loop_id = loop_.id.clone();
-    let cancelled = crate::goal_loop::until_flag(move || {
-        let current = ctx.goal_loops().lock().unwrap().get(&loop_id).cloned();
-        let replaced = match (&bound_wait, &current) {
+    let loop_id = &loop_.id;
+    let stop_asked = || {
+        let current = ctx.goal_loops().lock().unwrap().get(loop_id).cloned();
+        let replaced = match (&bound, &current) {
             (Some(old), Some(now)) => !std::sync::Arc::ptr_eq(&old.cancel, &now.cancel),
             (Some(_), None) => true,
             _ => false,
         };
         replaced
-            || bound_wait.as_ref().is_some_and(|h| {
+            || bound.as_ref().is_some_and(|h| {
                 h.interrupted.load(Ordering::Relaxed)
                     || h.cancel.load(Ordering::Relaxed)
                     || h.paused.load(Ordering::Relaxed)
             })
-    });
+    };
+    let cancelled = crate::goal_loop::until_flag(stop_asked);
     let turn = RoleTurn {
         workspace: &workspace,
         user: &user,
@@ -104,18 +104,28 @@ pub async fn run(
             }
         })
         .await;
-    state.status = if result.is_ok() { "done" } else { "error" }.into();
-    state.note = result.as_ref().err().cloned().unwrap_or_default();
+    // Validate before the one status write: an unusable result fails the role,
+    // and a person's pause/stop is "stopped", not a failure.
+    let result = result.and_then(|text| role_result(&text));
+    (state.status, state.note) = match &result {
+        Ok(_) => ("done".into(), String::new()),
+        Err(e) if stop_asked() => ("stopped".into(), e.clone()),
+        Err(e) => ("error".into(), e.clone()),
+    };
     ctx.goal_loops_repo()
         .set_iter_agent_at(iter_id, index, &state)
         .await?;
-    let text = result.map_err(Error::Upstream)?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| Error::Upstream(format!("invalid role result: {e}")))?;
+    result.map_err(Error::Upstream)
+}
+
+/// The `result` string of a role's JSON envelope.
+fn role_result(text: &str) -> std::result::Result<String, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("invalid role result: {e}"))?;
     value["result"]
         .as_str()
         .map(str::to_string)
-        .ok_or_else(|| Error::Upstream("missing role result".into()))
+        .ok_or_else(|| "missing role result".into())
 }
 
 /// Definition happens before a loop exists, but still uses the configured
@@ -169,5 +179,12 @@ mod tests {
         assert!(!super::valid_result("{}"));
         assert!(!super::valid_result(r#"{"result":"  "}"#));
         assert!(super::valid_result(r#"{"result":"complete"}"#));
+    }
+
+    #[test]
+    fn role_result_rejects_non_json_and_missing_result() {
+        assert!(super::role_result("not json").is_err());
+        assert!(super::role_result(r#"{"other":"x"}"#).is_err());
+        assert_eq!(super::role_result(r#"{"result":"ok"}"#).unwrap(), "ok");
     }
 }

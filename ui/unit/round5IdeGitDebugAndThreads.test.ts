@@ -290,6 +290,11 @@ describe('Round 5 — Bugs U2 & U3: Broad $HOME root guard, fresh status bypass,
     assert.equal(git.activeRepoId, 'repo_koala');
     assert.equal(git.subTab.repo_existing_1, 'prs');
     assert.equal(git.subTab.repo_koala, 'graph');
+    // Opening the tab also loads its status (the status bar follows the tab);
+    // let that land, then restart the sequence so the steps below read as before.
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    assert.equal(git.primary?.id, 'repo_koala');
+    branchSeq = 0;
 
     // 3. Normal status() followed immediately (<300ms) by refreshStatus({ force: true }) must hit ?fresh=true!
     await git.refreshStatus('repo_koala');

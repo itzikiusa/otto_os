@@ -489,6 +489,10 @@ async fn go_build_tags_overwrite_init_options_rewrite_excluded_diagnostic_and_ev
         assert!(srv_init["params"]["initializationOptions"]
             .get("env")
             .is_none());
+        assert_eq!(
+            srv_init["params"]["initializationOptions"]["semanticTokens"],
+            json!(true)
+        );
     }
 
     // Non-root workspace/executeCommand is rejected by the mux before reaching gopls.
@@ -741,4 +745,96 @@ async fn non_root_mux_handles_multibyte_utf8_and_blocks_rfc8089_secret_uris_and_
     let ok_msg = recv_msg(&mut client).await;
     assert_eq!(ok_msg["id"], json!(4));
     assert_eq!(ok_msg["result"]["contents"], json!("confined-hover-ok"));
+}
+
+/// pyright ignores `initializationOptions`; it reads the venv from `workspace/configuration`,
+/// which it asks only when the client advertises `workspace.configuration`.
+#[tokio::test]
+#[cfg(unix)]
+async fn python_initialize_advertises_workspace_configuration_with_the_venv() {
+    let system_py = std::path::Path::new("/usr/bin/python3");
+    if !system_py.is_file() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("py-app");
+    std::fs::create_dir_all(root.join(".venv/bin")).unwrap();
+    std::fs::write(root.join(".venv/pyvenv.cfg"), "").unwrap();
+    std::os::unix::fs::symlink(system_py, root.join(".venv/bin/python")).unwrap();
+    let root_str = std::fs::canonicalize(&root)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let (pool, rec) = recording_pool();
+    pool.record_owner_privilege("root1", true);
+    let key = PoolKey {
+        owner: "root1".into(),
+        lang: "python".into(),
+        root: root_str.clone(),
+        ssh: None,
+        go_build_tags: Vec::new(),
+    };
+    let mut a = pool.attach(key, "pyright-langserver", &[]).unwrap();
+    let init =
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}});
+    assert!(a.send(init.to_string()).await);
+    recv_msg(&mut a).await;
+    let params = rec.init_params.lock().unwrap()[0].clone();
+    assert_eq!(
+        params["capabilities"]["workspace"]["configuration"],
+        json!(true)
+    );
+    assert_eq!(
+        params["initializationOptions"]["pythonPath"],
+        json!(format!("{root_str}/.venv/bin/python"))
+    );
+}
+
+#[tokio::test]
+async fn jdtls_initialize_never_writes_eclipse_metadata_into_the_repo() {
+    let (pool, rec) = recording_pool();
+    pool.record_owner_privilege("root_j", true);
+    pool.record_owner_privilege("viewer_j", false);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    for owner in ["root_j", "viewer_j"] {
+        let key = PoolKey {
+            owner: owner.into(),
+            lang: "java".into(),
+            root: root.clone(),
+            ssh: None,
+            go_build_tags: Vec::new(),
+        };
+        let mut a = pool.attach(key, "jdtls", &[]).unwrap();
+        let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri": "file:///elsewhere",
+            "initializationOptions": {"bundles": ["/x/debug.jar"], "settings": {"java": {"home": "/jdk"}}}
+        }});
+        assert!(a.send(init.to_string()).await);
+        assert_eq!(recv_msg(&mut a).await["id"], json!(1));
+    }
+    let inits = rec.init_params.lock().unwrap().clone();
+    assert_eq!(inits.len(), 2);
+    for p in &inits {
+        assert_eq!(
+            p["initializationOptions"]["settings"]["java"]["import"]
+                ["generatesMetadataFilesAtProjectRoot"],
+            json!(false),
+            "{p}"
+        );
+    }
+    // The root owner's own options survive the merge; a non-root owner's are dropped.
+    assert_eq!(
+        inits[0]["initializationOptions"]["bundles"],
+        json!(["/x/debug.jar"])
+    );
+    assert_eq!(
+        inits[0]["initializationOptions"]["settings"]["java"]["home"],
+        json!("/jdk")
+    );
+    assert!(inits[1]["initializationOptions"].get("bundles").is_none());
 }

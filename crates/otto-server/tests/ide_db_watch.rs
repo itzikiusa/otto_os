@@ -418,9 +418,15 @@ func load(ctx context.Context) {
         root_detect["saved_connections"].as_array().unwrap().len(),
         1
     );
-    assert_eq!(
-        root_detect["ephemeral_targets"].as_array().unwrap().len(),
-        1
+    // Discovery also lists any database the host happens to be running, so
+    // only the seeded target is asserted, never the total.
+    let ephemeral = root_detect["ephemeral_targets"].as_array().unwrap();
+    assert!(
+        ephemeral
+            .iter()
+            .any(|t| t["ephemeral_id"] == "miniredis:test"),
+        "seeded ephemeral target missing: {} targets",
+        ephemeral.len()
     );
 
     // 6. Capture Baseline ("Before") snapshot, mutate Redis state, capture "After" snapshot & verify diff!

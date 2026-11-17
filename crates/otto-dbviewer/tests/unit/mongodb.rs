@@ -321,8 +321,8 @@ fn shorthand_find_with_filter_limit_sort() {
     assert_eq!(p.op, MongoOp::Find);
     assert_eq!(p.limit, Some(5));
     assert_eq!(p.filter.unwrap().get_str("status").unwrap(), "paid");
-    // serde_json integers become BSON Int64.
-    assert_eq!(p.sort.unwrap().get_i64("total").unwrap(), -1);
+    // serde_json integers that fit become BSON Int32.
+    assert_eq!(p.sort.unwrap().get_i32("total").unwrap(), -1);
 }
 
 #[test]
@@ -624,7 +624,7 @@ fn keyset_filter_with_cursor_ands_a_typed_gt_on_id() {
     let (filter, _) = keyset_filter(None, None, false, Some(&cursor))
         .unwrap()
         .unwrap();
-    let after_41 = id_after(Bson::Int64(41));
+    let after_41 = id_after(Bson::Int32(41));
     assert_eq!(filter, doc! { "$and": [{}, after_41] });
     // A cursor that cannot be decoded is the caller's error, not a silent skip.
     let bad = json!({ "$oid": "nope" });
@@ -768,7 +768,7 @@ fn parses_update_one_with_set_unset_rename_and_typed_sentinels() {
     // All three operators survive as separate top-level keys…
     let update = p.update.unwrap();
     let set = update.get_document("$set").unwrap();
-    assert_eq!(set.get("a.b"), Some(&Bson::Int64(1)));
+    assert_eq!(set.get("a.b"), Some(&Bson::Int32(1)));
     assert_eq!(set.get("big"), Some(&Bson::Int64(9007199254740993)));
     assert!(matches!(set.get("at"), Some(Bson::DateTime(_))));
     assert_eq!(
@@ -921,7 +921,7 @@ fn distinct_preserves_field_and_nested_filter() {
     assert_eq!(parsed.distinct_field.as_deref(), Some("profile.country"));
     assert_eq!(
         parsed.filter,
-        Some(doc! {"active": true, "age": {"$gt": 20_i64}})
+        Some(doc! {"active": true, "age": {"$gt": 20}})
     );
 }
 
@@ -1430,4 +1430,39 @@ fn new_read_forms_parse_to_what_they_ask_for() {
     let p = parse_command("db.users.estimatedDocumentCount()").unwrap();
     assert_eq!(p.op, MongoOp::Count);
     assert!(p.filter.is_none());
+}
+
+#[test]
+fn json_integers_that_fit_stay_int32() {
+    assert_eq!(json_to_bson(&json!(5)).unwrap(), Bson::Int32(5));
+    assert_eq!(json_to_bson(&json!(-5)).unwrap(), Bson::Int32(-5));
+    assert_eq!(
+        json_to_bson(&json!(1_u64 << 40)).unwrap(),
+        Bson::Int64(1 << 40)
+    );
+    assert_eq!(json_to_bson(&json!(1.5)).unwrap(), Bson::Double(1.5));
+    assert_eq!(
+        json_to_bson(&json!({ "a": [7] })).unwrap(),
+        Bson::Document(doc! { "a": [Bson::Int32(7)] })
+    );
+}
+
+#[test]
+fn show_helpers_run_their_db_method_and_strings_print_bare() {
+    assert_eq!(
+        shell_helper("show collections"),
+        Some("db.getCollectionNames()")
+    );
+    assert_eq!(
+        shell_helper("  show tables; "),
+        Some("db.getCollectionNames()")
+    );
+    assert_eq!(shell_helper("show dbs"), Some("db.getMongo().getDBNames()"));
+    assert_eq!(
+        shell_helper("show databases"),
+        Some("db.getMongo().getDBNames()")
+    );
+    assert_eq!(shell_helper("db.show.find()"), None);
+    assert_eq!(shell_helper("show users"), None);
+    assert!(mongosh_expression("db.x()", 10).contains("typeof item === 'string' ? item"));
 }

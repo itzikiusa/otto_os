@@ -25,7 +25,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { copyWithToast } from '../../lib/clipboard';
   import { focusFirstField } from '../../lib/inlineEdit';
-  import { renderMarkdown } from '../../lib/md';
+  import { renderPrMarkdown } from './prMarkdown';
   import { openExternal } from '../../lib/external';
   import { plural } from '../../lib/plural';
   import { loadErrorText } from '../../lib/loadError';
@@ -692,8 +692,8 @@
               </div>
             {:else}
               <div class="md-body">
-                <!-- renderMarkdown escapes input before transforming -->
-                {@html renderMarkdown(pr.description_md || '_No description._')}
+                <!-- renderPrMarkdown (lib/md renderMarkdown) escapes input before transforming -->
+                {@html renderPrMarkdown(pr.description_md || '_No description._')}
               </div>
               <button class="btn small ghost edit-btn" aria-label="Edit the title and description" onclick={startEdit} title="Edit the title and description on {providerName}"><Icon name="edit" size={12} /> Edit</button>
             {/if}

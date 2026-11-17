@@ -559,8 +559,13 @@
     align-items: center;
     min-width: 0;
   }
-  .mp-row {
+  /* Only the starred row grows sideways; a column row (Default model, the
+     Reasoning levels) keeps its 30px instead of stretching to the rail. */
+  .mp-rowwrap > .mp-row {
     flex: 1;
+  }
+  .mp-row {
+    flex: none;
     min-width: 0;
     display: flex;
     align-items: center;

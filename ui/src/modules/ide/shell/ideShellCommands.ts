@@ -148,7 +148,7 @@ export const WINDOW_COMMANDS: Record<IdeShortcutId, WindowCommand | undefined> =
   pasteHistory: undefined,
   save: { run: () => void ide.saveFile() },
   saveAll: { run: () => void ide.saveAll() },
-  closeTab: { file: true, run: () => { if (ide.activePath) void ide.closeTab(ide.activePath); } },
+  closeTab: { file: true, run: () => { if (ide.activePath && !ide.activeTab?.pinned) void ide.closeTab(ide.activePath); } },
   reopenTab: { run: () => void ide.reopenClosedTab() },
   toggleExplorer: { run: (c) => (c.toggleExplorer ? c.toggleExplorer() : false) },
   toggleDock: { run: () => ide.toggleBottomDock() },

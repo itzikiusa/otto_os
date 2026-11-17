@@ -19,7 +19,7 @@
   } from '../ideStore.svelte';
   import { ideDockPrefs } from './ideDockPrefs.svelte';
   import IdeVarRows from './IdeVarRows.svelte';
-  import { threadOptionLabel } from './ideDebugPanelModel';
+  import { activeThreadTitle, FRAMES_PANE, threadOptionLabel } from './ideDebugPanelModel';
   import { selectDebugThread } from './ideDebugThread';
   import { collectValues, reexpandOpenPaths, VarChangeTracker } from './ideVarTree';
 
@@ -41,9 +41,7 @@
 
   const LS_FRAMES_W = 'otto.ide.dbgFramesW';
   const LS_VARS_W = 'otto.ide.dbgVarsW';
-  const FRAMES_DEFAULT_W = 190;
-
-  let framesW = $state(loadPaneWidth(LS_FRAMES_W, FRAMES_DEFAULT_W, 160, 560));
+  let framesW = $state(loadPaneWidth(LS_FRAMES_W, FRAMES_PANE.default, FRAMES_PANE.min, FRAMES_PANE.max));
   let varsW = $state(loadPaneWidth(LS_VARS_W, 340, 200, 680));
   /** Open scopes by NAME and open variables by PATH: both outlive a stop. */
   let openScopes = $state<Record<string, boolean>>({});
@@ -59,7 +57,7 @@
   const scopeKey = (s: IdeScope): string => `${s.name}:${s.variables_reference}`;
   const frameName = $derived(dbg.stack_frames.find((f) => f.id === dbg.active_frame_id)?.name ?? '');
   /** Changes on every stop (DAP references are per stop) and on frame selection. */
-  const stopKey = $derived(isPaused ? `${dbg.id}:${dbg.scopes.map((s) => s.variables_reference).join(',')}` : '');
+  const stopKey = $derived(isPaused ? `${dbg.id}:${dbg.stop_seq ?? 0}:${dbg.scopes.map((s) => s.variables_reference).join(',')}` : '');
   const known = (ref: number) => ide.expandedVariables[ref];
 
   // After each stop: open the first scope the first time, then re-open every
@@ -167,7 +165,7 @@
     <header class="dbg-col-head">
       <h2 class="dbg-col-title">Frames</h2>
       {#if dbg.threads.length > 1}
-        <select class="input dbg-thread-select" dir="ltr" aria-label="Active thread" value={dbg.active_thread_id ?? dbg.threads[0]?.id} onchange={onThreadChange} data-testid="ide-debug-thread-select">
+        <select class="input dbg-thread-select" dir="ltr" aria-label="Active thread" title={activeThreadTitle(dbg.threads, { id: dbg.active_thread_id, reason: isPaused ? dbg.stopped_reason : null })} value={dbg.active_thread_id ?? dbg.threads[0]?.id} onchange={onThreadChange} data-testid="ide-debug-thread-select">
           {#each dbg.threads as th (th.id)}
             <option value={th.id}>{threadOptionLabel(th, { id: dbg.active_thread_id, reason: isPaused ? dbg.stopped_reason : null })}</option>
           {/each}
@@ -189,7 +187,7 @@
             onclick={() => onSelectFrame(frame)}
           >
             <span class="dbg-frame-fn mono ellipsis" dir="ltr" title={frame.name}>{frame.name}</span>
-            {#if frame.path}<span class="dbg-frame-loc mono" dir="ltr" title={`${frame.path}:${frame.line}`}>{ideBasename(frame.path)}:{frame.line}</span>{/if}
+            {#if frame.path}<span class="dbg-frame-loc mono ellipsis" dir="ltr" title={`${frame.path}:${frame.line}`}>{ideBasename(frame.path)}:{frame.line}</span>{/if}
           </button>
         {/each}
       {/if}
@@ -197,7 +195,7 @@
   </section>
 
   {#if (showVariables || hasTrailingConsole) && !compact}
-    <PaneDivider bind:width={framesW} storageKey={LS_FRAMES_W} min={160} max={560} defaultWidth={FRAMES_DEFAULT_W} label="Resize Frames column" />
+    <PaneDivider bind:width={framesW} storageKey={LS_FRAMES_W} min={FRAMES_PANE.min} max={FRAMES_PANE.max} defaultWidth={FRAMES_PANE.default} label="Resize Frames column" />
   {/if}
 {/if}
 
@@ -318,15 +316,16 @@
   }
   .dbg-pane-btn:hover { background: var(--hover); color: var(--text); }
   .dbg-pane-btn.is-on { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-text); }
-  .dbg-thread-select { block-size: 22px; font-size: var(--fs-xs); max-inline-size: 160px; min-inline-size: 0; }
+  .dbg-thread-select { block-size: 22px; font-size: var(--fs-xs); flex: 0 1 auto; max-inline-size: 75%; min-inline-size: 0; }
   .dbg-thread-one { font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
   .dbg-scroll { flex: 1; min-block-size: 0; overflow-y: auto; padding-block: 4px; }
   .dbg-muted { margin: 0; padding: 12px; font-size: var(--fs-xs); color: var(--text-dim); }
   .dbg-frame { display: flex; align-items: center; justify-content: space-between; gap: 8px; inline-size: 100%; padding: 4px 10px; border: 0; background: transparent; color: var(--text); text-align: start; cursor: pointer; font-size: var(--fs-xs); }
   .dbg-frame:hover { background: var(--hover); }
   .dbg-frame.is-selected { background: var(--accent-soft); color: var(--accent-text); }
-  .dbg-frame-fn { flex: 1; font-size: var(--fs-xs); }
-  .dbg-frame-loc { flex-shrink: 0; font-size: var(--fs-xs); color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  /* The name keeps at least ~14ch; a long file:line gives way first (both have a title). */
+  .dbg-frame-fn { flex: 1 0 min(14ch, 60%); min-inline-size: 0; font-size: var(--fs-xs); }
+  .dbg-frame-loc { flex: 0 1 auto; min-inline-size: 0; font-size: var(--fs-xs); color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .dbg-scope { border-block-end: 1px solid var(--separator); }
   .dbg-scope-head { display: flex; align-items: center; gap: 6px; inline-size: 100%; padding: 4px 8px; border: 0; background: transparent; color: var(--text); font-size: var(--fs-s); font-weight: 500; text-align: start; cursor: pointer; }
   .dbg-scope-head:hover { background: var(--hover); }

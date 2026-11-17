@@ -311,7 +311,7 @@ pub(super) async fn handshake_and_run(
             match launch_res {
                 Ok(resp) if !resp.success => {
                     let msg = resp.message.unwrap_or_else(|| "Debug target launch failed".into());
-                    return Err(Error::Invalid(msg));
+                    return Err(Error::Invalid(outdated_tool_message(&msg).unwrap_or(msg)));
                 }
                 Err(_) => {
                     return Err(Error::Upstream(
@@ -486,4 +486,35 @@ fn spawn_event_driver(
             }
         }
     });
+}
+
+/// Delve refuses a newer Go ("Version of Delve is too old for Go version 1.25.0
+/// (maximum supported version 1.24, …)"): a stable `tool_outdated:go:dap` prefix
+/// lets the UI offer "Update Delve" instead of the raw adapter text.
+pub(crate) fn outdated_tool_message(msg: &str) -> Option<String> {
+    let rest = msg
+        .split("Version of Delve is too old for Go version")
+        .nth(1)?;
+    let go = rest
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(['.', ',']);
+    let go = go.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+    Some(format!(
+        "tool_outdated:go:dap — Delve is too old for Go {go}. Update Delve."
+    ))
+}
+
+#[cfg(test)]
+mod outdated_tool_tests {
+    #[test]
+    fn delve_too_old_maps_to_an_update_action() {
+        let raw = "could not launch process: Version of Delve is too old for Go version 1.25.0 (maximum supported version 1.24, suppress this error with --check-go-version=false)";
+        assert_eq!(
+            super::outdated_tool_message(raw).as_deref(),
+            Some("tool_outdated:go:dap — Delve is too old for Go 1.25. Update Delve.")
+        );
+        assert_eq!(super::outdated_tool_message("exec: no such file"), None);
+    }
 }

@@ -67,7 +67,7 @@ A workflow is a graph of steps you build once and run many times. Each step is a
 **Running**
 - **Run…** with a JSON input (for example `repo_id`, `story_id`, `goals`, `msg`) and an optional review-mode override for every review step.
 - From a selected node: **▶ From here** (this node and everything after it) or **Only this**.
-- **Stop** finishes the current step, then halts.
+- **Stop** cuts the running step short and skips the rest.
 - At most 2 runs execute at once across the app; extra runs wait as **queued** and start in order.
 - Runs survive a daemon restart and resume from the step they were on.
 - Run view: status per step, attempt counts, logs, the step's work product (copyable), sub-agent rows, a zoomed step view, and paged checkpoints.

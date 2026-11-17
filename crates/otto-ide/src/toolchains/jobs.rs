@@ -1,5 +1,7 @@
 //! Background toolchain install job tracking and runner methods for [`ToolchainManager`].
 
+use std::path::Path;
+
 use otto_core::{new_id, Error, Result};
 
 use crate::target::TargetManager;
@@ -104,8 +106,15 @@ impl ToolchainManager {
         tokio::spawn(async move {
             let outcome = match req.target.kind {
                 IdeTargetKind::Local => {
-                    mgr.run_local_install(&job_id, eco, req.component, platform, sdk_entry)
-                        .await
+                    mgr.run_local_install(
+                        &job_id,
+                        eco,
+                        req.component,
+                        platform,
+                        sdk_entry,
+                        req.go_root.as_deref(),
+                    )
+                    .await
                 }
                 IdeTargetKind::Ssh => match ssh {
                     Some(spec) => {
@@ -177,8 +186,10 @@ impl ToolchainManager {
         component: IdeInstallComponent,
         platform: TargetPlatform,
         sdk_entry: Option<CatalogSdkEntry>,
+        go_root: Option<&str>,
     ) -> std::result::Result<String, String> {
         let root = self.toolchains_dir();
+        let go_root = go_root.map(Path::new);
         tokio::fs::create_dir_all(&root)
             .await
             .map_err(|e| format!("create toolchains dir: {e}"))?;
@@ -200,7 +211,7 @@ impl ToolchainManager {
                 65,
                 format!("Installing LSP ({})...", eco.lsp_name()),
             );
-            let p = install_local_lsp(self, job_id, &root, eco, platform).await?;
+            let p = install_local_lsp(self, job_id, &root, eco, platform, go_root).await?;
             if component == IdeInstallComponent::Lsp {
                 final_path = p;
             }
@@ -214,7 +225,7 @@ impl ToolchainManager {
                 85,
                 format!("Installing DAP ({})...", eco.dap_name()),
             );
-            let p = install_local_dap(self, job_id, &root, eco, platform).await?;
+            let p = install_local_dap(self, job_id, &root, eco, platform, go_root).await?;
             if component == IdeInstallComponent::Dap {
                 final_path = p;
             }

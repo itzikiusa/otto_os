@@ -286,8 +286,11 @@ export function createCompletionExtension(
       });
     }
     if (fire && (!autoTriggerGate || autoTriggerGate(u.state, u.state.selection.main.head))) {
+      // A microtask, not a timer: it runs before the next key event, so an
+      // Escape typed right after the trigger closes this completion instead
+      // of the timer reopening it after the Escape (and over a later Run).
       const v = u.view;
-      setTimeout(() => startCompletion(v), 0);
+      queueMicrotask(() => startCompletion(v));
     }
   });
   return [autocompletion({ override: [completionSource], activateOnTyping: true, maxRenderedOptions: 40 }), autoTrigger];

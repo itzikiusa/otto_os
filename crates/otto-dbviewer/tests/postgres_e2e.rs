@@ -613,3 +613,34 @@ async fn postgres_process_list_and_cancel() {
         .expect("join");
     assert!(slept.is_err(), "a cancelled statement returns an error");
 }
+
+/// NUMERIC keeps its scale and NaN; floats keep NaN/Infinity; BIT is bits.
+#[tokio::test]
+#[ignore]
+async fn postgres_numeric_float_and_bit_render_as_postgres_prints_them() {
+    if gated() {
+        return;
+    }
+    let d = PostgresDriver::default();
+    let res = d
+        .run(
+            &cfg(),
+            &query(
+                "SELECT 1.10::numeric(5,2), 1e-7::numeric, 'NaN'::numeric, \
+                 'NaN'::float8, '-Infinity'::float8, B'10101'",
+            ),
+        )
+        .await
+        .expect("run");
+    assert_eq!(
+        res.rows[0],
+        vec![
+            json!("1.10"),
+            json!("0.0000001"),
+            json!("NaN"),
+            json!("NaN"),
+            json!("-Infinity"),
+            json!("10101"),
+        ]
+    );
+}

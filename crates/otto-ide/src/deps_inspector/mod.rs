@@ -27,7 +27,9 @@ use self::enrich::{
 };
 use self::go_mod::enrich_go_mod_updates;
 pub use self::go_mod::parse_go_mod;
-pub use self::parsers::{parse_cargo_toml, parse_package_json, parse_python_deps};
+pub use self::parsers::{
+    apply_cargo_lock_versions, parse_cargo_toml, parse_package_json, parse_python_deps,
+};
 
 /// Inspect a manifest file (`go.mod`, `pom.xml`, `build.gradle*`, `package.json`,
 /// `Cargo.toml`, `requirements.txt`, `pyproject.toml`) for versions, upgrades,
@@ -113,6 +115,22 @@ pub async fn inspect_dependencies_scoped(
         ("npm", "npm", list)
     } else if fname == "Cargo.toml" {
         let mut list = parse_cargo_toml(&content);
+        let mp = manifest_path.to_path_buf();
+        let roots = allowed_roots.to_vec();
+        let lock = tokio::task::spawn_blocking(move || {
+            // The nearest `Cargo.lock` up the tree (a member's lock lives at the workspace root).
+            mp.ancestors()
+                .skip(1)
+                .take(8)
+                .take_while(|d| caller_is_root || roots.iter().any(|r| d.starts_with(r)))
+                .find_map(|d| fs::read_to_string(d.join("Cargo.lock")).ok())
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(lock) = lock {
+            apply_cargo_lock_versions(&mut list, &lock);
+        }
         enrich_crates_updates(&mut list).await;
         ("cargo", "crates.io", list)
     } else if fname == "requirements.txt" || fname == "pyproject.toml" {
@@ -259,6 +277,7 @@ pub fn parse_pom_dependencies_scoped(
                     property_name: prop_name,
                     managed_in,
                     vulnerabilities: Vec::new(),
+                    range: false,
                 });
             }
             i = end_idx + 1;
@@ -388,6 +407,7 @@ pub fn parse_gradle_dependencies(content: &str) -> Vec<IdeDepItem> {
                 property_name: None,
                 managed_in: None,
                 vulnerabilities: Vec::new(),
+                range: false,
             });
         }
     }

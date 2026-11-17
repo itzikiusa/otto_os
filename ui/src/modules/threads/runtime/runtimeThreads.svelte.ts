@@ -88,7 +88,8 @@ export function asThreadSession(r: RuntimeSession): Session {
     // Background work the agent started keeps the row alive between turns,
     // but calm: `running` ("Background task running"), never the working
     // pulse of a turn — the agent itself is idle.
-    status: r.status === 'working' || r.status === 'starting' ? 'working' : r.status !== 'closed' && (r.background_tasks?.length ?? 0) > 0 ? 'running' : 'idle',
+    // A turn waiting for an approval is still a turn in flight, never "Idle".
+    status: r.status === 'working' || r.status === 'starting' || r.status === 'awaiting_permission' ? 'working' : r.status !== 'closed' && (r.background_tasks?.length ?? 0) > 0 ? 'running' : 'idle',
     cwd: r.cwd,
     provider_session_id: r.native_thread_id ?? null,
     connection_id: null,
@@ -153,6 +154,9 @@ export function isRuntimeThread(s: Session | null | undefined): boolean {
 class RuntimeThreads {
   /** Every loaded runtime session, by id. */
   byId = $state<Record<string, RuntimeSession>>({});
+  /** Threads in Plan mode: every prompt asks for a plan until the person
+   *  leaves it (the daemon's `plan` is per prompt). This window only. */
+  planIds = $state<Record<string, boolean>>({});
   /** Workspaces whose list has loaded once. */
   loaded = $state<Record<string, boolean>>({});
   loadErrors = $state<Record<string, string>>({});
@@ -433,6 +437,7 @@ class RuntimeThreads {
       created = await api.post<RuntimeSession>(path, body);
     }
     this.byId[created.id] = created;
+    if (req.plan) this.planIds[created.id] = true;
     this.emitSequence(created.id, created.last_sequence);
     const pics = (req.attachments ?? []).filter((f) => f.mime.startsWith('image/'));
     const docs = (req.attachments ?? []).filter((f) => !f.mime.startsWith('image/'));
@@ -442,7 +447,6 @@ class RuntimeThreads {
         {
           text: req.prompt,
           ...(req.effort ? { effort: req.effort } : {}),
-          ...(req.plan ? { plan: true } : {}),
           ...(pics.length
             ? { images: pics.map(({ name, mime, data_base64 }) => ({ ...(name ? { name } : {}), mime, data_base64 })) }
             : {}),
@@ -493,6 +497,7 @@ class RuntimeThreads {
   }
 
   async prompt(id: string, req: RuntimePromptReq, localAttachments?: readonly QueuedAttachment[]): Promise<RuntimePromptResp> {
+    if (this.planIds[id] && req.plan === undefined) req = { ...req, plan: true };
     const resp = await api.post<RuntimePromptResp>(`/runtime-sessions/${id}/prompt`, req);
     if (resp.queued_id) {
       const cached: QueuedAttachment[] = localAttachments?.length

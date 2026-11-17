@@ -205,3 +205,104 @@ fn collect_dap_go_build_tags_honors_empty_module_override() {
         "empty [] module_go_build_tags override must suppress inherited workspace tags: {tags:?}"
     );
 }
+
+/// debugpy refuses a launch with both `module` and `program`; the bdb bridge needs `program`.
+#[tokio::test]
+#[cfg(unix)]
+async fn pytest_debug_launch_omits_program_only_under_debugpy() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let test_file = tmp.path().join("test_cart.py");
+    std::fs::write(&test_file, "def test_total():\n    pass\n").unwrap();
+    // A stand-in interpreter that "imports" debugpy.adapter.
+    let fake_py = tmp.path().join("fakepy");
+    std::fs::write(&fake_py, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&fake_py, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ws = tmp.path().to_string_lossy().into_owned();
+    let req = IdeStartDebugReq {
+        target: IdeTargetSpec::local(ws.clone()),
+        language: "python".into(),
+        launch: IdeDebugLaunchSpec {
+            program: test_file.to_string_lossy().into_owned(),
+            test_name: Some(format!("{}::test_total", test_file.display())),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ctx = DapStartContext {
+        caller_is_root: true,
+        project_env: Some(IdeProjectEnvironment {
+            python_interpreter: Some(fake_py.to_string_lossy().into_owned()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let resolved = crate::dap::adapters_py::resolve_python_adapter(
+        tmp.path(),
+        &req,
+        &ctx,
+        &ws,
+        BTreeMap::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resolved.adapter_name, "debugpy");
+    assert_eq!(resolved.launch_args["module"], "pytest");
+    assert!(
+        resolved.launch_args.get("program").is_none(),
+        "{}",
+        resolved.launch_args
+    );
+}
+
+/// debugpy installed after a first Debug is used by the next one (no daemon restart).
+#[tokio::test]
+#[cfg(unix)]
+async fn debugpy_installed_after_a_debug_is_used_by_the_next_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let script = tmp.path().join("app.py");
+    std::fs::write(&script, "print(1)\n").unwrap();
+    // A stand-in interpreter that "has" debugpy once the marker exists.
+    let marker = tmp.path().join("debugpy-installed");
+    let fake_py = tmp.path().join("fakepy");
+    std::fs::write(
+        &fake_py,
+        format!("#!/bin/sh\ntest -f '{}'\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_py, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ws = tmp.path().to_string_lossy().into_owned();
+    let req = IdeStartDebugReq {
+        target: IdeTargetSpec::local(ws.clone()),
+        language: "python".into(),
+        launch: IdeDebugLaunchSpec {
+            program: script.to_string_lossy().into_owned(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ctx = DapStartContext {
+        caller_is_root: true,
+        project_env: Some(IdeProjectEnvironment {
+            python_interpreter: Some(fake_py.to_string_lossy().into_owned()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let adapter = || async {
+        crate::dap::adapters_py::resolve_python_adapter(
+            tmp.path(),
+            &req,
+            &ctx,
+            &ws,
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap()
+        .adapter_name
+    };
+    assert_eq!(adapter().await, "python-bdb-dap");
+    std::fs::write(&marker, "").unwrap();
+    assert_eq!(adapter().await, "debugpy");
+}

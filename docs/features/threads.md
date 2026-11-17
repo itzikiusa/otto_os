@@ -56,7 +56,10 @@ carry into another conversation.
      a prompt" and "Open beside current thread"), and a round send button.
    - Under it: **Current checkout** (or another git worktree of the repo), the
      branch (switch or create), the interaction mode (Full access ·
-     Auto-accept edits · Plan, `⇧⇥`) and the access chip (below).
+     Auto-accept edits · Plan, `⇧⇥`) and the access chip (below). A
+     structured thread started in **Plan** stays in Plan: every follow-up asks
+     for a plan until you turn **Plan** off in the thread's composer (or press
+     `⇧⇥` there). The mode is kept in this window.
    - On wide windows a **project card** floats top-right; it also heads the
      right panel: folder, **Open in…** (Files, Git, a terminal thread, copy
      path), **project scripts** (saved per folder in this browser; running one

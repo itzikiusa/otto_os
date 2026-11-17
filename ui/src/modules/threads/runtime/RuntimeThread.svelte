@@ -25,6 +25,7 @@
   import { uiControl } from '../../../lib/stores/uiControl.svelte';
   import { toastError } from '../../../lib/toastError';
   import StageSlashPopup from '../StageSlashPopup.svelte';
+  import { EmojiAssistView } from '../../../lib/components/emojiAssistLazy.svelte';
   import { agentTasks } from './agentTasks';
   import { askFromComposer, askTargets } from './askTargets.svelte';
   import { attachmentSupport, capsOf, takesFile } from './attachmentSupport';
@@ -39,7 +40,7 @@
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
   import {
     appendDraftAttachments, buildOptimisticUserMessage, buildRuntimeBanners, collectMessageIds,
-    composerPlaceholderText, deriveActivePlan, deriveSessionError, handleSlashMenuKey, mapChildThreadSummaries,
+    composerPlaceholderText, deriveActivePlan, deriveSessionError, handleSlashMenuKey, isPlanToggleKey, mapChildThreadSummaries,
     pasteDraftAttachments, resolveEffectiveDraftModel, resolvePromptModelOverride, restoreOptimisticDraft,
     runViewSlash, withOptimisticItem, type OptimisticMessageState,
   } from './runtimeComposer';
@@ -54,6 +55,7 @@
   import RuntimeHistoryBar from './RuntimeHistoryBar.svelte';
   import RuntimeLinkedThreads from './RuntimeLinkedThreads.svelte';
   import RuntimePlan from './RuntimePlan.svelte';
+  import RuntimePlanToggle from './RuntimePlanToggle.svelte';
   import RuntimeQueueBar from './RuntimeQueueBar.svelte';
   import { linkedChildren } from './council';
   import { secretRequests } from '../../../lib/stores/secretRequests.svelte';
@@ -197,6 +199,7 @@
   // What the agent takes, as the daemon reports it (live first).
   const caps = $derived(capsOf(p?.session?.capabilities ?? session?.capabilities, runtimeBaselineCaps(provider, auth.meta)));
   const canImages = $derived(attachmentSupport(caps).images);
+  const planOn = $derived(!!caps.plan && !!runtimeThreads.planIds[ownerId]); // every prompt, until turned off
   const canFiles = $derived(attachmentSupport(caps).files);
   const takes = (f: File): boolean => takesFile(caps, f);
   let fileEl = $state<HTMLInputElement | null>(null);
@@ -373,10 +376,12 @@
     runtimeThreads.respond(ownerId, requestId, decision).catch((e: unknown) => void toastError('Couldn’t answer the approval', e));
 
   let askEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
+  let emojiEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   let dockEl = $state<{ onKey: (e: KeyboardEvent, composerEmpty: boolean) => boolean } | null>(null);
   const escState = { lastEscAt: -Infinity };
   function onKeydown(e: KeyboardEvent): void {
-    if (e.isComposing || askEl?.onKey(e)) return;
+    if (e.isComposing || askEl?.onKey(e) || emojiEl?.onKey(e)) return;
+    if (caps.plan && !suggestions.length && isPlanToggleKey(e)) return void (e.preventDefault(), (runtimeThreads.planIds[ownerId] = !planOn));
     if (handleSlashMenuKey(e, suggestions, cmdIdx, (i) => (cmdIdx = i), () => (cmdDismissed = true), acceptCmd)) return;
     if (dockEl?.onKey(e, !canSendOrQueue)) return;
     if (!ui.overlayOpen && composerStopKey(e, { running, composerEmpty: !canSendOrQueue, now: performance.now() }, escState)) {
@@ -533,10 +538,11 @@
     {/if}
     {#if composerTopSlot}{@render composerTopSlot({ focusComposer })}{/if}
 
-    <div class="rt-composer" bind:this={composerBoxEl}>
+    <div class="rt-composer" style:border-color={planOn ? 'color-mix(in srgb, var(--warning) 42%, var(--border))' : undefined} bind:this={composerBoxEl}>
       {#if suggestions.length > 0}
         <StageSlashPopup id={popId} items={suggestions} active={cmdIdx} onaccept={acceptCmd} onhover={(i) => (cmdIdx = i)} />
       {/if}
+      {#if EmojiAssistView.component}<EmojiAssistView.component bind:this={emojiEl} textareaEl={composerEl} />{/if}
       <RuntimeContextChips context={draft.context} onremove={(id) => { draft.context = draft.context.filter((c) => c.id !== id); }} onfocus={focusComposer} />
       <RuntimeAskAgent
         bind:this={askEl}
@@ -564,7 +570,7 @@
         autocapitalize="off"
         autocomplete="off"
         disabled={draft.reopening}
-        placeholder={composerPlaceholderText(closed, approvals, running, agentChat)}
+        placeholder={composerPlaceholderText(closed, approvals, running, agentChat, planOn)}
         aria-label="Message"
         aria-autocomplete="list"
         aria-controls={suggestions.length > 0 ? `${popId}-list` : undefined}
@@ -631,6 +637,7 @@
                 onaccessmodechange?.(m);
               }}
             />
+            {#if caps.plan}<RuntimePlanToggle id={ownerId} on={planOn} disabled={closed || !session} />{/if}
           {/if}
         </span>
         <RuntimeComposerActions

@@ -424,6 +424,28 @@ pub fn scan_parent_repos(parent_path: &str, is_root_user: bool) -> Result<IdeSca
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_member_folder_is_not_its_project() {
+        let entry = StoredProject {
+            owner_user_id: "u1".into(),
+            raw_primary_root: "/w/other".into(),
+            project: IdeNamedProject {
+                id: "p1".into(),
+                name: "X".into(),
+                primary_root: "/w/other".into(),
+                folders: vec!["/w/other".into(), "/w/lonely".into()],
+                pinned: false,
+                updated_at: String::new(),
+            },
+            non_root_project: None,
+        };
+        assert!(stored_project_primary_matches(&entry, "/w/other"));
+        assert!(
+            !stored_project_primary_matches(&entry, "/w/lonely"),
+            "opening `lonely` alone must not attach `other`"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn scan_parent_repos_deduplicates_symlink_to_sibling_repo() {

@@ -22,6 +22,8 @@ export interface GraphMenusHost {
   readonly worktreeBranches: Set<string>;
   readonly refKnowledge: RefKnowledge;
   readonly baseBranch: string | null;
+  /** The remote is a forge Otto can open PRs on (`canOpenPrs`). */
+  readonly canOpenPr: boolean;
   openCreatePr(source: string): void;
   chipsFor(c: CommitInfo): RefChip[];
   setCleanupBase(name: string | null): Promise<void>;
@@ -136,7 +138,7 @@ export function createGraphMenus(h: GraphMenusHost, a: GraphActions) {
     );
     // Open a PR from the checked-out branch (the "from a commit while on a
     // branch" case) — only meaningful when a branch is checked out.
-    if (currentBranch) {
+    if (currentBranch && h.canOpenPr) {
       items.push({ separator: true });
       items.push({
         label: `Create PR from ${currentBranch}…`,
@@ -278,12 +280,14 @@ export function createGraphMenus(h: GraphMenusHost, a: GraphActions) {
       });
       items.push({ label: 'Rename…', icon: 'edit', action: () => void renameBranch(b.name) });
       // Open a PR sourced from this branch.
-      items.push({ separator: true });
-      items.push({
-        label: `Create pull request from ${b.name}…`,
-        icon: 'send',
-        action: () => openCreatePr(b.name),
-      });
+      if (h.canOpenPr) {
+        items.push({ separator: true });
+        items.push({
+          label: `Create pull request from ${b.name}…`,
+          icon: 'send',
+          action: () => openCreatePr(b.name),
+        });
+      }
       // Merge into … — pick any OTHER local branch as the destination.
       const mergeInto = mergeIntoItems(b.name);
       if (mergeInto.length > 0) {
@@ -302,8 +306,9 @@ export function createGraphMenus(h: GraphMenusHost, a: GraphActions) {
       const up = b.upstream ? splitRemoteRef(b.upstream) : null;
       const trackRemote = up && up.branch === b.name ? up.remote : 'origin';
       const hasRemote = remoteNames.has(`${trackRemote}/${b.name}`);
-      // Never offer Delete on the checked-out branch (git refuses).
-      if (!isCurrent) {
+      // Never offer Delete on the checked-out branch, or one another worktree
+      // has checked out (git refuses both).
+      if (!isCurrent && !wtElsewhere) {
         items.push({ separator: true });
         items.push({
           label: `Delete ${b.name}…`,

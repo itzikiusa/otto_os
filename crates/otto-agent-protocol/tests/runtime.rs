@@ -4617,6 +4617,44 @@ async fn idle_agent_processes_are_released_and_the_next_prompt_resumes() {
     rt.close(&child.id).await.unwrap();
 }
 
+/// A revive is activity: the idle release (every 60 s) must not stop a
+/// thread just reopened because its last message is old.
+#[tokio::test]
+async fn reopen_counts_as_activity_for_the_idle_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let pool = pool().await;
+    let host = TestHost::new(cwd, false);
+    let rt = runtime(&pool, &host, RuntimeConfig::default());
+    let s = create(&rt, cwd).await;
+    host.wait(is_ready).await;
+    rt.prompt(&s.id, "hello").await.unwrap();
+    host.wait(is_terminal).await;
+    for fast in [false, true] {
+        let t0 = rt.get(&s.id).await.unwrap().last_active_at;
+        let past_idle = |by_ms: i64| {
+            t0 + chrono::TimeDelta::minutes(30) + chrono::TimeDelta::milliseconds(by_ms)
+        };
+        assert_eq!(
+            rt.release_idle_processes(30, past_idle(60_000)).await,
+            vec![s.id.clone()]
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if fast {
+            rt.reopen_fast(&s.id).await.unwrap();
+        } else {
+            rt.reopen(&s.id).await.unwrap();
+        }
+        assert!(
+            rt.release_idle_processes(30, past_idle(50))
+                .await
+                .is_empty(),
+            "reopen_fast={fast}: the revive is not released as idle"
+        );
+    }
+    rt.close(&s.id).await.unwrap();
+}
+
 /// T3 Code #29208: provider retries show as one row but are not progress,
 /// so a turn stuck retrying is still stopped as stalled.
 #[tokio::test]

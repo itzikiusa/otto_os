@@ -346,35 +346,31 @@ fn format_builtin_fallback_inner(lang: &str, content: &str) -> String {
     if matches!(lang, "shell" | "bash" | "sh" | "zsh") {
         return format_shell_fallback(content);
     }
-    let normalized = content.replace("\r\n", "\n");
-    let brace_indent = matches!(
+    // Code is left alone: brace counting can't see multi-line strings (template literals, raw
+    // strings, text blocks) and every project has its own indent, so re-indenting it here broke
+    // more than it fixed. A real formatter (prettier, gofmt, rustfmt, …) runs before this.
+    if matches!(
         lang,
-        "java"
-            | "kotlin"
-            | "javascript"
-            | "typescript"
-            | "json"
-            | "jsonc"
-            | "rust"
-            | "go"
-            | "c"
-            | "cpp"
-            | "protobuf"
-    );
-    let unit = if lang == "go" {
-        "\t"
-    } else if matches!(lang, "json" | "jsonc") {
-        "  "
-    } else {
-        "    "
-    };
+        "java" | "kotlin" | "javascript" | "typescript" | "rust" | "go" | "c" | "cpp" | "protobuf"
+    ) {
+        return content.to_string();
+    }
+    let normalized = content.replace("\r\n", "\n");
+    // JSON strings never span lines, so its brace depth is exact.
+    let brace_indent = matches!(lang, "json" | "jsonc");
+    let unit = "  ";
     let mut depth = 0usize;
     let mut out_lines: Vec<String> = Vec::new();
     let mut blanks = 0usize;
     let mut in_block = false;
 
     for raw in normalized.lines() {
-        let trimmed_end = raw.trim_end();
+        // Two trailing spaces are a Markdown hard line break.
+        let trimmed_end = if lang == "markdown" {
+            raw
+        } else {
+            raw.trim_end()
+        };
         if trimmed_end.trim().is_empty() {
             blanks += 1;
             if blanks <= 2 {

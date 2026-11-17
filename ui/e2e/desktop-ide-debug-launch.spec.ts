@@ -182,8 +182,10 @@ test.describe('Desktop IDE — launch target and one live debug session', () => 
       page.off('request', countLaunch);
       expect(secondId).not.toBe(firstId);
       await expect(dbgPanel).toContainText(/Paused/i, { timeout: 30_000 });
-      const live = await liveSessions();
-      expect(live.map((s) => s.id), 'only the new session is live on the daemon').toEqual([secondId]);
+      // Other workers share this daemon: judge only this test's own sessions.
+      const live = (await liveSessions()).map((s) => s.id);
+      expect(live, 'the first session ended').not.toContain(firstId);
+      expect(live, 'the new session is live').toContain(secondId);
     } finally {
       await stopAll(started);
     }

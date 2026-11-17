@@ -97,6 +97,7 @@ test('collab: peer_left drops the peer\'s cursor; an event room never clobbers t
     '../../../lib/toast.svelte': { toasts: { success() {}, error() {}, info() {} } },
     '../../../lib/toastError': { toastError() {} },
     './ideCollabNotices.svelte': { ideCollabNotices: { reset() {} } },
+    './ideCollabSync': { mergeText: (_b: string, _m: string, theirs: string) => theirs },
     './ideTypes': { collabGuestPost: async () => ({}), ideBasename: (p: string) => p, streamIdeSse: (_p: string, _h: unknown, _s: unknown, cb: (raw: string) => void) => { onEvent = cb; return Promise.resolve(); } },
   });
   const hostRoom = { id: 'r1', title: 'Pairing', target: { kind: 'local', root: '/repo', workspace_id: 'w1' }, default_role: 'viewer', peers: [{ peer_id: 'h' }, { peer_id: 'g1' }] };

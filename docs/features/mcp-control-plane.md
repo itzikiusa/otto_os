@@ -294,7 +294,10 @@ thereafter. The disclosure includes this install snippet for an external agent's
 
 `ottod mcp-server` reads `OTTO_API_TOKEN` (the restricted token) and optionally
 `OTTO_MCP_BASE` (defaults to `http://127.0.0.1:<port>`). It is **off by default**
-(`mcp_otto_server_enabled = false`) — nothing is exposed until an admin enables it.
+(`mcp_otto_server_enabled = false`) — nothing is exposed to outside clients until an
+admin enables it. The switch does not apply to Otto's own sessions (threads and agent
+sessions calling with their per-session token): they reach every tool ticked under
+**Otto server**, still through approval, RBAC and agent policy.
 
 ### 3.2.1 Reach it over HTTP, not only locally — the Streamable-HTTP transport
 
@@ -705,7 +708,7 @@ the UI:
   connection a write is refused (`read-only connection '<name>' cannot perform
   database mutations; turn off Read-only in the connection's settings…`); on an
   enforced **production** connection it is refused with `review_required:` — changes
-  there go through Database Explorer → Changes.
+  there go through Database Explorer → ⋯ → Database changes.
 - **The write-guard** (legacy connections): a connection marked **Read-only** or with
   environment **Production** refuses the write with `write_blocked: … so an agent
   cannot write to it; a person can run the write in the Database Explorer, or turn
@@ -1218,7 +1221,7 @@ directly.
 server**, open **Connect an external client**, mint a token, paste the snippet into
 the external agent's `.mcp.json`, and confirm `OTTO_API_TOKEN` is set and
 `OTTO_MCP_BASE` (if used) points at the daemon. A disabled server returns `denied` to
-every invoke.
+every invoke from an outside client (Otto's own sessions keep the enabled tools).
 
 **Rotating a token disabled my other tokens.** This defect is fixed: the row-level
 **Rotate** action uses CP37 and replaces only the selected token. Minted tokens for

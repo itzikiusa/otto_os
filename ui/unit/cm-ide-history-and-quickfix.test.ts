@@ -150,6 +150,16 @@ test('isBpTargetGutterElement enables 1-click breakpoints everywhere in .cm-gutt
   assert.equal(isBpTargetGutterElement(fakeGutterNode('.cm-ide-dep-gutter-btn', true)), false, 'clicking 🎯↑ parent POM jump does not toggle bp');
 });
 
+test('Java "Remove import" is offered only for an unused import, and never as the preferred fix', () => {
+  const doc = 'package demo;\n\nimport java.util.List;\nimport java.util.Map;\nimport java.util.*;\n\npublic class A {\n    List<String> items;\n}\n';
+  const removeAt = (line: number) => computeDeterministicQuickFixes(doc, '/ws/A.java', 'java', line).find((f) => f.id.startsWith('java-remove-import'));
+  assert.equal(removeAt(3), undefined, 'used List import must not offer Remove import');
+  assert.equal(removeAt(5), undefined, 'a wildcard import cannot be judged unused');
+  const unused = removeAt(4);
+  assert.ok(unused, 'unused Map import offers Remove import');
+  assert.equal(unused.isPreferred, false);
+});
+
 test('Deterministic Quick Fixes generate concrete text edits and live diff previews across Java, Go, Rust, JSON, and Shell', () => {
   // 1. Java missing import (`List`)
   const javaDoc = 'package demo;\n\npublic class A {\n    List<String> items;\n}\n';

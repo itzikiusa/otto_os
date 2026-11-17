@@ -9,7 +9,7 @@ use super::super::runner::{append_run_line, ActiveRunHandle};
 use super::{csv_list, resolve_program_in_env};
 use crate::go_build_cache::ide_build_cache_root;
 use crate::toolchains::is_executable_file;
-use crate::types::{IdeRunConfig, IdeTargetKind, IdeTargetSpec};
+use crate::types::{IdeRunConfig, IdeRunnerKind, IdeTargetKind, IdeTargetSpec};
 
 pub(in crate::environments) fn apply_runtime_profile_and_module_venv(
     cfg: &IdeRunConfig,
@@ -21,25 +21,114 @@ pub(in crate::environments) fn apply_runtime_profile_and_module_venv(
     if !spring_csv.is_empty() && !env_map.contains_key("SPRING_PROFILES_ACTIVE") {
         env_map.insert("SPRING_PROFILES_ACTIVE".into(), spring_csv);
     }
-    if target.kind == IdeTargetKind::Local && !env_map.contains_key("VIRTUAL_ENV") {
-        for vname in [".venv", "venv", ".env"] {
-            let cand = Path::new(cwd).join(vname);
-            if cand.join("pyvenv.cfg").is_file() && cand.join("bin/python").is_file() {
-                let bin = cand.join("bin").to_string_lossy().into_owned();
-                let cur_path = env_map.get("PATH").cloned().unwrap_or_default();
-                env_map.insert(
-                    "PATH".into(),
-                    if cur_path.is_empty() {
-                        bin
-                    } else {
-                        format!("{bin}:{cur_path}")
-                    },
-                );
-                env_map.insert("VIRTUAL_ENV".into(), cand.to_string_lossy().into_owned());
-                break;
-            }
-        }
+    if env_map.contains_key("VIRTUAL_ENV") {
+        return;
     }
+    // The nearest venv up from the run dir: a test in `tests/` uses the project's `.venv`.
+    let mut venv = None;
+    nearest_dir_in_roots(target, cwd, |dir| {
+        venv = [".venv", "venv", ".env"]
+            .iter()
+            .map(|v| dir.join(v))
+            .find(|c| c.join("pyvenv.cfg").is_file() && c.join("bin/python").is_file());
+        venv.is_some()
+    });
+    if let Some(cand) = venv {
+        let bin = cand.join("bin").to_string_lossy().into_owned();
+        let cur_path = env_map.get("PATH").cloned().unwrap_or_default();
+        env_map.insert(
+            "PATH".into(),
+            if cur_path.is_empty() {
+                bin
+            } else {
+                format!("{bin}:{cur_path}")
+            },
+        );
+        env_map.insert("VIRTUAL_ENV".into(), cand.to_string_lossy().into_owned());
+    }
+}
+
+/// The nearest ancestor of `cwd` (itself first) inside the target's roots for which `found`
+/// holds. Local targets only.
+pub(in crate::environments) fn nearest_dir_in_roots(
+    target: &IdeTargetSpec,
+    cwd: &str,
+    mut found: impl FnMut(&Path) -> bool,
+) -> Option<PathBuf> {
+    if target.kind != IdeTargetKind::Local {
+        return None;
+    }
+    let roots: Vec<PathBuf> = std::iter::once(target.root.clone())
+        .chain(target.merged_extra_roots())
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .collect();
+    let start = std::fs::canonicalize(cwd).ok()?;
+    start
+        .ancestors()
+        .take_while(|d| roots.iter().any(|r| d.starts_with(r)))
+        .find(|d| found(d))
+        .map(Path::to_path_buf)
+}
+
+pub(super) const GRADLE_BUILD_FILES: [&str; 4] = [
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+];
+
+/// Maven/Gradle run from the module that owns `cwd`: the nearest ancestor inside the target
+/// roots with a build file, so a test launched from its source folder still finds its POM.
+/// A JUnit run whose nearest build is Gradle runs Gradle. Local targets only; otherwise `cwd`.
+pub(in crate::environments) fn resolve_jvm_build_dir(
+    cfg: &mut IdeRunConfig,
+    target: &IdeTargetSpec,
+    cwd: String,
+) -> String {
+    let (maven, gradle) = match cfg.runner {
+        IdeRunnerKind::JavaJunit => (true, true),
+        IdeRunnerKind::Maven => (true, false),
+        IdeRunnerKind::Gradle => (false, true),
+        _ => return cwd,
+    };
+    let mut has_pom = false;
+    let module = nearest_dir_in_roots(target, &cwd, |dir| {
+        has_pom = maven && dir.join("pom.xml").is_file();
+        has_pom || (gradle && GRADLE_BUILD_FILES.iter().any(|f| dir.join(f).is_file()))
+    });
+    let Some(module) = module else {
+        return cwd;
+    };
+    if !has_pom {
+        cfg.runner = IdeRunnerKind::Gradle;
+    }
+    module.to_string_lossy().into_owned()
+}
+
+/// pytest's rootdir for a test run from `cwd`, so a test in `tests/` imports the project and
+/// gets its root `conftest.py`: the nearest ancestor inside the target roots with a pytest
+/// config / project file, else the highest one with a `conftest.py`. Local targets only;
+/// otherwise (or when neither exists) `cwd`.
+pub(crate) fn pytest_rootdir(target: &IdeTargetSpec, cwd: &str) -> String {
+    let mut top_conftest = None;
+    let config = nearest_dir_in_roots(target, cwd, |dir| {
+        if dir.join("conftest.py").is_file() {
+            top_conftest = Some(dir.to_path_buf());
+        }
+        [
+            "pytest.ini",
+            ".pytest.ini",
+            "pyproject.toml",
+            "tox.ini",
+            "setup.cfg",
+            "setup.py",
+        ]
+        .iter()
+        .any(|f| dir.join(f).is_file())
+    });
+    config
+        .or(top_conftest)
+        .map_or_else(|| cwd.to_string(), |d| d.to_string_lossy().into_owned())
 }
 
 pub(in crate::environments) fn has_manual_classpath(cfg: &IdeRunConfig) -> bool {

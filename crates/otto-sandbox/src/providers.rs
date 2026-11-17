@@ -6,8 +6,8 @@
 //! folder loads it — Otto pre-trusts every session cwd).
 //!
 //! [`crate::SandboxPolicy::for_agent`], [`crate::SandboxPolicy::deny_project_agent_config`]
-//! derive their lists from [`PROVIDERS`] (plus the few cross-CLI entries in
-//! [`SHARED`]), so adding a provider means adding one entry here — and
+//! derive their lists from [`PROVIDERS`](crate::providers::PROVIDERS) (plus the few cross-CLI entries in
+//! [`SHARED`](crate::providers::SHARED)), so adding a provider means adding one entry here — and
 //! otto-sessions' `every_model_family_has_a_sandbox_entry` test fails until
 //! every family in its provider list has one.
 

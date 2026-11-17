@@ -80,7 +80,11 @@
     await ide.loadCollabRooms();
     if (!ide.collabRoom && ide.collabRooms.length > 0 && ide.target.root) {
       const match = ide.collabRooms.find((r) => r.target.root === ide.target.root);
-      if (match) ide.collabRoom = match;
+      if (match) {
+        ide.collabRoom = match;
+        // After a reload the invite link comes back from the room list.
+        if (!ide.collabShareHash && match.share_hash) ide.collabShareHash = match.share_hash;
+      }
     }
   }
 
@@ -96,6 +100,13 @@
     const cleanHash = hash.startsWith('#') ? hash : `#${hash.replace(/^\//, '')}`;
     return `${window.location.origin}/${cleanHash}`;
   });
+  /** The page itself runs on this Mac (the app, Vite, 127.0.0.1): nobody else can open
+   *  a link built on it. Opened over the network listener or a public domain, it works. */
+  const linkIsLocalOnly = $derived(
+    typeof window === 'undefined' ||
+      !/^https?:$/.test(window.location.protocol) ||
+      /^(localhost|127\.|\[::1\]$)/.test(window.location.hostname),
+  );
 
   function parseShareLink(raw: string): { roomId: string; token: string } | null {
     const text = raw.trim();
@@ -224,6 +235,13 @@
                   Copy link
                 </button>
               </div>
+              {#if linkIsLocalOnly}
+                <p class="sh-local-warn" role="note" data-testid="ide-share-local-only">
+                  <Icon name="warning" size={12} />
+                  This link only opens on this Mac. To invite someone, turn on the network listener
+                  (Settings › Daemon) and open Otto from that address, then share again.
+                </p>
+              {/if}
             </div>
           {/if}
         </section>
@@ -478,6 +496,7 @@
   .sh-lbl { font-size: var(--fs-xs); font-weight: 500; color: var(--text-dim); }
   .sh-link-row { display: flex; align-items: center; gap: 8px; }
   .sh-link-row input { flex: 1; min-inline-size: 0; }
+  .sh-local-warn { display: flex; align-items: flex-start; gap: 4px; margin: 0; font-size: var(--fs-xs); color: var(--warning); line-height: 1.45; }
 
   .sh-role-cards, .sh-two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 

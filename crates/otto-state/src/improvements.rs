@@ -482,6 +482,36 @@ impl ImprovementsRepo {
         rows.iter().map(row_to_edit).collect()
     }
 
+    /// Pending-edit count per workspace; workspaces with none are absent.
+    pub async fn pending_counts(&self) -> Result<std::collections::HashMap<Id, i64>> {
+        let rows = sqlx::query(
+            "SELECT workspace_id, COUNT(*) AS n FROM improvement_edits \
+             WHERE status = 'pending' GROUP BY workspace_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("pending counts"))?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("workspace_id"), r.get("n")))
+            .collect())
+    }
+
+    /// Reject every pending edit of `ws` in one statement (no file changes —
+    /// the same outcome as rejecting each one). Returns how many it rejected.
+    pub async fn reject_all_pending(&self, ws: &Id, actor: &str) -> Result<u64> {
+        Ok(sqlx::query(
+            "UPDATE improvement_edits SET status = 'rejected', actor = ? \
+             WHERE workspace_id = ? AND status = 'pending'",
+        )
+        .bind(actor)
+        .bind(ws)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("reject pending edits"))?
+        .rows_affected())
+    }
+
     /// Move an edit `from` → `to` as a compare-and-set (stamping
     /// applied_at when `to` is Applied, and the actor). `None` when the edit
     /// had already left `from` — two decisions on one edit (a double click,

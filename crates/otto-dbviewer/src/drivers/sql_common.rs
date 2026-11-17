@@ -140,9 +140,14 @@ pub(crate) fn acquire_error(
 
 // --- Cell shaping -------------------------------------------------------------
 
-/// Pure shaping of an optional f64 (Null if absent or non-finite).
+/// Pure shaping of an optional f64: Null only for SQL NULL. JSON has no
+/// NaN/Infinity, so those come back as the text Postgres prints for them.
 pub(crate) fn float_to_json(v: Option<f64>) -> Value {
     match v {
+        Some(n) if n.is_nan() => Value::String("NaN".into()),
+        Some(n) if n.is_infinite() => {
+            Value::String(if n > 0.0 { "Infinity" } else { "-Infinity" }.into())
+        }
         Some(n) => serde_json::Number::from_f64(n)
             .map(Value::Number)
             .unwrap_or(Value::Null),
@@ -162,9 +167,17 @@ mod tests {
     }
 
     #[test]
-    fn float_to_json_drops_non_finite() {
+    fn float_to_json_keeps_non_finite_as_text() {
         assert_eq!(float_to_json(Some(1.5)), serde_json::json!(1.5));
-        assert_eq!(float_to_json(Some(f64::INFINITY)), Value::Null);
+        assert_eq!(float_to_json(Some(f64::NAN)), serde_json::json!("NaN"));
+        assert_eq!(
+            float_to_json(Some(f64::INFINITY)),
+            serde_json::json!("Infinity")
+        );
+        assert_eq!(
+            float_to_json(Some(f64::NEG_INFINITY)),
+            serde_json::json!("-Infinity")
+        );
         assert_eq!(float_to_json(None), Value::Null);
     }
 }

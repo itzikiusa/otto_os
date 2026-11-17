@@ -1301,6 +1301,9 @@ pub struct SessionManager {
     providers: ProviderRegistry,
     /// Optional context-provisioning hook, invoked before an agent spawn.
     pre_spawn_hook: Option<Arc<dyn PreSpawnHook>>,
+    /// The project env an IDE terminal (`meta.ide_terminal` + `ide_root`)
+    /// starts with; set once by the server after its context exists.
+    terminal_env: std::sync::OnceLock<Arc<dyn otto_core::hooks::TerminalEnvSource>>,
     /// Optional resolver for the workspace's enabled user-configured MCP servers,
     /// merged into `.mcp.json` on agent spawn (alongside Otto's browser entry).
     mcp_servers: Option<Arc<dyn crate::mcp::McpServerSource>>,
@@ -1430,6 +1433,7 @@ impl SessionManager {
             events,
             providers,
             pre_spawn_hook: None,
+            terminal_env: std::sync::OnceLock::new(),
             mcp_servers: None,
             output_scanner: None,
             ingest_base: std::env::var("OTTO_INGEST_BASE")
@@ -2500,6 +2504,9 @@ impl SessionManager {
             // posts trail/task activity to the per-session ingest endpoint.
             spec.env.extend(self.ingest_env(&session.id));
         }
+        // First, so every Otto-owned var set above still wins.
+        let ide_env = self.ide_terminal_env(&session).await;
+        spec.env.splice(0..0, ide_env);
 
         // Restore the saved grid from `pty_cols` / `pty_rows` in the session's
         // metadata (written by `resize()`). Falls back to 80×24 when absent or
@@ -5162,6 +5169,9 @@ impl SessionManager {
             // the workspace from the initial spawn).
             spec.env.extend(self.ingest_env(&session.id));
         }
+        // First, so every Otto-owned var set above still wins.
+        let ide_env = self.ide_terminal_env(&session).await;
+        spec.env.splice(0..0, ide_env);
         // Restore the saved grid — the client will confirm its own size via a
         // Resize frame on connect, but we want the PTY and emulator to agree
         // with what the user last had so the first snapshot is correctly framed.
@@ -6150,6 +6160,8 @@ mod cli_flags;
 #[path = "manager/codex_rollout.rs"]
 mod codex_rollout;
 use codex_rollout::codex_rollout_first_user_message;
+#[path = "manager/ide_terminal_env.rs"]
+mod ide_terminal_env;
 #[path = "manager/input_timeout.rs"]
 mod input_timeout;
 use input_timeout::{input_write_timeout, INPUT_WRITE_TIMEOUT};

@@ -156,10 +156,14 @@ export async function dispatchPromptToRuntimeSession(
 
 /** Whether `sid` is mid-turn (a new prompt would be queued behind it). */
 export function isRuntimeTurnBusy(bridge: RuntimeSessionPort, sid: string): boolean {
-  const row = bridge.runtimeThreads.get(sid);
+  return bridge.runtimeThreads.get(sid)?.status === 'starting' || isChatTurnRunning(bridge, sid);
+}
+
+/** Whether another turn is running or waiting on `sid`. A session still starting
+ *  has none: a prompt sent now is the first turn. */
+export function isChatTurnRunning(bridge: RuntimeSessionPort, sid: string): boolean {
   return (
-    row?.status === 'working' ||
-    row?.status === 'starting' ||
+    bridge.runtimeThreads.get(sid)?.status === 'working' ||
     Boolean(bridge.runtimeViews.projections[sid]?.turns.some((t) => t.status === 'running' || t.status === 'pending'))
   );
 }

@@ -9,12 +9,14 @@
   import { pollWhileVisible } from '../../lib/poll';
   import { quietCadence } from '../../lib/pollBackoff';
   import type { ClusterMetrics, ClusterOverview, Id } from '../../lib/api/types';
-  import { rateText, totalText } from './brokerFigures';
+  import { metricsUnreachable, rateText, totalText } from './brokerFigures';
+  import { brokers } from '../../lib/stores/brokers.svelte';
 
   interface Props {
     clusterId: Id;
   }
   let { clusterId }: Props = $props();
+  const unreachable = $derived(metricsUnreachable(brokers.clusters.find((c) => c.id === clusterId)?.metrics_url));
 
   let overview = $state<ClusterOverview | null>(null);
   let metrics = $state<ClusterMetrics | null>(null);
@@ -230,7 +232,9 @@
           </div>
         {/each}
       </div>
-      {#if metrics && !metrics.prometheus_available}
+      {#if metrics && !metrics.prometheus_available && unreachable}
+        <p class="muted small">{unreachable}</p>
+      {:else if metrics && !metrics.prometheus_available}
         <p class="muted small">
           Set a Prometheus <em>Metrics URL</em> on the cluster (e.g. Redpanda <code
             >:9644/public_metrics</code

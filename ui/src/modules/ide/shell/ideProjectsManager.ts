@@ -42,7 +42,9 @@ import {
   saveAdditionalRootsLocal,
   saveBuildToolPrefsLocal,
   saveLastIdeRoot,
+  saveLastSshTarget,
   saveNamedProjectsLocal,
+  type SavedSshTarget,
   toIdeNamedProject,
   type WorkspaceBuildToolPrefs,
 } from './ideProjectHelpers';
@@ -202,6 +204,15 @@ export async function removeNamedProject(host: NamedProjectsHost, projectId: str
   }
 }
 
+/** Going to an SSH host: it is no named project, so the project keeps its own local
+ *  tabs and stops being Active; a reload reopens the host. */
+export function leaveProjectForSsh(host: NamedProjectsHost, ssh: SavedSshTarget): void {
+  if (host.activeProjectId) snapshotProjectTabs(host.activeProjectId, host.tabs, host.activePath);
+  host.activeProjectId = null;
+  saveActiveProjectIdLocal(null, host.namedProjects);
+  saveLastSshTarget(ssh);
+}
+
 export async function activateNamedProject(host: NamedProjectsHost, projectId: string): Promise<void> {
   const proj = host.namedProjects.find((p) => p.id === projectId);
   if (!proj) return;
@@ -325,21 +336,12 @@ export async function attachProjectFoldersBatch(
   return added.length;
 }
 
-export function syncCurrentProjectFolders(
-  host: { namedProjects: IdeNamedProject[]; activeProjectId: string | null; target: IdeTargetSpec; additionalRoots: string[] },
-): void {
+/** Save the active named project's folders after a single add / remove, on the
+ *  server too: a local-only copy came back stale after a reload or on another device. */
+export async function syncCurrentProjectFolders(host: NamedProjectsHost): Promise<void> {
   if (!host.activeProjectId || !host.target.root) return;
   const primary = normalizeRootPath(host.target.root);
-  const seenKeys = new Set<string>([canonicalRootKey(primary)]);
-  const folders = [primary];
-  for (let i = 0; i < host.additionalRoots.length; i++) {
-    const f = normalizeRootPath(host.additionalRoots[i]);
-    const k = canonicalRootKey(f);
-    if (f && k && !seenKeys.has(k)) {
-      seenKeys.add(k);
-      folders.push(f);
-    }
-  }
+  const folders = [primary, ...host.additionalRoots];
   const cur = host.namedProjects.find((p) => p.id === host.activeProjectId);
   if (!cur) return;
   if (
@@ -348,11 +350,7 @@ export function syncCurrentProjectFolders(
   ) {
     return;
   }
-  const next = host.namedProjects.map((p) =>
-    p.id === host.activeProjectId ? { ...p, primary_root: primary, folders, updated_at: Date.now() } : p,
-  );
-  host.namedProjects = next;
-  saveNamedProjectsLocal(next, host.activeProjectId);
+  await upsertNamedProject(host, { id: cur.id, name: cur.name, primary_root: primary, folders, pinned: cur.pinned });
 }
 
 export async function performMutateFs(
@@ -367,6 +365,7 @@ export async function performMutateFs(
     loadTree(dirPath?: string): Promise<void>;
     openFile(rawPath: string, opts?: { preview?: boolean }): Promise<void>;
     closeSplit(): void;
+    resolvePath(p: string): string;
   },
   flushBuf: (path: string) => void,
   evict: (paths: string[], clearProblems?: boolean) => void,
@@ -375,6 +374,9 @@ export async function performMutateFs(
   path: string,
   destPath?: string,
 ): Promise<boolean> {
+  // A typed destination ("src/x.ts") is project-relative; tabs and the tree key on absolute paths.
+  path = host.resolvePath(path);
+  if (destPath) destPath = host.resolvePath(destPath);
   try {
     const prefs = readIdePreferences();
     const containing = findContainingRoot(path, host.projectRoots);

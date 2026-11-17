@@ -3,14 +3,14 @@
 
 import { api } from '../../../lib/api/client';
 import { readIdePreferences } from '../../../lib/components/cm-ide-prefs';
-import { confirmer } from '../../../lib/confirm.svelte';
+import { confirmer, type ChoiceOption } from '../../../lib/confirm.svelte';
 import {
   loadNamedIdeProjectsLocal,
   saveNamedIdeProjectsLocal,
   type NamedIdeProject,
 } from '../../../lib/ideProjectsModel';
 import { ideWorkspacePort } from '../../../lib/ideWorkspacePort.svelte';
-import { lsGet, lsSet } from '../../../lib/storage';
+import { lsGet, lsRemove, lsSet } from '../../../lib/storage';
 import { toasts } from '../../../lib/toast.svelte';
 import { loadErrorText } from '../../../lib/loadError';
 import { toastError } from '../../../lib/toastError';
@@ -109,7 +109,8 @@ export async function performCloseAllTabs(
         if (!saveTab) return;
         for (const t of dirty) if (!t.readOnly) await saveTab(t.path);
       },
-      { question: 'Discard changes and close all tabs?', title: 'Close all tabs?', confirmLabel: 'Discard & close all' },
+      saveTab,
+      { question: 'Save them before closing all tabs?', title: 'Close all tabs?', confirmLabel: 'Discard & close all' },
     ));
   if (!discard) return;
   const allPaths = host.tabs.map((t) => t.path);
@@ -120,22 +121,30 @@ export async function performCloseAllTabs(
   host.closeSplit();
 }
 
-/** Flush buffers, autosave (when on) what is dirty, then ask before discarding what is still unsaved. */
+/** Flush buffers, autosave (when on) what is dirty, then ask: Save all, Discard, or Cancel.
+ *  Resolves true when nothing unsaved is left in the way. */
 async function askDiscardDirty(
   host: { tabs: IdeOpenTab[] },
   bufPerf: { flushAll(h: { tabs: IdeOpenTab[] }): void; isTabDirty(t: IdeOpenTab): boolean },
   autosave: (dirty: IdeOpenTab[]) => Promise<void>,
+  saveTab: ((path: string) => Promise<boolean>) | undefined,
   copy: { question: string; title: string; confirmLabel: string },
 ): Promise<boolean> {
   bufPerf.flushAll(host);
-  let dirty = host.tabs.filter((t) => bufPerf.isTabDirty(t));
+  const dirtyNow = () => host.tabs.filter((t) => bufPerf.isTabDirty(t));
+  let dirty = dirtyNow();
   if (dirty.length > 0 && readIdePreferences().autoSave) {
     await autosave(dirty);
-    dirty = host.tabs.filter((t) => bufPerf.isTabDirty(t));
+    dirty = dirtyNow();
   }
   if (dirty.length === 0) return true;
   const what = dirty.length === 1 ? `“${dirty[0].name}” has` : `${dirty.length} tabs have`;
-  return confirmer.ask(`${what} unsaved changes. ${copy.question}`, { title: copy.title, confirmLabel: copy.confirmLabel, danger: true });
+  const options: ChoiceOption[] = [{ label: copy.confirmLabel, value: 'discard', kind: 'danger' }];
+  if (saveTab) options.unshift({ label: 'Save all', value: 'save', kind: 'primary' });
+  const { value } = await confirmer.choose(`${what} unsaved changes. ${copy.question}`, { title: copy.title, options });
+  if (value !== 'save' || !saveTab) return value === 'discard';
+  for (const t of dirtyNow()) if (!t.readOnly) await saveTab(t.path);
+  return dirtyNow().length === 0; // a failed save keeps you where you are
 }
 
 /** A target switch drops every tab: autosave what it can, then ask before
@@ -144,10 +153,11 @@ export function confirmDiscardOnSwitch(
   host: { target: IdeTargetSpec; tabs: IdeOpenTab[] },
   bufPerf: { flushAll(h: { tabs: IdeOpenTab[] }): void; isTabDirty(t: IdeOpenTab): boolean },
   flushAutoSave: () => Promise<void>,
+  saveTab: (path: string) => Promise<boolean>,
 ): Promise<boolean> {
   if (!host.target.root) return Promise.resolve(true);
-  return askDiscardDirty(host, bufPerf, flushAutoSave, {
-    question: 'Discard them and switch?',
+  return askDiscardDirty(host, bufPerf, flushAutoSave, saveTab, {
+    question: 'Save them before switching?',
     title: 'Discard unsaved changes?',
     confirmLabel: 'Discard & switch',
   });
@@ -584,8 +594,27 @@ export function emitIdeProjectsChanged(projects?: IdeNamedProject[], activeProje
   }
 }
 
+/** A local project opened: it is the last root, and no SSH host is reopened on reload. */
 export function saveLastIdeRoot(root: string): void {
-  if (root) ideWorkspacePort.setLastRoot(root);
+  if (!root) return;
+  ideWorkspacePort.setLastRoot(root);
+  saveLastSshTarget(null);
+}
+
+const LAST_SSH_TARGET_KEY = 'otto.ide.lastSshTarget';
+/** The SSH host + folder the IDE was on, so a reload reopens it (null once a local project opens). */
+export interface SavedSshTarget { connection_id: string; root: string; connection_name: string | null }
+export function saveLastSshTarget(t: SavedSshTarget | null): void {
+  if (t) lsSet(LAST_SSH_TARGET_KEY, JSON.stringify(t));
+  else lsRemove(LAST_SSH_TARGET_KEY);
+}
+export function loadLastSshTarget(): SavedSshTarget | null {
+  try {
+    const v = JSON.parse(lsGet(LAST_SSH_TARGET_KEY) || 'null') as SavedSshTarget | null;
+    return v && typeof v.connection_id === 'string' && typeof v.root === 'string' ? v : null;
+  } catch {
+    return null;
+  }
 }
 export function loadActiveProjectIdLocal(): string | null { return lsGet(ACTIVE_PROJECT_KEY) || null; }
 export function saveActiveProjectIdLocal(id: string | null, projects?: IdeNamedProject[], root?: string): void {
@@ -647,6 +676,10 @@ export function detectBuildToolFromState(
   return null;
 }
 
+/** True while the page restores a project's tabs (or opens its first file): the
+ *  stacked layout keeps the pane the person picked instead of following those opens. */
+export const ideTabRestore = { active: false };
+
 export async function restoreWorkspaceTabsOrInitial(host: {
   target: IdeTargetSpec; collabIsGuest: boolean; tabs: IdeOpenTab[]; hasClosedAllTabs: boolean; activePath: string | null;
   treeRootEntries: IdeFsEntry[]; childrenByDir: Record<string, IdeFsEntry[]>;
@@ -654,6 +687,17 @@ export async function restoreWorkspaceTabsOrInitial(host: {
 }): Promise<void> {
   if (host.collabIsGuest || host.tabs.length > 0 || host.hasClosedAllTabs) return;
   if (typeof window !== 'undefined' && /[?&](file|collab)=/.test(window.location.hash)) return;
+  ideTabRestore.active = true;
+  try {
+    await restoreTabs(host);
+  } finally {
+    // After the effects that react to these opens have run.
+    await new Promise((r) => setTimeout(r, 0));
+    ideTabRestore.active = false;
+  }
+}
+
+async function restoreTabs(host: Parameters<typeof restoreWorkspaceTabsOrInitial>[0]): Promise<void> {
   const saved = loadWorkspaceOpenTabs(host.target.root);
   // Stop as soon as the project switches: the rest of the list belongs to the old one.
   const key = ideTargetKey(host.target);

@@ -4,7 +4,7 @@
   import type { PrCommit, PrDetail } from '../../lib/api/types';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { renderMarkdown } from '../../lib/md';
+  import { renderPrMarkdown } from './prMarkdown';
   import { plural } from '../../lib/plural';
   import { rel } from '../../lib/stores/now.svelte';
   import { buildTimeline, type TimelineEvent } from './prTimeline';
@@ -64,8 +64,8 @@
                 {/each}
               </ul>
             {:else if ev.kind === 'comment'}
-              <!-- renderMarkdown escapes input before transforming -->
-              <div class="md-body comment">{@html renderMarkdown(ev.comment.body)}</div>
+              <!-- renderPrMarkdown (lib/md renderMarkdown) escapes input before transforming -->
+              <div class="md-body comment">{@html renderPrMarkdown(ev.comment.body)}</div>
             {/if}
           </div>
         </li>

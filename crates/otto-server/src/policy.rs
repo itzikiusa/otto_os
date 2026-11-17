@@ -1612,7 +1612,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
             // own tokens / shares is a credential administration act.
             || matches!(
                 p,
-                "/workspaces/{id}/self-improvement"
+                "/workspaces/{id}/self-improvement" | "/self-improvement"
                     | "/email-sender"
                     | "/email-sender/verify"
                     | "/notifications/settings"
@@ -1789,6 +1789,8 @@ mod tests {
             (Method::POST, "/api/v1/database-changes/{id}/reject"),
             (Method::POST, "/api/v1/skill-reviews/{id}/apply"),
             (Method::PUT, "/api/v1/workspaces/{id}/self-improvement"),
+            (Method::PUT, "/api/v1/self-improvement"),
+            (Method::POST, "/api/v1/improvement/edits/reject"),
             (Method::PUT, "/api/v1/email-sender"),
             (Method::POST, "/api/v1/email-sender/verify"),
             (Method::PUT, "/api/v1/notifications/settings"),
@@ -2679,6 +2681,18 @@ mod tests {
         assert_eq!(
             pol(Method::GET, "/api/v1/workspaces/{id}/improvement/runs"),
             Require(SelfImprovement, View)
+        );
+        assert_eq!(
+            pol(Method::PUT, "/api/v1/self-improvement"),
+            Require(SelfImprovement, Admin)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/self-improvement"),
+            Require(SelfImprovement, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/improvement/edits/reject"),
+            Require(SelfImprovement, Edit)
         );
     }
 

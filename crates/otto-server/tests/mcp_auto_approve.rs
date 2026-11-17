@@ -2357,3 +2357,53 @@ async fn slack_act_as_me_for_an_agent_always_asks_the_person() {
         "replayed as the person: {env}"
     );
 }
+
+/// T3: the outward "Otto MCP server" switch is for outside MCP clients. An
+/// Otto session's own token still reaches every ENABLED governed tool with
+/// it off (approval still applies); a tool not enabled stays refused, and a
+/// plain (non-session) token is refused by the switch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_token_skips_only_the_outward_switch() {
+    let d = boot().await;
+    let (st, body) = d
+        .send(
+            "PATCH",
+            &d.human.clone(),
+            "/mcp/otto-server",
+            Some(json!({"enabled": false})),
+        )
+        .await;
+    assert_eq!(st, 200, "disable outward: {body}");
+
+    let env = d.agent_invoke("list_repos", json!({})).await;
+    assert_ne!(env["decision"], "denied", "{env}");
+    let env = d.agent_invoke("create_pr", pr_args()).await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    let env = d.agent_invoke("get_issue", json!({"key": "X-1"})).await;
+    assert_eq!(env["decision"], "denied", "{env}");
+    assert!(
+        env["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not enabled"),
+        "{env}"
+    );
+
+    let (st, env) = d
+        .send(
+            "POST",
+            &d.human.clone(),
+            "/mcp/otto-tools/invoke",
+            Some(json!({"tool": "otto.list_repos", "arguments": {}})),
+        )
+        .await;
+    assert_eq!(st, 200, "{env}");
+    assert_eq!(env["decision"], "denied", "{env}");
+    assert!(
+        env["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("server is disabled"),
+        "{env}"
+    );
+}

@@ -56,10 +56,10 @@ fn internal_reviewer_scope_does_not_depend_on_outward_server_toggle() {
     ));
 }
 
-/// Q1: a UI-control tool called from an Otto session skips the outward
-/// master switch — but never the per-tool enable.
+/// Q1 / T3: any tool called from an Otto session (UI control, request_secret,
+/// …) skips the outward master switch — but never the per-tool enable.
 #[test]
-fn ui_tools_from_a_session_skip_only_the_master_switch() {
+fn tools_from_a_session_skip_only_the_master_switch() {
     let on = vec!["ui_db_run_query".to_string()];
     assert!(mcp_tool_enabled_for_token(
         false,

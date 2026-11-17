@@ -25,6 +25,7 @@
   import { formatBytes, formatSeconds } from '../../lib/metric-format';
   import { parseSetCookies } from '../../lib/api/apiVars';
   import { authedBlobUrl } from '../../lib/api/client';
+  import { reindentJson } from '../../lib/jsonReindent';
 
   interface Props {
     compact?: boolean;
@@ -121,10 +122,8 @@
   const prettyBody = $derived.by(() => {
     if (!resp) return '';
     if (resp.body.length > PRETTY_SIZE_LIMIT) return resp.body;
-    if (parsed !== undefined) {
-      try { return JSON.stringify(parsed, null, 2); } catch { /* fall through */ }
-    }
-    return resp.body;
+    // Valid JSON: re-indent the text, so big ints and `1.10` read as sent.
+    return parsed !== undefined ? reindentJson(resp.body) : resp.body;
   });
   const displayBody = $derived.by(() => {
     if (!resp) return '';

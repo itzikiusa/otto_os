@@ -106,19 +106,33 @@ pub(super) async fn resolve_js_ts_adapter(
     }
 
     let mut node_flags = Vec::new();
+    let mut program = program;
+    let mut args = req.launch.args.clone();
+    let mut cwd = cwd.to_string();
+    if let Some(tname) = req.launch.test_name.as_deref().filter(|s| !s.is_empty()) {
+        let pattern = regex::escape(tname);
+        let runner = (req.target.kind == IdeTargetKind::Local)
+            .then(|| js_runner_debug_launch(&program, &pattern))
+            .flatten();
+        match runner {
+            Some((entry, runner_args, pkg_dir)) => {
+                (program, args, cwd) = (entry, runner_args, pkg_dir)
+            }
+            None => {
+                node_flags.push("--test".into());
+                node_flags.push(format!("--test-name-pattern={pattern}"));
+            }
+        }
+    }
     let is_ts = program.ends_with(".ts") || program.ends_with(".mts") || program.ends_with(".cts");
     if is_ts {
-        let local_tsx = Path::new(cwd).join("node_modules/.bin/tsx");
+        let local_tsx = Path::new(&cwd).join("node_modules/.bin/tsx");
         if req.target.kind == IdeTargetKind::Local && local_tsx.is_file() {
             node_flags.push("--import".into());
             node_flags.push("tsx".into());
         } else {
             node_flags.push("--experimental-strip-types".into());
         }
-    }
-    if let Some(tname) = req.launch.test_name.as_deref().filter(|s| !s.is_empty()) {
-        node_flags.push("--test".into());
-        node_flags.push(format!("--test-name-pattern={}", regex::escape(tname)));
     }
 
     Ok(ResolvedDapAdapter {
@@ -128,8 +142,8 @@ pub(super) async fn resolve_js_ts_adapter(
             node_bin,
             node_flags,
             program: program.clone(),
-            args: req.launch.args.clone(),
-            cwd: cwd.to_string(),
+            args,
+            cwd: cwd.clone(),
             env,
             attach_port: req.launch.attach_port,
         }),
@@ -145,9 +159,59 @@ pub(super) async fn resolve_js_ts_adapter(
             "launch".into()
         },
         launch_args: json!({ "program": program, "cwd": cwd }),
-        normalized_cwd: cwd.to_string(),
+        normalized_cwd: cwd,
         initial_output: Vec::new(),
     })
+}
+
+/// Debug a Jest/Vitest test through its runner's own entry from the package root, as
+/// `(program, args, cwd)`; a `node:test` file (or no runner installed) keeps `node --test`.
+fn js_runner_debug_launch(file: &str, pattern: &str) -> Option<(String, Vec<String>, String)> {
+    if std::fs::read_to_string(file).ok()?.contains("node:test") {
+        return None;
+    }
+    let pkg = crate::gutter::js_test_package(file)?;
+    let rel = Path::new(file)
+        .strip_prefix(&pkg.dir)
+        .ok()?
+        .to_string_lossy()
+        .into_owned();
+    let entry = if pkg.jest {
+        "node_modules/jest/bin/jest.js"
+    } else {
+        "node_modules/vitest/vitest.mjs"
+    };
+    // A hoisted workspace keeps the runner in an ancestor's node_modules.
+    let entry = pkg
+        .dir
+        .ancestors()
+        .map(|d| d.join(entry))
+        .find(|p| p.is_file())?;
+    let args = if pkg.jest {
+        // Jest runs the tests in this process, under the bridge's inspector.
+        vec!["--runInBand".into(), rel, "-t".into(), pattern.into()]
+    } else {
+        // Vitest runs them in a worker: its own `--inspect-brk` opens the inspector there (it
+        // treats port 0 as "default 9229", so pick a free one).
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .ok()?
+            .local_addr()
+            .ok()?
+            .port();
+        vec![
+            "run".into(),
+            rel,
+            "-t".into(),
+            pattern.into(),
+            "--no-file-parallelism".into(),
+            format!("--inspect-brk=127.0.0.1:{port}"),
+        ]
+    };
+    Some((
+        entry.to_string_lossy().into_owned(),
+        args,
+        pkg.dir.to_string_lossy().into_owned(),
+    ))
 }
 
 pub(super) async fn resolve_java_adapter(
@@ -240,6 +304,7 @@ pub(super) async fn resolve_java_adapter(
         }
     }
 
+    let mut java_args = req.launch.args.clone();
     let (classpath, main_class) = if req.launch.attach_port.is_some() {
         (cwd.to_string(), String::new())
     } else if req.target.kind == IdeTargetKind::Local {
@@ -269,7 +334,17 @@ pub(super) async fn resolve_java_adapter(
             .launch
             .test_name
             .as_deref()
-            .is_some_and(|s| !s.is_empty());
+            .is_some_and(|s| !s.trim().is_empty());
+        // A test selector (`com.acme.CalcTest#adds`) runs through a JUnit launcher,
+        // unless the class is an app with its own `main` (the gutter's main item also
+        // names its class as the filter).
+        let has_main =
+            std::fs::read_to_string(&program).is_ok_and(|src| src.contains("static void main("));
+        let test_selector = req
+            .launch
+            .test_name
+            .clone()
+            .filter(|_| include_tests && !has_main);
         let mut cwd_hash: u64 = 0xcbf29ce484222325;
         for b in cwd.as_bytes() {
             cwd_hash ^= u64::from(*b);
@@ -282,8 +357,8 @@ pub(super) async fn resolve_java_adapter(
         // A Stop that cancels this debug start drops the guard, which kills javac.
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let _cancel_on_drop = crate::proc_group::CancelOnDrop(std::sync::Arc::clone(&cancel));
-        let plan = tokio::task::spawn_blocking(move || {
-            crate::java_workspace::prepare_java_execution_cancellable(
+        let (plan, launcher_args) = tokio::task::spawn_blocking(move || {
+            let mut plan = crate::java_workspace::prepare_java_execution_cancellable(
                 &target_path,
                 explicit_main.as_deref(),
                 include_tests,
@@ -292,10 +367,20 @@ pub(super) async fn resolve_java_adapter(
                 &javac_bin,
                 &out_base,
                 cancel,
-            )
+            )?;
+            let args = match &test_selector {
+                Some(sel) => crate::java_workspace::test_launcher::use_junit_launcher(
+                    &mut plan, sel, &javac_bin, &out_base, &env_clone,
+                )?,
+                None => Vec::new(),
+            };
+            Ok::<_, Error>((plan, args))
         })
         .await
         .map_err(|e| Error::Internal(format!("java debug build task failed: {e}")))??;
+        if !launcher_args.is_empty() {
+            java_args = launcher_args;
+        }
 
         for sr in &plan.source_roots {
             let s = sr.to_string_lossy().into_owned();
@@ -394,7 +479,7 @@ pub(super) async fn resolve_java_adapter(
             jvm_flags,
             classpath,
             main_class: main_class.clone(),
-            args: req.launch.args.clone(),
+            args: java_args,
             cwd: cwd.to_string(),
             env,
             attach_port: req.launch.attach_port,
@@ -429,7 +514,9 @@ fn resolve_java_source_or_fqcn(target: &IdeTargetSpec, raw_prog: &str, cwd: &str
         return normalize_target_path(target, &in_cwd.to_string_lossy());
     }
     let rel_java = format!("{}.java", raw_prog.replace('.', "/"));
-    for root in std::iter::once(target.root.as_str())
+    // `cwd` is the Maven module a test runs from: its own sources come first.
+    for root in [cwd, target.root.as_str()]
+        .into_iter()
         .chain(target.additional_roots.iter().map(String::as_str))
     {
         for root_sub in ["src/main/java", "src/test/java", "src", "."] {
@@ -439,7 +526,12 @@ fn resolve_java_source_or_fqcn(target: &IdeTargetSpec, raw_prog: &str, cwd: &str
             }
         }
     }
-    norm
+    // A class name no source matched stays a class name, not a path under the root.
+    if raw_prog.contains('/') {
+        norm
+    } else {
+        raw_prog.to_string()
+    }
 }
 
 pub(crate) fn infer_java_source_root(java_file: &str, fallback: &str) -> String {
@@ -459,6 +551,73 @@ pub(crate) fn infer_java_source_root(java_file: &str, fallback: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn java_class_name_resolves_inside_the_module_it_runs_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let module = root.join("legacy");
+        let src = module.join("src/test/java/com/acme/legacy/OldTest.java");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, "package com.acme.legacy;\n").unwrap();
+        let target = IdeTargetSpec {
+            root: root.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let cwd = module.to_string_lossy();
+        assert_eq!(
+            resolve_java_source_or_fqcn(&target, "com.acme.legacy.OldTest", &cwd),
+            src.to_string_lossy()
+        );
+        // An unknown class stays a class name, not a path under the root.
+        assert_eq!(
+            resolve_java_source_or_fqcn(&target, "com.acme.Missing", &cwd),
+            "com.acme.Missing"
+        );
+    }
+
+    #[test]
+    fn js_test_debug_launches_the_packages_runner_not_node_test() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let pkg = root.join("apps/web");
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        // A hoisted workspace: the runner lives in the root node_modules.
+        std::fs::create_dir_all(root.join("node_modules/vitest")).unwrap();
+        std::fs::write(root.join("node_modules/vitest/vitest.mjs"), "").unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"devDependencies":{"vitest":"^3"}}"#,
+        )
+        .unwrap();
+        let file = pkg.join("src/a.test.ts");
+        std::fs::write(&file, "import { it } from 'vitest';\n").unwrap();
+
+        let (program, args, cwd) =
+            js_runner_debug_launch(&file.to_string_lossy(), r"a \(b\)").unwrap();
+        assert_eq!(
+            program,
+            root.join("node_modules/vitest/vitest.mjs")
+                .to_string_lossy()
+        );
+        assert_eq!(cwd, pkg.to_string_lossy());
+        assert_eq!(
+            args[..5],
+            [
+                "run",
+                "src/a.test.ts",
+                "-t",
+                r"a \(b\)",
+                "--no-file-parallelism"
+            ]
+        );
+        assert!(args[5].starts_with("--inspect-brk=127.0.0.1:"));
+        assert!(!args.iter().any(|a| a == "--test"));
+
+        // A node:test file keeps `node --test`.
+        std::fs::write(&file, "import test from 'node:test';\n").unwrap();
+        assert!(js_runner_debug_launch(&file.to_string_lossy(), "x").is_none());
+    }
 
     #[test]
     fn infers_maven_gradle_java_source_roots() {

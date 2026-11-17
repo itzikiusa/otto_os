@@ -152,3 +152,25 @@ export function extractWhereBody(sql: string): string | null {
   return parts && parts.whereBody ? parts.whereBody : null;
 }
 
+
+/** A short, human label for a query tab: the user's name, else the table
+ *  after FROM/INTO/UPDATE/JOIN (with a non-SELECT verb), else a Mongo
+ *  `db.<collection>`, else a leading keyword, else "Query N". */
+export function tabLabel(t: { name?: string | null; statement: string }, index: number): string {
+  if (t.name && t.name !== 'Query') return t.name;
+  // The head of the buffer is enough for a label — never regex-scan a pasted
+  // 150 KB script on every keystroke.
+  const sql = t.statement.slice(0, 2048).trim();
+  if (!sql) return `Query ${index + 1}`;
+  const from = sql.match(/\b(?:from|into|update|join)\s+`?([\w.$]+)`?/i);
+  if (from) {
+    const obj = from[1].split('.').pop() ?? from[1];
+    const verb = sql.match(/^\s*(\w+)/)?.[1]?.toUpperCase() ?? '';
+    return verb && verb !== 'SELECT' ? `${verb} ${obj}` : obj;
+  }
+  const coll = sql.match(/^db\.([\w$]+)\.\w+\s*\(/)?.[1];
+  if (coll) return coll;
+  const verb = sql.match(/^\s*(\w+)/)?.[1];
+  if (verb) return verb.length > 18 ? `${verb.slice(0, 18)}…` : verb;
+  return `Query ${index + 1}`;
+}

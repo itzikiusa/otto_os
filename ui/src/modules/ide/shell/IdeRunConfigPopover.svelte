@@ -4,7 +4,7 @@
   import { placeAnchored, type AnchorPlacement } from '../../../lib/anchorPlace';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { ide, ideBasename, type IdeRunConfig } from '../ideStore.svelte';
+  import { GUTTER_TARGET_ID, ide, ideBasename, type IdeRunConfig } from '../ideStore.svelte';
   import {
     CURRENT_FILE_CONFIG_ID, currentFileRunnable, orderDetectedForLanguage, saveLaunchMemory,
   } from '../store/ideLaunchTarget';
@@ -37,7 +37,7 @@
   });
 
   const currentFile = $derived(currentFileRunnable(ide.activeTab));
-  const currentFileActive = $derived(!selectedConfig);
+  const currentFileActive = $derived(!selectedConfig && ide.selectedConfigId !== GUTTER_TARGET_ID);
 
   const repoSuites = $derived.by(() => {
     const roots =
@@ -99,7 +99,7 @@
 
   function selectTarget(id: string): void {
     ide.selectedConfigId = id;
-    saveLaunchMemory(ide.target, { selected: id });
+    if (id !== GUTTER_TARGET_ID) saveLaunchMemory(ide.target, { selected: id });
     closePopover(true);
   }
 </script>
@@ -148,6 +148,16 @@
       </span>
       {#if !currentFile.ok}<span class="run-item-why">{currentFile.reason}</span>{/if}
     </button>
+
+    {#if ide.envState.gutterTarget}
+      {@const item = ide.envState.gutterTarget}
+      {@const active = ide.selectedConfigId === GUTTER_TARGET_ID}
+      <div class="run-sec">From the editor</div>
+      <button type="button" class="run-item" class:is-active={active} aria-current={active ? 'true' : undefined} onclick={() => selectTarget(GUTTER_TARGET_ID)} data-testid="ide-run-gutter-target">
+        <span class="run-item-name" dir="ltr">{item.label.replace(/^Run /, '')}</span>
+        <Badge tone="neutral" variant="outline" label={ideBasename(item.run_spec.target_path || item.run_spec.cwd || '')} />
+      </button>
+    {/if}
 
     {#if savedConfigs.length > 0}
       <div class="run-sec">Saved configurations</div>

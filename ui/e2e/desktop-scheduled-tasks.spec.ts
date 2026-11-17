@@ -347,6 +347,18 @@ test.describe('scheduled tasks UI', () => {
     await expect(page.getByText('Sandbox', { exact: true })).toBeVisible();
   });
 
+  test('a too-short interval: the first Create click saves, says why and focuses the field (A10)', async ({ page }) => {
+    await openPage(page, 'scheduled-tasks');
+    await page.getByRole('button', { name: 'New task' }).click();
+    await page.getByPlaceholder('Nightly ticket review').fill('E2E short interval');
+    await page.locator('#sched-every').fill('2');
+    // One click straight from the field: the hint used to appear on blur and
+    // push the button down between mousedown and mouseup, losing the click.
+    await page.getByRole('button', { name: 'Create task' }).click();
+    await expect(page.locator('#sched-every-err')).toHaveText('The shortest interval is 5 minutes');
+    await expect(page.locator('#sched-every')).toBeFocused();
+  });
+
   test('create form: "Custom…" provider reveals a slug input and persists it', async ({ page }) => {
     await openPage(page, 'scheduled-tasks');
     await page.getByRole('button', { name: 'New task' }).click();

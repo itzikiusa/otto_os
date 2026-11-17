@@ -1159,6 +1159,9 @@ async fn finalize(
         Ok(()) => status,
         Err(_) => stored_status(ctx, loop_id).await.unwrap_or(loop_.status),
     };
+    if stored == GoalLoopStatus::Stopped {
+        close_open_iterations(ctx, loop_id).await;
+    }
     emit(
         ctx,
         &loop_.workspace_id,
@@ -1253,6 +1256,9 @@ async fn release_honouring_stop(ctx: &impl AutomationCtx, loop_id: &Id, handle: 
     let operation = ctx.goal_loops().operation(loop_id);
     let _guard = operation.lock().await;
     let was_current = deregister(ctx, loop_id, handle);
+    if handle.paused.load(Ordering::Relaxed) {
+        close_open_iterations(ctx, loop_id).await;
+    }
     if stop_landed_while_registered(was_current, handle) {
         let _ = finalize(
             ctx,
@@ -1263,6 +1269,14 @@ async fn release_honouring_stop(ctx: &impl AutomationCtx, loop_id: &Id, handle: 
         )
         .await;
     }
+}
+
+/// A pause or stop ends the iteration in flight: it reads Stopped, never
+/// Executing forever. Only called with no live controller for the loop (a
+/// Resume waits for the operation lock / an idle registry).
+async fn close_open_iterations(ctx: &impl AutomationCtx, loop_id: &Id) {
+    let closed = ctx.goal_loops_repo().stop_open_iterations(loop_id).await;
+    warn_on_err(loop_id, "stop_open_iterations", closed);
 }
 
 /// [`release_honouring_stop`]'s decision (pure).

@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use super::runner_java::GRADLE_BUILD_FILES;
 use super::{csv_list, resolve_program_in_env};
 use crate::toolchains::is_executable_file;
 use crate::types::{IdeRunConfig, IdeRunnerKind, IdeTargetKind};
@@ -110,6 +111,22 @@ pub(super) fn build_pytest_cmd(
     }
 }
 
+/// `flags`, the config's script, then its program arguments. Configs saved
+/// before the script moved out of `args` still start with it: never pass it twice.
+fn script_then_args(cfg: &IdeRunConfig, flags: Vec<String>, args: Vec<String>) -> Vec<String> {
+    let mut out = flags;
+    // Already named (a gutter `npx jest calc.test.js`): not passed twice.
+    let named = |tp: &String| {
+        args.iter()
+            .any(|a| a == tp || (!a.is_empty() && std::path::Path::new(tp).ends_with(a)))
+    };
+    if let Some(tp) = cfg.target_path.as_ref().filter(|tp| !named(tp)) {
+        out.push(tp.clone());
+    }
+    out.extend(args);
+    out
+}
+
 pub(super) fn build_script_cmd(
     cfg: &IdeRunConfig,
     env_map: &BTreeMap<String, String>,
@@ -126,15 +143,7 @@ pub(super) fn build_script_cmd(
         "node".into()
     };
     let prog = cmd_opt.map(str::to_string).unwrap_or(default_prog);
-    let mut out = build_flags;
-    if args.is_empty() {
-        if let Some(tp) = &cfg.target_path {
-            out.push(tp.clone());
-        }
-    } else {
-        out.extend(args);
-    }
-    (prog, out)
+    (prog, script_then_args(cfg, build_flags, args))
 }
 
 pub(super) fn build_npm_cmd(
@@ -175,11 +184,18 @@ pub(super) fn build_vitest_cmd(
     build_flags: Vec<String>,
 ) -> (String, Vec<String>) {
     let prog = cmd_opt.unwrap_or("npx").to_string();
-    if args.first().map(String::as_str) != Some("vitest") {
+    // `npx --no-install vitest …` (a gutter item) is already a full command line.
+    if !args.iter().take(2).any(|a| a == "vitest") {
         let mut v = vec!["vitest".into(), "run".into()];
         v.extend(build_flags);
         v.extend(args);
         args = v;
+    }
+    // Vitest's default reporter prints no per-test lines (nor console output)
+    // without a TTY, so the run had no results and a filtered run read as "No
+    // tests matched". The verbose reporter lists every test.
+    if !args.iter().any(|a| a.starts_with("--reporter")) {
+        args.push("--reporter=verbose".into());
     }
     if cfg.coverage
         && !args
@@ -235,8 +251,10 @@ pub(super) fn build_maven_cmd(
         args.push("test".into());
     }
     args.extend(build_flags);
+    let pom = read_local_manifest_head(target_kind, cwd, "pom.xml");
     if cfg.coverage
-        && read_local_manifest_head(target_kind, cwd, "pom.xml")
+        && pom
+            .as_deref()
             .is_some_and(|s| s.to_ascii_lowercase().contains("jacoco"))
     {
         if !args.iter().any(|a| a.starts_with("-Djacoco.skip=")) {
@@ -263,6 +281,10 @@ pub(super) fn build_maven_cmd(
     }
     if let Some(f) = filter {
         args.push(format!("-Dtest={f}"));
+        // From a reactor root, modules without the test must not fail the build.
+        if pom.as_deref().is_some_and(|s| s.contains("<modules>")) {
+            args.push("-Dsurefire.failIfNoSpecifiedTests=false".into());
+        }
     }
     if let Some(explicit) = cmd_opt {
         return (explicit.to_string(), args);
@@ -276,13 +298,8 @@ pub(super) fn build_maven_cmd(
         sh_args.extend(args);
         return ("sh".into(), sh_args);
     }
-    let mvnw = Path::new(cwd).join("mvnw");
-    let prog = if is_executable_file(&mvnw) {
-        "./mvnw"
-    } else {
-        "mvn"
-    };
-    (prog.into(), args)
+    let prog = find_build_wrapper(cwd, "mvnw", &["pom.xml"]).unwrap_or_else(|| "mvn".into());
+    (prog, args)
 }
 
 pub(super) fn build_gradle_cmd(
@@ -322,7 +339,14 @@ pub(super) fn build_gradle_cmd(
         args.push("--offline".into());
     }
     if let Some(f) = filter {
-        args.extend(["--tests".into(), f.to_string()]);
+        // Gradle selects a method as `Class.method`, not JUnit/Surefire's `Class#method`. A
+        // bare method name (a plugin item) matches nothing on its own, so match it in any class.
+        let f = f.replace('#', ".");
+        let bare_method = !f.contains(['.', '*']) && f.starts_with(|c: char| !c.is_uppercase());
+        args.extend([
+            "--tests".into(),
+            if bare_method { format!("*.{f}") } else { f },
+        ]);
     }
     if let Some(explicit) = cmd_opt {
         return (explicit.to_string(), args);
@@ -336,13 +360,29 @@ pub(super) fn build_gradle_cmd(
         sh_args.extend(args);
         return ("sh".into(), sh_args);
     }
-    let gradlew = Path::new(cwd).join("gradlew");
-    let prog = if is_executable_file(&gradlew) {
-        "./gradlew"
-    } else {
-        "gradle"
-    };
-    (prog.into(), args)
+    let prog =
+        find_build_wrapper(cwd, "gradlew", &GRADLE_BUILD_FILES).unwrap_or_else(|| "gradle".into());
+    (prog, args)
+}
+
+/// The build wrapper lives at the top of a multi-module build, above the module the build
+/// runs in: look in `cwd`, then up while the parent still belongs to the build.
+pub(crate) fn find_build_wrapper(cwd: &str, wrapper: &str, build_files: &[&str]) -> Option<String> {
+    let mut dir = Path::new(cwd);
+    loop {
+        let candidate = dir.join(wrapper);
+        if is_executable_file(&candidate) {
+            return Some(if dir == Path::new(cwd) {
+                format!("./{wrapper}")
+            } else {
+                candidate.to_string_lossy().into_owned()
+            });
+        }
+        dir = dir.parent()?;
+        if !build_files.iter().any(|f| dir.join(f).is_file()) {
+            return None;
+        }
+    }
 }
 
 pub(super) fn build_shell_cmd(
@@ -358,15 +398,7 @@ pub(super) fn build_shell_cmd(
     let prog = cmd_opt
         .unwrap_or(if is_bats { "bats" } else { "bash" })
         .to_string();
-    let mut out = build_flags;
-    if args.is_empty() {
-        if let Some(tp) = &cfg.target_path {
-            out.push(tp.clone());
-        }
-    } else {
-        out.extend(args);
-    }
-    (prog, out)
+    (prog, script_then_args(cfg, build_flags, args))
 }
 
 pub(super) fn build_custom_cmd(

@@ -106,7 +106,7 @@ test('a 3-row SQL review whose 2nd statement fails runs in one transaction: noth
   assert.match(h.flow.reviewError ?? '', /UPDATE … id = 2/);
   assert.match(h.flow.reviewError ?? '', /rolled back/);
   assert.equal(h.reruns.length, 0);
-  assert.deepEqual(h.toasts, ['error:The write stopped partway']);
+  assert.deepEqual(h.toasts, ['error:Nothing was written'], 'a rolled-back batch did not stop partway');
 });
 
 test('a Mongo review that fails partway clears only the drafts whose statements completed', async () => {

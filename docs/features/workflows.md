@@ -989,7 +989,10 @@ to create a workflow; the center is the canvas editor.
   bespoke form yet — including `prepare_context` as of this writing — fall back
   to a **raw-JSON params editor**.
 - **Save**: edits set an "unsaved" badge; **Save** (`PATCH /workflows/{id}` with
-  the new `graph`) persists. Running while dirty auto-saves first.
+  the new `graph` and the `expected_version` the editor loaded) persists. If the
+  workflow was saved elsewhere meanwhile the daemon answers 409 and the editor
+  asks **Reload theirs** or **Overwrite with mine**. Running while dirty
+  auto-saves first.
 - **Instructions**: a separate top-bar toggle opens the collapsible standing-
   instructions panel (its own "unsaved" badge + **Save**, independent of the
   graph editor) — see *Standing instructions* in §3.
