@@ -250,6 +250,17 @@ pub fn resolve_lsp_module_root_with_markers(
         return Ok(expanded_str.trim_end_matches('/').to_string());
     }
     let canon_root = std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
+    // The module root in the caller's spelling (`/tmp/x`, not `/private/tmp/x`): the
+    // server's rootUri must match the document URIs, or gopls calls every file
+    // "not included in your workspace".
+    let spell = |p: &Path| -> String {
+        let p = match p.strip_prefix(&canon_root) {
+            Ok(rel) if rel.as_os_str().is_empty() => root_path.to_path_buf(),
+            Ok(rel) => root_path.join(rel),
+            Err(_) => p.to_path_buf(),
+        };
+        p.to_string_lossy().trim_end_matches('/').to_string()
+    };
     let start_dir = if let Some(hint) = file_hint.map(str::trim).filter(|s| !s.is_empty()) {
         let hp = PathBuf::from(otto_core::paths::expand_tilde(hint));
         let full = if hp.is_absolute() {
@@ -314,7 +325,7 @@ pub fn resolve_lsp_module_root_with_markers(
             }
             if dir_has_any_manifest(cur, manifests, extra_markers) {
                 let top = climb_to_build_root(norm_lang, cur, &within_allowed);
-                return Ok(top.to_string_lossy().into_owned());
+                return Ok(spell(&top));
             }
             let Some(parent) = cur.parent() else {
                 break;
@@ -333,7 +344,7 @@ pub fn resolve_lsp_module_root_with_markers(
                 break;
             }
             if cur.join(".git").exists() {
-                return Ok(cur.to_string_lossy().into_owned());
+                return Ok(spell(cur));
             }
             let Some(parent) = cur.parent() else {
                 break;
@@ -348,7 +359,7 @@ pub fn resolve_lsp_module_root_with_markers(
         && within_allowed(&canon_root)
         && !is_multi_repo_umbrella_dir(&canon_root)
     {
-        return Ok(canon_root.to_string_lossy().into_owned());
+        return Ok(spell(&canon_root));
     }
 
     if !dir_has_any_manifest(&start_dir, manifests, extra_markers)
@@ -360,7 +371,7 @@ pub fn resolve_lsp_module_root_with_markers(
         ));
     }
 
-    Ok(start_dir.to_string_lossy().into_owned())
+    Ok(spell(&start_dir))
 }
 
 #[cfg(test)]
@@ -412,7 +423,6 @@ mod tests {
             std::fs::write(d.join("go.mod"), "module m\n").unwrap();
         }
         std::fs::write(dep.join("map.go"), "package ttlmap\n").unwrap();
-        let ws_canon = std::fs::canonicalize(&ws).unwrap();
         let root = resolve_lsp_module_root(
             "go",
             &ws.to_string_lossy(),
@@ -420,7 +430,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(root, ws_canon.to_string_lossy());
+        assert_eq!(root, ws.to_string_lossy());
         // A file of the workspace itself still roots at its own module.
         std::fs::create_dir_all(ws.join("sub")).unwrap();
         std::fs::write(ws.join("sub/go.mod"), "module s\n").unwrap();
@@ -431,7 +441,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(sub, ws_canon.join("sub").to_string_lossy());
+        assert_eq!(sub, ws.join("sub").to_string_lossy());
     }
 
     #[test]
@@ -511,7 +521,6 @@ mod tests {
         let ws = tmp.path().join("cue-workspace");
         let nested = ws.join("pkg/policy/sub");
         std::fs::create_dir_all(&nested).unwrap();
-        let canon_ws = std::fs::canonicalize(&ws).unwrap();
         let scoped = resolve_lsp_module_root(
             "cue",
             &ws.to_string_lossy(),
@@ -519,7 +528,28 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(PathBuf::from(scoped), canon_ws);
+        assert_eq!(PathBuf::from(scoped), ws);
+    }
+
+    #[test]
+    fn module_root_keeps_the_callers_spelling_of_a_symlinked_root() {
+        // `/tmp/x` is `/private/tmp/x` on macOS: the server's root must use the
+        // spelling of the document URIs or gopls says "not in your workspace".
+        let tmp = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(tmp.path()).unwrap().join("real");
+        std::fs::create_dir_all(real.join("goapp/pkg")).unwrap();
+        std::fs::write(real.join("goapp/go.mod"), "module example.com/a\n").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let file = link.join("goapp/pkg/a.go");
+        let root = resolve_lsp_module_root(
+            "go",
+            &link.to_string_lossy(),
+            Some(&file.to_string_lossy()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(PathBuf::from(root), link.join("goapp"));
     }
 
     #[test]
