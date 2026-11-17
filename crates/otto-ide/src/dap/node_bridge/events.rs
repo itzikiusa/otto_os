@@ -142,6 +142,14 @@ pub(super) async fn handle_node_cdp_msg<W: AsyncWrite + Unpin>(
                 )
                 .await?;
         }
+        // Node drops a `runIfWaitingForDebugger` dispatched before its main thread
+        // enters `waitForFrontend` (the connect races Node's startup; under load the
+        // window is wide), then waits forever. This event marks that wait: release it.
+        "NodeRuntime.waitingForDebugger" if st.config_done => {
+            let cid = st.alloc_cdp();
+            ws.send_json(&json!({ "id": cid, "method": "Runtime.runIfWaitingForDebugger" }))
+                .await?;
+        }
         "Inspector.detached"
         | "Runtime.executionContextDestroyed"
         | "Runtime.executionContextsCleared" => {
