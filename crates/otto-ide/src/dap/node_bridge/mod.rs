@@ -9,6 +9,8 @@
 
 mod cdp;
 mod events;
+#[cfg(test)]
+mod tests;
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -75,6 +77,8 @@ pub(super) struct NodeBridgeState {
     pub(super) bp_ids_by_file: HashMap<String, Vec<String>>,
     pub(super) user_bp_lines: HashMap<String, Vec<u32>>,
     pub(super) initial_brk_skipped: bool,
+    /// `configurationDone` arrived, so the debuggee may run.
+    pub(super) config_done: bool,
     pub(super) frames: Vec<Value>,
     pub(super) obj_refs: HashMap<i64, String>,
     pub(super) next_var_ref: i64,
@@ -89,6 +93,7 @@ impl NodeBridgeState {
             bp_ids_by_file: HashMap::new(),
             user_bp_lines: HashMap::new(),
             initial_brk_skipped: false,
+            config_done: false,
             frames: Vec::new(),
             obj_refs: HashMap::new(),
             next_var_ref: 1000,
@@ -334,6 +339,11 @@ async fn handle_node_dap_req<W: AsyncWrite + Unpin>(
             let id2 = st.alloc_cdp();
             ws.send_json(&json!({ "id": id2, "method": "Debugger.enable" }))
                 .await?;
+            // Announces `NodeRuntime.waitingForDebugger` once Node's main thread really
+            // waits (see `events.rs`).
+            let id3 = st.alloc_cdp();
+            ws.send_json(&json!({ "id": id3, "method": "NodeRuntime.enable" }))
+                .await?;
             dap_w
                 .send_response(req.seq, &req.command, Ok(Some(json!({}))))
                 .await?;
@@ -365,6 +375,7 @@ async fn handle_node_dap_req<W: AsyncWrite + Unpin>(
                 .await?;
         }
         "configurationDone" => {
+            st.config_done = true;
             let cid = st.alloc_cdp();
             ws.send_json(&json!({ "id": cid, "method": "Runtime.runIfWaitingForDebugger" }))
                 .await?;
