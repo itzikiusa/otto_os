@@ -13,6 +13,7 @@ import {
   creditsText,
   formatSpan,
   isStale,
+  limitReachedShown,
   planLabel,
   providerName,
   resetText,
@@ -76,6 +77,16 @@ test('staleness: the server verdict, or the clock since the page loaded', () => 
   assert.equal(isStale({ status: 'ok', taken_at: iso(NOW - 10 * MIN) }, 1800, NOW), false);
   assert.equal(isStale({ status: 'ok', taken_at: iso(NOW - 31 * MIN) }, 1800, NOW), true);
   assert.equal(isStale({ status: 'unknown', taken_at: null }, 1800, NOW), false);
+});
+
+test('limit reached: on a fresh reading, or an old one while a used-up window holds', () => {
+  const usedUp = win({ id: 'usage_limit', used_percent: 100, left_percent: 0, resets_at: iso(NOW + 20 * HOUR) });
+  assert.equal(limitReachedShown({ limit_reached: null, windows: [usedUp] }, false, NOW), false);
+  assert.equal(limitReachedShown({ limit_reached: 'usage_limit_exceeded', windows: [win()] }, false, NOW), true);
+  assert.equal(limitReachedShown({ limit_reached: 'usage_limit_exceeded', windows: [win(), usedUp] }, true, NOW), true);
+  assert.equal(limitReachedShown({ limit_reached: 'usage_limit_exceeded', windows: [win()] }, true, NOW), false);
+  // Once the reset passes the old reading proves nothing.
+  assert.equal(limitReachedShown({ limit_reached: 'usage_limit_exceeded', windows: [usedUp] }, true, NOW + 21 * HOUR), false);
 });
 
 test('age, tone, plan, provider and credits labels', () => {

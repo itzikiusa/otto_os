@@ -60,6 +60,13 @@ export function windowReset(w: WindowLimit, now: number): boolean {
   return at !== null && at <= now;
 }
 
+/** Show "Limit reached": on a fresh reading, or on an old one while a used-up
+ *  window has not reset yet (usage only grows until then, so it still holds). */
+export function limitReachedShown(a: Pick<AccountLimits, 'limit_reached' | 'windows'>, stale: boolean, now: number): boolean {
+  if (!a.limit_reached) return false;
+  return !stale || a.windows.some((w) => w.left_percent === 0 && ms(w.resets_at) !== null && !windowReset(w, now));
+}
+
 /** The percent line for one window. */
 export function windowText(w: WindowLimit, stale: boolean, takenAt: string | null, now: number): string {
   if (windowReset(w, now) || w.left_percent === null) {

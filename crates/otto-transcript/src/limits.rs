@@ -15,12 +15,16 @@
 //! CLIs wrote `resets_in_seconds` (relative to the line) or an RFC 3339
 //! `resets_at`; both are read. An API-key login writes `"rate_limits":null`,
 //! which [`parse_codex_rate_limits`] reports as [`CodexLimitsLine::NoLimits`]
-//! so the caller can say why there is nothing to show.
+//! so the caller can say why there is nothing to show. A turn the plan
+//! refused writes a `rate_limits` object with no windows (they say nothing,
+//! so they are skipped) and then its error,
+//! `"codex_error_info":"usage_limit_exceeded"` with the "try again at …"
+//! sentence, read as [`CodexLimitsLine::LimitHit`].
 //!
 //! Claude Code writes no plan limits to its transcripts (they reach only the
 //! status-line command and `/usage`), so there is no Claude parser here.
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -75,12 +79,21 @@ pub enum CodexLimitsLine {
     /// A `token_count` line whose `rate_limits` is null or absent: this login
     /// reports no plan limits (API key, or a CLI without the field).
     NoLimits,
+    /// A turn refused with `usage_limit_exceeded`.
+    LimitHit {
+        at: DateTime<Utc>,
+        /// From the error's "try again at Nov 18th, 2026 8:42 AM" (the
+        /// CLI's local time), when the sentence says so.
+        resets_at: Option<DateTime<Utc>>,
+    },
 }
 
-/// Parse one Codex rollout line. `None` for any line that is not a
-/// `token_count` event (most lines; a cheap substring test runs first).
+/// Parse one Codex rollout line. `None` for any line that is neither a
+/// `token_count` event nor a usage-limit error (most lines; a cheap
+/// substring test runs first).
 pub fn parse_codex_rate_limits(line: &str) -> Option<CodexLimitsLine> {
-    if !line.contains("\"token_count\"") {
+    let hit = line.contains("\"usage_limit_exceeded\"");
+    if !hit && !line.contains("\"token_count\"") {
         return None;
     }
     let v: Value = serde_json::from_str(line).ok()?;
@@ -88,14 +101,25 @@ pub fn parse_codex_rate_limits(line: &str) -> Option<CodexLimitsLine> {
         return None;
     }
     let payload = v.get("payload")?;
-    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
-        return None;
-    }
     let taken_at = v
         .get("timestamp")
         .and_then(Value::as_str)
         .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
         .map(|t| t.with_timezone(&Utc));
+    if hit {
+        // `task_complete.error` on current CLIs, an `error` event on others.
+        let err = payload.get("error").unwrap_or(payload);
+        if err.get("codex_error_info").and_then(Value::as_str) == Some("usage_limit_exceeded") {
+            let message = err.get("message").and_then(Value::as_str).unwrap_or("");
+            return Some(CodexLimitsLine::LimitHit {
+                at: taken_at?,
+                resets_at: try_again_at(message),
+            });
+        }
+    }
+    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+        return None;
+    }
     let Some(rl) = payload.get("rate_limits").filter(|r| r.is_object()) else {
         return Some(CodexLimitsLine::NoLimits);
     };
@@ -118,8 +142,9 @@ pub fn parse_codex_rate_limits(line: &str) -> Option<CodexLimitsLine> {
                 _ => None,
             },
         });
-    if windows.is_empty() && credits.is_none() {
-        return Some(CodexLimitsLine::NoLimits);
+    if windows.is_empty() {
+        // A refused turn's placeholder: no numbers, not an API-key login.
+        return None;
     }
     Some(CodexLimitsLine::Snapshot(LimitSnapshot {
         limit_id: str_field(rl, "limit_id"),
@@ -130,6 +155,21 @@ pub fn parse_codex_rate_limits(line: &str) -> Option<CodexLimitsLine> {
         credits,
         reached: str_field(rl, "rate_limit_reached_type"),
     }))
+}
+
+/// `… try again at Nov 18th, 2026 8:42 AM.` → that local time.
+fn try_again_at(message: &str) -> Option<DateTime<Utc>> {
+    let rest = &message[message.find("try again at ")? + "try again at ".len()..];
+    let text = rest.trim_end_matches('.');
+    // Drop the day's ordinal suffix: `18th,` → `18,`.
+    let comma = text.find(',')?;
+    let day = text[..comma].trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let plain = format!("{day}{}", &text[comma..]);
+    let naive = NaiveDateTime::parse_from_str(&plain, "%b %d, %Y %I:%M %p").ok()?;
+    Local
+        .from_local_datetime(&naive)
+        .earliest()
+        .map(|t| t.with_timezone(&Utc))
 }
 
 fn str_field(obj: &Value, key: &str) -> Option<String> {
@@ -272,6 +312,40 @@ mod tests {
         // No timestamp: the percent could not be aged, so it is not reported.
         let untimed = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":5}}}}"#;
         assert_eq!(parse_codex_rate_limits(untimed), None);
+    }
+
+    #[test]
+    fn a_refused_turn_is_a_limit_hit_and_its_placeholder_says_nothing() {
+        // What `codex exec` writes when the plan is used up (CLI 0.13x).
+        let placeholder = r#"{"timestamp":"2026-11-16T16:44:28.847Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"premium","limit_name":null,"primary":null,"secondary":null,"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"plan_type":null,"rate_limit_reached_type":null}}}"#;
+        assert_eq!(parse_codex_rate_limits(placeholder), None);
+        let done = r#"{"timestamp":"2026-11-16T16:44:28.852Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t","last_agent_message":null,"error":{"message":"You\u2019ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 18th, 2026 8:42 AM.","codex_error_info":"usage_limit_exceeded"}}}"#;
+        let want = Local
+            .with_ymd_and_hms(2026, 11, 18, 8, 42, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            parse_codex_rate_limits(done),
+            Some(CodexLimitsLine::LimitHit {
+                at: "2026-11-16T16:44:28.852Z".parse().unwrap(),
+                resets_at: Some(want),
+            })
+        );
+        // The `error` event form, and a sentence without a time.
+        let event = r#"{"timestamp":"2026-11-16T16:44:28Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}"#;
+        assert!(matches!(
+            parse_codex_rate_limits(event),
+            Some(CodexLimitsLine::LimitHit {
+                resets_at: None,
+                ..
+            })
+        ));
+        assert_eq!(
+            try_again_at("try again at Nov 1st, 2026 12:05 PM")
+                .map(|t| t.with_timezone(&Local).format("%d %H:%M").to_string())
+                .as_deref(),
+            Some("01 12:05")
+        );
     }
 
     #[test]

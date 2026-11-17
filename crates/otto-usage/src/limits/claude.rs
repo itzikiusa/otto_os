@@ -211,6 +211,10 @@ pub(crate) enum UsageAnswer {
     },
     /// `rate_limits_available: false` — an API key / Bedrock / Vertex login.
     Unavailable,
+    /// Plan limits apply but `rate_limits` is null: the CLI's own call to
+    /// Anthropic's usage endpoint failed (offline, rate-limited, or a sign-in
+    /// Anthropic no longer accepts).
+    NotFetched,
 }
 
 /// Parse the `response` of a successful `get_usage` control response.
@@ -221,7 +225,12 @@ pub(crate) fn parse_get_usage(resp: &Value, observed_at: DateTime<Utc>) -> Optio
             .is_some()
             .then_some(UsageAnswer::Unavailable);
     }
-    let rl = resp.get("rate_limits").filter(|r| r.is_object())?;
+    let Some(rl) = resp.get("rate_limits").filter(|r| r.is_object()) else {
+        return resp
+            .get("rate_limits")
+            .is_some_and(Value::is_null)
+            .then_some(UsageAnswer::NotFetched);
+    };
     let mut windows = BTreeMap::new();
     for kind in [
         "five_hour",
@@ -548,6 +557,10 @@ mod tests {
             parse_get_usage(&unavailable, now),
             Some(UsageAnswer::Unavailable)
         );
+        // The CLI's usage call failed (what an expired sign-in answers).
+        let failed =
+            json!({"subscription_type": "max", "rate_limits_available": true, "rate_limits": null});
+        assert_eq!(parse_get_usage(&failed, now), Some(UsageAnswer::NotFetched));
         assert_eq!(parse_get_usage(&json!({}), now), None);
     }
 
