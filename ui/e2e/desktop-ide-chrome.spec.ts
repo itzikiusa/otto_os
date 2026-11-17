@@ -30,6 +30,7 @@ async function getSeed(): Promise<{ workspaceId: string; workspaceRoot: string }
   writeFileSync(join(root, ...DEEP_DIRS, DEEP_FILE), 'package adapters\n\nfunc X() int { return 1 }\n');
   writeFileSync(join(root, 'data.csv'), 'id,name,amount\n1,alpha,10\n2,beta,20\n');
   writeFileSync(join(root, 'README.md'), '# Chrome\n');
+  writeFileSync(join(root, 'app', 'long.go'), ['package main', '', ...Array.from({ length: 400 }, (_, i) => `var v${i} = ${i}`), ''].join('\n'));
   for (const argv of [['init', '-b', 'main'], ['config', 'user.email', 'chrome@otto.local'], ['config', 'user.name', 'Otto Chrome'], ['config', 'commit.gpgsign', 'false'], ['add', '.'], ['commit', '-m', 'seed']]) {
     execFileSync('git', argv, { cwd: root, stdio: 'ignore' });
   }
@@ -196,6 +197,20 @@ test.describe('IDE editor chrome', () => {
     }
     await shot(page, '06-go-more-menu');
     await page.keyboard.press('Escape');
+  });
+
+  test('leaving the IDE and coming back keeps the file scrolled where it was', async ({ page }) => {
+    await boot(page, 'dark');
+    await openPolyglotFile(page, 'app', 'long.go');
+    const scroller = page.locator('.ide-editor-area .cm-scroller').first();
+    await expect(editorContent(page)).toContainText('var v0 = 0');
+    await scroller.evaluate((el) => { el.scrollTop = 3000; });
+    await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(2500);
+    await page.evaluate(() => { location.hash = '#/agents'; });
+    await expect(page.getByTestId('ide-project-tree')).toHaveCount(0);
+    await page.evaluate(() => { location.hash = '#/ide'; });
+    await expect(editorContent(page)).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => scroller.evaluate((el) => el.scrollTop), { timeout: 5_000 }).toBeGreaterThan(2500);
   });
 
   test('light theme: crumbs row and status strip', async ({ page }) => {
