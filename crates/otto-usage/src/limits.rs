@@ -800,8 +800,42 @@ fn codex_row(
     now: DateTime<Utc>,
 ) -> AccountLimits {
     let found = scan::latest_cached(sessions);
+    // A refused turn newer than the numbers: the plan is used up until the
+    // reset its error named, whatever the last snapshot said.
+    let hit = found
+        .limit_hit
+        .filter(|h| found.main.as_ref().is_none_or(|m| h.at > m.taken_at));
     let Some(main) = found.main.as_ref() else {
-        let reason = if !found.any_rollout {
+        if let Some(
+            h @ scan::LimitHit {
+                resets_at: Some(_), ..
+            },
+        ) = hit
+        {
+            let stale = (now - h.at).num_seconds() > STALE_AFTER_SECS;
+            return AccountLimits {
+                key,
+                provider: "codex".into(),
+                account_id,
+                label,
+                source: source.into(),
+                status: if stale {
+                    LimitStatus::Stale
+                } else {
+                    LimitStatus::Ok
+                },
+                reason: None,
+                plan: None,
+                taken_at: Some(h.at),
+                windows: vec![limit_hit_window(h, now)],
+                credits: None,
+                limit_reached: Some(LIMIT_HIT.into()),
+                check: None,
+            };
+        }
+        let reason = if hit.is_some() {
+            "This login hit its Codex usage limit; new turns wait for the reset."
+        } else if !found.any_rollout {
             "No Codex session has run on this login yet. Limits appear after its first turn."
         } else if found.saw_no_limits {
             "This login reports no plan limits (an API key, or a Codex CLI too old to write them)."
@@ -823,6 +857,16 @@ fn codex_row(
             windows.extend(codex_windows(extra, Some(&name), now));
         }
     }
+    let mut limit_reached = main.reached.clone();
+    if let Some(h) = hit {
+        limit_reached = Some(LIMIT_HIT.into());
+        // The snapshot shows no exhausted window: the hit's own reset is the
+        // only one that says when turns run again.
+        let exhausted = windows.iter().any(|w| w.left_percent == Some(0.0));
+        if !exhausted && h.resets_at.is_some() {
+            windows.push(limit_hit_window(h, now));
+        }
+    }
     let stale = (now - main.taken_at).num_seconds() > STALE_AFTER_SECS;
     AccountLimits {
         key,
@@ -840,8 +884,28 @@ fn codex_row(
         taken_at: Some(main.taken_at),
         windows,
         credits: main.credits.clone(),
-        limit_reached: main.reached.clone(),
+        limit_reached,
         check: None,
+    }
+}
+
+/// `limit_reached` of a row whose newest turn was refused.
+const LIMIT_HIT: &str = "usage_limit_exceeded";
+
+/// The refused turn as one used-up window that resets when its error said.
+fn limit_hit_window(h: scan::LimitHit, now: DateTime<Utc>) -> WindowLimit {
+    let reset = h.resets_at.is_some_and(|r| r <= now);
+    let used = (!reset).then_some(100.0);
+    WindowLimit {
+        id: "usage_limit".into(),
+        name: "Usage limit".into(),
+        window_minutes: None,
+        used_percent: used,
+        left_percent: used.map(|_| 0.0),
+        resets_at: h.resets_at,
+        reset_since_snapshot: reset,
+        active: true,
+        severity: None,
     }
 }
 
@@ -900,6 +964,8 @@ fn window_name(minutes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+    use std::time::SystemTime;
 
     fn line(ts: &str, used: f64, resets_at: i64, plan: &str) -> String {
         format!(
@@ -996,6 +1062,104 @@ mod tests {
         assert!(w.reset_since_snapshot);
         assert_eq!(w.used_percent, None);
         assert_eq!(w.left_percent, None);
+    }
+
+    /// A turn the plan refused, as `codex exec` writes it (no numbers).
+    fn refused(ts: &str, message: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":null,"rate_limits":{{"limit_id":"premium","limit_name":null,"primary":null,"secondary":null,"credits":{{"has_credits":false,"unlimited":false,"balance":"0"}},"plan_type":null,"rate_limit_reached_type":null}}}}}}
+{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"task_complete","last_agent_message":null,"error":{{"message":"{message}","codex_error_info":"usage_limit_exceeded"}}}}}}
+"#
+        )
+    }
+
+    const HIT: &str = "You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 18th, 2026 8:42 AM.";
+
+    fn codex_default(codex: &Path, home: &Path, now: DateTime<Utc>) -> AccountLimits {
+        let claude = home.join("claude");
+        build(
+            &[],
+            true,
+            home,
+            home,
+            &env_for(&claude, codex),
+            &Default::default(),
+            &Default::default(),
+            now,
+        )
+        .into_iter()
+        .find(|r| r.key == "codex:default")
+        .unwrap()
+    }
+
+    #[test]
+    fn a_refused_turn_reads_as_limit_reached_until_its_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("codex");
+        let day = codex.join("2026/11/16");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(
+            day.join("rollout-fail.jsonl"),
+            refused("2026-11-16T16:44:28Z", HIT),
+        )
+        .unwrap();
+        let reset = chrono::Local
+            .with_ymd_and_hms(2026, 11, 18, 8, 42, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let row = codex_default(&codex, dir.path(), at("2026-11-16T16:50:00Z"));
+        assert_eq!(row.status, LimitStatus::Ok, "{:?}", row.reason);
+        assert_eq!(row.limit_reached.as_deref(), Some(LIMIT_HIT));
+        assert_eq!(row.taken_at, Some(at("2026-11-16T16:44:28Z")));
+        assert_eq!(row.windows.len(), 1);
+        let w = &row.windows[0];
+        assert_eq!((w.id.as_str(), w.left_percent), ("usage_limit", Some(0.0)));
+        assert_eq!(w.resets_at, Some(reset));
+
+        // No time in the sentence: unknown, but not "no limits yet".
+        let other = tempfile::tempdir().unwrap();
+        let codex = other.path().join("codex");
+        let day = codex.join("2026/11/16");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(
+            day.join("rollout-fail.jsonl"),
+            refused("2026-11-16T16:44:28Z", "You’ve hit your usage limit."),
+        )
+        .unwrap();
+        let row = codex_default(&codex, other.path(), at("2026-11-16T16:50:00Z"));
+        assert_eq!(row.status, LimitStatus::Unknown);
+        assert!(row.reason.unwrap().contains("hit its Codex usage limit"));
+    }
+
+    #[test]
+    fn a_refused_turn_after_the_last_snapshot_marks_it_reached() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("codex");
+        // The last real numbers: nothing exhausted yet (another bucket ran out).
+        let reset = at("2026-11-12T15:00:00Z").timestamp();
+        rollout(&codex, &line("2026-11-12T10:00:00Z", 13.0, reset, "pro"));
+        let older = SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(codex.join("2026/11/12/rollout-2026-11-12T10-00-00-x.jsonl"))
+            .unwrap()
+            .set_modified(older)
+            .unwrap();
+        let day = codex.join("2026/11/12");
+        std::fs::write(
+            day.join("rollout-fail.jsonl"),
+            refused("2026-11-12T10:30:00Z", HIT),
+        )
+        .unwrap();
+        let row = codex_default(&codex, dir.path(), at("2026-11-12T10:35:00Z"));
+        assert_eq!(
+            row.plan.as_deref(),
+            Some("pro"),
+            "the snapshot's numbers stay"
+        );
+        assert_eq!(row.limit_reached.as_deref(), Some(LIMIT_HIT));
+        let ids: Vec<&str> = row.windows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["primary", "secondary", "usage_limit"]);
     }
 
     #[test]

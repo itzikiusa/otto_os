@@ -227,7 +227,11 @@ failure on a read returns an error (500) — never a 200 with zero totals.
   left_percent?, resets_at?, reset_since_snapshot, active, severity?}` (`active: false` = listed
   but not enforced now, e.g. Claude `limits[].is_active`; shown dimmed); `ClaudeCheck{enabled, checking,
   checked_at?, error?}` (Claude rows only, else null). Codex: the `rate_limits` of the newest
-  `token_count` rollout line, read on demand (cached 15 s per root). Claude: an in-memory
+  `token_count` rollout line, read on demand (cached 15 s per root); a refused turn's windowless
+  placeholder is skipped, and a newer `usage_limit_exceeded` error sets `limit_reached:
+  "usage_limit_exceeded"` (plus a `usage_limit` window, 0 % left, resetting at the error's "try again
+  at …" time, when no window of the last snapshot is used up; `unknown` when that time doesn't parse
+  and there is no snapshot). Claude: an in-memory
   latest-per-window store keyed by the login's config dir, fed by `rate_limit_event` frames of
   structured Claude sessions (`otto_usage::limits::record_claude_line`) and by the opt-in check
   below; window ids `five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`,

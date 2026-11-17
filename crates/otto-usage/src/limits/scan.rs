@@ -3,7 +3,11 @@
 //! The rollouts already hold it (every `token_count` line), so nothing is
 //! stored: a read walks the newest day directories, opens the most recently
 //! written rollouts and reads each one's tail backwards until a snapshot turns
-//! up. A short per-root cache keeps a page that polls from re-reading files.
+//! up. A rollout whose turn the plan refused carries no numbers, only the
+//! `usage_limit_exceeded` error: that is kept as the newest limit hit and the
+//! walk goes on to older rollouts for the last real snapshot (an hourly job
+//! failing for days writes dozens of such rollouts). A short per-root cache
+//! keeps a page that polls from re-reading files.
 //! Blocking by contract — the async entry point runs it on the blocking pool.
 
 use std::collections::HashMap;
@@ -12,15 +16,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
+use chrono::{DateTime, Utc};
+
 use otto_transcript::limits::{parse_codex_rate_limits, CodexLimitsLine, LimitSnapshot};
 
 /// Day directories (`YYYY/MM/DD`) looked at, newest first.
 const MAX_DAY_DIRS: usize = 10;
-/// Rollouts opened per read, most recently written first.
-const MAX_FILES: usize = 16;
+/// Rollouts opened per read at most, most recently written first; the walk
+/// stops at the first one holding a main snapshot.
+const MAX_FILES: usize = 64;
 /// Bytes read from the end of each rollout; token_count lines are frequent,
 /// so the newest one sits well inside this.
 const TAIL_BYTES: u64 = 1024 * 1024;
+/// Bytes read per walk in all (refused turns' rollouts are a few KB each).
+const MAX_BYTES: u64 = 16 * TAIL_BYTES;
 /// How long one root's answer is reused.
 const CACHE_TTL: Duration = Duration::from_secs(15);
 
@@ -35,6 +44,16 @@ pub(crate) struct Found {
     pub any_rollout: bool,
     /// A `token_count` line said `rate_limits: null` (API-key login).
     pub saw_no_limits: bool,
+    /// The newest turn refused with `usage_limit_exceeded`.
+    pub limit_hit: Option<LimitHit>,
+}
+
+/// A turn the plan refused.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LimitHit {
+    pub at: DateTime<Utc>,
+    /// From the error's "try again at …", when it parsed.
+    pub resets_at: Option<DateTime<Utc>>,
 }
 
 /// [`scan_root`] behind a [`CACHE_TTL`] per-root cache.
@@ -61,9 +80,10 @@ pub(crate) fn scan_root(root: &Path) -> Found {
     let mut found = Found::default();
     let files = newest_rollouts(root);
     found.any_rollout = !files.is_empty();
+    let mut read = 0;
     for file in files {
-        scan_file(&file, &mut found);
-        if found.main.is_some() {
+        read += scan_file(&file, &mut found);
+        if found.main.is_some() || read >= MAX_BYTES {
             break;
         }
     }
@@ -72,9 +92,10 @@ pub(crate) fn scan_root(root: &Path) -> Found {
 
 /// Fold one rollout's tail into `found`: lines newest first, the first
 /// snapshot per `limit_id` wins (an older file never overrides a newer one).
-fn scan_file(file: &Path, found: &mut Found) {
+/// Returns the bytes read.
+fn scan_file(file: &Path, found: &mut Found) -> u64 {
     let Some(text) = read_tail(file) else {
-        return;
+        return 0;
     };
     for line in text.lines().rev() {
         match parse_codex_rate_limits(line) {
@@ -88,9 +109,15 @@ fn scan_file(file: &Path, found: &mut Found) {
                 }
             }
             Some(CodexLimitsLine::NoLimits) => found.saw_no_limits = true,
-            None => {}
+            Some(CodexLimitsLine::LimitHit { at, resets_at })
+                if found.limit_hit.is_none_or(|h| at > h.at) =>
+            {
+                found.limit_hit = Some(LimitHit { at, resets_at });
+            }
+            _ => {}
         }
     }
+    text.len() as u64
 }
 
 /// The last [`TAIL_BYTES`] of `file`, starting at a line boundary.
@@ -226,6 +253,62 @@ mod tests {
         );
         let found = scan_root(dir.path());
         assert!(found.any_rollout && found.saw_no_limits && found.main.is_none());
+    }
+
+    /// What a `codex exec` turn writes when the plan is used up.
+    fn refused_turn(ts: &str) -> Vec<String> {
+        vec![
+            format!(
+                r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":null,"rate_limits":{{"limit_id":"premium","limit_name":null,"primary":null,"secondary":null,"credits":{{"has_credits":false,"unlimited":false,"balance":"0"}},"plan_type":null,"rate_limit_reached_type":null}}}}}}"#
+            ),
+            format!(
+                r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"task_complete","last_agent_message":null,"error":{{"message":"You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 18th, 2026 8:42 AM.","codex_error_info":"usage_limit_exceeded"}}}}}}"#
+            ),
+        ]
+    }
+
+    #[test]
+    fn refused_turns_do_not_hide_the_last_real_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("2026/11/13/rollout-real.jsonl");
+        write(&real, &[token_line("2026-11-13T09:33:37Z", "codex", 100.0)]);
+        let base = SystemTime::now() - Duration::from_secs(40 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&real)
+            .unwrap()
+            .set_modified(base)
+            .unwrap();
+        // More failed hourly runs than the old 16-file walk looked at.
+        for i in 0..30u64 {
+            let f = dir
+                .path()
+                .join(format!("2026/11/16/rollout-fail-{i:02}.jsonl"));
+            write(
+                &f,
+                &refused_turn(&format!("2026-11-16T{:02}:00:00Z", i % 24)),
+            );
+            std::fs::File::options()
+                .write(true)
+                .open(&f)
+                .unwrap()
+                .set_modified(base + Duration::from_secs(3600 * (i + 1)))
+                .unwrap();
+        }
+        let found = scan_root(dir.path());
+        let main = found.main.expect("the walk reached the real snapshot");
+        assert_eq!(main.windows[0].used_percent, 100.0);
+        assert!(
+            found.extra.is_empty(),
+            "the windowless placeholders are skipped"
+        );
+        assert!(
+            !found.saw_no_limits,
+            "a refused turn is not an API-key login"
+        );
+        let hit = found.limit_hit.unwrap();
+        assert!(hit.at > main.taken_at);
+        assert!(hit.resets_at.is_some());
     }
 
     #[test]

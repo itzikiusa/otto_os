@@ -19,6 +19,7 @@
     barTone,
     creditsText,
     isStale,
+    limitReachedShown,
     meterLabel,
     planLabel,
     providerName,
@@ -109,7 +110,7 @@
             {#if a.status === 'unknown'}
               <p class="reason small dim">{a.reason ?? 'Otto has no reading for this login.'}</p>
             {:else}
-              {#if a.limit_reached && !stale}
+              {#if limitReachedShown(a, stale, now)}
                 <p class="reached small"><Icon name="warning" size={12} /> Limit reached — new turns wait for the reset.</p>
               {/if}
               <div class="wins">
