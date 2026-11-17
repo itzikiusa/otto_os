@@ -1136,3 +1136,32 @@ fn module_venv_is_found_up_from_the_run_dir_inside_the_roots() {
     apply_runtime_profile_and_module_venv(&IdeRunConfig::default(), &target, &tests_dir, &mut env);
     assert_eq!(env.get("VIRTUAL_ENV"), None);
 }
+
+#[test]
+fn a_pytest_run_from_tests_dir_moves_to_the_projects_rootdir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tests = root.join("svc/tests/unit");
+    std::fs::create_dir_all(&tests).unwrap();
+    let target = IdeTargetSpec::local(root.to_string_lossy());
+    let rootdir = |cwd: &std::path::Path| super::pytest_rootdir(&target, &cwd.to_string_lossy());
+    let s = |p: PathBuf| p.to_string_lossy().into_owned();
+
+    // No conftest or config file: the run stays where it was asked to.
+    assert_eq!(rootdir(&tests), s(tests.clone()));
+    // The highest conftest.py wins over a nested one.
+    std::fs::write(root.join("svc/tests/conftest.py"), "").unwrap();
+    std::fs::write(root.join("svc/conftest.py"), "").unwrap();
+    assert_eq!(rootdir(&tests), s(root.join("svc")));
+    // The nearest pytest config / project file wins over any conftest.
+    std::fs::write(root.join("conftest.py"), "").unwrap();
+    std::fs::write(root.join("svc/tests/pytest.ini"), "").unwrap();
+    assert_eq!(rootdir(&tests), s(root.join("svc/tests")));
+
+    let mut ssh = IdeTargetSpec::local("/remote/app");
+    ssh.kind = IdeTargetKind::Ssh;
+    assert_eq!(
+        super::pytest_rootdir(&ssh, "/remote/app/tests"),
+        "/remote/app/tests"
+    );
+}

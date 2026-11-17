@@ -31,6 +31,8 @@ class _StreamProxy:
         return len(s)
     def flush(self):
         pass
+    def isatty(self):
+        return False
 
 sys.stdout = _StreamProxy('stdout')
 sys.stderr = _StreamProxy('stderr')
@@ -345,7 +347,17 @@ if prog:
 tname = dbg.launch_cfg.get('testName')
 _exit_code = 0
 try:
+    pytest = None
     if tname:
+        try:
+            import pytest
+        except ImportError:
+            pass
+    if pytest is not None:
+        # Run pytest itself, as the Run does: its collection, conftest fixtures and
+        # parametrize apply, and breakpoints bind in the test and the project code alike.
+        raise SystemExit(dbg.runcall(pytest.main, list(dbg.launch_cfg.get('args') or [tname])))
+    elif tname:
         if not os.path.isfile(prog):
             sys.stderr.write('otto py_bridge: test file not found: %s\n' % prog)
             sys.stderr.flush()

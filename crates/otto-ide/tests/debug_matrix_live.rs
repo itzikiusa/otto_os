@@ -81,7 +81,9 @@ impl Fixture {
     /// project environment carrying PATH plus `env`.
     async fn new(files: &[(&str, &str)], env: &[(&str, &str)]) -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let root_path = tmp.path().join("proj");
+        // The real path, as a workspace has: pytest finds its rootdir from the cwd (which a
+        // run resolves to the real path) and the test paths, so a `/var` symlink splits them.
+        let root_path = tmp.path().canonicalize().unwrap().join("proj");
         for (rel, content) in files {
             let p = root_path.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -230,6 +232,12 @@ impl Fixture {
     /// The gutter Debug action: pauses on each `(line, local names)` stop in
     /// `rel`, then runs to a clean exit.
     async fn debug(&self, item: &Value, rel: &str, stops: &[(u32, &[&str])]) {
+        let stops: Vec<_> = stops.iter().map(|&(l, n)| (rel, l, n)).collect();
+        self.debug_across(item, &stops).await;
+    }
+
+    /// [`Self::debug`] with each stop in its own file: `(rel, line, local names)`.
+    async fn debug_across(&self, item: &Value, stops: &[(&str, u32, &[&str])]) {
         let spec = &item["run_spec"];
         let program = spec["debug_program"]
             .as_str()
@@ -238,10 +246,9 @@ impl Fixture {
         let test_name = spec["debug_test_name"]
             .as_str()
             .or(spec["test_filter"].as_str());
-        let bp_path = self.path(rel);
         let bps: Vec<Value> = stops
             .iter()
-            .map(|(l, _)| json!({ "path": bp_path, "line": l }))
+            .map(|(rel, l, _)| json!({ "path": self.path(rel), "line": l }))
             .collect();
         let (st, body) = send_json(
             &self.app,
@@ -266,7 +273,7 @@ impl Fixture {
         let sid = body["session"]["id"].as_str().unwrap().to_string();
         let mut budget = FIRST_PAUSE;
         let mut left = Value::Null;
-        for (line, names) in stops {
+        for (rel, line, names) in stops {
             // A NEW pause: not the line we just continued from.
             let snap = wait_for(&self.app, &sid, budget, |s| {
                 s["state"] == "paused" && s["paused_line"] != left
@@ -843,6 +850,64 @@ async fn matrix_python_debug_pytest() {
     let item = f.gutter("test_app.py", "test", "test_adds_numbers").await;
     f.debug(&item, "test_app.py", &[(6, &["left"]), (7, &["total"])])
         .await;
+}
+
+// The usual layout: tests in `tests/`, the code and `conftest.py` at the project root. The
+// gutter's cwd is `tests/`; the run and the debug must still import `calc` and get the
+// root fixture, and the debug must also stop inside the project code.
+const PY_CALC: &str = "def add(a, b):\n    total = a + b\n    return total\n";
+const PY_CONFTEST: &str = "import pytest\n\n\n@pytest.fixture\ndef base():\n    return 40\n";
+const PY_TESTS_DIR_TEST: &str = r#"from calc import add
+
+
+def test_adds_with_fixture(base):
+    left = base
+    total = add(left, 2)
+    assert total == 42
+    print("PY_ROOTDIR_DONE")
+"#;
+
+async fn py_rootdir_fixture() -> Option<Fixture> {
+    let f = py_venv_fixture().await?;
+    for (rel, src) in [
+        ("calc.py", PY_CALC),
+        ("conftest.py", PY_CONFTEST),
+        ("tests/test_calc.py", PY_TESTS_DIR_TEST),
+    ] {
+        let p = std::path::PathBuf::from(f.path(rel));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, src).unwrap();
+    }
+    Some(f)
+}
+
+#[tokio::test]
+async fn matrix_python_run_pytest_from_tests_dir_with_root_conftest() {
+    let Some(f) = py_rootdir_fixture().await else {
+        return;
+    };
+    let item = f
+        .gutter("tests/test_calc.py", "test", "test_adds_with_fixture")
+        .await;
+    f.run(&item, "passed").await;
+}
+
+#[tokio::test]
+async fn matrix_python_debug_pytest_from_tests_dir_with_root_conftest() {
+    let Some(f) = py_rootdir_fixture().await else {
+        return;
+    };
+    let item = f
+        .gutter("tests/test_calc.py", "test", "test_adds_with_fixture")
+        .await;
+    f.debug_across(
+        &item,
+        &[
+            ("tests/test_calc.py", 6, &["base", "left"]),
+            ("calc.py", 3, &["a", "b", "total"]),
+        ],
+    )
+    .await;
 }
 
 #[tokio::test]

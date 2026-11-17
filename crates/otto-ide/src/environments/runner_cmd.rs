@@ -13,6 +13,7 @@ use self::runner_cmd_langs::{
     build_custom_cmd, build_gradle_cmd, build_java_main_cmd, build_maven_cmd, build_npm_cmd,
     build_pytest_cmd, build_script_cmd, build_shell_cmd, build_vitest_cmd,
 };
+pub(crate) use self::runner_java::pytest_rootdir;
 pub(super) use self::runner_java::{
     apply_runtime_profile_and_module_venv, compile_java_main_step, has_manual_classpath,
     resolve_jvm_build_dir,

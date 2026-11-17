@@ -30,6 +30,20 @@ pub(super) async fn resolve_python_adapter(
     env: BTreeMap<String, String>,
 ) -> Result<ResolvedDapAdapter> {
     let program = normalize_target_path(&req.target, &req.launch.program);
+    // A test debugs from pytest's rootdir, like its Run: the project imports and the root
+    // `conftest.py` resolve the same way.
+    let test_cwd;
+    let cwd = if req
+        .launch
+        .test_name
+        .as_deref()
+        .is_some_and(|t| !t.is_empty())
+    {
+        test_cwd = crate::environments::pytest_rootdir(&req.target, cwd);
+        test_cwd.as_str()
+    } else {
+        cwd
+    };
     let mut candidates = Vec::new();
     let allow_workspace_venv = ctx.caller_is_root || req.target.kind == IdeTargetKind::Ssh;
     if allow_workspace_venv {
