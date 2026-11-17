@@ -528,6 +528,11 @@ pub fn remove_all_tag_blocks(xml: &str, tag: &str) -> String {
 
 /// Resolve the active local Maven repository directory (`MAVEN_REPO_LOCAL` -> `M2_REPO` -> `~/.m2/repository`).
 pub fn resolve_m2_repo(env_map: &BTreeMap<String, String>) -> Option<PathBuf> {
+    explicit_m2_repo(env_map).or_else(|| dirs::home_dir().map(|h| h.join(".m2/repository")))
+}
+
+/// The local Maven repository the run env sets (`MAVEN_REPO_LOCAL` / `M2_REPO`), if any.
+pub fn explicit_m2_repo(env_map: &BTreeMap<String, String>) -> Option<PathBuf> {
     if let Some(custom) = env_map
         .get("MAVEN_REPO_LOCAL")
         .or_else(|| env_map.get("M2_REPO"))
@@ -535,12 +540,10 @@ pub fn resolve_m2_repo(env_map: &BTreeMap<String, String>) -> Option<PathBuf> {
     {
         return Some(PathBuf::from(custom.trim()));
     }
-    if let Ok(custom) = std::env::var("MAVEN_REPO_LOCAL") {
-        if !custom.trim().is_empty() {
-            return Some(PathBuf::from(custom.trim()));
-        }
-    }
-    dirs::home_dir().map(|h| h.join(".m2/repository"))
+    std::env::var("MAVEN_REPO_LOCAL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| PathBuf::from(s.trim()))
 }
 
 /// Locate a dependency `.jar` (or `-sources.jar` when `sources == true`) in `.m2` or `~/.gradle`.

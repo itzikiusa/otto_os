@@ -339,6 +339,10 @@ fn maven_module_classpath(
         "-Dmdep.includeScope=test",
     ]);
     cmd.arg(format!("-Dmdep.outputFile={}", cp_file.display()));
+    // The javac fallback reads the same repo, so both resolve the same JARs.
+    if let Some(repo) = super::explicit_m2_repo(env_map) {
+        cmd.arg(format!("-Dmaven.repo.local={}", repo.display()));
+    }
     Some((|| {
         let (status, output) = run_build_tool(cmd, env_map, "mvn")?;
         if !status.success() {
@@ -978,6 +982,23 @@ mod javac_process_tests {
             )),
             "built from the reactor root: {call}"
         );
+        assert!(!call.contains("-Dmaven.repo.local"), "{call}");
+
+        // A run env that names the local repo hands it to Maven too.
+        let mut env = path_env(&bin);
+        env.insert("MAVEN_REPO_LOCAL".into(), "/custom/m2".into());
+        prepare_java_execution(
+            &app,
+            None,
+            false,
+            std::slice::from_ref(&module),
+            &env,
+            &javac,
+            &root.join("out"),
+        )
+        .unwrap();
+        let call = fs::read_to_string(&seen).unwrap();
+        assert!(call.ends_with(" -Dmaven.repo.local=/custom/m2\n"), "{call}");
     }
 
     #[test]
