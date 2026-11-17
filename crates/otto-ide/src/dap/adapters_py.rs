@@ -243,8 +243,10 @@ async fn probe_debugpy_cached(
     .await
     .map(|o| o.status.success())
     .unwrap_or(false);
-    if let Some(key) = cache_key {
-        debugpy_probe_cache().insert(key, ok);
+    // Only a hit is cached: installing debugpy later changes nothing the key sees (the
+    // interpreter itself), so a cached miss would hide it until the daemon restarts.
+    if let Some(key) = cache_key.filter(|_| ok) {
+        debugpy_probe_cache().insert(key, true);
     }
     ok
 }
