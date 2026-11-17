@@ -733,7 +733,9 @@ async fn matrix_java_junit4_run_test() {
 
 #[tokio::test]
 async fn matrix_java_junit4_debug_test() {
-    if !java_ready() {
+    // The debug classpath comes from `mvn test-compile`, which needs the same
+    // plugins as the run; with an empty `~/.m2` it would download them.
+    if !java_ready_with(M2_JUNIT4_RUN) {
         return;
     }
     let f = java_fixture().await;
