@@ -33,7 +33,27 @@ pub(super) fn resolve_program_in_env(program: &str, env_map: &BTreeMap<String, S
             return hit;
         }
     }
-    PathBuf::from(program)
+    build_tool_fallback(program, dirs::home_dir().as_deref()).unwrap_or_else(|| program.into())
+}
+
+/// `mvn` / `gradle` that the run's PATH lacks (a slow or skipped login-shell capture drops
+/// sdkman's init from it): sdkman's current candidate, then Homebrew, as the JDK scan does.
+pub(super) fn build_tool_fallback(program: &str, home: Option<&Path>) -> Option<PathBuf> {
+    let candidate = match program {
+        "mvn" => "maven",
+        "gradle" => "gradle",
+        _ => return None,
+    };
+    let mut dirs: Vec<PathBuf> = home
+        .map(|h| {
+            h.join(".sdkman/candidates")
+                .join(candidate)
+                .join("current/bin")
+        })
+        .into_iter()
+        .collect();
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    find_executable_in(&dirs, &[program])
 }
 
 pub(super) fn resolve_run_cwd(target: &IdeTargetSpec, raw_cwd: Option<&str>) -> String {

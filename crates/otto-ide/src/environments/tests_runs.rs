@@ -1165,3 +1165,62 @@ fn a_pytest_run_from_tests_dir_moves_to_the_projects_rootdir() {
         "/remote/app/tests"
     );
 }
+
+/// `mvn` / `gradle` off the captured PATH still resolve from sdkman's current candidate.
+#[test]
+#[cfg(unix)]
+fn mvn_and_gradle_off_the_path_resolve_from_sdkman() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    for (cand, bin) in [("maven", "mvn"), ("gradle", "gradle")] {
+        let dir = home
+            .path()
+            .join(".sdkman/candidates")
+            .join(cand)
+            .join("current/bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(bin), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(dir.join(bin), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            super::runner_cmd::build_tool_fallback(bin, Some(home.path())),
+            Some(dir.join(bin))
+        );
+    }
+    assert_eq!(
+        super::runner_cmd::build_tool_fallback("go", Some(home.path())),
+        None
+    );
+}
+
+/// A program missing from the run's PATH fails with how to fix it, not a bare `os error 2`.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_program_missing_from_the_path_says_how_to_fix_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (runs, handle, stop_rx) = local_run_handle("run_missing");
+    let cfg = IdeRunConfig {
+        id: "rc_missing".into(),
+        name: "missing".into(),
+        runner: IdeRunnerKind::Custom,
+        command: Some("otto-no-such-tool".into()),
+        ..Default::default()
+    };
+    let env = BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+    execute_run_task(
+        runs,
+        Arc::clone(&handle),
+        TargetManager::new(),
+        IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned()),
+        None,
+        vec![(cfg, env)],
+        None,
+        stop_rx,
+    )
+    .await;
+    let out = handle.snapshot().output.join("\n");
+    assert!(
+        out.contains("'otto-no-such-tool' is not on the run's PATH")
+            && out.contains("Custom PATH entries"),
+        "{out}"
+    );
+}

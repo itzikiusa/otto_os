@@ -251,6 +251,11 @@ never spawned per request) and merges:
 
 into **all** Run executions, DAP Debug sessions, IDE Terminals, and local LSP
 servers (`gopls`, `jdtls`, `rust-analyzer`, `pyright`, `tsserver`).
+When that PATH has no `mvn` / `gradle` (a slow capture falls back to `-lc`, which
+skips `~/.zshrc` and so sdkman's init), a local run looks in
+`~/.sdkman/candidates/{maven,gradle}/current/bin`, then `/opt/homebrew/bin` and
+`/usr/local/bin`. A program that is still missing fails with a hint to add its
+folder under Shell env & vars › Custom PATH entries.
 
 Per-project configuration is persisted in SQLite (`0214_ide_configs.sql`), with
 secret environment variable values stored in the macOS Keychain via
