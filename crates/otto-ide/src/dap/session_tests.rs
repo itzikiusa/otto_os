@@ -81,9 +81,10 @@ fn spawn_mock_dap_server(
                         req.seq,
                         "threads",
                         Ok(Some(json!({
+                            // A parked goroutine before the stopped one, as Delve lists them.
                             "threads": [
-                                { "id": 1, "name": "goroutine 1 (running)" },
-                                { "id": 2, "name": "goroutine 14 (chan receive)" }
+                                { "id": 2, "name": "goroutine 14 (chan receive)" },
+                                { "id": 1, "name": "goroutine 1 (running)" }
                             ]
                         }))),
                     )
@@ -294,6 +295,10 @@ async fn full_mock_dap_lifecycle_over_duplex() {
     assert_eq!(paused.stop_seq, 1);
     assert_eq!(paused.paused_line, Some(6));
     assert_eq!(paused.threads.len(), 2);
+    assert_eq!(
+        paused.threads[0].id, 1,
+        "the stopped goroutine leads the Frames list"
+    );
     assert_eq!(paused.stack_frames.len(), 1);
     assert_eq!(paused.scopes.len(), 1);
     assert!(paused.scopes[0]
