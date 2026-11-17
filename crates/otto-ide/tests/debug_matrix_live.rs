@@ -851,7 +851,7 @@ async fn matrix_python_run_script() {
         return;
     }
     let f = py_fixture().await;
-    let item = f.gutter("app.py", "main", "__main__").await;
+    let item = f.gutter("app.py", "main", "app.py").await;
     f.run(&item, "PY_MAIN_DONE 42").await;
 }
 
@@ -861,7 +861,7 @@ async fn matrix_python_debug_script() {
         return;
     }
     let f = py_fixture().await;
-    let item = f.gutter("app.py", "main", "__main__").await;
+    let item = f.gutter("app.py", "main", "app.py").await;
     f.debug(&item, "app.py", &[(7, &["base"]), (8, &["total"])])
         .await;
 }
@@ -1135,7 +1135,8 @@ async fn matrix_python_run_and_debug_nested_and_second_root_scripts() {
     )
     .await;
     for rel in PY_DEEP_CELLS {
-        let item = f.gutter(rel, "main", "__main__").await;
+        // The script entry is labelled with its file name (the menu reads "Run 'app.py'").
+        let item = f.gutter(rel, "main", rel.rsplit('/').next().unwrap()).await;
         f.run(&item, "PY_DEEP_DONE 42").await;
         f.debug(&item, rel, &[(3, &["base"]), (4, &["total"])])
             .await;

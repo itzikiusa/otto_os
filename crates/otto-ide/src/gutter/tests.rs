@@ -502,11 +502,11 @@ fn shell_function_items_only_when_sourcing_runs_nothing_else() {
     assert!(fn_labels(script).is_empty());
 
     let library = "#!/usr/bin/env bash\nNAME=x\nexport PATH\n. ./common.sh\ngreet() {\n  if true; then echo hi; fi\n}\n";
-    assert_eq!(fn_labels(library), ["Run greet()"]);
+    assert_eq!(fn_labels(library), ["greet()"]);
 
     let guarded =
         "greet() {\n  echo hi\n}\nif [[ \"${BASH_SOURCE[0]}\" == \"$0\" ]]; then\n  greet\nfi\n";
-    assert_eq!(fn_labels(guarded), ["Run greet()"]);
+    assert_eq!(fn_labels(guarded), ["greet()"]);
 }
 
 #[test]
