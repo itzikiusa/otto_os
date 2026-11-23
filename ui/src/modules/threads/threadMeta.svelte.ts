@@ -113,9 +113,16 @@ class ThreadMeta {
     const seen = typeof seenRaw === 'string' ? Date.parse(seenRaw) : NaN;
     if (Number.isFinite(seen) && (!ended || Date.parse(ended) <= seen)) return;
     // Never before what was on screen, whatever this device's clock says.
+    // One attempt per (thread, ended turn): a refused or failed write (daemon
+    // down, a viewer) must not loop through the effect that called this.
+    if (this.tried.get(id) === ended) return;
+    this.tried.set(id, ended);
     const at = new Date(Math.max(Date.now(), ended ? Date.parse(ended) + 1 : 0)).toISOString();
     void this.write(id, { thread_seen_at: at }, false);
   }
+
+  /** The last turn end a seen mark was tried for, per thread (not reactive). */
+  private tried = new Map<string, string | null>();
 
   /** Write `patch` on thread `id`; false (rolled back, toast shown) on failure. */
   async write(id: string, patch: ThreadMetaPatch, loud = true): Promise<boolean> {

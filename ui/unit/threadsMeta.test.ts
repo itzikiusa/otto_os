@@ -85,3 +85,20 @@ test('Done = the last turn ended after thread_seen_at; seeing it writes once', a
   assert.equal(fresh.threadMeta.unread('b', false), false);
   assert.deepEqual(inbox.migrationPatches(['x'], ['x', 'y'], (id) => id !== 'y'), [['x', { thread_pinned: true, thread_history: true }]]);
 });
+
+test('a seen mark that fails is tried once per ended turn, not in a loop', async () => {
+  const t = load(async () => { throw new Error('daemon down'); }, {
+    a: row({ last_turn_ended_at: '2026-11-23T10:05:00Z', thread_seen_at: '2026-11-23T10:00:00Z' }),
+  });
+  (globalThis as { document?: unknown }).document = { hidden: false };
+  t.threadMeta.markSeen('a');
+  await new Promise((r) => setTimeout(r, 0));
+  t.threadMeta.markSeen('a');
+  t.threadMeta.markSeen('a');
+  assert.equal(t.patched.length, 1);
+  assert.deepEqual(t.toasts, []);
+  // A newer turn end is a new attempt.
+  (t.rows.a.meta as Record<string, unknown>).last_turn_ended_at = '2026-11-23T10:09:00Z';
+  t.threadMeta.markSeen('a');
+  assert.equal(t.patched.length, 2);
+});
