@@ -2,11 +2,12 @@
 // section, the sidebar — goes through here (T3 Code's useSideThreadTrigger,
 // MIT, Copyright (c) 2026 T3 Tools Inc.): a tab in the right panel while the
 // parent stays put; `main` (⌘/Ctrl-click) opens it in the main view
-// instead. One per-device setting (Settings in the subagent's tab) flips the
+// instead. One per-device setting (Settings ▸ Threads, threadPrefs) flips the
 // default. A phone's right panel is a full-height sheet with Back.
 import { router } from '../../../lib/router.svelte';
 import { threads } from '../threadsStore.svelte';
 import { threadsChrome } from '../threadsChrome.svelte';
+import { threadPrefs } from './threadPrefs.svelte';
 
 /** Where a click opens a subagent: the setting, flipped by ⌘/Ctrl-click. */
 export function opensInMain(modifier: boolean, setting: 'panel' | 'main'): boolean {
@@ -18,7 +19,7 @@ export function openChildThread(id: string, modifier = false): void {
     router.go(`threads/${id}`);
     return;
   }
-  if (opensInMain(modifier, threadsChrome.subagentsIn)) {
+  if (opensInMain(modifier, threadPrefs.subagentIn)) {
     threads.selectThread(id);
     return;
   }

@@ -40,6 +40,7 @@ mod reopen;
 mod request_ids;
 mod secret_request;
 mod selection;
+mod swarm_resume;
 mod task_stop;
 mod usage_hook;
 pub use admission::{HANDSHAKE_TIMEOUT, MAX_QUEUED_BYTES, MAX_QUEUED_PROMPTS};
@@ -1975,7 +1976,11 @@ impl AgentRuntime {
         }
         self.ensure_process(live).await?;
         let resume = live.lock().session.native_thread_id.clone();
-        if resume.is_none() || self.wait_started(live).await {
+        if resume.is_none() {
+            return Ok(());
+        }
+        if self.wait_started(live).await {
+            self.card_swarm_members(live).await;
             return Ok(());
         }
         // A refusal that does not say the conversation is gone may pass (a

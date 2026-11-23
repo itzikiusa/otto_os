@@ -3,7 +3,7 @@
   (T3 Code's SideThreadPane, MIT, Copyright (c) 2026 T3 Tools Inc.): the
   "Subagent of …" line, its whole thread (steerable — it has a composer),
   and "Open in main view". Where a click opens a subagent is the per-device
-  pref Settings ▸ Threads writes (threadsChrome.subagentsIn). Having it here
+  pref Settings ▸ Threads writes (threadPrefs.subagentIn). Having it here
   counts as looking at it (thread_seen_at, as the sidebar reads it).
 -->
 <script lang="ts">
