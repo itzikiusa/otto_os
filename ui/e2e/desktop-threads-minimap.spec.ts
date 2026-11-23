@@ -56,6 +56,10 @@ test('a long thread has a minimap: marks, hover label, click jumps, the current 
   await expect(ticks.nth(2)).toHaveAttribute('aria-current', 'location');
   await page.keyboard.press('Alt+ArrowUp');
   await expect(ticks.nth(1)).toHaveAttribute('aria-current', 'location');
+  // After clicking the conversation text (the focus leaves the pane) they still step.
+  await u2.click();
+  await page.keyboard.press('Alt+ArrowDown');
+  await expect(ticks.nth(2)).toHaveAttribute('aria-current', 'location');
   await expectNoHorizontalOverflow(page);
   if (SHOTS) {
     mkdirSync(SHOTS, { recursive: true });

@@ -25,8 +25,10 @@
     scroller: HTMLElement | null;
     /** Render every row and stop following the bottom, before a jump. */
     onexpand: () => void;
+    /** This pane is the focused one (⌥↑ / ⌥↓ with focus on the page body). */
+    focused?: boolean;
   }
-  let { sessionId, items, turns, messageIds, scroller, onexpand }: Props = $props();
+  let { sessionId, items, turns, messageIds, scroller, onexpand, focused = false }: Props = $props();
 
   const turnsKey = $derived(turns.map((t) => t.status).join());
   const ticks = $derived.by((): MinimapTick[] => {
@@ -79,7 +81,10 @@
       if (!e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
       const pane = scroller?.parentElement;
       const t = e.target as Element | null;
-      if (!pane || !t || !pane.contains(t) || t instanceof HTMLTextAreaElement || t instanceof HTMLInputElement) return;
+      // Inside this pane (not while typing), or outside every thread pane —
+      // the page after clicking the conversation text — while it is the focused one.
+      const here = !!t && (pane?.contains(t) || (untrack(() => focused) && !t.closest('section.rt')));
+      if (!pane || !here || t instanceof HTMLTextAreaElement || t instanceof HTMLInputElement) return;
       if (!untrack(() => ticks.length)) return;
       e.preventDefault();
       untrack(measure);
