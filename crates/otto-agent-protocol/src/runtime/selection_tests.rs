@@ -565,8 +565,10 @@ async fn fresh_context_can_stop_leftover_background_work() {
 
 /// Review 1: a switch whose request is dropped mid-handshake (a page reload)
 /// still ends: the agent never comes up, so the thread is exactly as before.
-#[tokio::test]
-async fn a_switch_whose_request_is_dropped_still_ends() {
+
+/// A Claude thread whose switch to Codex never comes up (its handshake
+/// never answers; `start_wait` gives up after 600 ms).
+async fn silent_codex() -> (Fixture, Id) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_str().unwrap().to_string();
     let rec = Arc::new(StdMutex::new(Rec::default()));
@@ -602,6 +604,13 @@ async fn a_switch_whose_request_is_dropped_still_ends() {
         .await
         .unwrap();
     let f = Fixture { rt, rec, _dir: dir };
+    (f, s.id)
+}
+
+#[tokio::test]
+async fn a_switch_whose_request_is_dropped_still_ends() {
+    let (f, id) = silent_codex().await;
+    let s = f.rt.get(&id).await.unwrap();
     f.send(&s.id, RuntimePromptReq::of("hi")).await;
     seed_commands(&f, &s.id);
     let switch = RuntimePromptReq {
@@ -732,4 +741,36 @@ async fn a_switch_drops_the_old_agents_commands() {
     let st = live.lock();
     assert_eq!(st.session.provider, RuntimeProvider::Codex);
     assert!(st.proj.commands.is_empty(), "{:?}", st.proj.commands);
+}
+
+/// Review 11: a pin made while a switch starts is kept when the switch fails
+/// (only the provider's own meta key is put back).
+#[tokio::test]
+async fn a_failed_switch_keeps_meta_patched_meanwhile() {
+    let (f, id) = silent_codex().await;
+    f.send(&id, RuntimePromptReq::of("hi")).await;
+    let rt = f.rt.clone();
+    let sid = id.clone();
+    let switch = tokio::spawn(async move {
+        let req = RuntimePromptReq {
+            provider: Some("codex".into()),
+            ..RuntimePromptReq::of("go")
+        };
+        rt.prompt_to_end(&sid, &req).await
+    });
+    f.until(&id, "the switch to start", |st| st.fresh_starting)
+        .await;
+    let pin = serde_json::json!({"thread_pinned": true});
+    f.rt.update_thread_meta(&id, pin.as_object().unwrap().clone())
+        .await
+        .unwrap();
+    assert!(switch.await.unwrap().is_err(), "codex never comes up");
+    let s = f.rt.get(&id).await.unwrap();
+    assert_eq!(s.provider, RuntimeProvider::Claude);
+    let meta = s.meta.unwrap_or_default();
+    assert_eq!(
+        meta.get("thread_pinned"),
+        Some(&serde_json::json!(true)),
+        "{meta}"
+    );
 }

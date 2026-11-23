@@ -20,7 +20,9 @@ pub(super) struct Switch {
 /// What a switch replaced, put back when its first prompt fails.
 struct Before {
     provider: RuntimeProvider,
-    meta: Option<serde_json::Value>,
+    /// `meta.provider_slug` before (only that key is put back: a pin or
+    /// "seen" patched meanwhile stays).
+    slug: Option<serde_json::Value>,
     model: Option<String>,
     effort: Option<String>,
     model_from_provider: bool,
@@ -34,7 +36,7 @@ struct Before {
 impl Before {
     fn restore(self, st: &mut State) {
         st.session.provider = self.provider;
-        st.session.meta = self.meta;
+        set_slug(st, self.slug);
         st.session.model = self.model;
         st.session.effort = self.effort;
         st.model_from_provider = self.model_from_provider;
@@ -44,6 +46,20 @@ impl Before {
         }
         st.proj.commands = self.commands;
     }
+}
+
+/// Set (or with `None` remove) `meta.provider_slug`, returning what it was.
+fn set_slug(st: &mut State, to: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    let mut meta = match st.session.meta.take() {
+        Some(serde_json::Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    let was = match to {
+        Some(v) => meta.insert(PROVIDER_SLUG_META_KEY.into(), v),
+        None => meta.remove(PROVIDER_SLUG_META_KEY),
+    };
+    st.session.meta = (!meta.is_empty()).then_some(serde_json::Value::Object(meta));
+    was
 }
 
 /// Move the thread onto `sw` in memory (persisted once the first prompt is
@@ -65,28 +81,10 @@ fn switch_to(st: &mut State, sw: Switch, model: Option<String>) -> Before {
         &sw.slug,
         handoff::BUDGET_TOKENS,
     );
-    let mut meta = st
-        .session
-        .meta
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(o) = meta.as_object_mut() {
-        match &sw.meta_slug {
-            Some(s) => {
-                o.insert(PROVIDER_SLUG_META_KEY.into(), s.clone().into());
-            }
-            None => {
-                o.remove(PROVIDER_SLUG_META_KEY);
-            }
-        }
-    }
-    let meta = meta
-        .as_object()
-        .is_some_and(|o| !o.is_empty())
-        .then_some(meta);
+    let slug = set_slug(st, sw.meta_slug.clone().map(Into::into));
     let before = Before {
         provider: std::mem::replace(&mut st.session.provider, sw.provider),
-        meta: std::mem::replace(&mut st.session.meta, meta),
+        slug,
         model: std::mem::replace(&mut st.session.model, model.clone()),
         effort: st.session.effort.take(),
         model_from_provider: std::mem::replace(&mut st.model_from_provider, false),
