@@ -19,6 +19,7 @@ mod archive;
 mod attention;
 mod auto_close;
 mod children;
+mod client_calls;
 pub mod council;
 pub use secret_request::{answer_secret_request, pending_secret_requests};
 mod descendants;
@@ -2261,6 +2262,7 @@ fn close_locked(inner: &Arc<Inner>, live: &Arc<Live>, st: &mut State) -> Runtime
         return st.session.clone();
     }
     cancel_pending(inner, live, st, CancelReason::Closed);
+    client_calls::drop_session(&st.session.id);
     finish_turn(
         inner,
         live,
@@ -3303,6 +3305,7 @@ pub(super) fn apply_step_opts(
                 todo.turn_id = turn_id;
                 upsert_item(inner, live, st, todo);
             }
+            DriverEvent::ClientCall { id, op } => client_calls::start(inner, st, id, op),
             DriverEvent::AgentSettings { model, access } => {
                 selection::follow_agent(inner, live, st, model, access)
             }

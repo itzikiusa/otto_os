@@ -598,16 +598,35 @@ Installed versions and what each advertised: [ACP capabilities](./acp-capabiliti
 | Stop | – | yes (live) | yes (live) | yes (live) | yes (live) |
 | Reopen keeps the session | – | `session/resume` (live) | `session/resume` (live) | `session/resume` (live) | yes once prompted; an un-prompted session is "not found" and starts fresh with a notice (live) |
 | Notices, compaction, image / link answers | shown when sent (unit); no live agent sent any | | | | |
-| `fs/*`, `terminal/*` served by Otto | not advertised (see below) | | | | |
+| `fs/*`, `terminal/*` served by Otto | off | off (agent keeps its own tools) | **on**: reads, writes and commands go through Otto; the command's output streams into its row (live) | off (own tools) | off (own tools) |
 | Steer a running turn | – | no (ACP v1 has none) | yes (`_x.ai/interject`) | no | no |
 
-`fs/*` and `terminal/*` are still not advertised. One live turn per agent
-with a client that serves them showed only **grok** uses them
-(`fs/read_text_file`, `terminal/create` → `wait_for_exit` → `output` →
-`release`); agy, opencode and muse keep their own tools. Serving them for
-grok would put its commands and reads through Otto and stream command output
-live; it was not landed because Otto's implementation could not be verified
-against grok within this pass's turn budget.
+`fs/*` and `terminal/*` are served per flavour (`AcpFlavor::client_fs` /
+`client_terminal`), on for **grok** only: a live turn per agent showed grok
+is the one that uses them (`fs/read_text_file`, `terminal/create` →
+`wait_for_exit` → `output` → `release`); agy, opencode and muse keep their
+own tools whatever is advertised. What Otto does
+(`acp_client.rs`, `runtime/client_calls.rs`):
+
+- Files stay inside the thread's folder (canonical paths: no `..` or symlink
+  escape); reads up to 8 MB.
+- A write becomes a file-change row with its diff. Under approval-required it
+  waits for the person (a File change approval); a refusal answers the agent
+  with an error.
+- A command runs under the agent's own sandbox profile (the `sandbox-exec -p`
+  wrapper of its prepared spec) and env, asks first under approval-required,
+  and streams its output into the running command row as it arrives (grok
+  never embeds `terminal` content, so the open `execute` call whose command
+  it runs gets it). Output is kept up to the agent's `outputByteLimit`
+  (default 1 MB); at most 16 terminals per thread; all are killed when the
+  thread closes.
+- Live (grok 1.0.92, full access): the command's output streamed through
+  Otto and a requested file landed in the folder.
+
+Decision: control-plane MCP servers keep reaching ACP agents only through
+Otto's governed `otto` bridge (approvals, audit, per-workspace enablement),
+never as direct `http` entries in `mcpServers`, even where the agent
+advertises http.
 
 url-mode `elicitation/create` is one question naming the URL; choosing
 "Open in the browser" answers `accept` and opens the page (unit; no

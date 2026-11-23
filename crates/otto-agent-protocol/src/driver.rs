@@ -74,6 +74,45 @@ pub enum ChildSignal {
 /// What a driver reports. `turn_item` / `plan` / `command_output` /
 /// `request` map 1:1 onto `turn_item.updated`, `plan.updated`,
 /// `command_output.delta` and `runtime_request.updated`.
+
+/// What a [`DriverEvent::ClientCall`] asks the runtime to do. Paths are
+/// absolute; `root` is the folder a file must stay inside. A terminal's
+/// `program` / `args` already carry the session's sandbox wrapper.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClientOp {
+    ReadFile {
+        root: String,
+        path: String,
+        line: Option<u64>,
+        limit: Option<u64>,
+    },
+    WriteFile {
+        root: String,
+        path: String,
+        content: String,
+    },
+    TerminalCreate {
+        terminal_id: String,
+        program: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+        cwd: String,
+        byte_limit: Option<u64>,
+    },
+    TerminalOutput {
+        terminal_id: String,
+    },
+    TerminalWait {
+        terminal_id: String,
+    },
+    TerminalKill {
+        terminal_id: String,
+    },
+    TerminalRelease {
+        terminal_id: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DriverEvent {
     /// The protocol session is ready (`provider_session` → ready). `native_thread_id`
@@ -122,6 +161,13 @@ pub enum DriverEvent {
     /// What the running turn cost in US dollars (merged into its usage).
     TurnCost(f64),
     ContextUsage(ThreadTokenUsage),
+    /// An ACP client method the agent called (`fs/*`, `terminal/*`), for the
+    /// runtime to run off the session lock; the answer comes back through
+    /// [`StructuredDriver::on_client_result`].
+    ClientCall {
+        id: String,
+        op: ClientOp,
+    },
     /// The agent changed its mode or model itself (ACP `current_mode_update`,
     /// `config_option_update`): the thread's chips follow it.
     AgentSettings {
@@ -671,6 +717,21 @@ pub trait StructuredDriver: Send + 'static {
     fn init_sideband_resume(&mut self, _seed: SidebandResumeSeed) {}
 
     /// Translate off-lock sideband data into a sans-IO [`DriverStep`].
+    /// The runtime ran a [`DriverEvent::ClientCall`]: its JSON result, or why
+    /// it failed.
+    fn on_client_result(
+        &mut self,
+        _id: &str,
+        _result: std::result::Result<serde_json::Value, String>,
+    ) -> DriverStep {
+        DriverStep::default()
+    }
+
+    /// A chunk of a client terminal's output, as it arrives.
+    fn on_client_output(&mut self, _terminal_id: &str, _chunk: &str) -> DriverStep {
+        DriverStep::default()
+    }
+
     fn on_sideband(&mut self, _payload: SidebandPayload) -> DriverStep {
         DriverStep::default()
     }

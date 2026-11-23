@@ -44,8 +44,8 @@ use otto_core::auth::{AuthContext, RoleChecker};
 
 pub use acp_sideband::confinement::validate_confined_tail_path;
 pub use driver::{
-    ActiveTailChunk, ActiveTailKind, ActiveTailSource, ChildSignal, DriverError, DriverEvent,
-    DriverFactory, DriverStep, LaunchContext, LaunchSpec, McpDelivery, McpServerDef,
+    ActiveTailChunk, ActiveTailKind, ActiveTailSource, ChildSignal, ClientOp, DriverError,
+    DriverEvent, DriverFactory, DriverStep, LaunchContext, LaunchSpec, McpDelivery, McpServerDef,
     SidebandPayload, SidebandPoll, SidebandResumeSeed, SidebandSource, StructuredDriver,
 };
 pub use host::{RuntimeHost, SessionManagerHost};

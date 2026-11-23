@@ -512,3 +512,51 @@ async fn agy_live_slash_command() {
     assert_eq!(status, TurnTerminalStatus::Completed);
     live.rt.close(&live.s.id).await.unwrap();
 }
+
+/// Otto serves grok's `fs/*` and `terminal/*` (full access: grok's own
+/// policy denies tools here otherwise): the command's output streams into
+/// its tool row, a write lands in the folder as a file-change row. 2 turns.
+#[tokio::test]
+#[ignore = "needs the real grok CLI, signed in; spends 2 turns"]
+async fn grok_live_client_fs_and_terminal() {
+    let live = start(
+        RuntimeProvider::Grok,
+        AcpDriver::grok,
+        RuntimeAccessMode::FullAccess,
+    )
+    .await;
+    live.ready(1).await;
+    let (status, _) = live
+        .turn("Read README.md, then run the shell command `echo otto-term-7` once. Reply with one line: the file's text and the command's output.", 1)
+        .await;
+    let streamed: String = live
+        .host
+        .all()
+        .iter()
+        .filter_map(|e| match &e.body {
+            RuntimeEventBody::CommandOutputDelta { chunk, .. } => Some(chunk.clone()),
+            _ => None,
+        })
+        .collect();
+    println!(
+        "turn 1: {status:?}; streamed {streamed:?}\n{}",
+        live.host.transcript()
+    );
+    assert_eq!(status, TurnTerminalStatus::Completed);
+    assert!(
+        streamed.contains("otto-term-7"),
+        "terminal output streamed through Otto"
+    );
+    let (status, _) = live
+        .turn(
+            "Create the file note.txt containing exactly the text: hi from grok",
+            2,
+        )
+        .await;
+    let note = std::fs::read_to_string(std::path::Path::new(&live.host.root).join("note.txt"));
+    let changed = live.host.transcript().contains("note.txt");
+    println!("turn 2: {status:?}; note.txt = {note:?}; change row: {changed}");
+    assert_eq!(status, TurnTerminalStatus::Completed);
+    assert_eq!(note.as_deref().ok().map(str::trim), Some("hi from grok"));
+    live.rt.close(&live.s.id).await.unwrap();
+}

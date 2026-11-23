@@ -19,6 +19,12 @@
 //! * `fs`         — calls `fs/read_text_file` on the client and reports the error.
 //! * `agent-mode <id>` — the agent switches its own mode
 //!   (`current_mode_update`), then `end_turn`.
+//! * `fs-read <path>` / `fs-write <path>` — `fs/read_text_file` /
+//!   `fs/write_text_file` (content `written\n`) on the client, then
+//!   `read: <content>` / `wrote` (or `refused <code>`).
+//! * `term <command>` — an `execute` tool call run on a client terminal:
+//!   `terminal/create`, the terminal embedded in the call's content,
+//!   `wait_for_exit`, `output`, `release`, then `term: <output>`.
 //! * `tool`       — a `read` tool call that completes on its own (no
 //!   permission request), then `done`.
 //! * `edit <path>` — an `edit` tool call on `<path>` (relative to the cwd)
@@ -84,6 +90,22 @@ fn commands(sid: &str) {
             {"name":"compact","description":"Summarize the conversation"},
             {"name":"review","description":"Review changes","input":{"hint":"what to focus on"}}]}),
     );
+}
+
+/// A request to the client; waits for its answer (other lines are dropped).
+fn call(
+    lines: &mut impl Iterator<Item = std::io::Result<String>>,
+    id: &str,
+    method: &str,
+    params: Value,
+) -> Option<Value> {
+    out(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
+    loop {
+        let m = next(lines)?;
+        if m.get("id") == Some(&json!(id)) && m.get("method").is_none() {
+            return Some(m);
+        }
+    }
 }
 
 fn reply(id: &Value, result: Value) {
@@ -357,6 +379,11 @@ fn main() {
                         );
                         done("end_turn");
                     }
+                    t if t.starts_with("fs-") || t.starts_with("term ") => {
+                        if client_turn(&mut lines, &id, &sid, t).is_none() {
+                            return;
+                        }
+                    }
                     "tool" => {
                         update(
                             &sid,
@@ -428,4 +455,103 @@ fn main() {
             _ => {}
         }
     }
+}
+
+/// The `fs-read` / `fs-write` / `term` prompts: client methods Otto serves.
+fn client_turn(
+    lines: &mut impl Iterator<Item = std::io::Result<String>>,
+    id: &Value,
+    sid: &str,
+    text: &str,
+) -> Option<()> {
+    let sid = sid.to_string();
+    let done = |stop: &str| reply(id, json!({"stopReason":stop}));
+    let mut lines = lines;
+    match text {
+        t if t.starts_with("fs-read ") || t.starts_with("fs-write ") => {
+            let path = std::env::current_dir()
+                .map(|d| {
+                    d.join(t[t.find(' ').unwrap() + 1..].trim())
+                        .display()
+                        .to_string()
+                })
+                .unwrap_or_default();
+            let read = t.starts_with("fs-read ");
+            let (method, params) = if read {
+                ("fs/read_text_file", json!({"sessionId":sid,"path":path}))
+            } else {
+                (
+                    "fs/write_text_file",
+                    json!({"sessionId":sid,"path":path,"content":"written\n"}),
+                )
+            };
+            let Some(m) = call(&mut lines, "fs1", method, params) else {
+                return None;
+            };
+            let text = match (&m["error"]["code"], read) {
+                (Value::Number(c), _) => format!("refused {c}"),
+                (_, true) => format!(
+                    "read: {}",
+                    m["result"]["content"].as_str().unwrap_or_default()
+                ),
+                (_, false) => "wrote".into(),
+            };
+            chunk(&sid, "agent_message_chunk", &text);
+            done("end_turn");
+        }
+        t if t.starts_with("term ") => {
+            let command = t[5..].to_string();
+            update(
+                &sid,
+                json!({"sessionUpdate":"tool_call","toolCallId":"x1","title":command,"kind":"execute","status":"in_progress","rawInput":{"command":command}}),
+            );
+            let Some(m) = call(
+                &mut lines,
+                "t1",
+                "terminal/create",
+                json!({"sessionId":sid,"command":command}),
+            ) else {
+                return None;
+            };
+            let Some(tid) = m["result"]["terminalId"].as_str().map(str::to_string) else {
+                chunk(
+                    &sid,
+                    "agent_message_chunk",
+                    &format!("refused {}", m["error"]["code"]),
+                );
+                update(
+                    &sid,
+                    json!({"sessionUpdate":"tool_call_update","toolCallId":"x1","status":"failed"}),
+                );
+                done("end_turn");
+                return Some(());
+            };
+            update(
+                &sid,
+                json!({"sessionUpdate":"tool_call_update","toolCallId":"x1","content":[{"type":"terminal","terminalId":tid}]}),
+            );
+            let ids = json!({"sessionId":sid,"terminalId":tid});
+            call(&mut lines, "t2", "terminal/wait_for_exit", ids.clone());
+            let Some(o) = call(&mut lines, "t3", "terminal/output", ids.clone()) else {
+                return None;
+            };
+            call(&mut lines, "t4", "terminal/release", ids);
+            let output = o["result"]["output"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            update(
+                &sid,
+                json!({"sessionUpdate":"tool_call_update","toolCallId":"x1","status":"completed"}),
+            );
+            chunk(
+                &sid,
+                "agent_message_chunk",
+                &format!("term: {}", output.trim()),
+            );
+            done("end_turn");
+        }
+        _ => {}
+    }
+    Some(())
 }

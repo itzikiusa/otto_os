@@ -42,6 +42,8 @@ use crate::driver::{
 
 #[path = "acp_bg.rs"]
 mod bg;
+#[path = "acp_client.rs"]
+pub(crate) mod client;
 #[path = "acp_raw.rs"]
 mod raw;
 #[path = "acp_subagent.rs"]
@@ -134,6 +136,12 @@ pub struct AcpFlavor {
     /// (Muse's `muse-login`), so the handshake fails with its own "log in"
     /// message instead of a daemon opening a browser.
     pub no_authenticate: bool,
+    /// Serve `fs/read_text_file` / `fs/write_text_file` (advertised in
+    /// `initialize`): only for an agent the live tests showed uses them.
+    pub client_fs: bool,
+    /// Serve `terminal/*` (Otto runs the command under the agent's sandbox
+    /// and streams its output into the tool row).
+    pub client_terminal: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -166,6 +174,12 @@ pub(super) struct Tool {
     /// Every `(path, old, new)` diff of the call — a multi-file edit renders
     /// as one patch (T3 Code `acpToolCallDiffPatch`, ddd36a53a5).
     pub(super) diffs: Vec<(String, Option<String>, String)>,
+    /// The client terminal this call embeds (`terminal` content).
+    #[serde(default)]
+    pub(super) terminal: Option<String>,
+    /// Every `locations[].path` the agent named.
+    #[serde(default)]
+    pub(super) locations: Vec<String>,
 }
 
 const MAX_RETIRED_TOOL_IDS: usize = 512;
@@ -306,6 +320,21 @@ pub(super) struct AcpDriverState {
     pub(super) plan_active: bool,
     /// Grok's silent "denied by prompt policy" was explained once.
     pub(super) denied_noticed: bool,
+    /// The agent's sandbox wrapper (`sandbox-exec -p <profile>`), reused for
+    /// client terminals; empty when the agent runs unconfined.
+    pub(super) confine: Vec<String>,
+    /// The agent's prepared env (a client terminal gets it too). Not in a
+    /// snapshot.
+    #[serde(skip)]
+    pub(super) child_env: Vec<(String, String)>,
+    pub(super) terminals: u64,
+    /// Each open client terminal's output so far (bounded), by terminal id.
+    #[serde(skip)]
+    pub(super) terminal_output: HashMap<String, String>,
+    pub(super) client_seq: u64,
+    pub(super) client_waits: HashMap<String, client::ClientWait>,
+    /// Supervised writes / commands waiting for the person.
+    pub(super) client_held: HashMap<String, client::HeldCall>,
     /// The session's running cost (`usage_update.cost`, USD) and its value
     /// when the running turn started.
     pub(super) cost_total: Option<f64>,
@@ -401,6 +430,13 @@ impl AcpDriver {
                 base_mode: None,
                 plan_active: false,
                 denied_noticed: false,
+                confine: Vec::new(),
+                child_env: Vec::new(),
+                terminals: 0,
+                terminal_output: HashMap::new(),
+                client_seq: 0,
+                client_waits: HashMap::new(),
+                client_held: HashMap::new(),
                 cost_total: None,
                 cost_at_turn: None,
                 lost_resume: false,
@@ -563,6 +599,11 @@ impl AcpDriver {
                 initialize_meta: Some(json!({"clientType": "extension"})),
                 cancel_meta: Some(json!({"cancelTrigger": "ctrl_c"})),
                 interject: Some("_x.ai/interject"),
+                // Grok 1.0.92 reads files and runs commands through the client
+                // when it may (live 2026-11-23); agy, opencode and Muse keep
+                // their own tools whatever is advertised.
+                client_fs: true,
+                client_terminal: true,
                 ..AcpFlavor::default()
             },
         )
@@ -1186,7 +1227,12 @@ impl AcpDriver {
                 exit_code: None,
             },
             ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
-                let file_name = t.file.clone().unwrap_or_else(|| t.title.clone());
+                // Every file it names when no diff lists them (a move, a delete).
+                let file_name = if t.diffs.is_empty() && t.locations.len() > 1 {
+                    t.locations.join(", ")
+                } else {
+                    t.file.clone().unwrap_or_else(|| t.title.clone())
+                };
                 let raw_diff = (t.diffs.len() > 1).then(|| multi_file_patch(&t.diffs));
                 let raw_old = if t.diffs.len() > 1 {
                     None
@@ -1212,7 +1258,15 @@ impl AcpDriver {
                 image_files: Vec::new(),
                 tool_name: t.title.clone(),
                 input: t.raw_input.clone().unwrap_or(Value::Null),
-                output,
+                // Every location, not only the first (a search across files).
+                output: match (output, t.locations.len() > 1) {
+                    (out, true) => Some(format!(
+                        "{}Files: {}",
+                        out.map(|o| format!("{o}\n")).unwrap_or_default(),
+                        t.locations.join(", ")
+                    )),
+                    (out, false) => out,
+                },
                 images: t.images.clone(),
             },
         };
@@ -1238,6 +1292,9 @@ impl AcpDriver {
                     } else if let Some(text) = block_text(&c.content) {
                         t.output.push_str(&text);
                     }
+                }
+                ToolCallContent::Terminal(term) => {
+                    t.terminal = Some(term.terminal_id.0.to_string());
                 }
                 ToolCallContent::Diff(d) => {
                     let path = d.path.display().to_string();
@@ -1324,6 +1381,11 @@ impl AcpDriver {
             file,
             diff: classified_diff,
             diffs,
+            locations: call
+                .locations
+                .iter()
+                .map(|l| l.path.display().to_string())
+                .collect(),
             ..Tool::default()
         };
         Self::merge_content(&mut t, &call.content);
@@ -1389,15 +1451,24 @@ impl AcpDriver {
         if let Some(i) = f.raw_input {
             t.raw_input = Some(i);
         }
-        if let Some(locs) = &f.locations {
-            if let Some(l) = locs.first() {
-                t.file = Some(l.path.display().to_string());
-            }
+        if let Some(locs) = f.locations.as_ref().filter(|l| !l.is_empty()) {
+            t.locations = locs.iter().map(|l| l.path.display().to_string()).collect();
+            t.file = t.locations.first().cloned();
         }
         if let Some(content) = &f.content {
             // An update's content replaces the previous content (ACP).
             t.output.clear();
             Self::merge_content(&mut t, content);
+            // A client terminal it embeds: what it printed so far.
+            if let Some(kept) = t
+                .terminal
+                .as_ref()
+                .and_then(|id| self.state.terminal_output.get(id))
+            {
+                if t.output.is_empty() {
+                    t.output = kept.clone();
+                }
+            }
         } else if let Some(txt) = raw_output_text(f.raw_output.as_ref()) {
             t.output = txt;
         }
@@ -1419,9 +1490,8 @@ impl AcpDriver {
             self.state.denied_noticed = true;
             step.push(DriverEvent::TurnItem(notice(
                 format!("{}:grok-denied", self.turn()),
-                "Grok refused a tool without asking: its own permission settings deny anything not \
-                 pre-approved (Grok also reads Claude Code's `permissions.defaultMode`, for example \
-                 `dontAsk`). Switch this thread to Full access, or change that setting."
+                "Grok denies tools without asking when ~/.claude/settings.json sets \
+                 permissions.defaultMode to dontAsk \u{b7} Use Full access for this thread"
                     .into(),
             )));
         }
@@ -2391,6 +2461,7 @@ impl StructuredDriver for AcpDriver {
         // Elicitation is a draft ACP capability not yet exposed by our pinned SDK.
         let mut init = serde_json::to_value(init).expect("initialize serializes");
         init["clientCapabilities"]["elicitation"] = json!({"form":{}});
+        self.client_capabilities(&mut init);
         let (id, line) = self.request(M_INITIALIZE, init);
         self.state.init_id = id;
         step.write(line);
@@ -2470,6 +2541,7 @@ impl StructuredDriver for AcpDriver {
     }
 
     fn adopt_spec(&mut self, spec: &mut LaunchSpec) {
+        self.adopt_confinement(spec);
         self.state.sideband.adopt_env(self.provider, &mut spec.env);
         let Some(var) = self.flavor.bundle_env else {
             return;
@@ -2482,6 +2554,7 @@ impl StructuredDriver for AcpDriver {
 
     fn interrupt(&mut self) -> DriverStep {
         let mut step = DriverStep::default();
+        self.cancel_client_held(&mut step);
         self.state.sideband.on_turn_settled();
         // ACP: the client answers every open permission request `cancelled`.
         for (_, (rpc_id, _)) in self.state.questions.drain() {
@@ -2536,6 +2609,9 @@ impl StructuredDriver for AcpDriver {
         request_id: &str,
         decision: ApprovalDecision,
     ) -> Result<DriverStep, DriverError> {
+        if let Some(step) = self.respond_client(request_id, decision) {
+            return Ok(step);
+        }
         let p = self
             .state
             .pending
@@ -2740,8 +2816,11 @@ impl StructuredDriver for AcpDriver {
                     ),
                 }
             }
+            (Some(m), Some(id)) if m.starts_with("fs/") || m.starts_with("terminal/") => {
+                self.on_client_request(&mut step, &m, id, &params);
+            }
             (Some(m), Some(id)) => {
-                // fs/*, terminal/*, …: not offered in our client capabilities.
+                // Anything else: not offered in our client capabilities.
                 step.write(
                     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":format!("method not supported: {m}")}})
                         .to_string(),
@@ -2830,6 +2909,14 @@ impl StructuredDriver for AcpDriver {
 
     fn init_sideband_resume(&mut self, seed: SidebandResumeSeed) {
         self.state.sideband.init_resume(self.provider, seed);
+    }
+
+    fn on_client_result(&mut self, id: &str, result: Result<Value, String>) -> DriverStep {
+        self.client_result(id, result)
+    }
+
+    fn on_client_output(&mut self, terminal_id: &str, chunk: &str) -> DriverStep {
+        self.client_output(terminal_id, chunk)
     }
 
     fn on_sideband(&mut self, payload: SidebandPayload) -> DriverStep {
@@ -3608,6 +3695,60 @@ mod tests {
             .any(|o| o.decision == ApprovalDecision::DeclineAlways && o.label == "Never"));
         let s = d.respond(&id, ApprovalDecision::DeclineAlways).unwrap();
         assert_eq!(sent(&s, 0)["result"]["outcome"]["optionId"], "n");
+    }
+
+    /// Every location a tool names is shown, not only the first.
+    /// grok runs a command through `terminal/create` without embedding the
+    /// terminal in the call: the open execute call it runs still streams.
+    #[test]
+    fn a_client_terminal_streams_into_the_execute_call_it_runs() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g"}}"#);
+        d.state.access = RuntimeAccessMode::FullAccess;
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        d.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"g","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"run","kind":"execute","status":"in_progress","rawInput":{"command":"echo x"}}}}"#);
+        let s = d.on_line(r#"{"jsonrpc":"2.0","id":3,"method":"terminal/create","params":{"sessionId":"g","command":"/bin/bash -lc 'echo x'"}}"#);
+        let (id, op) = s
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DriverEvent::ClientCall { id, op } => Some((id.clone(), op.clone())),
+                _ => None,
+            })
+            .expect("a client call");
+        let crate::driver::ClientOp::TerminalCreate { program, args, .. } = op else {
+            panic!("{op:?}")
+        };
+        assert_eq!((program.as_str(), args[0].as_str()), ("/bin/sh", "-c"));
+        let s = d.on_client_result(&id, Ok(json!({})));
+        assert_eq!(sent(&s, 0)["result"]["terminalId"], "term-1");
+        let s = d.on_client_output("term-1", "x\n");
+        assert!(s.events.iter().any(|e| matches!(e,
+            DriverEvent::CommandOutput { item_id, chunk } if item_id == "t1:tool:c1" && chunk == "x\n")));
+    }
+
+    #[test]
+    fn every_location_is_shown() {
+        let mut d = AcpDriver::gemini("gemini");
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s"}}"#);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let s = d.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"grep","kind":"search","status":"completed","locations":[{"path":"/w/a.rs"},{"path":"/w/b.rs"}]}}}"#);
+        let out = s.events.iter().find_map(|e| match e {
+            DriverEvent::TurnItem(TurnItem {
+                kind: TurnItemKind::DynamicTool { output, .. },
+                ..
+            }) => output.clone(),
+            _ => None,
+        });
+        assert_eq!(out.as_deref(), Some("Files: /w/a.rs, /w/b.rs"));
+        let s = d.on_line(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"c2","title":"mv","kind":"move","status":"completed","locations":[{"path":"/w/old.rs"},{"path":"/w/new.rs"}]}}}"#);
+        assert!(s.events.iter().any(|e| matches!(e,
+            DriverEvent::TurnItem(TurnItem { kind: TurnItemKind::FileChange { file_name, .. }, .. })
+                if file_name == "/w/old.rs, /w/new.rs")));
     }
 
     #[test]
