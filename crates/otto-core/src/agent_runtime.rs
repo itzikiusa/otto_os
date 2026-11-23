@@ -2866,6 +2866,7 @@ mod tests {
             questions: Vec::new(),
             question_title: None,
             answers: None,
+            for_person: false,
         };
         let old: OldRequest = serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
         assert_eq!(old.decision, Some(OldDecision::Decline));
