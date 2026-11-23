@@ -55,7 +55,8 @@ export interface UpdateMcpServerReq {
 // `.mcp.json` config CRUD. The richer governed registry uses the DTOs below.
 // ---------------------------------------------------------------------------
 
-export type McpTransport = 'stdio' | 'http';
+/** `sse`: the legacy HTTP+SSE transport (protocol 2024-11-05), governed only. */
+export type McpTransport = 'stdio' | 'http' | 'sse';
 export type McpRiskLabel = 'read' | 'write' | 'dangerous' | 'unknown';
 export type McpInjectionRisk = 'low' | 'medium' | 'high';
 export type McpHealthStatus = 'unknown' | 'healthy' | 'unhealthy' | 'disabled';
