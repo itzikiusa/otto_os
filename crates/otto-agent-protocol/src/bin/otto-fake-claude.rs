@@ -21,6 +21,11 @@
 //! * `escape`      — starts `sleep 600` in a process group of its own (as
 //!   Claude Code does with some jobs), writes its pid to
 //!   `.fake-claude/escaped.pid`, then answers like `echo`.
+//! * `mcp <server> <tool> [json]` — a real MCP call: launches `<server>` from
+//!   the `--mcp-config` file (its `${NAME:-}` env references expanded from
+//!   this process), runs `initialize` + `tools/call` off the main loop, and
+//!   reports it as Claude Code does: a `mcp__<server>__<tool>` tool_use, its
+//!   tool_result (the MCP `content`, `is_error`), "mcp done", `result`.
 //! * anything else — `echo: <text>` as stream events + `assistant`.
 //!
 //! An `interrupt` control request ends the running turn as interrupted; a
@@ -118,6 +123,82 @@ fn user_text(msg: &Value) -> String {
 enum In {
     Line(Value),
     Eof,
+    /// An `mcp` call's outcome: (tool_use id, MCP result or error text).
+    McpDone(String, Result<Value, String>),
+}
+
+/// `${NAME:-}` / `${NAME}` from this process's env (Claude Code expands
+/// `.mcp.json` env the same way).
+fn expand_env(v: &str) -> String {
+    let mut out = String::new();
+    let mut rest = v;
+    while let Some(i) = rest.find("${") {
+        out.push_str(&rest[..i]);
+        let Some(end) = rest[i..].find('}') else {
+            break;
+        };
+        let name = rest[i + 2..i + end].split(":-").next().unwrap_or_default();
+        out.push_str(&std::env::var(name).unwrap_or_default());
+        rest = &rest[i + end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One stdio MCP call against `server` from the `--mcp-config` document.
+fn mcp_call(config: &str, server: &str, tool: &str, args: Value) -> Result<Value, String> {
+    use std::io::BufReader;
+    use std::process::{Command, Stdio};
+    let raw = std::fs::read_to_string(config).unwrap_or_else(|_| config.to_string());
+    let doc: Value = serde_json::from_str(&raw).map_err(|e| format!("mcp config: {e}"))?;
+    let spec = doc
+        .pointer(&format!("/mcpServers/{server}"))
+        .ok_or_else(|| format!("no MCP server {server}"))?;
+    let mut cmd = Command::new(spec["command"].as_str().unwrap_or_default());
+    for a in spec["args"].as_array().into_iter().flatten() {
+        cmd.arg(a.as_str().unwrap_or_default());
+    }
+    for (k, v) in spec["env"].as_object().into_iter().flatten() {
+        cmd.env(k, expand_env(v.as_str().unwrap_or_default()));
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("spawn {server}: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let mut lines = BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
+    let mut ask = |id: u64, method: &str, params: Value| -> Result<Value, String> {
+        if method.starts_with("notifications/") {
+            let note = json!({"jsonrpc":"2.0","method":method});
+            return writeln!(stdin, "{note}")
+                .map(|_| Value::Null)
+                .map_err(|e| e.to_string());
+        }
+        let req = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+        writeln!(stdin, "{req}").map_err(|e| e.to_string())?;
+        loop {
+            let line = lines
+                .next()
+                .ok_or("server closed")?
+                .map_err(|e| e.to_string())?;
+            let v: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+            if v["id"] == json!(id) {
+                return match v.get("error") {
+                    Some(e) => Err(e.to_string()),
+                    None => Ok(v["result"].clone()),
+                };
+            }
+        }
+    };
+    let hello = json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-claude","version":"0"}});
+    ask(1, "initialize", hello)?;
+    ask(0, "notifications/initialized", Value::Null)?;
+    let res = ask(2, "tools/call", json!({"name": tool, "arguments": args}));
+    let _ = child.kill();
+    let _ = child.wait();
+    res
 }
 
 /// What the fake owes later: a background task's completion.
@@ -159,7 +240,9 @@ fn main() {
             id
         }
     };
+    let mcp_config = arg_after(&args, "--mcp-config").unwrap_or_default();
     let (tx, rx) = mpsc::channel::<In>();
+    let mcp_tx = tx.clone();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
             let Ok(line) = line else { break };
@@ -227,6 +310,23 @@ fn main() {
         let msg = match msg {
             In::Line(v) => v,
             In::Eof => return,
+            In::McpDone(tu, res) => {
+                waiting = None;
+                let (content, is_error) = match res {
+                    Ok(r) => (
+                        r["content"].clone(),
+                        r["isError"].as_bool().unwrap_or(false),
+                    ),
+                    Err(e) => (json!([{"type":"text","text":e}]), true),
+                };
+                out(
+                    json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tu,"content":content,"is_error":is_error}]},"parent_tool_use_id":null}),
+                );
+                n += 1;
+                text_message(&format!("m{n}"), "mcp done");
+                result_ok();
+                continue;
+            }
         };
         match msg.get("type").and_then(Value::as_str) {
             Some("control_response")
@@ -454,6 +554,25 @@ fn main() {
                         }
                         text_message(&mid, &format!("echo: {text}"));
                         result_ok();
+                    }
+                    "mcp" => {
+                        let mut parts = text.splitn(4, ' ').skip(1);
+                        let server = parts.next().unwrap_or_default().to_string();
+                        let tool = parts.next().unwrap_or_default().to_string();
+                        let args: Value = parts
+                            .next()
+                            .and_then(|a| serde_json::from_str(a).ok())
+                            .unwrap_or_else(|| json!({}));
+                        let tu = format!("tu{n}");
+                        out(
+                            json!({"type":"assistant","message":{"id":mid,"content":[{"type":"tool_use","id":tu,"name":format!("mcp__{server}__{tool}"),"input":args}]},"parent_tool_use_id":null}),
+                        );
+                        let (config, done) = (mcp_config.clone(), mcp_tx.clone());
+                        std::thread::spawn(move || {
+                            let res = mcp_call(&config, &server, &tool, args);
+                            let _ = done.send(In::McpDone(tu, res));
+                        });
+                        waiting = Some((None, false));
                     }
                     // `mode`: the permission mode it runs in (plan, default…).
                     "mode" => {

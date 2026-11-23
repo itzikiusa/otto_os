@@ -1257,15 +1257,17 @@ async fn gateway_call(ctx: &Ctx, namespaced: &str, args: &Value) -> Result<(Valu
         "arguments": args,
         "workspace_id": ws,
         "session_id": ctx.session_id,
+        "wait_seconds": GOVERNED_WAIT_SECS,
     });
-    // The daemon may queue, cold-open (spawn + initialize) and then run the
-    // downstream call, each up to otto-mcp's `OP_TIMEOUT`: the default 20 s
-    // gave up first, dropping the handler mid-call (integrations-4-01).
+    // The daemon may wait on the person's approval, then queue, cold-open
+    // (spawn + initialize) and run the downstream call, each up to
+    // otto-mcp's `OP_TIMEOUT`: the default 20 s gave up first, dropping the
+    // handler mid-call (integrations-4-01).
     let v = ctx
         .post_json_within(
             "/mcp/gateway/invoke",
             &body,
-            otto_mcp::client::GATEWAY_CALL_TIMEOUT,
+            Duration::from_secs(GOVERNED_WAIT_SECS) + otto_mcp::client::GATEWAY_CALL_TIMEOUT,
         )
         .await?;
     let is_error = matches!(

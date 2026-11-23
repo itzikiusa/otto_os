@@ -35,6 +35,8 @@
   import RuntimeAskAgent from './RuntimeAskAgent.svelte';
   import { attentionItems, attentionPillText } from './attentionDock';
   import RuntimeAttentionDock from './RuntimeAttentionDock.svelte';
+  import { isMcpAsk } from './mcpAsks';
+  import { mcpAsks } from './mcpAsks.svelte';
   import RuntimeComposerActions from './RuntimeComposerActions.svelte';
   import RuntimeModelChip from './RuntimeModelChip.svelte';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
@@ -131,7 +133,10 @@
   const visibleRows = $derived(renderWindow(rows, rowCap, holdFrom, timelineRowKey));
   let prevMsgIds: string[] = [];
   const messageIds = $derived.by(() => (prevMsgIds = collectMessageIds(rows, prevMsgIds)));
-  const approvals = $derived(new Map((p ? pendingApprovals(p) : []).map((a) => [a.requestId, a] as const)));
+  // The agent's approval-gated MCP calls (mcp_approvals cards) wait in the same dock.
+  $effect(() => mcpAsks.hold());
+  const mcpPending = $derived(mcpAsks.pending(sessionId));
+  const approvals = $derived(new Map([...(p ? pendingApprovals(p) : []), ...mcpPending.map((a) => mcpAsks.asRow(a))].map((a) => [a.requestId, a] as const)));
   const turn = $derived(p ? latestTurn(p) : null);
   const closed = $derived(session?.status === 'closed');
   const dormant = $derived(session?.status === 'dormant');
@@ -152,7 +157,7 @@
   const secretAsk = $derived(session && !auth.isImpersonating && session.created_by === auth.me?.id ? (secretRequests.bySession[sessionId] ?? null) : null);
   $effect(() => void secretRequests.load());
   // What the agent waits on the person for: answered in the attention dock.
-  const attention = $derived(attentionItems(p?.requests ?? [], secretAsk));
+  const attention = $derived(attentionItems(p?.requests ?? [], secretAsk, mcpPending));
 
   let scroller = $state<HTMLDivElement | null>(null);
   let streamEl = $state<HTMLDivElement | null>(null);
@@ -373,7 +378,7 @@
   }
 
   const respond = (requestId: string, decision: ApprovalDecision): Promise<void> =>
-    runtimeThreads.respond(ownerId, requestId, decision).catch((e: unknown) => void toastError('Couldn’t answer the approval', e));
+    (isMcpAsk(requestId) ? mcpAsks.answer(requestId, decision) : runtimeThreads.respond(ownerId, requestId, decision)).catch((e: unknown) => void toastError('Couldn’t answer the approval', e));
 
   let askEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);
   let emojiEl = $state<{ onKey: (e: KeyboardEvent) => boolean } | null>(null);

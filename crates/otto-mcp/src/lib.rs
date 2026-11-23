@@ -16,6 +16,7 @@
 //! for the threat model and the requirement traceability. The HTTP surface
 //! (`api_router`) is wired into `otto-server` via the `McpCtx` trait.
 
+pub mod approval_wait;
 pub mod auto_approve;
 pub mod client;
 pub mod governance;

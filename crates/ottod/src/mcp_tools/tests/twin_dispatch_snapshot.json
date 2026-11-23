@@ -825,7 +825,7 @@
             "if_hash": "h",
             "workspace_id": "ws-test"
           },
-          "wait_seconds": 15
+          "wait_seconds": 300
         }
       ]
     ],
@@ -851,7 +851,7 @@
             "content": "",
             "workspace_id": "ws-test"
           },
-          "wait_seconds": 15
+          "wait_seconds": 300
         }
       ]
     ],
@@ -877,7 +877,7 @@
             "to": "b.md",
             "workspace_id": "ws-test"
           },
-          "wait_seconds": 15
+          "wait_seconds": 300
         }
       ]
     ],
@@ -901,7 +901,7 @@
             "path": "a.md",
             "workspace_id": "ws-test"
           },
-          "wait_seconds": 15
+          "wait_seconds": 300
         }
       ]
     ],
@@ -1388,7 +1388,7 @@
             "workspace_id": "ws-test",
             "request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
           },
-          "wait_seconds": 15
+          "wait_seconds": 300
         }
       ]
     ],
@@ -1415,7 +1415,7 @@
             "body_mode": "none",
             "workspace_id": "ws-test"
           },
-          "wait_seconds": 15
+          "wait_seconds": 300
         }
       ]
     ],
@@ -1437,7 +1437,7 @@
             "workspace_id": "ws-test",
             "automation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
           },
-          "wait_seconds": 15
+          "wait_seconds": 300
         }
       ]
     ],

@@ -19,6 +19,7 @@
     attentionHeadline, currentIndex, dockKeyAction, keyDecision, stepId, type AttentionItem,
   } from './attentionDock';
   import RuntimeApprovalRow from './RuntimeApprovalRow.svelte';
+  import { isMcpAsk } from './mcpAsks';
   import RuntimeQuestionCard from './RuntimeQuestionCard.svelte';
   import RuntimeSecretCard from './RuntimeSecretCard.svelte';
   import type { PendingApproval } from './timeline';
@@ -167,7 +168,7 @@
           <button type="button" class="icon-btn ad-nav" aria-label="Next request" title="Next request" onclick={() => (picked = stepId(list, picked, 1))}><Icon name="chevronRight" size={12} /></button>
         </span>
       {/if}
-      {#if onjump && cur.kind === 'approval'}
+      {#if onjump && cur.kind === 'approval' && !isMcpAsk(cur.id)}
         <button type="button" class="btn small ghost ad-jump" title="Show where the agent asked" data-testid="runtime-attention-jump" onclick={() => onjump?.(curId)}>Show</button>
       {/if}
     </div>

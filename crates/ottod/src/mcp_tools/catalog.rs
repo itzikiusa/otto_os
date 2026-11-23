@@ -739,8 +739,8 @@ pub(super) const GOVERNED_ALIASED_BY_NATIVE: &[(&str, &str)] = &[
 ];
 
 /// How long a governed call waits for a human decision before returning
-/// `pending_approval`. Below [`CALL_TIMEOUT`] so the daemon answers before this
-/// bridge gives up; a later identical call reuses the approval once granted.
+/// `pending_approval` (the person answers in the thread); the bridge's request
+/// budget adds it, and a later identical call reuses a later approval.
 pub(super) const GOVERNED_WAIT_SECS: u64 = otto_core::mcp_budgets::GOVERNED_WAIT_SECS;
 
 /// The stdio-facing name of a governed catalog entry: `otto.create_pr` →
