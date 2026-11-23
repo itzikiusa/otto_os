@@ -4,7 +4,7 @@
 // the composer. The live answer controls exist once, in the dock; the
 // timeline keeps the historical row. Pure (unit/threadsAttentionDock.test.ts).
 import type { ApprovalDecision, ApprovalOption, McpApproval, RequestKind, RuntimeRequest } from '../../../lib/api/types.ts';
-import { askTool, MCP_ASK } from './mcpAsks.ts';
+import { askSentence, MCP_ASK } from './mcpAsks.ts';
 
 export type AttentionKind = 'approval' | 'question' | 'secret';
 
@@ -16,8 +16,8 @@ export interface AttentionItem {
   at: string | null;
   /** Approvals: the request kind (command, file_change …). */
   requestKind?: RequestKind;
-  /** An MCP approval card (`mcpAsks.ts`): the tool it would run. */
-  tool?: string;
+  /** An MCP approval card (`mcpAsks.ts`): what it wants, as the headline. */
+  sentence?: string;
 }
 
 /** Everything pending, in the order it should be answered: a secret first
@@ -26,9 +26,9 @@ export interface AttentionItem {
 export function attentionItems(
   requests: readonly Pick<RuntimeRequest, 'id' | 'kind' | 'status' | 'created_at' | 'response_capability'>[],
   secret: { request_id: string } | null,
-  mcp: readonly Pick<McpApproval, 'id' | 'created_at' | 'server_name' | 'tool' | 'title'>[] = [],
+  mcp: readonly Pick<McpApproval, 'id' | 'created_at' | 'kind' | 'server_name' | 'tool' | 'title'>[] = [],
 ): AttentionItem[] {
-  const out: AttentionItem[] = mcp.map((a) => ({ kind: 'approval', id: MCP_ASK + a.id, at: a.created_at, requestKind: 'permission', tool: askTool(a) }));
+  const out: AttentionItem[] = mcp.map((a) => ({ kind: 'approval', id: MCP_ASK + a.id, at: a.created_at, requestKind: 'permission', sentence: askSentence(a) }));
   for (const r of requests) {
     if (r.status !== 'pending') continue;
     if (r.kind === 'question') {
@@ -72,7 +72,7 @@ const VERBS: Record<RequestKind, string> = {
 export function attentionHeadline(item: AttentionItem, agent: string): string {
   if (item.kind === 'secret') return `${agent} asks for a secret`;
   if (item.kind === 'question') return `${agent} asks`;
-  if (item.tool) return `${agent} wants to use ${item.tool}`;
+  if (item.sentence) return item.sentence;
   return `${agent} wants to ${VERBS[item.requestKind ?? 'permission']}`;
 }
 

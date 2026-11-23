@@ -27,6 +27,8 @@ export interface PendingApproval {
   kind: RequestKind;
   prompt: string | null;
   reason: string | null;
+  /** `prompt` folds under "Details" (an app's request: the dock's headline already says what it wants). */
+  folded?: boolean;
   options: ApprovalOption[];
   /** False once the provider process is gone (`not_resumable`). */
   canRespond: boolean;

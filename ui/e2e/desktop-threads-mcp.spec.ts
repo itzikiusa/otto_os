@@ -5,7 +5,7 @@ import { mcpThreads } from './threads-mcp-fixture';
 const PROBE = fileURLToPath(new URL('./fixtures/mcp-probe.mjs', import.meta.url));
 
 // An approval-gated Otto tool called by a thread's agent asks IN the thread
-// (the attention dock: "Claude wants to use otto · broadcast_message" · Deny /
+// (the attention dock: "otto · broadcast_message wants to broadcast message" · Deny /
 // Allow once), and the waiting call then runs on that answer — no
 // "pending_approval, resubmit after it is approved" reply.
 const t = mcpThreads('desktop-browser');

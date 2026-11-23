@@ -86,8 +86,13 @@
 
 {#if docked}
   <div class="ra ra-docked" role="group" aria-label={LABELS[approval.kind]} data-testid="runtime-approval-dock-{approval.requestId}">
-    {#if approval.prompt}<code class="ra-detail" dir="auto" title={approval.prompt}>{approval.prompt}</code>{/if}
-    {#if approval.reason}<p class="ra-reason" dir="auto">{approval.reason}</p>{/if}
+    {#if approval.folded}
+      {#if approval.reason}<p class="ra-reason" dir="auto">{approval.reason}</p>{/if}
+      {#if approval.prompt}<details class="ra-more"><summary>Details</summary><code class="ra-detail" dir="auto">{approval.prompt}</code></details>{/if}
+    {:else}
+      {#if approval.prompt}<code class="ra-detail" dir="auto" title={approval.prompt}>{approval.prompt}</code>{/if}
+      {#if approval.reason}<p class="ra-reason" dir="auto">{approval.reason}</p>{/if}
+    {/if}
     <div class="ra-actions">
       {#if approval.canRespond}
         {#each primary as o (o.decision)}
@@ -192,6 +197,16 @@
       min-block-size: calc(var(--hit-min) + 8px);
       padding-inline: 14px;
     }
+  }
+  .ra-more summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+  }
+  .ra-more[open] .ra-detail {
+    display: block;
+    max-block-size: 160px;
+    margin-block-start: var(--sp-1);
   }
   .ra-reason {
     margin: 0;

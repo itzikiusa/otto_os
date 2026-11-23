@@ -26,6 +26,13 @@ export function askTool(a: Pick<McpApproval, 'server_name' | 'tool' | 'title'>):
   return a.tool ? `${a.server_name ?? 'MCP'} · ${bare(a.tool)}` : a.title;
 }
 
+/** The dock's plain sentence for a card: "github · create_issue wants to
+ *  create issue", or an agent's own question ("otto asks: Deploy?"). */
+export function askSentence(a: Pick<McpApproval, 'kind' | 'server_name' | 'tool' | 'title'>): string {
+  if (a.kind === 'human_ask') return `${a.server_name ?? 'MCP'} asks: ${a.title}`;
+  return a.tool ? `${askTool(a)} wants to ${bare(a.tool).replace(/[_.]+/g, ' ')}` : a.title;
+}
+
 /** The arguments in full — the card's redacted copy, pretty-printed: the
  *  person approves what they can read (the block scrolls, height-capped). */
 export function argsText(json: string): string | null {
@@ -50,6 +57,8 @@ export function askAsPending(a: McpApproval, opts: { canDecide: boolean; always:
   return {
     requestId: MCP_ASK + a.id,
     kind: 'permission',
+    // The dock's headline says what it wants (`askSentence`); the arguments sit behind Details.
+    folded: true,
     prompt: argsText(a.args_redacted_json),
     reason: a.detail,
     options,
