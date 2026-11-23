@@ -2,6 +2,7 @@
   // Changes tab: the working tree, or — once the branch is ahead of its
   // upstream — the local commits a Create PR would send (T3 0.1.6 "review
   // local commits in the Diff pane"): all of them as one range, or one commit.
+  import { focusRow } from './changesFocus';
   import { api, isAbortError } from '../../lib/api/client';
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -88,14 +89,14 @@
   const rows = $derived(activeScope === 'commits' ? commitFiles : workingRows);
   const selectedRow = $derived(rows.find((r) => r.path === selectedPath) ?? null);
 
-  // A turn's changes card asked for a file (threads.changesFocus): show it.
+  // A turn's changes card asked for a file (threads.changesFocus): show it;
+  // once the rows are there without it, drop the ask (it never lingers).
   $effect(() => {
     const want = threads.changesFocus;
-    const hit = want ? rows.find((r) => want === r.path || want.endsWith(`/${r.path}`)) : null;
-    if (hit) {
-      selectedPath = hit.path;
-      threads.changesFocus = null;
-    }
+    if (!want) return;
+    const hit = focusRow(rows, want);
+    if (hit) selectedPath = hit.path;
+    if (hit || rows.length > 0) threads.changesFocus = null;
   });
   // Keep a valid selection as the list changes.
   $effect(() => {
