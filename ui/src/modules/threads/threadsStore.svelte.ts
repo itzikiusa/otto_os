@@ -125,6 +125,8 @@ class ThreadsStore {
   }
 
   inspectorTab = $state<ThreadsInspectorTab>('changes');
+  /** A file the Changes surface should show first (a turn's changes card); it clears once shown. */
+  changesFocus = $state<string | null>(null);
   /** Bumped to bring Thread details' "Agents & tasks" into view. */
   agentsTasksReveal = $state(0);
   showAgentsTasks(): void {

@@ -586,6 +586,7 @@
     border-radius: var(--radius-l);
     border: 1px solid var(--border);
     background: var(--surface);
+    box-shadow: var(--shadow-card);
   }
   .nt-composer.compact {
     container-type: inline-size;
@@ -609,8 +610,8 @@
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: var(--fs-m);
-    line-height: 1.55;
+    font-size: var(--fs-l);
+    line-height: 1.6;
     unicode-bidi: plaintext;
     text-align: start;
     outline: none;

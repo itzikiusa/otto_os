@@ -80,6 +80,15 @@
   const rows = $derived(activeScope === 'commits' ? commitFiles : workingRows);
   const selectedRow = $derived(rows.find((r) => r.path === selectedPath) ?? null);
 
+  // A turn's changes card asked for a file (threads.changesFocus): show it.
+  $effect(() => {
+    const want = threads.changesFocus;
+    const hit = want ? rows.find((r) => want === r.path || want.endsWith(`/${r.path}`)) : null;
+    if (hit) {
+      selectedPath = hit.path;
+      threads.changesFocus = null;
+    }
+  });
   // Keep a valid selection as the list changes.
   $effect(() => {
     if (rows.length === 0) selectedPath = null;

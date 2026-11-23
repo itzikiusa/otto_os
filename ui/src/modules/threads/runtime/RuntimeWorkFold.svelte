@@ -57,7 +57,6 @@
   {#if fold}
     <details class="rf" bind:open={userOpen} data-testid="runtime-fold-{id}">
       <summary>
-        <Icon name="check" size={12} />
         <span class="ellipsis">{foldLine(entries)}{tokens ? ` · ${tokens}` : ''}</span>
         <Icon name="chevronRight" size={12} />
       </summary>
@@ -76,15 +75,16 @@
     flex-direction: column;
     gap: 2px;
   }
+  /* One dim line, a hairline under it, then the answer (the target's fold). */
   .rf > summary {
     display: flex;
     align-items: center;
-    gap: 8px;
-    min-block-size: 28px;
-    padding: 2px 6px;
-    border-radius: var(--radius-s);
+    gap: var(--sp-1);
+    min-block-size: 32px;
+    padding-block: var(--sp-2);
+    border-block-end: 1px solid var(--border);
     color: var(--text-dim);
-    font-size: var(--fs-s);
+    font-size: var(--fs-m);
     list-style: none;
     cursor: pointer;
   }
@@ -92,7 +92,6 @@
     display: none;
   }
   .rf > summary:hover {
-    background: var(--hover);
     color: var(--text);
   }
   .rf > summary:focus-visible {
@@ -100,8 +99,10 @@
     outline-offset: -2px;
   }
   .rf > summary .ellipsis {
-    flex: 1;
     min-width: 0;
+  }
+  .rf-wrap:has(> .rf) {
+    margin-block-end: var(--sp-3);
   }
   .rf[open] > summary > :global(svg:last-child) {
     transform: rotate(90deg);

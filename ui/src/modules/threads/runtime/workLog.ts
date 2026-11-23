@@ -163,6 +163,22 @@ export function visibleTools(rows: readonly TimelineRow[], v: ToolVisibility): T
   return out;
 }
 
+/** While a stretch runs, how many of its leading steps fold into "N
+ *  earlier steps" (T3's live work log): the finished ones before the live
+ *  step, up to the first that needs a person (a failure, an approval) —
+ *  that one and everything after it stays in sight. Fewer than two: none. */
+export function earlierSteps(parts: readonly WorkPart[], pendingRequestIds: ReadonlySet<string>): number {
+  const entriesOf = (p: WorkPart): WorkEntry[] => (p.kind === 'item' ? [p.entry] : p.entries);
+  if (!parts.some((p) => entriesOf(p).some((e) => isLive(e.item)))) return 0;
+  let n = 0;
+  while (n < parts.length - 1) {
+    const es = entriesOf(parts[n]);
+    if (es.some((e) => isLive(e.item)) || needsEyes(es, pendingRequestIds) || !es.every((e) => FOLDABLE.has(e.item.type))) break;
+    n++;
+  }
+  return n >= 2 ? n : 0;
+}
+
 /** A running group's line: its live call by name, then "+N more". Null
  *  when nothing in it runs (the group keeps its summary sentence). */
 export function liveSummary(entries: readonly WorkEntry[], cwd: string | null | undefined): string | null {
