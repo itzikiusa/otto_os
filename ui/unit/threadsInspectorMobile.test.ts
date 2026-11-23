@@ -9,6 +9,7 @@ function store() {
     '../../lib/stores/openfile.svelte': { openFile: {} }, '../../lib/stores/workspace.svelte': { ws: {} },
     '../../lib/toast.svelte': { toasts: {} }, '../../lib/toastError': { toastError: () => {} },
     './threadsChrome.svelte': { threadsChrome: { addSurface: () => {} } }, './threadUndo': { offerUndo: () => {} }, './threadMeta.svelte': { threadMeta: { markSeen: () => {} } },
+    './worktreeProjects.svelte': { worktreeProjects: { root: (c: string | null | undefined) => (c ?? '').trim().replace(/\/+$/, ''), of: () => null } },
   }).threads;
 }
 
