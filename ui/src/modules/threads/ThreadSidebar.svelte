@@ -363,6 +363,26 @@
   function toggleFamily(id: string): void {
     foldedFamilies = { ...foldedFamilies, [id]: !isFolded(id) };
   }
+  // Hundreds of rows: the first screenful renders at once, the rest follows
+  // in small chunks after the first paint (folds render nothing until open).
+  const FIRST_ROWS = 30;
+  const ROW_CHUNK = 60;
+  let rowCap = $state(FIRST_ROWS);
+  $effect(() => {
+    const n = sections.main.length;
+    if (rowCap >= n) return;
+    const t = setTimeout(() => (rowCap = Math.min(n, rowCap + ROW_CHUNK)), 16);
+    return () => clearTimeout(t);
+  });
+  const mainRows = $derived.by(() => {
+    const m = sections.main;
+    if (m.length <= rowCap) return m;
+    const out = m.slice(0, rowCap);
+    const f = m.find((r) => r.session.id === threads.focusedSessionId);
+    if (f && !out.includes(f)) out.push(f);
+    return out;
+  });
+
   let searchInputEl = $state<HTMLInputElement | null>(null);
   function clearSearch(): void {
     search = '';
@@ -486,7 +506,7 @@
       {/if}
     {:else if !grouped}
       <div class="th-list" data-testid="threads-active-list">
-        {@render familyRows(sections.main)}
+        {@render familyRows(mainRows)}
       </div>
     {:else}
       <LazyMount
