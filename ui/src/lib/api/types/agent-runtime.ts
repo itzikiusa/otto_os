@@ -584,6 +584,9 @@ export interface AskChildReq {
   title?: string;
   access_mode?: RuntimeAccessMode;
   images?: PromptImage[];
+  /** "Answer to me only": the answer stays with the person (default: it
+   *  wakes the thread's agent, and the subagent gets the conversation so far). */
+  to_me_only?: boolean;
 }
 
 export interface AskChildResp {
@@ -609,6 +612,23 @@ export interface PeerInfo {
   title: string;
   status: RuntimeSessionStatus;
   is_self: boolean;
+}
+
+/** `POST /runtime-sessions/{id}/stop-family` (body `{background}`): one Stop
+ *  for the thread and its open subagents. */
+export interface FamilyStopResp {
+  subagents: number;
+  turns: number;
+  tasks: number;
+}
+
+/** `GET /runtime-sessions/{id}/subagent-targets`: a provider the thread's
+ *  agent may delegate to (`otto.thread_capabilities`). */
+export interface SubagentTarget {
+  provider: string;
+  /** Up to 12 model ids its CLI lists; empty = its default. */
+  models: string[];
+  efforts: string[];
 }
 
 /** `GET /runtime-sessions/{id}/peers/{peer}/reply?wait_secs=`. */

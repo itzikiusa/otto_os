@@ -453,14 +453,19 @@ function withDays(rows: TimelineRow[], _items: readonly TurnItem[], now: Date = 
 /** Who a framed message came from — an agent's feed turn (`[Message from
  *  Scheduled · Brief (t-1)]: body`), a linked thread (`[Message from
  *  thread "Fix CI" (claude, id …). Answer it with …]\n\nbody`), or a child
- *  thread's answer woken into its parent (`[Reply from thread "Fix CI"
- *  (codex, id …): its turn finished. Answer it with …]\n\nbody`, otto-agent-protocol
- *  runtime/children.rs `wake_text`; `reply: true`). The header is the whole
+ *  thread's answer woken into its parent (`[Reply from subagent "Fix CI"
+ *  (codex, id …): its turn finished. …]\n\nbody`, otto-agent-protocol
+ *  runtime/children.rs `wake_text`; `reply: true`; stored history may
+ *  still read `[Reply from thread …]` / `[Opened by thread …]`), or a
+ *  subagent's task (`[Subagent task from thread "Fix CI" (…). …]`). The header is the whole
  *  first line, so a `]` in a title does not end it early. Null for a message
  *  the user typed. */
-export function messageAttribution(text: string): { from: string; body: string; reply?: true } | null {
-  const thread = /^\[(Message from|Opened by|Reply from) thread "(.*?)" \([^\n]*\]\s*\n\n?([\s\S]*)$/.exec(text);
-  if (thread) return { from: thread[2] || 'a linked thread', body: thread[3], ...(thread[1] === 'Reply from' ? { reply: true as const } : {}) };
+export function messageAttribution(text: string): { from: string; body: string; reply?: true; task?: true } | null {
+  const thread = /^\[(Message from thread|Opened by thread|Subagent task from thread|Reply from thread|Reply from subagent) "(.*?)" \([^\n]*\]\s*\n\n?([\s\S]*)$/.exec(text);
+  if (thread) {
+    const kind = thread[1].startsWith('Reply from') ? { reply: true as const } : thread[1] === 'Message from thread' ? {} : { task: true as const };
+    return { from: thread[2] || 'the parent thread', body: thread[3], ...kind };
+  }
   const feed = /^\[Message from ([^\]]+?)(?: \([^()\]]*\))?\]: ([\s\S]*)$/.exec(text);
   return feed ? { from: feed[1], body: feed[2] } : null;
 }

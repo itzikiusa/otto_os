@@ -2,7 +2,15 @@
 // one set of status words, running first and the rest under Previous.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { subagentSection, subagentWord } from '../src/modules/threads/threadSubagents.ts';
+import { register } from 'node:module';
+
+const hook =
+  'export async function resolve(s, c, n) {' +
+  "  if (/^\\.{1,2}\\//.test(s) && !/\\.[a-z]+$/i.test(s)) { try { return await n(s + '.ts', c); } catch {} }" +
+  '  return n(s, c);' +
+  '}';
+register('data:text/javascript,' + encodeURIComponent(hook));
+const { subagentSection, subagentWord } = await import('../src/modules/threads/runtime/childThreads.ts');
 import type { AgentTask } from '../src/modules/threads/runtime/agentTasks.ts';
 
 const task = (p: Partial<AgentTask>): AgentTask => ({

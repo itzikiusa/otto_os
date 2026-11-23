@@ -10,6 +10,7 @@
   import { toastError } from '../../../lib/toastError';
   import { mcpChanged } from './mcpServers';
   import { nativeServerNames } from './nativeServers';
+  import { mcpAsks } from './mcpAsksStore.svelte';
   import { runtimeThreads } from './runtimeThreads.svelte';
 
   interface Props {
@@ -21,6 +22,8 @@
   }
   let { sessionId, workspaceId, servers, idle }: Props = $props();
   let enabled = $state<string[] | null>(null);
+  // Keeps the thread's MCP approval cards live (its dock shows them).
+  $effect(() => mcpAsks.hold());
   let busy = $state(false);
 
   $effect(() => {

@@ -18,10 +18,10 @@ export type PaneState = 'working' | 'needs-you' | 'answered' | 'failed' | 'stopp
 export const PANE_STATE_LABEL: Readonly<Record<PaneState, string>> = {
   working: 'Working',
   'needs-you': 'Needs you',
-  answered: 'Answered',
+  answered: 'Done',
   failed: 'Failed',
   stopped: 'Stopped',
-  idle: 'Ready',
+  idle: 'Done',
 };
 
 const OUTCOME: Readonly<Record<string, PaneState>> = { completed: 'answered', failed: 'failed', interrupted: 'stopped' };
@@ -65,13 +65,13 @@ export function seatNo(s: RuntimeSession, seats: readonly RuntimeSession[]): num
   return i >= 0 ? i + 1 : 0;
 }
 
-/** "Seat 2 · Opus · High" / "Synthesis · Claude" (`short`: without the effort). */
+/** "2 · Opus · High" / "Compared · Claude" (`short`: without the effort). */
 export function seatLabel(s: RuntimeSession, seats: readonly RuntimeSession[], name: SeatNamer, short = false): string {
   const c = councilOf(s);
   const provider = c?.provider || (typeof s.meta?.provider_slug === 'string' ? s.meta.provider_slug : '') || s.provider;
   const { model, effort } = name(provider, c?.model ?? s.model ?? null, c?.effort ?? null);
-  if (c?.role === 'synthesis') return `Synthesis · ${model}`;
-  const head = `Seat ${seatNo(s, seats)} · ${model}`;
+  if (c?.role === 'synthesis') return `Compared · ${model}`;
+  const head = `${seatNo(s, seats)} · ${model}`;
   return effort && !short ? `${head} · ${effort}` : head;
 }
 
@@ -81,7 +81,11 @@ export function councilTitle(seat1Title: string): string {
   const at = seat1Title.lastIndexOf(' · Seat ');
   if (at > 0) return seat1Title.slice(0, at);
   const dot = seat1Title.lastIndexOf(' · ');
-  return dot > 0 ? seat1Title.slice(0, dot) : seat1Title;
+  if (dot <= 0) return seat1Title;
+  // "<title> · 1 · <who>" (today's), "<title> · <who>" (before numbers).
+  const head = seat1Title.slice(0, dot);
+  const m = / · (\d+)$/.exec(head);
+  return m ? head.slice(0, m.index) : head;
 }
 
 /** The council every one of `paneIds` belongs to (null when any pane is
@@ -172,7 +176,7 @@ export function stripModel(inp: StripInput): StripModel {
 }
 
 const busy = (x: StripChip): boolean => x.state === 'working' || x.state === 'needs-you';
-const seatList = (ns: number[]): string => (ns.length === 1 ? `seat ${ns[0]}` : `seats ${ns.slice(0, -1).join(', ')} and ${ns.at(-1)}`);
+const seatList = (ns: number[]): string => (ns.length === 1 ? `model ${ns[0]}` : `models ${ns.slice(0, -1).join(', ')} and ${ns.at(-1)}`);
 
 /** Whether Synthesize can run now, and why not: every seat must be done
  *  (the daemon refuses while one works) and at least one must have answered. */
@@ -180,7 +184,7 @@ export function synthGate(chips: readonly StripChip[]): { enabled: boolean; reas
   const seats = chips.filter((x) => x.seat !== null && x.seat > 0);
   const waiting = seats.filter(busy).map((x) => x.seat as number);
   if (waiting.length) return { enabled: false, reason: `Waiting for ${seatList(waiting)}` };
-  if (!seats.some((x) => x.state === 'answered')) return { enabled: false, reason: 'No seat has answered yet' };
+  if (!seats.some((x) => x.state === 'answered')) return { enabled: false, reason: 'No model has answered yet' };
   return { enabled: true, reason: '' };
 }
 
@@ -191,7 +195,7 @@ export const stoppable = (chips: readonly StripChip[]): StripChip[] => chips.fil
 export function askSeatsText(seats: readonly RuntimeSession[]): string {
   const open = seats.filter((s) => s.status !== 'closed');
   const asleep = open.filter((s) => s.status === 'dormant').length;
-  const n = `${open.length} ${open.length === 1 ? 'seat' : 'seats'}`;
+  const n = `${open.length} ${open.length === 1 ? 'model' : 'models'}`;
   return asleep ? `${n} (${asleep} stopped — ${asleep === 1 ? 'it' : 'they'} will restart)` : n;
 }
 
@@ -242,11 +246,11 @@ export function addCandidates(rows: readonly Session[], panes: readonly string[]
 export function councilErrorText(e: unknown): string {
   const raw = loadErrorText(e).replace(/^(conflict|invalid|bad request|error)\s*:\s*/i, '').trim();
   const seat = /^seat (\d+) \(([^)]*)\):\s*([\s\S]*)$/i.exec(raw);
-  if (seat) return `Seat ${seat[1]} (${seat[2]}): ${sentence(seat[3])}`;
-  if (/^no seat has answered/i.test(raw)) return 'No seat has answered yet, so there is nothing to compare.';
+  if (seat) return `Model ${seat[1]} (${seat[2]}): ${sentence(seat[3])}`;
+  if (/^no seat has answered/i.test(raw)) return 'No model has answered yet, so there is nothing to compare.';
   const working = /^(seat \d+|the last synthesis) is still working/i.exec(raw);
-  if (working) return `${cap(working[1])} is still working. Wait for it or stop it, then synthesize.`;
-  if (/^seat 1 is closed/i.test(raw)) return 'Seat 1 is closed. Reopen it, then synthesize.';
+  if (working) return `${/^seat/i.test(working[1]) ? `Model ${working[1].slice(5)}` : 'The last comparison'} is still working. Wait for it or stop it, then compare.`;
+  if (/^seat 1 is closed/i.test(raw)) return 'The first compared thread is closed. Reopen it, then compare.';
   return sentence(raw);
 }
 

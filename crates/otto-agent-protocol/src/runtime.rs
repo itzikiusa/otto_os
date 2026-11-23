@@ -18,9 +18,13 @@ mod admission;
 mod archive;
 mod attention;
 mod auto_close;
+mod child_question;
 mod children;
 mod client_calls;
 pub mod council;
+mod delegation;
+mod drain;
+mod family;
 pub use secret_request::{answer_secret_request, pending_secret_requests};
 mod descendants;
 mod fresh;
@@ -37,6 +41,7 @@ mod reopen;
 mod request_ids;
 mod secret_request;
 mod selection;
+mod swarm_resume;
 mod task_stop;
 mod usage_hook;
 pub use admission::{HANDSHAKE_TIMEOUT, MAX_QUEUED_BYTES, MAX_QUEUED_PROMPTS};
@@ -1419,7 +1424,7 @@ impl AgentRuntime {
         let mut st = live.lock();
         check_can_prompt(&st)?;
         let turn_id = new_id();
-        let switched = fresh::with_handoff(&st, req);
+        let sent = delegation::for_driver(&self.inner, &st, req);
         let Some(proc) = st.proc.as_mut() else {
             // It died in its handshake (signed out, bad argv) before this
             // prompt reached it; the next prompt respawns.
@@ -1431,7 +1436,7 @@ impl AgentRuntime {
         };
         let step = proc
             .driver
-            .prompt(&turn_id, switched.as_ref().unwrap_or(req))
+            .prompt(&turn_id, &sent)
             .map_err(|e| Error::Invalid(e.0))?;
         if req.fresh_context {
             self.commit_fresh(live, &mut st, &turn_id);
@@ -1651,67 +1656,6 @@ impl AgentRuntime {
     /// sync paths that end a turn).
     fn kick_queue(&self, id: &Id) {
         kick_queue(&self.inner, id);
-    }
-
-    async fn drain_queue(&self, id: &Id) {
-        let Ok(live) = self.live(id).await else {
-            return;
-        };
-        let _one = live.drain_lock.lock().await;
-        let _prompt = live.prompt_lock.lock().await;
-        let next = {
-            let st = live.lock();
-            if st.session.status == RuntimeSessionStatus::Closed || st.turn.is_some() {
-                return;
-            }
-            // A child thread's reply never respawns a stopped agent: it waits
-            // for the person (their next message, or Revive). A queue with a
-            // person's message in it goes out in order.
-            // A message whose delivery failed waits for a person's retry.
-            let mut ready = st.proj.queue.iter().filter(|q| q.error.is_none());
-            if st.proc.is_none() && ready.clone().all(|q| q.wake.is_some()) {
-                return;
-            }
-            ready.next().cloned()
-        };
-        let Some(rec) = next else {
-            return;
-        };
-        let res = self.prompt_now(id, &live, &rec.req).await;
-        let mut st = live.lock();
-        let failed = res
-            .as_ref()
-            .is_err_and(|e| !matches!(e, Error::Conflict(m) if m == TURN_RUNNING));
-        match res {
-            // A turn started first: this one waits for its end.
-            Err(Error::Conflict(m)) if m == TURN_RUNNING => return,
-            Ok(_) => st.proj.queue.retain(|q| q.id != rec.id),
-            Err(e) => {
-                // Never lost: it stays queued, marked, for Retry / Edit.
-                if let Some(q) = st.proj.queue.iter_mut().find(|q| q.id == rec.id) {
-                    q.error = Some(e.to_string());
-                }
-                let mut n = item(
-                    new_id(),
-                    TurnItemStatus::Failed,
-                    None,
-                    TurnItemKind::SystemNotice {
-                        message: format!(
-                            "A queued message could not be sent: {e}. It is still queued — retry, edit or remove it."
-                        ),
-                        task_settlement: None,
-                    },
-                );
-                n.turn_id = None;
-                upsert_item(&self.inner, &live, &mut st, n);
-            }
-        }
-        emit_queue(&self.inner, &live, &mut st);
-        drop(st);
-        if failed {
-            // The ones behind it still go out (each failure is marked once).
-            self.kick_queue(id);
-        }
     }
 
     /// The session's attachment folder.
@@ -2043,7 +1987,11 @@ impl AgentRuntime {
         }
         self.ensure_process(live).await?;
         let resume = live.lock().session.native_thread_id.clone();
-        if resume.is_none() || self.wait_started(live).await {
+        if resume.is_none() {
+            return Ok(());
+        }
+        if self.wait_started(live).await {
+            self.card_swarm_members(live).await;
             return Ok(());
         }
         // A refusal that does not say the conversation is gone may pass (a

@@ -68,6 +68,18 @@ pub trait RuntimeHost: Send + Sync + 'static {
         None
     }
 
+    /// The providers a thread's agent may delegate to (`SubagentTarget`).
+    /// Unit-test hosts: none.
+    async fn subagent_targets(&self) -> Vec<otto_core::agent_runtime::SubagentTarget> {
+        Vec::new()
+    }
+
+    /// Whether a thread's first prompt carries the delegation rules
+    /// (`runtime::delegation`). Off for unit-test hosts.
+    fn teaches_delegation(&self) -> bool {
+        false
+    }
+
     /// Whether `slug` (built-in or custom) is enabled in `ProviderRegistry`.
     /// Defaults to `true` for unit tests without a registry.
     fn is_provider_enabled(&self, _slug: &str) -> bool {
@@ -277,6 +289,32 @@ impl RuntimeHost for SessionManagerHost {
 
     fn is_provider_enabled(&self, slug: &str) -> bool {
         self.manager.providers().is_enabled(slug)
+    }
+
+    fn teaches_delegation(&self) -> bool {
+        true
+    }
+
+    async fn subagent_targets(&self) -> Vec<otto_core::agent_runtime::SubagentTarget> {
+        use otto_sessions::provider_models as pm;
+        let reg = self.manager.providers();
+        let (models, _) =
+            pm::probe_provider_models_cached_with_status(&pm::ModelProbe::for_registry(reg)).await;
+        reg.names()
+            .into_iter()
+            .filter(|slug| reg.is_enabled(slug))
+            .filter_map(|slug| {
+                let p = reg
+                    .runtime_provider_for(&slug)
+                    .or_else(|| RuntimeProvider::parse(&slug))?;
+                let ids = models.get(&slug).into_iter().flatten();
+                Some(otto_core::agent_runtime::SubagentTarget {
+                    models: ids.take(12).map(|m| m.id.clone()).collect(),
+                    efforts: otto_core::agent_runtime::RuntimeCapabilities::for_provider(p).efforts,
+                    provider: slug,
+                })
+            })
+            .collect()
     }
 
     fn claude_config_dir_for(&self, slug: &str) -> Option<std::path::PathBuf> {

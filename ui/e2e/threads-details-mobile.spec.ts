@@ -106,8 +106,7 @@ test('phone: thread details open as the details drawer, by touch', async ({ page
   await expectFullyInViewport(page, page.locator('.ctx-menu'), 'Open in menu (phone)');
   await page.keyboard.press('Escape');
 
-  // A subagent row brings Agents & tasks into view.
-  await sub.getByRole('button', { name: /^PR sweep Working/ }).tap();
-  await expect(page.getByTestId('thread-agents-tasks')).toBeInViewport();
+  // A provider's own subagent lives in its turn's row: Background tasks does not list it.
+  await expect(page.getByTestId('thread-agents-tasks')).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 });

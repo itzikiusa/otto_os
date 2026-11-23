@@ -6,7 +6,7 @@
 import { api } from '../../lib/api/client';
 import type { RuntimeEvent, RuntimeReplay } from '../../lib/api/types';
 import { onLive } from '../../lib/live';
-import { mcpAsks } from './runtime/mcpAsks.svelte';
+import { mcpAsks } from './runtime/mcpAsksStore.svelte';
 
 class InboxLive {
   /** session → pending request id → its kind. */

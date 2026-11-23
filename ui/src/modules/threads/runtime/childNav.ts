@@ -1,15 +1,31 @@
-// Opening a child thread from its card or its sidebar row: in place, or
-// beside its parent in the split (1-up → 2-up → grid, the layout Threads
-// already has). A phone has no split: the child opens in place and the
-// header's "‹ <parent>" chip (ThreadParentChip.svelte) leads back.
+// Opening a subagent — its row, the waiting line, the details' Subagents
+// section, the sidebar — goes through here (T3 Code's useSideThreadTrigger,
+// MIT, Copyright (c) 2026 T3 Tools Inc.): a tab in the right panel while the
+// parent stays put; `main` (⌘/Ctrl-click) opens it in the main view
+// instead. One per-device setting (Settings ▸ Threads, threadPrefs) flips the
+// default. A phone's right panel is a full-height sheet with Back.
 import { router } from '../../../lib/router.svelte';
-import { viewport } from '../../../lib/stores/viewport.svelte';
 import { threads } from '../threadsStore.svelte';
+import { threadsChrome } from '../threadsChrome.svelte';
+import { threadPrefs } from './threadPrefs.svelte';
 
-export function openChildThread(id: string, beside = false): void {
+/** Where a click opens a subagent: the setting, flipped by ⌘/Ctrl-click. */
+export function opensInMain(modifier: boolean, setting: 'panel' | 'main'): boolean {
+  return (setting === 'main') !== modifier;
+}
+
+export function openChildThread(id: string, modifier = false): void {
   if (router.module !== 'threads') {
     router.go(`threads/${id}`);
     return;
   }
-  threads.selectThread(id, { split: beside && !viewport.isPhone });
+  if (opensInMain(modifier, threadPrefs.subagentIn)) {
+    threads.selectThread(id);
+    return;
+  }
+  threadsChrome.subagentId = id;
+  threads.setInspectorTab('subagent');
 }
+
+/** A click's "open elsewhere" modifier. */
+export const mainViewKey = (e: MouseEvent | KeyboardEvent): boolean => e.metaKey || e.ctrlKey;

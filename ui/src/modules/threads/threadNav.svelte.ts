@@ -7,7 +7,7 @@
 // has loaded, from the persisted waiting list. Logic is pure in
 // threadAttention.ts (unit/threadsAttention.test.ts).
 import type { Session } from '../../lib/api/types';
-import { mcpAsks } from './runtime/mcpAsks.svelte';
+import { mcpAsks } from './runtime/mcpAsksStore.svelte';
 import { events } from '../../lib/events.svelte';
 import { keyContext } from '../../lib/keys';
 import { router } from '../../lib/router.svelte';

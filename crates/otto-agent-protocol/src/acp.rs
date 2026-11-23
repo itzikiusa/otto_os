@@ -313,6 +313,11 @@ pub(super) struct AcpDriverState {
     pub(super) sideband: crate::acp_sideband::AcpSideband,
     /// agy swarm members this session added, by member name.
     pub(super) swarm: HashMap<String, TurnItem>,
+    /// Every swarm member that has a card (open or settled): a `session/load`
+    /// replay cards only members it never saw (added before an agent restart
+    /// or before cards existed), never one twice.
+    #[serde(default)]
+    pub(super) swarm_seen: std::collections::HashSet<String>,
     /// The mode the session opened in (`modes.currentModeId`): where leaving
     /// plan mode returns when the access mode has no mode of its own.
     pub(super) base_mode: Option<String>,
@@ -427,6 +432,7 @@ impl AcpDriver {
                 questions: HashMap::new(),
                 sideband: crate::acp_sideband::AcpSideband::for_provider(provider),
                 swarm: HashMap::new(),
+                swarm_seen: Default::default(),
                 base_mode: None,
                 plan_active: false,
                 denied_noticed: false,
@@ -1528,15 +1534,41 @@ impl AcpDriver {
     /// `name-1..k` for `n` / `tasks`), open until a `kill` names it or the
     /// process ends.
     fn swarm_members(&mut self, step: &mut DriverStep, t: &Tool) {
-        if self.provider != RuntimeProvider::Agy
-            || t.title != "Run swarm"
-            || t.status != ToolCallStatus::Completed
-        {
+        if t.title != "Run swarm" || t.status != ToolCallStatus::Completed {
             return;
         }
-        let Some(input) = t.raw_input.as_ref() else {
-            return;
+        if let Some(input) = t.raw_input.as_ref() {
+            self.swarm_from(step, input, false);
+        }
+    }
+
+    /// A `session/load` replay's completed "Run swarm" call ([`Self::swarm_from`]).
+    fn replayed_swarm(&mut self, step: &mut DriverStep, update: &SessionUpdate) {
+        let (title, status, input) = match update {
+            SessionUpdate::ToolCall(c) => {
+                (Some(c.title.as_str()), Some(c.status), c.raw_input.as_ref())
+            }
+            SessionUpdate::ToolCallUpdate(u) => (
+                u.fields.title.as_deref(),
+                u.fields.status,
+                u.fields.raw_input.as_ref(),
+            ),
+            _ => return,
         };
+        if title == Some("Run swarm") && status == Some(ToolCallStatus::Completed) {
+            if let Some(input) = input {
+                self.swarm_from(step, input, true);
+            }
+        }
+    }
+
+    /// [`Self::swarm_members`] on a call's `rawInput`; `replayed`: from a
+    /// `session/load` replay — only members without a card get one, outside
+    /// any turn (`replay:swarm:<member>`).
+    fn swarm_from(&mut self, step: &mut DriverStep, input: &Value, replayed: bool) {
+        if self.provider != RuntimeProvider::Agy {
+            return;
+        }
         let s = |k: &str| input.get(k).and_then(Value::as_str);
         let Some(name) = s("name").filter(|n| !n.is_empty()) else {
             return;
@@ -1567,11 +1599,18 @@ impl AcpDriver {
                     vec![(name.to_string(), brief.to_string())]
                 };
                 for (member, prompt) in members {
-                    if self.state.swarm.contains_key(&member) {
+                    if self.state.swarm.contains_key(&member)
+                        || (replayed && self.state.swarm_seen.contains(&member))
+                    {
                         continue;
                     }
+                    let id = if replayed {
+                        format!("replay:swarm:{member}")
+                    } else {
+                        format!("{}:swarm:{member}", self.turn())
+                    };
                     let mut it = item(
-                        format!("{}:swarm:{member}", self.turn()),
+                        id,
                         TurnItemStatus::Running,
                         Some(member.clone()),
                         TurnItemKind::Subagent {
@@ -1586,8 +1625,13 @@ impl AcpDriver {
                         },
                     );
                     // Its card stays in the turn that added it.
-                    it.turn_id = self.state.turn_id.clone();
+                    it.turn_id = if replayed {
+                        None
+                    } else {
+                        self.state.turn_id.clone()
+                    };
                     step.push(DriverEvent::TurnItem(it.clone()));
+                    self.state.swarm_seen.insert(member.clone());
                     self.state.swarm.insert(member, it);
                 }
             }
@@ -1706,7 +1750,10 @@ impl AcpDriver {
             _ => {}
         }
         if matches!(self.state.phase, Phase::Creating { loading: true }) {
-            return; // history replayed by session/load
+            // History replayed by session/load is dropped — except a swarm
+            // member with no card yet: it gets one, like a new member.
+            self.replayed_swarm(step, &n.update);
+            return;
         }
         match n.update {
             SessionUpdate::AgentMessageChunk(c) => {
@@ -3189,6 +3236,55 @@ mod tests {
 
     /// agy's swarm (live 1.5.8 frames): each `swarm add` is a background
     /// subagent card that a `swarm kill` stops; other actions stay tool rows.
+    #[test]
+    fn a_load_replay_cards_only_swarm_members_without_a_card() {
+        let mut d = AcpDriver::agy("agy");
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+        // Carded before a restart (kept in the driver's state).
+        d.state.swarm_seen.insert("echoer".into());
+        // A refused resume replays the conversation through session/load.
+        d.state.phase = Phase::Creating { loading: true };
+        let upd = |id: &str, input: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"tool_call_update","toolCallId":"{id}","name":"swarm","status":"completed","kind":"other","title":"Run swarm","rawInput":{input}}}}}}}"#
+            )
+        };
+        let cards = |s: &DriverStep| -> Vec<TurnItem> {
+            s.events
+                .iter()
+                .filter_map(|e| match e {
+                    DriverEvent::TurnItem(i) if matches!(i.kind, TurnItemKind::Subagent { .. }) => {
+                        Some(i.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let s = d.on_line(&upd(
+            "c1",
+            r#"{"action":"add","name":"echoer","brief":"b"}"#,
+        ));
+        assert!(cards(&s).is_empty(), "already carded");
+        let s = d.on_line(&upd(
+            "c2",
+            r#"{"action":"add","name":"lost","brief":"find it"}"#,
+        ));
+        let made = cards(&s);
+        assert_eq!(made.len(), 1);
+        assert_eq!(made[0].id, "replay:swarm:lost");
+        assert!(made[0].turn_id.is_none());
+        assert!(made[0].is_background_open());
+        // Replayed again: no second card. Other replayed history stays dropped.
+        assert!(
+            cards(&d.on_line(&upd("c3", r#"{"action":"add","name":"lost","brief":"x"}"#)))
+                .is_empty()
+        );
+        let chunk = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"old"}}}}"#;
+        assert!(d.on_line(chunk).events.is_empty());
+    }
+
     #[test]
     fn agy_swarm_members_are_background_subagents() {
         let mut d = AcpDriver::agy("agy");

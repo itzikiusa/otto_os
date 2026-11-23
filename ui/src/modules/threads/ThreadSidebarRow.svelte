@@ -23,7 +23,8 @@
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import ProjectBadge from './ProjectBadge.svelte';
   import { councilOf } from './runtime/council';
-  import { inboxClass, statusWord, subagentRollup, subagentWord } from './threadInbox';
+  import { inboxClass, statusWord, subagentWord } from './threadInbox';
+  import { childRollup } from './runtime/childThreads';
   import { inboxLive } from './threadInbox.svelte';
   import { threadMeta } from './threadMeta.svelte';
   import { threadRepos } from './threadRepos.svelte';
@@ -52,11 +53,11 @@
   const unread = $derived(!selected && st.key !== 'needs-you' && threadMeta.unread(s.id, ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true));
 
   const kids = $derived(family ? family.kids : []);
-  /** Its subagents rolled up (threadInbox.ts `subagentRollup`). */
+  /** Its subagents rolled up (runtime/childThreads.ts `childRollup`, the one source). */
   const subs = $derived(
     kids.length === 0
       ? null
-      : subagentRollup(kids.map((id) => ({ title: ws.getSession(id)?.title ?? runtimeThreads.get(id)?.title ?? '', key: threadStateById(id)?.key }))),
+      : childRollup(kids.map((id) => ({ title: ws.getSession(id)?.title ?? runtimeThreads.get(id)?.title ?? '', word: subagentWord(threadStateById(id)?.key) }))),
   );
   const subNeeds = $derived(!history && !!subs && subs.needsYou > 0);
   const cls = $derived(history ? 'rest' : subNeeds ? 'needs' : inboxClass(st.key, unread));

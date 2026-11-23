@@ -32,23 +32,23 @@
     class="cp-toggle"
     class:on={council.on}
     aria-pressed={council.on}
-    aria-label="Ask several agents"
+    aria-label="Compare models"
     disabled={disabled || (!runtime && !council.on)}
     title={!runtime && !council.on
-      ? 'Asking several agents works with Claude Code, Codex, Antigravity, Gemini, Grok, OpenCode, Pi and Muse'
-      : 'Ask several: send this prompt to 2–4 agents and compare (⌘ or ⇧-click models to add them)'}
+      ? 'Comparing models works with Claude Code, Codex, Antigravity, Gemini, Grok, OpenCode, Pi and Muse'
+      : 'Compare models: send this prompt to 2–4 models and compare their answers (⌘ or ⇧-click models to add them)'}
     data-testid="new-thread-ask-several"
     onclick={() => council.toggle({ provider, model, effort })}
   >
     <Icon name="people" size={14} />
-    <span class="cp-toggle-label">Ask several</span>
+    <span class="cp-toggle-label">Compare models</span>
   </button>
 {:else if council.on}
   <div class="cp-seats" role="group" aria-label="Agents to ask" data-testid="new-thread-council-seats">
     {#each council.seats as seat, i (`${seat.provider}:${seat.model}:${seat.effort}`)}
       <span class="cp-seat">
         {#if hasProviderIcon(seat.provider)}<ProviderIcon provider={seat.provider} size={12} />{/if}
-        <span class="ellipsis"><span class="cp-no">Seat {i + 1} ·</span> {seatLabel(seat, auth.meta)}</span>
+        <span class="ellipsis"><span class="cp-no">{i + 1} ·</span> {seatLabel(seat, auth.meta)}</span>
         <button
           type="button"
           class="icon-btn cp-remove"

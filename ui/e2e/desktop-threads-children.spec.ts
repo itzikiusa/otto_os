@@ -52,6 +52,9 @@ test('Ask another agent opens a linked child shown live in the parent and nested
   const chips = thread.getByTestId('runtime-ask-targets');
   await expect(chips).toContainText('Codex');
   await expect(chips).toContainText('asks before it edits, like this thread');
+  // Delegate: the answer goes to the thread's agent unless "answer to me only".
+  await expect(thread.getByTestId('runtime-ask-what')).toContainText('the answer goes to Claude');
+  await expect(thread.getByTestId('runtime-ask-to-me')).not.toBeChecked();
 
   await thread.getByTestId('runtime-composer').fill('Why does the linker fail?');
   await thread.getByTestId('runtime-send').click();
@@ -65,6 +68,7 @@ test('Ask another agent opens a linked child shown live in the parent and nested
   await expect.poll(async () => (await read()).asks.length).toBe(1);
   const sent = await read();
   expect(sent.asks[0]).toMatchObject({ id: 'rt_lead', prompt: 'Why does the linker fail?', targets: [{ provider: 'codex' }] });
+  expect(sent.asks[0]).not.toHaveProperty('to_me_only');
   expect(sent.prompts).toBe(0);
   await expect(chips).toHaveCount(0);
   await expect(thread.getByTestId('runtime-composer')).toHaveValue('');
@@ -86,14 +90,16 @@ test('Ask another agent opens a linked child shown live in the parent and nested
   await page.getByTestId('thread-family-fold-rt_lead').click();
   await expect(page.getByTestId(`thread-row-${childId}`)).toHaveCount(0);
 
-  // Open beside: parent and child side by side.
-  await card.getByTestId('runtime-item-beside').click();
+  // Open: a tab in the right panel while the parent stays put.
+  await card.getByTestId('runtime-item-open').click();
+  await expect(page.getByTestId('runtime-subagent-pane')).toBeVisible();
   await expect(page.getByTestId(`runtime-thread-${childId}`)).toBeVisible();
   await expect(page.getByTestId('runtime-thread-rt_lead')).toBeVisible();
 
-  // Its finished turn comes back to the parent as one line with Open.
+  // Its finished turn adds no second mention: its one row already says Done.
   await page.evaluate((id) => (window as unknown as { __mockRuntime: Hooks }).__mockRuntime.childDone(id, 'The linker needs -lm.'), childId);
-  await expect(thread.getByTestId(`runtime-child-notice-${childId}`)).toContainText('finished: The linker needs -lm.');
+  await expect(thread.locator('[data-testid^="runtime-child-row-"]')).toHaveCount(1);
+  await expect(thread.getByTestId(`runtime-child-notice-${childId}`)).toHaveCount(0);
 });
 
 test('typing @cod offers Codex as a chip', async ({ page }) => {

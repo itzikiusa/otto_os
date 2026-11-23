@@ -52,12 +52,14 @@ Threads (Experimental) is a conversation-first workspace for coding agents. It k
 - Pick the layout from the toolbar ⋯: **Single thread**, **Split** (2-up resizable) or **Grid** (up to 4 live threads at once).
 - ⋯ › **Send to another thread…** lists the threads this one is connected to with their status and the thread's session rooms; each row opens, opens beside or messages. **Message a thread…** sends to any thread (or all of them), and **Start a room…** starts a **Session Room**.
 
-**Ask another agent from a thread**
-- In a thread's composer, **Ask another agent** (the people icon beside **+**) opens the agent menu. Each model you pick becomes a chip above the text; you can also type `@` and part of a provider or model name (`@cod`, `@opus`).
-- With chips set, **Send** asks those agents instead of this thread's agent. Each one gets its own new thread, linked to this one and in the same folder. Pick up to 4.
-- The chip row says what they may do. They get this thread's access or a narrower one you pick, never wider.
-- The parent shows a live card per child: status, elapsed time, its latest step, and its answer's first line when it ends, with **Stop**, **Open beside** and **Open**.
-- The sidebar folds these subagents under the thread that started them; the row says how many. When one needs you, the thread says **Needs you**. Open them with the row's chevron.
+**Subagents: several agents and providers under one thread**
+- Just ask: "do this with a Codex subagent and a Gemini subagent". The thread's agent checks which providers and models are enabled, delegates, and is woken when each one finishes. It never polls.
+- Or delegate yourself: **Delegate to…** (the people icon beside Attach, or type `@cod`, `@opus`) adds provider chips; Send opens one subagent each. They get your message and the conversation so far, and their answers go to the thread's agent — tick **Answer to me only** to keep them with you.
+- A turn's subagents are one row in the timeline: provider icons, "3 subagents · 2 working", elapsed. Open it for one row each; a row opens its full answer.
+- Under the timeline: "Waiting on 2 subagents · <titles> · **Stop**". **Stop** (here or the composer's) stops the thread and all its subagents.
+- A subagent's approval shows above your composer as "Approval needed from <title>" — answer it right there. A subagent's question goes to the thread's agent first; if it can't answer, it shows as "Question from <title>".
+- **Open** puts a subagent in a tab on the right while the thread stays put; ⌘-click opens it in the main view. Settings ▸ Threads makes the main view the default on this device. Inside a subagent, the first line says whose subagent it is, with **Open parent**.
+- Statuses are always Working, Needs you, Done, Failed or Stopped.
 
 **MCP tools in a thread**
 - **⋯ → MCP servers** lists every server the thread's agent has (Otto's tools, this workspace's servers, the agent's own config), each with a word: Connected, Added, Needs sign-in, Failed, Disabled or Not supported, and why when it isn't connected.
@@ -65,11 +67,10 @@ Threads (Experimental) is a conversation-first workspace for coding agents. It k
 - An MCP server that asks you something shows its question in the same place.
 - Turned a server on or off while the agent runs? The thread says **MCP servers changed** with **Restart agent to apply**; the conversation continues.
 
-**Council: one prompt, several agents**
-- In the new-thread stage, turn on **Ask several** beside the agent chip, then pick 2–4 models. Each one is a seat; the send button reads e.g. **Ask 3**.
-- The seats open side by side (Split for 2, Grid for 3–4). Each one is a normal thread with its own composer: to follow up with one agent, type in its thread. Every seat is read-only, so agents working in one folder never clash on files. ⌘↵ starts them in the background and a toast offers **Show**.
-- The sidebar folds the seats under seat 1 (open them with its chevron). On a phone, the thread details (the right-panel button) list the other seats; tap one to switch.
-- The thread's **⋯** menu holds the rest: **Open council side by side**, **Ask every seat…** (the same follow-up to each seat; a busy seat queues it) and **Synthesize with ▸** a judge (seat 1's agent first). The judge is one more read-only thread, opened beside the seats, that compares each seat's latest answer: where they agree, where they differ, and a pick or a merge.
+**Compare models: one prompt, several models**
+- In the new-thread stage, turn on **Compare models** beside the agent chip, then pick 2–4 models; the send button reads e.g. **Ask 3**.
+- They open side by side (Split for 2, Grid for 3–4). Each is a normal, read-only thread with its own composer. ⌘↵ starts them in the background.
+- The thread's **⋯** menu holds the rest: **Open side by side**, **Ask every model…** and **Compare answers with ▸** a judge, which compares each model's latest answer.
 
 **Workspace inspector** (the right panel: Browser, Files, Diff, Pull request, Side chat)
 - **Files**: browse the working tree and open multiple file tabs (`Preview` for Markdown, JSON, CSV/TSV and images, or `Source` with syntax highlighting).
