@@ -13,6 +13,7 @@ import type {
 } from '../../../lib/api/types';
 import { plural } from '../../../lib/plural.ts';
 import { subagentChildren, workLabel } from './timeline.ts';
+import { perfCount } from '../../../lib/perfCount.ts';
 
 /** `needs-you`: a linked child thread waits on a person (an approval, a
  *  question, a secret) — still active, listed with the running ones. */
@@ -255,6 +256,7 @@ export function agentTasks(
   background: readonly BackgroundTask[],
   opts: AgentTasksOptions = {},
 ): AgentTasks {
+  perfCount('agentTasks');
   const outputMap = opts.output ?? {};
   const itemsById = new Map<string, TurnItem>();
   let latestActivityMs = 0;

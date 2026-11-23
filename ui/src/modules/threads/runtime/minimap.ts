@@ -4,6 +4,7 @@
 // (unit/runtimeMinimap.test.ts).
 import type { ProviderTurn, TurnItem } from '../../../lib/api/types';
 import { messageAttribution } from './timeline.ts';
+import { perfCount } from '../../../lib/perfCount.ts';
 
 /** Fewer user turns than this: no rail (the thread is short enough). */
 export const MINIMAP_MIN = 6;
@@ -19,6 +20,7 @@ export interface MinimapTick {
 /** One tick per top-level message the person typed (framed messages from
  *  other threads left out), oldest first. */
 export function minimapTicks(items: readonly TurnItem[], turns: readonly ProviderTurn[]): MinimapTick[] {
+  perfCount('minimapTicks');
   const failed = new Set(turns.filter((t) => t.status === 'failed').map((t) => t.id));
   const asked = new Set<string>();
   for (const i of items) if (i.type === 'approval_request' && i.turn_id) asked.add(i.turn_id);
@@ -38,6 +40,7 @@ export function minimapTicks(items: readonly TurnItem[], turns: readonly Provide
  *  scroller's top edge, in tick order (NaN for a message not rendered);
  *  scrolled to the end, the last tick. */
 export function currentTick(tops: readonly number[], viewport: number, atEnd = false): number {
+  perfCount('minimapMeasure');
   if (atEnd && tops.length) return tops.length - 1; // at the bottom the last turn is the one you read
   let cur = 0;
   for (let i = 0; i < tops.length; i++) if (tops[i] <= viewport / 3) cur = i;

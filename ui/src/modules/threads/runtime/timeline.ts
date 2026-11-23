@@ -20,6 +20,7 @@ import type {
 } from '../../../lib/api/types';
 import type { RuntimeProjection } from './projection';
 import { settingsChangeOf, type SettingsChange } from './settingsChange.ts';
+import { perfCount } from '../../../lib/perfCount.ts';
 
 export interface PendingApproval {
   requestId: string;
@@ -124,6 +125,7 @@ const EMPTY_SUBAGENT_CHILDREN: ReadonlyMap<string, TurnItem[]> = new Map();
 
 /** A subagent's own activity (items with `parent_item_id`), by card id. */
 export function subagentChildren(items: readonly TurnItem[]): Map<string, TurnItem[]> {
+  perfCount('subagentChildren');
   let hasParent = false;
   for (let idx = 0; idx < items.length; idx++) {
     if (items[idx].parent_item_id) {
@@ -287,6 +289,7 @@ function getOrCreateWorkRow(workId: string, work: WorkEntry[]): WorkTimelineRow 
 }
 
 export function timelineRows(items: readonly TurnItem[], turns: readonly ProviderTurn[] = []): TimelineRow[] {
+  perfCount('timelineRows');
   // A subagent's own items render inside its card, not in the timeline;
   // plumbing tool calls and a lost-conversation error not at all.
   items = items.filter((i) => !i.parent_item_id && !isLostConversation(i) && !(i.type === 'dynamic_tool' && HIDDEN_TOOLS.has(i.tool_name)));

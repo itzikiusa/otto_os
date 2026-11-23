@@ -7,6 +7,7 @@
 // adapter the card reads (built on runtime/agentTasks.ts); a richer helper
 // replaces it with a single import. Pure (unit/threadsSubagents.test.ts).
 import type { AgentTask, AgentTaskStatus } from './runtime/agentTasks';
+import { perfCount } from '../../lib/perfCount.ts';
 
 export type SubagentWord = 'Working' | 'Needs you' | 'Done' | 'Failed' | 'Stopped';
 
@@ -75,6 +76,7 @@ export function subagentSection(
   tasks: { running: readonly AgentTask[]; finished: readonly AgentTask[] },
   more: { parent?: { id: string; title: string } | null; delegated?: readonly SubagentThread[]; providerOf?: (threadId: string) => string | null },
 ): SubagentSection {
+  perfCount('detailsSubagents');
   const row = (t: AgentTask): SubagentRow => ({
     id: t.id,
     title: t.label,
