@@ -192,3 +192,17 @@ test('phone: a finished turn reads as one line and a changes card; times show wi
   await expect(thread.getByText('Offline edits now survive')).toBeVisible();
   await expect(card).toBeVisible();
 });
+
+test('phone: Settings › Threads by touch', async ({ page }, info) => {
+  await page.goto('/#/settings/threads');
+  const sec = page.getByTestId('settings-threads');
+  await expect(sec).toBeVisible({ timeout: 30_000 });
+  const steer = sec.getByRole('radiogroup', { name: 'While the agent works, Enter' }).getByRole('radio', { name: 'Steer' });
+  await atLeast44(steer, 'Steer option');
+  await steer.tap();
+  await expect(steer).toHaveAttribute('aria-checked', 'true');
+  await sec.getByRole('radiogroup', { name: 'Tool calls' }).getByRole('radio', { name: 'Hide all' }).tap();
+  expect(JSON.parse((await page.evaluate(() => localStorage.getItem('otto_threads_prefs_v1'))) ?? '{}')).toMatchObject({ midTurn: 'steer', tools: 'none' });
+  await expectNoHorizontalOverflow(page);
+  await shoot(page, 'settings-threads', info.project.name);
+});
