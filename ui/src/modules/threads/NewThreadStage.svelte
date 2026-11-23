@@ -23,7 +23,13 @@
   import { placeholderTitle } from './threadTitle';
   import { FolderPickerModal } from './threadLazy.svelte';
   import { threadAccessDefault } from './threadAccessDefault.svelte';
-  import { startNewWorktree } from './threadGitMenus';
+  import { BRANCH_NAME_OK, createWorktree, takenBranches, worktreeBase } from './threadGitMenus';
+  import { worktreeBranch } from './worktreeBranch';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { announceShown } from '../../lib/announce.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { saveTransientComposerDraft } from '../../lib/stores/runtimeDraftCursor';
   import { threadRepos } from './threadRepos.svelte';
   import { threadsChrome } from './threadsChrome.svelte';
   import { harnessLabel, isThreadSession } from './threadsHelpers';
@@ -40,6 +46,13 @@
   let openInBeside = $state(false);
   let worktree = $state<{ path: string; branch: string | null; repo: Repo } | null>(null);
   let projectEl = $state<HTMLButtonElement | null>(null);
+  // "New worktree": only the intent until the first message is sent — then
+  // the branch is named from it (worktreeBranch.ts) and the worktree made,
+  // with progress here and, on failure, the draft kept and Retry beside the error.
+  let newWt = $state<{ repo: Repo; base: string | null; branch: string | null } | null>(null);
+  let wtProgress = $state<string | null>(null);
+  let wtError = $state<string | null>(null);
+  let composer = $state<{ retry(): Promise<void>; draftText(): string } | null>(null);
 
   const homePath = $derived(ws.scratch?.root_path ?? '~');
   const scratchActive = $derived(useScratch || ws.current === null);
@@ -106,6 +119,50 @@
   function setCwd(path: string): void {
     pickedCwd = path;
     cwdError = '';
+    newWt = null;
+    wtError = null;
+  }
+
+  function chooseNewWorktree(r: Repo, base: string | null): void {
+    newWt = { repo: r, base, branch: null };
+    wtError = null;
+  }
+
+  async function nameBranch(): Promise<void> {
+    const wt = newWt;
+    if (!wt) return;
+    let initial = wt.branch;
+    if (!initial) {
+      const taken = await takenBranches(wt.repo).catch(() => ({ branches: [] as string[], base: null }));
+      initial = worktreeBranch({ prompt: composer?.draftText() ?? '', branches: taken.branches, defaultBranch: taken.base ?? wt.base, now: new Date() });
+    }
+    const name = await confirmer.promptText(`The new worktree’s branch${wt.base ? `, from ${wt.base}` : ''}. It is made when you send.`, {
+      title: 'Name the branch',
+      confirmLabel: 'Use this name',
+      initial,
+      validate: BRANCH_NAME_OK,
+    });
+    if (name && newWt === wt) newWt = { ...wt, branch: name.trim() };
+  }
+
+  /** Make the chosen new worktree; its path, or null (the error is shown). */
+  async function makeWorktree(req: StartLaunch): Promise<string | null> {
+    const wt = newWt!;
+    wtError = null;
+    try {
+      wtProgress = 'Naming the branch…';
+      const taken = await takenBranches(wt.repo);
+      const name = wt.branch ?? worktreeBranch({ prompt: req.withPrompt ? req.titleSeed : '', branches: taken.branches, defaultBranch: taken.base ?? wt.base, now: new Date() });
+      wtProgress = `Creating worktree ${name}${wt.base ? ` from ${wt.base}` : ''}…`;
+      const w = await createWorktree(wt.repo, name, wt.base);
+      pickWorktree(w.path, w.branch, wt.repo);
+      return w.path;
+    } catch (e) {
+      wtError = loadErrorText(e);
+      return null;
+    } finally {
+      wtProgress = null;
+    }
   }
 
   function pickWorktree(path: string, br: string | null, r: Repo): void {
@@ -163,8 +220,16 @@
 
   async function launch(req: StartLaunch): Promise<boolean> {
     const { provider } = req;
+    // A new worktree moves the stage (and its draft key) to the worktree's folder.
+    const draftKeyBefore = stageDraftKey;
     let dir = cwd.trim();
     if (homePath !== '~' && (dir === '~' || dir.startsWith('~/'))) dir = homePath + dir.slice(1);
+    // Every provider starts after this: the worktree comes first.
+    if (newWt) {
+      const made = await makeWorktree(req);
+      if (!made) return false;
+      dir = made;
+    }
     if (dir !== '') {
       cwdError = '';
       const check = await checkFolder(dir, (url) => api.get(url));
@@ -207,6 +272,7 @@
       threadsChrome.rememberProject(targetWs, dir || null);
       if (openInBeside && threads.paneIds.length > 0 && !req.council) threads.openBeside(created.id);
       else if (!req.council) threads.selectThread(created.id);
+      if (stageDraftKey !== draftKeyBefore) saveTransientComposerDraft(draftKeyBefore, '');
       return true;
     } catch (e) {
       toastError('Couldn’t start thread', e);
@@ -239,6 +305,7 @@
     </h1>
 
     <RuntimeStartComposer
+      bind:this={composer}
       cwd={cleanCwd}
       pickerStart={homePath}
       draftKey={stageDraftKey}
@@ -265,6 +332,9 @@
           planSupported={m.planSupported}
           interactionMode={m.interactionMode}
           onPickWorktree={pickWorktree}
+          newWorktree={newWt ? { base: newWt.base, branch: newWt.branch } : null}
+          onNewWorktree={(base) => repo && chooseNewWorktree(repo, base)}
+          onNameBranch={() => void nameBranch()}
           onOpenProjectMenu={openProjectMenu}
           onToggleBeside={() => (openInBeside = !openInBeside)}
           onOpenModeMenu={(anchor) => m.openModeMenu(anchor)}
@@ -273,9 +343,16 @@
         {#if caution && m.accessShown}
           <p class="nt-note" data-testid="new-thread-access-caution">{caution}</p>
         {/if}
-        {#if busyHere.length > 0}
+        {#if wtProgress}
+          <p class="nt-note nt-progress" use:announceShown={wtProgress} data-testid="new-thread-worktree-progress"><span class="spinner" aria-hidden="true"></span>{wtProgress}</p>
+        {:else if wtError}
+          <div data-testid="new-thread-worktree-failed">
+            <LoadState what="the worktree" errorTitle="Couldn’t create the worktree — your message is still here" variant="compact" error={wtError} empty onretry={() => void composer?.retry()} />
+          </div>
+        {/if}
+        {#if busyHere.length > 0 && !newWt}
           <p class="nt-note" data-testid="new-thread-same-checkout">
-            {busyHere.length === 1 ? 'Another thread is' : `${busyHere.length} threads are`} working in this {repo ? 'checkout' : 'folder'}{#if repo}{' · '}<button type="button" class="nt-link" onclick={() => void startNewWorktree(repo, (path, br) => pickWorktree(path, br, repo))}>Use a new worktree</button>{/if}
+            {busyHere.length === 1 ? 'Another thread is' : `${busyHere.length} threads are`} working in this {repo ? 'checkout' : 'folder'}{#if repo}{' · '}<button type="button" class="nt-link" onclick={() => { const r = repo; if (r) void worktreeBase(r).then((b) => chooseNewWorktree(r, b)); }}>Use a new worktree</button>{/if}
           </p>
         {/if}
       {/snippet}
@@ -345,6 +422,11 @@
     padding-inline: 12px;
     font-size: var(--fs-s);
     color: var(--text-dim);
+  }
+  .nt-progress {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
   }
   .nt-link {
     padding: 0;

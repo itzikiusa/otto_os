@@ -92,6 +92,18 @@ async function createBranch(repo: Repo): Promise<void> {
   }
 }
 
+/** The new-thread stage's "New worktree" intent (NewThreadStage.svelte): the
+ *  worktree is made when the first message is sent, so choosing it only
+ *  records it — no name asked first. */
+export interface NewWorktreeChoice {
+  /** It is the stage's current choice. */
+  pending: boolean;
+  /** Chose "New worktree" (from `base`, the main checkout's branch). */
+  onNew: (base: string | null) => void;
+  /** "Name the branch…" (only while pending). */
+  onName: () => void;
+}
+
 /** "Current checkout" vs the repo's other worktrees (T3's checkout picker);
  *  `threadsHere` counts the open threads already working in a checkout. */
 export async function openCheckoutMenu(
@@ -99,7 +111,8 @@ export async function openCheckoutMenu(
   repo: Repo,
   cwd: string,
   onPick: (path: string, branch: string | null) => void,
-  threadsHere?: (path: string) => number,
+  threadsHere: ((path: string) => number) | undefined,
+  newWt: NewWorktreeChoice,
 ): Promise<void> {
   let list: WorktreeInfo[] = [];
   try {
@@ -118,54 +131,42 @@ export async function openCheckoutMenu(
         label: w.is_main ? 'Current checkout' : projectNameFromCwd(w.path),
         hint: [w.branch ?? 'detached', n > 0 ? `${n} ${n === 1 ? 'thread' : 'threads'} here` : ''].filter(Boolean).join(' · '),
         title: compactPath(w.path, home),
-        checked: here === w.path.replace(/\/+$/, '') || (w.is_main && here.startsWith(`${w.path.replace(/\/+$/, '')}/`)),
+        checked: !newWt.pending && (here === w.path.replace(/\/+$/, '') || (w.is_main && here.startsWith(`${w.path.replace(/\/+$/, '')}/`))),
         action: () => onPick(w.path, w.branch),
       };
     });
+  const base = list.find((w) => w.is_main)?.branch ?? git.statusById[repo.id]?.branch ?? null;
   items.push(
-    { label: 'New worktree…', icon: 'plus', action: () => void newWorktree(repo, list, onPick) },
+    { label: 'New worktree', icon: 'plus', checked: newWt.pending, hint: base ? `from ${base}` : undefined, title: 'Made when you send: a new branch named from your message, in its own folder', action: () => newWt.onNew(base) },
+    ...(newWt.pending ? [{ label: 'Name the branch…', icon: 'edit', action: newWt.onName } satisfies MenuItem] : []),
     { separator: true },
     { label: 'Manage worktrees in Git', icon: 'worktree', action: () => router.go(`git/${encodeURIComponent(repo.id)}`) },
   );
   ctxMenu.showAt(anchor, items, { align: 'start' });
 }
 
-/** "Use a new worktree" outside the checkout menu (the stage's same-checkout
- *  line): the same prompt, from the repo's main checkout branch. */
-export async function startNewWorktree(repo: Repo, onPick: (path: string, branch: string | null) => void): Promise<void> {
+/** The main checkout's branch: what a new worktree starts from. */
+export async function worktreeBase(repo: Repo): Promise<string | null> {
   const list = await api.get<WorktreeInfo[]>(`/repos/${encodeURIComponent(repo.id)}/worktrees`).catch(() => [] as WorktreeInfo[]);
-  await newWorktree(repo, list, onPick);
+  return list.find((w) => w.is_main)?.branch ?? git.statusById[repo.id]?.branch ?? null;
 }
 
-/** A new branch in a new worktree beside the repo, from the current branch
- *  (`POST /repos/{id}/worktrees`); the thread then starts in it. */
-async function newWorktree(
-  repo: Repo,
-  list: WorktreeInfo[],
-  onPick: (path: string, branch: string | null) => void,
-): Promise<void> {
-  const base = list.find((w) => w.is_main)?.branch ?? git.statusById[repo.id]?.branch ?? null;
-  const name = await confirmer.promptText(
-    `Creates a new branch${base ? ` from ${base}` : ''} checked out in its own folder next to ${repo.name}; the thread starts there.`,
-    {
-      title: 'New worktree',
-      confirmLabel: 'Create',
-      placeholder: 'feature/my-change',
-      validate: (v) => (/^[^\s~^:?*[\\]+$/.test(v.trim()) && !v.trim().startsWith('-') ? null : 'Enter a valid branch name'),
-    },
-  );
-  if (!name) return;
-  try {
-    const w = await api.post<WorktreeInfo>(`/repos/${encodeURIComponent(repo.id)}/worktrees`, {
-      branch: name.trim(),
-      ...(base ? { base } : {}),
-    } satisfies WorktreeCreateReq);
-    toasts.success('Worktree created', w.path);
-    onPick(w.path, w.branch);
-  } catch (e) {
-    toastError('Couldn’t create the worktree', e);
-  }
+/** Every branch name a new worktree's branch must not reuse: the local
+ *  branches (`GET /repos/{id}/refs`); the repo's base branch alongside. */
+export async function takenBranches(repo: Repo): Promise<{ branches: string[]; base: string | null }> {
+  const read = await gitApi.readRefs(repo.id);
+  if (!read.refs) throw new Error(loadErrorText(read.error));
+  return { branches: read.refs.local.map((b) => b.name), base: read.refs.base_branch ?? null };
 }
+
+/** A new branch in a new worktree beside the repo (`POST /repos/{id}/worktrees`). */
+export function createWorktree(repo: Repo, branch: string, base: string | null): Promise<WorktreeInfo> {
+  return api.post<WorktreeInfo>(`/repos/${encodeURIComponent(repo.id)}/worktrees`, { branch, ...(base ? { base } : {}) } satisfies WorktreeCreateReq);
+}
+
+/** A branch name the person types (the same rule `git` applies, roughly). */
+export const BRANCH_NAME_OK = (v: string): string | null =>
+  /^[^\s~^:?*[\\]+$/.test(v.trim()) && !v.trim().startsWith('-') ? null : 'Enter a valid branch name';
 
 /** Otto has no native-editor launcher, so "Open in" offers the places Otto
  *  itself can open a folder: the Files inspector, the Git page, a terminal
