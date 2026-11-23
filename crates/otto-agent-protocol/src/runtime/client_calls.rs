@@ -26,7 +26,9 @@ const MAX_FILE_BYTES: u64 = 8 << 20;
 struct Terminal {
     output: Mutex<(String, bool)>,
     exit: watch::Receiver<Option<(Option<i32>, Option<String>)>>,
-    child: Mutex<Option<tokio::process::Child>>,
+    /// The command's process group (it leads its own): a kill reaches
+    /// everything it started, also after the shell itself exited.
+    pgid: Option<i32>,
 }
 
 /// Start `op` for the session `st` belongs to.
@@ -45,9 +47,23 @@ pub(super) fn start(inner: &Inner, st: &State, id: String, op: ClientOp) {
     });
 }
 
-/// The session's terminals end with it.
+/// The session's terminals end with it, or with its agent process (close,
+/// exit, a replaced process, idle release): their commands are killed.
 pub(super) fn drop_session(sid: &Id) {
-    TERMINALS.retain(|(s, _), _| s != sid);
+    TERMINALS.retain(|(s, _), t| {
+        if s == sid {
+            kill(t);
+        }
+        s != sid
+    });
+}
+
+/// Every terminal (the daemon is stopping: nothing could reach them after).
+pub(super) fn drop_all() {
+    TERMINALS.retain(|_, t| {
+        kill(t);
+        false
+    });
 }
 
 fn deliver(
@@ -183,6 +199,7 @@ async fn run(
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
+                .process_group(0)
                 .kill_on_drop(true);
             let mut child = cmd
                 .spawn()
@@ -191,7 +208,7 @@ async fn run(
             let t = Arc::new(Terminal {
                 output: Mutex::new((String::new(), false)),
                 exit: rx,
-                child: Mutex::new(None),
+                pgid: child.id().map(|p| p as i32),
             });
             let limit = byte_limit.map_or(DEFAULT_BYTE_LIMIT, |b| b as usize);
             let pipes = [
@@ -204,7 +221,6 @@ async fn run(
                     .take()
                     .map(|p| Box::new(p) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
             ];
-            *t.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
             TERMINALS.insert((sid.clone(), terminal_id.clone()), Arc::clone(&t));
             let mut readers = Vec::new();
             for mut pipe in pipes.into_iter().flatten() {
@@ -237,20 +253,16 @@ async fn run(
                     }
                 }));
             }
-            let waiter = Arc::clone(&t);
             tokio::spawn(async move {
-                for r in readers {
-                    let _ = r.await;
-                }
-                let child = waiter
-                    .child
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
-                let status = match child {
-                    Some(mut c) => c.wait().await.ok(),
-                    None => None,
-                };
+                // The command's own exit decides, not its pipes: a background
+                // process it left (`npm run dev &`) keeps them open.
+                let status = child.wait().await.ok();
+                let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+                    for r in readers {
+                        let _ = r.await;
+                    }
+                })
+                .await;
                 use std::os::unix::process::ExitStatusExt;
                 let _ = tx.send(Some((
                     status.and_then(|s| s.code()),
@@ -293,8 +305,11 @@ async fn run(
 }
 
 fn kill(t: &Terminal) {
-    if let Some(c) = t.child.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-        let _ = c.start_kill();
+    if let Some(pgid) = t.pgid {
+        // SAFETY: a plain signal to the process group this terminal created.
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        }
     }
 }
 

@@ -5577,3 +5577,87 @@ async fn every_structured_provider_takes_and_gives_a_handoff() {
     assert_eq!(handoffs(&host).len(), chain.len());
     rt.close(&s.id).await.unwrap();
 }
+
+/// Security 2 / review R3 + R4: a client terminal's commands die with the
+/// thread (close) and with its agent process (exit), its whole process group
+/// included; `wait_for_exit` answers when the shell exits even though a
+/// background child still holds the pipes.
+#[tokio::test]
+async fn client_terminals_die_with_the_thread_and_wait_ignores_background_pipes() {
+    use otto_agent_protocol::acp::AcpFlavor;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap().display().to_string();
+    let host = TestHost::new(&root, false);
+    let drivers: Arc<dyn DriverFactory> =
+        Arc::new(|p: RuntimeProvider| -> Option<Box<dyn StructuredDriver>> {
+            Some(Box::new(AcpDriver::with_flavor(
+                p,
+                AcpFlavor {
+                    program: fake_bin!("otto-fake-agent"),
+                    client_fs: true,
+                    client_terminal: true,
+                    ..AcpFlavor::default()
+                },
+            )))
+        });
+    let rt = AgentRuntime::new(
+        AgentRuntimeRepo::new(pool().await),
+        Arc::clone(&host) as Arc<dyn RuntimeHost>,
+        drivers,
+        RuntimeConfig {
+            attachments_dir: dir.path().join("a"),
+            ..RuntimeConfig::default()
+        },
+    );
+    let create = || async {
+        rt.create(
+            &"u1".into(),
+            &"w1".into(),
+            CreateRuntimeSessionReq {
+                provider: Some(RuntimeProvider::Grok),
+                cwd: Some(root.clone()),
+                access_mode: Some(RuntimeAccessMode::FullAccess),
+                ..CreateRuntimeSessionReq::default()
+            },
+        )
+        .await
+        .unwrap()
+    };
+    // A ticker in a subshell (a grandchild of the terminal's shell).
+    let ticker =
+        |name: &str| format!("term-keep (while true; do echo x >> {name}; sleep 0.1; done) & wait");
+    let alive = |name: &'static str| {
+        let path = dir.path().join(name);
+        async move {
+            let a = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let b = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            b > a
+        }
+    };
+    let s = create().await;
+    rt.prompt(&s.id, &ticker("close.txt")).await.unwrap();
+    host.wait(is_terminal).await;
+    assert!(alive("close.txt").await, "the command runs");
+    rt.close(&s.id).await.unwrap();
+    assert!(!alive("close.txt").await, "closing the thread killed it");
+
+    let s2 = create().await;
+    rt.prompt(&s2.id, &ticker("exit.txt")).await.unwrap();
+    host.wait_n(is_terminal, 2).await;
+    assert!(alive("exit.txt").await);
+    rt.prompt(&s2.id, "crash").await.unwrap();
+    host.wait_n(is_terminal, 3).await;
+    assert!(!alive("exit.txt").await, "the agent's exit killed it");
+
+    // `sleep 30 &`: the shell exits at once; the turn must not wait 30 s.
+    let s3 = create().await;
+    let t0 = std::time::Instant::now();
+    rt.prompt(&s3.id, "term sleep 30 & echo bg-started")
+        .await
+        .unwrap();
+    host.wait_n(is_terminal, 4).await;
+    assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
+    assert_eq!(last_assistant_text(&host), "term: bg-started");
+    rt.close(&s3.id).await.unwrap();
+}
