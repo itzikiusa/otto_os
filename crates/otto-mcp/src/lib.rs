@@ -26,6 +26,7 @@ pub mod policy;
 pub mod profiles;
 pub mod risk;
 pub mod service;
+mod sse_transport;
 pub mod types;
 
 pub use http::{api_router, outcome_to_resp, McpCtx};
