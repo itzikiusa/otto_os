@@ -971,11 +971,6 @@
 {/if}
 
 <style>
-  /* Key hints are LTR glyph runs: an RTL page must not reorder ⌥⌘N. */
-  kbd {
-    direction: ltr;
-    unicode-bidi: isolate;
-  }
   /* ── placement ───────────────────────────────────────────────────────── */
   .fb.app {
     position: absolute;

@@ -639,11 +639,6 @@
 {/if}
 
 <style>
-  /* Key hints are LTR glyph runs: an RTL page must not reorder them. */
-  kbd {
-    direction: ltr;
-    unicode-bidi: isolate;
-  }
   .pal-backdrop {
     position: fixed;
     inset: 0;
