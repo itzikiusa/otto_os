@@ -147,6 +147,14 @@ impl AgentRuntime {
             }
         };
         let sid = adopted.checkpoint.session_id.clone();
+        // A fresh start or provider switch cut mid-handshake never took a
+        // prompt, and its process may run another provider than the row
+        // names: not adopted, the thread resumes as it was.
+        if adopted.checkpoint.fresh_starting {
+            adopted.client.shutdown(Duration::from_millis(500)).await;
+            let _ = tokio::fs::remove_file(socket_path).await;
+            return None;
+        }
         let rec = match self.inner.repo.get(&sid).await {
             Ok(r) if !r.closed => r,
             _ => {

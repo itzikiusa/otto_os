@@ -124,6 +124,8 @@ fn main() {
     let mut asks = 0u32;
     let args: Vec<String> = std::env::args().collect();
     let refuse = args.iter().any(|a| a == "--refuse-session");
+    // Never answer session/new (a handshake cut by a daemon restart).
+    let hang = std::env::var_os("OTTO_FAKE_HANG_SESSION").is_some();
     let mut mode = args
         .windows(2)
         .find(|w| w[0] == "--approval-mode")
@@ -152,6 +154,7 @@ fn main() {
                 json!({"protocolVersion":1,"agentCapabilities":{"loadSession":true,
                     "promptCapabilities":{"embeddedContext":true}}}),
             ),
+            "session/new" if hang => {}
             "session/new" if refuse => out(
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"Authentication required"}}),
             ),
