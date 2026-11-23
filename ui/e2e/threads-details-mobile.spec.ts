@@ -76,7 +76,20 @@ test('phone: thread details open as the details drawer, by touch', async ({ page
   await page.getByTestId('threads-toggle-inspector').tap();
   const card = page.getByTestId('thread-details-card');
   await expect(card).toBeVisible();
-  await expectFullyInViewport(page, card, 'details card (drawer)');
+  // A phone on its side folds the card to one summary row (the surface
+  // below keeps its height); a tap opens it.
+  const summary = card.getByTestId('details-summary');
+  if (info.project.name === 'iphone-landscape') {
+    await expect(summary).toHaveAttribute('aria-expanded', 'false');
+    await expect(card.getByTestId('details-branch')).toHaveCount(0);
+    expect((await card.boundingBox())!.height, 'folded card').toBeLessThan(80);
+    await summary.tap();
+    // Open, it scrolls inside its half of the panel.
+    await expectFullyInViewport(page, summary, 'details summary (phone on its side)');
+  } else {
+    await expect(summary).toHaveCount(0);
+    await expectFullyInViewport(page, card, 'details card (drawer)');
+  }
   await expect(card.getByTestId('details-branch')).toContainText('feat/phone', { timeout: 15_000 });
   await expect(card.getByTestId('details-git-action')).toHaveAttribute('data-kind', 'commit');
   const sub = card.getByTestId('details-subagent');
