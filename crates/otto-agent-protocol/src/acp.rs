@@ -102,7 +102,7 @@ pub struct AcpFlavor {
     /// for a mode only a launch flag gives (agy's full access), which the
     /// runtime enters and leaves by respawning.
     pub mode_id: Option<fn(RuntimeAccessMode) -> Option<&'static str>>,
-    /// Environment per access mode (opencode's `OPENCODE_PERMISSION`; Muse's
+    /// Environment per access mode (opencode's `OPENCODE_CONFIG_CONTENT`; Muse's
     /// launcher switch, the same in every mode).
     pub access_env: Option<AccessEnv>,
     /// When the agent takes its model as a session config option instead of
@@ -240,8 +240,12 @@ pub(super) struct AcpDriverState {
     /// `promptCapabilities.image` / `.embeddedContext` from `initialize`.
     pub(super) images: bool,
     pub(super) embedded: bool,
-    /// `modes.availableModes[].id` from `session/new|load`.
+    /// `modes.availableModes[].id` from `session/new|load` — or, for an
+    /// agent with no session modes, the values of its `mode`-category
+    /// config option (opencode's `build` / `plan`).
     pub(super) modes: Vec<String>,
+    /// That config option's id: modes then go as `session/set_config_option`.
+    pub(super) mode_config_id: Option<String>,
     /// `models.availableModels[].modelId` from `session/new|load`, when advertised.
     #[serde(default)]
     pub(super) available_models: Vec<String>,
@@ -294,6 +298,8 @@ pub(super) struct AcpDriverState {
     pub(super) base_mode: Option<String>,
     /// The session is in the agent's `plan` mode.
     pub(super) plan_active: bool,
+    /// Grok's silent "denied by prompt policy" was explained once.
+    pub(super) denied_noticed: bool,
     /// The session's running cost (`usage_update.cost`, USD) and its value
     /// when the running turn started.
     pub(super) cost_total: Option<f64>,
@@ -357,6 +363,7 @@ impl AcpDriver {
                 images: false,
                 embedded: false,
                 modes: Vec::new(),
+                mode_config_id: None,
                 available_models: Vec::new(),
                 effort_options: Vec::new(),
                 access: RuntimeAccessMode::default(),
@@ -386,6 +393,7 @@ impl AcpDriver {
                 swarm: HashMap::new(),
                 base_mode: None,
                 plan_active: false,
+                denied_noticed: false,
                 cost_total: None,
                 cost_at_turn: None,
                 lost_resume: false,
@@ -512,10 +520,9 @@ impl AcpDriver {
 
     /// Grok over ACP, as T3 Code launches it (`grokAcpSpawnArgs`,
     /// `acpSupport.ts:47-58`): approval-required is `--permission-mode
-    /// default agent stdio` (every tool call asks), full-access `agent
-    /// --always-approve stdio`. Grok has no auto-accept-edits launch mode
-    /// (T3 Code offers none either), so that mode asks like
-    /// approval-required. `-m` is grok's top-level model flag; context flags
+    /// default agent stdio` (every tool call asks), auto-accept-edits
+    /// `--permission-mode acceptEdits` (1.0.92), full-access `agent
+    /// --always-approve stdio`. `-m` is grok's top-level model flag; context flags
     /// (`--rules=`) must precede `agent`, hence the tail. Auth: `xai.api_key` when
     /// `XAI_API_KEY` is set, else `cached_token` (`acpSupport.ts:21-25,
     /// 77-81`); `_meta` on initialize / cancel (`:98-101`). T3 Code also sets
@@ -536,6 +543,10 @@ impl AcpDriver {
                         RuntimeAccessMode::FullAccess => {
                             (Vec::new(), v(&["agent", "--always-approve", "stdio"]))
                         }
+                        RuntimeAccessMode::AutoAcceptEdits => (
+                            v(&["--permission-mode", "acceptEdits"]),
+                            v(&["agent", "stdio"]),
+                        ),
                         _ => (v(&["--permission-mode", "default"]), v(&["agent", "stdio"])),
                     }
                 }),
@@ -550,13 +561,14 @@ impl AcpDriver {
         )
     }
 
-    /// opencode over ACP (`opencode acp`; verified live against 1.19.5): no
+    /// opencode over ACP (`opencode acp`; verified live against 2.3.0): no
     /// model flag — the model is the `model` session config option (value
-    /// `provider/model`, the only config option it advertises); it takes
-    /// stdio `mcpServers` with their env in `session/new|load`. The access
-    /// mode rides `OPENCODE_PERMISSION`, a JSON permission object deep-merged
-    /// OVER the user's config (a bare string like `"allow"` breaks
-    /// `session/new` with a `directory` service failure): full access allows
+    /// `provider/model`), effort the `effort` one, plan the `plan` value of
+    /// its `mode` option (`build` / `plan`; it has no session modes); it
+    /// takes stdio `mcpServers` with their env in `session/new|load`. The
+    /// access mode is a `permission` object in `OPENCODE_CONFIG_CONTENT`
+    /// (inline config merged over the user's; 2.x dropped
+    /// `OPENCODE_PERMISSION`, which 2.3.0 ignores): full access allows
     /// everything; the others ask for everything but reads (plus edits for
     /// auto-accept-edits) through `session/request_permission`. Without it
     /// opencode's own default is to allow, so every mode sets it.
@@ -576,23 +588,27 @@ impl AcpDriver {
                             r#"{"*":"ask","read":"allow","glob":"allow","grep":"allow","list":"allow"}"#
                         }
                     };
-                    vec![("OPENCODE_PERMISSION".into(), rules.into())]
+                    vec![(
+                        "OPENCODE_CONFIG_CONTENT".into(),
+                        format!(r#"{{"permission":{rules}}}"#),
+                    )]
                 }),
                 model_config_id: Some("model"),
+                effort_config_id: Some("effort"),
                 ..AcpFlavor::default()
             },
         )
     }
 
-    /// Meta's Muse Code over ACP (`muse acp`; verified against 1.4.20). Its
-    /// session modes are approval policies, switched live with
+    /// Meta's Muse Code over ACP (`muse acp`; verified live against 1.4.25).
+    /// Its session modes are approval policies, switched live with
     /// `session/set_mode`: approval-required asks for anything no permission
     /// rule covers (`promptUnmatched`), auto-accept-edits is Muse's own
     /// default (`onRequest`: asks only when an action needs it), full access
-    /// runs everything (`allowAll`). No plan mode. The model is `--model`
-    /// (`muse acp` refuses it for the offline `echo` provider only); effort
-    /// rides the `thought_level` config option built from Muse's model
-    /// catalog (tiers `none` … `ultra`). `--trust-workspace` loads the
+    /// runs everything (`allowAll`). No plan mode. The model is the `model`
+    /// session config option (switched live; 1.4.25 advertises it); effort
+    /// rides the `thought_level` option only where the session advertises it
+    /// (1.4.25 offers none: "this session offers no option"). `--trust-workspace` loads the
     /// folder's skills and rules (Otto pre-trusts every session cwd); Muse's
     /// own sandbox is off under Otto's Seatbelt. `MUSE_NO_AUTO_UPDATE=1` stops the launcher from checking for
     /// a new binary on every spawn (Otto's update pass does that), as T3 Code
@@ -616,6 +632,7 @@ impl AcpDriver {
                     let (k, v) = otto_core::agent_runtime::MUSE_NO_AUTO_UPDATE;
                     vec![(k.into(), v.into())]
                 }),
+                model_config_id: Some("model"),
                 effort_config_id: Some("thought_level"),
                 own_sandbox_off: Some("--disable-sandbox"),
                 no_authenticate: true,
@@ -746,6 +763,8 @@ impl AcpDriver {
         let vals: Vec<String> = opts
             .iter()
             .filter_map(|o| o.get("value").and_then(Value::as_str).map(str::to_string))
+            // opencode's `default` is "no pick", not a tier.
+            .filter(|v| v != "default")
             .collect();
         if !vals.is_empty() {
             self.state.effort_options = vals;
@@ -808,6 +827,16 @@ impl AcpDriver {
     fn resolve_effort_with(&self, options: &[String], raw: &str) -> Result<String, DriverError> {
         let name = self.provider.as_str();
         if self.flavor.effort_config_id.is_none() {
+            return Err(DriverError(format!(
+                "{name} does not take a reasoning effort"
+            )));
+        }
+        // A session that advertised neither an effort option nor tiered
+        // models takes none (Muse 1.4.25: "this session offers no option").
+        if self.state.phase == Phase::Ready
+            && options.is_empty()
+            && self.state.available_models.is_empty()
+        {
             return Err(DriverError(format!(
                 "{name} does not take a reasoning effort"
             )));
@@ -892,12 +921,7 @@ impl AcpDriver {
         if req.plan && self.state.modes.iter().any(|m| m == "plan") {
             // Plan mode is one of the agent's session modes (agy `plan`).
             if !self.state.plan_active {
-                let (id, line) = self.request(
-                    M_SESSION_SET_MODE,
-                    SetSessionModeRequest::new(sid.clone(), "plan"),
-                );
-                self.state.mode_req = Some(id);
-                step.write(line);
+                self.set_mode(step, &sid, "plan");
                 self.state.plan_active = true;
             }
         } else if self.state.plan_active {
@@ -911,12 +935,7 @@ impl AcpDriver {
                 .map(str::to_string)
                 .or_else(|| self.state.base_mode.clone());
             if let Some(mode) = back {
-                let (id, line) = self.request(
-                    M_SESSION_SET_MODE,
-                    SetSessionModeRequest::new(sid.clone(), mode),
-                );
-                self.state.mode_req = Some(id);
-                step.write(line);
+                self.set_mode(step, &sid, &mode);
             }
         } else if access_changed {
             self.write_mode(step, &sid, self.state.access);
@@ -937,13 +956,24 @@ impl AcpDriver {
 
     fn write_mode(&mut self, step: &mut DriverStep, sid: &str, mode: RuntimeAccessMode) {
         if let Some(mode_id) = self.flavor.mode_id.and_then(|f| f(mode)) {
-            let (id, line) = self.request(
-                M_SESSION_SET_MODE,
-                SetSessionModeRequest::new(sid.to_string(), mode_id),
-            );
-            self.state.mode_req = Some(id);
-            step.write(line);
+            self.set_mode(step, sid, mode_id);
         }
+    }
+
+    /// `session/set_mode`, or the agent's mode config option.
+    fn set_mode(&mut self, step: &mut DriverStep, sid: &str, mode: &str) {
+        let (id, line) = match self.state.mode_config_id.clone() {
+            Some(config_id) => self.request(
+                M_SET_CONFIG_OPTION,
+                json!({"sessionId": sid, "configId": config_id, "value": mode}),
+            ),
+            None => self.request(
+                M_SESSION_SET_MODE,
+                SetSessionModeRequest::new(sid.to_string(), mode.to_string()),
+            ),
+        };
+        self.state.mode_req = Some(id);
+        step.write(line);
     }
 
     /// T3 Code's choice (`AcpSessionRuntime.ts:1065-1074`): a preferred
@@ -1318,6 +1348,22 @@ impl AcpDriver {
             t.images.clear();
         }
         Self::merge_raw_images(&mut t, f.raw_output.as_ref());
+        // Grok 1.0.92 in agent mode denies an unapproved tool without a
+        // `session/request_permission` when its own settings say `dontAsk`
+        // (it also reads Claude Code's `permissions.defaultMode`; live).
+        if self.provider == RuntimeProvider::Grok
+            && !self.state.denied_noticed
+            && t.output.contains("denied by prompt policy")
+        {
+            self.state.denied_noticed = true;
+            step.push(DriverEvent::TurnItem(notice(
+                format!("{}:grok-denied", self.turn()),
+                "Grok refused a tool without asking: its own permission settings deny anything not \
+                 pre-approved (Grok also reads Claude Code's `permissions.defaultMode`, for example \
+                 `dontAsk`). Switch this thread to Full access, or change that setting."
+                    .into(),
+            )));
+        }
         self.emit_tool_or_subagent(
             step,
             &id,
@@ -1767,11 +1813,36 @@ impl AcpDriver {
                         .collect()
                 })
                 .unwrap_or_default();
-            let current_mode = result
+            let mut current_mode = result
                 .as_ref()
                 .and_then(|r| r.pointer("/modes/currentModeId"))
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            let mode_option = result
+                .as_ref()
+                .and_then(|r| r.get("configOptions"))
+                .and_then(Value::as_array)
+                .and_then(|a| {
+                    a.iter()
+                        .find(|c| c.get("category").and_then(Value::as_str) == Some("mode"))
+                })
+                .filter(|_| self.state.modes.is_empty());
+            if let Some(c) = mode_option {
+                self.state.mode_config_id = c.get("id").and_then(Value::as_str).map(str::to_string);
+                self.state.modes = c
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|o| Some(o.get("value")?.as_str()?.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                current_mode = c
+                    .get("currentValue")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
             self.state.plan_active = current_mode.as_deref() == Some("plan");
             // A new session has spent nothing; a loaded one's running cost is
             // unknown until its first `usage_update` (that turn counts none).
@@ -2066,6 +2137,8 @@ impl StructuredDriver for AcpDriver {
                 c.efforts.clear();
             } else if !self.state.effort_options.is_empty() {
                 c.efforts = effort_levels(&self.state.effort_options);
+            } else if self.state.available_models.is_empty() {
+                c.efforts.clear();
             }
             c.plan = self.state.modes.iter().any(|m| m == "plan");
         }
@@ -2780,13 +2853,8 @@ mod tests {
         assert_eq!(spec.program, "muse");
         assert_eq!(
             spec.args,
-            [
-                "acp",
-                "--trust-workspace",
-                "--model",
-                "muse-spark-1.3",
-                "--disable-sandbox"
-            ]
+            ["acp", "--trust-workspace", "--disable-sandbox"],
+            "the model is a config option, not a flag"
         );
         assert!(spec.tail_args.is_empty());
         assert_eq!(
@@ -2798,14 +2866,21 @@ mod tests {
             ..c.clone()
         });
         assert!(!unconfined.args.iter().any(|a| a == "--disable-sandbox"));
-        assert!(!d.switches_model_live());
+        assert!(d.switches_model_live());
 
         d.start(&c);
         d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":false,"embeddedContext":true}},"authMethods":[{"id":"muse-login","name":"Log in to Muse"}],"agentInfo":{"name":"muse","version":"1.4.20"}}}"#);
         let s = d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"01a1e323","modes":{"currentModeId":"onRequest","availableModes":[{"id":"allowAll","name":"Allow all"},{"id":"promptUnmatched","name":"Ask before unmatched actions"},{"id":"onRequest","name":"Ask on request"},{"id":"denyUnmatched","name":"Deny unmatched actions"}]},"configOptions":[{"id":"mode","category":"mode","type":"select","currentValue":"onRequest","options":[]},{"id":"thought_level","category":"thought_level","type":"select","currentValue":"high","options":[{"value":"minimal"},{"value":"low"},{"value":"medium"},{"value":"high"},{"value":"xhigh"},{"value":"max"},{"value":"ultra"}]}]}}"#);
         let w: Vec<Value> = (0..s.writes.len()).map(|i| sent(&s, i)).collect();
-        assert_eq!(w[0]["method"], "session/set_mode");
-        assert_eq!(w[0]["params"]["modeId"], "promptUnmatched");
+        assert_eq!(
+            (
+                w[0]["params"]["configId"].as_str(),
+                w[0]["params"]["value"].as_str()
+            ),
+            (Some("model"), Some("muse-spark-1.3"))
+        );
+        assert_eq!(w[1]["method"], "session/set_mode");
+        assert_eq!(w[1]["params"]["modeId"], "promptUnmatched");
         let caps = d.capabilities();
         assert!(caps.images && caps.files && !caps.plan && !caps.steer);
         assert_eq!(
@@ -2834,6 +2909,26 @@ mod tests {
         );
         assert_eq!(w[1]["method"], "session/prompt");
         assert!(d.prompt("t2", &RuntimePromptReq::of("again")).is_err());
+    }
+
+    /// Muse 1.4.25 (live): `mode` + `model` config options, no
+    /// `thought_level` — no effort is offered, and one asked for is dropped
+    /// with a notice instead of a `-32602` from the agent.
+    #[test]
+    fn muse_without_an_effort_option_offers_none_and_drops_one_asked_for() {
+        let mut d = AcpDriver::muse("muse");
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s","modes":{"currentModeId":"onRequest","availableModes":[{"id":"onRequest","name":"Ask"}]},"configOptions":[{"id":"mode","category":"mode","type":"select","currentValue":"onRequest","options":[{"value":"onRequest"}]},{"id":"model","category":"model","type":"select","currentValue":"muse-wonder-full-1.0","options":[{"value":"muse-spark-1.3"}]}]}}"#);
+        assert!(d.capabilities().efforts.is_empty());
+        let mut req = RuntimePromptReq::of("go");
+        req.effort = Some("high".into());
+        let s = d.prompt("t1", &req).unwrap();
+        let w: Vec<Value> = (0..s.writes.len()).map(|i| sent(&s, i)).collect();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0]["method"], "session/prompt");
+        assert!(s.events.iter().any(|e| matches!(e,
+            DriverEvent::TurnItem(i) if i.id.ends_with(":effort-dropped"))));
     }
 
     /// A signed-out Muse refuses `session/new` (-32000). Its only auth
@@ -2983,8 +3078,8 @@ mod tests {
         assert_eq!(
             spec.env,
             [(
-                "OPENCODE_PERMISSION".to_string(),
-                r#"{"*":"allow"}"#.to_string()
+                "OPENCODE_CONFIG_CONTENT".to_string(),
+                r#"{"permission":{"*":"allow"}}"#.to_string()
             )]
         );
         // Every mode is explicit and valid JSON (opencode's default allows).
@@ -2996,7 +3091,8 @@ mod tests {
                 access_mode: mode,
                 ..c.clone()
             });
-            let rules: Value = serde_json::from_str(&spec.env[0].1).unwrap();
+            let config: Value = serde_json::from_str(&spec.env[0].1).unwrap();
+            let rules = &config["permission"];
             assert_eq!(rules["*"], bash);
             assert_eq!(
                 rules.get("edit").map_or("ask", |v| v.as_str().unwrap()),
@@ -3011,6 +3107,41 @@ mod tests {
         assert_eq!(set["method"], "session/set_config_option");
         assert_eq!(set["params"]["configId"], "model");
         assert_eq!(set["params"]["value"], "anthropic/claude-sonnet");
+    }
+
+    /// opencode 2.3.0 (live dump): no session modes; `effort` and `mode`
+    /// (`build` / `plan`) config options. Effort and plan mode go as
+    /// `session/set_config_option`; leaving plan returns to `build`.
+    #[test]
+    fn opencode_effort_and_plan_ride_its_config_options() {
+        let mut d = AcpDriver::opencode();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_1","configOptions":[{"id":"model","category":"model","type":"select","currentValue":"a/b","options":[{"value":"a/b"}]},{"id":"effort","category":"thought_level","type":"select","currentValue":"default","options":[{"value":"minimal"},{"value":"low"},{"value":"medium"},{"value":"high"},{"value":"xhigh"},{"value":"max"},{"value":"default"}]},{"id":"mode","category":"mode","type":"select","currentValue":"build","options":[{"value":"build"},{"value":"plan"}]}]}}"#);
+        let caps = d.capabilities();
+        assert!(caps.plan);
+        assert!(
+            caps.efforts.iter().any(|e| e == "high"),
+            "{:?}",
+            caps.efforts
+        );
+        let mut req = RuntimePromptReq::of("go");
+        req.effort = Some("high".into());
+        req.plan = true;
+        let s = d.prompt("t1", &req).unwrap();
+        let w: Vec<Value> = (0..s.writes.len()).map(|i| sent(&s, i)).collect();
+        let cfg = |v: &Value| {
+            (
+                v["params"]["configId"].clone(),
+                v["params"]["value"].clone(),
+            )
+        };
+        assert_eq!(cfg(&w[0]), (json!("effort"), json!("high")));
+        assert_eq!(cfg(&w[1]), (json!("mode"), json!("plan")));
+        assert_eq!(w[2]["method"], "session/prompt");
+        d.on_line(r#"{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}"#);
+        let s = d.prompt("t2", &RuntimePromptReq::of("now build")).unwrap();
+        assert_eq!(cfg(&sent(&s, 0)), (json!("mode"), json!("build")));
     }
 
     #[test]
@@ -3125,6 +3256,31 @@ mod tests {
         assert!(
             matches!(&s.events[0], DriverEvent::Ready { native_thread_id: Some(n), .. } if n == "fresh")
         );
+    }
+
+    /// Live wire (grok 1.0.92, approval-required, Claude `defaultMode:
+    /// dontAsk` on the machine): the tool fails with no permission request.
+    /// The thread says why, once.
+    #[test]
+    fn grok_denied_without_asking_says_so_once() {
+        let mut d = AcpDriver::grok();
+        d.start(&ctx(None));
+        d.on_line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        d.on_line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"g1"}}"#);
+        d.prompt("t1", &RuntimePromptReq::of("go")).unwrap();
+        let denied = |id: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"g1","update":{{"sessionUpdate":"tool_call_update","toolCallId":"{id}","title":"echo","kind":"execute","status":"failed","content":[{{"type":"content","content":{{"type":"text","text":"Tool `run_terminal_command` was not executed: denied by prompt policy (tool not pre-approved)"}}}}]}}}}}}"#
+            )
+        };
+        let notices = |s: &DriverStep| {
+            s.events
+                .iter()
+                .filter(|e| matches!(e, DriverEvent::TurnItem(i) if i.id.ends_with(":grok-denied")))
+                .count()
+        };
+        assert_eq!(notices(&d.on_line(&denied("c1"))), 1);
+        assert_eq!(notices(&d.on_line(&denied("c2"))), 0, "once per session");
     }
 
     #[test]
@@ -3375,9 +3531,9 @@ mod tests {
         let full = g.launch(&at(RuntimeAccessMode::FullAccess));
         assert!(full.args.is_empty());
         assert_eq!(full.tail_args, ["agent", "--always-approve", "stdio"]);
-        // No auto-accept-edits launch mode: it asks, as approval-required.
+        // grok 1.0.92's own accept-edits mode.
         let edits = g.launch(&at(RuntimeAccessMode::AutoAcceptEdits));
-        assert_eq!(edits.args, ["--permission-mode", "default"]);
+        assert_eq!(edits.args, ["--permission-mode", "acceptEdits"]);
         assert_eq!(edits.tail_args, ["agent", "stdio"]);
         assert!(!g.switches_access_live(RuntimeAccessMode::FullAccess));
 

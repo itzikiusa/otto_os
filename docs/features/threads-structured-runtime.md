@@ -370,10 +370,19 @@ protocol from a script.
   returned its env secret to the model.
 - `session/load` with the earlier id remembered the earlier turn. The replayed
   history is dropped.
-- The access mode is the `OPENCODE_PERMISSION` env. opencode deep-merges this
-  JSON object over the user's config:
+- **opencode 2.3.0** (re-verified live 2026-11-23, see
+  [ACP capabilities](./acp-capabilities.md)): `OPENCODE_PERMISSION` is gone
+  (2.3.0 ignores it and ran a shell command unasked), so the access mode is
+  now a `permission` object in `OPENCODE_CONFIG_CONTENT` (inline config,
+  merged over the user's), which restores `session/request_permission`.
+  2.3.0 also advertises `effort` and `mode` (`build` / `plan`) config
+  options: Otto offers effort and plan mode through `session/set_config_option`.
+  The binary lives in `~/.opencode/bin`, which ottod now adds to its PATH.
+- The access mode (1.19.5: `OPENCODE_PERMISSION`; 2.x: `{"permission": …}`
+  in `OPENCODE_CONFIG_CONTENT`) is this JSON object, merged over the user's
+  config:
 
-  | Mode | `OPENCODE_PERMISSION` |
+  | Mode | permission object |
   |---|---|
   | full access | `{"*":"allow"}` |
   | auto-accept edits | `{"*":"ask", "read"/"glob"/"grep"/"list"/"edit": "allow"}` |
