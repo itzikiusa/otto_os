@@ -58,11 +58,12 @@ carry into another conversation.
      `runtime_request.updated` events; after a reload, one compact read of
      the thread's newest turn — `threadInbox.svelte.ts`), as does the
      working time. A terminal thread waiting on you reads Approval.
-   - **Done** is this window's unread flag: a turn that ended (completed or
-     failed) while the thread was not in front of you
-     (`runtimeThreads.unread` / `ws.unread`); opening the thread clears it.
-     It is per window and in memory: a reload or another device does not
-     carry it.
+   - **Done** is "the last turn ended after you last had the thread in front
+     of you", on every device: the thread's `meta.thread_seen_at` (written
+     once each time you focus it with the window visible, or when a turn ends
+     while it is in front of you) against its `meta.last_turn_ended_at`
+     (`threadMeta.svelte.ts`). A thread never marked seen anywhere falls back
+     to this window's own flag (a turn it saw end off screen).
    - **Subagents** (threads started from a thread) fold under it by default;
      the row says "N subagents" and, when one of them needs you, the
      thread's own word becomes **Needs you** (the tooltip names it). Opened,
@@ -80,10 +81,14 @@ carry into another conversation.
      for 5 s; a newer action replaces it, and ⌘Z / Ctrl+Z runs it while focus
      is not in a text field, editor or terminal. Archiving a working session
      still asks first.
-   - Pins and History are kept by this browser (`otto_threads_v1`), so the
-     Mac and a phone can differ: storing them on the thread needs a daemon
-     route a structured thread does not have yet (`PATCH /runtime-sessions/{id}`
-     takes only a title).
+   - **Pins, History and "seen" live on the thread** (`meta.thread_pinned`,
+     `thread_history`, `thread_seen_at`; `PATCH /runtime-sessions/{id}` or
+     `PATCH /sessions/{id}` `meta`), so the Mac and a phone agree, live
+     (`provider_session.updated` `thread` / `session_meta_updated`). A change
+     shows at once; a refused write rolls back with the error toast. This
+     browser's old local lists move onto the threads once. A shared / guest
+     link cannot change them. The inbox's recency is when a thread's last
+     turn ended, so a pin or a look never reorders it.
    - Footer: Settings, Git, a **usage meter** in the Usage slot — the focused
      thread's agent's tightest plan window ("5h 62%" used; warning from 80 %,
      danger from 95 %; every window and its reset in the tooltip; click opens

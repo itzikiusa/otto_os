@@ -25,6 +25,7 @@
   import { councilOf } from './runtime/council';
   import { inboxClass, statusWord, subagentRollup, subagentWord } from './threadInbox';
   import { inboxLive } from './threadInbox.svelte';
+  import { threadMeta } from './threadMeta.svelte';
   import { threadRepos } from './threadRepos.svelte';
   import { threadRowState, threadStateById } from './threadNav.svelte';
 
@@ -48,7 +49,7 @@
   const selected = $derived(threads.focusedSessionId === s.id && !threads.newDraftMode);
   const inPane = $derived(threads.paneIds.includes(s.id) && !threads.newDraftMode);
   /** Finished a turn while you looked elsewhere (cleared when focused). */
-  const unread = $derived(!selected && st.key !== 'needs-you' && (ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true));
+  const unread = $derived(!selected && st.key !== 'needs-you' && threadMeta.unread(s.id, ws.unread[s.id] === true || runtimeThreads.unread[s.id] === true));
 
   const kids = $derived(family ? family.kids : []);
   /** Its subagents rolled up (threadInbox.ts `subagentRollup`). */

@@ -22,8 +22,10 @@ export function inboxOrder(
   score: (s: Session) => number,
   parentOf: (s: Session) => string | null,
   folded: (id: string) => boolean = () => false,
+  /** Recency (ISO time, newest first): last activity unless the caller knows better. */
+  at: (s: Session) => string = (s) => s.last_active_at,
 ): FamilyRow[] {
-  const sorted = [...list].sort((a, b) => score(a) - score(b) || b.last_active_at.localeCompare(a.last_active_at));
+  const sorted = [...list].sort((a, b) => score(a) - score(b) || at(b).localeCompare(at(a)));
   const present = new Set(sorted.map((s) => s.id));
   const childrenOf = new Map<string, Session[]>();
   const roots: { s: Session; detached: boolean }[] = [];

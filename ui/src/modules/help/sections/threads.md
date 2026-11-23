@@ -25,7 +25,7 @@ Threads (Experimental) is a conversation-first workspace for coding agents. It k
 - **Group by project** (the filter menu) shows a folder per project instead. Otto remembers it on this device.
 - **Undo**: pinning, moving to History and dismissing a side chat happen at once. The notice offers **Undo** for 5 seconds, or press **⌘Z** outside a text field.
 - **Usage meter**: the footer shows how much of the focused agent's tightest plan limit is used (for example **5h 62%**). It turns amber at 80 % and red at 95 %. Hover it to see every limit and when it resets; click it to open Usage.
-- Pins and History are kept by this browser, so a phone and the Mac can differ.
+- Pins, History and what you have seen follow you: pin on the Mac and the phone shows it pinned straight away.
 
 **Rich conversation & composer**
 - Full GitHub-flavored Markdown, syntax-highlighted code blocks, inline workspace/local image thumbnails with zoomable lightbox, and expandable **Thinking** blocks (including full reasoning prose on Antigravity sessions).
