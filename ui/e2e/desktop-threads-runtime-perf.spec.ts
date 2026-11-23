@@ -261,12 +261,18 @@ test('b. a 500-thread sidebar over 20 projects: first render, Search, switching'
   await page.goto('/#/threads/' + ids.small);
   await page.evaluate(() => import(/* @vite-ignore */ '/src/modules/threads/ThreadSidebar.svelte'));
   await page.goto('about:blank');
+  let rowReads = 0;
+  page.on('request', (rq) => {
+    if (/\/runtime-sessions\/[^/]+\/events\?/.test(rq.url())) rowReads++;
+  });
   const t0 = Date.now();
   await page.goto('/#/threads/mock-3');
   const side = page.getByTestId('threads-sidebar');
   await expect(side.getByText('Mock thread 3 ', { exact: false }).first()).toBeVisible({ timeout: 60_000 });
   const firstRender = Date.now() - t0;
   const sideNodes = await side.evaluate((el) => el.getElementsByTagName('*').length);
+  await page.waitForTimeout(2000); // ui-guards: allow — let per-row reads settle before counting
+  const eventReads = rowReads;
   // Search: per-keystroke cost.
   const search = side.getByRole('searchbox').or(side.getByPlaceholder('Search')).first();
   let searchKeys: ReturnType<typeof dist> | null = null;
@@ -294,7 +300,7 @@ test('b. a 500-thread sidebar over 20 projects: first render, Search, switching'
       /* not reachable on this build */
     }
   }
-  record('sidebar500', { firstRenderMs: firstRender, sidebarNodes: sideNodes, searchKey: searchKeys, switchMs: dist(sw) });
+  record('sidebar500', { firstRenderMs: firstRender, sidebarNodes: sideNodes, eventReads, searchKey: searchKeys, switchMs: dist(sw) });
 });
 
 test('f. page load: requests and bytes', async ({ page }) => {

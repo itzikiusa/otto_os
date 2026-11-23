@@ -62,7 +62,9 @@
   const cls = $derived(history ? 'rest' : subNeeds ? 'needs' : inboxClass(st.key, unread));
   const runtime = $derived(isRuntimeThread(s));
   $effect(() => {
-    if (runtime && (cls === 'needs' || cls === 'working')) inboxLive.ensure(s.id);
+    // Approval vs Question needs the request's kind (one queued read); a
+    // working row's start comes from the live events ("Working" until then).
+    if (runtime && cls === 'needs') inboxLive.ensure(s.id);
   });
   const word = $derived(
     child ? subagentWord(st.key) : subNeeds ? 'Needs you' : statusWord(cls, {
