@@ -52,7 +52,7 @@ export const threadSwitcherSource: PaletteThreadSource = {
     threads.startNewThread({ workspaceId: ws.currentId, draft });
   },
   warm() {
-    for (const { s, cls } of live()) if (isRuntimeThread(s) && cls === 'needs') inboxLive.ensure(s.id);
+    for (const { s, cls } of live()) if (isRuntimeThread(s) && (cls === 'needs' || cls === 'working')) inboxLive.ensure(s.id);
   },
 };
 
