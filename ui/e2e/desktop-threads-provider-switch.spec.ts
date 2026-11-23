@@ -116,6 +116,9 @@ test('claude → codex → claude: the same thread, a handoff divider each way',
   await expect(notice).toHaveCount(0);
   await expect(thread.getByTestId('runtime-model')).not.toHaveAttribute('aria-label', /fake-claude/);
   expect(await provider(id)).toBe('codex');
+  // The sidebar row (and every list fed by the same rows) shows the new provider.
+  const rowGlyph = page.locator('[data-testid^="thread-"]', { has: page.getByTestId(`thread-status-${id}`) }).last().locator('.tr-prov');
+  await expect(rowGlyph).toHaveAttribute('title', 'Codex');
   await handoff.locator('summary').click();
   await expect(handoff).toContainText('1 turn handed over.');
   await expect(handoff.locator('pre')).toContainText('[Context handoff from Claude Code]');
@@ -134,6 +137,7 @@ test('claude → codex → claude: the same thread, a handoff divider each way',
   await expect(handoff).toHaveCount(2);
   await expect(handoff.nth(1).locator('summary')).toHaveText('Context handoff · Codex → Claude Code');
   expect(await provider(id)).toBe('claude');
+  await expect(rowGlyph).toHaveAttribute('title', 'Claude Code');
   // Same visible thread throughout: one row in the sidebar.
   await expect(page.getByTestId(`runtime-thread-${id}`)).toBeVisible();
 });

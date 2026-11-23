@@ -17,7 +17,7 @@ import type { MidTurn } from './runtime/composerSend';
 import type { ToolVisibility } from './runtime/workLog';
 import type { ThreadsLayoutMode } from './threadsStore.svelte';
 
-export const RELATED_LABEL = 'Related threads…';
+export const RELATED_LABEL = 'Send to another thread…';
 export const TERMINAL_LABEL = 'Terminal drawer';
 
 /** Thread items the sidebar row already offers (runtimeMenu.ts, threadMenu.ts). */
@@ -82,7 +82,7 @@ export function threadsPageMenu(s: PageMenuState, act: PageMenuActions): MenuIte
     ...(compact || s.sidebarVisible === false ? [{ label: 'New thread', icon: 'edit', hint: '⌘T', action: () => act.newThread() }] : []),
     // A terminal thread's own menu already carries it (threadMenu.ts).
     ...(s.threadId && !s.threadItems.some((i) => i.label === RELATED_LABEL)
-      ? [{ label: RELATED_LABEL, icon: 'people', action: () => act.related(s.threadId!) }] : []),
+      ? [{ label: RELATED_LABEL, icon: 'send', action: () => act.related(s.threadId!) }] : []),
     ...(pageTerminal
       ? [{ label: TERMINAL_LABEL, icon: 'terminal', checked: s.terminalOpen, hint: '/terminal', action: () => act.toggleTerminal() }] : []),
     ...viewMenu(s, act),
@@ -98,7 +98,7 @@ function viewMenu(s: PageMenuState, act: PageMenuActions): MenuItem[] {
     { label: 'Split', hint: '2-up', checked: s.layout === 'split', action: () => act.layout('split') },
     { label: 'Grid', hint: '4-up', checked: s.layout === 'grid', action: () => act.layout('grid') },
     ...(s.cardOn !== null
-      ? [{ separator: true }, { label: 'Project card', icon: 'note', checked: s.cardOn, action: () => act.toggleCard() }] : []),
+      ? [{ separator: true }, { label: 'Thread details', icon: 'note', checked: s.cardOn, action: () => act.toggleCard() }] : []),
   ];
   const prefs: MenuItem[] = s.midTurn && act.setMidTurn ? [
     { label: 'While working, messages queue', hint: s.compact ? undefined : '⌘↵ steers', title: 'A message sent while the agent works waits for the turn to end', checked: s.midTurn === 'queue', action: () => act.setMidTurn!('queue') },

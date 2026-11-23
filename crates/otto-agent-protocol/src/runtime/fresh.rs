@@ -262,9 +262,8 @@ impl AgentRuntime {
         if handoff.is_some() {
             // The switch took: the thread runs on this provider from now on.
             let s = &st.session;
-            let _ = live
-                .persist
-                .send(PersistOp::Provider(s.provider, s.meta.clone()));
+            let slug = (s.provider_slug() != s.provider.as_str()).then(|| s.provider_slug().into());
+            let _ = live.persist.send(PersistOp::Provider(s.provider, slug));
             let _ = live.persist.send(PersistOp::Model(s.model.clone()));
             let _ = live.persist.send(PersistOp::Effort(None));
         }

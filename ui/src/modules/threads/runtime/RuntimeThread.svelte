@@ -767,7 +767,9 @@
   /* A short pane (a phone on its side with the keyboard up): one row, so the
      conversation keeps its lines. */
   @container (max-block-size: 420px) {
+    .rt-composer { gap: var(--sp-1); padding-block: var(--sp-2) var(--sp-1); }
     .rt-composer textarea { min-block-size: 1lh; }
+    .rt-dock { padding-block-end: var(--sp-2); }
   }
   .rt-foot {
     display: flex;

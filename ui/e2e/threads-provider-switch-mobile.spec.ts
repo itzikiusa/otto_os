@@ -64,8 +64,9 @@ test.beforeEach(async ({ page }, info) => {
   }, wsId);
 });
 
-test('codex → claude on a phone: arm in the sheet, the line and the divider fit', async ({ page }) => {
+test('codex → claude on a 390 px phone: arm in the sheet, the line and the divider fit', async ({ page }) => {
   test.setTimeout(150_000);
+  await page.setViewportSize({ width: 390, height: 844 });
   const { id, thread } = await open(page, 'codex', 'Phone switch');
   const composer = thread.getByTestId('runtime-composer');
   await composer.fill('phone first');

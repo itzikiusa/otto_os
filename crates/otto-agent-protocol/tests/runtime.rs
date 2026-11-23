@@ -4913,6 +4913,11 @@ async fn a_provider_switch_hands_the_history_over_in_both_directions() {
     rt.prompt(&s.id, "first").await.unwrap();
     host.wait_n(is_terminal, 1).await;
     let claude_native = rt.get(&s.id).await.unwrap().native_thread_id;
+    // A pin set from another device survives the switch's meta write.
+    let pin = serde_json::json!({"thread_pinned": true});
+    rt.update_thread_meta(&s.id, pin.as_object().unwrap().clone())
+        .await
+        .unwrap();
 
     // Claude → Codex: same thread, the answer shows Codex read the handoff.
     let t2 = rt
@@ -4999,6 +5004,14 @@ async fn a_provider_switch_hands_the_history_over_in_both_directions() {
         .unwrap();
     assert_eq!(stored.session.provider, RuntimeProvider::Claude);
     assert_eq!(stored.session.native_thread_id, back.native_thread_id);
+    assert_eq!(
+        stored
+            .session
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("thread_pinned")),
+        Some(&serde_json::json!(true))
+    );
     rt.close(&s.id).await.unwrap();
 }
 

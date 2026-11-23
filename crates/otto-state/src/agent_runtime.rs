@@ -377,21 +377,36 @@ impl AgentRuntimeRepo {
         Ok(())
     }
 
-    /// A provider switch: the provider and the meta naming its account
-    /// (`meta.provider_slug`), in one write.
+    /// A provider switch: the provider, and the named account's slug merged
+    /// into `meta.provider_slug` (`None` removes it; other meta keys stay).
     pub async fn set_provider(
         &self,
         id: &Id,
         provider: RuntimeProvider,
-        meta: Option<&serde_json::Value>,
+        slug: Option<&str>,
     ) -> Result<()> {
-        sqlx::query("UPDATE agent_runtime_sessions SET provider = ?, meta = ? WHERE id = ?")
-            .bind(provider.as_str())
-            .bind(meta.map(|m| m.to_string()))
+        sqlx::query(
+            "UPDATE agent_runtime_sessions SET provider = ?, \
+             meta = json_patch(COALESCE(meta, '{}'), ?) WHERE id = ?",
+        )
+        .bind(provider.as_str())
+        .bind(serde_json::json!({ "provider_slug": slug }).to_string())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set runtime session provider"))?;
+        Ok(())
+    }
+
+    /// Merge `patch` into the session's `meta` (RFC 7396: a `null` value
+    /// removes its key). Callers pass only the client-owned thread keys.
+    pub async fn patch_meta(&self, id: &Id, patch: &serde_json::Value) -> Result<()> {
+        sqlx::query("UPDATE agent_runtime_sessions SET meta = json_patch(COALESCE(meta, '{}'), ?) WHERE id = ?")
+            .bind(patch.to_string())
             .bind(id)
             .execute(&self.pool)
             .await
-            .map_err(dberr("set runtime session provider"))?;
+            .map_err(dberr("patch runtime session meta"))?;
         Ok(())
     }
 

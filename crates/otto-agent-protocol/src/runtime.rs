@@ -184,8 +184,8 @@ enum PersistOp {
     /// The agent's own name for the conversation (the title stays auto).
     Title(String),
     ClearNativeThreadId,
-    /// A provider switch took effect: the provider and its meta (account slug).
-    Provider(RuntimeProvider, Option<serde_json::Value>),
+    /// A provider switch took effect: the provider and its account slug.
+    Provider(RuntimeProvider, Option<String>),
     /// The thread's model / effort / access, in the order they took effect.
     Model(Option<String>),
     Effort(Option<String>),
@@ -2908,6 +2908,7 @@ fn set_session_status(
     let background_tasks = st.session.background_tasks.clone();
     let capabilities = Some(st.session.capabilities.clone());
     let title = Some(st.session.title.clone());
+    let thread = otto_core::agent_runtime::thread_meta_of(st.session.meta.as_ref());
     let prev = st.proj.session.as_ref();
     if prev.is_some_and(|p| {
         p.status == status
@@ -2917,6 +2918,7 @@ fn set_session_status(
             && p.title == title
             && p.provider == Some(st.session.provider)
             && p.provider_slug.as_deref() == Some(st.session.provider_slug())
+            && p.thread == thread
     }) {
         return;
     }
@@ -2932,6 +2934,7 @@ fn set_session_status(
         title,
         provider: Some(st.session.provider),
         provider_slug: Some(st.session.provider_slug().into()),
+        thread,
     };
     emit(
         inner,
@@ -3950,7 +3953,7 @@ async fn persister(repo: AgentRuntimeRepo, id: Id, mut rx: mpsc::UnboundedReceiv
             PersistOp::NativeThreadId(n) => repo.set_native_thread_id(&id, &n).await,
             PersistOp::Title(t) => repo.set_title(&id, &t, true).await,
             PersistOp::ClearNativeThreadId => repo.clear_native_thread_id(&id).await,
-            PersistOp::Provider(p, meta) => repo.set_provider(&id, p, meta.as_ref()).await,
+            PersistOp::Provider(p, slug) => repo.set_provider(&id, p, slug.as_deref()).await,
             PersistOp::Model(Some(m)) => repo.set_model(&id, &m).await,
             PersistOp::Model(None) => repo.clear_model(&id).await,
             PersistOp::Effort(e) => repo.set_effort(&id, e.as_deref()).await,

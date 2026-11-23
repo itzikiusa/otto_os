@@ -222,9 +222,10 @@ test('the phone lists every workspace’s threads under their folders, light and
     const sidebar = page.getByTestId('threads-sidebar');
     // The window has the home workspace open; both threads live elsewhere.
     for (const [title, dir] of [['Phone thread', 1], ['Desk terminal thread', 2]] as const) {
-      const group = sidebar.getByRole('region', { name: `Project ${folder(dir)}` });
-      await expect(group, `${scheme}: ${title}`).toBeVisible({ timeout: 30_000 });
-      await expect(group).toContainText(title);
+      const row = sidebar
+        .locator('[data-testid^="thread-row-"]', { hasText: title })
+        .filter({ has: page.locator('.tr-proj').getByText(folder(dir), { exact: true }) });
+      await expect(row, `${scheme}: ${title}`).toBeVisible({ timeout: 30_000 });
     }
     await expectFullyInViewport(page, sidebar, `threads sidebar (${scheme})`);
     await expectNoHorizontalOverflow(page);

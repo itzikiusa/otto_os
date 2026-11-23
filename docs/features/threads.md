@@ -31,12 +31,51 @@ carry into another conversation.
 
 ## Layout & Workflows
 
-0. **Top bar:** four controls — sidebar toggle, a `project / thread`
-   breadcrumb (with the **Related threads** chip while the thread has any),
-   the **right panel**, and ⋯. The ⋯ holds the thread's actions (rename, pin,
-   search, system notes, Related threads…, Continue on phone, Move to History,
-   close), then New thread, Terminal drawer and **View ▸** (single · split ·
-   grid, Project card; a phone gets no View). Back / Forward are ⌘⇧← / ⌘⇧→.
+0. **Top bar:** four controls — sidebar toggle, the project's two-letter
+   badge and a `project / thread` breadcrumb in reading size (the title
+   bold; double-click or F2 renames), the **right panel**, and ⋯. The ⋯ holds
+   the thread's actions (rename, pin, search, system notes, **Send to another
+   thread…**, Continue on phone, Move to History, close), then New thread,
+   Terminal drawer and **View ▸** (single · split · grid, **Thread details**
+   while the card can float; a phone gets no View). Back / Forward are ⌘⇧← /
+   ⌘⇧→.
+   - **Thread details** (`ThreadDetailsCard`): one card for the thread's
+     facts — the folder with **Open in ▾** (Files, Git, a terminal thread, copy
+     path, and the folder's **project scripts**: run one, add one, remove
+     one), the branch ▾, **one git action** for the checkout's state
+     (**Commit** → **Push** / **Publish branch** → **Create PR** → **PR #N**;
+     the chevron beside it holds all three; push asks where it goes first and
+     Create PR uses the Git sheet that names the destination; the row hides
+     when there is nothing to do), **Changes +N −M** ("No changes" at zero;
+     opens Changes), then **Subagents · N running**: the thread it works under
+     first ("↑ parent") when it is itself a subagent, each running subagent
+     with its agent's glyph, status word (Working · Needs you · Done · Failed ·
+     Stopped), elapsed time and **Stop**, and the rest under **Previous**. A
+     row with its own thread opens it (on a phone the drawer gives way);
+     a turn's own subagent opens Agents & tasks. Background commands and
+     timers stay in Agents & tasks. It works the same for terminal threads
+     (folder, git, their delegated threads).
+   - It **floats top-right** of the conversation while the right panel is
+     closed and one conversation (or the New thread stage) has a whole
+     reading column left beside it; the conversation moves over
+     (`--thread-card-reserve` on the stage), so the card never covers a
+     message. Anywhere else (a split, a narrower window, the right panel open,
+     a phone or tablet) the same card heads the right panel / details drawer.
+     Its **×** hides the floating card on this device; ⋯ › View › **Thread
+     details** brings it back.
+   - **⌘K opens on your threads** (`lib/paletteThreads.svelte.ts`,
+     `threadSwitcher.ts`, `threadSwitcherSource.svelte.ts`): in Threads the
+     first group of the ⌘K bar (and of the phone's command sheet, More ›
+     Commands) is **Threads**, ordered and worded by the sidebar's inbox
+     (`threadInbox.ts`): what needs you (**Approval** / **Question**, read
+     once per waiting thread when the bar opens), **Failed**, finished unread
+     (**Done**), then **Working**, then the rest, in the sidebar's order inside
+     each, with the project per row and the order held while it is open.
+     Typing filters threads by title and project with the commands; the last
+     command row is **New thread: <query>** (the New thread stage with the
+     query as the draft). Enter opens in the focused pane, ⌘↵ beside it when
+     a split is open. Outside Threads the bar gains **Threads needing you**
+     only while one waits (there the word is "Needs you").
    Single view has no
    separate pane header. See
    [Threads layout](./threads-structured-runtime.md#threads-layout).
@@ -44,28 +83,83 @@ carry into another conversation.
    - One search row with **filter by project** (several at once; a "Showing …
      · Clear" line appears while a filter is on), **Add project** (a folder that
      shows in the rail before its first thread) and **New thread**.
-   - **Pinned**, then each **project** with its threads — threads needing
-     approval first, then working ones, then most recent; `delegated_by`
-     workers nest under their lead.
-   - **History** (threads moved to History + closed ones) folded at the bottom.
-   - Footer: Settings, Git, Usage, and Refresh (sessions + git status).
+   - **An inbox, not a status board** (`threadInbox.ts`). One list across
+     projects: threads that need you first (**Approval**, **Question**), then
+     **Failed**, then finished-unread (**Done**), then by the time the thread
+     last came back to you, newest first. Each row is one button with three
+     lines: the project's badge and name … the status word (else the
+     relative time); the title (bold while it needs you or is Done); the
+     branch (worktree icon in a worktree, the folder's name when no branch is
+     known) … the agent's glyph. Pin / Open beside / ⋯ appear on hover and
+     focus; on touch they are in the row's long-press menu.
+   - **Words, not dots.** Approval · Question · Failed · Done · Working 18s.
+     Question vs Approval comes from the thread's pending requests (live
+     `runtime_request.updated` events; after a reload, one compact read of
+     the thread's newest turn — `threadInbox.svelte.ts`), as does the
+     working time. A terminal thread waiting on you reads Approval.
+   - **Done** is "the last turn ended after you last had the thread in front
+     of you", on every device: the thread's `meta.thread_seen_at` (written
+     once each time you focus it with the window visible, or when a turn ends
+     while it is in front of you) against its `meta.last_turn_ended_at`
+     (`threadMeta.svelte.ts`). A thread never marked seen anywhere falls back
+     to this window's own flag (a turn it saw end off screen).
+   - **Subagents** (threads started from a thread) fold under it by default;
+     the row says "N subagents" and, when one of them needs you, the
+     thread's own word becomes **Needs you** (the tooltip names it). Opened,
+     they are two-line rows with Working · Needs you · Done · Failed ·
+     Stopped. The focused thread's family opens itself.
+   - **Pinned** sits on top when there are pins; **Working N** (running
+     threads not waiting on you, open by default) and **History N** (moved to
+     History + closed, folded) sit below the list. The focused thread stays
+     visible inside a folded section.
+   - **Group by project** in the filter menu brings back the per-project
+     folders (IDE projects first, pinned projects first, each foldable with a
+     "1 needs you" note when folded); remembered on this device.
+   - **Undo, not confirm** (`threadUndo.ts`). Pin / unpin, Move to History /
+     back and dismissing a side chat act at once with one "… · Undo" notice
+     for 5 s; a newer action replaces it, and ⌘Z / Ctrl+Z runs it while focus
+     is not in a text field, editor or terminal. Archiving a working session
+     still asks first.
+   - **Pins, History and "seen" live on the thread** (`meta.thread_pinned`,
+     `thread_history`, `thread_seen_at`; `PATCH /runtime-sessions/{id}` or
+     `PATCH /sessions/{id}` `meta`), so the Mac and a phone agree, live
+     (`provider_session.updated` `thread` / `session_meta_updated`). A change
+     shows at once; a refused write rolls back with the error toast. This
+     browser's old local lists move onto the threads once. A shared / guest
+     link cannot change them. The inbox's recency is when a thread's last
+     turn ended, so a pin or a look never reorders it.
+   - Footer: Settings, Git, a **usage meter** in the Usage slot — the focused
+     thread's agent's tightest plan window ("5h 62%" used; warning from 80 %,
+     danger from 95 %; every window and its reset in the tooltip; click opens
+     Usage) when Usage has fresh numbers for that agent (Codex, Claude, agy,
+     Grok, Muse logins), else the plain icon — and Refresh. The meter reads
+     the Usage page's own `GET /usage/limits` poller
+     (`lib/stores/usageLimits.svelte.ts`, 60 s while visible).
 2. **New Thread Stage (`NewThreadStage`):**
    - "What should we build in *project*?" (click the project to switch folder
      or workspace) and a single composer: attach a file (`@path`), one agent
      chip holding the harness, model and reasoning effort (plus "Start without
      a prompt" and "Open beside current thread"), and a round send button.
-   - Under it: **Current checkout** (or another git worktree of the repo), the
-     branch (switch or create), the interaction mode (Full access ·
+   - Under it: **Current checkout** (or another git worktree of the repo, or
+     **New worktree** — see below), the branch (switch or create), the interaction mode (Full access ·
      Auto-accept edits · Plan, `⇧⇥`) and the access chip (below). A
      structured thread started in **Plan** stays in Plan: every follow-up asks
      for a plan until you turn **Plan** off in the thread's composer (or press
      `⇧⇥` there). The mode is kept in this window.
-   - On wide windows a **project card** floats top-right; it also heads the
-     right panel: folder, **Open in…** (Files, Git, a terminal thread, copy
-     path), **project scripts** (saved per folder in this browser; running one
-     opens a shell thread), branch, **Create PR** (the Git Create-PR sheet,
-     which names the GitHub/Bitbucket destination before sending) and
-     **Changes +N −M** (opens the Changes tab).
+   - **New worktree** (the checkout chip's menu, or **Use a new worktree** on
+     the "another thread is working in this checkout" line) records the
+     intent only: the chip reads **New worktree from <base>** and nothing is
+     asked. Sending the first message names the branch from it — a short
+     kebab slug of its first words, under the repo's own prefix when most of
+     its branches use one (`feat/…`), `-2`, `-3` on a collision, a dated
+     `thread-YYYY-MM-DD-HHMM` when started without a prompt
+     (`worktreeBranch.ts`) — creates it (`POST /repos/{id}/worktrees`) and
+     then starts the thread there, whichever agent it is. **Name the branch…**
+     in the same menu sets the name (prefilled with the generated one).
+     Progress shows under the composer; a failure keeps the draft and its
+     attachments and shows the error with **Retry**.
+   - The thread details card (above) floats top-right where there is room
+     and heads the right panel otherwise.
 3. **Multi-Session Split & Grid Canvas (`ThreadCanvas` / `ThreadPane`):**
    - Switch between **single**, **Split** (2-up side-by-side), and **Grid**
      (2×2 up to 4 live threads) from the top-bar ⋯ or `⌘K`.
@@ -109,9 +203,10 @@ carry into another conversation.
      Workspace DB/SSH connections, live `db_mcp_activity` stream whenever an
      agent executes `otto_db_query`, and **Open side-by-side** to launch
      Database Explorer in Otto's split pane.
-   - Session-to-session messages, broadcasts and **Start a room** live in the
-     header's **Related threads** popover (`POST /sessions/{id}/message` with
-     `from_session_id` for a terminal thread).
+   - Session-to-session messages, broadcasts, opening a related thread beside
+     and **Start a room** live in ⋯ › **Send to another thread…**
+     (`POST /sessions/{id}/message` with `from_session_id` for a terminal
+     thread); the thread's subagents are listed in the details card.
 
 ## Recoverable runtime drafts
 
@@ -312,8 +407,8 @@ result, as it does for any tool. Threads only (T3 Code #15907, #30257).
 - **Message a thread › All open threads in this project** also reaches the
   structured threads in the same folder and reports who could not receive it
   (`threadRelay.ts`).
-- *(Coordinator: sidebar rows / status words of this round — T-ATTENTION — go
-  here once that work lands.)*
+- **The sidebar is an inbox** (rows, words, Working / History folds, Group by
+  project, subagents, Undo, the usage meter): see Layout › Sidebar above.
 
 ## Composer and timeline (2026-11 redesign)
 
@@ -392,6 +487,11 @@ Muse — and pi) unless a line says otherwise.
   context). Nothing is sent and the draft stays.
 - **Notices above the composer** show one quiet line at a time (an urgent
   one always shows); the rest fold into "N more: …" (`runtime/banners.ts`).
+  On a phone on its side or with the on-screen keyboard up, every quiet
+  notice (the queue strip too) folds into that one line, and a pane under
+  420 px tall gets a one-row input with tighter padding, so the latest
+  message stays in sight (the timeline keeps following the bottom as the
+  keyboard opens).
 
 ## On a phone and a tablet
 

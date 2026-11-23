@@ -97,7 +97,7 @@ test('agent runs and helpers fold into their own groups; the page opens on the n
   for (const id of ['rt_run0', 'rt_run1', 'rt_pr', 'rt_diag']) await expect(history.getByTestId(`thread-history-${id}`)).toHaveCount(0);
 });
 
-test('a turn that ends off screen leaves an unread dot, cleared on focus', async ({ page }) => {
+test('a turn that ends off screen reads “Done”, cleared on focus', async ({ page }) => {
   await openThreads(page, [
     { id: 'rt_a', title: 'Thread A', last_active_at: at(9) },
     { id: 'rt_b', title: 'Thread B', last_active_at: at(8) },
@@ -106,13 +106,13 @@ test('a turn that ends off screen leaves an unread dot, cleared on focus', async
 
   await hooks(page, 'finish', 'rt_b');
   await hooks(page, 'finish', 'rt_a');
-  await expect(page.getByTestId('thread-unread-rt_b')).toBeVisible();
+  await expect(page.getByTestId('thread-status-rt_b')).toHaveText('Done');
   // The focused thread's own turn is seen.
-  await expect(page.getByTestId('thread-unread-rt_a')).toHaveCount(0);
+  await expect(page.getByTestId('thread-status-rt_a')).not.toHaveText('Done');
 
   await page.getByTestId('thread-row-rt_b').locator('.tr-main').click();
   await expect(page.getByTestId('runtime-thread-rt_b')).toBeVisible();
-  await expect(page.getByTestId('thread-unread-rt_b')).toHaveCount(0);
+  await expect(page.getByTestId('thread-status-rt_b')).not.toHaveText('Done');
 });
 
 test('scrolled up, new messages raise a pill that jumps to the latest', async ({ page }) => {

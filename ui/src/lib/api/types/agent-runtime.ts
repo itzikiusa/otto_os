@@ -37,6 +37,8 @@ export interface ProviderSession {
    *  own): a provider switch changes them. */
   provider?: RuntimeProvider;
   provider_slug?: string;
+  /** The client-owned thread meta (`ThreadMetaPatch` keys); absent = none set. */
+  thread?: ThreadMetaPatch;
 }
 
 /** What a provider switch handed the new provider (`session_boundary.handoff`):
@@ -652,8 +654,21 @@ export interface ListRuntimeSessionsQuery {
 
 /** Body of POST /runtime-sessions/{id}/prompt. */
 /** `PATCH /runtime-sessions/{id}` — rename. */
+/** `PATCH /runtime-sessions/{id}`: a rename and/or the client-owned thread meta. */
 export interface UpdateRuntimeSessionReq {
-  title: string;
+  title?: string;
+  /** A merge patch of the thread keys only (`null` clears one). */
+  meta?: ThreadMetaPatch;
+}
+
+/** The client-owned Threads keys on a session's `meta` — a structured one
+ *  (`PATCH /runtime-sessions/{id}`) and a terminal one (`PATCH /sessions/{id}`) alike. */
+export interface ThreadMetaPatch {
+  thread_pinned?: boolean | null;
+  /** Moved to History. */
+  thread_history?: boolean | null;
+  /** RFC 3339: when the person last had the thread in front of them. */
+  thread_seen_at?: string | null;
 }
 
 /** `text` may be empty when `images` is not. `model` / `effort` apply to this
