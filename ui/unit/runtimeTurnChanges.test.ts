@@ -41,3 +41,15 @@ test('a turn’s files: one row per file, relative paths, failed and other turns
   assert.deepEqual(changeTotals(files), { added: 3, removed: 2 });
   assert.deepEqual(changeTotals([{ path: 'x', added: null, removed: null }]), { added: null, removed: null });
 });
+
+test('a streaming thread re-reads no diff text: counts are kept per item object', () => {
+  let reads = 0;
+  const item = fc('f1', '/w/a.ts');
+  Object.defineProperty(item, 'diff_str', { get: () => (reads++, '+a\n+b\n-c'), enumerable: true });
+  const items = [item];
+  assert.deepEqual(turnChanges(items, 't1', '/w'), [{ path: 'a.ts', added: 2, removed: 1 }]);
+  const once = reads;
+  // A new batch: the same item object, another array around it.
+  assert.deepEqual(turnChanges([...items], 't1', '/w'), [{ path: 'a.ts', added: 2, removed: 1 }]);
+  assert.equal(reads, once);
+});
