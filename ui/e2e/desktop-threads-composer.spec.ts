@@ -15,6 +15,7 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 //     ⌘↵ the other one; the choice in the toolbar ⋯ › View (composerSend.ts).
 //   • The / popup lists the agent's own commands (hostCommands.ts).
 //   • ↑ / ↓ recall sent prompts (promptHistory.ts).
+//   • Files dropped on the pane attach like a paste (composerDrop.ts).
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.use({ serviceWorkers: 'block' });
@@ -194,5 +195,36 @@ test('↑ in an empty composer recalls sent prompts, ↓ goes back to the empty 
     await composer.fill('/');
     await composer.press('ArrowUp');
     await expect(composer).toHaveValue('/');
+  }
+});
+
+/** A drag of `files` (name, type, bytes) entering and dropping on `target`. */
+async function dropFiles(target: Locator, files: { name: string; type: string; text: string }[], stopAtOver = false): Promise<void> {
+  await target.evaluate((el, { files, stopAtOver }) => {
+    const dt = new DataTransfer();
+    for (const f of files) dt.items.add(new File([f.text], f.name, { type: f.type }));
+    const fire = (type: string) => el.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+    fire('dragenter');
+    fire('dragover');
+    if (!stopAtOver) fire('drop');
+  }, { files, stopAtOver });
+}
+
+test('files dropped on the thread attach like a paste; an unsupported type is refused by name', async ({ page }) => {
+  test.setTimeout(90_000);
+  for (const provider of ['codex', 'claude'] as const) {
+    const { thread } = await open(page, provider, `Drop ${provider}`);
+    const box = thread.locator('.rt-composer');
+    // Over the pane: only the composer lights up.
+    await dropFiles(thread.locator('.rt-scroll'), [{ name: 'shot.png', type: 'image/png', text: 'png' }], true);
+    await expect(box).toHaveAttribute('data-drop', '');
+    await thread.locator('.rt-scroll').evaluate((el) => el.dispatchEvent(new DragEvent('dragleave', { bubbles: true, dataTransfer: (() => { const d = new DataTransfer(); d.items.add(new File(['x'], 'x.png', { type: 'image/png' })); return d; })() })));
+    await expect(box).not.toHaveAttribute('data-drop', '');
+    await dropFiles(thread.locator('.rt-scroll'), [{ name: 'shot.png', type: 'image/png', text: 'png' }]);
+    await expect(thread.getByTestId('runtime-images')).toBeVisible();
+    await expect(thread.getByTestId('runtime-images').getByRole('button', { name: 'Open shot.png' })).toHaveCount(1);
+    await dropFiles(box, [{ name: 'notes.zip', type: 'application/zip', text: 'zip' }]);
+    await expect(thread.getByTestId('runtime-attach-error')).toContainText('notes.zip not added: application/zip can’t be attached here');
+    await expect(box).not.toHaveAttribute('data-drop', '');
   }
 });

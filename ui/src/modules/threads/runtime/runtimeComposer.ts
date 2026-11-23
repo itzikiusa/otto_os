@@ -147,8 +147,16 @@ export async function appendDraftAttachments<TDraft extends { images: ComposerFi
   draft: TDraft,
   files: Iterable<File>,
   takes: (f: File) => boolean,
+  /** What the agent takes ("images and PDFs"): a file it doesn't is refused by name (a drop). */
+  accepts?: string,
 ): Promise<void> {
   let refused: string | null = null;
+  if (accepts) {
+    const list = [...files];
+    const no = list.find((f) => !takes(f));
+    if (no) refused = `${no.name || 'That file'} not added: ${no.type || 'this file type'} can’t be attached here — this agent takes ${accepts}.`;
+    files = list;
+  }
   const read = await readAttachments(files, takes, {
     usedBytes: attachmentBytes(draft.images),
     refuse: (m) => (refused ??= m),

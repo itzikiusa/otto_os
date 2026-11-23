@@ -18,7 +18,7 @@
   type="button"
   class="icon-btn"
   aria-label={canFiles ? 'Attach an image or PDF' : 'Attach an image'}
-  title={canFiles ? 'Attach an image or PDF (or paste one)' : 'Attach an image (or paste one)'}
+  title={canFiles ? 'Attach an image or PDF (or paste / drop one)' : 'Attach an image (or paste / drop one)'}
   data-testid={testId}
   {disabled}
   onclick={() => fileEl?.click()}

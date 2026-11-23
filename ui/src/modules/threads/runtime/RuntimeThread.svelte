@@ -42,6 +42,7 @@
   import { isAltSend, midTurnDelivery, primaryAction } from './composerSend';
   import { threadPrefs } from './threadPrefs.svelte';
   import { recallPrompt, sentPrompts, type HistoryState } from './promptHistory';
+  import { dropAttachments, fileDrop } from './composerDrop';
   import RuntimeModelChip from './RuntimeModelChip.svelte';
   import RuntimeBannerStack from './RuntimeBannerStack.svelte';
   import {
@@ -438,7 +439,7 @@
 </script>
 
 <svelte:window onkeydown={onWindowKey} />
-<section class="rt" class:compact aria-label="Conversation" data-testid="runtime-thread-{sessionId}">
+<section class="rt" class:compact aria-label="Conversation" data-testid="runtime-thread-{sessionId}" use:fileDrop={{ box: () => composerBoxEl, onfiles: (f) => dropAttachments(ownerId, draft, f, caps, agentName) }}>
   {#if onswitch}<RuntimeLinkedThreads {sessionId} {onswitch} />{/if}
   <div class="rt-scroll" class:isolated={!ui.overlayOpen} bind:this={scroller}>
     <div class="rt-stream" bind:this={streamEl} data-runtime-stream>
@@ -748,6 +749,8 @@
     background: var(--surface);
   }
   /* A visible focus ring (the shared accent line), not just a border shade. */
+  /* Files dragged over the pane (composerDrop.ts): a calm ring, no overlay. */
+  .rt-composer:global([data-drop]) { border-color: var(--accent-line-strong); background: var(--accent-faint); }
   .rt-composer:focus-within {
     border-color: var(--accent-line);
     box-shadow: 0 0 0 1px var(--accent-line);
