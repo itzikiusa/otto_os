@@ -231,6 +231,9 @@ async fn device_token_does_normal_app_work_but_not_credentials_or_admin() {
             Some(json!({"username": "eve", "password": "x"})),
         ),
         (M::PATCH, "/settings", Some(json!({}))),
+        // A sign-in opens a browser and answers on this Mac's loopback.
+        (M::POST, "/mcp/servers/s1/oauth/start", Some(json!({}))),
+        (M::DELETE, "/mcp/servers/s1/oauth", None),
     ] {
         let (s, v) = d
             .send(Via::Tailnet, m.clone(), path, Some(&token), body)

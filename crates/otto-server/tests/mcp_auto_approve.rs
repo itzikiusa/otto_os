@@ -548,6 +548,14 @@ async fn an_agent_credential_cannot_decide_approvals_but_its_owner_can() {
         .await;
     assert_eq!(st, 403);
     assert_eq!(d.pending_approvals().await.len(), 1, "still pending");
+    // Nor can it start (or end) a server's OAuth sign-in.
+    for (m, path) in [
+        ("POST", "/mcp/servers/s1/oauth/start"),
+        ("DELETE", "/mcp/servers/s1/oauth"),
+    ] {
+        let (st, body) = d.send(m, &d.agent, path, Some(json!({}))).await;
+        assert_eq!(st, 403, "{m} {path}: {body}");
+    }
 
     // The human owner approves their own agent's request — the normal flow —
     // and the agent's identical retry then executes on that approval.
