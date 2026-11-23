@@ -6,8 +6,8 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 // serves the rows), after T3 Code's layout:
 //   1. the toolbar keeps four controls (sidebar, title, right panel, ⋯); the
 //      project card, terminal drawer, layout and New thread moved into ⋯;
-//   2. related threads are ONE chip + popover (no Peers tab, no "To:" bar),
-//      shown only while the thread has related threads;
+//   2. subagents live in the details card; relay / rooms are ONE ⋯ item
+//      and popover (no Peers tab, no "To:" bar, no header chip);
 //   3. the right panel's + menu has no Terminal / Peers, and no Connections
 //      until the thread touched a database;
 //   4. a split pane's header has no phone button (⋯ › Continue on phone);
@@ -44,6 +44,7 @@ const WORKER = { id: 'rt_worker', title: 'Codex worker', provider: 'codex', pare
 const SOLO = { id: 'rt_solo', title: 'Solo thread', last_active_at: at(8) };
 
 test('the toolbar keeps four controls; the rest is one ⋯ away', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
   await openThreads(page, [LEAD, WORKER, SOLO]);
   await expect(page.getByTestId('runtime-thread-rt_lead')).toBeVisible({ timeout: 15_000 });
 
@@ -58,20 +59,19 @@ test('the toolbar keeps four controls; the rest is one ⋯ away', async ({ page 
   const menu = page.locator('.ctx-menu');
   await expectFullyInViewport(page, menu, 'toolbar ⋯ menu');
   // New thread is the sidebar's pencil while the sidebar shows; layout and
-  // the project card sit in View.
-  await expect(menu.getByRole('menuitem', { name: 'Related threads…' })).toBeVisible();
+  // the thread details card sit in View.
+  await expect(menu.getByRole('menuitem', { name: 'Send to another thread…' })).toBeVisible();
   await expect(menu.getByRole('menuitem', { name: 'New thread' })).toHaveCount(0);
   await expect(menu.getByRole('menuitemcheckbox', { name: 'Terminal drawer' })).toHaveCount(1);
   await menu.getByRole('menuitem', { name: 'View' }).click();
   const view = page.locator('.ctx-submenu');
-  for (const name of ['Project card', 'Single thread', 'Split', 'Grid']) {
+  for (const name of ['Thread details', 'Single thread', 'Split', 'Grid']) {
     await expect(view.getByRole('menuitemcheckbox', { name })).toBeVisible();
   }
-  // The project card opens from ⋯ and closes on Escape.
-  await view.getByRole('menuitemcheckbox', { name: 'Project card' }).click();
-  await expect(page.getByTestId('threads-project-card')).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(page.getByTestId('threads-project-card')).toHaveCount(0);
+  // The details card floats by default; ⋯ › View › Thread details hides it.
+  await expect(view.getByRole('menuitemcheckbox', { name: 'Thread details' })).toBeChecked();
+  await view.getByRole('menuitemcheckbox', { name: 'Thread details' }).click();
+  await expect(page.getByTestId('thread-details-card')).toHaveCount(0);
   // Light and dark.
   await page.screenshot({ path: test.info().outputPath('threads-clean-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });
@@ -79,41 +79,53 @@ test('the toolbar keeps four controls; the rest is one ⋯ away', async ({ page 
   await page.emulateMedia({ colorScheme: 'light' });
 });
 
-test('related threads are one chip and one popover; none shows for a solo thread', async ({ page }) => {
+test('subagents sit in the details card; ⋯ › Send to another thread… holds relay and rooms', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
   await openThreads(page, [LEAD, WORKER, SOLO]);
   await expect(page.getByTestId('runtime-thread-rt_lead')).toBeVisible({ timeout: 15_000 });
-  // No old strip above the conversation, no Peers bar in the pane.
+  // No old strip above the conversation, no Peers bar in the pane, no header chip.
   await expect(page.locator('[data-testid^="pane-peer-bar-"]')).toHaveCount(0);
+  await expect(page.getByTestId('threads-related-chip')).toHaveCount(0);
 
-  const chip = page.getByTestId('threads-related-chip');
-  await expect(chip).toContainText('1');
-  await chip.click();
+  // The details card lists the subagent with its status word.
+  const subs = page.getByTestId('thread-details-card').getByTestId('details-subagents');
+  await expect(subs).toContainText('Subagents · 1 running');
+  const sub = subs.getByTestId('details-subagent');
+  await expect(sub).toContainText('Codex worker');
+  await expect(sub).toHaveAttribute('data-word', 'Working');
+
+  // ⋯ › Send to another thread…: one popover under ⋯ (relay, open beside, rooms).
+  const more = page.getByTestId('threads-thread-menu');
+  await more.click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Send to another thread…' }).click();
   const pop = page.getByTestId('threads-related-popover');
-  await expectFullyInViewport(page, pop, 'related threads popover');
-  const row = pop.getByTestId('related-row-rt_worker');
-  await expect(row).toContainText('Codex worker');
-  await expect(row).toContainText('Working');
+  await expectFullyInViewport(page, pop, 'send to another thread popover');
+  await expect(pop.getByTestId('related-row-rt_worker')).toContainText('Codex worker');
   for (const action of ['related-message-any', 'related-start-room']) await expect(pop.getByTestId(action)).toBeVisible();
-  // Escape closes it and hands focus back to the chip.
+  // Escape closes it and hands focus back to ⋯.
   await pop.focus();
   await page.keyboard.press('Escape');
   await expect(pop).toHaveCount(0);
-  await expect(chip).toBeFocused();
+  await expect(more).toBeFocused();
 
-  // Open beside: the worker joins a split; its pane header has no phone button.
-  await chip.click();
+  // Open beside: the subagent joins a split; its pane header has no phone button.
+  await more.click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Send to another thread…' }).click();
   await pop.getByRole('button', { name: 'Open Codex worker beside' }).click();
   await expect(page.getByTestId('thread-pane-rt_worker')).toBeVisible();
   await expect(page.locator('[data-testid^="pane-continue-phone-"]')).toHaveCount(0);
   await expect(page.locator('[data-testid^="pane-terminal-btn-"]').first()).toBeVisible();
 
-  // A thread with nothing related shows no chip; ⋯ › Related threads… still
-  // opens the popover (message a thread, start a room).
+  // A solo thread: no Subagents section; ⋯ still opens the popover.
+  await more.click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'View' }).click();
+  await page.locator('.ctx-submenu').getByRole('menuitemcheckbox', { name: 'Single thread' }).click();
   await page.getByTestId('thread-row-rt_solo').locator('.tr-main').click();
   await expect(page.getByTestId('runtime-thread-rt_solo')).toBeVisible();
-  await expect(page.getByTestId('threads-related-chip')).toHaveCount(0);
-  await page.getByTestId('threads-thread-menu').click();
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Related threads…' }).click();
+  await expect(page.getByTestId('thread-details-card')).toBeVisible();
+  await expect(page.getByTestId('details-subagents')).toHaveCount(0);
+  await more.click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Send to another thread…' }).click();
   await expect(page.getByTestId('threads-related-popover')).toContainText('No related threads yet');
 });
 
@@ -143,16 +155,15 @@ test('the composer is quiet: no "Saved" line while the draft is fine', async ({ 
   await expect(thread.getByTestId('runtime-model')).toHaveCount(1);
 });
 
-test('phone: the toolbar, ⋯ and the related popover fit with no sideways scroll', async ({ page }) => {
+test('phone: the toolbar, ⋯ and the send-to popover fit with no sideways scroll', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   // At phone width the sidebar is a drawer: the page opens on the thread.
   await openThreads(page, [LEAD, WORKER], 'runtime-thread-rt_lead');
   await expectNoHorizontalOverflow(page);
   await page.getByTestId('threads-thread-menu').click();
   await expectFullyInViewport(page, page.locator('.ctx-menu'), 'toolbar ⋯ menu (phone)');
-  await page.keyboard.press('Escape');
-  await page.getByTestId('threads-related-chip').click();
-  await expectFullyInViewport(page, page.getByTestId('threads-related-popover'), 'related popover (phone)');
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Send to another thread…' }).click();
+  await expectFullyInViewport(page, page.getByTestId('threads-related-popover'), 'send-to popover (phone)');
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: test.info().outputPath('threads-clean-phone.png'), animations: 'disabled' });
 });

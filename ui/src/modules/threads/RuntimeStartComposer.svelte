@@ -225,6 +225,16 @@
     ctxMenu.showAt(target, buildModeMenu(interactionMode, (m) => (interactionMode = m)), { align: 'end' });
   }
 
+  /** Send what is in the box again (the host's Retry after a failed start). */
+  export function retry(): Promise<void> {
+    return launch(true);
+  }
+
+  /** The text in the box (the host names a branch from it). */
+  export function draftText(): string {
+    return prompt;
+  }
+
   /** Start with a message the host wrote (a suggestion, a menu ask) and the
    *  composer's picks; `access` overrides the chip for this start. */
   export function launchText(text: string, access?: RuntimeAccessMode): Promise<boolean> {

@@ -232,6 +232,24 @@ async fn drain_stderr<R: AsyncRead + Unpin>(mut stderr: R, tail: Arc<Mutex<Vec<u
     }
 }
 
+/// A failed spawn as the API reports it: a missing or unusable CLI is the
+/// caller's to fix (400), a timeout upstream, the rest internal.
+pub(crate) fn map_spawn_error(
+    provider: &str,
+    program: &str,
+    e: std::io::Error,
+) -> otto_core::Error {
+    use otto_core::Error;
+    let msg = format!("could not start {provider} ({program}): {e}");
+    match e.kind() {
+        std::io::ErrorKind::NotFound
+        | std::io::ErrorKind::PermissionDenied
+        | std::io::ErrorKind::InvalidInput => Error::Invalid(msg),
+        std::io::ErrorKind::TimedOut => Error::Upstream(msg),
+        _ => Error::Internal(msg),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -33,6 +33,8 @@ export function inboxSections(
   classOf: (s: Session) => InboxClass,
   parentOf: (s: Session) => string | null,
   folded: (id: string) => boolean = () => false,
+  /** When the thread last came back to the person (ISO, newest first). */
+  at?: (s: Session) => string,
 ): { main: FamilyRow[]; working: FamilyRow[] } {
   const byId = new Map(list.map((s) => [s.id, s] as const));
   const rootOf = (s: Session): string => {
@@ -60,8 +62,8 @@ export function inboxSections(
   const workList: Session[] = [];
   for (const s of list) (working(rootOf(s)) ? workList : mainList).push(s);
   return {
-    main: inboxOrder(mainList, score, parentOf, folded),
-    working: inboxOrder(workList, () => 0, parentOf, folded),
+    main: inboxOrder(mainList, score, parentOf, folded, at),
+    working: inboxOrder(workList, () => 0, parentOf, folded, at),
   };
 }
 
@@ -103,6 +105,29 @@ export function subagentRollup(subs: readonly { title: string; key: string | nul
     else if (w === 'Failed') r.failed++;
   }
   return r;
+}
+
+/** Finished unread ("Done") across reloads and devices: the last turn ended
+ *  after the person last had the thread in front of them (`meta.thread_seen_at`).
+ *  A thread never seen on any device counts as read (no flood of "Done"). */
+export function unseen(endedIso: string | null | undefined, seenIso: unknown): boolean {
+  if (!endedIso || typeof seenIso !== 'string') return false;
+  const ended = Date.parse(endedIso);
+  const seen = Date.parse(seenIso);
+  return Number.isFinite(ended) && Number.isFinite(seen) && ended > seen;
+}
+
+/** The meta writes that move this browser's old local pins / History onto
+ *  the threads themselves — only for threads that still exist. */
+export function migrationPatches(
+  pins: readonly string[],
+  history: readonly string[],
+  exists: (id: string) => boolean,
+): [string, { thread_pinned?: true; thread_history?: true }][] {
+  const out = new Map<string, { thread_pinned?: true; thread_history?: true }>();
+  for (const id of pins) if (exists(id)) out.set(id, { ...out.get(id), thread_pinned: true });
+  for (const id of history) if (exists(id)) out.set(id, { ...out.get(id), thread_history: true });
+  return [...out];
 }
 
 /** "18s", "4m", "1h 5m" for a positive span. */
